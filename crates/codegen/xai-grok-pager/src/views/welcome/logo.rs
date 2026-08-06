@@ -36,7 +36,7 @@ fn pick_logo_for(window_height: u16, hidden: bool) -> Option<&'static str> {
 }
 
 /// The braille art has no ASCII stand-in; see the module doc.
-fn logo_hidden() -> bool {
+pub(super) fn logo_hidden() -> bool {
     crate::glyphs::is_legacy_windows_console()
 }
 
@@ -157,7 +157,11 @@ fn render_into(area: Rect, buf: &mut Buffer, theme: &Theme, logo: &str) {
 }
 
 pub fn logo_line_count(window_height: u16) -> u16 {
-    pick_logo(window_height).map_or(0, count_lines)
+    logo_line_count_for(window_height, logo_hidden())
+}
+
+pub(super) fn logo_line_count_for(window_height: u16, hidden: bool) -> u16 {
+    pick_logo_for(window_height, hidden).map_or(0, count_lines)
 }
 
 pub fn logo_visual_width(window_height: u16) -> u16 {
@@ -170,23 +174,14 @@ pub fn render_logo(area: Rect, buf: &mut Buffer, theme: &Theme, window_height: u
     }
 }
 
-/// The hero box always shows the full logo: it is laid out beside the menu, so
-/// it fits whenever the box does. These report and render that logo directly,
-/// independent of the height-based [`pick_logo`] tiers used by the stacked
-/// layout. When [`logo_hidden`], they report 0 and render nothing.
-pub fn full_logo_line_count() -> u16 {
-    full_logo_line_count_for(logo_hidden())
-}
-
-fn full_logo_line_count_for(hidden: bool) -> u16 {
+/// The hero box always uses the full logo metrics, independent of the
+/// height-based [`pick_logo`] tiers used by the stacked layout. Layout callers
+/// pass the resolved legacy-console flag so geometry tests stay deterministic.
+pub(super) fn full_logo_line_count_for(hidden: bool) -> u16 {
     if hidden { 0 } else { count_lines(LOGO) }
 }
 
-pub fn full_logo_visual_width() -> u16 {
-    full_logo_visual_width_for(logo_hidden())
-}
-
-fn full_logo_visual_width_for(hidden: bool) -> u16 {
+pub(super) fn full_logo_visual_width_for(hidden: bool) -> u16 {
     if hidden { 0 } else { visual_width(LOGO) }
 }
 

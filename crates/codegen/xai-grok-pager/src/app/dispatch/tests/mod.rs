@@ -40,7 +40,7 @@ use super::dashboard::{
 };
 use super::modes::{
     YOLO_ON_UNDER_PLAN_TOAST, active_agent_plan_nudge_state, dispatch_cycle_mode_and_sync,
-    permission_mode_toast,
+    permission_mode_toast, yolo_toast_with_locale,
 };
 use super::permissions::drain_permission_queue;
 use super::prompt::{dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner};
@@ -81,6 +81,7 @@ fn test_app() -> AppView {
         registry: crate::actions::ActionRegistry::defaults(),
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
+        locale: std::sync::Arc::new(crate::locale::LocaleContext::default()),
         cwd: PathBuf::from("/tmp"),
         cwd_has_git_ancestor: false,
         acp_tx: tx,

@@ -44,6 +44,36 @@ impl EffortTokenError {
             Self::NoActiveModel => "no active model to apply effort to".to_string(),
         }
     }
+
+    pub(crate) fn message_with_locale(&self, locale: &crate::locale::LocaleContext) -> String {
+        match self {
+            Self::Unsupported => locale
+                .named_text(
+                    "reasoning.error.unsupported",
+                    "current model does not support reasoning effort",
+                )
+                .into_owned(),
+            Self::UnknownToken { token, offered } if offered.is_empty() => locale
+                .named_text(
+                    "reasoning.error.unknown_no_options",
+                    "unknown effort level '{token}'; this model has no selectable effort levels",
+                )
+                .replace("{token}", token),
+            Self::UnknownToken { token, offered } => locale
+                .named_text(
+                    "reasoning.error.unknown_options",
+                    "unknown effort level '{token}'; use one of: {options}",
+                )
+                .replace("{token}", token)
+                .replace("{options}", &offered.join(", ")),
+            Self::NoActiveModel => locale
+                .named_text(
+                    "reasoning.error.no_active_model",
+                    "no active model to apply effort to",
+                )
+                .into_owned(),
+        }
+    }
 }
 
 /// Per-agent model state.

@@ -29,6 +29,7 @@
 //!   A could atomically rename racer B's half-written file into place.
 
 #![cfg(unix)]
+#![cfg(not(feature = "community-build"))]
 
 mod common;
 

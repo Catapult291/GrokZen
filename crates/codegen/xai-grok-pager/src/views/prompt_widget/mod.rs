@@ -2323,7 +2323,22 @@ impl PromptWidget {
     /// prompt already holds [`Self::IMAGE_CAP`] images.
     #[allow(dead_code)]
     pub(crate) fn cap_reached_toast() -> String {
-        format!("Image limit reached (max {})", Self::IMAGE_CAP)
+        Self::cap_reached_toast_with_locale(None)
+    }
+
+    pub(crate) fn cap_reached_toast_with_locale(
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> String {
+        locale
+            .map(|locale| {
+                locale
+                    .named_text(
+                        "prompt.image.limit_reached",
+                        "Image limit reached (max {max})",
+                    )
+                    .replace("{max}", &Self::IMAGE_CAP.to_string())
+            })
+            .unwrap_or_else(|| format!("Image limit reached (max {})", Self::IMAGE_CAP))
     }
 
     /// Insert a pasted image as an atomic `[Image #N]` chip.
@@ -2331,17 +2346,38 @@ impl PromptWidget {
     /// Returns `Err` with a user-facing message if the image is rejected
     /// (cap reached or too small). The caller should show a toast.
     pub fn insert_image(&mut self, image: PastedImage) -> Result<(), String> {
+        self.insert_image_with_locale(image, None)
+    }
+
+    pub fn insert_image_with_locale(
+        &mut self,
+        image: PastedImage,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> Result<(), String> {
         if self.images.len() >= Self::IMAGE_CAP {
-            return Err(Self::cap_reached_toast());
+            return Err(Self::cap_reached_toast_with_locale(locale));
         }
         // Backend APIs reject images with either side < 8 px.
         const MIN_SIDE: u32 = 8;
         if let Some((w, h)) = image.preview_dimensions()
             && (w < MIN_SIDE || h < MIN_SIDE)
         {
-            return Err(format!(
-                "Image too small ({w}×{h}). Must be at least {MIN_SIDE}×{MIN_SIDE} pixels."
-            ));
+            let english =
+                "Image too small ({width}×{height}). Must be at least {min}×{min} pixels.";
+            let message = locale
+                .map(|locale| {
+                    locale
+                        .named_text("prompt.image.too_small", english)
+                        .replace("{width}", &w.to_string())
+                        .replace("{height}", &h.to_string())
+                        .replace("{min}", &MIN_SIDE.to_string())
+                })
+                .unwrap_or_else(|| {
+                    format!(
+                        "Image too small ({w}×{h}). Must be at least {MIN_SIDE}×{MIN_SIDE} pixels."
+                    )
+                });
+            return Err(message);
         }
 
         self.image_counter += 1;
@@ -2376,6 +2412,54 @@ impl PromptWidget {
         self.images.push(img);
 
         Ok(())
+    }
+
+    fn refresh_image_chip_displays(&mut self, locale: Option<&crate::locale::LocaleContext>) {
+        let updates: Vec<_> = self
+            .images
+            .iter()
+            .filter_map(|image| {
+                let label = locale
+                    .map(|locale| {
+                        locale
+                            .named_text("prompt.image.chip", "Image #{number}")
+                            .replace("{number}", &image.display_number.to_string())
+                    })
+                    .unwrap_or_else(|| format!("Image #{}", image.display_number));
+                let display = chip_line(label);
+                let needs_update = self
+                    .textarea
+                    .elements()
+                    .iter()
+                    .find(|element| element.id == image.element_id)
+                    .is_some_and(|element| element.display.as_ref() != Some(&display));
+                needs_update.then_some((image.element_id, display))
+            })
+            .collect();
+        for (element_id, display) in updates {
+            self.textarea.set_element_display(element_id, Some(display));
+        }
+    }
+
+    fn refresh_paste_chip_displays(&mut self, locale: Option<&crate::locale::LocaleContext>) {
+        let updates: Vec<_> = self
+            .textarea
+            .elements()
+            .iter()
+            .filter(|element| element.kind == KIND_PASTE)
+            .filter_map(|element| {
+                let pasted = &self.textarea.text()[element.range.clone()];
+                let display = if pasted.len() > PASTE_CHIP_DISPLAY_BYTES {
+                    paste_chip_display_bytes_with_locale(pasted.len(), locale)
+                } else {
+                    paste_chip_display_with_locale(pasted.lines().count(), locale)
+                };
+                (element.display.as_ref() != Some(&display)).then_some((element.id, display))
+            })
+            .collect();
+        for (element_id, display) in updates {
+            self.textarea.set_element_display(element_id, Some(display));
+        }
     }
 
     fn sync_images_with_textarea(&mut self) {
@@ -2779,7 +2863,11 @@ impl PromptWidget {
     /// so the affordance advertised there is pasting the content again.
     /// Double-click expands from either position (a click moves the
     /// cursor onto the chip first).
-    fn paste_preview_hint(&self, theme: &Theme) -> Line<'static> {
+    fn paste_preview_hint(
+        &self,
+        theme: &Theme,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> Line<'static> {
         let dim = Style::default().fg(theme.gray);
         // Chord deliberately deviates from the tips' text_secondary to a
         // real accent: oscura/rosepine alias text_secondary and gray to
@@ -2788,15 +2876,38 @@ impl PromptWidget {
             .fg(theme.fuzzy_accent)
             .add_modifier(Modifier::BOLD);
         let action = if self.paste_element_at_cursor().is_some() {
-            "enter"
+            locale
+                .map(|locale| locale.named_static_text("prompt.paste.action.enter", "enter"))
+                .unwrap_or("enter")
         } else {
-            "paste again"
+            locale
+                .map(|locale| {
+                    locale.named_static_text("prompt.paste.action.paste_again", "paste again")
+                })
+                .unwrap_or("paste again")
         };
         Line::from(vec![
             Span::styled(action, chord),
-            Span::styled(" or ", dim),
-            Span::styled("double-click", chord),
-            Span::styled(" to expand", dim),
+            Span::styled(
+                locale
+                    .map(|locale| locale.named_static_text("prompt.paste.or", " or "))
+                    .unwrap_or(" or "),
+                dim,
+            ),
+            Span::styled(
+                locale
+                    .map(|locale| {
+                        locale.named_static_text("prompt.paste.action.double_click", "double-click")
+                    })
+                    .unwrap_or("double-click"),
+                chord,
+            ),
+            Span::styled(
+                locale
+                    .map(|locale| locale.named_static_text("prompt.paste.to_expand", " to expand"))
+                    .unwrap_or(" to expand"),
+                dim,
+            ),
         ])
     }
 
@@ -2889,12 +3000,29 @@ impl PromptWidget {
         info: Option<&PromptInfo>,
         voice: Option<VoicePromptOverlay>,
     ) -> PromptRenderResult {
+        self.draw_with_locale(buf, area, overlay_area, style, info, voice, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with_locale(
+        &mut self,
+        buf: &mut Buffer,
+        area: Rect,
+        overlay_area: Option<Rect>,
+        style: &PromptStyle,
+        info: Option<&PromptInfo>,
+        voice: Option<VoicePromptOverlay>,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> PromptRenderResult {
         if area.height == 0 || area.width < 4 {
             return PromptRenderResult {
                 cursor_pos: None,
                 post_flush_escapes: None,
             };
         }
+
+        self.refresh_image_chip_displays(locale);
+        self.refresh_paste_chip_displays(locale);
 
         let theme = Theme::current();
         let bg = style.bg.color(theme.bg_base);
@@ -3241,7 +3369,7 @@ impl PromptWidget {
                     width: content_area.width,
                     height: 1,
                 };
-                self.render_info_line(buf, info_rect, info, bg, &theme, style.focused);
+                self.render_info_line(buf, info_rect, info, bg, &theme, style.focused, locale);
             }
         }
 
@@ -3303,7 +3431,12 @@ impl PromptWidget {
         {
             let preview_style = PreviewStyle::new(theme.paste_bg, theme.paste_fg, theme.paste_dim);
             let config = PreviewConfig {
-                hint: Some(self.paste_preview_hint(&theme)),
+                hint: Some(self.paste_preview_hint(&theme, locale)),
+                omitted_lines: locale.map(|locale| {
+                    locale
+                        .named_text("prompt.paste.omitted_lines", "⋮ ({count} more lines)")
+                        .into_owned()
+                }),
                 ..Default::default()
             };
             render_preview_overlay(buf, overlay, paste_text, preview_style, config);
@@ -3323,13 +3456,49 @@ impl PromptWidget {
                     post_flush_escapes: None,
                 };
             };
-            post_flush_escapes = crate::render::render_image_overlay(
+            let image_labels = crate::render::ImageOverlayLabels {
+                image: locale
+                    .map(|locale| locale.named_static_text("prompt.image.title", "Image"))
+                    .unwrap_or("Image"),
+                format: locale
+                    .map(|locale| locale.named_static_text("prompt.image.format", "Format:"))
+                    .unwrap_or("Format:"),
+                dimensions: locale
+                    .map(|locale| {
+                        locale.named_static_text("prompt.image.dimensions", "Dimensions:")
+                    })
+                    .unwrap_or("Dimensions:"),
+                preview_unavailable: locale
+                    .map(|locale| {
+                        locale.named_static_text(
+                            "prompt.image.preview_unavailable",
+                            "Preview unavailable",
+                        )
+                    })
+                    .unwrap_or("Preview unavailable"),
+                preview_pending: locale
+                    .map(|locale| {
+                        locale.named_static_text("prompt.image.preview_pending", "Preview pending")
+                    })
+                    .unwrap_or("Preview pending"),
+                size: locale
+                    .map(|locale| locale.named_static_text("prompt.image.size", "Size:"))
+                    .unwrap_or("Size:"),
+                path: locale
+                    .map(|locale| locale.named_static_text("prompt.image.path", "Path:"))
+                    .unwrap_or("Path:"),
+                loading: locale
+                    .map(|locale| locale.named_static_text("prompt.image.loading", "Loading..."))
+                    .unwrap_or("Loading..."),
+            };
+            post_flush_escapes = crate::render::render_image_overlay_with_labels(
                 buf,
                 overlay,
                 image,
                 theme.paste_bg,
                 theme.paste_fg,
                 theme.paste_dim,
+                &image_labels,
             );
         }
 
@@ -3368,6 +3537,7 @@ impl PromptWidget {
         bg: ratatui::style::Color,
         theme: &Theme,
         focused: bool,
+        locale: Option<&crate::locale::LocaleContext>,
     ) {
         if area.height == 0 {
             return;
@@ -3438,7 +3608,12 @@ impl PromptWidget {
         // Build right-side spans: "multiline" indicator.
         let mut right_spans: Vec<Span<'static>> = Vec::new();
         if info.multiline {
-            right_spans.push(Span::styled("multiline", flag_style));
+            right_spans.push(Span::styled(
+                locale
+                    .map(|locale| locale.named_static_text("prompt.mode.multiline", "multiline"))
+                    .unwrap_or("multiline"),
+                flag_style,
+            ));
         }
 
         if !right_spans.is_empty() {
@@ -3686,24 +3861,59 @@ fn normalize_cr(text: &str) -> String {
 ///
 /// Renders as: `[Pasted: N lines]`
 fn paste_chip_display(line_count: usize) -> Line<'static> {
-    chip_line(format!(
-        "Pasted: {} line{}",
-        line_count,
-        if line_count != 1 { "s" } else { "" }
-    ))
+    paste_chip_display_with_locale(line_count, None)
+}
+
+fn paste_chip_display_with_locale(
+    line_count: usize,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Line<'static> {
+    let english = if line_count == 1 {
+        "Pasted: {count} line"
+    } else {
+        "Pasted: {count} lines"
+    };
+    let label = locale
+        .map(|locale| {
+            locale
+                .named_text("prompt.paste.chip.lines", english)
+                .replace("{count}", &line_count.to_string())
+        })
+        .unwrap_or_else(|| english.replace("{count}", &line_count.to_string()));
+    chip_line(label)
 }
 
 /// Display `Line` for a byte-triggered paste chip, e.g. `[Pasted: 12 KB]` or
 /// `[Pasted: 1.0 MB]` (size, not a line count). Decimal (1000-based) units.
 fn paste_chip_display_bytes(byte_len: usize) -> Line<'static> {
+    paste_chip_display_bytes_with_locale(byte_len, None)
+}
+
+fn paste_chip_display_bytes_with_locale(
+    byte_len: usize,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Line<'static> {
     let size = if byte_len >= 1_000_000 {
         format!("{:.1} MB", byte_len as f64 / 1_000_000.0)
     } else if byte_len >= 1000 {
         format!("{} KB", byte_len / 1000)
     } else {
-        format!("{byte_len} bytes")
+        locale
+            .map(|locale| {
+                locale
+                    .named_text("prompt.paste.size.bytes", "{count} bytes")
+                    .replace("{count}", &byte_len.to_string())
+            })
+            .unwrap_or_else(|| format!("{byte_len} bytes"))
     };
-    chip_line(format!("Pasted: {size}"))
+    let label = locale
+        .map(|locale| {
+            locale
+                .named_text("prompt.paste.chip.size", "Pasted: {size}")
+                .replace("{size}", &size)
+        })
+        .unwrap_or_else(|| format!("Pasted: {size}"));
+    chip_line(label)
 }
 
 /// Highest `display_number` present in `images`, or `0` when the slice is empty.

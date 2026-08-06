@@ -63,7 +63,7 @@ impl SleepInhibitor {
     #[cfg(target_os = "macos")]
     fn platform_inhibit(&self) -> bool {
         let mut assertion_id: u32 = 0;
-        let reason = core_foundation::string::CFString::new("grok: agent turn in progress");
+        let reason = core_foundation::string::CFString::new("grok-zh: agent turn in progress");
         let assertion_type =
             core_foundation::string::CFString::from_static_string("NoIdleSleepAssertion");
 

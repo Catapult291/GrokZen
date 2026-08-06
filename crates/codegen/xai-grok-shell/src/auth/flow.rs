@@ -733,7 +733,7 @@ async fn run_auth_flow_steps(
         "auth: no OAuth2 configuration available (neither enterprise OIDC nor xAI OAuth2 configured)"
     );
     anyhow::bail!(
-        "No OAuth2 configuration available. Run `grok login` to authenticate, or contact your administrator if you use enterprise SSO."
+        "No OAuth2 configuration available. Run `grok-zh login` to authenticate, or contact your administrator if you use enterprise SSO."
     )
 }
 

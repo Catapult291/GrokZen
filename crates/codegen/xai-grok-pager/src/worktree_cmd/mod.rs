@@ -43,7 +43,7 @@ pub struct WorktreeArgs {
 
 #[derive(Debug, Subcommand, Clone)]
 enum WorktreeCommand {
-    /// List tracked worktrees
+    /// 列出已跟踪的工作树
     #[command(visible_alias = "ls")]
     List {
         #[arg(long)]
@@ -55,9 +55,9 @@ enum WorktreeCommand {
         #[arg(long)]
         all: bool,
     },
-    /// Show details for a specific worktree
+    /// 显示指定工作树的详细信息
     Show { id_or_path: String },
-    /// Remove worktrees
+    /// 移除工作树
     Rm {
         #[arg(required = true)]
         ids: Vec<String>,
@@ -66,7 +66,7 @@ enum WorktreeCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Garbage-collect orphaned/stale worktrees
+    /// 清理孤立或过期的工作树
     #[command(alias = "prune")]
     Gc {
         #[arg(long)]
@@ -76,7 +76,7 @@ enum WorktreeCommand {
         #[arg(short, long)]
         force: bool,
     },
-    /// Database maintenance
+    /// 数据库维护
     Db {
         #[command(subcommand)]
         command: WorktreeDbCommand,
@@ -85,11 +85,11 @@ enum WorktreeCommand {
 
 #[derive(Debug, Subcommand, Clone)]
 enum WorktreeDbCommand {
-    /// Rebuild DB from filesystem scan
+    /// 通过扫描文件系统重建数据库
     Rebuild,
-    /// Show DB statistics
+    /// 显示数据库统计信息
     Stats,
-    /// Print DB file path
+    /// 输出数据库文件路径
     Path,
 }
 

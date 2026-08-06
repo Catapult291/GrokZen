@@ -147,16 +147,25 @@ impl BlockContent for BgTaskBlock {
             Some(d) if !d.trim().is_empty() => d.replace('\n', " "),
             _ => command,
         };
+        let task_label = ctx
+            .locale
+            .named_static_text("scrollback.bg_task.label", "Task ");
         let line = match &self.kind {
             BgTaskKind::Started => Line::from(vec![
-                Span::styled("Task ", bold),
-                Span::styled("started: ", muted),
+                Span::styled(task_label, bold),
+                Span::styled(
+                    ctx.locale
+                        .named_static_text("scrollback.bg_task.started", "started: "),
+                    muted,
+                ),
                 Span::styled(display, muted),
             ]),
             BgTaskKind::Completed { elapsed } => Line::from(vec![
-                Span::styled("Task ", bold),
+                Span::styled(task_label, bold),
                 Span::styled(
-                    format!("completed in {}: ", format_duration(*elapsed)),
+                    ctx.locale
+                        .named_text("scrollback.bg_task.completed", "completed in {duration}: ")
+                        .replace("{duration}", &format_duration(*elapsed)),
                     muted,
                 ),
                 Span::styled(display, muted),
@@ -170,19 +179,37 @@ impl BlockContent for BgTaskBlock {
                 let is_killed = signal
                     .as_deref()
                     .is_some_and(|s| matches!(s, "killed" | "SIGTERM" | "SIGKILL" | "oom"));
-                let verb = if is_killed { "killed" } else { "failed" };
+                let verb = if is_killed {
+                    ctx.locale
+                        .named_static_text("scrollback.bg_task.killed", "killed")
+                } else {
+                    ctx.locale
+                        .named_static_text("scrollback.bg_task.failed", "failed")
+                };
                 let detail = if is_killed {
                     String::new()
                 } else {
                     match (exit_code, signal) {
                         (_, Some(sig)) => format!(" ({})", sig),
-                        (Some(code), None) => format!(" (exit {})", code),
+                        (Some(code), None) => ctx
+                            .locale
+                            .named_text("scrollback.bg_task.exit", " (exit {code})")
+                            .replace("{code}", &code.to_string()),
                         (None, None) => String::new(),
                     }
                 };
                 Line::from(vec![
-                    Span::styled("Task ", bold),
-                    Span::styled(format!("{verb} in {}: ", format_duration(*elapsed)), muted),
+                    Span::styled(task_label, bold),
+                    Span::styled(
+                        ctx.locale
+                            .named_text(
+                                "scrollback.bg_task.failed_duration",
+                                "{verb} in {duration}: ",
+                            )
+                            .replace("{verb}", verb)
+                            .replace("{duration}", &format_duration(*elapsed)),
+                        muted,
+                    ),
                     Span::styled(format!("{}{}", display, detail), muted),
                 ])
             }
@@ -358,6 +385,7 @@ mod tests {
             appearance: AppearanceConfig::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

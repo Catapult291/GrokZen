@@ -2341,7 +2341,7 @@ fn format_session_info_session_auth_ignores_api_key_env() {
     assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
     assert!(!text.contains("console.x.ai"), "{text}");
-    assert!(!text.contains("grok login"), "{text}");
+    assert!(!text.contains("grok-zh login"), "{text}");
 }
 #[test]
 fn format_session_info_api_key_without_env() {
@@ -2351,7 +2351,7 @@ fn format_session_info_api_key_without_env() {
     assert!(!text.contains("XAI_API_KEY"), "{text}");
     assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
-            text.contains("Run `grok login` to use your SuperGrok subscription instead."),
+            text.contains("Run `grok-zh login` to use your SuperGrok subscription instead."),
             "{text}"
         );
     assert!(!text.contains("grok.com"), "{text}");
@@ -2363,7 +2363,7 @@ fn format_session_info_api_key_auth_suggests_grok_login() {
     assert!(text.contains("Auth method: API key (XAI_API_KEY)"), "{text}");
     assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(
-            text.contains("Run `grok login` to use your SuperGrok subscription instead."),
+            text.contains("Run `grok-zh login` to use your SuperGrok subscription instead."),
             "{text}"
         );
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
@@ -2378,7 +2378,7 @@ fn format_session_info_session_only_shows_oauth() {
     assert!(!text.contains("Manage account and credits"), "{text}");
     assert!(!text.contains("Also present: XAI_API_KEY"), "{text}");
     assert!(!text.contains("console.x.ai"), "{text}");
-    assert!(!text.contains("grok login"), "{text}");
+    assert!(!text.contains("grok-zh login"), "{text}");
 }
 #[test]
 fn format_session_info_shows_conversation_id_when_present() {

@@ -214,9 +214,19 @@ pub struct Shortcut<'a> {
 /// (vim-mode on and search not yet active), so users discover how to start
 /// typing. No-op otherwise. Shared by the picker modals' footer builders.
 pub fn push_vim_nav_search_hint<'a>(shortcuts: &mut Vec<Shortcut<'a>>, search_active: bool) {
+    push_vim_nav_search_hint_with_locale(shortcuts, search_active, None)
+}
+
+pub fn push_vim_nav_search_hint_with_locale<'a>(
+    shortcuts: &mut Vec<Shortcut<'a>>,
+    search_active: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
     if !search_active && crate::appearance::cache::load_vim_mode() {
         shortcuts.push(Shortcut {
-            label: "i search",
+            label: locale
+                .map(|locale| locale.named_static_text("picker.shortcut.search_vim", "i search"))
+                .unwrap_or("i search"),
             clickable: false,
             id: 0,
         });

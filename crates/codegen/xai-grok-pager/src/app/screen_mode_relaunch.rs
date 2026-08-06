@@ -210,7 +210,10 @@ pub(crate) fn screen_mode_relaunch_resume_hint(session_id: &str, want_minimal: b
     } else {
         "--fullscreen"
     };
-    format!("{GROK_SCREEN_MODE_ENV}={mode} grok {flag} --resume {session_id}")
+    format!(
+        "{GROK_SCREEN_MODE_ENV}={mode} {} {flag} --resume {session_id}",
+        xai_grok_product::CLI_NAME
+    )
 }
 
 /// Replace the current process with a relaunch into the requested screen mode.
@@ -834,11 +837,11 @@ mod tests {
         // explicit flag keeps the resume in the right mode if the env is dropped.
         assert_eq!(
             screen_mode_relaunch_resume_hint("abc-sid", false),
-            "GROK_SCREEN_MODE=fullscreen grok --fullscreen --resume abc-sid"
+            "GROK_SCREEN_MODE=fullscreen grok-zh --fullscreen --resume abc-sid"
         );
         assert_eq!(
             screen_mode_relaunch_resume_hint("abc-sid", true),
-            "GROK_SCREEN_MODE=minimal grok --minimal --resume abc-sid"
+            "GROK_SCREEN_MODE=minimal grok-zh --minimal --resume abc-sid"
         );
     }
 

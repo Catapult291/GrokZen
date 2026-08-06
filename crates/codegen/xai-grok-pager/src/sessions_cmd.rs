@@ -12,23 +12,23 @@ pub struct SessionsArgs {
 
 #[derive(Debug, Subcommand, Clone)]
 enum SessionsCommand {
-    /// List recent sessions (same as search with no query)
+    /// 列出最近会话（等同于无查询词的搜索）
     List {
-        /// Maximum number of sessions to show
+        /// 最多显示的会话数
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
     },
-    /// Search sessions by keyword
+    /// 按关键词搜索会话
     Search {
-        /// Search query (searches summaries and first prompts).
+        /// 搜索词（搜索摘要和首条提示词）。
         query: String,
-        /// Maximum number of sessions to show
+        /// 最多显示的会话数
         #[arg(short = 'n', long, default_value = "20")]
         limit: usize,
     },
-    /// Permanently delete a session from history
+    /// 从历史记录中永久删除会话
     Delete {
-        /// Session id to delete.
+        /// 要删除的会话 ID。
         id: String,
     },
 }

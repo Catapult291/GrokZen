@@ -63,6 +63,10 @@ pub struct CommandTrigger {
     pub command_index: usize,
     /// Source of this command.
     pub source: CommandSource,
+    /// ACP metadata proved this is a bundled skill (not user/project/plugin).
+    pub bundled_skill: bool,
+    /// ACP metadata proved this is a first-party product-chat skill.
+    pub product_chat_skill: bool,
 }
 
 impl CommandTrigger {
@@ -86,6 +90,8 @@ impl CommandTrigger {
             args_required: command.args_required(),
             command_index,
             source,
+            bundled_skill: command.is_bundled_skill(),
+            product_chat_skill: command.is_product_chat_skill(),
         }
     }
 }

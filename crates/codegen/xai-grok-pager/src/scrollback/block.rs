@@ -460,6 +460,17 @@ pub(crate) fn join_searchable(parts: impl IntoIterator<Item = Option<String>>) -
 }
 
 impl RenderBlock {
+    /// Update display-only locale state carried by structured scrollback
+    /// blocks. Canonical source/search text is deliberately unaffected.
+    pub(crate) fn set_locale(&mut self, locale: crate::locale::LocaleContext) {
+        match self {
+            RenderBlock::Thinking(block) => block.set_locale(locale),
+            RenderBlock::SessionEvent(block) => block.set_locale(locale),
+            RenderBlock::ContextInfo(block) => block.set_locale(locale),
+            _ => {}
+        }
+    }
+
     pub(crate) fn rendered_output(&self, ctx: &BlockContext) -> RenderedBlockOutput {
         let RenderBlock::ToolCall(ToolCallBlock::Edit(edit)) = self else {
             return RenderedBlockOutput::from(self.output(ctx));
@@ -781,6 +792,15 @@ impl RenderBlock {
         model: impl Into<String>,
     ) -> Self {
         RenderBlock::ContextInfo(ContextInfoBlock::new(snapshot, model))
+    }
+
+    /// Create a `/context` snapshot block in the selected UI locale.
+    pub fn context_info_with_locale(
+        snapshot: xai_grok_shell::session::ContextInfo,
+        model: impl Into<String>,
+        locale: crate::locale::LocaleContext,
+    ) -> Self {
+        RenderBlock::ContextInfo(ContextInfoBlock::new_with_locale(snapshot, model, locale))
     }
 
     /// Create a session event block.
@@ -1247,6 +1267,7 @@ mod tests {
             appearance: AppearanceConfig::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

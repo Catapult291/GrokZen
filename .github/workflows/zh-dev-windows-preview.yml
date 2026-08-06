@@ -1,0 +1,240 @@
+name: zh-dev Windows preview
+
+on:
+  push:
+    branches:
+      - zh-dev
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Optional embedded version (defaults to a CI build number)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zh-dev-windows-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-gnu-preview:
+    name: Windows x64 GNU preview
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      RUSTUP_TOOLCHAIN: 1.93.0-x86_64-pc-windows-gnu
+      TARGET: x86_64-pc-windows-gnu
+
+    steps:
+      - name: Check out zh-dev
+        uses: actions/checkout@v4
+
+      - name: Select preview version
+        shell: pwsh
+        run: |
+          $requested = '${{ inputs.version }}'
+          if ([string]::IsNullOrWhiteSpace($requested)) {
+            $version = "0.2.119-zh.ci.$env:GITHUB_RUN_NUMBER"
+          } else {
+            $version = $requested.Trim()
+          }
+          if ($version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {
+            throw "Invalid version: $version"
+          }
+          "GROK_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PACKAGE_NAME=grok-zh-$version-windows-x86_64-gnu" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Configure pinned Rust, MinGW and protoc
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN `
+            --profile minimal --component rustfmt --component rust-src
+
+          $sysroot = (& rustc --print sysroot).Trim()
+          $rustc = Join-Path $sysroot 'bin\rustc.exe'
+          $rustdoc = Join-Path $sysroot 'bin\rustdoc.exe'
+          if (!(Test-Path -LiteralPath $rustc)) {
+            throw "Pinned rustc is missing: $rustc"
+          }
+
+          $mingw = 'C:\mingw64\bin'
+          $gcc = Join-Path $mingw 'gcc.exe'
+          $gxx = Join-Path $mingw 'g++.exe'
+          $ar = Join-Path $mingw 'ar.exe'
+          foreach ($tool in @($gcc, $gxx, $ar)) {
+            if (!(Test-Path -LiteralPath $tool)) {
+              throw "Required MinGW tool is missing: $tool"
+            }
+          }
+
+          $protocVersion = '29.3'
+          $protocArchive = Join-Path $env:RUNNER_TEMP "protoc-$protocVersion-win64.zip"
+          $protocRoot = Join-Path $env:RUNNER_TEMP "protoc-$protocVersion"
+          $protocUri = "https://github.com/protocolbuffers/protobuf/releases/download/v$protocVersion/protoc-$protocVersion-win64.zip"
+          Invoke-WebRequest -Uri $protocUri -OutFile $protocArchive
+          $protocHash = (Get-FileHash -LiteralPath $protocArchive -Algorithm SHA256).Hash
+          if ($protocHash -ne '57EA59E9F551AD8D71FFAA9B5CFBE0CA1F4E720972A1DB7EC2D12AB44BFF9383') {
+            throw "Unexpected protoc SHA-256: $protocHash"
+          }
+          Expand-Archive -LiteralPath $protocArchive -DestinationPath $protocRoot
+          $protoc = Join-Path $protocRoot 'bin\protoc.exe'
+          if (!(Test-Path -LiteralPath $protoc)) {
+            throw "Downloaded protoc is missing: $protoc"
+          }
+
+          $targetDir = Join-Path $env:RUNNER_TEMP 'grok-zh-target'
+          $cargoHome = Join-Path $env:RUNNER_TEMP 'grok-zh-cargo'
+
+          $mingw | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "RUSTC=$rustc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RUSTDOC=$rustdoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PROTOC=$protoc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_HOME=$cargoHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_TARGET_DIR=$targetDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$gcc" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CC=$gcc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CXX=$gxx" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "AR=$ar" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          & $rustc -Vv
+          & $gcc --version
+          & $protoc --version
+
+      - name: Validate localization metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo fmt --all -- --check
+
+          $metadataPath = 'crates/codegen/xai-grok-locale/locales/zh-CN-metadata.json'
+          $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+          $count = @($metadata.PSObject.Properties).Count
+          if ($count -lt 2000) {
+            throw "Unexpectedly small zh-CN catalog: $count keys"
+          }
+          if (Select-String -LiteralPath $metadataPath -SimpleMatch '词元' -Quiet) {
+            throw 'The zh-CN catalog must keep Token instead of 词元.'
+          }
+          "Validated $count zh-CN entries."
+
+          cargo test --frozen -j 1 -p xai-grok-locale
+
+      - name: Build low-memory Windows preview
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --frozen -j 1 `
+            --target $env:TARGET `
+            -p xai-grok-pager-bin `
+            --profile release `
+            --features release-dist `
+            --config profile.release.lto=false `
+            --config profile.release.debug=0 `
+            --config profile.release.codegen-units=16 `
+            --config profile.release.package.xai-grok-shell.opt-level=1 `
+            --config profile.release.package.xai-grok-shell.codegen-units=16
+
+      - name: Package unsigned green preview
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          $package = Join-Path $dist $env:PACKAGE_NAME
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+
+          $builtExe = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release\grok-zh.exe"
+          if (!(Test-Path -LiteralPath $builtExe)) {
+            throw "Built executable is missing: $builtExe"
+          }
+          $packageExe = Join-Path $package 'grok-zh.exe'
+          Copy-Item -LiteralPath $builtExe -Destination $packageExe
+
+          $strip = 'C:\mingw64\bin\strip.exe'
+          $objdump = 'C:\mingw64\bin\objdump.exe'
+          & $strip --strip-debug $packageExe
+          if ($LASTEXITCODE -ne 0) {
+            throw "strip failed: $LASTEXITCODE"
+          }
+
+          $rgVersion = '15.1.0'
+          $rgArchive = Join-Path $env:RUNNER_TEMP 'ripgrep.zip'
+          $rgExtract = Join-Path $env:RUNNER_TEMP 'ripgrep'
+          $rgUri = "https://github.com/BurntSushi/ripgrep/releases/download/$rgVersion/ripgrep-$rgVersion-x86_64-pc-windows-msvc.zip"
+          Invoke-WebRequest -Uri $rgUri -OutFile $rgArchive
+          Expand-Archive -LiteralPath $rgArchive -DestinationPath $rgExtract
+          $rgSource = Get-ChildItem -LiteralPath $rgExtract -Filter rg.exe -Recurse -File |
+            Select-Object -First 1
+          if (!$rgSource) {
+            throw 'Downloaded ripgrep archive does not contain rg.exe.'
+          }
+          $rgHash = (Get-FileHash -LiteralPath $rgSource.FullName -Algorithm SHA256).Hash
+          if ($rgHash -ne 'DECDD4992F3F1B9A5EF9898F1B40AB16886D579D6516B4EFD3D5EAA19364E408') {
+            throw "Unexpected ripgrep SHA-256: $rgHash"
+          }
+          Copy-Item -LiteralPath $rgSource.FullName -Destination (Join-Path $package 'rg.exe')
+
+          Copy-Item -LiteralPath 'LICENSE' -Destination (Join-Path $package 'LICENSE-grok-build.txt')
+          $rgLicenseDir = Join-Path $package 'licenses\ripgrep'
+          New-Item -ItemType Directory -Path $rgLicenseDir -Force | Out-Null
+          foreach ($licenseName in @('COPYING', 'LICENSE-MIT', 'UNLICENSE')) {
+            $license = Get-ChildItem -LiteralPath $rgExtract -Filter $licenseName -Recurse -File |
+              Select-Object -First 1
+            if ($license) {
+              Copy-Item -LiteralPath $license.FullName -Destination $rgLicenseDir
+            }
+          }
+
+          $exeHash = (Get-FileHash -LiteralPath $packageExe -Algorithm SHA256).Hash
+          @"
+          $exeHash  grok-zh.exe
+          $rgHash  rg.exe
+          "@.Trim() | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
+
+          $signature = (Get-AuthenticodeSignature -LiteralPath $packageExe).Status
+          $pe = (& $objdump -f $packageExe | Select-String 'file format').Line.Trim()
+          @"
+          Grok Build 简体中文 CI 预览版
+          Version: $env:GROK_VERSION
+          Commit: $env:GITHUB_SHA
+          Target: $env:TARGET
+          Profile: low-memory release with release-dist features (not canonical Thin-LTO release-dist)
+          PE: $pe
+          Authenticode: $signature
+          Executable started by CI: false
+          "@.Trim() | Set-Content -LiteralPath (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
+
+          $zip = Join-Path $dist "$env:PACKAGE_NAME.zip"
+          Compress-Archive -Path (Join-Path $package '*') -DestinationPath $zip -CompressionLevel Optimal
+          $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          "ZIP_SHA256=$zipHash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "Created $zip ($zipHash)"
+
+      - name: Upload green preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-zh-windows-${{ github.run_number }}
+          path: dist/*.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Publish artifact hash in summary
+        shell: pwsh
+        run: |
+          @"
+          ## Windows GNU preview
+
+          - Version: ``$env:GROK_VERSION``
+          - ZIP SHA-256: ``$env:ZIP_SHA256``
+          - Unsigned low-memory CI preview; the executable was not started.
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

@@ -815,9 +815,13 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
                 false
             } else if let Some(pending_id) = agent.pending_recap_entry.take() {
                 agent.scrollback.remove_entry(pending_id);
-                agent.show_toast(crate::app::dispatch::recap_unavailable_toast(
-                    crate::app::dispatch::scrollback_has_user_messages(&agent.scrollback),
-                ));
+                let has_messages =
+                    crate::app::dispatch::scrollback_has_user_messages(&agent.scrollback);
+                let toast = crate::app::dispatch::recap_unavailable_toast_with_locale(
+                    agent.scrollback.locale(),
+                    has_messages,
+                );
+                agent.show_toast(toast);
                 true
             } else {
                 false
@@ -919,7 +923,10 @@ pub(super) fn handle_session_notification(notif: &acp::ExtNotification, app: &mu
             actually_changed
         }
         XaiSessionUpdate::MemoryFiles { files } => {
-            let entries = crate::views::memory_modal::build_entries(files);
+            let entries = crate::views::memory_modal::build_entries_with_locale(
+                files,
+                Some(agent.scrollback.locale()),
+            );
             let modal_state = crate::views::memory_modal::MemoryModalState::new(entries);
             agent.active_modal = Some(crate::views::modal::ActiveModal::MemoryBrowser {
                 state: Box::new(modal_state),

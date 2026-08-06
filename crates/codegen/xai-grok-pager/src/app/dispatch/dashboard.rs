@@ -22,6 +22,19 @@ use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, DashboardReturn, TrustState};
 use agent_client_protocol as acp;
 
+fn localized_template(
+    locale: &crate::locale::LocaleContext,
+    id: &str,
+    english: &str,
+    replacements: &[(&str, &str)],
+) -> String {
+    let mut message = locale.named_text(id, english).into_owned();
+    for (placeholder, value) in replacements {
+        message = message.replace(placeholder, value);
+    }
+    message
+}
+
 // ---------------------------------------------------------------------------
 // Agent Dashboard dispatchers
 // ---------------------------------------------------------------------------
@@ -126,21 +139,32 @@ pub(super) fn dispatch_open_dashboard(app: &mut AppView) -> Vec<Effect> {
     use crate::views::dashboard::dashboard_enabled;
 
     if !dashboard_enabled() {
-        app.show_toast("Agent dashboard is disabled in this configuration");
+        let message = app.locale.named_static_text(
+            "dashboard.toast.disabled",
+            "Agent dashboard is disabled in this configuration",
+        );
+        app.show_toast(message);
         return vec![];
     }
     // Gate behind auth. Until login completes, the
     // backend rejects new sessions; activating the dashboard view
     // visually dismisses the auth UI. Toast and stay put.
     if !matches!(app.auth_state, crate::app::app_view::AuthState::Done) {
-        app.show_toast("Sign in to open the dashboard");
+        let message = app
+            .locale
+            .named_static_text("dashboard.toast.sign_in", "Sign in to open the dashboard");
+        app.show_toast(message);
         return vec![];
     }
     // Same rationale for folder trust: opening the dashboard would visually
     // dismiss the trust question with the folder still unanswered. Toast and
     // stay put (mirrors the auth gate above) so the question is resolved first.
     if matches!(app.trust_state, TrustState::Pending { .. }) {
-        app.show_toast("Answer the folder-trust question to open the dashboard");
+        let message = app.locale.named_static_text(
+            "dashboard.toast.folder_trust",
+            "Answer the folder-trust question to open the dashboard",
+        );
+        app.show_toast(message);
         return vec![];
     }
     // Edge case 24: idempotent toggle — opening from the dashboard view
@@ -317,6 +341,14 @@ pub(super) fn dispatch_dashboard_attach(
     id: crate::views::dashboard::DashboardRowId,
 ) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
+    let session_missing = app.locale.named_static_text(
+        "dashboard.toast.session_missing",
+        "Session no longer exists",
+    );
+    let subagent_missing = app.locale.named_static_text(
+        "dashboard.toast.subagent_missing",
+        "Subagent no longer running",
+    );
     // Attach is a fullscreen view switch AND signals
     // "session-overlay mode" via `attached_agent`. The agent view
     // takes the full screen and the renderer wraps it in a bordered
@@ -336,7 +368,7 @@ pub(super) fn dispatch_dashboard_attach(
         DashboardRowId::TopLevel(agent_id) => {
             if !app.agents.contains_key(&agent_id) {
                 if let Some(d) = app.dashboard.as_mut() {
-                    d.set_error_toast("Session no longer exists");
+                    d.set_error_toast(session_missing);
                 }
                 return vec![];
             }
@@ -373,7 +405,7 @@ pub(super) fn dispatch_dashboard_attach(
                 .is_some_and(|a| a.subagent_sessions.contains_key(&child_session_id));
             if !alive {
                 if let Some(d) = app.dashboard.as_mut() {
-                    d.set_error_toast("Subagent no longer running");
+                    d.set_error_toast(subagent_missing);
                 }
                 return vec![];
             }
@@ -516,6 +548,9 @@ fn clear_pending_overlay_stop(app: &mut AppView) {
 /// is INSIDE the session being closed: the view returns to the
 /// dashboard instead of falling back to another agent.
 pub(super) fn dispatch_dashboard_overlay_stop(app: &mut AppView) -> Vec<Effect> {
+    let session_closed = app
+        .locale
+        .named_static_text("dashboard.toast.session_closed", "Session closed");
     let Some(id) = app.dashboard.as_ref().and_then(|d| d.attached_agent) else {
         return vec![];
     };
@@ -560,7 +595,7 @@ pub(super) fn dispatch_dashboard_overlay_stop(app: &mut AppView) -> Vec<Effect> 
         // agent disappears externally (`app_view.rs`, AgentDashboard arm).
         // Don't clobber a refusal toast planted by the close path above.
         if d.error_toast.is_none() {
-            d.error_toast = Some(format!("{} Session closed", crate::glyphs::check_mark()));
+            d.error_toast = Some(format!("{} {session_closed}", crate::glyphs::check_mark()));
         }
     }
     effects
@@ -575,12 +610,16 @@ pub(super) fn dispatch_dashboard_overlay_stop(app: &mut AppView) -> Vec<Effect> 
 /// dashboard is never left in worktree mode in a non-git directory).
 pub(super) fn dispatch_dashboard_toggle_worktree(app: &mut AppView) -> Vec<Effect> {
     let has_git = app.cwd_has_git_ancestor;
+    let not_git = app.locale.named_static_text(
+        "dashboard.toast.worktree_requires_git",
+        "Not a git repository — worktrees need one",
+    );
     if let Some(d) = app.dashboard.as_mut() {
         if has_git {
             d.dispatch_worktree = !d.dispatch_worktree;
         } else {
             d.dispatch_worktree = false;
-            d.set_error_toast("Not a git repository — worktrees need one");
+            d.set_error_toast(not_git);
         }
     }
     vec![]
@@ -598,12 +637,19 @@ pub(super) fn dispatch_dashboard_toggle_worktree(app: &mut AppView) -> Vec<Effec
 pub(super) fn dispatch_dashboard_toggle_auto_approve(app: &mut AppView) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
 
+    let select_session = app
+        .locale
+        .named_static_text("dashboard.toast.select_session", "Select a session first");
+    let session_missing = app.locale.named_static_text(
+        "dashboard.toast.session_missing",
+        "Session no longer exists",
+    );
     let Some(d) = app.dashboard.as_ref() else {
         return vec![];
     };
     let Some(selected) = d.selected.as_ref() else {
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Select a session first");
+            d.set_error_toast(select_session);
         }
         return vec![];
     };
@@ -614,7 +660,7 @@ pub(super) fn dispatch_dashboard_toggle_auto_approve(app: &mut AppView) -> Vec<E
     };
     if !app.agents.contains_key(&agent_id) {
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Session no longer exists");
+            d.set_error_toast(session_missing);
         }
         return vec![];
     }
@@ -798,7 +844,11 @@ pub(super) fn dispatch_dashboard_open_location_picker(app: &mut AppView) -> Vec<
         // Gate on the dashboard being the *foreground* view (not merely
         // `app.dashboard.is_some()`, which stays true for the rest of the
         // session once the dashboard has been opened even once).
-        app.show_toast("Open the dashboard (/dashboard) to change location");
+        let message = app.locale.named_static_text(
+            "dashboard.toast.open_to_change_location",
+            "Open the dashboard (/dashboard) to change location",
+        );
+        app.show_toast(message);
         return vec![];
     }
     // Idempotent — re-triggering while open keeps the current query.
@@ -825,9 +875,12 @@ pub(super) fn dispatch_dashboard_open_location_picker(app: &mut AppView) -> Vec<
     };
 
     let mut candidates: Vec<LocationCandidate> = Vec::new();
+    let current = app
+        .locale
+        .named_static_text("dashboard.location.current", "current");
     candidates.push(LocationCandidate {
         label: location_picker_label(&cwd),
-        detail: format!("{}  (current)", crate::recent_dirs::display_path(&cwd)),
+        detail: format!("{}  ({current})", crate::recent_dirs::display_path(&cwd)),
         worktree: worktree_label(&cwd),
         path: cwd.clone(),
     });
@@ -869,22 +922,32 @@ pub(super) fn dispatch_dashboard_change_location(app: &mut AppView, input: Strin
     // overlay) would otherwise silently change the process cwd, since
     // `app.dashboard` stays `Some` for the rest of the session once opened.
     if !matches!(app.active_view, ActiveView::AgentDashboard) {
-        app.show_toast("Open the dashboard (/dashboard) to change location");
+        let message = app.locale.named_static_text(
+            "dashboard.toast.open_to_change_location",
+            "Open the dashboard (/dashboard) to change location",
+        );
+        app.show_toast(message);
         return vec![];
     }
     let path = match resolve_location_input(&input, &app.cwd).filter(|p| p.is_dir()) {
         Some(p) => p,
         None => {
+            let message = localized_template(
+                app.locale.as_ref(),
+                "dashboard.toast.not_directory",
+                "Not a directory: {path}",
+                &[("{path}", input.trim())],
+            );
             if let Some(lp) = app
                 .dashboard
                 .as_mut()
                 .and_then(|d| d.location_picker.as_mut())
             {
-                lp.error = Some(format!("Not a directory: {}", input.trim()));
+                lp.error = Some(message.clone());
             } else if let Some(d) = app.dashboard.as_mut() {
                 // `/cd <bad path>` typed into the dispatch box (no picker
                 // open) — surface the error as a dashboard toast.
-                d.set_error_toast(&format!("Not a directory: {}", input.trim()));
+                d.set_error_toast(&message);
             }
             return vec![];
         }
@@ -951,6 +1014,10 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
     app: &mut AppView,
     label: Option<String>,
 ) -> Vec<Effect> {
+    let not_git = app.locale.named_static_text(
+        "dashboard.toast.worktree_create_requires_git",
+        "Not a git repository — can't create a worktree here",
+    );
     // Apply the prompt, attach choice, and staged model/mode together.
     // The worktree path must honor all of these exactly like the normal
     // dispatch path (`dispatch_dashboard_dispatch`).
@@ -973,7 +1040,7 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
             if let Some(p) = prompt {
                 d.dispatch.restore(p);
             }
-            d.set_error_toast("Not a git repository — can't create a worktree here");
+            d.set_error_toast(not_git);
         }
         return vec![];
     }
@@ -1103,6 +1170,10 @@ pub(super) fn dispatch_dashboard_dispatch(
     text: String,
     attach: bool,
 ) -> Vec<Effect> {
+    let empty_prompt = app.locale.named_static_text(
+        "dashboard.toast.empty_prompt",
+        "Type a prompt to dispatch a session",
+    );
     let text = merge_prompt_with_voice_interim(text, voice_stop_on_submit(app));
     // Paste-then-immediate-send: a Cmd+V image probe is still off-thread. Stash
     // this send and re-issue it once the probe completes so the image is never
@@ -1122,7 +1193,7 @@ pub(super) fn dispatch_dashboard_dispatch(
     // slash-fallback callers.
     if trimmed.is_empty() {
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Type a prompt to dispatch a session");
+            d.set_error_toast(empty_prompt);
         }
         return vec![];
     }
@@ -1135,11 +1206,16 @@ pub(super) fn dispatch_dashboard_dispatch(
     const MAX_DISPATCH_BYTES: usize = 64 * 1024;
     if text.len() > MAX_DISPATCH_BYTES {
         let chars = text.chars().count();
+        let chars_text = chars.to_string();
+        let bytes_text = text.len().to_string();
+        let message = localized_template(
+            app.locale.as_ref(),
+            "dashboard.toast.prompt_too_long",
+            "Prompt too long ({chars} chars / {bytes} bytes; max ~64 KiB)",
+            &[("{chars}", &chars_text), ("{bytes}", &bytes_text)],
+        );
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast(&format!(
-                "Prompt too long ({chars} chars / {} bytes; max ~64 KiB)",
-                text.len()
-            ));
+            d.set_error_toast(&message);
         }
         return vec![];
     }
@@ -1337,12 +1413,18 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         // upsell via the feedback toast.
         if reg.is_restricted(invocation.token) {
             let token = invocation.token.to_string();
+            let message = localized_template(
+                app.locale.as_ref(),
+                "dashboard.toast.supergrok_required",
+                "/{command} requires SuperGrok — upgrade at {url}",
+                &[
+                    ("{command}", &token),
+                    ("{url}", super::billing::UPSELL_URL_UPGRADE),
+                ],
+            );
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.set_error_toast(&format!(
-                    "/{token} requires SuperGrok — upgrade at {}",
-                    super::billing::UPSELL_URL_UPGRADE
-                ));
+                d.set_error_toast(&message);
             }
             return vec![];
         }
@@ -1364,9 +1446,15 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             && !command.offered_when_session_less()
         {
             let name = command.name();
+            let message = localized_template(
+                app.locale.as_ref(),
+                "dashboard.toast.session_scoped_command",
+                "/{name} only works in a session",
+                &[("{name}", name)],
+            );
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.set_error_toast(&format!("/{name} only works in a session"));
+                d.set_error_toast(&message);
             }
             return vec![];
         }
@@ -1503,9 +1591,13 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
         // `/plan` with an existing plan has nothing to show on the
         // session-less dashboard.
         CommandResult::Action(Action::ShowPlan) => {
+            let message = app.locale.named_static_text(
+                "dashboard.toast.no_plan",
+                "No plan to show on the dashboard",
+            );
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.set_error_toast("No plan to show on the dashboard");
+                d.set_error_toast(message);
             }
             vec![]
         }
@@ -1517,9 +1609,13 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             dispatch(action, app)
         }
         CommandResult::Doctor(_) => {
+            let message = app.locale.named_static_text(
+                "dashboard.toast.doctor_requires_session",
+                "Open a session to run /doctor.",
+            );
             if let Some(d) = app.dashboard.as_mut() {
                 d.dispatch.set_text("");
-                d.set_error_toast("Open a session to run /doctor.");
+                d.set_error_toast(message);
             }
             vec![]
         }
@@ -1645,6 +1741,14 @@ pub(super) fn apply_pending_dispatch_config(
 pub(super) fn dispatch_dashboard_peek_cycle_mode(app: &mut AppView) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
 
+    let subagent_mode = app.locale.named_static_text(
+        "dashboard.toast.subagent_mode",
+        "Can't change a subagent's mode",
+    );
+    let session_missing = app.locale.named_static_text(
+        "dashboard.toast.session_missing",
+        "Session no longer exists",
+    );
     let Some(row) = app
         .dashboard
         .as_ref()
@@ -1656,7 +1760,7 @@ pub(super) fn dispatch_dashboard_peek_cycle_mode(app: &mut AppView) -> Vec<Effec
         DashboardRowId::TopLevel(id) => id,
         DashboardRowId::Subagent { .. } => {
             if let Some(d) = app.dashboard.as_mut() {
-                d.set_error_toast("Can't change a subagent's mode");
+                d.set_error_toast(subagent_mode);
             }
             return vec![];
         }
@@ -1665,7 +1769,7 @@ pub(super) fn dispatch_dashboard_peek_cycle_mode(app: &mut AppView) -> Vec<Effec
     if !app.agents.contains_key(&agent_id) {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Session no longer exists");
+            d.set_error_toast(session_missing);
         }
         return vec![];
     }
@@ -1690,6 +1794,14 @@ pub(super) fn dispatch_dashboard_peek_reply(
 ) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
 
+    let subagent_reply = app.locale.named_static_text(
+        "dashboard.toast.subagent_reply",
+        "Can't reply to a subagent",
+    );
+    let session_missing = app.locale.named_static_text(
+        "dashboard.toast.session_missing",
+        "Session no longer exists",
+    );
     let text = merge_prompt_with_voice_interim(text, voice_stop_on_submit(app));
 
     // Paste-then-immediate-send: a Cmd+V image probe is still off-thread. Stash
@@ -1707,7 +1819,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
     // peeks driven by their parent turn.
     let DashboardRowId::TopLevel(agent_id) = row else {
         if let Some(d) = app.dashboard.as_mut() {
-            d.set_error_toast("Can't reply to a subagent");
+            d.set_error_toast(subagent_reply);
         }
         return vec![];
     };
@@ -1715,7 +1827,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
     if !app.agents.contains_key(&agent_id) {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Session no longer exists");
+            d.set_error_toast(session_missing);
         }
         return vec![];
     }
@@ -1741,7 +1853,7 @@ pub(super) fn dispatch_dashboard_peek_reply(
         let Some(agent) = app.agents.get_mut(&agent_id) else {
             if let Some(d) = app.dashboard.as_mut() {
                 d.set_peek(None);
-                d.set_error_toast("Session no longer exists");
+                d.set_error_toast(session_missing);
             }
             return vec![];
         };
@@ -1791,6 +1903,10 @@ pub(super) fn dispatch_dashboard_toggle_pin(app: &mut AppView) -> Vec<Effect> {
 }
 
 pub(super) fn dispatch_dashboard_begin_rename(app: &mut AppView) {
+    let subagent_rename = app.locale.named_static_text(
+        "dashboard.toast.subagent_rename",
+        "Subagent rows can't be renamed",
+    );
     let Some(d) = app.dashboard.as_mut() else {
         return;
     };
@@ -1800,7 +1916,7 @@ pub(super) fn dispatch_dashboard_begin_rename(app: &mut AppView) {
     // Only top-level rows are renameable (subagents are tool-spawned
     // and have no user-visible name to rename).
     if sel.is_subagent() {
-        d.set_error_toast("Subagent rows can't be renamed");
+        d.set_error_toast(subagent_rename);
         return;
     }
     // The draft starts EMPTY (not prefilled with the current title):
@@ -1922,6 +2038,18 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
     use std::time::Instant;
 
+    let stop_before_delete = app.locale.named_static_text(
+        "dashboard.toast.stop_before_delete",
+        "Stop the session before deleting",
+    );
+    let session_missing = app.locale.named_static_text(
+        "dashboard.toast.session_list_missing",
+        "Session is no longer in the list",
+    );
+    let chat_delete_unsupported = app.locale.named_static_text(
+        "dashboard.toast.chat_delete_unsupported",
+        "Deleting chat conversations isn't supported yet",
+    );
     let Some(sel) = app.dashboard.as_ref().and_then(|d| d.selected.clone()) else {
         return vec![];
     };
@@ -1943,7 +2071,7 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                 return match stopped {
                     Some(effects) => effects,
                     None => {
-                        app.show_toast("Stop the session before deleting");
+                        app.show_toast(stop_before_delete);
                         vec![]
                     }
                 };
@@ -1980,13 +2108,13 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                 .find(|e| e.session_id == session_id.as_str());
             match entry {
                 None => {
-                    app.show_toast("Session is no longer in the list");
+                    app.show_toast(session_missing);
                     vec![]
                 }
                 // Chat conversations can't be deleted from here yet, so
                 // don't arm a confirm that could never succeed.
                 Some(e) if e.origin.kind == "conversation" => {
-                    app.show_toast("Deleting chat conversations isn't supported yet");
+                    app.show_toast(chat_delete_unsupported);
                     vec![]
                 }
                 // No local turn to cancel, so a busy roster row can't delete.
@@ -1994,7 +2122,7 @@ pub(super) fn dispatch_dashboard_stop(app: &mut AppView) -> Vec<Effect> {
                     if !crate::views::dashboard::roster_activity_to_state(e.activity)
                         .allows_delete() =>
                 {
-                    app.show_toast("Stop the session before deleting");
+                    app.show_toast(stop_before_delete);
                     vec![]
                 }
                 Some(_) => arm_or_delete(app, sel),
@@ -2106,6 +2234,30 @@ fn delete_dashboard_row(
 ) -> Vec<Effect> {
     use crate::views::dashboard::DashboardRowId;
 
+    let stop_before_delete = app.locale.named_static_text(
+        "dashboard.toast.stop_before_delete",
+        "Stop the session before deleting",
+    );
+    let no_history = app.locale.named_static_text(
+        "dashboard.toast.no_session_history",
+        "No session history to delete",
+    );
+    let deleting = app
+        .locale
+        .named_static_text("dashboard.toast.deleting_session", "Deleting session…");
+    let subagent_delete = app.locale.named_static_text(
+        "dashboard.toast.subagent_delete",
+        "Subagent rows can't be deleted from the dashboard",
+    );
+    let session_missing = app.locale.named_static_text(
+        "dashboard.toast.session_list_missing",
+        "Session is no longer in the list",
+    );
+    let chat_delete_unsupported = app.locale.named_static_text(
+        "dashboard.toast.chat_delete_unsupported",
+        "Deleting chat conversations isn't supported yet",
+    );
+
     if let Some(d) = app.dashboard.as_mut() {
         d.delete_confirm = None;
     }
@@ -2119,15 +2271,15 @@ fn delete_dashboard_row(
             // (a new turn, `/loop`, queued prompt, replay, needs-input, or
             // bg task), and delete must never run on a non-settled row.
             if !crate::views::dashboard::classify_top_level(agent).allows_delete() {
-                app.show_toast("Stop the session before deleting");
+                app.show_toast(stop_before_delete);
                 return vec![];
             }
             let Some(session_id) = agent.session.session_id.clone() else {
-                app.show_toast("No session history to delete");
+                app.show_toast(no_history);
                 return vec![];
             };
             let cwd = agent.session.cwd.display().to_string();
-            app.show_toast("Deleting session\u{2026}");
+            app.show_toast(deleting);
             vec![Effect::DeleteSession {
                 source: "current".into(),
                 session_id: session_id.to_string(),
@@ -2136,7 +2288,7 @@ fn delete_dashboard_row(
             }]
         }
         DashboardRowId::Subagent { .. } => {
-            app.show_toast("Subagent rows can't be deleted from the dashboard");
+            app.show_toast(subagent_delete);
             vec![]
         }
         DashboardRowId::Roster { session_id } => {
@@ -2147,18 +2299,18 @@ fn delete_dashboard_row(
                 .find(|e| e.session_id == session_id)
                 .cloned()
             else {
-                app.show_toast("Session is no longer in the list");
+                app.show_toast(session_missing);
                 return vec![];
             };
             if entry.origin.kind == "conversation" {
-                app.show_toast("Deleting chat conversations isn't supported yet");
+                app.show_toast(chat_delete_unsupported);
                 return vec![];
             }
             if !crate::views::dashboard::roster_activity_to_state(entry.activity).allows_delete() {
-                app.show_toast("Stop the session before deleting");
+                app.show_toast(stop_before_delete);
                 return vec![];
             }
-            app.show_toast("Deleting session\u{2026}");
+            app.show_toast(deleting);
             vec![Effect::DeleteSession {
                 source: "local".into(),
                 session_id,
@@ -2335,6 +2487,13 @@ pub(super) fn dispatch_dashboard_permission_select(
     request_id: usize,
     option_id: acp::PermissionOptionId,
 ) -> Vec<Effect> {
+    let row_missing = app
+        .locale
+        .named_static_text("dashboard.toast.row_missing", "Row no longer exists");
+    let permission_changed = app.locale.named_static_text(
+        "dashboard.toast.permission_changed",
+        "Permission has changed — re-open peek",
+    );
     // Determine the owning AgentId.
     let target_id = match &row {
         crate::views::dashboard::DashboardRowId::TopLevel(id) => *id,
@@ -2344,7 +2503,7 @@ pub(super) fn dispatch_dashboard_permission_select(
     let Some(agent) = app.agents.get_mut(&target_id) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Row no longer exists");
+            d.set_error_toast(row_missing);
         }
         return vec![];
     };
@@ -2356,7 +2515,7 @@ pub(super) fn dispatch_dashboard_permission_select(
     if !front_matches {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Permission has changed — re-open peek");
+            d.set_error_toast(permission_changed);
         }
         return vec![];
     }
@@ -2399,6 +2558,13 @@ pub(super) fn dispatch_dashboard_permission_followup(
     request_id: usize,
     text: String,
 ) -> Vec<Effect> {
+    let row_missing = app
+        .locale
+        .named_static_text("dashboard.toast.row_missing", "Row no longer exists");
+    let permission_changed = app.locale.named_static_text(
+        "dashboard.toast.permission_changed",
+        "Permission has changed — re-open peek",
+    );
     let target_id = match &row {
         crate::views::dashboard::DashboardRowId::TopLevel(id) => *id,
         crate::views::dashboard::DashboardRowId::Subagent { parent, .. } => *parent,
@@ -2407,7 +2573,7 @@ pub(super) fn dispatch_dashboard_permission_followup(
     let Some(agent) = app.agents.get_mut(&target_id) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Row no longer exists");
+            d.set_error_toast(row_missing);
         }
         return vec![];
     };
@@ -2419,7 +2585,7 @@ pub(super) fn dispatch_dashboard_permission_followup(
     if !front_matches {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Permission has changed — re-open peek");
+            d.set_error_toast(permission_changed);
         }
         return vec![];
     }
@@ -2468,6 +2634,9 @@ pub(super) fn dispatch_dashboard_question_answer(
     option_idx: Option<usize>,
     freeform: String,
 ) -> Vec<Effect> {
+    let row_missing = app
+        .locale
+        .named_static_text("dashboard.toast.row_missing", "Row no longer exists");
     let target_id = match &row {
         crate::views::dashboard::DashboardRowId::TopLevel(id) => *id,
         crate::views::dashboard::DashboardRowId::Subagent { parent, .. } => *parent,
@@ -2476,7 +2645,7 @@ pub(super) fn dispatch_dashboard_question_answer(
     let Some(agent) = app.agents.get_mut(&target_id) else {
         if let Some(d) = app.dashboard.as_mut() {
             d.set_peek(None);
-            d.set_error_toast("Row no longer exists");
+            d.set_error_toast(row_missing);
         }
         return vec![];
     };

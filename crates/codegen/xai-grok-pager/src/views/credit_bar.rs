@@ -5,6 +5,7 @@
 
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
+use std::borrow::Cow;
 
 use crate::theme::Theme;
 
@@ -45,6 +46,66 @@ impl CreditBalance {
             _ => "Usage",
         }
     }
+
+    fn usage_label_with_locale<'a>(
+        &self,
+        locale: Option<&'a crate::locale::LocaleContext>,
+    ) -> Cow<'static, str> {
+        let (id, english) = match self.period_type.as_deref() {
+            Some(t) if t.contains("WEEKLY") => ("status.billing.weekly_limit", "Weekly limit"),
+            Some(t) if t.contains("MONTHLY") => ("status.billing.monthly_limit", "Monthly limit"),
+            _ => ("status.billing.usage", "Usage"),
+        };
+        locale
+            .map(|locale| locale.named_text(id, english))
+            .unwrap_or(Cow::Borrowed(english))
+    }
+}
+
+fn billing_text<'a>(
+    locale: Option<&crate::locale::LocaleContext>,
+    id: &str,
+    english: &'a str,
+) -> Cow<'a, str> {
+    locale
+        .map(|locale| locale.named_text(id, english))
+        .unwrap_or(Cow::Borrowed(english))
+}
+
+fn localized_reset_display(reset: &str, locale: Option<&crate::locale::LocaleContext>) -> String {
+    if !locale.is_some_and(|locale| locale.locale() == crate::locale::UiLocale::ZhCn) {
+        return reset.to_string();
+    }
+    const MONTHS: [(&str, u8); 12] = [
+        ("January", 1),
+        ("February", 2),
+        ("March", 3),
+        ("April", 4),
+        ("May", 5),
+        ("June", 6),
+        ("July", 7),
+        ("August", 8),
+        ("September", 9),
+        ("October", 10),
+        ("November", 11),
+        ("December", 12),
+    ];
+    for (name, month) in MONTHS {
+        let Some(rest) = reset
+            .strip_prefix(name)
+            .and_then(|rest| rest.strip_prefix(' '))
+        else {
+            continue;
+        };
+        let Some((day, time)) = rest.split_once(", ") else {
+            continue;
+        };
+        let Ok(day) = day.parse::<u8>() else {
+            continue;
+        };
+        return format!("{month}月{day}日 {time}");
+    }
+    reset.to_string()
 }
 
 /// Auto top-up rule data used by the `/usage` summary.
@@ -104,15 +165,26 @@ fn fmt_dollars(cents: i64) -> String {
 /// - auto top-up on, no max   → `Auto topup: $N`
 /// - auto top-up on, max set  → `Auto topup: $N` + `Max monthly topup: $M`
 pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopupInfo>) -> String {
+    format_usage_summary_with_locale(balance, autotopup, None)
+}
+
+pub fn format_usage_summary_with_locale(
+    balance: &CreditBalance,
+    autotopup: Option<&AutoTopupInfo>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     // Floor to match the backend SpendingLimiter's `as u8` truncation
     // (99.994% → 99%, never 100% until truly exhausted).
-    let mut lines = vec![format!(
-        "{}: {}%",
-        balance.usage_label(),
-        balance.usage_pct.floor() as i64
-    )];
+    let mut lines = vec![
+        billing_text(locale, "status.billing.percent", "{label}: {percent}%")
+            .replace("{label}", &balance.usage_label_with_locale(locale))
+            .replace("{percent}", &(balance.usage_pct.floor() as i64).to_string()),
+    ];
     if let Some(reset) = &balance.period_end_display {
-        lines.push(format!("Next reset: {reset}"));
+        lines.push(
+            billing_text(locale, "status.billing.next_reset", "Next reset: {time}")
+                .replace("{time}", &localized_reset_display(reset, locale)),
+        );
     }
 
     // Billing stores credit / top-up amounts as negative cents (accounting
@@ -123,18 +195,38 @@ pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopu
         .filter(|c| *c > 0)
     {
         lines.push(String::new());
-        lines.push(format!("Credits: {}", fmt_dollars(prepaid)));
+        lines.push(
+            billing_text(locale, "status.billing.credits", "Credits: {amount}")
+                .replace("{amount}", &fmt_dollars(prepaid)),
+        );
         match autotopup {
             Some(at) if at.enabled && at.topup_amount_cents.is_some() => {
-                lines.push(format!(
-                    "Auto topup: {}",
-                    fmt_dollars(at.topup_amount_cents.unwrap().abs())
-                ));
+                lines.push(
+                    billing_text(locale, "status.billing.auto_topup", "Auto topup: {amount}")
+                        .replace(
+                            "{amount}",
+                            &fmt_dollars(at.topup_amount_cents.unwrap().abs()),
+                        ),
+                );
                 if let Some(max) = at.max_amount_cents {
-                    lines.push(format!("Max monthly topup: {}", fmt_dollars(max.abs())));
+                    lines.push(
+                        billing_text(
+                            locale,
+                            "status.billing.max_monthly_topup",
+                            "Max monthly topup: {amount}",
+                        )
+                        .replace("{amount}", &fmt_dollars(max.abs())),
+                    );
                 }
             }
-            _ => lines.push("Auto topup: disabled".to_string()),
+            _ => lines.push(
+                billing_text(
+                    locale,
+                    "status.billing.auto_topup_disabled",
+                    "Auto topup: disabled",
+                )
+                .into_owned(),
+            ),
         }
     }
 
@@ -145,7 +237,15 @@ pub fn format_usage_summary(balance: &CreditBalance, autotopup: Option<&AutoTopu
         let used = balance.on_demand_used_cents.unwrap_or(0).abs() as f64 / 100.0;
         let cap = balance.on_demand_cap_cents.unwrap_or(0).abs() as f64 / 100.0;
         lines.push(String::new());
-        lines.push(format!("Pay-as-you-go: ${used:.2} used of ${cap:.2} limit"));
+        lines.push(
+            billing_text(
+                locale,
+                "status.billing.pay_as_you_go",
+                "Pay-as-you-go: {used} used of {limit} limit",
+            )
+            .replace("{used}", &format!("${used:.2}"))
+            .replace("{limit}", &format!("${cap:.2}")),
+        );
     }
 
     lines.join("\n")
@@ -169,7 +269,16 @@ pub fn usage_warning(
     autotopup: Option<&AutoTopupInfo>,
     usage_visible: bool,
 ) -> Option<(String, bool)> {
-    usage_warning_for_session(balance, autotopup, usage_visible, false)
+    usage_warning_for_session_with_locale(balance, autotopup, usage_visible, false, None)
+}
+
+pub fn usage_warning_with_locale(
+    balance: &CreditBalance,
+    autotopup: Option<&AutoTopupInfo>,
+    usage_visible: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<(String, bool)> {
+    usage_warning_for_session_with_locale(balance, autotopup, usage_visible, false, locale)
 }
 
 /// Like [`usage_warning`], but suppresses output for gateway/chat-kind sessions.
@@ -178,6 +287,16 @@ pub fn usage_warning_for_session(
     autotopup: Option<&AutoTopupInfo>,
     usage_visible: bool,
     gateway_chat: bool,
+) -> Option<(String, bool)> {
+    usage_warning_for_session_with_locale(balance, autotopup, usage_visible, gateway_chat, None)
+}
+
+pub fn usage_warning_for_session_with_locale(
+    balance: &CreditBalance,
+    autotopup: Option<&AutoTopupInfo>,
+    usage_visible: bool,
+    gateway_chat: bool,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> Option<(String, bool)> {
     if gateway_chat || !usage_visible {
         return None;
@@ -198,7 +317,12 @@ pub fn usage_warning_for_session(
                 let used = balance.on_demand_used_cents.unwrap_or(0).abs();
                 let remaining = (cap - used).max(0);
                 if remaining <= LOW_BALANCE_CENTS {
-                    let text = format!("Pay-as-you-go limit left: {}", fmt_dollars(remaining));
+                    let text = billing_text(
+                        locale,
+                        "status.billing.warning.payg_left",
+                        "Pay-as-you-go limit left: {amount}",
+                    )
+                    .replace("{amount}", &fmt_dollars(remaining));
                     return Some((text, remaining <= PAY_AS_YOU_GO_CRITICAL_CENTS));
                 }
             }
@@ -210,8 +334,15 @@ pub fn usage_warning_for_session(
             // "Left" = complement of floored usage, so it agrees with the
             // floored summary (99.994% → "1% left", not "0%").
             let remaining = (100 - pct.floor() as i64).max(0);
-            let label = balance.usage_label();
-            return Some((format!("{label} left: {remaining}%"), pct > 95.0));
+            let label = balance.usage_label_with_locale(locale);
+            let warning = billing_text(
+                locale,
+                "status.billing.warning.percent_left",
+                "{label} left: {percent}%",
+            )
+            .replace("{label}", &label)
+            .replace("{percent}", &remaining.to_string());
+            return Some((warning, pct > 95.0));
         }
         return None;
     };
@@ -223,7 +354,12 @@ pub fn usage_warning_for_session(
 
     let credits_warning = || {
         (
-            format!("Credits left: {}", fmt_dollars(credits_cents)),
+            billing_text(
+                locale,
+                "status.billing.warning.credits_left",
+                "Credits left: {amount}",
+            )
+            .replace("{amount}", &fmt_dollars(credits_cents)),
             true,
         )
     };
@@ -284,6 +420,13 @@ pub fn credit_bar_line_for_session(
 mod tests {
     use super::*;
 
+    fn zh_locale() -> crate::locale::LocaleContext {
+        crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        })
+    }
+
     fn bal(pct: f64) -> CreditBalance {
         CreditBalance {
             usage_pct: pct,
@@ -316,6 +459,35 @@ mod tests {
         // Even with an auto-topup rule present, zero prepaid → no credits block.
         let out = format_usage_summary(&b, Some(&topup(true, Some(2000), Some(10000))));
         assert_eq!(out, "Usage: 25%\nNext reset: June 14, 16:00");
+    }
+
+    #[test]
+    fn localization_regression_billing_summary_and_reset_are_chinese() {
+        let b = CreditBalance {
+            period_type: Some("USAGE_PERIOD_TYPE_WEEKLY".into()),
+            period_end_display: Some("August 11, 15:11".into()),
+            prepaid_balance_cents: Some(10_000),
+            ..bal(3.9)
+        };
+        let locale = zh_locale();
+        assert_eq!(
+            format_usage_summary_with_locale(
+                &b,
+                Some(&topup(false, Some(2_000), Some(10_000))),
+                Some(&locale),
+            ),
+            "每周限额：3%\n下次重置：8月11日 15:11\n\n额度余额：$100\n自动充值：已关闭"
+        );
+
+        let warning = CreditBalance {
+            effective_usage_pct: 92.0,
+            prepaid_balance_cents: None,
+            ..b
+        };
+        assert_eq!(
+            usage_warning_with_locale(&warning, None, true, Some(&locale)),
+            Some(("每周限额剩余：8%".to_string(), false))
+        );
     }
 
     #[test]

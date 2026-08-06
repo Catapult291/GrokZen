@@ -24,6 +24,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use xai_acp_lib::AcpAgentTx;
+
+fn localized_welcome_model_name(
+    locale: &crate::locale::LocaleContext,
+    model_name_base: String,
+    reasoning_effort: Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+) -> String {
+    crate::views::localized_model_name(model_name_base, reasoning_effort, Some(locale))
+}
+
 /// State for the "New Worktree" popup dialog on the welcome screen.
 #[derive(Debug, Default)]
 pub struct NewWorktreeDialogState {
@@ -607,6 +616,9 @@ pub struct AppView {
     /// startup; updated synchronously by `set_X_inner` so dispatch
     /// stays sans-IO.
     pub current_ui: xai_grok_shell::agent::config::UiConfig,
+    /// Immutable UI locale resolved once at startup. This is deliberately
+    /// separate from voice/STT language and from server protocol locale fields.
+    pub locale: Arc<crate::locale::LocaleContext>,
     /// Working directory.
     pub cwd: PathBuf,
     /// Whether the cwd is inside a git repository (any ancestor has `.git`).
@@ -1385,6 +1397,21 @@ impl AppView {
         models: ModelState,
         bootstrap_acp_commands: Vec<agent_client_protocol::AvailableCommand>,
     ) -> Self {
+        Self::new_with_locale(
+            acp_tx,
+            models,
+            bootstrap_acp_commands,
+            Arc::new(crate::locale::LocaleContext::default()),
+        )
+    }
+
+    /// Create an AppView with an already-resolved immutable UI locale.
+    pub fn new_with_locale(
+        acp_tx: AcpAgentTx,
+        models: ModelState,
+        bootstrap_acp_commands: Vec<agent_client_protocol::AvailableCommand>,
+        locale: Arc<crate::locale::LocaleContext>,
+    ) -> Self {
         let slash_mru =
             std::rc::Rc::new(std::cell::RefCell::new(crate::slash::mru::SlashMru::new()));
         let command_tags =
@@ -1401,6 +1428,7 @@ impl AppView {
             registry: ActionRegistry::defaults(),
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
+            locale,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             cwd_has_git_ancestor: std::env::current_dir()
                 .ok()
@@ -4316,6 +4344,12 @@ impl AppView {
     }
     fn draw_inner(&mut self, terminal: &mut PagerTerminal) {
         self.resync_announcement_slash_gate_on_divergence();
+        // Keep structured scrollback chrome aligned with the immutable app
+        // locale across full, dashboard, and minimal render surfaces.
+        let locale = self.locale.as_ref().clone();
+        for agent in self.agents.values_mut() {
+            agent.scrollback.set_locale(&locale);
+        }
         if self.screen_mode.is_minimal() {
             if let Some(hooks) = crate::minimal_hook::hooks() {
                 (hooks.draw)(self, terminal);
@@ -4445,7 +4479,10 @@ impl AppView {
                             Vec::new();
                         if self.default_yolo {
                             flags_vec.push(crate::views::prompt_widget::PromptFlag {
-                                text: "always-approve",
+                                text: self.locale.named_static_text(
+                                    "mode.always_approve.label",
+                                    "always-approve",
+                                ),
                                 color: None,
                                 bold: false,
                             });
@@ -4459,10 +4496,11 @@ impl AppView {
                             self.tip.as_deref()
                         };
                         let model_name_base = self.models.current_model_name().unwrap_or_default();
-                        let model_name = match self.models.reasoning_effort {
-                            Some(eff) => format!("{model_name_base} ({eff})"),
-                            None => model_name_base,
-                        };
+                        let model_name = localized_welcome_model_name(
+                            &self.locale,
+                            model_name_base,
+                            self.models.reasoning_effort,
+                        );
                         let hero_cta = crate::views::announcements::promo_cta(
                             &self.active_announcements,
                             &self.hidden_announcement_ids,
@@ -4476,7 +4514,15 @@ impl AppView {
                                 )
                             })
                             .or(self.announcement.as_ref());
+                        let localized_hero_announcement = hero_announcement.map(|announcement| {
+                            crate::views::welcome::localized_announcement_for_display(
+                                &self.locale,
+                                announcement,
+                            )
+                        });
+                        let hero_announcement = localized_hero_announcement.as_deref();
                         let welcome_params = crate::views::welcome::WelcomeRenderParams {
+                            locale: &self.locale,
                             prompt_focus: if self.welcome_prompt_focused {
                                 WelcomePromptFocus::Focused
                             } else {
@@ -4584,19 +4630,21 @@ impl AppView {
                         self.session_picker_state.hit_areas = result.session_picker_hit_areas;
                         if let Some(modal) = self.import_claude_modal.as_mut() {
                             let theme = crate::theme::Theme::current();
-                            crate::views::import_claude_modal::render_import_claude_modal(
+                            crate::views::import_claude_modal::render_import_claude_modal_with_locale(
                                 f.buffer_mut(),
                                 view_area,
                                 modal,
                                 &theme,
                                 compact,
+                                Some(self.locale.as_ref()),
                             );
                         }
                         if let Some(dialog) = self.new_worktree_dialog.as_ref() {
-                            crate::views::new_worktree_dialog::render_new_worktree_dialog(
+                            crate::views::new_worktree_dialog::render_new_worktree_dialog_with_locale(
                                 view_area,
                                 f.buffer_mut(),
                                 dialog,
+                                Some(self.locale.as_ref()),
                             );
                         }
                         if let Some(crate::views::modal::ActiveModal::DocViewer {
@@ -4619,6 +4667,7 @@ impl AppView {
                                 cached_lines,
                                 compact,
                                 &theme,
+                                Some(self.locale.as_ref()),
                             );
                         }
                         if !has_access && !self.access_gate_shown_logged {
@@ -4720,7 +4769,7 @@ impl AppView {
                                     )
                                 })
                                 .unwrap_or((false, false, false));
-                            let header = crate::views::dashboard::render_dashboard_session_header(
+                            let header = crate::views::dashboard::render_dashboard_session_header_with_locale(
                                 f.buffer_mut(),
                                 view_area,
                                 &theme,
@@ -4732,6 +4781,7 @@ impl AppView {
                                 header_pad_left,
                                 header_pad_right,
                                 header_pad_top,
+                                Some(self.locale.as_ref()),
                             );
                             match header {
                                 Some(chrome) => (chrome.content, Some(chrome)),
@@ -4794,6 +4844,7 @@ impl AppView {
                                 overlay_active,
                                 link_spans,
                                 AppRenderParams {
+                                    locale: Some(self.locale.as_ref()),
                                     voice_available,
                                     voice_listening,
                                     voice_interim: voice_interim.as_deref(),
@@ -4802,12 +4853,13 @@ impl AppView {
                             );
                             if let Some(modal) = self.import_claude_modal.as_mut() {
                                 let theme = crate::theme::Theme::current();
-                                crate::views::import_claude_modal::render_import_claude_modal(
+                                crate::views::import_claude_modal::render_import_claude_modal_with_locale(
                                     f.buffer_mut(),
                                     view_area,
                                     modal,
                                     &theme,
                                     compact,
+                                    Some(self.locale.as_ref()),
                                 );
                             }
                             if let Some(tutorial) = self.tutorial.as_mut() {
@@ -4872,7 +4924,7 @@ impl AppView {
                                     caption: crate::views::announcements::usable_cta_caption(owner),
                                 },
                             );
-                            let dash_cursor = crate::views::dashboard::render_dashboard(
+                            let dash_cursor = crate::views::dashboard::render_dashboard_with_locale(
                                 f.buffer_mut(),
                                 view_area,
                                 dashboard,
@@ -4882,6 +4934,7 @@ impl AppView {
                                 dashboard_roster,
                                 self.dashboard_sessions_loading,
                                 dash_upgrade_cta,
+                                Some(self.locale.as_ref()),
                             );
                             let (popup_cursor, popup_post_flush, drawn_popup_agent) =
                                 if let Some(agent_id) = dashboard.attached_agent {
@@ -4893,12 +4946,13 @@ impl AppView {
                                         .unwrap_or_else(|| "(session)".to_string());
                                     let bundle_state = &self.bundle_state;
                                     let (cursor, post_flush, drawn) =
-                                        crate::views::dashboard::render_popup_overlay(
+                                        crate::views::dashboard::render_popup_overlay_with_locale(
                                             f.buffer_mut(),
                                             popup_area,
                                             &theme,
                                             &title,
                                             dashboard,
+                                            Some(self.locale.as_ref()),
                                             |inner, buf| {
                                                 if let Some(agent) = agents.get_mut(&agent_id) {
                                                     agent.draw(
@@ -4914,6 +4968,7 @@ impl AppView {
                                                     false,
                                                     link_spans,
                                                     AppRenderParams {
+                                                        locale: Some(self.locale.as_ref()),
                                                         esc_owned_before_agent,
                                                         ..Default::default()
                                                     },
@@ -5806,6 +5861,28 @@ pub(crate) mod tests {
     use crossterm::event::{
         Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
     };
+
+    #[test]
+    fn welcome_model_name_localizes_effort_without_changing_model_name() {
+        let zh = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let display = localized_welcome_model_name(
+            &zh,
+            "Grok 4.5".to_string(),
+            Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+        );
+        assert_eq!(display, "Grok 4.5 (高)");
+
+        let english = localized_welcome_model_name(
+            &crate::locale::LocaleContext::default(),
+            "Grok 4.5".to_string(),
+            Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+        );
+        assert_eq!(english, "Grok 4.5 (high)");
+    }
+
     #[test]
     fn welcome_show_toast_scrubs_control_chars() {
         let mut app = test_app();
@@ -5897,6 +5974,7 @@ pub(crate) mod tests {
             registry: ActionRegistry::defaults(),
             settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
+            locale: std::sync::Arc::new(crate::locale::LocaleContext::default()),
             cwd: std::path::PathBuf::from("/tmp"),
             cwd_has_git_ancestor: false,
             acp_tx: tx,
@@ -10319,6 +10397,7 @@ pub(crate) mod tests {
         app.welcome_doc_viewer = Some(crate::views::modal::ActiveModal::DocViewer {
             title: "Release Notes".into(),
             content: "line\n".repeat(80),
+            locale: crate::locale::UiLocale::EnUs,
             scroll: 0,
             window: crate::views::modal_window::ModalWindowState::new(),
             cached_lines: None,

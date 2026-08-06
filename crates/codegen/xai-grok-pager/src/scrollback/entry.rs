@@ -119,6 +119,11 @@ pub struct ScrollbackEntry {
     /// keyed so Expanded tool path paint (relative vs absolute) invalidates.
     cached_output: RefCell<Option<CachedOutput>>,
 
+    /// Display locale used when constructing [`BlockContext`]. The owning
+    /// [`ScrollbackState`](super::state::ScrollbackState) replaces the English
+    /// default when an entry is inserted.
+    locale: crate::locale::LocaleContext,
+
     /// Cached truncated-mode height. See [`CachedTruncatedHeight`] for why
     /// this needs its own cache separate from `cached_output`.
     ///
@@ -198,6 +203,7 @@ impl ScrollbackEntry {
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
+            locale: crate::locale::LocaleContext::default(),
             cached_truncated_height: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
             cached_line_widths: RefCell::new(None),
@@ -230,6 +236,7 @@ impl ScrollbackEntry {
             created_at: Some(Local::now()),
             finished_at: None,
             cached_output: RefCell::new(None),
+            locale: crate::locale::LocaleContext::default(),
             cached_truncated_height: RefCell::new(None),
             cached_estimate_lines: RefCell::new(None),
             cached_line_widths: RefCell::new(None),
@@ -300,6 +307,21 @@ impl ScrollbackEntry {
     pub fn invalidate_cache(&mut self) {
         self.invalidate_width_caches();
         *self.cached_line_widths.borrow_mut() = None;
+    }
+
+    /// Apply the display locale to both context-driven blocks (notably tool
+    /// calls) and blocks that retain their own locale-aware render state.
+    pub(crate) fn set_locale(&mut self, locale: crate::locale::LocaleContext) {
+        if self.locale.locale() == locale.locale() {
+            return;
+        }
+        self.locale = locale.clone();
+        self.block.set_locale(locale);
+        self.invalidate_cache();
+    }
+
+    pub(crate) fn locale(&self) -> &crate::locale::LocaleContext {
+        &self.locale
     }
 
     /// Invalidate only the caches keyed by terminal width — the resize path.
@@ -419,6 +441,7 @@ impl ScrollbackEntry {
             appearance: appearance.clone(),
             is_selected: effective_selected,
             cwd: cwd_key.clone(),
+            locale: self.locale.clone(),
         };
         let rendered = self.rendered_output_with_hooks(&ctx);
         *self.cached_output.borrow_mut() = Some(CachedOutput {
@@ -556,6 +579,7 @@ impl ScrollbackEntry {
             appearance: appearance.clone(),
             is_selected: false,
             cwd: cwd.map(|p| p.to_path_buf()),
+            locale: self.locale.clone(),
         }
     }
 
@@ -576,8 +600,8 @@ impl ScrollbackEntry {
         if let Some(ref hd) = self.hook_data {
             use super::blocks::tool::ToolCallBlock;
             use super::blocks::tool::hook::{
-                render_hook_separator, render_hooks_detail, render_hooks_for_mode,
-                render_hooks_inline_suffix,
+                render_hook_separator, render_hooks_detail_with_locale,
+                render_hooks_for_mode_with_locale, render_hooks_inline_suffix_with_locale,
             };
             let is_lifecycle = matches!(
                 self.block,
@@ -586,7 +610,8 @@ impl ScrollbackEntry {
             match ctx.mode {
                 super::types::DisplayMode::Collapsed => {
                     // Append [hooks: N/M] to the first (header) line for all events
-                    if let Some(suffix_spans) = render_hooks_inline_suffix(hd)
+                    if let Some(suffix_spans) =
+                        render_hooks_inline_suffix_with_locale(hd, Some(&ctx.locale))
                         && let Some(first_line) = output.lines.first_mut()
                     {
                         first_line.content.spans.extend(suffix_spans);
@@ -594,8 +619,18 @@ impl ScrollbackEntry {
                 }
                 _ => {
                     // Expanded: separator + separate sections
-                    let pre = render_hooks_for_mode("pre_tool_use", &hd.pre_hooks, ctx.mode);
-                    let post = render_hooks_for_mode("post_tool_use", &hd.post_hooks, ctx.mode);
+                    let pre = render_hooks_for_mode_with_locale(
+                        "pre_tool_use",
+                        &hd.pre_hooks,
+                        ctx.mode,
+                        Some(&ctx.locale),
+                    );
+                    let post = render_hooks_for_mode_with_locale(
+                        "post_tool_use",
+                        &hd.post_hooks,
+                        ctx.mode,
+                        Some(&ctx.locale),
+                    );
                     let has_any = !pre.is_empty() || !post.is_empty() || !hd.lifecycle.is_empty();
                     // Lifecycle blocks already show the event name as the block header,
                     // so skip the separator (no tool output above) and the section header.
@@ -606,11 +641,18 @@ impl ScrollbackEntry {
                     output.lines.extend(post);
                     for (event_name, runs) in &hd.lifecycle {
                         if is_lifecycle {
-                            output.lines.extend(render_hooks_detail(runs, ctx.mode));
+                            output.lines.extend(render_hooks_detail_with_locale(
+                                runs,
+                                ctx.mode,
+                                Some(&ctx.locale),
+                            ));
                         } else {
-                            output
-                                .lines
-                                .extend(render_hooks_for_mode(event_name, runs, ctx.mode));
+                            output.lines.extend(render_hooks_for_mode_with_locale(
+                                event_name,
+                                runs,
+                                ctx.mode,
+                                Some(&ctx.locale),
+                            ));
                         }
                     }
                 }
@@ -641,6 +683,7 @@ impl ScrollbackEntry {
             appearance: appearance.clone(),
             is_selected: false,
             cwd: cwd.map(|p| p.to_path_buf()),
+            locale: self.locale.clone(),
         }
     }
 
@@ -664,6 +707,7 @@ impl ScrollbackEntry {
             appearance: appearance.clone(),
             is_selected: false,
             cwd: cwd.map(|p| p.to_path_buf()),
+            locale: self.locale.clone(),
         }
     }
 
@@ -692,6 +736,7 @@ impl ScrollbackEntry {
             appearance: appearance.clone(),
             is_selected,
             cwd: cwd.map(|p| p.to_path_buf()),
+            locale: self.locale.clone(),
         }
     }
 }

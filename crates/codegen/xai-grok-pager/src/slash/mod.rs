@@ -40,6 +40,14 @@ pub const MAX_VISIBLE_SUGGESTIONS: usize = 6;
 /// A single row in the slash suggestion dropdown.
 #[derive(Debug, Clone)]
 pub struct SuggestionRow {
+    /// Stable canonical command name used only for presentation metadata.
+    /// `None` for argument rows. Display aliases and inserted text remain
+    /// untouched by localization.
+    pub command_canonical: Option<String>,
+    /// Whether the fixed command description may be resolved through the
+    /// locale catalog. Dynamic ACP skills/workflows remain opaque even if
+    /// their name collides with a built-in command.
+    pub localize_description: bool,
     /// Display text (e.g., "/model" or "Grok 4 Fast").
     pub display: String,
     /// Description text (e.g., "Switch the active model").
@@ -54,12 +62,86 @@ pub struct SuggestionRow {
 }
 
 impl SuggestionRow {
+    fn is_known_shell_command(trigger: &CommandTrigger) -> bool {
+        matches!(
+            (trigger.canonical.as_str(), trigger.description.as_str()),
+            (
+                "deep-research",
+                "Research with bounded parallel agents, cross-check evidence, and write a cited report"
+            ) | (
+                "workflow",
+                "Launch a saved workflow, or manage a run (pause, resume, stop, save)"
+            ) | ("goal", "Set, manage, or check an autonomous goal")
+                | ("flush", "Flush conversation memory to disk now")
+                | (
+                    "dream",
+                    "Run memory consolidation (merge session logs into organized topics)"
+                )
+                | ("memory", "Browse, view, and manage your memories")
+        )
+    }
+
+    /// Bundled skills are dynamic ACP commands, but their shipped short
+    /// descriptions are stable client-owned chrome. Require both trusted
+    /// bundled scope and an exact canonical/English pair so user, project,
+    /// plugin, workflow, and changed server text remain opaque.
+    fn is_known_bundled_skill(trigger: &CommandTrigger) -> bool {
+        if !trigger.bundled_skill && !trigger.product_chat_skill {
+            return false;
+        }
+        matches!(
+            (trigger.canonical.as_str(), trigger.description.as_str()),
+            (
+                "build-with-ai",
+                "Build AI apps on SpaceXAI (XAI_API_KEY + api.x.ai)"
+            ) | (
+                "code-review",
+                "Run an extremely strict maintainability review for abstraction quality, giant files, and spaghetti-condition growth. Use for a deep code quality audit or an especially harsh maintainability review."
+            ) | ("create-skill", "Create a new Grok skill")
+                | ("create-workflow", "Author a new multi-agent workflow")
+                | (
+                    "design",
+                    "Run the full design-doc-writer and design-doc-reviewer loop until consensus. Produces a polished design document with a PR plan."
+                )
+                | (
+                    "execute-plan",
+                    "Execute a PR Plan DAG from a design document. Parses the plan, topologically sorts it, implements PRs in parallel using worktree-isolated subagents, runs mandatory orchestrator-level review, and assembles either a Graphite PR stack or a plain-git branch stack depending on tool availability."
+                )
+                | (
+                    "bundled:imagine",
+                    "Prompting and workflow guidance for Imagine image tools"
+                )
+                | (
+                    "implement",
+                    "Run the full implement-review-fix loop using implementer and reviewer personas. Supports effort-based multi-reviewer scaling (1-5 reviewers) with automatic specialization selection. Includes memory-based feedback loop that learns from past review patterns. Loops until all reviewers find 0 issues of any severity."
+                )
+                | (
+                    "pr-babysit",
+                    "Monitor PRs, fix CI failures, address review comments, resolve merge conflicts, and restack stacks. Supports independent PRs, Graphite stacks, and GitHub stacked PRs (gh-stack)."
+                )
+                | (
+                    "resume-claude",
+                    "Continue from a recent Claude Code session"
+                )
+                | ("resume-codex", "Continue from a recent Codex session")
+                | ("resume-cursor", "Continue from a recent Cursor session")
+                | (
+                    "review",
+                    "Run a reviewer subagent against uncommitted local changes, a named branch, or a GitHub PR. Local and branch modes write a review file plus a summary to disk. PR mode posts the findings as a PENDING GitHub review for the user to inspect and submit through the UI."
+                )
+        )
+    }
+
     fn from_command(trigger: &CommandTrigger, takes_args: bool) -> Self {
         let mut insert_text = trigger.display.clone();
         if takes_args {
             insert_text.push(' ');
         }
         Self {
+            command_canonical: Some(trigger.canonical.clone()),
+            localize_description: trigger.source == CommandSource::Builtin
+                || Self::is_known_shell_command(trigger)
+                || Self::is_known_bundled_skill(trigger),
             display: trigger.display.clone(),
             description: trigger.description.clone(),
             insert_text,
@@ -70,6 +152,8 @@ impl SuggestionRow {
 
     fn from_arg(item: &ArgItem) -> Self {
         Self {
+            command_canonical: None,
+            localize_description: false,
             display: item.display.clone(),
             description: item.description.clone(),
             insert_text: item.insert_text.clone(),
@@ -2225,6 +2309,8 @@ mod tests {
         assert!(!command_prefix_matches_smart("Privacy", "PR"));
 
         let row = SuggestionRow {
+            command_canonical: Some("privacy".to_string()),
+            localize_description: true,
             display: "/Privacy".to_string(),
             description: String::new(),
             insert_text: "/Privacy ".to_string(),
@@ -2579,6 +2665,106 @@ mod tests {
         assert_eq!(row_tag(&snap, "/acp-command"), Some("beta".to_string()));
         assert_eq!(row_tag(&snap, "/skill-cmd"), Some("new".to_string()));
         assert_eq!(row_tag(&snap, "/builtin-cmd"), None);
+    }
+
+    #[test]
+    fn localization_regression_only_exact_bundled_skill_descriptions_are_localizable() {
+        fn skill(scope: &str, description: &str) -> agent_client_protocol::AvailableCommand {
+            let meta = serde_json::json!({
+                "scope": scope,
+                "path": format!("/grok/{scope}/build-with-ai/SKILL.md"),
+            })
+            .as_object()
+            .cloned()
+            .expect("skill meta is an object");
+            agent_client_protocol::AvailableCommand::new(
+                "build-with-ai".to_string(),
+                description.to_string(),
+            )
+            .meta(meta)
+        }
+
+        fn product_skill(
+            description: &str,
+            product: &str,
+        ) -> agent_client_protocol::AvailableCommand {
+            let meta = serde_json::json!({
+                "scope": "server",
+                "path": "chat-product://build-with-ai",
+                "product": product,
+            })
+            .as_object()
+            .cloned()
+            .expect("skill meta is an object");
+            agent_client_protocol::AvailableCommand::new(
+                "build-with-ai".to_string(),
+                description.to_string(),
+            )
+            .meta(meta)
+        }
+
+        let exact = "Build AI apps on SpaceXAI (XAI_API_KEY + api.x.ai)";
+        let mut ctrl = SlashController::new(
+            CommandRegistry::new(Vec::new()),
+            std::path::PathBuf::from("."),
+        );
+        let state = SlashState::default();
+        let models = ModelState::default();
+
+        ctrl.registry_mut()
+            .set_acp_commands(&[skill("bundled", exact)]);
+        ctrl.refresh(&state, "/", 1, &models);
+        let bundled = state
+            .snapshot()
+            .matches
+            .into_iter()
+            .find(|row| row.display == "/build-with-ai")
+            .expect("bundled skill row");
+        assert!(bundled.localize_description);
+
+        ctrl.registry_mut()
+            .set_acp_commands(&[product_skill(exact, "chat")]);
+        ctrl.refresh(&state, "/", 1, &models);
+        let product = state
+            .snapshot()
+            .matches
+            .into_iter()
+            .find(|row| row.display == "/build-with-ai")
+            .expect("product skill row");
+        assert!(product.localize_description);
+
+        ctrl.registry_mut()
+            .set_acp_commands(&[product_skill(exact, "team")]);
+        ctrl.refresh(&state, "/", 1, &models);
+        let other_server = state
+            .snapshot()
+            .matches
+            .into_iter()
+            .find(|row| row.display == "/build-with-ai")
+            .expect("other server skill row");
+        assert!(!other_server.localize_description);
+
+        ctrl.registry_mut()
+            .set_acp_commands(&[skill("local", exact)]);
+        ctrl.refresh(&state, "/", 1, &models);
+        let local = state
+            .snapshot()
+            .matches
+            .into_iter()
+            .find(|row| row.display == "/build-with-ai")
+            .expect("local skill row");
+        assert!(!local.localize_description);
+
+        ctrl.registry_mut()
+            .set_acp_commands(&[skill("bundled", "Build AI apps with a team-owned override")]);
+        ctrl.refresh(&state, "/", 1, &models);
+        let changed = state
+            .snapshot()
+            .matches
+            .into_iter()
+            .find(|row| row.display == "/build-with-ai")
+            .expect("changed bundled row");
+        assert!(!changed.localize_description);
     }
 
     #[test]

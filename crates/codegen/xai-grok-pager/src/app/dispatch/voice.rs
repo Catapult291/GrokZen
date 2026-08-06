@@ -64,11 +64,15 @@ fn open_voice_tier_upsell(app: &mut AppView) -> Vec<Effect> {
             }
         }
         ActiveView::AgentDashboard => {
+            let message = app
+                .locale
+                .named_text(
+                    "voice.supergrok_required",
+                    "/voice requires SuperGrok — upgrade at {url}",
+                )
+                .replace("{url}", super::billing::UPSELL_URL_UPGRADE);
             if let Some(d) = app.dashboard.as_mut() {
-                d.set_error_toast(&format!(
-                    "/voice requires SuperGrok — upgrade at {}",
-                    super::billing::UPSELL_URL_UPGRADE
-                ));
+                d.set_error_toast(&message);
             }
         }
         _ => {}

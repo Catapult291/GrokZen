@@ -1,9 +1,69 @@
 pub mod find_protoc;
 
 use anyhow::Context;
+use std::ffi::OsString;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::{fs, iter};
+
+fn protoc_path_arg(flag: &str, path: &Path) -> OsString {
+    let mut arg = OsString::from(flag);
+    arg.push("=");
+    arg.push(path.as_os_str());
+    arg
+}
+
+fn parse_dependency_paths(output: &str) -> anyhow::Result<Vec<PathBuf>> {
+    let first_line = output
+        .lines()
+        .next()
+        .context("protoc dependency output is empty")?;
+    let separator = first_line
+        .char_indices()
+        .find_map(|(index, character)| {
+            if character != ':' {
+                return None;
+            }
+            let remainder = &first_line[index + character.len_utf8()..];
+            (remainder.is_empty() || remainder.chars().next().is_some_and(char::is_whitespace))
+                .then_some(index)
+        })
+        .with_context(|| format!("invalid protoc dependency output: {output:?}"))?;
+
+    let first_line_end = output.find('\n').unwrap_or(output.len());
+    let mut dependencies = String::from(&output[separator + 1..first_line_end]);
+    if first_line_end < output.len() {
+        dependencies.push('\n');
+        dependencies.push_str(&output[first_line_end + 1..]);
+    }
+    let dependencies = dependencies.replace("\\\r\n", " ").replace("\\\n", " ");
+
+    let mut paths = Vec::new();
+    let mut current = String::new();
+    let mut characters = dependencies.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\\' {
+            match characters.peek().copied() {
+                Some(next) if next.is_whitespace() || matches!(next, '#' | ':') => {
+                    current.push(next);
+                    characters.next();
+                }
+                _ => current.push(character),
+            }
+        } else if character.is_whitespace() {
+            if !current.is_empty() {
+                paths.push(PathBuf::from(std::mem::take(&mut current)));
+            }
+        } else {
+            current.push(character);
+        }
+    }
+    if !current.is_empty() {
+        paths.push(PathBuf::from(current));
+    }
+
+    Ok(paths)
+}
 
 /// Find the protoc well-known types include directory.
 ///
@@ -118,10 +178,14 @@ impl XaiProtoBuilder {
 
         // Can only process one input file when using --dependency_out=FILE.
         for proto in protos {
+            let temporary_output = tempfile::TempDir::new()
+                .context("failed to create temporary protoc output directory")?;
+            let dependency_output = temporary_output.path().join("dependencies.d");
+            let descriptor_output = temporary_output.path().join("descriptor.pb");
             let mut command = Command::new(protoc.unwrap_or(Path::new("protoc")));
             command
-                .arg("--dependency_out=/dev/stdout")
-                .arg("--descriptor_set_out=/dev/null");
+                .arg(protoc_path_arg("--dependency_out", &dependency_output))
+                .arg(protoc_path_arg("--descriptor_set_out", &descriptor_output));
 
             // Add protoc's well-known types include directory first (if found).
             // This is needed for Bazel sandboxed builds where protoc and its
@@ -140,37 +204,37 @@ impl XaiProtoBuilder {
             command.arg(proto);
 
             command.stdin(Stdio::null());
+            command.stdout(Stdio::null());
             command.stderr(Stdio::inherit());
 
-            let output = command.output().context("protoc command failed")?;
-            if !output.status.success() {
-                return Err(anyhow::anyhow!("protoc command failed"));
+            let status = command.status().context("protoc command failed")?;
+            if !status.success() {
+                return Err(anyhow::anyhow!("protoc command failed with {status}"));
             }
 
-            let output =
-                String::from_utf8(output.stdout).context("protoc command output not UTF-8")?;
-
-            let mut lines = output.lines();
-            let first_line = lines.next().context("protoc command output is empty")?;
-            let prefix = "/dev/null:";
-            let rem = first_line.strip_prefix(prefix).with_context(|| {
-                format!("protoc command output must start with /dev/null: {output:?}")
+            let output = fs::read_to_string(&dependency_output).with_context(|| {
+                format!(
+                    "failed to read protoc dependency output {}",
+                    dependency_output.display()
+                )
             })?;
-            for line in iter::once(rem).chain(lines) {
-                let line = line.trim();
-                let line = line.strip_suffix("\\").unwrap_or(line);
+            for path in parse_dependency_paths(&output)? {
                 // Depending on absolute paths like
                 // /Users/user/homebrew/Cellar/protobuf/29.1/include/google/protobuf/timestamp.proto
                 // is valid, but we want to have output more deterministic.
-                if line.contains("/include/google/protobuf/") {
+                let normalized_path = path.to_string_lossy().replace('\\', "/");
+                if normalized_path.contains("/include/google/protobuf/") {
                     continue;
                 }
 
-                if !fs::exists(line)? {
-                    return Err(anyhow::anyhow!("dependency file not found: {line}"));
+                if !path.try_exists()? {
+                    return Err(anyhow::anyhow!(
+                        "dependency file not found: {}",
+                        path.display()
+                    ));
                 }
 
-                println!("cargo:rerun-if-changed={line}");
+                println!("cargo:rerun-if-changed={}", path.display());
             }
         }
 
@@ -290,5 +354,50 @@ pub fn configure() -> XaiProtoBuilder {
         pbjson_ignore_unknown_fields: false,
         pbjson_preserve_proto_field_names: false,
         file_descriptor_set_path: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_dependency_paths;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parses_unix_dependency_output() {
+        let output = "/tmp/descriptor.pb: proto/service.proto \\\n proto/common.proto\n";
+
+        assert_eq!(
+            parse_dependency_paths(output).expect("dependency output should parse"),
+            vec![
+                PathBuf::from("proto/service.proto"),
+                PathBuf::from("proto/common.proto"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_windows_dependency_output_without_splitting_drive_prefixes() {
+        let output = "C:\\Temp\\descriptor.pb: F:\\repo\\proto\\service.proto \\\r\n F:\\repo\\proto\\common.proto\r\n";
+
+        assert_eq!(
+            parse_dependency_paths(output).expect("dependency output should parse"),
+            vec![
+                PathBuf::from("F:\\repo\\proto\\service.proto"),
+                PathBuf::from("F:\\repo\\proto\\common.proto"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_makefile_escaped_paths() {
+        let output = "/tmp/descriptor.pb: proto/a\\ file.proto proto/hash\\#name.proto\n";
+
+        assert_eq!(
+            parse_dependency_paths(output).expect("dependency output should parse"),
+            vec![
+                PathBuf::from("proto/a file.proto"),
+                PathBuf::from("proto/hash#name.proto"),
+            ]
+        );
     }
 }

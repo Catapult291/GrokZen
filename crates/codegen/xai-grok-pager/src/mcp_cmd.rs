@@ -10,21 +10,21 @@ use xai_grok_shell::util::config::{McpServerConfig, McpServerTransportConfig};
 use crate::util::display_user_grok_path;
 
 const ADD_AFTER_HELP: &str = "\
-Examples:
-  # Add a stdio server (everything after -- is the server command)
-  grok mcp add xcode -- xcrun mcpbridge
+示例：
+  # 添加 stdio 服务器（-- 之后的内容均为服务器命令）
+  grok-zh mcp add xcode -- xcrun mcpbridge
 
-  # Add a stdio server with environment variables
-  grok mcp add postgres -e DATABASE_URL=postgres://localhost/mydb -- npx -y @modelcontextprotocol/server-postgres
+  # 添加带环境变量的 stdio 服务器
+  grok-zh mcp add postgres -e DATABASE_URL=postgres://localhost/mydb -- npx -y @modelcontextprotocol/server-postgres
 
-  # Add a remote HTTP server
-  grok mcp add --transport http sentry https://mcp.sentry.dev/mcp
+  # 添加远程 HTTP 服务器
+  grok-zh mcp add --transport http sentry https://mcp.sentry.dev/mcp
 
-  # Add a remote server with an authentication header
-  grok mcp add --transport http api https://mcp.example.com/mcp --header \"Authorization: Bearer YOUR_TOKEN\"
+  # 添加带身份验证请求头的远程服务器
+  grok-zh mcp add --transport http api https://mcp.example.com/mcp --header \"Authorization: Bearer YOUR_TOKEN\"
 
-  # Add to the project config (./.grok/config.toml) instead of ~/.grok/config.toml
-  grok mcp add --scope project github -- npx -y @modelcontextprotocol/server-github";
+  # 写入项目配置（./.grok/config.toml），而不是 ~/.grok-zh/config.toml
+  grok-zh mcp add --scope project github -- npx -y @modelcontextprotocol/server-github";
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct McpArgs {
@@ -32,23 +32,23 @@ pub struct McpArgs {
     pub command: McpCommand,
 }
 
-/// Transport used to communicate with an MCP server.
+/// 与 MCP 服务器通信所使用的传输方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum McpTransport {
-    /// Launch a local process and communicate over stdin/stdout
+    /// 启动本地进程并通过 stdin/stdout 通信
     Stdio,
-    /// Connect to a remote server over streamable HTTP
+    /// 通过流式 HTTP 连接远程服务器
     Http,
-    /// Connect to a remote server over Server-Sent Events
+    /// 通过 Server-Sent Events 连接远程服务器
     Sse,
 }
 
-/// Which config file an MCP server definition is written to.
+/// MCP 服务器定义要写入的配置文件范围。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum McpScope {
-    /// `~/.grok/config.toml`, available in all your projects
+    /// `~/.grok-zh/config.toml`，可用于你的所有项目
     User,
-    /// `./.grok/config.toml`, shared with everyone working in this directory
+    /// `./.grok/config.toml`，与此目录中的所有协作者共享
     Project,
 }
 
@@ -63,39 +63,39 @@ impl McpScope {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum McpCommand {
-    /// List configured MCP servers
+    /// 列出已配置的 MCP 服务器
     List {
-        /// Emit machine-readable JSON output
+        /// 输出机器可读的 JSON
         #[arg(long)]
         json: bool,
     },
-    /// Add or update an MCP server
+    /// 添加或更新 MCP 服务器
     Add(AddArgs),
-    /// Remove an MCP server
+    /// 移除 MCP 服务器
     Remove {
-        /// Server name to remove
+        /// 要移除的服务器名称
         name: String,
 
-        /// Config to remove from. When omitted, all scopes are searched.
+        /// 从指定配置范围移除；省略时搜索所有范围。
         #[arg(short = 's', long, value_enum)]
         scope: Option<McpScope>,
     },
-    /// Enable an MCP server
+    /// 启用 MCP 服务器
     Enable {
-        /// Server name
+        /// 服务器名称
         name: String,
     },
-    /// Disable an MCP server
+    /// 禁用 MCP 服务器
     Disable {
-        /// Server name
+        /// 服务器名称
         name: String,
     },
-    /// Diagnose MCP server configuration and connectivity
+    /// 诊断 MCP 服务器配置和连接
     Doctor {
-        /// Emit machine-readable JSON output
+        /// 输出机器可读的 JSON
         #[arg(long)]
         json: bool,
-        /// Server name to check
+        /// 要检查的服务器名称
         name: Option<String>,
     },
 }
@@ -105,31 +105,31 @@ pub enum McpCommand {
 #[derive(Debug, clap::Args, Clone)]
 #[command(after_help = ADD_AFTER_HELP)]
 pub struct AddArgs {
-    /// Server name
+    /// 服务器名称
     name: String,
 
-    /// Command to launch (stdio) or URL to connect to (http, sse)
+    /// 要启动的命令（stdio）或要连接的 URL（http、sse）
     #[arg(value_name = "COMMAND_OR_URL", group = "source")]
     command_or_url: Option<String>,
 
-    /// Arguments passed to the server command. Place them after `--` so
-    /// flags such as `-y` are passed to the server instead of grok.
+    /// 传给服务器命令的参数。请放在 `--` 之后，使 `-y` 等参数传给
+    /// 服务器而不是 grok-zh。
     #[arg(value_name = "ARGS")]
     args: Vec<String>,
 
-    /// Transport type. Defaults to stdio.
+    /// 传输类型，默认为 stdio。
     #[arg(short = 't', long, value_enum)]
     transport: Option<McpTransport>,
 
-    /// Config to write to: user (~/.grok/config.toml) or project (./.grok/config.toml)
+    /// 写入范围：用户配置（~/.grok-zh/config.toml）或项目配置（./.grok/config.toml）
     #[arg(short = 's', long, value_enum, default_value = "user")]
     scope: McpScope,
 
-    /// Environment variable for the server process (repeatable)
+    /// 服务器进程的环境变量（可重复指定）
     #[arg(short = 'e', long = "env", value_name = "KEY=value")]
     env: Vec<String>,
 
-    /// HTTP header for remote servers (repeatable)
+    /// 远程服务器的 HTTP 请求头（可重复指定）
     #[arg(short = 'H', long = "header", value_name = "NAME: VALUE")]
     header: Vec<String>,
 
@@ -183,7 +183,7 @@ fn run_list(json: bool) -> Result<()> {
             .collect();
         println!("{}", serde_json::to_string_pretty(&payload)?);
     } else if servers.is_empty() {
-        println!("No MCP servers configured. Run `grok mcp add --help` to get started.");
+        println!("No MCP servers configured. Run `grok-zh mcp add --help` to get started.");
     } else {
         for (name, (config, scope)) in &servers {
             let transport = match &config.transport {
@@ -313,7 +313,7 @@ fn resolve_add(args: &AddArgs) -> Result<ResolvedAdd> {
         McpTransport::Stdio => {
             let Some(command) = source else {
                 bail!(
-                    "A command is required for stdio servers. Usage: grok mcp add <name> -- <command> [args...]"
+                    "A command is required for stdio servers. Usage: grok-zh mcp add <name> -- <command> [args...]"
                 );
             };
             if !args.header.is_empty() {
@@ -347,7 +347,7 @@ fn resolve_add(args: &AddArgs) -> Result<ResolvedAdd> {
                         format!("http://{command}")
                     };
                 warnings.push(format!(
-                    "Warning: '{command}' looks like a URL, but it is being added as a stdio command because --transport was not specified.\nFor a remote server, use: grok mcp add --transport http {} {suggested_url}",
+                    "Warning: '{command}' looks like a URL, but it is being added as a stdio command because --transport was not specified.\nFor a remote server, use: grok-zh mcp add --transport http {} {suggested_url}",
                     args.name
                 ));
             }
@@ -371,7 +371,7 @@ fn resolve_add(args: &AddArgs) -> Result<ResolvedAdd> {
             };
             let Some(url) = source else {
                 bail!(
-                    "A URL is required for {label} servers. Usage: grok mcp add --transport {label} <name> <url>"
+                    "A URL is required for {label} servers. Usage: grok-zh mcp add --transport {label} <name> <url>"
                 );
             };
             if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -581,7 +581,7 @@ async fn run_set_enabled(name: &str, enabled: bool) -> Result<()> {
         if !available.is_empty() {
             eprintln!("Available servers: {}", available.join(", "));
         } else {
-            eprintln!("No MCP servers configured. Run `grok mcp add --help` to get started.");
+            eprintln!("No MCP servers configured. Run `grok-zh mcp add --help` to get started.");
         }
         std::process::exit(1);
     }
@@ -653,7 +653,9 @@ async fn run_remove(name: &str, requested_scope: Option<McpScope>) -> Result<()>
             eprintln!("MCP server '{name}' exists in multiple scopes:");
             eprintln!("  user: {}", display_user_grok_path("config.toml"));
             eprintln!("  project: {}", project_path.display());
-            eprintln!("Specify which one to remove, e.g.: grok mcp remove {name} --scope project");
+            eprintln!(
+                "Specify which one to remove, e.g.: grok-zh mcp remove {name} --scope project"
+            );
             std::process::exit(1);
         }
     };

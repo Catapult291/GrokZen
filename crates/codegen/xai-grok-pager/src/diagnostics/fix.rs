@@ -18,12 +18,12 @@ pub const TMUX_CLIPBOARD_ID: DiagnosticId = DiagnosticId::new("terminal", "tmux-
 pub const DCS_PASSTHROUGH_ID: DiagnosticId = DiagnosticId::new("terminal", "dcs-passthrough");
 pub const TMUX_EXTENDED_KEYS_ID: DiagnosticId = DiagnosticId::new("terminal", "tmux-extended-keys");
 pub const TMUX_TRUECOLOR_ID: DiagnosticId = DiagnosticId::new("terminal", "tmux-truecolor");
-pub const SSH_WRAP_FIX_COMMAND: &str = "grok doctor fix terminal.ssh-wrap";
-pub const SSH_WRAP_ONE_OFF: &str = "grok wrap ssh <host>";
+pub const SSH_WRAP_FIX_COMMAND: &str = "grok-zh doctor fix terminal.ssh-wrap";
+pub const SSH_WRAP_ONE_OFF: &str = "grok-zh wrap ssh <host>";
 
-const MANAGED_NAMESPACE: &str = "grok doctor";
-const SSH_WRAP_ALIAS_POSIX: &str = "alias ssh='grok wrap ssh'";
-const SSH_WRAP_ALIAS_FISH: &str = "alias ssh 'grok wrap ssh'";
+const MANAGED_NAMESPACE: &str = "grok-zh doctor";
+const SSH_WRAP_ALIAS_POSIX: &str = "alias ssh='grok-zh wrap ssh'";
+const SSH_WRAP_ALIAS_FISH: &str = "alias ssh 'grok-zh wrap ssh'";
 const TMUX_SCANNER_CAVEAT: &str = "Grok checks this file for direct global assignments of this option. Review sourced files, conditionals, plugins, and generated tmux setup yourself.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -311,7 +311,7 @@ impl std::fmt::Display for FixError {
         match self {
             Self::UnknownId(id) => write!(
                 formatter,
-                "`{id}` is not an available Doctor fix. Run `grok doctor fix` to list available fixes."
+                "`{id}` is not an available Doctor fix. Run `grok-zh doctor fix` to list available fixes."
             ),
             Self::PlatformUnsupported => write!(
                 formatter,
@@ -492,28 +492,28 @@ const FIX_REGISTRY: &[FixSpec] = &[
         id: TMUX_CLIPBOARD_ID,
         handle: "tmux-clipboard",
         label: TMUX_CLIPBOARD_SPEC.label,
-        command: "grok doctor fix terminal.tmux-clipboard",
+        command: "grok-zh doctor fix terminal.tmux-clipboard",
         kind: FixKind::TmuxOption(&TMUX_CLIPBOARD_SPEC),
     },
     FixSpec {
         id: DCS_PASSTHROUGH_ID,
         handle: "dcs-passthrough",
         label: DCS_PASSTHROUGH_SPEC.label,
-        command: "grok doctor fix terminal.dcs-passthrough",
+        command: "grok-zh doctor fix terminal.dcs-passthrough",
         kind: FixKind::TmuxOption(&DCS_PASSTHROUGH_SPEC),
     },
     FixSpec {
         id: TMUX_EXTENDED_KEYS_ID,
         handle: "tmux-extended-keys",
         label: TMUX_EXTENDED_KEYS_SPEC.label,
-        command: "grok doctor fix terminal.tmux-extended-keys",
+        command: "grok-zh doctor fix terminal.tmux-extended-keys",
         kind: FixKind::TmuxOption(&TMUX_EXTENDED_KEYS_SPEC),
     },
     FixSpec {
         id: TMUX_TRUECOLOR_ID,
         handle: "tmux-truecolor",
         label: TMUX_TRUECOLOR_SPEC.label,
-        command: "grok doctor fix terminal.tmux-truecolor",
+        command: "grok-zh doctor fix terminal.tmux-truecolor",
         kind: FixKind::TmuxOption(&TMUX_TRUECOLOR_SPEC),
     },
 ];
@@ -531,7 +531,7 @@ pub fn resolve_fix_id(value: &str) -> Result<DiagnosticId, FixError> {
 }
 
 pub(crate) fn human_fix_command(id: DiagnosticId) -> Option<String> {
-    fix_spec(id).map(|spec| format!("grok doctor fix {}", spec.handle))
+    fix_spec(id).map(|spec| format!("grok-zh doctor fix {}", spec.handle))
 }
 
 pub(crate) fn automatic_fix_choices()
@@ -612,10 +612,10 @@ pub(crate) fn format_applicable_automatic_fixes(
         output.push_str(&format!("  {handle:<20} {label}\n"));
         match availability {
             AutomaticFixAvailability::Here => output.push_str(&format!(
-                "    Run: grok doctor fix {handle}\n    In Grok: /doctor fix {handle}\n"
+                "    Run: grok-zh doctor fix {handle}\n    In grok-zh: /doctor fix {handle}\n"
             )),
             AutomaticFixAvailability::RunLocally => output.push_str(&format!(
-                "    On your local computer, run: grok doctor fix {handle}\n"
+                "    On your local computer, run: grok-zh doctor fix {handle}\n"
             )),
         }
     }
@@ -657,7 +657,7 @@ pub(crate) fn format_fix_preview(plan: &FixPlan) -> String {
     match &plan.payload {
         FixPayload::SshWrap(_) => {
             output.push_str(
-                "\nWhat this changes:\n  In new interactive shells, `ssh ...` runs as `grok wrap ssh ...`.\n",
+                "\nWhat this changes:\n  In new interactive shells, `ssh ...` runs as `grok-zh wrap ssh ...`.\n",
             );
             let _ = writeln!(
                 output,
@@ -735,7 +735,7 @@ fn plan_ssh_wrap(
             "The alias loads only in new interactive shells.",
             "Use `command ssh ...` to bypass the alias.",
             "For manually entered `ssh -f`, ControlPersist workflows, or OpenSSH `~^Z` local suspend, use `command ssh ...`. Wrapping does not fully preserve those behaviors.",
-            "`grok wrap` starts the SSH process directly, so the alias does not loop.",
+            "`grok-zh wrap` starts the SSH process directly, so the alias does not loop.",
             "Grok checks this file for direct SSH aliases and functions. Review sourced files, plugins, and generated shell setup yourself.",
         ],
         payload: FixPayload::SshWrap(SshWrapPlan { shell, managed }),

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     AgentTurnExpectation, ContentController, PtyHarness, StyledLine, pager_binary, parse_keys,
@@ -1107,8 +1108,7 @@ fn capture_artifacts(
 fn render_svg(lines: &[StyledLine], cursor: (u16, u16), note: &str) -> String {
     let cols = lines
         .iter()
-        .flat_map(|line| line.runs.iter())
-        .map(|run| run.text.chars().count())
+        .map(|line| line.runs.iter().map(|run| run.text.width()).sum::<usize>())
         .max()
         .unwrap_or(1)
         .max(80);
@@ -1146,7 +1146,7 @@ fn render_svg(lines: &[StyledLine], cursor: (u16, u16), note: &str) -> String {
                 attrs.push_str(" text-decoration=\"underline\"");
             }
             if let Some(bg) = &run.bg {
-                let w = run.text.chars().count() * char_width;
+                let w = run.text.width() * char_width;
                 svg.push_str(&format!(
                     "<rect x=\"{x}\" y=\"{}\" width=\"{w}\" height=\"{line_height}\" fill=\"{}\"/>\n",
                     y - 14,
@@ -1157,7 +1157,7 @@ fn render_svg(lines: &[StyledLine], cursor: (u16, u16), note: &str) -> String {
                 "<text x=\"{x}\" y=\"{y}\" {attrs}>{}</text>\n",
                 escape_xml(&run.text)
             ));
-            x += run.text.chars().count() * char_width;
+            x += run.text.width() * char_width;
         }
     }
     let cursor_row = cursor.0 as usize;
@@ -1669,7 +1669,7 @@ fn locate_prompt(harness: &PtyHarness) -> Result<MousePoint> {
         let Some(marker_byte) = line.find('❯') else {
             continue;
         };
-        let col = line[..marker_byte].chars().count() + 2;
+        let col = line[..marker_byte].width() + 2;
         return Ok(MousePoint {
             row: row as u16,
             col: col as u16,
@@ -1688,11 +1688,11 @@ fn locate_prompt_drop_point(harness: &PtyHarness) -> Result<MousePoint> {
             continue;
         };
         let after_marker = &line[marker_byte + '❯'.len_utf8()..];
-        let content_cols = after_marker.trim_end().chars().count();
-        let marker_col = line[..marker_byte].chars().count();
+        let content_cols = after_marker.trim_end().width();
+        let marker_col = line[..marker_byte].width();
         return Ok(MousePoint {
             row: row as u16,
-            col: (marker_col + 2 + content_cols).min(line.chars().count().saturating_sub(1)) as u16,
+            col: (marker_col + 2 + content_cols).min(line.width().saturating_sub(1)) as u16,
         });
     }
     bail!(
@@ -1758,9 +1758,9 @@ fn locate_text_impl(
         while let Some(rel_byte) = line[start_byte..].find(text) {
             let byte = start_byte + rel_byte;
             if seen == occurrence {
-                let mut col = line[..byte].chars().count();
+                let mut col = line[..byte].width();
                 if end {
-                    col += text.chars().count().saturating_sub(1);
+                    col += text.width().saturating_sub(1);
                 }
                 return Ok(MousePoint {
                     row: row as u16,
@@ -2028,6 +2028,38 @@ fn default_image_height() -> DimensionAssertion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StyledRun;
+
+    #[test]
+    fn svg_background_uses_terminal_cell_width_for_cjk() {
+        let svg = render_svg(
+            &[StyledLine {
+                line: 0,
+                runs: vec![StyledRun {
+                    text: "中文".to_string(),
+                    fg: None,
+                    bg: Some("#123456".to_string()),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    strikeout: false,
+                    dim: false,
+                    inverse: false,
+                }],
+            }],
+            (0, 4),
+            "",
+        );
+
+        assert!(
+            svg.contains("width=\"32\""),
+            "CJK run should span four cells"
+        );
+        assert!(
+            svg.contains("x=\"48\""),
+            "cursor should start after four cells"
+        );
+    }
 
     #[test]
     fn parses_minimal_scenario() {

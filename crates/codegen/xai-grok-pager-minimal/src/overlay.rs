@@ -60,7 +60,11 @@ enum Kind {
 ///
 /// `items_width` is the width the rows render at (minimal is flush-left, so
 /// the prompt/viewport width); slash rows wrap, so their count is line-based.
-fn active(prompt: &PromptWidget, items_width: u16) -> Option<(Kind, u16)> {
+fn active(
+    prompt: &PromptWidget,
+    items_width: u16,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
+) -> Option<(Kind, u16)> {
     use xai_grok_pager::views::completion_dropdown::MAX_VISIBLE_ROWS;
     use xai_grok_pager::views::file_search::dropdown::MAX_DROPDOWN_ROWS as FILE_MAX;
     use xai_grok_pager::views::slash_dropdown::desired_item_rows;
@@ -72,7 +76,11 @@ fn active(prompt: &PromptWidget, items_width: u16) -> Option<(Kind, u16)> {
         return (n > 0).then_some((Kind::FileSearch, n));
     }
     if prompt.slash_open() {
-        let n = desired_item_rows(&prompt.slash_snapshot().matches, items_width);
+        let snap = xai_grok_pager::views::slash_dropdown::localized_snapshot(
+            prompt.slash_snapshot(),
+            locale,
+        );
+        let n = desired_item_rows(&snap.matches, items_width);
         return (n > 0).then_some((Kind::Slash, n));
     }
     if prompt.completion_dropdown_open() {
@@ -86,8 +94,12 @@ fn active(prompt: &PromptWidget, items_width: u16) -> Option<(Kind, u16)> {
 /// Extra rows the active dropdown needs above the prompt (top border + items +
 /// bottom border), or 0 when none is open. The bottom border doubles as the gap
 /// row directly above the prompt, matching `render_dropdown_chrome`.
-pub fn overlay_rows(prompt: &PromptWidget, items_width: u16) -> u16 {
-    active(prompt, items_width)
+pub fn overlay_rows(
+    prompt: &PromptWidget,
+    items_width: u16,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
+) -> u16 {
+    active(prompt, items_width, locale)
         .map(|(_, rows)| panel_rows(rows))
         .unwrap_or(0)
 }
@@ -212,6 +224,7 @@ fn will_commit(app: &AppView) -> bool {
 
 /// Resolve the target viewport height for the active agent's overlay state.
 fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
+    let locale = app.locale.clone();
     let minimal_live_rows = app.appearance.minimal_live_rows;
     let ceiling = term_h.saturating_sub(1).max(3);
     let base = minimal_live_rows.clamp(3, ceiling);
@@ -262,7 +275,7 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
     // screen. Checked before the app-modal branch since the session picker is
     // also an `active_modal`.
     if let Some(kind) = super::panel::active(agent) {
-        return super::panel::panel_height(agent, kind, width, ceiling);
+        return super::panel::panel_height(agent, kind, width, ceiling, Some(&locale));
     }
 
     // A centered app-modal (command palette / settings / pickers) or the
@@ -295,7 +308,7 @@ fn compute_target(app: &mut AppView, term_h: u16, width: u16) -> u16 {
 
     // Otherwise size to fit the prompt (it expands as you type) plus any
     // prompt-anchored dropdown.
-    let overlay_h = overlay_rows(&agent.prompt, width);
+    let overlay_h = overlay_rows(&agent.prompt, width, Some(locale.as_ref()));
     let cap = ceiling.saturating_sub(overlay_h + 1).max(1);
     let prompt_h = agent
         .prompt
@@ -365,8 +378,9 @@ pub fn render(
     layout_cfg: &LayoutConfig,
     compact: bool,
     theme: &Theme,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
 ) {
-    let Some((kind, item_rows)) = active(prompt, prompt_area.width) else {
+    let Some((kind, item_rows)) = active(prompt, prompt_area.width, locale) else {
         return;
     };
 
@@ -406,7 +420,10 @@ pub fn render(
             );
         }
         Kind::Slash => {
-            let snap = prompt.slash_snapshot();
+            let snap = xai_grok_pager::views::slash_dropdown::localized_snapshot(
+                prompt.slash_snapshot(),
+                locale,
+            );
             let hovered = prompt.slash_hovered();
             xai_grok_pager::views::slash_dropdown::render_dropdown(
                 buf, items_rect, &snap, hovered, theme,
@@ -539,13 +556,20 @@ pub fn render_modal(
     agent: &mut AgentView,
     theme: &Theme,
     screen_h: u16,
+    locale: &xai_grok_pager::locale::LocaleContext,
 ) -> Option<(u16, u16)> {
     match modal {
-        Modal::Permission => render_permission(buf, area, agent, theme),
-        Modal::Question => render_question(buf, area, agent, theme, screen_h),
+        Modal::Permission => render_permission(buf, area, agent, theme, locale),
+        Modal::Question => render_question(buf, area, agent, theme, screen_h, locale),
         Modal::Rewind => {
             if let Some(rw) = minimal_api::rewind_state(agent) {
-                xai_grok_pager::views::rewind::render_rewind_overlay(buf, area, &rw.phase, true);
+                xai_grok_pager::views::rewind::render_rewind_overlay(
+                    buf,
+                    area,
+                    &rw.phase,
+                    true,
+                    Some(locale),
+                );
             }
             None
         }
@@ -556,12 +580,13 @@ pub fn render_modal(
             // render the hit-test rects into a local Vec and store them back after.
             let mut buttons: Vec<Rect> = Vec::new();
             let drawn = if let Some(ctv) = minimal_api::cancel_turn_view(agent) {
-                xai_grok_pager::views::modal::render_cancel_turn_panel(
+                xai_grok_pager::views::modal::render_cancel_turn_panel_with_locale(
                     buf,
                     area,
                     ctv,
                     true,
                     &mut buttons,
+                    Some(locale),
                 );
                 true
             } else {
@@ -572,7 +597,7 @@ pub fn render_modal(
             }
             None
         }
-        Modal::Plan => super::plan::render(buf, area, agent, theme),
+        Modal::Plan => super::plan::render(buf, area, agent, theme, Some(locale)),
     }
 }
 
@@ -605,11 +630,12 @@ pub fn render_app_modal(
     area: Rect,
     agent: &mut AgentView,
     compact: bool,
+    locale: &xai_grok_pager::locale::LocaleContext,
 ) -> bool {
     if agent.active_modal.is_none() {
         return false;
     }
-    minimal_api::draw_active_modal(agent, area, buf, Theme::current(), compact);
+    minimal_api::draw_active_modal(agent, area, buf, Theme::current(), compact, Some(locale));
     true
 }
 
@@ -618,12 +644,13 @@ fn render_permission(
     area: Rect,
     agent: &mut AgentView,
     theme: &Theme,
+    locale: &xai_grok_pager::locale::LocaleContext,
 ) -> Option<(u16, u16)> {
     let perm = agent.permission_queue.front()?;
     // Clone so the immutable borrow of `agent.prompt` ends before the mutable
     // `agent.prompt.draw` below.
     let followup = agent.prompt.text().to_string();
-    let result = xai_grok_pager::views::permission_view::render_permission_view(
+    let result = xai_grok_pager::views::permission_view::render_permission_view_with_placeholder(
         buf,
         area,
         perm,
@@ -632,6 +659,7 @@ fn render_permission(
         minimal_api::hovered_permission_item(agent),
         theme,
         true,
+        locale.text(xai_grok_pager::locale::TextKey::PermissionRejectFeedback),
     );
     // Follow-up (reject-with-text) hosts an inline editor; draw it plainly
     // (minimal skips the full TUI's accent-bar/scrollbar chrome).
@@ -649,7 +677,7 @@ fn render_permission(
     };
     agent
         .prompt
-        .draw(buf, rect, None, &style, None, None)
+        .draw_with_locale(buf, rect, None, &style, None, None, Some(locale))
         .cursor_pos
 }
 
@@ -659,6 +687,7 @@ fn render_question(
     agent: &mut AgentView,
     theme: &Theme,
     screen_h: u16,
+    locale: &xai_grok_pager::locale::LocaleContext,
 ) -> Option<(u16, u16)> {
     use xai_grok_pager::views::question_view::{QUESTION_VIEW_HPAD, QuestionFocus};
 
@@ -702,13 +731,15 @@ fn render_question(
     }
 
     if let Some(qv) = minimal_api::question_view(agent) {
-        xai_grok_pager::views::question_view::render_question_view(
+        xai_grok_pager::views::question_view::render_question_view_with_placeholder(
             buf,
             q_area,
             qv,
             minimal_api::hovered_question_item(agent),
             theme,
             true,
+            locale.text(xai_grok_pager::locale::TextKey::QuestionOtherPlaceholder),
+            Some(locale),
         );
     }
 
@@ -767,7 +798,7 @@ fn render_question(
         };
         return agent
             .prompt
-            .draw(buf, editor, None, &style, None, None)
+            .draw_with_locale(buf, editor, None, &style, None, None, Some(locale))
             .cursor_pos;
     }
     None
@@ -880,7 +911,14 @@ mod tests {
         let theme = Theme::terminal_default();
         let area = Rect::new(0, 0, content_w as u16, multi_h);
         let mut buf = Buffer::empty(area);
-        let cursor = render_question(&mut buf, area, &mut multi, &theme, screen_h);
+        let cursor = render_question(
+            &mut buf,
+            area,
+            &mut multi,
+            &theme,
+            screen_h,
+            &xai_grok_pager::locale::LocaleContext::default(),
+        );
         assert!(cursor.is_some(), "InputMode returns the editor cursor");
 
         // Editor occupies the last 3 rows; its first row carries the prefix.
@@ -892,9 +930,10 @@ mod tests {
                     .unwrap_or_default()
             })
             .collect();
+        let expected_marker = format!("({})", xai_grok_pager::glyphs::filled_dot());
         assert!(
-            row_text.contains('z') && row_text.contains("(\u{25cf})"),
-            "editor row must keep the freeform-row `z (\u{25cf})` prefix, got {row_text:?}"
+            row_text.contains('z') && row_text.contains(&expected_marker),
+            "editor row must keep the freeform-row `z {expected_marker}` prefix, got {row_text:?}"
         );
         assert!(
             row_text.contains("line one"),
@@ -945,7 +984,14 @@ mod tests {
         let theme = Theme::terminal_default();
         let area = Rect::new(0, 0, content_w as u16, capped);
         let mut buf = Buffer::empty(area);
-        render_question(&mut buf, area, &mut agent, &theme, screen_h);
+        render_question(
+            &mut buf,
+            area,
+            &mut agent,
+            &theme,
+            screen_h,
+            &xai_grok_pager::locale::LocaleContext::default(),
+        );
 
         let all_text: String = (0..area.height)
             .flat_map(|y| {
@@ -985,8 +1031,8 @@ mod tests {
     #[test]
     fn fresh_prompt_has_no_overlay() {
         let pw = PromptWidget::new();
-        assert_eq!(overlay_rows(&pw, 80), 0);
-        assert!(active(&pw, 80).is_none());
+        assert_eq!(overlay_rows(&pw, 80, None), 0);
+        assert!(active(&pw, 80, None).is_none());
     }
 
     #[test]
@@ -998,8 +1044,8 @@ mod tests {
         minimal_api::prompt_suggestions_mut(&mut pw).dropdown.open = true;
         minimal_api::prompt_suggestions_mut(&mut pw).dropdown.items =
             vec![completion_item(), completion_item(), completion_item()];
-        assert_eq!(active(&pw, 80), Some((Kind::Completion, 3)));
-        assert_eq!(overlay_rows(&pw, 80), 5); // 3 items + 2 borders
+        assert_eq!(active(&pw, 80, None), Some((Kind::Completion, 3)));
+        assert_eq!(overlay_rows(&pw, 80, None), 5); // 3 items + 2 borders
     }
 
     #[test]
@@ -1011,15 +1057,15 @@ mod tests {
             (0..(MAX_VISIBLE_ROWS as usize + 5))
                 .map(|_| completion_item())
                 .collect();
-        assert_eq!(overlay_rows(&pw, 80), MAX_VISIBLE_ROWS + 2);
+        assert_eq!(overlay_rows(&pw, 80, None), MAX_VISIBLE_ROWS + 2);
     }
 
     #[test]
     fn empty_open_dropdown_reports_nothing() {
         let mut pw = PromptWidget::new();
         minimal_api::prompt_suggestions_mut(&mut pw).dropdown.open = true; // open but no items
-        assert_eq!(overlay_rows(&pw, 80), 0);
-        assert!(active(&pw, 80).is_none());
+        assert_eq!(overlay_rows(&pw, 80, None), 0);
+        assert!(active(&pw, 80, None).is_none());
     }
 
     #[test]

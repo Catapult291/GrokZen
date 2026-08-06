@@ -4,7 +4,10 @@ use crate::acp::tracker::TurnActivity;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
 use crate::app::roster::{RosterActivity, RosterEntry};
-use crate::app::subagent::{SubagentInfo, format_activity_label, format_subagent_label};
+use crate::app::subagent::{
+    SubagentInfo, format_activity_label_with_locale, format_subagent_label_with_locale,
+};
+use crate::locale::LocaleContext;
 use indexmap::IndexMap;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
@@ -12,6 +15,24 @@ use std::time::{Instant, SystemTime};
 /// yet. The renderer paints this part in the primary colour and the trailing
 /// ` #<id>` suffix in dim gray (see `render::render_row`).
 pub(crate) const NEW_SESSION_LABEL: &str = "New session";
+
+pub(crate) fn new_session_label(locale: Option<&LocaleContext>) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text("dashboard.row.new_session", NEW_SESSION_LABEL))
+        .unwrap_or(NEW_SESSION_LABEL)
+}
+
+fn row_static(locale: Option<&LocaleContext>, id: &str, english: &'static str) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn row_text(locale: Option<&LocaleContext>, id: &str, english: &str) -> String {
+    locale
+        .map(|locale| locale.named_text(id, english).into_owned())
+        .unwrap_or_else(|| english.to_string())
+}
 /// A single row in the dashboard. Built per-frame from `app.agents`.
 #[derive(Debug, Clone)]
 pub struct DashboardRow {
@@ -85,12 +106,16 @@ pub enum RowBadge {
 }
 impl RowBadge {
     pub fn label(self) -> &'static str {
+        self.label_with_locale(None)
+    }
+
+    pub fn label_with_locale(self, locale: Option<&LocaleContext>) -> &'static str {
         match self {
-            Self::Worktree => "worktree",
-            Self::NeedsInput => "needs-input",
-            Self::BgTask => "bg",
-            Self::Pinned => "pinned",
-            Self::Failed => "failed",
+            Self::Worktree => row_static(locale, "dashboard.badge.worktree", "worktree"),
+            Self::NeedsInput => row_static(locale, "dashboard.badge.needs_input", "needs-input"),
+            Self::BgTask => row_static(locale, "dashboard.badge.background", "bg"),
+            Self::Pinned => row_static(locale, "dashboard.badge.pinned", "pinned"),
+            Self::Failed => row_static(locale, "dashboard.badge.failed", "failed"),
         }
     }
 }
@@ -123,7 +148,23 @@ pub fn build_rows(
     filter: &Filter,
     home: Option<&str>,
 ) -> Vec<DashboardRow> {
-    let mut rows = build_local_rows(agents, pinned, active, home, true);
+    build_rows_with_locale(
+        agents, pinned, reorder, active, grouping, filter, home, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_rows_with_locale(
+    agents: &IndexMap<AgentId, AgentView>,
+    pinned: &std::collections::BTreeSet<DashboardRowId>,
+    reorder: &[DashboardRowId],
+    active: Option<AgentId>,
+    grouping: super::state::Grouping,
+    filter: &Filter,
+    home: Option<&str>,
+    locale: Option<&LocaleContext>,
+) -> Vec<DashboardRow> {
+    let mut rows = build_local_rows(agents, pinned, active, home, true, locale);
     apply_filter(&mut rows, filter, home);
     sort_rows(&mut rows, grouping, reorder);
     rows
@@ -152,8 +193,25 @@ pub fn build_rows_with_roster(
     home: Option<&str>,
     roster: &[RosterEntry],
 ) -> Vec<DashboardRow> {
-    let mut rows = build_local_rows(agents, pinned, active, home, false);
-    append_roster_rows(&mut rows, roster, agents, pinned, home);
+    build_rows_with_roster_and_locale(
+        agents, pinned, reorder, active, grouping, filter, home, roster, None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_rows_with_roster_and_locale(
+    agents: &IndexMap<AgentId, AgentView>,
+    pinned: &std::collections::BTreeSet<DashboardRowId>,
+    reorder: &[DashboardRowId],
+    active: Option<AgentId>,
+    grouping: super::state::Grouping,
+    filter: &Filter,
+    home: Option<&str>,
+    roster: &[RosterEntry],
+    locale: Option<&LocaleContext>,
+) -> Vec<DashboardRow> {
+    let mut rows = build_local_rows(agents, pinned, active, home, false, locale);
+    append_roster_rows(&mut rows, roster, agents, pinned, home, locale);
     apply_filter(&mut rows, filter, home);
     sort_rows(&mut rows, grouping, reorder);
     rows
@@ -172,6 +230,7 @@ fn build_local_rows(
     active: Option<AgentId>,
     home: Option<&str>,
     include_subagents: bool,
+    locale: Option<&LocaleContext>,
 ) -> Vec<DashboardRow> {
     let mut rows = Vec::new();
     for (id, agent) in agents.iter() {
@@ -185,12 +244,13 @@ fn build_local_rows(
         {
             continue;
         }
-        let row = top_level_row(
+        let row = top_level_row_with_locale(
             *id,
             agent,
             pinned.contains(&top_id),
             active == Some(*id),
             home,
+            locale,
         );
         rows.push(row);
         if !include_subagents {
@@ -213,7 +273,7 @@ fn build_local_rows(
         let total = subagents.len();
         let keep = MAX_VISIBLE_SUBAGENTS.min(total);
         for info in subagents.iter().take(keep) {
-            rows.push(subagent_row(
+            rows.push(subagent_row_with_locale(
                 *id,
                 agent,
                 info,
@@ -222,16 +282,18 @@ fn build_local_rows(
                     child_session_id: info.child_session_id.to_string(),
                 }),
                 home,
+                locale,
             ));
         }
         if total > keep {
-            let agent_label = top_level_label(agent);
+            let agent_label = top_level_label_with_locale(agent, locale);
             rows.push(DashboardRow {
                 id: DashboardRowId::Subagent {
                     parent: *id,
                     child_session_id: format!("__more_{}", id.0),
                 },
-                label: format!("\u{2026} {} more", total - keep),
+                label: row_text(locale, "dashboard.row.more", "… {count} more")
+                    .replace("{count}", &(total - keep).to_string()),
                 subtitle: None,
                 state: RowState::Idle,
                 activity: None,
@@ -274,6 +336,7 @@ fn append_roster_rows(
     agents: &IndexMap<AgentId, AgentView>,
     pinned: &std::collections::BTreeSet<DashboardRowId>,
     home: Option<&str>,
+    locale: Option<&LocaleContext>,
 ) {
     if roster.is_empty() {
         return;
@@ -317,8 +380,12 @@ fn append_roster_rows(
             .unwrap_or_else(|| sanitize(&entry.session_id));
         let state = roster_activity_to_state(entry.activity);
         let activity = match state {
-            RowState::NeedsInput => Some("Awaiting input".to_string()),
-            RowState::Working => Some("Working".to_string()),
+            RowState::NeedsInput => Some(
+                row_static(locale, "dashboard.row.awaiting_input", "Awaiting input").to_string(),
+            ),
+            RowState::Working => {
+                Some(row_static(locale, "dashboard.row.working", "Working").to_string())
+            }
             _ => None,
         };
         let mut badges = Vec::new();
@@ -416,12 +483,22 @@ pub fn has_background_work(agent: &AgentView) -> bool {
 /// dashboard rows list those separately. Counts come from local state (not
 /// backend content), so no sanitise.
 fn background_work_label(agent: &AgentView) -> Option<String> {
+    background_work_label_with_locale(agent, None)
+}
+
+fn background_work_label_with_locale(
+    agent: &AgentView,
+    locale: Option<&LocaleContext>,
+) -> Option<String> {
     let w = agent.watchers();
-    crate::views::turn_status::format_still_running([
-        (w.monitors, "monitor"),
-        (w.loops, "loop"),
-        (w.commands, "task"),
-    ])
+    crate::views::turn_status::format_still_running_with_locale(
+        [
+            (w.monitors, "monitor"),
+            (w.loops, "loop"),
+            (w.commands, "task"),
+        ],
+        locale,
+    )
 }
 /// Classify a subagent.
 ///
@@ -473,6 +550,10 @@ fn is_empty_top_level(agent: &AgentView) -> bool {
     true
 }
 fn top_level_label(agent: &AgentView) -> String {
+    top_level_label_with_locale(agent, None)
+}
+
+fn top_level_label_with_locale(agent: &AgentView, locale: Option<&LocaleContext>) -> String {
     if let Some(name) = agent.display_name.as_deref() {
         let trimmed = name.trim();
         if !trimmed.is_empty() {
@@ -499,9 +580,9 @@ fn top_level_label(agent: &AgentView) -> String {
     }
     if let Some(sid) = agent.session.session_id.as_ref() {
         let short: String = sid.0.chars().take(8).collect();
-        return format!("{NEW_SESSION_LABEL} #{short}");
+        return format!("{} #{short}", new_session_label(locale));
     }
-    NEW_SESSION_LABEL.to_string()
+    new_session_label(locale).to_string()
 }
 fn top_level_row(
     id: AgentId,
@@ -510,11 +591,22 @@ fn top_level_row(
     is_active: bool,
     home: Option<&str>,
 ) -> DashboardRow {
+    top_level_row_with_locale(id, agent, pinned, is_active, home, None)
+}
+
+fn top_level_row_with_locale(
+    id: AgentId,
+    agent: &AgentView,
+    pinned: bool,
+    is_active: bool,
+    home: Option<&str>,
+    locale: Option<&LocaleContext>,
+) -> DashboardRow {
     let state = classify_top_level(agent);
-    let label = top_level_label(agent);
-    let subtitle = top_level_subtitle(agent);
-    let activity = top_level_activity(agent, state);
-    let secondary_line = top_level_secondary_line(agent, state, activity.as_deref());
+    let label = top_level_label_with_locale(agent, locale);
+    let subtitle = top_level_subtitle_with_locale(agent, locale);
+    let activity = top_level_activity_with_locale(agent, state, locale);
+    let secondary_line = top_level_secondary_line(agent, state, activity.as_deref(), locale);
     let anchor: Instant = match state {
         RowState::Working => agent
             .turn_started_at
@@ -574,8 +666,19 @@ fn subagent_row(
     pinned: bool,
     home: Option<&str>,
 ) -> DashboardRow {
+    subagent_row_with_locale(parent, parent_view, info, pinned, home, None)
+}
+
+fn subagent_row_with_locale(
+    parent: AgentId,
+    parent_view: &AgentView,
+    info: &SubagentInfo,
+    pinned: bool,
+    home: Option<&str>,
+    locale: Option<&LocaleContext>,
+) -> DashboardRow {
     let state = classify_subagent(info);
-    let (label_raw, desc_raw) = format_subagent_label(info);
+    let (label_raw, desc_raw) = format_subagent_label_with_locale(info, locale);
     let label = {
         let label = sanitize(&label_raw);
         let desc = sanitize(&desc_raw);
@@ -585,7 +688,7 @@ fn subagent_row(
             format!("{label} · {desc}")
         }
     };
-    let activity = subagent_activity(info, state);
+    let activity = subagent_activity_with_locale(info, state, locale);
     let cwd = info
         .child_cwd
         .as_deref()
@@ -603,8 +706,8 @@ fn subagent_row(
     if state == RowState::Failed {
         badges.push(RowBadge::Failed);
     }
-    let parent_label = Some(top_level_label(parent_view));
-    let subtitle = subagent_subtitle(info, &cwd);
+    let parent_label = Some(top_level_label_with_locale(parent_view, locale));
+    let subtitle = subagent_subtitle_with_locale(info, &cwd, locale);
     let secondary_line = subagent_secondary_line(info, state, activity.as_deref());
     DashboardRow {
         id: DashboardRowId::Subagent {
@@ -653,6 +756,13 @@ fn cwd_basename(cwd: &std::path::Path) -> Option<String> {
 /// the dashboard opens (see `dispatch_open_dashboard`) so the branch is
 /// the latest, not a stale notification value.
 fn top_level_subtitle(agent: &AgentView) -> Option<String> {
+    top_level_subtitle_with_locale(agent, None)
+}
+
+fn top_level_subtitle_with_locale(
+    agent: &AgentView,
+    locale: Option<&LocaleContext>,
+) -> Option<String> {
     let lazy = crate::git_info::cwd_git_info_lazy(&agent.session.cwd);
     let trimmed = |s: &str| {
         let t = s.trim();
@@ -693,7 +803,7 @@ fn top_level_subtitle(agent: &AgentView) -> Option<String> {
         return None;
     }
     if is_worktree {
-        parts.push("worktree".to_string());
+        parts.push(row_static(locale, "dashboard.badge.worktree", "worktree").to_string());
     }
     Some(parts.join(" "))
 }
@@ -718,17 +828,28 @@ fn top_level_secondary_line(
     agent: &AgentView,
     state: RowState,
     activity: Option<&str>,
+    locale: Option<&LocaleContext>,
 ) -> Option<String> {
     match state {
         RowState::NeedsInput => {
             if let Some(perm) = agent.permission_queue.front() {
                 let title = perm.title.trim();
                 if !title.is_empty() {
-                    return Some(format!("Pending: {}", sanitize(title)));
+                    return Some(
+                        row_text(locale, "dashboard.row.pending", "Pending: {detail}")
+                            .replace("{detail}", &sanitize(title)),
+                    );
                 }
             }
             if agent.question_view.is_some() {
-                return Some("Pending: question".to_string());
+                return Some(
+                    row_static(
+                        locale,
+                        "dashboard.row.pending_question",
+                        "Pending: question",
+                    )
+                    .to_string(),
+                );
             }
             activity.map(sanitize)
         }
@@ -772,9 +893,20 @@ fn first_nonempty_line(s: &str) -> Option<&str> {
 /// (which is the worktree folder name when running in a worktree) plus a
 /// `worktree` suffix when one is set.
 fn subagent_subtitle(info: &SubagentInfo, cwd: &std::path::Path) -> Option<String> {
+    subagent_subtitle_with_locale(info, cwd, None)
+}
+
+fn subagent_subtitle_with_locale(
+    info: &SubagentInfo,
+    cwd: &std::path::Path,
+    locale: Option<&LocaleContext>,
+) -> Option<String> {
     let name = cwd_basename(cwd)?;
     if info.worktree_path.is_some() {
-        Some(format!("{name} worktree"))
+        Some(format!(
+            "{name} {}",
+            row_static(locale, "dashboard.badge.worktree", "worktree")
+        ))
     } else {
         Some(name)
     }
@@ -789,25 +921,50 @@ fn subagent_secondary_line(
     activity.map(sanitize)
 }
 fn top_level_activity(agent: &AgentView, state: RowState) -> Option<String> {
+    top_level_activity_with_locale(agent, state, None)
+}
+
+fn top_level_activity_with_locale(
+    agent: &AgentView,
+    state: RowState,
+    locale: Option<&LocaleContext>,
+) -> Option<String> {
     match state {
-        RowState::NeedsInput => Some("Awaiting your input".to_string()),
+        RowState::NeedsInput => Some(
+            row_static(
+                locale,
+                "dashboard.row.awaiting_your_input",
+                "Awaiting your input",
+            )
+            .to_string(),
+        ),
         RowState::Working => {
             if let Some(cmd) = agent.session.state.command_in_flight() {
-                Some(format!("{}…", cmd.display_name()))
+                Some(format!("{}…", cmd.display_name_with_locale(locale)))
             } else if let Some(activity) = agent.resolve_turn_activity() {
-                Some(sanitize(&format_activity_label(&activity)))
+                Some(sanitize(&format_activity_label_with_locale(
+                    &activity, locale,
+                )))
             } else if agent.session.loading_replay {
-                Some("Loading…".to_string())
-            } else if let Some(bg) = background_work_label(agent) {
+                Some(row_static(locale, "dashboard.row.loading", "Loading…").to_string())
+            } else if let Some(bg) = background_work_label_with_locale(agent, locale) {
                 Some(bg)
             } else {
-                Some("Working".to_string())
+                Some(row_static(locale, "dashboard.row.working", "Working").to_string())
             }
         }
         _ => None,
     }
 }
 fn subagent_activity(info: &SubagentInfo, state: RowState) -> Option<String> {
+    subagent_activity_with_locale(info, state, None)
+}
+
+fn subagent_activity_with_locale(
+    info: &SubagentInfo,
+    state: RowState,
+    locale: Option<&LocaleContext>,
+) -> Option<String> {
     if state == RowState::Working {
         if let Some(label) = info
             .activity_label
@@ -819,20 +976,30 @@ fn subagent_activity(info: &SubagentInfo, state: RowState) -> Option<String> {
         }
         let last_tool = info.tools_used.last().map(|s| s.as_ref()).unwrap_or("");
         if last_tool.is_empty() {
-            Some("Working".to_string())
+            Some(row_static(locale, "dashboard.row.working", "Working").to_string())
         } else {
-            Some(sanitize(&format_activity_label(
+            Some(sanitize(&format_activity_label_with_locale(
                 &TurnActivity::ToolRunning {
                     title: last_tool.to_string(),
                     description: None,
                 },
+                locale,
             )))
         }
     } else if info.finished {
         let turns = info.turns.unwrap_or(0);
         let tools = info.tool_calls.unwrap_or(0);
         let toks = info.tokens_used.unwrap_or(0);
-        Some(format!("{tools} tools · {toks} tok · {turns} turns"))
+        Some(
+            row_text(
+                locale,
+                "dashboard.row.finished_stats",
+                "{tools} tools · {tokens} tok · {turns} turns",
+            )
+            .replace("{tools}", &tools.to_string())
+            .replace("{tokens}", &toks.to_string())
+            .replace("{turns}", &turns.to_string()),
+        )
     } else {
         None
     }
@@ -1528,6 +1695,7 @@ mod tests {
             &IndexMap::new(),
             &std::collections::BTreeSet::new(),
             None,
+            None,
         );
         assert_eq!(rows.len(), 1);
         rows[0].last_change_at.elapsed().unwrap_or_default()
@@ -1563,6 +1731,7 @@ mod tests {
             &agents,
             &pinned,
             None,
+            None,
         );
         sort_rows(&mut rows, super::super::state::Grouping::State, &[]);
         assert_eq!(
@@ -1596,7 +1765,7 @@ mod tests {
         pinned: &std::collections::BTreeSet<DashboardRowId>,
     ) -> Vec<DashboardRow> {
         let mut rows = Vec::new();
-        append_roster_rows(&mut rows, entries, &IndexMap::new(), pinned, None);
+        append_roster_rows(&mut rows, entries, &IndexMap::new(), pinned, None, None);
         rows
     }
     /// An untitled, inactive roster session is the "New session" noise the

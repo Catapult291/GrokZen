@@ -240,6 +240,17 @@ pub fn verb_group_header_label(
     show_thinking: bool,
     theme: &Theme,
 ) -> VerbGroupHeaderLabel {
+    verb_group_header_label_with_locale(entries, header_idx, end, show_thinking, theme, None)
+}
+
+pub fn verb_group_header_label_with_locale(
+    entries: &[&ScrollbackEntry],
+    header_idx: usize,
+    end: usize,
+    show_thinking: bool,
+    theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> VerbGroupHeaderLabel {
     let mut acc = BucketAccumulator::default();
 
     let end = end.min(entries.len());
@@ -252,7 +263,7 @@ pub fn verb_group_header_label(
         acc.push(kind, entry);
     }
 
-    acc.into_label(theme)
+    acc.into_label(theme, locale)
 }
 
 /// Aggregated label for a truncation ("N more") header, describing the rows
@@ -276,6 +287,17 @@ pub fn truncation_header_label(
     limit: Option<usize>,
     show_thinking: bool,
     theme: &Theme,
+) -> Option<VerbGroupHeaderLabel> {
+    truncation_header_label_with_locale(entries, range, limit, show_thinking, theme, None)
+}
+
+pub fn truncation_header_label_with_locale(
+    entries: &[&ScrollbackEntry],
+    range: std::ops::Range<usize>,
+    limit: Option<usize>,
+    show_thinking: bool,
+    theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> Option<VerbGroupHeaderLabel> {
     let mut acc = BucketAccumulator::default();
     let end = range.end.min(entries.len());
@@ -305,7 +327,7 @@ pub fn truncation_header_label(
     if acc.is_empty() {
         return None;
     }
-    Some(acc.into_label(theme))
+    Some(acc.into_label(theme, locale))
 }
 
 /// Shared bucket accumulation + label rendering for the aggregated group
@@ -372,7 +394,11 @@ impl<'e> BucketAccumulator<'e> {
         }
     }
 
-    fn into_label(self, theme: &Theme) -> VerbGroupHeaderLabel {
+    fn into_label(
+        self,
+        theme: &Theme,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> VerbGroupHeaderLabel {
         let text_style = theme.fg(theme.gray_bright).add_modifier(Modifier::BOLD);
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut text = String::new();
@@ -382,18 +408,35 @@ impl<'e> BucketAccumulator<'e> {
             } else {
                 bucket.sources.len()
             };
-            let segment = format!(
-                "{}{} {} {}",
-                if i == 0 { "" } else { ", " },
-                bucket.kind.verb(self.running),
-                count,
-                bucket.kind.noun(count)
-            );
+            let separator = if i == 0 {
+                std::borrow::Cow::Borrowed("")
+            } else {
+                locale
+                    .map(|locale| locale.named_text("scrollback.verb_group.separator", ", "))
+                    .unwrap_or_else(|| std::borrow::Cow::Borrowed(", "))
+            };
+            let english_verb = bucket.kind.verb(self.running);
+            let verb = locale
+                .map(|locale| {
+                    locale.named_text(bucket.kind.verb_locale_key(self.running), english_verb)
+                })
+                .unwrap_or_else(|| std::borrow::Cow::Borrowed(english_verb));
+            let english_noun = bucket.kind.noun(count);
+            let noun = locale
+                .map(|locale| locale.named_text(bucket.kind.noun_locale_key(), english_noun))
+                .unwrap_or_else(|| std::borrow::Cow::Borrowed(english_noun));
+            let segment = format!("{separator}{verb} {count} {noun}");
             text.push_str(&segment);
             spans.push(Span::styled(segment, text_style));
         }
         if self.failed_count > 0 {
-            let suffix = format!(" · {} failed", self.failed_count);
+            let suffix = locale
+                .map(|locale| {
+                    locale
+                        .named_text("scrollback.verb_group.failed", " · {count} failed")
+                        .replace("{count}", &self.failed_count.to_string())
+                })
+                .unwrap_or_else(|| format!(" · {} failed", self.failed_count));
             text.push_str(&suffix);
             spans.push(Span::styled(suffix, theme.fg(theme.accent_error)));
         }
@@ -474,6 +517,22 @@ mod tests {
         )
     }
 
+    fn label_zh_cn(entries: &[ScrollbackEntry]) -> VerbGroupHeaderLabel {
+        let refs: Vec<&ScrollbackEntry> = entries.iter().collect();
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        verb_group_header_label_with_locale(
+            &refs,
+            0,
+            refs.len(),
+            /*show_thinking=*/ true,
+            &Theme::current(),
+            Some(&locale),
+        )
+    }
+
     #[test]
     fn buckets_in_first_appearance_order_with_plurality() {
         let entries = vec![
@@ -486,6 +545,12 @@ mod tests {
         assert_eq!(l.text, "Read 2 files, Searched 1 pattern, Listed 1 dir");
         assert!(!l.running);
         assert!(!l.failed);
+
+        let localized = label_zh_cn(&entries);
+        assert_eq!(
+            localized.text,
+            "读取 2 个文件，搜索 1 个匹配项，列出 1 个目录"
+        );
     }
 
     #[test]
@@ -513,6 +578,9 @@ mod tests {
         let l = label(&entries);
         assert_eq!(l.text, "Read 3 files · 2 failed");
         assert!(l.failed);
+
+        let localized = label_zh_cn(&entries);
+        assert_eq!(localized.text, "读取 3 个文件 · 2 项失败");
     }
 
     #[test]

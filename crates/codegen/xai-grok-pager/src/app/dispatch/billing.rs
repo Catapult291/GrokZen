@@ -99,6 +99,8 @@ pub(super) fn open_credit_limit_upsell(
 ) {
     use crate::scrollback::blocks::CreditLimitCardAction;
 
+    let locale = agent.scrollback.locale();
+
     let (
         heading,
         upgrade_tier_desc,
@@ -117,28 +119,55 @@ pub(super) fn open_credit_limit_upsell(
         bool,
     ) = match mode {
         CreditLimitUpsellMode::UnifiedCredits => (
-            "You hit your weekly limit.",
-            "Upgrade to a higher tier for more usage",
-            "Buy more credits",
-            "Purchase credits to keep using Grok Build",
+            locale.named_static_text(
+                "billing.credit_limit.weekly_heading",
+                "You hit your weekly limit.",
+            ),
+            locale.named_static_text(
+                "billing.credit_limit.upgrade_usage",
+                "Upgrade to a higher tier for more usage",
+            ),
+            locale.named_static_text("billing.credit_limit.buy_credits", "Buy more credits"),
+            locale.named_static_text(
+                "billing.credit_limit.buy_credits_description",
+                "Purchase credits to keep using Grok Build",
+            ),
             CreditLimitCardAction::PurchaseCredits,
             xai_grok_telemetry::events::CreditLimitChoice::PurchaseCredits,
             false,
         ),
         CreditLimitUpsellMode::LegacyPayg { enabled: true } => (
-            "You\u{2019}ve hit your spending cap.",
-            "Upgrade to a higher tier for more credits",
-            "Increase limit",
-            "Raise your pay-as-you-go spending cap",
+            locale.named_static_text(
+                "billing.credit_limit.spending_cap_heading",
+                "You’ve hit your spending cap.",
+            ),
+            locale.named_static_text(
+                "billing.credit_limit.upgrade_credits",
+                "Upgrade to a higher tier for more credits",
+            ),
+            locale.named_static_text("billing.credit_limit.increase_limit", "Increase limit"),
+            locale.named_static_text(
+                "billing.credit_limit.increase_limit_description",
+                "Raise your pay-as-you-go spending cap",
+            ),
             CreditLimitCardAction::IncreasePaygLimit,
             xai_grok_telemetry::events::CreditLimitChoice::PayAsYouGo,
             true,
         ),
         CreditLimitUpsellMode::LegacyPayg { enabled: false } => (
-            "You\u{2019}ve hit the credit limit for your plan.",
-            "Upgrade to a higher tier for more credits",
-            "Pay as you go",
-            "Enable pay-as-you-go credits for on-demand usage",
+            locale.named_static_text(
+                "billing.credit_limit.plan_heading",
+                "You’ve hit the credit limit for your plan.",
+            ),
+            locale.named_static_text(
+                "billing.credit_limit.upgrade_credits",
+                "Upgrade to a higher tier for more credits",
+            ),
+            locale.named_static_text("billing.credit_limit.payg", "Pay as you go"),
+            locale.named_static_text(
+                "billing.credit_limit.payg_description",
+                "Enable pay-as-you-go credits for on-demand usage",
+            ),
             CreditLimitCardAction::EnablePayg,
             xai_grok_telemetry::events::CreditLimitChoice::PayAsYouGo,
             false,
@@ -184,7 +213,9 @@ pub(super) fn open_credit_limit_upsell(
         question: heading.into(),
         options: vec![
             QuestionOption {
-                label: "Upgrade tier".into(),
+                label: locale
+                    .named_static_text("billing.credit_limit.upgrade_tier", "Upgrade tier")
+                    .into(),
                 description: upgrade_tier_desc.into(),
                 preview: None,
                 id: Some(UPSELL_URL_UPGRADE.into()),
@@ -270,14 +301,21 @@ fn open_supergrok_upsell(
         return false;
     }
 
+    let locale = agent.scrollback.locale();
     let (heading, source, modal_id_prefix) = match reason {
         UpsellReason::FreeUsageLimit => (
-            "You hit your free usage limit.",
+            locale.named_static_text(
+                "billing.supergrok.free_usage_heading",
+                "You hit your free usage limit.",
+            ),
             SuperGrokUpsell::FreeUsagePaywall,
             "free-usage-upsell",
         ),
         UpsellReason::RestrictedCommand => (
-            "Unlock all features with SuperGrok.",
+            locale.named_static_text(
+                "billing.supergrok.unlock_heading",
+                "Unlock all features with SuperGrok.",
+            ),
             SuperGrokUpsell::RestrictedCommand,
             "restricted-command-upsell",
         ),
@@ -290,14 +328,31 @@ fn open_supergrok_upsell(
 
     let options = vec![
         QuestionOption {
-            label: "Upgrade to SuperGrok".into(),
-            description: "For everyday coding and productivity tasks".into(),
+            label: locale
+                .named_static_text("billing.supergrok.upgrade", "Upgrade to SuperGrok")
+                .into(),
+            description: locale
+                .named_static_text(
+                    "billing.supergrok.upgrade_description",
+                    "For everyday coding and productivity tasks",
+                )
+                .into(),
             preview: None,
             id: Some(UPSELL_URL_UPGRADE.into()),
         },
         QuestionOption {
-            label: "Upgrade to SuperGrok Heavy".into(),
-            description: "Get the most out of Grok Build. Highest usage limits.".into(),
+            label: locale
+                .named_static_text(
+                    "billing.supergrok.upgrade_heavy",
+                    "Upgrade to SuperGrok Heavy",
+                )
+                .into(),
+            description: locale
+                .named_static_text(
+                    "billing.supergrok.upgrade_heavy_description",
+                    "Get the most out of Grok Build. Highest usage limits.",
+                )
+                .into(),
             preview: None,
             // No Heavy-specific URL exists; the /supergrok page lists
             // both plans, so both upgrade options land there.
@@ -367,6 +422,7 @@ pub(super) fn handle_billing_fetched(
     }
     // Render the `/usage` summary from the now-current cached rule.
     let summary_topup = app.auto_topup.clone();
+    let locale = app.locale.clone();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         // Gateway/chat-kind: do not attach Build coding credits.
         let mut topup = agent.auto_topup.clone();
@@ -374,10 +430,14 @@ pub(super) fn handle_billing_fetched(
         agent.apply_credit_balance(balance.clone(), topup);
         if !silent && !agent.chat_kind {
             let msg = match &balance {
-                Some(bal) => {
-                    crate::views::credit_bar::format_usage_summary(bal, summary_topup.as_ref())
-                }
-                None => "No billing data available.".to_string(),
+                Some(bal) => crate::views::credit_bar::format_usage_summary_with_locale(
+                    bal,
+                    summary_topup.as_ref(),
+                    Some(locale.as_ref()),
+                ),
+                None => locale
+                    .named_text("status.billing.no_data", "No billing data available.")
+                    .into_owned(),
             };
             agent.scrollback.push_block(RenderBlock::System(
                 crate::scrollback::blocks::SystemMessageBlock::new(msg),
@@ -490,6 +550,18 @@ pub(super) fn handle_credit_limit_recheck_complete(
         app.apply_auth_meta(&auth_meta);
     }
     let tier_changed = app.subscription_tier != old_tier && app.subscription_tier.is_some();
+    let upgrade_message = tier_changed.then(|| {
+        let tier_name = app.subscription_tier.as_deref().unwrap_or_else(|| {
+            app.locale
+                .named_static_text("billing.higher_tier", "a higher tier")
+        });
+        app.locale
+            .named_text(
+                "billing.subscription_upgraded_retrying",
+                "Subscription upgraded to {tier}. Retrying…",
+            )
+            .replace("{tier}", tier_name)
+    });
 
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
@@ -502,10 +574,9 @@ pub(super) fn handle_credit_limit_recheck_complete(
 
     if tier_changed && !user_moved_on {
         if let Some(prompt) = agent.credit_limit_stashed_prompt.take() {
-            let tier_name = app.subscription_tier.as_deref().unwrap_or("a higher tier");
-            agent.scrollback.push_block(RenderBlock::system(format!(
-                "Subscription upgraded to {tier_name}. Retrying\u{2026}"
-            )));
+            if let Some(message) = upgrade_message {
+                agent.scrollback.push_block(RenderBlock::system(message));
+            }
             agent.session.enqueue_in_flight_prompt_front(prompt);
         }
     } else if !user_moved_on {

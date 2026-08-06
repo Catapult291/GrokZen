@@ -23,6 +23,8 @@ pub mod mcp_cmd;
 pub mod memory_cmd;
 pub mod memory_release;
 pub mod memory_trace;
+/// Central UI localization types and semantic message keys.
+pub use xai_grok_locale as locale;
 // ── Minimal (scrollback-native) mode seam ────────────────────────────────────
 // The *only* minimal-specific surface in this (the "full pager") crate. Both
 // modules are grouped under `src/minimal/` so a full-pager contributor sees one

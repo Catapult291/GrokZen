@@ -560,9 +560,13 @@ fn committed_block_uses_owning_session_cwd_for_tool_paths() {
             text.push_str(buf[(x, y)].symbol());
         }
     }
-    assert!(text.contains("src/main.rs"), "rendered text: {text:?}");
+    let normalized_text = text.replace('\\', "/");
     assert!(
-        !text.contains("/alternate/worktree"),
+        normalized_text.contains("src/main.rs"),
+        "rendered text: {text:?}"
+    );
+    assert!(
+        !normalized_text.contains("/alternate/worktree"),
         "session prefix should be elided: {text:?}"
     );
 }

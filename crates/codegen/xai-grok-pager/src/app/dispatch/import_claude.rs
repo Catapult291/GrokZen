@@ -3,6 +3,92 @@
 use crate::app::actions::Effect;
 use crate::app::app_view::AppView;
 
+fn import_text(locale: &crate::locale::LocaleContext, id: &str, english: &str) -> String {
+    locale.named_text(id, english).into_owned()
+}
+
+fn localize_import_summary(locale: &crate::locale::LocaleContext, summary: &str) -> String {
+    if locale.locale() != crate::locale::UiLocale::ZhCn {
+        return summary.to_string();
+    }
+
+    summary
+        .split_inclusive('\n')
+        .map(|line| {
+            let (body, newline) = line
+                .strip_suffix('\n')
+                .map_or((line, ""), |body| (body, "\n"));
+            let localized = if body == "Found Claude settings to import:" {
+                import_text(
+                    locale,
+                    "import.summary.found",
+                    "Found Claude settings to import:",
+                )
+            } else if let Some(rest) = body.strip_prefix("Global (") {
+                format!(
+                    "{} ({rest}",
+                    locale.named_static_text("import.scope.global", "Global")
+                )
+            } else if let Some(rest) = body.strip_prefix("Project (") {
+                format!(
+                    "{} ({rest}",
+                    locale.named_static_text("import.scope.project", "Project")
+                )
+            } else if body.starts_with("  - ") {
+                body.replace(
+                    "permission rule(s)",
+                    locale
+                        .named_static_text("import.summary.permission_rules", "permission rule(s)"),
+                )
+                .replace(
+                    "environment variable(s)",
+                    locale.named_static_text(
+                        "import.summary.environment_variables",
+                        "environment variable(s)",
+                    ),
+                )
+                .replace(
+                    "MCP server(s)",
+                    locale.named_static_text("import.summary.mcp_servers", "MCP server(s)"),
+                )
+                .replace(
+                    "hook(s)",
+                    locale.named_static_text("import.summary.hooks", "hook(s)"),
+                )
+                .replace(
+                    "extra skill dir(s)",
+                    locale
+                        .named_static_text("import.summary.extra_skill_dirs", "extra skill dir(s)"),
+                )
+                .replace(
+                    "extra rule dir(s)",
+                    locale.named_static_text("import.summary.extra_rule_dirs", "extra rule dir(s)"),
+                )
+            } else if body.starts_with("      ") {
+                body.replace(
+                    "<redacted, ",
+                    locale.named_static_text("import.summary.redacted_prefix", "<redacted, "),
+                )
+                .replace(
+                    " chars>",
+                    locale.named_static_text("import.summary.redacted_suffix", " chars>"),
+                )
+                .replace(
+                    " (timeout: ",
+                    locale.named_static_text("import.summary.timeout_prefix", " (timeout: "),
+                )
+            } else {
+                body.to_string()
+            };
+            format!("{localized}{newline}")
+        })
+        .collect()
+}
+
+fn is_claude_import_warning(message: &str) -> bool {
+    message.contains("Claude settings") || message.contains("Claude 设置")
+}
+
 /// Open the interactive Claude-import modal on the welcome screen.
 ///
 /// Scans for importable items. If empty, shows a brief startup warning and
@@ -21,10 +107,14 @@ pub(super) fn dispatch_import_claude(app: &mut AppView) -> Vec<Effect> {
         }
         app.has_claude_import = false;
         app.startup_warnings
-            .retain(|w| !w.message.contains("Claude settings"));
+            .retain(|w| !is_claude_import_warning(&w.message));
         app.startup_warnings.push(crate::startup::StartupWarning {
             severity: crate::startup::WarningSeverity::Info,
-            message: "No Claude settings found to import.".into(),
+            message: import_text(
+                app.locale.as_ref(),
+                "import.status.none_found",
+                "No Claude settings found to import.",
+            ),
             action: None,
         });
         return vec![];
@@ -46,27 +136,48 @@ pub(super) fn dispatch_import_claude_confirm(app: &mut AppView) -> Vec<Effect> {
     let selected_count = filtered.global_items.len() + filtered.project_items.len();
 
     let mut summary = if selected_count == 0 {
-        "No items selected.".to_string()
+        import_text(
+            app.locale.as_ref(),
+            "import.status.none_selected",
+            "No items selected.",
+        )
     } else {
-        filtered.summary(&cwd).trim_end().to_string()
+        localize_import_summary(app.locale.as_ref(), filtered.summary(&cwd).trim_end())
     };
 
     if selected_count > 0 {
         match xai_grok_shell::claude_import::apply_import(&filtered, &cwd) {
             Ok(result) => {
-                summary.push_str(&format!(
-                    "\nImported {} of {} setting(s).",
-                    result.total(),
-                    total_in_modal
-                ));
+                let imported = import_text(
+                    app.locale.as_ref(),
+                    "import.status.imported",
+                    "Imported {imported} of {total} setting(s).",
+                )
+                .replace("{imported}", &result.total().to_string())
+                .replace("{total}", &total_in_modal.to_string());
+                summary.push('\n');
+                summary.push_str(&imported);
                 for path in &result.modified_files {
-                    summary.push_str(&format!("\n  Updated: {}", path));
+                    let updated = import_text(
+                        app.locale.as_ref(),
+                        "import.status.updated",
+                        "  Updated: {path}",
+                    )
+                    .replace("{path}", path);
+                    summary.push('\n');
+                    summary.push_str(&updated);
                 }
             }
             Err(e) => {
+                let message = import_text(
+                    app.locale.as_ref(),
+                    "import.status.failed",
+                    "Failed to import Claude settings: {error}",
+                )
+                .replace("{error}", &e.to_string());
                 app.startup_warnings.push(crate::startup::StartupWarning {
                     severity: crate::startup::WarningSeverity::Warning,
-                    message: format!("Failed to import Claude settings: {}", e),
+                    message,
                     action: None,
                 });
                 return vec![];
@@ -83,7 +194,7 @@ pub(super) fn dispatch_import_claude_confirm(app: &mut AppView) -> Vec<Effect> {
     }
     app.has_claude_import = false;
     app.startup_warnings
-        .retain(|w| !w.message.contains("Claude settings"));
+        .retain(|w| !is_claude_import_warning(&w.message));
     app.startup_warnings.push(crate::startup::StartupWarning {
         severity: crate::startup::WarningSeverity::Info,
         message: summary,
@@ -119,6 +230,6 @@ pub(super) fn dispatch_dismiss_claude_import(app: &mut AppView) -> Vec<Effect> {
     // would now point to a different row.
     app.welcome_menu_index = None;
     app.startup_warnings
-        .retain(|w| !w.message.contains("Claude settings"));
+        .retain(|w| !is_claude_import_warning(&w.message));
     vec![]
 }

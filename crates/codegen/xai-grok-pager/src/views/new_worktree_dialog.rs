@@ -22,19 +22,33 @@ const LABEL_PREFIX: &str = "Name (optional): ";
 /// The dialog grows with the typed label up to the available width, then
 /// scrolls the input viewport to keep the live cursor visible.
 pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorktreeDialogState) {
-    let theme = Theme::current();
+    render_new_worktree_dialog_with_locale(area, buf, state, None)
+}
 
-    let dialog_width = dialog_width_for(area.width, state.label());
+pub fn render_new_worktree_dialog_with_locale(
+    area: Rect,
+    buf: &mut Buffer,
+    state: &NewWorktreeDialogState,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
+    let theme = Theme::current();
+    let label_prefix = locale
+        .map(|locale| locale.named_static_text("new_worktree.label.name_optional", LABEL_PREFIX))
+        .unwrap_or(LABEL_PREFIX);
+
+    let dialog_width = dialog_width_for_with_prefix(area.width, state.label(), label_prefix);
 
     if area.height < DIALOG_HEIGHT || area.width < 20 {
         // Too small to render — draw a minimal "resize" hint so the user
         // knows the dialog is still active and can press Esc to dismiss.
         if area.height >= 1 && area.width >= 16 {
-            let hint = Line::from(Span::styled(
-                "[Esc] to close",
-                Style::default().fg(theme.gray_dim),
-            ));
-            hint.render(Rect::new(area.x, area.y, area.width.min(16), 1), buf);
+            let hint_text = locale
+                .map(|locale| {
+                    locale.named_static_text("new_worktree.narrow.close", "[Esc] to close")
+                })
+                .unwrap_or("[Esc] to close");
+            let hint = Line::from(Span::styled(hint_text, Style::default().fg(theme.gray_dim)));
+            hint.render(Rect::new(area.x, area.y, area.width, 1), buf);
         }
         return;
     }
@@ -116,7 +130,9 @@ pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorkt
 
     // Row 1: Title
     let title = Line::from(Span::styled(
-        "New Worktree",
+        locale
+            .map(|locale| locale.named_static_text("new_worktree.title", "New Worktree"))
+            .unwrap_or("New Worktree"),
         Style::default()
             .fg(theme.text_primary)
             .add_modifier(Modifier::BOLD),
@@ -124,12 +140,12 @@ pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorkt
     title.render(Rect::new(inner_x, dialog.y + 1, inner_width, 1), buf);
 
     // Row 2: Label input.
-    let prefix_w = LABEL_PREFIX.width() as u16;
+    let prefix_w = label_prefix.width() as u16;
     let input_width = inner_width.saturating_sub(prefix_w);
     let viewport = state.viewport(input_width as usize);
     let visible_input = &state.label()[viewport.visible_byte_range];
 
-    let prefix_span = Span::styled(LABEL_PREFIX, Style::default().fg(theme.gray_bright));
+    let prefix_span = Span::styled(label_prefix, Style::default().fg(theme.gray_bright));
     let input_span = Span::styled(visible_input, Style::default().fg(theme.text_primary));
     let input_line = Line::from(vec![prefix_span, input_span]);
     input_line.render(Rect::new(inner_x, dialog.y + 2, inner_width, 1), buf);
@@ -143,28 +159,46 @@ pub fn render_new_worktree_dialog(area: Rect, buf: &mut Buffer, state: &NewWorkt
     // Row 3: Hints
     let hints = Line::from(vec![
         Span::styled(
-            "enter",
+            locale
+                .map(|locale| locale.named_static_text("new_worktree.key.enter", "enter"))
+                .unwrap_or("enter"),
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" = create   ", Style::default().fg(theme.gray)),
         Span::styled(
-            "esc",
+            locale
+                .map(|locale| locale.named_static_text("new_worktree.hint.create", " = create   "))
+                .unwrap_or(" = create   "),
+            Style::default().fg(theme.gray),
+        ),
+        Span::styled(
+            locale
+                .map(|locale| locale.named_static_text("new_worktree.key.esc", "esc"))
+                .unwrap_or("esc"),
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" = cancel", Style::default().fg(theme.gray)),
+        Span::styled(
+            locale
+                .map(|locale| locale.named_static_text("new_worktree.hint.cancel", " = cancel"))
+                .unwrap_or(" = cancel"),
+            Style::default().fg(theme.gray),
+        ),
     ]);
     hints.render(Rect::new(inner_x, dialog.y + 3, inner_width, 1), buf);
 }
 
 /// Dialog width that fits the typed label, clamped to the available area.
 fn dialog_width_for(area_width: u16, label: &str) -> u16 {
+    dialog_width_for_with_prefix(area_width, label, LABEL_PREFIX)
+}
+
+fn dialog_width_for_with_prefix(area_width: u16, label: &str, label_prefix: &str) -> u16 {
     let max_width = area_width.saturating_sub(4);
     // prefix + label + block cursor + inner pad
-    let needed = (LABEL_PREFIX.width() + label.width() + 1 + INNER_PAD as usize) as u16;
+    let needed = (label_prefix.width() + label.width() + 1 + INNER_PAD as usize) as u16;
     needed.max(MIN_DIALOG_WIDTH).min(max_width)
 }
 

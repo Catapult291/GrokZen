@@ -257,7 +257,17 @@ impl AgentView {
     /// Triggered on Shift+Tab mode cycles.
     /// Renders at full visibility for 2 s, then fades out over the final 0.3 s.
     pub fn show_mode_switch_banner(&mut self, mode_name: &str) {
-        let msg = format!("Switched to mode: {}", mode_name);
+        let locale = self.scrollback.locale();
+        let localized_mode = match mode_name {
+            "Plan" => locale.named_text("mode.plan.label", mode_name),
+            "Auto" => locale.named_text("mode.auto.label", mode_name),
+            "Normal" => locale.named_text("mode.normal.label", mode_name),
+            "Always-Approve" => locale.named_text("mode.always_approve.label", mode_name),
+            _ => std::borrow::Cow::Borrowed(mode_name),
+        };
+        let msg = locale
+            .named_text("mode.switch.banner", "Switched to mode: {mode}")
+            .replace("{mode}", localized_mode.as_ref());
         self.mode_switch_banner = Some((msg, MODE_BANNER_TOTAL_TICKS));
     }
 
@@ -311,11 +321,23 @@ impl AgentView {
         if crate::terminal::image::detect_graphics_protocol().supports_images() {
             return true;
         }
-        let msg = match crate::terminal::terminal_context().graphics_protocol_skip_reason() {
-            Some("tmux") => "Inline images disabled within tmux.",
-            _ => "Image rendering not supported in this terminal",
-        };
-        self.show_toast_ticks(msg, 60);
+        let (id, english) =
+            match crate::terminal::terminal_context().graphics_protocol_skip_reason() {
+                Some("tmux") => (
+                    "media.toast.tmux_disabled",
+                    "Inline images disabled within tmux.",
+                ),
+                _ => (
+                    "media.toast.unsupported_terminal",
+                    "Image rendering not supported in this terminal",
+                ),
+            };
+        let message = self
+            .scrollback
+            .locale()
+            .named_static_text(id, english)
+            .to_string();
+        self.show_toast_ticks(&message, 60);
         false
     }
 
@@ -360,7 +382,11 @@ impl AgentView {
                 // Best-effort clipboard so SSH/VM users can paste into a
                 // browser on another machine without selecting TUI text.
                 let _ = crate::clipboard::SystemClipboard::try_set(url);
-                self.show_toast("Browser unavailable - URL shown above");
+                let message = self.scrollback.locale().named_static_text(
+                    "browser.unavailable_url_shown",
+                    "Browser unavailable - URL shown above",
+                );
+                self.show_toast(message);
             }
         }
     }

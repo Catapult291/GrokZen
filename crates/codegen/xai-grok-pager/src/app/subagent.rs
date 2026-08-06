@@ -399,6 +399,13 @@ fn parse_tag_prefix(description: &str) -> (Option<&str>, &str) {
 /// regardless of whether the tag was used as the label, so callers never
 /// render `[tag]` bracket noise inline.
 pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
+    format_subagent_label_with_locale(info, None)
+}
+
+pub(crate) fn format_subagent_label_with_locale(
+    info: &SubagentInfo,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> (String, String) {
     let (tag, clean_desc) = parse_tag_prefix(&info.description);
     let raw_label = if let Some(p) = info
         .persona
@@ -419,7 +426,10 @@ pub(crate) fn format_subagent_label(info: &SubagentInfo) -> (String, String) {
     } else if let Some(tag) = tag {
         tag.to_string()
     } else {
-        "general".to_string()
+        locale
+            .map(|locale| locale.named_static_text("subagent.label.general", "general"))
+            .unwrap_or("general")
+            .to_string()
     };
     let mut chars = raw_label.chars();
     let label = match chars.next() {
@@ -446,44 +456,86 @@ pub(crate) fn format_subagent_meta(
 /// Used in the subagent scrollback block and the fullscreen title bar.
 /// Callers handle the `None` activity / "Waiting" case separately.
 pub(crate) fn format_activity_label(activity: &crate::acp::tracker::TurnActivity) -> String {
+    format_activity_label_with_locale(activity, None)
+}
+
+pub(crate) fn format_activity_label_with_locale(
+    activity: &crate::acp::tracker::TurnActivity,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     use crate::acp::tracker::TurnActivity;
+    let static_text = |id: &str, english: &'static str| {
+        locale
+            .map(|locale| locale.named_static_text(id, english))
+            .unwrap_or(english)
+    };
     match activity {
-        TurnActivity::Thinking => "Thinking".to_string(),
-        TurnActivity::Responding => "Responding".to_string(),
+        TurnActivity::Thinking => static_text("turn.activity.thinking", "Thinking").to_string(),
+        TurnActivity::Responding => {
+            static_text("turn.activity.responding", "Responding").to_string()
+        }
         TurnActivity::ToolRunning { title, description } => {
             if let Some(desc) = description
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                crate::acp::tracker::format_waiting_for_subject(desc)
+                crate::acp::tracker::format_waiting_for_subject_with_locale(desc, locale)
             } else if title.is_empty() {
-                "Running tool".to_string()
+                static_text("turn.activity.running_tool", "Running tool").to_string()
             } else {
                 let first_line = title.lines().next().unwrap_or(title);
                 let max_len = crate::acp::tracker::MAX_ACTIVITY_SUBJECT_CHARS;
                 if first_line.len() <= max_len {
-                    format!("Running: {first_line}")
+                    locale
+                        .map(|locale| {
+                            locale
+                                .named_text("turn.activity.running", "Running: {subject}")
+                                .replace("{subject}", first_line)
+                        })
+                        .unwrap_or_else(|| format!("Running: {first_line}"))
                 } else {
                     let char_count = first_line.chars().count();
                     if char_count <= max_len {
-                        format!("Running: {first_line}")
+                        locale
+                            .map(|locale| {
+                                locale
+                                    .named_text("turn.activity.running", "Running: {subject}")
+                                    .replace("{subject}", first_line)
+                            })
+                            .unwrap_or_else(|| format!("Running: {first_line}"))
                     } else {
                         let truncated: String = first_line.chars().take(max_len).collect();
-                        format!("Running: {truncated}\u{2026}")
+                        locale
+                            .map(|locale| {
+                                locale
+                                    .named_text("turn.activity.running", "Running: {subject}")
+                                    .replace("{subject}", &format!("{truncated}\u{2026}"))
+                            })
+                            .unwrap_or_else(|| format!("Running: {truncated}\u{2026}"))
                     }
                 }
             }
         }
-        TurnActivity::AutoCompacting => "Compacting".to_string(),
+        TurnActivity::AutoCompacting => {
+            static_text("turn.activity.compacting", "Compacting").to_string()
+        }
         TurnActivity::Retrying {
             attempt,
             max_retries,
             ..
-        } => {
-            format!("Retrying ({attempt}/{max_retries})")
-        }
-        TurnActivity::Waiting(reason) => reason.label(),
+        } => locale
+            .map(|locale| {
+                locale
+                    .named_text(
+                        "turn.activity.retrying",
+                        "Retrying ({attempt}/{max_retries})",
+                    )
+                    .replace("{attempt}", &attempt.to_string())
+                    .replace("{max_retries}", &max_retries.to_string())
+            })
+            .unwrap_or_else(|| format!("Retrying ({attempt}/{max_retries})")),
+        TurnActivity::Waiting(reason) => reason.label_with_locale(locale),
     }
 }
 #[cfg(test)]

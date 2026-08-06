@@ -17,8 +17,12 @@ pub fn render_top_bar(
     buf: &mut Buffer,
     theme: &Theme,
     announcement: Option<&xai_grok_announcements::RemoteAnnouncement>,
+    locale: Option<&crate::locale::LocaleContext>,
 ) {
-    let line = truncate_line(location_line(theme), area.width as usize);
+    let line = truncate_line(
+        location_line_with_locale(theme, locale),
+        area.width as usize,
+    );
     let line_width = line.width() as u16;
     buf.set_line(area.x, area.y, &line, line_width.min(area.width));
 
@@ -41,8 +45,16 @@ pub fn render_top_bar(
 
 /// Build the `{git branch} {worktree} {cwd}` line for the welcome top bar,
 /// reading the live process cwd.
+#[allow(dead_code)]
 pub(crate) fn location_line(theme: &Theme) -> Line<'static> {
-    location_line_at(theme, &process_cwd())
+    location_line_with_locale(theme, None)
+}
+
+pub(crate) fn location_line_with_locale(
+    theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Line<'static> {
+    location_line_at_with_locale(theme, &process_cwd(), locale)
 }
 
 /// As [`location_line`], but for an explicit `cwd`. The dashboard header
@@ -51,7 +63,16 @@ pub(crate) fn location_line(theme: &Theme) -> Line<'static> {
 ///
 /// Render-safe: reads the per-cwd git cache; never blocks or spawns `git`.
 /// The caller width-truncates the returned line.
+#[allow(dead_code)]
 pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
+    location_line_at_with_locale(theme, cwd, None)
+}
+
+pub(crate) fn location_line_at_with_locale(
+    theme: &Theme,
+    cwd: &Path,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Line<'static> {
     let info_style = Style::default().fg(theme.gray);
 
     let info = git_info::cwd_git_info_lazy(cwd);
@@ -60,7 +81,10 @@ pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
     if let Some(branch) = info.as_ref().and_then(|i| i.branch.as_deref()) {
         let icon = git_info::branch_icon();
         let git_text = if branch.is_empty() {
-            format!("{icon} detached")
+            let detached = locale.map_or("detached", |locale| {
+                locale.named_static_text("welcome.location.detached", "detached")
+            });
+            format!("{icon} {detached}")
         } else {
             format!("{icon} {branch}")
         };
@@ -73,12 +97,12 @@ pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
     // Worktree badge — matches the session status bar's `worktree ` marker
     // (accent_user) before the path when the cwd is a linked worktree.
     if info.as_ref().is_some_and(|i| i.is_worktree) {
-        parts.push(Span::styled(
-            "worktree ",
-            Style::default().fg(theme.accent_user),
-        ));
+        let badge = locale.map_or("worktree ", |locale| {
+            locale.named_static_text("welcome.location.worktree_badge", "worktree ")
+        });
+        parts.push(Span::styled(badge, Style::default().fg(theme.accent_user)));
     }
-    let cwd_display = format_cwd_display(cwd, info.as_ref());
+    let cwd_display = format_cwd_display_with_locale(cwd, info.as_ref(), locale);
     let cwd_style = Style::default().fg(theme.gray_dim);
     parts.push(Span::styled(cwd_display, cwd_style));
     Line::from(parts)
@@ -97,16 +121,44 @@ fn process_cwd() -> PathBuf {
 /// cache miss (`info == None`, e.g. the very first frame) it still shows the
 /// raw cwd path with `~` collapsed; the worktree suffix fills in once the
 /// probe lands.
+#[allow(dead_code)]
 fn format_cwd_display(cwd: &Path, info: Option<&git_info::CwdGitInfo>) -> String {
+    format_cwd_display_with_locale(cwd, info, None)
+}
+
+fn format_cwd_display_with_locale(
+    cwd: &Path,
+    info: Option<&git_info::CwdGitInfo>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     let display = collapse_home(cwd);
     let main_repo = info.and_then(|i| i.main_repo.as_deref());
-    format_cwd_parts(&display, main_repo)
+    format_cwd_parts_with_locale(&display, main_repo, locale)
 }
 
 /// Pure formatting for the cwd display — no global state, easy to test.
+#[allow(dead_code)]
 fn format_cwd_parts(display: &str, main_repo: Option<&str>) -> String {
+    format_cwd_parts_with_locale(display, main_repo, None)
+}
+
+fn format_cwd_parts_with_locale(
+    display: &str,
+    main_repo: Option<&str>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     if let Some(main_repo) = main_repo {
-        format!("{display} (worktree of {main_repo})")
+        locale
+            .map(|locale| {
+                locale
+                    .named_text(
+                        "welcome.location.worktree_of",
+                        "{display} (worktree of {main_repo})",
+                    )
+                    .replace("{display}", display)
+                    .replace("{main_repo}", main_repo)
+            })
+            .unwrap_or_else(|| format!("{display} (worktree of {main_repo})"))
     } else {
         display.to_string()
     }

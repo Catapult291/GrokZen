@@ -64,10 +64,16 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
         return Ok(());
     }
 
+    let product_name = if cfg!(feature = "community-build") {
+        xai_grok_product::DISPLAY_NAME
+    } else {
+        "Grok Build"
+    };
+
     if let Some(error) = status.error.as_deref() {
         println!(
-            "Grok Build - v{} [{}]",
-            status.current_version, status.channel
+            "{} - v{} [{}]",
+            product_name, status.current_version, status.channel
         );
         println!("Update check failed: {error}");
         return Ok(());
@@ -78,33 +84,50 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     if status.update_available {
         if let Some(latest_version) = status.latest_version.as_deref() {
             println!(
-                "A new version of Grok Build is available: {} -> {}{}",
-                status.current_version, latest_version, channel_label
+                "A new version of {} is available: {} -> {}{}",
+                product_name, status.current_version, latest_version, channel_label
             );
         } else {
-            println!("A new version of Grok Build is available.");
+            println!("A new version of {product_name} is available.");
         }
         return Ok(());
     }
 
     if let Some(latest_version) = status.latest_version.as_deref() {
         println!(
-            "Grok Build - v{} (latest: {}){}",
-            status.current_version, latest_version, channel_label
+            "{} - v{} (latest: {}){}",
+            product_name, status.current_version, latest_version, channel_label
         );
         return Ok(());
     }
 
-    println!("Grok Build - v{}{}", status.current_version, channel_label);
+    println!(
+        "{} - v{}{}",
+        product_name, status.current_version, channel_label
+    );
     Ok(())
 }
 
 pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
-    let installer = get_installer().await.map(|value| value.to_string());
     let current_version = get_installed_grok_version();
+    let channel = update_config.channel.clone();
+
+    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
+        return UpdateStatus {
+            current_version,
+            latest_version: None,
+            update_available: false,
+            installer: None,
+            channel,
+            auto_update: Some(false),
+            error: Some(crate::UPDATE_DISABLED_REASON.to_string()),
+        };
+    }
+
     let current_config = config::load_config().await;
     let auto_update = current_config.cli.auto_update;
-    let channel = update_config.channel.clone();
+
+    let installer = get_installer().await.map(|value| value.to_string());
 
     let Some(ref inst) = installer else {
         return UpdateStatus {
@@ -360,6 +383,9 @@ fn env_installer() -> Option<&'static str> {
 }
 
 pub async fn get_installer() -> Option<&'static str> {
+    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
+        return None;
+    }
     if let Some(i) = env_installer() {
         return Some(i);
     }
@@ -765,6 +791,7 @@ pub async fn run_install_script(
     target: Option<&str>,
     update_config: &UpdateConfig,
 ) -> Result<()> {
+    crate::ensure_updates_enabled()?;
     let result = match installer {
         "npm" => install_npm(
             target,
@@ -1013,6 +1040,7 @@ async fn download_range(
 /// counter is used as a fallback.
 #[doc(hidden)]
 pub async fn download_with_progress(url: &str, dest: &std::path::Path) -> Result<()> {
+    crate::ensure_updates_enabled()?;
     // Try parallel byte-range first. Falls through to single-connection on any
     // failure (HEAD missing Content-Length, ranges rejected, partial-fetch error).
     match try_parallel_download(url, dest, true).await {
@@ -1075,6 +1103,7 @@ pub async fn download_with_progress(url: &str, dest: &std::path::Path) -> Result
 /// Download a file silently (no progress bar).
 #[doc(hidden)]
 pub async fn download_silent(url: &str, dest: &std::path::Path) -> Result<()> {
+    crate::ensure_updates_enabled()?;
     match try_parallel_download(url, dest, false).await {
         Ok(()) => return Ok(()),
         Err(e) => {
@@ -1186,6 +1215,7 @@ pub async fn install_internal_from_bases(
     update_config: &UpdateConfig,
     bases: &[&str],
 ) -> Result<()> {
+    crate::ensure_updates_enabled()?;
     let mut last_err: Option<anyhow::Error> = None;
     for (i, base) in bases.iter().enumerate() {
         match download_verified_from_base(target, update_config, base).await {
@@ -1254,6 +1284,7 @@ pub async fn install_internal_from_base(
     update_config: &UpdateConfig,
     gcs_base_url: &str,
 ) -> Result<()> {
+    crate::ensure_updates_enabled()?;
     let download = download_verified_from_base(target, update_config, gcs_base_url).await?;
     activate_verified_download(&download).await
 }
@@ -2262,6 +2293,7 @@ pub fn install_npm_for_test(
     channel: &str,
     npm_registry: Option<&str>,
 ) -> Result<()> {
+    crate::ensure_updates_enabled()?;
     install_npm(target, channel, npm_registry)
 }
 
@@ -2335,6 +2367,9 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
 }
 
 pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &mut UpdateConfig) {
+    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
+        return;
+    }
     if let Some(ch) = channel_switch
         && update_config.channel != ch
     {
@@ -2361,6 +2396,7 @@ pub async fn run_update(
     channel_switch: Option<&str>,
     update_config: &mut UpdateConfig,
 ) -> Result<Option<String>> {
+    crate::ensure_updates_enabled()?;
     apply_channel_switch(channel_switch, update_config).await;
     let installer = match get_installer().await {
         Some(i) => i,

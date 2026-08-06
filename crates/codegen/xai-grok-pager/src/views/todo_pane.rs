@@ -180,13 +180,32 @@ impl TodoCounts {
 }
 
 fn empty_placeholder_message(todos_empty: bool, counts: TodoCounts) -> String {
+    empty_placeholder_message_with_locale(todos_empty, counts, None)
+}
+
+fn empty_placeholder_message_with_locale(
+    todos_empty: bool,
+    counts: TodoCounts,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
+    let text = |id: &str, english: &str| {
+        locale
+            .map(|locale| locale.named_text(id, english).into_owned())
+            .unwrap_or_else(|| english.to_string())
+    };
     if todos_empty {
-        return "No todo items.".into();
+        return text("todo.empty.none", "No todo items.");
     }
     match (counts.completed, counts.cancelled) {
-        (_, 0) => "All done.".into(),
-        (0, c) => format!("{c} cancelled."),
-        (d, c) => format!("{d} done. {c} cancelled."),
+        (_, 0) => text("todo.empty.all_done", "All done."),
+        (0, c) => text("todo.empty.cancelled", "{cancelled} cancelled.")
+            .replace("{cancelled}", &c.to_string()),
+        (d, c) => text(
+            "todo.empty.done_cancelled",
+            "{done} done. {cancelled} cancelled.",
+        )
+        .replace("{done}", &d.to_string())
+        .replace("{cancelled}", &c.to_string()),
     }
 }
 
@@ -490,6 +509,17 @@ impl TodoPane {
         focused: bool,
         layout_cfg: &LayoutConfig,
     ) {
+        self.render_with_locale(area, buf, focused, layout_cfg, None);
+    }
+
+    pub fn render_with_locale(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        focused: bool,
+        layout_cfg: &LayoutConfig,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) {
         // Detect theme switch and refresh styles before rebuilding entries.
         let current_theme = crate::theme::Theme::current_kind();
         if current_theme != self.last_theme {
@@ -503,7 +533,11 @@ impl TodoPane {
         if self.entries.is_empty() {
             // Empty state: placeholder message in muted style.
             if inner.height > 0 && inner.width > 0 {
-                let msg = empty_placeholder_message(self.todos.is_empty(), self.counts());
+                let msg = empty_placeholder_message_with_locale(
+                    self.todos.is_empty(),
+                    self.counts(),
+                    locale,
+                );
                 let theme = crate::theme::Theme::current();
                 let span = ratatui::text::Span::styled(
                     msg,
@@ -518,6 +552,7 @@ impl TodoPane {
         ListPane::new(&self.entries)
             .focused(focused)
             .style(self.list_style)
+            .with_locale(locale)
             .render(inner, buf, &mut self.list_state);
     }
 }

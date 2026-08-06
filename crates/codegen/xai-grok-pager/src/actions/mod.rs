@@ -214,9 +214,29 @@ impl ActionDef {
     /// Uses `default_key` only. For paired hints (j/k, h/l), the view should
     /// use [`HintItem::paired`] with keys from two related action defs.
     pub fn hint(&self) -> HintItem {
-        let mut item = HintItem::new(self.default_key, self.label);
+        self.hint_with_locale(None)
+    }
+
+    /// Convert this action def into a localized shortcuts-bar hint while
+    /// retaining the canonical action ID and key binding.
+    pub fn hint_with_locale(&self, locale: Option<&crate::locale::LocaleContext>) -> HintItem {
+        let label = locale
+            .map(|locale| {
+                locale
+                    .named_static_text(&format!("shortcuts.action.{:?}.label", self.id), self.label)
+            })
+            .unwrap_or(self.label);
+        let description = locale
+            .map(|locale| {
+                locale.named_static_text(
+                    &format!("shortcuts.action.{:?}.description", self.id),
+                    self.description,
+                )
+            })
+            .unwrap_or(self.description);
+        let mut item = HintItem::new(self.default_key, label);
         item.custom_display = self.hint_key_display;
-        item.description = Some(std::borrow::Cow::Borrowed(self.description));
+        item.description = Some(std::borrow::Cow::Borrowed(description));
         item
     }
 }

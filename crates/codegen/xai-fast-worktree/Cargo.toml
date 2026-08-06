@@ -44,6 +44,7 @@ tokio-util = { workspace = true }
 tempfile = { workspace = true, optional = true }
 tracing = { workspace = true }
 xai-gix-status = { workspace = true }
+xai-grok-product = { path = "../xai-grok-product" }
 xai-sqlite-journal = { workspace = true, optional = true }
 xai-tty-utils = { workspace = true }
 tracing-subscriber = { workspace = true }

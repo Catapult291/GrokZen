@@ -86,6 +86,7 @@ impl HintItem {
 /// Shortcuts bar widget. Renders a list of `HintItem`s.
 pub struct ShortcutsBar<'a> {
     hints: &'a [HintItem],
+    locale: Option<&'a crate::locale::LocaleContext>,
     /// If set, replaces all hints with "press again to {label}".
     pending_confirmation: Option<PendingHint>,
     /// Right-aligned text (e.g. team name).
@@ -118,6 +119,7 @@ impl<'a> ShortcutsBar<'a> {
     pub fn new(hints: &'a [HintItem]) -> Self {
         Self {
             hints,
+            locale: None,
             pending_confirmation: None,
             right_text: None,
             compact: None,
@@ -137,6 +139,13 @@ impl<'a> ShortcutsBar<'a> {
     /// Set the pending confirmation hint (replaces all normal hints).
     pub fn with_pending(mut self, pending: Option<PendingHint>) -> Self {
         self.pending_confirmation = pending;
+        self
+    }
+
+    /// Localize fixed shortcut chrome at the final display boundary. Key
+    /// chords, action ids, and dynamic right-side text remain canonical.
+    pub fn with_locale(mut self, locale: Option<&'a crate::locale::LocaleContext>) -> Self {
+        self.locale = locale;
         self
     }
 
@@ -181,7 +190,14 @@ impl Widget for ShortcutsBar<'_> {
         // If pending confirmation, show only "press again to {label}"
         if let Some(pending) = &self.pending_confirmation {
             let key_text = pending.shortcut.display();
-            let label = format!("press again to {}", pending.label);
+            let action = localized_shortcut_label(self.locale, pending.label);
+            let label = if let Some(locale) = self.locale {
+                locale
+                    .named_text("shortcut.press_again", "press again to {action}")
+                    .replace("{action}", action.as_ref())
+            } else {
+                format!("press again to {action}")
+            };
 
             let mut x = area.x;
 
@@ -239,8 +255,9 @@ impl Widget for ShortcutsBar<'_> {
             buf.set_span(x, area.y, &colon, 1);
             x += 1;
 
-            let action_span = Span::styled(hint.label.as_ref(), action_style);
-            let action_width = hint.label.width() as u16;
+            let label = localized_shortcut_label(self.locale, hint.label.as_ref());
+            let action_span = Span::styled(label.as_ref(), action_style);
+            let action_width = label.width() as u16;
             if x + action_width > area.x + area.width {
                 break;
             }
@@ -262,6 +279,41 @@ impl Widget for ShortcutsBar<'_> {
             }
         }
     }
+}
+
+fn localized_shortcut_label<'a>(
+    locale: Option<&crate::locale::LocaleContext>,
+    english: &'a str,
+) -> Cow<'a, str> {
+    let Some(locale) = locale else {
+        return Cow::Borrowed(english);
+    };
+    let explicit = match english {
+        "top/btm" => Some("shortcut.top_bottom"),
+        "copy cmd" => Some("shortcut.copy_command"),
+        "send to bg" => Some("shortcut.send_to_background"),
+        "send+open" => Some("shortcut.send_open"),
+        "New Agent" => Some("shortcut.new_agent"),
+        "confirm delete" => Some("shortcut.confirm_delete"),
+        "delete this session" => Some("shortcut.delete_session"),
+        "show all" => Some("shortcut.show_all"),
+        "show fewer" => Some("shortcut.show_fewer"),
+        _ => None,
+    };
+    let id = explicit.map(str::to_owned).unwrap_or_else(|| {
+        let suffix = english
+            .chars()
+            .map(|character| {
+                if character.is_ascii_alphanumeric() {
+                    character.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        format!("shortcut.{}", suffix.trim_matches('_').replace("__", "_"))
+    });
+    locale.named_text(&id, english)
 }
 
 /// Compute the hint list the bar will actually render.

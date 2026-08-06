@@ -20,6 +20,156 @@ use crate::render::scrollbar::render_scrollbar_styled;
 use crate::slash::{MAX_VISIBLE_SUGGESTIONS, SlashSnapshot, SuggestionRow};
 use crate::theme::Theme;
 
+/// Apply locale metadata to a render-only snapshot. Command identity, aliases,
+/// insertion text, fuzzy-match indices, and the controller's raw state remain
+/// canonical. Callers must use the returned snapshot for both row measurement
+/// and painting so localized wrapping cannot drift from dropdown geometry.
+pub fn localized_snapshot(
+    mut snap: SlashSnapshot,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> SlashSnapshot {
+    let Some(locale) = locale else {
+        return snap;
+    };
+    if locale.locale() != crate::locale::UiLocale::ZhCn {
+        return snap;
+    }
+
+    for row in &mut snap.matches {
+        match row.command_canonical.as_deref() {
+            Some(canonical) if row.localize_description => {
+                row.description = locale
+                    .named_text(
+                        &format!("slash.command.{canonical}.description"),
+                        &row.description,
+                    )
+                    .into_owned();
+            }
+            // Dynamic ACP command rows are opaque. In particular, do not run
+            // their server-authored descriptions through the argument-string
+            // mapper merely because the text happens to equal a fixed picker
+            // phrase such as "Heavy reasoning".
+            Some(_) => {}
+            None => {
+                row.display = localized_argument_display(locale, &row.display, &row.description);
+                row.description = localized_argument_description(locale, &row.description);
+            }
+        }
+
+        if let Some(tag) = row.tag.as_mut() {
+            let catalog_id = match tag.as_str() {
+                "new" => Some("slash.tag.new"),
+                "beta" => Some("slash.tag.beta"),
+                _ => None,
+            };
+            if let Some(catalog_id) = catalog_id {
+                *tag = locale.named_text(catalog_id, tag).into_owned();
+            }
+        }
+    }
+    snap
+}
+
+pub(crate) fn localized_argument_display(
+    locale: &crate::locale::LocaleContext,
+    text: &str,
+    description: &str,
+) -> String {
+    let (base, marker_id, marker_english) = if let Some(base) = text.strip_suffix(" (active)") {
+        (base, Some("slash.marker.active"), "active")
+    } else if let Some(base) = text.strip_suffix(" (current)") {
+        (base, Some("slash.marker.current"), "current")
+    } else {
+        (text, None, "")
+    };
+
+    // Picker labels are presentation only. Match the client-owned built-in
+    // label together with its built-in description so a dynamic ACP option
+    // that merely reuses a word such as `high` remains opaque.
+    let label_id = match (base, description) {
+        ("High Effort", "Highest implementation quality with extensive reasoning") => {
+            Some("slash.arg.model_effort.high.label")
+        }
+        ("Medium Effort", "Balanced effort with standard implementation and testing") => {
+            Some("slash.arg.model_effort.medium.label")
+        }
+        ("Low Effort", "Quick, fast implementations") => Some("slash.arg.model_effort.low.label"),
+        ("none", "No reasoning") => Some("reasoning_effort.none.label"),
+        ("minimal", "Minimal reasoning") => Some("reasoning_effort.minimal.label"),
+        ("low", "Faster, lighter reasoning") => Some("reasoning_effort.low.label"),
+        ("medium", "Balanced reasoning") => Some("reasoning_effort.medium.label"),
+        ("high", "Heavy reasoning") => Some("reasoning_effort.high.label"),
+        ("xhigh", "Extended reasoning") => Some("reasoning_effort.xhigh.label"),
+        ("max", "Maximum reasoning") => Some("reasoning_effort.max.label"),
+        _ => None,
+    };
+    let base = label_id
+        .map(|id| locale.named_text(id, base).into_owned())
+        .unwrap_or_else(|| base.to_string());
+    match marker_id {
+        Some(id) => format!("{base}（{}）", locale.named_text(id, marker_english)),
+        None => base,
+    }
+}
+
+pub(crate) fn localized_argument_description(
+    locale: &crate::locale::LocaleContext,
+    english: &str,
+) -> String {
+    let catalog_id = match english {
+        "Hide the announcement banner" => Some("slash.command.announcements.arg.hide.description"),
+        "Show the announcement banner" => Some("slash.command.announcements.arg.show.description"),
+        "Toggle the scroll-diagnostics HUD" => Some("slash.command.debug.arg.scroll.description"),
+        "Toggle the FPS overlay" => Some("slash.command.debug.arg.fps.description"),
+        "Toggle the scroll flight recorder (JSONL)" => {
+            Some("slash.command.debug.arg.log.description")
+        }
+        "Browse in-TUI How-to Guides" => Some("slash.command.docs.arg.how-to.description"),
+        "Open docs.x.ai/build in the browser" => Some("slash.command.docs.arg.web.description"),
+        "Show automatic fixes available here" => Some("slash.command.doctor.arg.fix.description"),
+        "directory" => Some("slash.command.export.arg.directory.description"),
+        "file" => Some("slash.command.export.arg.file.description"),
+        "No reasoning" => Some("slash.arg.reasoning_effort.none.description"),
+        "Minimal reasoning" => Some("slash.arg.reasoning_effort.minimal.description"),
+        "Faster, lighter reasoning" => Some("slash.arg.reasoning_effort.low.description"),
+        "Balanced reasoning" => Some("slash.arg.reasoning_effort.medium.description"),
+        "Heavy reasoning" => Some("slash.arg.reasoning_effort.high.description"),
+        "Extended reasoning" => Some("slash.arg.reasoning_effort.xhigh.description"),
+        "Maximum reasoning" => Some("slash.arg.reasoning_effort.max.description"),
+        "SpaceXAI's new frontier model" => Some("slash.arg.model.grok_4_5.description"),
+        "Highest implementation quality with extensive reasoning" => {
+            Some("slash.arg.model_effort.high.description")
+        }
+        "Balanced effort with standard implementation and testing" => {
+            Some("slash.arg.model_effort.medium.description")
+        }
+        "Quick, fast implementations" => Some("slash.arg.model_effort.low.description"),
+        "View usage" => Some("slash.command.usage.arg.show.description"),
+        "Manage billing" => Some("slash.command.usage.arg.manage.description"),
+        _ => None,
+    };
+    if let Some(id) = catalog_id {
+        return locale.named_text(id, english).into_owned();
+    }
+
+    if let Some(title) = english
+        .strip_prefix("Open \"")
+        .and_then(|rest| rest.strip_suffix('"'))
+    {
+        return locale
+            .named_text("slash.command.docs.arg.open_template", "Open “{title}”")
+            .replace("{title}", title);
+    }
+
+    if english == "auto (follow system)" {
+        locale
+            .named_text("slash.arg.theme.auto.description", english)
+            .into_owned()
+    } else {
+        english.to_string()
+    }
+}
+
 /// Maximum number of visible rows in the dropdown (excluding separator).
 pub const MAX_DROPDOWN_ROWS: u16 = MAX_VISIBLE_SUGGESTIONS as u16;
 
@@ -498,6 +648,8 @@ mod tests {
     fn desired_item_rows_caps_many_short_items() {
         let matches: Vec<SuggestionRow> = (0..20)
             .map(|i| SuggestionRow {
+                command_canonical: None,
+                localize_description: false,
                 display: format!("/cmd{i}"),
                 description: String::new(),
                 insert_text: format!("/cmd{i}"),
@@ -519,6 +671,8 @@ mod tests {
         let theme = Theme::current();
         let matches: Vec<SuggestionRow> = (0..12)
             .map(|i| SuggestionRow {
+                command_canonical: None,
+                localize_description: false,
                 display: format!("/cmd{i}"),
                 description: format!("description for command {i}"),
                 insert_text: format!("/cmd{i}"),
@@ -554,12 +708,110 @@ mod tests {
 
     fn row(display: &str, description: &str) -> SuggestionRow {
         SuggestionRow {
+            command_canonical: None,
+            localize_description: false,
             display: display.into(),
             description: description.into(),
             insert_text: display.into(),
             indices: vec![],
             tag: None,
         }
+    }
+
+    #[test]
+    fn localization_regression_slash_snapshot_uses_canonical_metadata_only() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let mut command = row(
+            "/workflows",
+            "Show workflow runs (phases, agents, progress)",
+        );
+        command.command_canonical = Some("workflows".to_string());
+        command.localize_description = true;
+        command.tag = Some("new".to_string());
+        let mut argument = row("grok-4.5", "Server-authored model description");
+        argument.tag = Some("preview".to_string());
+        let effort = row("high (active)", "Heavy reasoning");
+        let high_effort = row(
+            "High Effort (active)",
+            "Highest implementation quality with extensive reasoning",
+        );
+        let custom_effort = row("Deep (active)", "Maximum reasoning");
+        let mut shell_goal = row("/goal", "Set, manage, or check an autonomous goal");
+        shell_goal.command_canonical = Some("goal".to_string());
+        shell_goal.localize_description = true;
+        let mut colliding_workflow = row("/goal", "Workflow: team-defined goal review");
+        colliding_workflow.command_canonical = Some("goal".to_string());
+        let mut colliding_argument_phrase = row("/dynamic", "Heavy reasoning");
+        colliding_argument_phrase.command_canonical = Some("dynamic".to_string());
+        let mut bundled_skill = row(
+            "/build-with-ai",
+            "Build AI apps on SpaceXAI (XAI_API_KEY + api.x.ai)",
+        );
+        bundled_skill.command_canonical = Some("build-with-ai".to_string());
+        bundled_skill.localize_description = true;
+        let raw = SlashSnapshot {
+            open: true,
+            matches: vec![
+                command,
+                argument,
+                effort,
+                high_effort,
+                custom_effort,
+                shell_goal,
+                colliding_workflow,
+                colliding_argument_phrase,
+                bundled_skill,
+            ],
+            ..Default::default()
+        };
+
+        let localized = localized_snapshot(raw.clone(), Some(&locale));
+        assert_eq!(
+            localized.matches[0].description,
+            "显示工作流运行情况（阶段、智能体、进度）"
+        );
+        assert_eq!(localized.matches[0].tag.as_deref(), Some("新"));
+        assert_eq!(
+            localized.matches[0].insert_text, raw.matches[0].insert_text,
+            "localization must not change accepted command text"
+        );
+        assert_eq!(
+            localized.matches[1].description, "Server-authored model description",
+            "argument rows remain opaque"
+        );
+        assert_eq!(localized.matches[1].tag.as_deref(), Some("preview"));
+        assert_eq!(localized.matches[2].display, "高（当前）");
+        assert_eq!(localized.matches[2].description, "高强度推理");
+        assert_eq!(localized.matches[3].display, "高强度（当前）");
+        assert_eq!(
+            localized.matches[3].description,
+            "最高实现质量，并进行充分推理"
+        );
+        assert_eq!(
+            localized.matches[4].display, "Deep（当前）",
+            "custom ACP effort labels remain opaque apart from the UI marker"
+        );
+        assert_eq!(
+            localized.matches[4].description, "最大推理",
+            "known built-in description phrases remain localized"
+        );
+        assert_eq!(localized.matches[5].description, "设置、管理或检查自主目标");
+        assert_eq!(
+            localized.matches[6].description, "Workflow: team-defined goal review",
+            "dynamic ACP workflows remain opaque on canonical-name collisions"
+        );
+        assert_eq!(
+            localized.matches[7].description, "Heavy reasoning",
+            "dynamic ACP commands must not collide with argument translations"
+        );
+        assert_eq!(
+            localized.matches[8].description,
+            "在 SpaceXAI 上构建 AI 应用（XAI_API_KEY + api.x.ai）"
+        );
+        assert_eq!(localized.matches[8].insert_text, raw.matches[8].insert_text);
     }
 
     /// Degenerate geometry sweep: tiny/zero widths and heights, over-wide

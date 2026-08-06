@@ -1162,7 +1162,7 @@
         pw.handle_paste("line1\nline2\nline3\nline4");
         pw.textarea.set_cursor(0);
         let hint: String = pw
-            .paste_preview_hint(&Theme::current())
+            .paste_preview_hint(&Theme::current(), None)
             .spans
             .iter()
             .map(|s| s.content.as_ref())
@@ -1178,7 +1178,7 @@
         let mut pw = PromptWidget::new();
         pw.handle_paste("line1\nline2\nline3\nline4");
         let hint: String = pw
-            .paste_preview_hint(&Theme::current())
+            .paste_preview_hint(&Theme::current(), None)
             .spans
             .iter()
             .map(|s| s.content.as_ref())

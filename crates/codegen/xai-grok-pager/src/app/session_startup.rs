@@ -271,6 +271,15 @@ impl PagerArgs {
 /// User-facing refusal when process-wide `--chat` would open a local Build disk row.
 pub const CHAT_MODE_LOCAL_BUILD_REFUSAL: &str = "cannot open a local Build session while --chat is active; \
 resume a conversation or start a new chat (/chat)";
+
+pub fn chat_mode_local_build_refusal(locale: &crate::locale::LocaleContext) -> String {
+    locale
+        .named_text(
+            "session.chat.local_build_refusal",
+            CHAT_MODE_LOCAL_BUILD_REFUSAL,
+        )
+        .into_owned()
+}
 /// User-facing error when `--chat` is combined with leader mode.
 pub const CHAT_MODE_LEADER_CONFLICT: &str = "gateway chat mode (--chat) cannot run with leader mode; \
 pass --no-leader or disable [cli] use_leader in config";
@@ -607,16 +616,7 @@ pub fn probe_advertised_tool_ids() -> Option<Vec<String>> {
 }
 #[cfg(feature = "local-workspace")]
 fn local_workspace_ack_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var("GROK_HOME")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            dirs::home_dir()
-                .or_else(|| std::env::var_os("HOME").map(Into::into))
-                .map(|h| h.join(".grok"))
-        })?;
-    Some(home.join("local_workspace_ack"))
+    xai_grok_config::user_grok_home().map(|home| home.join("local_workspace_ack"))
 }
 /// Conservative shape check for a chat-mode `--resume <id>` passthrough.
 ///
@@ -752,7 +752,7 @@ async fn most_recent_session_id(cwd: &str) -> anyhow::Result<(String, Option<Str
     let first = summaries.first().ok_or_else(|| {
         anyhow::anyhow!(
             "No session found for current directory. \
-             Use 'grok' to start a new session."
+             Use 'grok-zh' to start a new session."
         )
     })?;
     Ok((first.info.id.to_string(), first.display_title_opt()))

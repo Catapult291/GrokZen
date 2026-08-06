@@ -119,7 +119,13 @@ impl SearchToolCallBlock {
     }
 
     /// Render the header line: **Search Tools** `query` `(N results)`
-    fn header_line(&self, theme: &Theme, muted: bool, max_width: Option<usize>) -> Line<'static> {
+    fn header_line(
+        &self,
+        theme: &Theme,
+        muted: bool,
+        max_width: Option<usize>,
+        locale: &crate::locale::LocaleContext,
+    ) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
         } else {
@@ -132,19 +138,27 @@ impl SearchToolCallBlock {
             theme.fg(theme.command)
         };
 
-        let prefix = "Search Tools ";
+        let prefix = locale
+            .named_text("scrollback.tool.search_tools.label", "Search Tools ")
+            .into_owned();
 
         match max_width {
             Some(w) => {
-                let s = if self.result_count == 1 { "" } else { "s" };
-                let suffix = format!(" ({} result{s})", self.result_count);
+                let suffix = if locale.locale() == crate::locale::UiLocale::ZhCn {
+                    format!("（{} 个结果）", self.result_count)
+                } else {
+                    let s = if self.result_count == 1 { "" } else { "s" };
+                    format!(" ({} result{s})", self.result_count)
+                };
 
-                let suffix_fits = prefix.len() + suffix.len() < w;
+                let prefix_width = unicode_width::UnicodeWidthStr::width(prefix.as_str());
+                let suffix_fits =
+                    prefix_width + unicode_width::UnicodeWidthStr::width(suffix.as_str()) < w;
                 let effective_suffix = if suffix_fits { &suffix } else { "" };
 
                 let query_budget = w
-                    .saturating_sub(prefix.len())
-                    .saturating_sub(effective_suffix.len());
+                    .saturating_sub(prefix_width)
+                    .saturating_sub(unicode_width::UnicodeWidthStr::width(effective_suffix));
                 let display_query = truncate_str(&self.query, query_budget);
 
                 let mut spans = vec![
@@ -188,10 +202,11 @@ impl BlockContent for SearchToolCallBlock {
                     &theme,
                     muted_collapsed,
                     Some(ctx.content_width()),
+                    &ctx.locale,
                 ))],
             },
             DisplayMode::Truncated | DisplayMode::Expanded => {
-                let header = self.header_line(&theme, false, None);
+                let header = self.header_line(&theme, false, None, &ctx.locale);
                 let wrapped = crate::render::wrapping::wrap_header_flush(
                     header,
                     ctx.width as usize,
@@ -241,7 +256,16 @@ impl BlockContent for SearchToolCallBlock {
                 } else if self.error.is_none() {
                     lines.push(Line::from("").into());
                     lines.push(
-                        Line::from(Span::styled("  (no results found)", theme.muted())).into(),
+                        Line::from(Span::styled(
+                            ctx.locale
+                                .named_text(
+                                    "scrollback.tool.search_tools.no_results_found",
+                                    "  (no results found)",
+                                )
+                                .into_owned(),
+                            theme.muted(),
+                        ))
+                        .into(),
                     );
                 }
 
@@ -313,9 +337,14 @@ impl BlockContent for SearchToolCallBlock {
         }
     }
 
-    fn preamble(&self, _ctx: &BlockContext) -> Option<Text<'static>> {
+    fn preamble(&self, ctx: &BlockContext) -> Option<Text<'static>> {
         let theme = Theme::current();
-        Some(Text::from(vec![self.header_line(&theme, false, None)]))
+        Some(Text::from(vec![self.header_line(
+            &theme,
+            false,
+            None,
+            &ctx.locale,
+        )]))
     }
 }
 

@@ -841,6 +841,7 @@ impl AgentView {
                 appearance: appearance.clone(),
                 is_selected: self.scrollback.selected() == Some(idx),
                 cwd: Some(self.session.cwd.clone()),
+                locale: self.scrollback.locale().clone(),
             };
 
             if let Some(text) = entry.block.copy_visible_text_in_state(&ctx)

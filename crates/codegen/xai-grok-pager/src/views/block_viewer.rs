@@ -476,6 +476,7 @@ impl BlockViewerPane {
             appearance: Default::default(),
             is_selected: false,
             cwd: None,
+            locale: entry.locale().clone(),
         };
         block
             .output(&ctx)
@@ -534,7 +535,10 @@ impl BlockViewerPane {
                 Style::default().fg(theme.gray_dim),
             )));
             lines.push(Line::from(Span::styled(
-                format!("Sources ({})", ws.citations.len()),
+                entry
+                    .locale()
+                    .named_text("block_viewer.sources", "Sources ({count})")
+                    .replace("{count}", &ws.citations.len().to_string()),
                 Style::default().fg(theme.text_secondary),
             )));
             let url_style = Style::default().fg(theme.gray);
@@ -574,13 +578,25 @@ impl BlockViewerPane {
         // Metadata
         if let Some(limit) = st.limit {
             lines.push(Line::from(vec![
-                Span::styled("limit: ", label),
+                Span::styled(
+                    entry
+                        .locale()
+                        .named_static_text("block_viewer.limit", "limit: "),
+                    label,
+                ),
                 Span::styled(limit.to_string(), value),
             ]));
         }
-        let s = if st.result_count == 1 { "" } else { "s" };
+        let english = if st.result_count == 1 {
+            "{count} result"
+        } else {
+            "{count} results"
+        };
         lines.push(Line::from(Span::styled(
-            format!("{} result{s}", st.result_count),
+            entry
+                .locale()
+                .named_text("block_viewer.results", english)
+                .replace("{count}", &st.result_count.to_string()),
             label,
         )));
 
@@ -847,7 +863,7 @@ impl BlockViewerPane {
         list_state.set_clipboard_provider(Box::new(SystemClipboard));
 
         let theme = Theme::current();
-        let (items, diff_meta) = Self::build_edit_items(edit, &theme);
+        let (items, diff_meta) = Self::build_edit_items(edit, &theme, entry.locale());
 
         Some(Self {
             entry_id,
@@ -880,6 +896,7 @@ impl BlockViewerPane {
     fn build_edit_items(
         edit: &crate::scrollback::blocks::EditToolCallBlock,
         theme: &Theme,
+        locale: &crate::locale::LocaleContext,
     ) -> (Vec<ContentLine>, Vec<Option<DiffLineMeta>>) {
         use crate::scrollback::blocks::DiffRenderConfig;
 
@@ -888,7 +905,7 @@ impl BlockViewerPane {
         // (incl. the file-scoped upgrade) as the scrollback output.
         let rendered = edit.render_diff_lines(
             theme, 500, // wide width — NoWrap mode
-            &config,
+            &config, locale,
         );
 
         // Build a flat list of DiffLine references from all hunks, interleaving
@@ -1705,6 +1722,7 @@ impl BlockViewerPane {
         entry: &ScrollbackEntry,
         focused: bool,
         prepend_lines: &[Line<'static>],
+        locale: Option<&crate::locale::LocaleContext>,
     ) {
         let theme = Theme::current();
 
@@ -1797,6 +1815,7 @@ impl BlockViewerPane {
             ListPane::new(&self.cached_unified)
                 .focused(focused)
                 .style(self.list_style)
+                .with_locale(locale)
                 .render(render_area, buf, &mut self.list_state);
         }
     }

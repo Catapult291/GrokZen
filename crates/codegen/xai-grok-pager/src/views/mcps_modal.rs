@@ -1,6 +1,20 @@
 //! MCP server data types, status enum, response conversion, and section
 //! presentation helpers (labels, description lines, connectors URLs).
 
+use crate::locale::LocaleContext;
+
+fn mcp_static(locale: Option<&LocaleContext>, id: &str, english: &'static str) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn mcp_text(locale: Option<&LocaleContext>, id: &str, english: &str) -> String {
+    locale
+        .map(|locale| locale.named_text(id, english).into_owned())
+        .unwrap_or_else(|| english.to_string())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpWireSource {
     Managed,
@@ -46,10 +60,30 @@ pub fn section_key(section: &McpSectionId) -> String {
 
 /// Display label for a section header, e.g. `"Managed by grok.com (3)"`.
 pub fn section_label(section: &McpSectionId, count: usize) -> String {
+    section_label_with_locale(section, count, None)
+}
+
+pub fn section_label_with_locale(
+    section: &McpSectionId,
+    count: usize,
+    locale: Option<&LocaleContext>,
+) -> String {
     match section {
-        McpSectionId::Managed => format!("Managed by grok.com ({count})"),
-        McpSectionId::Plugin(name) => format!("Plugin: {name} ({count})"),
-        McpSectionId::Local => format!("Local ({count})"),
+        McpSectionId::Managed => mcp_text(
+            locale,
+            "extensions.mcp.section.managed",
+            "Managed by grok.com ({count})",
+        )
+        .replace("{count}", &count.to_string()),
+        McpSectionId::Plugin(name) => mcp_text(
+            locale,
+            "extensions.mcp.section.plugin",
+            "Plugin: {name} ({count})",
+        )
+        .replace("{name}", name)
+        .replace("{count}", &count.to_string()),
+        McpSectionId::Local => mcp_text(locale, "extensions.mcp.section.local", "Local ({count})")
+            .replace("{count}", &count.to_string()),
     }
 }
 
@@ -79,11 +113,24 @@ pub fn managed_connectors_url_display(team_id: Option<&str>) -> String {
 /// Description lines shown under the Managed section header (when expanded).
 /// `team_id` matches the Ctrl+O / open-connectors deep link for the session.
 pub fn section_description_lines(section: &McpSectionId, team_id: Option<&str>) -> Vec<String> {
+    section_description_lines_with_locale(section, team_id, None)
+}
+
+pub fn section_description_lines_with_locale(
+    section: &McpSectionId,
+    team_id: Option<&str>,
+    locale: Option<&LocaleContext>,
+) -> Vec<String> {
     match section {
         McpSectionId::Managed => {
             let url = managed_connectors_url_display(team_id);
             vec![
-                "Add, remove, or manage connectors. Ctrl+O to open or go to:".into(),
+                mcp_static(
+                    locale,
+                    "extensions.mcp.managed.description",
+                    "Add, remove, or manage connectors. Ctrl+O to open or go to:",
+                )
+                .into(),
                 format!("[{url}]"),
             ]
         }
@@ -246,12 +293,24 @@ impl McpServerDisplayStatus {
 
     /// Short human label for the status.
     pub(crate) fn label(&self) -> &'static str {
+        self.label_with_locale(None)
+    }
+
+    pub(crate) fn label_with_locale(&self, locale: Option<&LocaleContext>) -> &'static str {
         match self {
-            Self::Ready => "ready",
-            Self::NeedsAuth => "needs auth",
-            Self::SetupRequired => "setup required",
-            Self::Unavailable => "unavailable",
-            Self::Initializing => "initializing",
+            Self::Ready => mcp_static(locale, "extensions.mcp.status.ready", "ready"),
+            Self::NeedsAuth => mcp_static(locale, "extensions.mcp.status.needs_auth", "needs auth"),
+            Self::SetupRequired => mcp_static(
+                locale,
+                "extensions.mcp.status.setup_required",
+                "setup required",
+            ),
+            Self::Unavailable => {
+                mcp_static(locale, "extensions.mcp.status.unavailable", "unavailable")
+            }
+            Self::Initializing => {
+                mcp_static(locale, "extensions.mcp.status.initializing", "initializing")
+            }
         }
     }
 }

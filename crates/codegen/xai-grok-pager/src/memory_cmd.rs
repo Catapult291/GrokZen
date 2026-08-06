@@ -13,18 +13,18 @@ pub struct MemoryArgs {
 
 #[derive(Debug, Subcommand, Clone)]
 pub enum MemoryCommand {
-    /// Clear memory files (workspace by default)
+    /// 清除记忆文件（默认为工作区范围）
     Clear {
-        /// Clear workspace-scoped memory (MEMORY.md, sessions/, index.sqlite)
+        /// 清除工作区记忆（MEMORY.md、sessions/、index.sqlite）
         #[arg(long, group = "scope")]
         workspace: bool,
-        /// Clear global MEMORY.md
+        /// 清除全局 MEMORY.md
         #[arg(long, group = "scope")]
         global: bool,
-        /// Clear both workspace and global memory
+        /// 同时清除工作区和全局记忆
         #[arg(long, group = "scope")]
         all: bool,
-        /// Skip confirmation prompt
+        /// 跳过确认提示
         #[arg(long, short = 'y')]
         yes: bool,
     },

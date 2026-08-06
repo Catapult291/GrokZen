@@ -56,8 +56,10 @@ pub(super) fn min_content_height(
     menu_height: u16,
     tip_height: u16,
     info_height: u16,
+    logo_hidden: bool,
 ) -> u16 {
-    let inner = super::logo::full_logo_line_count().max(right_col_height(menu_height, info_height));
+    let inner = super::logo::full_logo_line_count_for(logo_hidden)
+        .max(right_col_height(menu_height, info_height));
     let hero_box_height = 2 + V_PAD * 2 + inner;
     let gap_after_error = if error_height > 0 { 1u16 } else { 0 };
     gap_after_error + error_height + hero_box_height + 1 + WelcomeLayout::fixed_below(tip_height)
@@ -73,17 +75,21 @@ pub(super) fn clamp_info_height(
     error_height: u16,
     menu_height: u16,
     tip_height: u16,
+    logo_hidden: bool,
 ) -> u16 {
     (0..=desired)
         .rev()
-        .find(|&h| content_height >= min_content_height(error_height, menu_height, tip_height, h))
+        .find(|&h| {
+            content_height
+                >= min_content_height(error_height, menu_height, tip_height, h, logo_hidden)
+        })
         .unwrap_or(0)
 }
 
 /// Width (cols) of the hero box's left (logo) column, including padding.
 /// Collapses to a small inset when the logo is hidden.
-fn left_col_width() -> u16 {
-    let logo_width = super::logo::full_logo_visual_width();
+fn left_col_width(logo_hidden: bool) -> u16 {
+    let logo_width = super::logo::full_logo_visual_width_for(logo_hidden);
     if logo_width == 0 {
         H_INSET
     } else {
@@ -105,6 +111,7 @@ pub(super) fn compute_hero_box(
     announcement: Option<&xai_grok_announcements::RemoteAnnouncement>,
     expanded: bool,
     has_upgrade_cta: bool,
+    logo_hidden: bool,
 ) -> WelcomeLayout {
     let zero = Rect::default();
     let tip_gap = if tip_height > 0 { 1u16 } else { 0 };
@@ -115,7 +122,7 @@ pub(super) fn compute_hero_box(
     // i.e. measured == drawn.
     let box_width = content_area.width.saturating_sub(6).min(120);
     let inner_width = box_width.saturating_sub(2);
-    let left_col_width = left_col_width();
+    let left_col_width = left_col_width(logo_hidden);
     let right_width = inner_width.saturating_sub(left_col_width);
     let info_slot_width = right_width.saturating_sub(H_INSET);
     let info_height = match announcement {
@@ -125,11 +132,12 @@ pub(super) fn compute_hero_box(
             error_height,
             menu_height,
             tip_height,
+            logo_hidden,
         ),
         None => changelog_height,
     };
 
-    let logo_rows = super::logo::full_logo_line_count();
+    let logo_rows = super::logo::full_logo_line_count_for(logo_hidden);
     let info_gap = if info_height > 0 { 1u16 } else { 0 };
     let inner_height = logo_rows.max(right_col_height(menu_height, info_height));
     let hero_box_height = 2 + V_PAD * 2 + inner_height;
@@ -202,7 +210,7 @@ pub(super) fn compute_hero_box(
 
     // Left column: balanced padding around the logo; collapses to a small
     // inset when the logo is hidden.
-    let logo_width = super::logo::full_logo_visual_width();
+    let logo_width = super::logo::full_logo_visual_width_for(logo_hidden);
     // Logo body leans right; shave a column off the left pad to optically center.
     let logo_left_pad = LOGO_H_PAD.saturating_sub(1);
 
@@ -308,6 +316,7 @@ pub(super) fn render_hero_box(
     changelog_bullets: &[String],
     changelog_has_full_notes: bool,
     upgrade_cta: Option<&str>,
+    locale: &crate::locale::LocaleContext,
     #[cfg(feature = "local-workspace")] workspace_mode: Option<(
         super::WelcomeWorkspaceMode,
         bool,
@@ -329,6 +338,7 @@ pub(super) fn render_hero_box(
         layout.hero_version,
         buf,
         theme,
+        locale,
         None,
         0,
         false,
@@ -338,10 +348,11 @@ pub(super) fn render_hero_box(
     // Subtitle line below the version.
     if layout.hero_subtitle.height > 0 {
         let subtitle_style = Style::default().fg(theme.gray);
+        let subtitle = locale.named_static_text("welcome.hero.subtitle", HERO_SUBTITLE);
         buf.set_span(
             layout.hero_subtitle.x,
             layout.hero_subtitle.y,
-            &Span::styled(HERO_SUBTITLE, subtitle_style),
+            &Span::styled(subtitle, subtitle_style),
             layout.hero_subtitle.width,
         );
     }
@@ -374,6 +385,7 @@ pub(super) fn render_hero_box(
                 changelog_bullets,
                 changelog_has_full_notes,
                 mouse_pos,
+                locale,
             );
         }
     }
@@ -385,7 +397,7 @@ pub(super) fn render_hero_box(
                 height: 1.min(layout.hero_menu.height),
                 ..layout.hero_menu
             };
-            let rects = super::render_workspace_mode_picker(
+            let rects = super::render_workspace_mode_picker_with_locale(
                 picker_rect,
                 buf,
                 theme,
@@ -393,6 +405,7 @@ pub(super) fn render_hero_box(
                 mouse_pos,
                 locked,
                 ack_pending,
+                Some(locale),
             );
             let menu_area = Rect {
                 y: layout.hero_menu.y + super::workspace_mode::WORKSPACE_MODE_MENU_ROWS,
@@ -548,6 +561,7 @@ fn render_hero_changelog(
     bullets: &[String],
     clickable: bool,
     mouse_pos: Option<(u16, u16)>,
+    locale: &crate::locale::LocaleContext,
 ) -> Option<Rect> {
     if area.width == 0 || area.height == 0 {
         return None;
@@ -563,7 +577,7 @@ fn render_hero_changelog(
             .fg(theme.gray_bright)
             .add_modifier(Modifier::DIM),
     );
-    let title = "Changelog";
+    let title = locale.text(crate::locale::TextKey::WelcomeChangelog);
     buf.set_span(
         area.x,
         area.y,

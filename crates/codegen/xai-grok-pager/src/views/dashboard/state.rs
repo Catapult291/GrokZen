@@ -399,6 +399,9 @@ impl PersistedDashboard {
 /// `DashboardRowId` so a rename / reorder / completion does not invalidate
 /// the cursor as long as the row's id is stable.
 pub struct DashboardState {
+    /// Display locale for fixed dashboard chrome. Dynamic session, agent,
+    /// path, branch, prompt, and server-provided text stays opaque.
+    ui_locale: crate::locale::LocaleContext,
     /// Currently selected row id. May be `None` when no rows are visible.
     pub selected: Option<DashboardRowId>,
     /// Hover target for visual feedback.
@@ -1335,6 +1338,7 @@ impl DashboardState {
         let mut peek_reply = PromptWidget::new();
         peek_reply.set_compact(true);
         Self {
+            ui_locale: crate::locale::LocaleContext::default(),
             selected: None,
             hovered_row: None,
             selected_section: None,
@@ -1420,6 +1424,14 @@ impl DashboardState {
             // flag atomically.
             new_agent_button_focused: true,
         }
+    }
+
+    pub(crate) fn set_ui_locale(&mut self, locale: Option<&crate::locale::LocaleContext>) {
+        self.ui_locale = locale.cloned().unwrap_or_default();
+    }
+
+    pub(crate) fn ui_locale(&self) -> &crate::locale::LocaleContext {
+        &self.ui_locale
     }
 
     /// Adopt the shared slash MRU store (owned by `AppView`) into both the
@@ -2503,7 +2515,14 @@ impl DashboardState {
         let mut attachment = match image {
             ProbedAttachment::Image(pasted) => {
                 if peek_in_question {
-                    self.set_error_toast("Pasted image discarded — reply switched to a question");
+                    let message = self
+                        .ui_locale
+                        .named_text(
+                            "dashboard.error.paste_question",
+                            "Pasted image discarded — reply switched to a question",
+                        )
+                        .into_owned();
+                    self.set_error_toast(&message);
                     ClipboardPasteCompletion::Dropped
                 } else {
                     let (_, completion) = if peek {
@@ -2528,7 +2547,14 @@ impl DashboardState {
             if file_urls.as_deref().is_some_and(|urls| {
                 !crate::prompt_images::try_read_images_from_paste(urls).is_empty()
             }) {
-                self.set_error_toast("Pasted image discarded — reply switched to a question");
+                let message = self
+                    .ui_locale
+                    .named_text(
+                        "dashboard.error.paste_question",
+                        "Pasted image discarded — reply switched to a question",
+                    )
+                    .into_owned();
+                self.set_error_toast(&message);
             }
             attachment = ClipboardPasteCompletion::Dropped;
         }
@@ -2604,12 +2630,26 @@ impl DashboardState {
                 });
             } else if !same_row {
                 // Never reply to a row the user is no longer peeking.
-                self.set_error_toast("Reply canceled — peek panel changed");
+                let message = self
+                    .ui_locale
+                    .named_text(
+                        "dashboard.error.reply_row_changed",
+                        "Reply canceled — peek panel changed",
+                    )
+                    .into_owned();
+                self.set_error_toast(&message);
             } else {
                 // A question now owns the panel (Enter answers it there, and the
                 // reply dispatch would silently queue a prompt + wipe the draft
                 // behind the dialog) — drop the stash; the draft stays put.
-                self.set_error_toast("Reply canceled — answer the question first");
+                let message = self
+                    .ui_locale
+                    .named_text(
+                        "dashboard.error.reply_question_pending",
+                        "Reply canceled — answer the question first",
+                    )
+                    .into_owned();
+                self.set_error_toast(&message);
             }
         }
         actions
@@ -2747,7 +2787,12 @@ impl DashboardState {
             let valid = self.peek.as_ref().is_some_and(|p| idx < p.options.len());
             if !valid {
                 let n_opts = self.peek.as_ref().map(|p| p.options.len()).unwrap_or(0);
-                self.set_error_toast(&format!("No such option (only {n_opts} available)"));
+                let english = format!("No such option (only {n_opts} available)");
+                let message = self
+                    .ui_locale
+                    .named_text("dashboard.error.invalid_option", &english)
+                    .replace("{count}", &n_opts.to_string());
+                self.set_error_toast(&message);
                 return Some(InputOutcome::Changed);
             }
             if let Some(p) = self.peek.as_mut() {
@@ -4309,16 +4354,17 @@ impl DashboardState {
     /// chrome + picker pipeline via `handle_modal_key`.
     fn handle_shortcuts_modal_input(&mut self, ev: &Event) -> InputOutcome {
         use crate::views::shortcuts_help::{
-            ModalKeyOutcome, ShortcutsHelpOutcome, handle_modal_key, handle_mouse, handle_paste,
-            toggle_membership,
+            ModalKeyOutcome, ShortcutsHelpOutcome, handle_modal_key_with_locale,
+            handle_mouse_with_locale, handle_paste, toggle_membership,
         };
 
+        let ui_locale = self.ui_locale.clone();
         let Some(modal) = self.shortcuts_modal.as_mut() else {
             return InputOutcome::Unchanged;
         };
         match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
-                match handle_modal_key(
+                match handle_modal_key_with_locale(
                     key,
                     &modal.entries,
                     &mut modal.state,
@@ -4328,6 +4374,7 @@ impl DashboardState {
                     &modal.expanded_ids,
                     &mut modal.mode,
                     /* compact */ false,
+                    Some(&ui_locale),
                 ) {
                     ModalKeyOutcome::Close => {
                         InputOutcome::Action(Action::DashboardCloseShortcutsHelp)
@@ -4372,13 +4419,14 @@ impl DashboardState {
                     // picker content below.
                     _ => {}
                 }
-                match handle_mouse(
+                match handle_mouse_with_locale(
                     mouse,
                     &modal.entries,
                     &mut modal.state,
                     modal.filter_active,
                     &modal.collapsed_sections,
                     &mut modal.mode,
+                    Some(&ui_locale),
                 ) {
                     ShortcutsHelpOutcome::Close => {
                         InputOutcome::Action(Action::DashboardCloseShortcutsHelp)

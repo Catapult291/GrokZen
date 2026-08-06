@@ -94,6 +94,7 @@ pub(super) fn prompt_style(
 }
 /// Draw the pinned live region (tail + status + prompt) into the inline viewport.
 pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
+    let locale = app.locale.clone();
     let force_todos = minimal_api::minimal_show_todos(app);
     let auth_hint = crate::auth::minimal_auth_hint(
         &app.auth_state,
@@ -101,11 +102,11 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         app.has_access(),
         app.is_zdr_blocked(),
     );
-    let pending_hint = minimal_pending_hint(&app.pending_action);
+    let pending_hint = minimal_pending_hint(&app.pending_action, Some(&locale));
     let transcript_hint = if minimal_api::minimal_ctrl_o_opens_transcript(app) {
-        "ctrl+o transcript"
+        locale.named_text("minimal.transcript_hint_ctrl_o", "Ctrl+O transcript")
     } else {
-        "/transcript"
+        std::borrow::Cow::Borrowed("/transcript")
     };
     let transcript_progress = minimal_api::minimal_transcript_progress(app);
     let AppView {
@@ -143,7 +144,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         Clear.render(area, frame.buffer_mut());
         let agent = agent_id.and_then(|id| agents.get_mut(&id));
         let Some(agent) = agent else {
-            crate::auth::render_auth(frame.buffer_mut(), area, &theme, &auth_hint);
+            crate::auth::render_auth(frame.buffer_mut(), area, &theme, &auth_hint, &locale);
             return (None, None);
         };
         agent.active_pane = xai_grok_pager::app::agent_view::AgentPane::Prompt;
@@ -151,23 +152,25 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         let show_todos = crate::todo::todo_panel_visible(agent, force_todos);
         let queued = agent.session.pending_prompts.len() + agent.shared_queue.len();
         if let Some(kind) = super::panel::active(agent) {
-            let cursor = super::panel::render(frame.buffer_mut(), area, agent, kind, &theme);
+            let cursor =
+                super::panel::render(frame.buffer_mut(), area, agent, kind, &theme, Some(&locale));
             return (cursor, None);
         }
         if super::overlay::app_modal_active(agent) {
-            super::overlay::render_app_modal(frame.buffer_mut(), area, agent, compact);
+            super::overlay::render_app_modal(frame.buffer_mut(), area, agent, compact, &locale);
             return (None, None);
         }
         if minimal_api::extensions_modal(agent).is_some() {
             let tick = (now_millis() / 100) as u64;
             if let Some(state) = minimal_api::extensions_modal_mut(agent) {
-                xai_grok_pager::views::extensions_modal::render_extensions_modal(
+                xai_grok_pager::views::extensions_modal::render_extensions_modal_with_locale(
                     frame.buffer_mut(),
                     area,
                     state,
                     None,
                     compact,
                     tick,
+                    Some(&locale),
                 );
             }
             return (None, None);
@@ -213,6 +216,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 &status_activity,
                 transcript_progress,
                 &theme,
+                Some(&locale),
             );
             let modal_area = Rect {
                 x: area.x,
@@ -227,12 +231,14 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 agent,
                 &theme,
                 term_h,
+                &locale,
             );
             return (cursor, None);
         }
         let status_h = 1u16.min(area.height);
-        let overlay_h = super::overlay::overlay_rows(&agent.prompt, area.width)
-            .min(area.height.saturating_sub(status_h + 1));
+        let overlay_h =
+            super::overlay::overlay_rows(&agent.prompt, area.width, Some(locale.as_ref()))
+                .min(area.height.saturating_sub(status_h + 1));
         let info_h = if overlay_h == 0 {
             1u16.min(area.height.saturating_sub(status_h + 1))
         } else {
@@ -262,7 +268,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
             after_btw.min(crate::todo::MAX_TODO_ROWS)
         };
         let todo_lines = if show_todos {
-            crate::todo::todo_panel_lines(agent, todos_cap, force_todos)
+            crate::todo::todo_panel_lines_with_locale(agent, todos_cap, force_todos, Some(&locale))
         } else {
             Vec::new()
         };
@@ -316,7 +322,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
         );
         if let (Some(btw), Some(btw_area)) = (agent.btw_state.as_ref(), btw_area) {
             let focused = minimal_api::btw_focused(agent);
-            xai_grok_pager::views::btw_overlay::render_btw_panel(
+            xai_grok_pager::views::btw_overlay::render_btw_panel_with_locale(
                 frame.buffer_mut(),
                 btw,
                 btw_area,
@@ -326,6 +332,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 &mut agent.last_btw_selection_model,
                 None,
                 &[],
+                Some(&locale),
             );
             agent.last_btw_area = btw_area;
         }
@@ -345,6 +352,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
             &status_activity,
             transcript_progress,
             &theme,
+            Some(&locale),
         );
         let prompt_area = Rect {
             x: area.x,
@@ -361,6 +369,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 layout_cfg,
                 compact,
                 &theme,
+                Some(locale.as_ref()),
             );
         } else if info_h > 0 {
             let info_area = inset_left(
@@ -380,14 +389,21 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                     info_area,
                     agent,
                     queued,
-                    transcript_hint,
+                    transcript_hint.as_ref(),
                     &theme,
+                    Some(&locale),
                 );
             }
         }
-        let result = agent
-            .prompt
-            .draw(frame.buffer_mut(), prompt_area, None, &style, None, None);
+        let result = agent.prompt.draw_with_locale(
+            frame.buffer_mut(),
+            prompt_area,
+            None,
+            &style,
+            None,
+            None,
+            Some(&locale),
+        );
         (
             result.cursor_pos,
             result
@@ -518,19 +534,26 @@ fn render_minimal_status(
     activity: &Option<xai_grok_pager::acp::tracker::TurnActivity>,
     transcript_progress: Option<(usize, usize)>,
     theme: &Theme,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
 ) {
     if area.height == 0 || area.width == 0 {
         return;
     }
     if let Some((done, total)) = transcript_progress {
         let style = theme.primary().bg(Color::Reset);
+        let progress = locale
+            .map(|locale| {
+                locale
+                    .named_text(
+                        "minimal.transcript_rendering",
+                        "rendering transcript… {done}/{total}",
+                    )
+                    .replace("{done}", &done.to_string())
+                    .replace("{total}", &total.to_string())
+            })
+            .unwrap_or_else(|| format!("rendering transcript… {done}/{total}"));
         buf.set_style(area, style);
-        buf.set_span(
-            area.x,
-            area.y,
-            &Span::styled(format!("rendering transcript… {done}/{total}"), style),
-            area.width,
-        );
+        buf.set_span(area.x, area.y, &Span::styled(progress, style), area.width);
         return;
     }
     let watchers = minimal_api::watchers(agent);
@@ -543,7 +566,7 @@ fn render_minimal_status(
         watchers,
         parked,
     ) {
-        render_idle_hint(buf, area, theme);
+        render_idle_hint(buf, area, theme, locale);
         return;
     }
     let is_pending_user_input =
@@ -556,6 +579,7 @@ fn render_minimal_status(
         buf,
         area,
         turn_status::TurnStatusArgs {
+            locale,
             state: &agent.session.state,
             activity,
             turn_elapsed: agent.turn_elapsed(),
@@ -578,22 +602,35 @@ fn render_minimal_status(
     );
 }
 /// Idle status: `minimal · [/fullscreen to go back ·] /help` (+ auto-set note).
-fn render_idle_hint(buf: &mut Buffer, area: Rect, theme: &Theme) {
+fn render_idle_hint(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
+) {
     let style = theme.dim().bg(Color::Reset);
     buf.set_style(area, style);
     let auto = xai_grok_pager::app::minimal_auto_set_for_mouse_leak();
     let switch_back = xai_grok_pager::app::minimal_show_switch_back_to_fullscreen();
-    let hint = match (auto, switch_back) {
-        (true, true) => {
+    let (key, english) = match (auto, switch_back) {
+        (true, true) => (
+            "minimal.idle_hint_auto_switch",
             "minimal · auto-set on JetBrains/Windows due to JetBrains mouse reporting issues \
-             · /fullscreen to go back · /help"
-        }
-        (true, false) => {
-            "minimal · auto-set on JetBrains/Windows due to JetBrains mouse reporting issues · /help"
-        }
-        (false, true) => "minimal · /fullscreen to go back · /help",
-        (false, false) => "minimal · /help",
+             · /fullscreen to go back · /help",
+        ),
+        (true, false) => (
+            "minimal.idle_hint_auto",
+            "minimal · auto-set on JetBrains/Windows due to JetBrains mouse reporting issues · /help",
+        ),
+        (false, true) => (
+            "minimal.idle_hint_switch",
+            "minimal · /fullscreen to go back · /help",
+        ),
+        (false, false) => ("minimal.idle_hint", "minimal · /help"),
     };
+    let hint = locale
+        .map(|locale| locale.named_text(key, english))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed(english));
     buf.set_span(area.x, area.y, &Span::styled(hint, style), area.width);
 }
 /// Render the one-line info bar directly below the prompt: the selected model,
@@ -617,34 +654,46 @@ fn render_prompt_info(
     queued: usize,
     transcript_hint: &str,
     theme: &Theme,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
 ) {
     use xai_grok_pager::views::context_bar::fmt_tokens;
     let base = theme.primary().bg(Color::Reset);
     let sep = theme.dim().bg(Color::Reset);
     let mut segs: Vec<(String, Style)> = Vec::new();
-    if let Some(label) = agent.prompt_input_mode.prompt_info_override() {
+    if let Some(label) = agent
+        .prompt_input_mode
+        .prompt_info_override_with_locale(locale)
+    {
         segs.push((label.to_string(), base));
     } else {
         if let Some(model) = agent.session.models.current_model_name() {
-            let label = match agent.session.models.reasoning_effort {
-                Some(eff) => format!("{model} ({eff})"),
-                None => model,
-            };
+            let label = xai_grok_pager::views::localized_model_name(
+                model,
+                agent.session.models.reasoning_effort,
+                locale,
+            );
             segs.push((label, base));
         }
         let effective_plan =
             minimal_api::plan_mode_pending(agent).unwrap_or(minimal_api::plan_mode_active(agent));
-        let mode_flag: Option<(&str, Color)> = if effective_plan {
-            Some(("plan", theme.accent_plan))
+        let mode_flag: Option<(&str, &str, Color)> = if effective_plan {
+            Some(("minimal.mode.plan", "plan", theme.accent_plan))
         } else if agent.session.is_yolo() {
-            Some(("always-approve", theme.warning))
+            Some((
+                "minimal.mode.always_approve",
+                "always-approve",
+                theme.warning,
+            ))
         } else if agent.session.is_auto() {
-            Some(("auto", theme.accent_system))
+            Some(("minimal.mode.auto", "auto", theme.accent_system))
         } else {
             None
         };
-        if let Some((label, color)) = mode_flag {
-            segs.push((label.to_string(), base.fg(color)));
+        if let Some((key, label, color)) = mode_flag {
+            let label = locale
+                .map(|locale| locale.named_text(key, label).into_owned())
+                .unwrap_or_else(|| label.to_string());
+            segs.push((label, base.fg(color)));
         }
         let used = agent.context_state.as_ref().map(|c| c.used);
         let total = agent
@@ -663,7 +712,14 @@ fn render_prompt_info(
         }
     }
     if queued > 0 {
-        segs.push((format!("{queued} queued"), base));
+        let queued_label = locale
+            .map(|locale| {
+                locale
+                    .named_text("minimal.queued", "{count} queued")
+                    .replace("{count}", &queued.to_string())
+            })
+            .unwrap_or_else(|| format!("{queued} queued"));
+        segs.push((queued_label, base));
         segs.push(("/queue".to_string(), base));
     }
     segs.push((transcript_hint.to_string(), base));
@@ -686,16 +742,24 @@ fn render_prompt_info(
 /// which minimal does not render.
 fn minimal_pending_hint(
     pending: &Option<xai_grok_pager::app::app_view::PendingAction>,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
 ) -> Option<String> {
     let pending = pending.as_ref()?;
     if pending.expired() {
         return None;
     }
     let label = pending.label?;
-    Some(format!(
-        "press {} again to {label}",
-        pending.shortcut.display()
-    ))
+    let shortcut = pending.shortcut.display().to_string();
+    Some(
+        locale
+            .map(|locale| {
+                locale
+                    .named_text("minimal.double_press", "press {shortcut} again to {action}")
+                    .replace("{shortcut}", &shortcut)
+                    .replace("{action}", label)
+            })
+            .unwrap_or_else(|| format!("press {shortcut} again to {label}")),
+    )
 }
 /// Render the one-line double-press confirmation hint under the prompt, in the
 /// warning color so it stands out from the model/context info row.
@@ -862,7 +926,7 @@ mod tests {
         xai_grok_pager::app::set_minimal_show_switch_back_to_fullscreen_for_test(false);
         let a = agent();
         let mut buf = Buffer::empty(area);
-        render_minimal_status(&mut buf, area, &a, &None, None, &theme);
+        render_minimal_status(&mut buf, area, &a, &None, None, &theme, None);
         let idle = read(&buf);
         assert!(idle.contains("/help"), "idle hint: {idle:?}");
         assert!(
@@ -871,7 +935,7 @@ mod tests {
         );
         xai_grok_pager::app::set_minimal_show_switch_back_to_fullscreen_for_test(true);
         let mut buf = Buffer::empty(area);
-        render_minimal_status(&mut buf, area, &a, &None, None, &theme);
+        render_minimal_status(&mut buf, area, &a, &None, None, &theme, None);
         let switched = read(&buf);
         assert!(
             switched.contains("/fullscreen to go back"),
@@ -888,6 +952,7 @@ mod tests {
             &Some(TurnActivity::Responding),
             None,
             &theme,
+            None,
         );
         let text = read(&buf);
         assert!(text.contains("Responding"), "rich activity: {text:?}");
@@ -903,6 +968,7 @@ mod tests {
             }),
             None,
             &theme,
+            None,
         );
         assert!(read(&buf).contains("Retrying"), "retry: {:?}", read(&buf));
     }
@@ -932,7 +998,7 @@ mod tests {
         );
         assert_eq!(minimal_api::watchers(&a).loops, 1);
         let mut buf = Buffer::empty(area);
-        render_minimal_status(&mut buf, area, &a, &None, None, &theme);
+        render_minimal_status(&mut buf, area, &a, &None, None, &theme, None);
         let text = read(&buf);
         assert!(
             text.contains("1 loop still running"),
@@ -973,7 +1039,7 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
-        render_prompt_info(&mut buf, area, &a, 3, "ctrl+o transcript", &theme);
+        render_prompt_info(&mut buf, area, &a, 3, "ctrl+o transcript", &theme, None);
         let text: String = (0..area.width)
             .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
             .collect();
@@ -999,7 +1065,7 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
-        render_prompt_info(&mut buf, area, &a, 2, "ctrl+o transcript", &theme);
+        render_prompt_info(&mut buf, area, &a, 2, "ctrl+o transcript", &theme, None);
         let text: String = (0..area.width)
             .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
             .collect();
@@ -1025,7 +1091,7 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 1);
         let mut buf = Buffer::empty(area);
-        render_prompt_info(&mut buf, area, &a, 0, "/transcript", &theme);
+        render_prompt_info(&mut buf, area, &a, 0, "/transcript", &theme, None);
         let text: String = (0..area.width)
             .filter_map(|x| buf.cell((x, 0)).map(|c| c.symbol().to_string()))
             .collect();
@@ -1043,7 +1109,7 @@ mod tests {
         };
         let render = |a: &xai_grok_pager::app::agent_view::AgentView| -> String {
             let mut buf = Buffer::empty(area);
-            render_prompt_info(&mut buf, area, a, 0, "ctrl+o transcript", &theme);
+            render_prompt_info(&mut buf, area, a, 0, "ctrl+o transcript", &theme, None);
             read(&buf)
         };
         let mut a = agent();
@@ -1068,11 +1134,11 @@ mod tests {
         use xai_grok_pager::app::actions::Action;
         use xai_grok_pager::app::app_view::PendingAction;
         use xai_grok_pager::input::key::KeyShortcut;
-        assert!(minimal_pending_hint(&None).is_none());
+        assert!(minimal_pending_hint(&None, None).is_none());
         let shortcut = KeyShortcut::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
         let pending = Some(PendingAction::new(Action::Quit, shortcut, "quit"));
         assert_eq!(
-            minimal_pending_hint(&pending).as_deref(),
+            minimal_pending_hint(&pending, None).as_deref(),
             Some("press Ctrl+q again to quit")
         );
         let silent = Some(PendingAction::with_ttl(
@@ -1081,13 +1147,13 @@ mod tests {
             None,
             std::time::Duration::from_secs(1),
         ));
-        assert!(minimal_pending_hint(&silent).is_none());
+        assert!(minimal_pending_hint(&silent, None).is_none());
         let expired = Some(PendingAction::with_ttl(
             Action::Quit,
             shortcut,
             Some("quit"),
             std::time::Duration::ZERO,
         ));
-        assert!(minimal_pending_hint(&expired).is_none());
+        assert!(minimal_pending_hint(&expired, None).is_none());
     }
 }

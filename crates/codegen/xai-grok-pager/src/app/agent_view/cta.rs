@@ -106,6 +106,7 @@ impl AgentView {
     /// Spinner phases (`Installing`/`AwaitingReload`/`AwaitingMcps`) and the
     /// brief `Installed` confirmation render status text without buttons.
     pub(super) fn draw_plugin_cta(&mut self, buf: &mut Buffer, area: Rect, theme: &Theme) {
+        let locale = self.scrollback.locale();
         let tick = self.scrollback.animation_tick();
         let spinner = {
             let frames = crate::glyphs::braille_spinner_frames();
@@ -113,56 +114,95 @@ impl AgentView {
         };
         let secondary = Style::default().fg(theme.text_secondary);
         let name_style = Style::default().fg(theme.accent_model);
-        let (left_spans, connect_label): (Vec<Span<'static>>, Option<&'static str>) =
-            match &self.plugin_cta.phase {
-                CtaPhase::Hidden => {
-                    self.plugin_cta.hit_connect.clear();
-                    self.plugin_cta.hit_dismiss.clear();
-                    return;
-                }
-                CtaPhase::Matched { name, .. } => (
-                    vec![
-                        Span::styled("Install ", secondary),
-                        Span::styled(name.clone(), name_style),
-                        Span::styled(" plugin?", secondary),
-                    ],
-                    Some("[Install]"),
-                ),
-                CtaPhase::Installing { name, .. } => (
-                    vec![
-                        Span::styled(format!("{spinner} Installing "), secondary),
-                        Span::styled(name.clone(), name_style),
-                        Span::styled(" plugin\u{2026}", secondary),
-                    ],
-                    None,
-                ),
-                CtaPhase::AwaitingReload { name } | CtaPhase::AwaitingMcps { name } => (
-                    vec![
-                        Span::styled(format!("{spinner} Setting up "), secondary),
-                        Span::styled(name.clone(), name_style),
-                        Span::styled(" plugin\u{2026}", secondary),
-                    ],
-                    None,
-                ),
-                CtaPhase::Installed { name } => (
-                    vec![
-                        Span::styled(name.clone(), name_style),
-                        Span::styled(
-                            format!(" plugin installed {}", crate::glyphs::check_mark()),
-                            secondary,
+        let (left_spans, connect_label): (Vec<Span<'static>>, Option<&'static str>) = match &self
+            .plugin_cta
+            .phase
+        {
+            CtaPhase::Hidden => {
+                self.plugin_cta.hit_connect.clear();
+                self.plugin_cta.hit_dismiss.clear();
+                return;
+            }
+            CtaPhase::Matched { name, .. } => (
+                vec![
+                    Span::styled(
+                        locale.named_static_text("plugin_cta.install_prefix", "Install "),
+                        secondary,
+                    ),
+                    Span::styled(name.clone(), name_style),
+                    Span::styled(
+                        locale.named_static_text("plugin_cta.install_suffix", " plugin?"),
+                        secondary,
+                    ),
+                ],
+                Some(locale.named_static_text("plugin_cta.button.install", "[Install]")),
+            ),
+            CtaPhase::Installing { name, .. } => (
+                vec![
+                    Span::styled(
+                        format!(
+                            "{spinner} {}",
+                            locale.named_static_text("plugin_cta.installing_prefix", "Installing ")
                         ),
-                    ],
-                    None,
-                ),
-                CtaPhase::Error { name, .. } => (
-                    vec![
-                        Span::styled("Couldn't install ", secondary),
-                        Span::styled(name.clone(), name_style),
-                        Span::styled(" plugin", secondary),
-                    ],
-                    Some("[Retry]"),
-                ),
-            };
+                        secondary,
+                    ),
+                    Span::styled(name.clone(), name_style),
+                    Span::styled(
+                        locale.named_static_text("plugin_cta.progress_suffix", " plugin\u{2026}"),
+                        secondary,
+                    ),
+                ],
+                None,
+            ),
+            CtaPhase::AwaitingReload { name } | CtaPhase::AwaitingMcps { name } => (
+                vec![
+                    Span::styled(
+                        format!(
+                            "{spinner} {}",
+                            locale.named_static_text("plugin_cta.setting_up_prefix", "Setting up ")
+                        ),
+                        secondary,
+                    ),
+                    Span::styled(name.clone(), name_style),
+                    Span::styled(
+                        locale.named_static_text("plugin_cta.progress_suffix", " plugin\u{2026}"),
+                        secondary,
+                    ),
+                ],
+                None,
+            ),
+            CtaPhase::Installed { name } => (
+                vec![
+                    Span::styled(name.clone(), name_style),
+                    Span::styled(
+                        format!(
+                            "{} {}",
+                            locale.named_static_text(
+                                "plugin_cta.installed_suffix",
+                                " plugin installed"
+                            ),
+                            crate::glyphs::check_mark()
+                        ),
+                        secondary,
+                    ),
+                ],
+                None,
+            ),
+            CtaPhase::Error { name, .. } => (
+                vec![
+                    Span::styled(
+                        locale.named_static_text("plugin_cta.error_prefix", "Couldn't install "),
+                        secondary,
+                    ),
+                    Span::styled(name.clone(), name_style),
+                    Span::styled(
+                        locale.named_static_text("plugin_cta.error_suffix", " plugin"),
+                        secondary,
+                    ),
+                ],
+                Some(locale.named_static_text("plugin_cta.button.retry", "[Retry]")),
+            ),
+        };
 
         use unicode_width::UnicodeWidthStr;
         let dismiss_label = "[x]";

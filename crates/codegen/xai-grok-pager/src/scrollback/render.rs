@@ -11,9 +11,7 @@ use super::entry::ScrollbackEntry;
 use super::layout::HorizontalLayout;
 use super::state::EntryLayoutInfo;
 use super::state::groups::{GroupKind, GroupSpan, span_containing};
-use super::state::verb_group::{
-    GroupHeaderLabel, truncation_header_label, verb_group_header_label,
-};
+use super::state::verb_group::GroupHeaderLabel;
 use super::text_selection::{
     ResolvedSelectableLine, ResolvedSelectionBoundaries, ResolvedSelectionModel,
     VisibleBlockGeometry,
@@ -39,17 +37,38 @@ pub(crate) const GROUP_HEADER_RANGE_ID: u16 = u16::MAX;
 /// Label for the inline-media native-open text button (terminals without
 /// inline graphics). Graphics terminals use a shorter overlay `[Open]` instead.
 pub fn media_open_button_label(is_video: bool) -> &'static str {
+    media_open_button_label_with_locale(is_video, None)
+}
+
+pub fn media_open_button_label_with_locale(
+    is_video: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> &'static str {
     if is_video {
-        "[Open Video]"
+        locale
+            .map(|locale| locale.named_static_text("media.open_video", "[Open Video]"))
+            .unwrap_or("[Open Video]")
     } else {
-        "[Open Image]"
+        locale
+            .map(|locale| locale.named_static_text("media.open_image", "[Open Image]"))
+            .unwrap_or("[Open Image]")
     }
 }
 
 /// Centered left column for the `[Open]` text button. Shared by the renderer
 /// and the hit-area computation so the label and click target stay aligned.
 pub fn media_open_button_col(content_width: u16, is_video: bool) -> u16 {
-    let label_w = media_open_button_label(is_video).len() as u16;
+    media_open_button_col_with_locale(content_width, is_video, None)
+}
+
+pub fn media_open_button_col_with_locale(
+    content_width: u16,
+    is_video: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> u16 {
+    let label_w = unicode_width::UnicodeWidthStr::width(media_open_button_label_with_locale(
+        is_video, locale,
+    )) as u16;
     content_width.saturating_sub(label_w) / 2
 }
 
@@ -259,6 +278,7 @@ pub fn render_scrolled_entries_with_scratch(
         media_paths,
         group_spans,
         cwd,
+        None,
     )
     .result
 }
@@ -282,6 +302,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
     media_paths: &[std::path::PathBuf],
     group_spans: Option<(&[GroupSpan], usize)>,
     cwd: Option<&std::path::Path>,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> ScrollRenderResultWithBoundaries {
     if entries.is_empty() || viewport.width == 0 || viewport.height == 0 {
         return ScrollRenderResultWithBoundaries::default();
@@ -393,13 +414,16 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                     Some(span.range.end.saturating_sub(base))
                 })
                 .unwrap_or(entries.len());
-            Some(GroupHeaderLabel::VerbRun(verb_group_header_label(
-                entries,
-                i,
-                end,
-                show_thinking,
-                theme,
-            )))
+            Some(GroupHeaderLabel::VerbRun(
+                super::state::verb_group::verb_group_header_label_with_locale(
+                    entries,
+                    i,
+                    end,
+                    show_thinking,
+                    theme,
+                    locale,
+                ),
+            ))
         } else if entry_layout_info.is_group_header()
             && crate::appearance::cache::load_group_tool_verbs()
         {
@@ -418,12 +442,13 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                     };
                     let start = span.range.start.saturating_sub(base);
                     let end = span.range.end.saturating_sub(base);
-                    truncation_header_label(
+                    super::state::verb_group::truncation_header_label_with_locale(
                         entries,
                         start..end,
                         (!span.expanded).then_some(hidden),
                         show_thinking,
                         theme,
+                        locale,
                     )
                 })
                 .map(GroupHeaderLabel::Truncation)
@@ -440,6 +465,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
             .with_group_header_count(entry_layout_info.group_header_count)
             .with_group_collapse_header(entry_layout_info.group_collapse_header)
             .with_group_header_label(header_label.as_ref())
+            .with_locale(locale)
             .with_cwd(cwd);
         renderer.render(entry_content_area, buf);
 
@@ -838,8 +864,11 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
             // Centered `[Open]` button → click-to-open. It is the second-to-last
             // content line (the last line is a blank spacer).
             let open_button_screen_rect = if content_lines >= 2 {
-                let label_w = media_open_button_label(is_video).len() as u16;
-                let col = media_open_button_col(content_width, is_video);
+                let label_w = unicode_width::UnicodeWidthStr::width(
+                    media_open_button_label_with_locale(is_video, Some(&ctx.locale)),
+                ) as u16;
+                let col =
+                    media_open_button_col_with_locale(content_width, is_video, Some(&ctx.locale));
                 let button_virtual_y = content_y_start + (content_lines - 2);
                 line_screen_rect(button_virtual_y, label_w).map(|mut rect| {
                     rect.x = rect.x.saturating_add(col);
@@ -1159,6 +1188,7 @@ mod tests {
             0,
             0,
             &[],
+            None,
             None,
             None,
         )
@@ -3545,6 +3575,7 @@ mod tests {
             appearance: appearance.clone(),
             is_selected: false,
             cwd: Some(cwd.clone()),
+            locale: Default::default(),
         };
         let painted = entry.block.output(&ctx);
         let header = &painted.lines[0];

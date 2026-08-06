@@ -80,6 +80,8 @@ pub struct EntryRenderer<'a> {
     dim_accent: bool,
     /// Session/worktree cwd (`AgentSession.cwd`) for Expanded tool paths.
     cwd: Option<&'a Path>,
+    /// Render-only locale for local chrome; block payloads stay canonical.
+    locale: Option<&'a crate::locale::LocaleContext>,
 }
 
 impl<'a> EntryRenderer<'a> {
@@ -100,11 +102,17 @@ impl<'a> EntryRenderer<'a> {
             hide_accent: false,
             dim_accent: false,
             cwd: None,
+            locale: None,
         }
     }
 
     pub fn with_cwd(mut self, cwd: Option<&'a Path>) -> Self {
         self.cwd = cwd;
+        self
+    }
+
+    pub fn with_locale(mut self, locale: Option<&'a crate::locale::LocaleContext>) -> Self {
+        self.locale = locale;
         self
     }
 
@@ -340,9 +348,24 @@ impl<'a> EntryRenderer<'a> {
             spans.extend(label.line.spans.iter().cloned());
         } else {
             let label = if self.group_collapse_header {
-                format!("{n} tool calls & thoughts")
+                self.locale
+                    .map(|locale| {
+                        locale
+                            .named_text(
+                                "scrollback.group.tool_calls_thoughts",
+                                "{count} tool calls & thoughts",
+                            )
+                            .replace("{count}", &n.to_string())
+                    })
+                    .unwrap_or_else(|| format!("{n} tool calls & thoughts"))
             } else {
-                format!("{n} more")
+                self.locale
+                    .map(|locale| {
+                        locale
+                            .named_text("scrollback.group.more", "{count} more")
+                            .replace("{count}", &n.to_string())
+                    })
+                    .unwrap_or_else(|| format!("{n} more"))
             };
             spans.push(ratatui::text::Span::styled(label, text_style));
         }

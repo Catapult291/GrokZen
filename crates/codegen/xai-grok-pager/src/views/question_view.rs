@@ -1274,6 +1274,35 @@ pub fn build_flat_option_lines(
     freeform_selected: bool,
     panel_focused: bool,
 ) -> Vec<Line<'static>> {
+    build_flat_option_lines_with_placeholder(
+        question,
+        content_w,
+        cursor,
+        hovered,
+        selections,
+        theme,
+        show_freeform,
+        freeform_text,
+        freeform_selected,
+        panel_focused,
+        "Type your answer here",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_flat_option_lines_with_placeholder(
+    question: &Question,
+    content_w: usize,
+    cursor: usize,
+    hovered: Option<usize>,
+    selections: &QuestionSelection,
+    theme: &Theme,
+    show_freeform: bool,
+    freeform_text: &str,
+    freeform_selected: bool,
+    panel_focused: bool,
+    freeform_placeholder: &str,
+) -> Vec<Line<'static>> {
     let prefix_w = option_prefix_w(question);
     let max_lw = compute_max_label_w(&question.options, content_w);
     let is_multi = question.multi_select.unwrap_or(false);
@@ -1322,7 +1351,7 @@ pub fn build_flat_option_lines(
     // Freeform row — hidden in InputMode (prompt widget below replaces it).
     if show_freeform {
         let freeform_idx = question.options.len();
-        all_lines.push(build_freeform_line(
+        all_lines.push(build_freeform_line_with_placeholder(
             freeform_idx == cursor,
             hovered == Some(freeform_idx),
             freeform_text,
@@ -1330,6 +1359,7 @@ pub fn build_flat_option_lines(
             is_multi,
             theme,
             panel_focused,
+            freeform_placeholder,
         ));
     }
 
@@ -1555,6 +1585,7 @@ fn build_single_option_lines(
 /// so the freeform row aligns with the option labels.
 /// `freeform_text` is the per-question freeform text — when non-empty the row
 /// shows as ticked with a preview of the answer.
+#[cfg(test)]
 fn build_freeform_line(
     is_cursor: bool,
     is_hovered: bool,
@@ -1563,6 +1594,29 @@ fn build_freeform_line(
     is_multi: bool,
     theme: &Theme,
     panel_focused: bool,
+) -> Line<'static> {
+    build_freeform_line_with_placeholder(
+        is_cursor,
+        is_hovered,
+        freeform_text,
+        is_selected,
+        is_multi,
+        theme,
+        panel_focused,
+        "Type your answer here",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_freeform_line_with_placeholder(
+    is_cursor: bool,
+    is_hovered: bool,
+    freeform_text: &str,
+    is_selected: bool,
+    is_multi: bool,
+    theme: &Theme,
+    panel_focused: bool,
+    freeform_placeholder: &str,
 ) -> Line<'static> {
     // Whitespace-only freeform is treated as empty — never shown as selected.
     let is_selected = is_selected && !freeform_text.trim().is_empty();
@@ -1619,7 +1673,7 @@ fn build_freeform_line(
     } else {
         // Empty — show placeholder.
         (
-            "Type your answer here".to_string(),
+            freeform_placeholder.to_string(),
             Style::default().fg(fg(theme.gray)).bg(row_bg),
         )
     };
@@ -1659,6 +1713,30 @@ pub fn render_question_view(
     hovered_item: Option<usize>,
     theme: &Theme,
     focused: bool,
+) -> QuestionViewRenderResult {
+    render_question_view_with_placeholder(
+        buf,
+        area,
+        state,
+        hovered_item,
+        theme,
+        focused,
+        "Type your answer here",
+        None,
+    )
+}
+
+/// Locale-aware variant of [`render_question_view`].
+#[allow(clippy::too_many_arguments)]
+pub fn render_question_view_with_placeholder(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &QuestionViewState,
+    hovered_item: Option<usize>,
+    theme: &Theme,
+    focused: bool,
+    freeform_placeholder: &str,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> QuestionViewRenderResult {
     if area.height == 0 || area.width == 0 {
         return QuestionViewRenderResult {
@@ -1715,6 +1793,7 @@ pub fn render_question_view(
         state.fullscreen,
         state.cached_desc_cap,
         state.cached_preview_cap,
+        locale,
     );
 
     // ── Gap ──
@@ -1746,7 +1825,7 @@ pub fn render_question_view(
     let freeform_h: u16 = if sticky_freeform { 1 } else { 0 };
 
     // Build option lines WITHOUT the freeform row (it's sticky or inline).
-    let all_lines = build_flat_option_lines(
+    let all_lines = build_flat_option_lines_with_placeholder(
         question,
         content_w,
         cursor,
@@ -1757,6 +1836,7 @@ pub fn render_question_view(
         freeform_text,
         freeform_selected,
         focused,
+        freeform_placeholder,
     );
 
     let visible_h = visible_bottom.saturating_sub(y).saturating_sub(freeform_h) as usize;
@@ -1782,7 +1862,7 @@ pub fn render_question_view(
             let freeform_idx = question.options.len();
             let is_multi = question.multi_select.unwrap_or(false);
             let _prefix_w = option_prefix_w(question);
-            let freeform_line = build_freeform_line(
+            let freeform_line = build_freeform_line_with_placeholder(
                 freeform_idx == cursor,
                 hovered_item == Some(freeform_idx),
                 freeform_text,
@@ -1790,6 +1870,7 @@ pub fn render_question_view(
                 is_multi,
                 theme,
                 focused,
+                freeform_placeholder,
             );
             let row_rect = Rect {
                 x: content_x,
@@ -1868,7 +1949,14 @@ pub fn render_question_scrollbar(
 }
 
 /// Render a truncation indicator line: `... Ctrl-F to expand`.
-fn render_truncation_indicator(buf: &mut Buffer, x: u16, y: u16, width: u16, theme: &Theme) {
+fn render_truncation_indicator(
+    buf: &mut Buffer,
+    x: u16,
+    y: u16,
+    width: u16,
+    theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
     let style = Style::default().fg(theme.gray).bg(theme.bg_light);
     let indicator = Line::from(vec![
         Span::styled("... ", style),
@@ -1876,7 +1964,12 @@ fn render_truncation_indicator(buf: &mut Buffer, x: u16, y: u16, width: u16, the
             "Ctrl-F",
             Style::default().fg(theme.accent_user).bg(theme.bg_light),
         ),
-        Span::styled(" to expand", style),
+        Span::styled(
+            locale
+                .map(|locale| locale.named_static_text("question.truncation.expand", " to expand"))
+                .unwrap_or(" to expand"),
+            style,
+        ),
     ]);
     buf.set_line(x, y, &indicator, width);
 }
@@ -1902,6 +1995,7 @@ fn render_question_chrome(
     fullscreen: bool,
     desc_cap: u16,
     preview_cap: u16,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> u16 {
     let mut cur_y = y;
     let w = width as usize;
@@ -1965,7 +2059,7 @@ fn render_question_chrome(
                 if cur_y >= max_y {
                     return cur_y;
                 }
-                render_truncation_indicator(buf, x, cur_y, width, theme);
+                render_truncation_indicator(buf, x, cur_y, width, theme, locale);
                 cur_y += 1;
                 break;
             }
@@ -2025,7 +2119,7 @@ fn render_question_chrome(
                     if cur_y >= max_y {
                         return cur_y;
                     }
-                    render_truncation_indicator(buf, x, cur_y, width, theme);
+                    render_truncation_indicator(buf, x, cur_y, width, theme, locale);
                     cur_y += 1;
                     break 'preview_done;
                 }

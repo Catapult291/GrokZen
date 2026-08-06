@@ -1,6 +1,10 @@
 //! Individual setting setters with persistence effects and toasts.
 
-use super::ui::{refresh_open_settings_modals, save_success_toast};
+use super::ui::{
+    refresh_open_settings_modals, setting_already_default_toast, setting_cleared_toast,
+    show_restart_required_setting_choice_toast, show_restart_required_setting_success_toast,
+    show_setting_choice_toast, show_setting_success_toast, show_setting_value_toast,
+};
 use crate::app::actions::Effect;
 use crate::app::app_view::{ActiveView, AppView};
 use agent_client_protocol as acp;
@@ -26,7 +30,7 @@ pub(in crate::app::dispatch) fn set_multiline_mode(app: &mut AppView, new: bool)
             surface = "dashboard",
             "setting changed",
         );
-        app.show_toast(&save_success_toast("Multiline", new));
+        show_setting_success_toast(app, "multiline_mode", "Multiline", new);
         return vec![];
     }
 
@@ -48,7 +52,7 @@ pub(in crate::app::dispatch) fn set_multiline_mode(app: &mut AppView, new: bool)
         value = new,
         "setting changed",
     );
-    app.show_toast(&save_success_toast("Multiline", new));
+    show_setting_success_toast(app, "multiline_mode", "Multiline", new);
     vec![]
 }
 
@@ -80,7 +84,13 @@ pub(in crate::app::dispatch) fn set_render_mermaid(
         value = kind.as_canonical(),
         "setting changed",
     );
-    app.show_toast(&format!("\u{2713} Mermaid: {}", kind.as_canonical()));
+    show_setting_choice_toast(
+        app,
+        "render_mermaid",
+        "Mermaid rendering",
+        kind.as_canonical(),
+        kind.as_canonical(),
+    );
     vec![Effect::PersistSetting {
         key: "render_mermaid",
         value: crate::settings::SettingValue::Enum(kind.as_canonical()),
@@ -113,9 +123,13 @@ pub(in crate::app::dispatch) fn set_screen_mode(app: &mut AppView, value: String
     set_screen_mode_inner(app, canonical);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "screen_mode", value = canonical, "setting changed");
-    app.show_toast(&format!(
-        "\u{2713} Screen mode: {canonical} (restart to apply)"
-    ));
+    show_restart_required_setting_choice_toast(
+        app,
+        "screen_mode",
+        "Default screen mode",
+        canonical,
+        canonical,
+    );
     vec![Effect::PersistSetting {
         key: "screen_mode",
         value: crate::settings::SettingValue::Enum(canonical),
@@ -152,9 +166,13 @@ pub(in crate::app::dispatch) fn set_hunk_tracker_mode(
     set_hunk_tracker_mode_inner(app, canonical);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "hunk_tracker_mode", value = canonical, "setting changed");
-    app.show_toast(&format!(
-        "\u{2713} Hunk tracker: {canonical} (restart to apply)"
-    ));
+    show_restart_required_setting_choice_toast(
+        app,
+        "hunk_tracker_mode",
+        "Hunk tracker mode",
+        canonical,
+        canonical,
+    );
     vec![Effect::PersistSetting {
         key: "hunk_tracker_mode",
         value: crate::settings::SettingValue::Enum(canonical),
@@ -185,7 +203,13 @@ pub(in crate::app::dispatch) fn set_voice_capture_mode(
     set_voice_capture_mode_inner(app, canonical);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "voice_capture_mode", value = canonical, "setting changed");
-    app.show_toast(&format!("\u{2713} Voice capture: {canonical}"));
+    show_setting_choice_toast(
+        app,
+        "voice_capture_mode",
+        "Voice capture",
+        canonical,
+        canonical,
+    );
     vec![Effect::PersistSetting {
         key: "voice_capture_mode",
         value: crate::settings::SettingValue::Enum(canonical),
@@ -218,7 +242,7 @@ pub(in crate::app::dispatch) fn set_voice_keybind_enabled(
     set_voice_keybind_enabled_inner(app, new);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "voice_keybind_enabled", value = new, "setting changed");
-    app.show_toast(&save_success_toast("Voice shortcut", new));
+    show_setting_success_toast(app, "voice_keybind_enabled", "Voice shortcut", new);
     vec![Effect::PersistSetting {
         key: "voice_keybind_enabled",
         value: crate::settings::SettingValue::Bool(new),
@@ -276,13 +300,18 @@ pub(in crate::app::dispatch) fn set_voice_stt_language(
         effective,
         "setting changed"
     );
-    let toast = if canonical == xai_grok_voice::STT_LANGUAGE_AUTO {
-        format!("\u{2713} Voice language: System ({effective})")
+    let value = if canonical == xai_grok_voice::STT_LANGUAGE_AUTO {
+        let system = app
+            .locale
+            .setting_choice_label("voice_stt_language", canonical, "System");
+        format!("{system} ({effective})")
     } else {
         let name = xai_grok_voice::stt_language_by_code(canonical).map_or(canonical, |l| l.name);
-        format!("\u{2713} Voice language: {name}")
+        app.locale
+            .setting_choice_label("voice_stt_language", canonical, name)
+            .into_owned()
     };
-    app.show_toast(&toast);
+    show_setting_value_toast(app, "voice_stt_language", "Voice language", &value);
     vec![Effect::PersistSetting {
         key: "voice_stt_language",
         value: crate::settings::SettingValue::Enum(canonical),
@@ -320,7 +349,7 @@ pub(in crate::app::dispatch) fn set_vim_mode(app: &mut AppView, new: bool) -> Ve
         value = new,
         "setting changed",
     );
-    app.show_toast(&save_success_toast("Vim scrollback", new));
+    show_setting_success_toast(app, "vim_mode", "Vim scrollback navigation", new);
     vec![Effect::PersistSetting {
         key: "vim_mode",
         value: crate::settings::SettingValue::Bool(new),
@@ -353,10 +382,12 @@ pub(in crate::app::dispatch) fn set_remember_tool_approvals(
         value = new,
         "setting changed",
     );
-    app.show_toast(&format!(
-        "{} (restart to apply)",
-        save_success_toast("Remember tool approvals", new),
-    ));
+    show_restart_required_setting_success_toast(
+        app,
+        "remember_tool_approvals",
+        "Remember tool approvals",
+        new,
+    );
     vec![Effect::PersistSetting {
         key: "remember_tool_approvals",
         value: crate::settings::SettingValue::Bool(new),
@@ -391,10 +422,12 @@ pub(in crate::app::dispatch) fn set_ask_user_question_timeout_enabled(
         value = new,
         "setting changed",
     );
-    app.show_toast(&format!(
-        "{} (restart to apply)",
-        save_success_toast("Ask-Question timeout", new),
-    ));
+    show_restart_required_setting_success_toast(
+        app,
+        "toolset.ask_user_question.timeout_enabled",
+        "Ask-Question timeout",
+        new,
+    );
     vec![Effect::PersistSetting {
         key: "toolset.ask_user_question.timeout_enabled",
         value: crate::settings::SettingValue::Bool(new),
@@ -440,7 +473,7 @@ pub(in crate::app::dispatch) fn set_show_thinking_blocks(
         value = new,
         "setting changed",
     );
-    app.show_toast(&save_success_toast("Thinking blocks", new));
+    show_setting_success_toast(app, "show_thinking_blocks", "Thinking blocks", new);
     vec![Effect::PersistSetting {
         key: "show_thinking_blocks",
         value: crate::settings::SettingValue::Bool(new),
@@ -480,7 +513,7 @@ pub(in crate::app::dispatch) fn set_group_tool_verbs(app: &mut AppView, new: boo
         value = new,
         "setting changed",
     );
-    app.show_toast(&save_success_toast("Group tool calls", new));
+    show_setting_success_toast(app, "group_tool_verbs", "Group tool calls", new);
     vec![Effect::PersistSetting {
         key: "group_tool_verbs",
         value: crate::settings::SettingValue::Bool(new),
@@ -527,7 +560,7 @@ pub(in crate::app::dispatch) fn set_collapsed_edit_blocks(
         value = new,
         "setting changed",
     );
-    app.show_toast(&save_success_toast("Collapsed edit blocks", new));
+    show_setting_success_toast(app, "collapsed_edit_blocks", "Collapsed edit blocks", new);
     vec![Effect::PersistSetting {
         key: "collapsed_edit_blocks",
         value: crate::settings::SettingValue::Bool(new),
@@ -562,7 +595,7 @@ pub(in crate::app::dispatch) fn set_prompt_suggestions(
         value = new,
         "setting changed",
     );
-    app.show_toast(&save_success_toast("Prompt suggestions", new));
+    show_setting_success_toast(app, "prompt_suggestions", "Prompt suggestions", new);
     vec![Effect::PersistSetting {
         key: "prompt_suggestions",
         value: crate::settings::SettingValue::Bool(new),
@@ -594,7 +627,13 @@ pub(in crate::app::dispatch) fn set_keep_text_selection(
         value = kind.as_canonical(),
         "setting changed",
     );
-    app.show_toast(&format!("\u{2713} Text selection: {}", kind.as_canonical()));
+    show_setting_choice_toast(
+        app,
+        "keep_text_selection",
+        "Keep text selection",
+        kind.as_canonical(),
+        kind.as_canonical(),
+    );
     vec![Effect::PersistSetting {
         key: "keep_text_selection",
         value: crate::settings::SettingValue::Enum(kind.as_canonical()),
@@ -630,7 +669,7 @@ pub(in crate::app::dispatch) fn set_scroll_speed(app: &mut AppView, raw: i64) ->
         value = clamped,
         "setting changed",
     );
-    app.show_toast(&format!("\u{2713} Scroll speed: {clamped}"));
+    show_setting_value_toast(app, "scroll_speed", "Scroll speed", &clamped.to_string());
     vec![Effect::PersistSetting {
         key: "scroll_speed",
         value: crate::settings::SettingValue::Int(clamped as i64),
@@ -664,7 +703,13 @@ pub(in crate::app::dispatch) fn set_scroll_mode(
         value = mode.as_canonical(),
         "setting changed",
     );
-    app.show_toast(&format!("\u{2713} Scroll input: {}", mode.as_canonical()));
+    show_setting_choice_toast(
+        app,
+        "scroll_mode",
+        "Scroll input",
+        mode.as_canonical(),
+        mode.as_canonical(),
+    );
     vec![Effect::PersistSetting {
         key: "scroll_mode",
         value: crate::settings::SettingValue::Enum(mode.as_canonical()),
@@ -695,7 +740,7 @@ pub(in crate::app::dispatch) fn set_invert_scroll(app: &mut AppView, new: bool) 
         value = new,
         "setting changed",
     );
-    app.show_toast(&save_success_toast("Invert scroll", new));
+    show_setting_success_toast(app, "invert_scroll", "Invert scroll", new);
     vec![Effect::PersistSetting {
         key: "invert_scroll",
         value: crate::settings::SettingValue::Bool(new),
@@ -731,7 +776,7 @@ pub(in crate::app::dispatch) fn set_scroll_lines(app: &mut AppView, raw: i64) ->
         value = clamped,
         "setting changed",
     );
-    app.show_toast(&format!("\u{2713} Scroll lines: {clamped}"));
+    show_setting_value_toast(app, "scroll_lines", "Scroll lines", &clamped.to_string());
     vec![Effect::PersistSetting {
         key: "scroll_lines",
         value: crate::settings::SettingValue::Int(clamped as i64),
@@ -769,7 +814,7 @@ pub(in crate::app::dispatch) fn set_respect_manual_folds(
         value = new,
         "setting changed",
     );
-    app.show_toast(&save_success_toast("Respect manual folds", new));
+    show_setting_success_toast(app, "respect_manual_folds", "Respect manual folds", new);
     vec![Effect::PersistSetting {
         key: "respect_manual_folds",
         value: crate::settings::SettingValue::Bool(new),
@@ -817,10 +862,13 @@ pub(in crate::app::dispatch) fn set_default_selected_permission(
         value = new_canonical,
         "setting changed",
     );
-    app.show_toast(&format!(
-        "\u{2713} Default selected permission: {}",
+    show_setting_choice_toast(
+        app,
+        "default_selected_permission",
+        "Default selected permission",
+        new_canonical,
         parsed.display(),
-    ));
+    );
     vec![Effect::PersistSetting {
         key: "default_selected_permission",
         value: crate::settings::SettingValue::Enum(new_canonical),
@@ -879,9 +927,22 @@ pub(in crate::app::dispatch) fn set_compact_mode(app: &mut AppView, new: bool) -
     // Turning the setting off while the short-terminal derivation holds keeps
     // the UI compact; say so instead of implying the layout will loosen.
     if !new && crate::views::agent::effective_compact(false, app.last_known_terminal_rows) {
-        app.show_toast("\u{2713} Compact mode: off (auto-compact active on small terminal)");
+        let saved = super::ui::save_success_toast_with_locale(
+            app.locale.as_ref(),
+            "compact_mode",
+            "Compact mode",
+            false,
+        );
+        let toast = app
+            .locale
+            .named_text(
+                "settings.toast.compact_auto_active",
+                "{message} (auto-compact active on small terminal)",
+            )
+            .replace("{message}", &saved);
+        app.show_toast(&toast);
     } else {
-        app.show_toast(&save_success_toast("Compact mode", new));
+        show_setting_success_toast(app, "compact_mode", "Compact mode", new);
     }
     vec![Effect::PersistSetting {
         key: "compact_mode",
@@ -913,7 +974,7 @@ pub(in crate::app::dispatch) fn set_timestamps(app: &mut AppView, new: bool) -> 
     set_timestamps_inner(app, new);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "show_timestamps", value = new, "setting changed");
-    app.show_toast(&save_success_toast("Timestamps", new));
+    show_setting_success_toast(app, "show_timestamps", "Timestamps", new);
     vec![Effect::PersistSetting {
         key: "show_timestamps",
         value: crate::settings::SettingValue::Bool(new),
@@ -946,7 +1007,7 @@ pub(in crate::app::dispatch) fn set_timeline(app: &mut AppView, new: bool) -> Ve
     set_timeline_inner(app, new);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "show_timeline", value = new, "setting changed");
-    app.show_toast(&save_success_toast("Timeline sidebar", new));
+    show_setting_success_toast(app, "show_timeline", "Timeline sidebar", new);
     vec![Effect::PersistSetting {
         key: "show_timeline",
         value: crate::settings::SettingValue::Bool(new),
@@ -968,7 +1029,7 @@ pub(in crate::app::dispatch) fn set_page_flip_on_send(app: &mut AppView, new: bo
     set_page_flip_on_send_inner(app, new);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "page_flip_on_send", value = new, "setting changed");
-    app.show_toast(&save_success_toast("Snap prompt to top on send", new));
+    show_setting_success_toast(app, "page_flip_on_send", "Snap prompt to top on send", new);
     vec![Effect::PersistSetting {
         key: "page_flip_on_send",
         value: crate::settings::SettingValue::Bool(new),
@@ -993,7 +1054,7 @@ pub(in crate::app::dispatch) fn set_combine_queued_prompts(
     set_combine_queued_prompts_inner(app, new);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "combine_queued_prompts", value = new, "setting changed");
-    app.show_toast(&save_success_toast("Combine queued prompts", new));
+    show_setting_success_toast(app, "combine_queued_prompts", "Combine queued prompts", new);
     vec![Effect::PersistSetting {
         key: "combine_queued_prompts",
         value: crate::settings::SettingValue::Bool(new),
@@ -1033,7 +1094,7 @@ pub(in crate::app::dispatch) fn set_simple_mode(app: &mut AppView, new: bool) ->
     // Toast label mirrors the renamed registry label
     // ("Disable vim input mode") so the user sees the same name in the
     // modal and the toast.
-    app.show_toast(&save_success_toast("Disable vim input mode", new));
+    show_setting_success_toast(app, "simple_mode", "Disable vim input mode", new);
     vec![Effect::PersistSetting {
         key: "simple_mode",
         value: crate::settings::SettingValue::Bool(new),
@@ -1086,7 +1147,7 @@ fn set_contextual_hint(
     set_contextual_hint_inner(app, write, new);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key, value = new, "setting changed");
-    app.show_toast(&save_success_toast(label, new));
+    show_setting_success_toast(app, key, label, new);
     vec![Effect::PersistSetting {
         key,
         value: crate::settings::SettingValue::Bool(new),
@@ -1213,12 +1274,6 @@ pub(in crate::app::dispatch) fn set_contextual_hint_ssh_wrap(
 // (rollback of corrupted config).
 // ---------------------------------------------------------------------------
 
-/// Format a "✓ <Label>: <value>" toast for theme-family settings.
-/// `value` is the user-friendly display name, not the canonical.
-fn save_theme_toast(label: &str, value: &str) -> String {
-    format!("\u{2713} {label}: {value}")
-}
-
 /// Apply a (non-auto) theme to the live display.
 ///
 /// Centralised so `set_theme_inner` and `preview_theme_inner` share the
@@ -1314,10 +1369,13 @@ pub(in crate::app::dispatch) fn set_theme(app: &mut AppView, new: String) -> Vec
         value = %new_canonical,
         "setting changed",
     );
-    app.show_toast(&save_theme_toast(
+    show_setting_choice_toast(
+        app,
+        "theme",
         "Theme",
+        new_canonical,
         crate::theme::display_name_for_canonical(new_canonical),
-    ));
+    );
     vec![Effect::PersistSetting {
         key: "theme",
         value: crate::settings::SettingValue::Enum(new_canonical),
@@ -1418,10 +1476,13 @@ pub(in crate::app::dispatch) fn set_auto_dark_theme(app: &mut AppView, new: Stri
         value = %new_canonical,
         "setting changed",
     );
-    app.show_toast(&save_theme_toast(
+    show_setting_choice_toast(
+        app,
+        "auto_dark_theme",
         "Auto dark theme",
+        new_canonical,
         crate::theme::display_name_for_canonical(new_canonical),
-    ));
+    );
     vec![Effect::PersistSetting {
         key: "auto_dark_theme",
         value: crate::settings::SettingValue::Enum(new_canonical),
@@ -1531,10 +1592,13 @@ pub(in crate::app::dispatch) fn set_auto_light_theme(
         value = %new_canonical,
         "setting changed",
     );
-    app.show_toast(&save_theme_toast(
+    show_setting_choice_toast(
+        app,
+        "auto_light_theme",
         "Auto light theme",
+        new_canonical,
         crate::theme::display_name_for_canonical(new_canonical),
-    ));
+    );
     vec![Effect::PersistSetting {
         key: "auto_light_theme",
         value: crate::settings::SettingValue::Enum(new_canonical),
@@ -1627,13 +1691,6 @@ pub(in crate::app::dispatch) fn set_default_model_inner(
     true
 }
 
-/// Toast format for `default_model`. Mirrors `save_theme_toast` —
-/// renders the user-friendly model name (NOT the internal id) so the
-/// toast text matches what the user typed.
-fn save_default_model_toast(value: &str) -> String {
-    format!("\u{2713} Default model: {value}")
-}
-
 /// Outer dispatcher for `Action::SetDefaultModel`. Switches and persists
 /// and toasts. `PersistSetting` emitted first for consistent rollback;
 /// `SwitchModel` second. Idempotent: same model already active → no-op.
@@ -1696,7 +1753,7 @@ pub(in crate::app::dispatch) fn set_default_model(
         prev_id = ?prev_id.as_ref().map(|id| id.0.as_ref()),
         "setting changed",
     );
-    app.show_toast(&save_default_model_toast(&new_display));
+    show_setting_value_toast(app, "default_model", "Default model", &new_display);
 
     // Persist the **model ID** (catalog key), not the display name.
     // The shell's `resolve_default_model` matches by slug / map key,
@@ -1779,7 +1836,8 @@ pub(in crate::app::dispatch) fn clear_default_model(app: &mut AppView) -> Vec<Ef
             "setting changed (startup-window clear — pager mirror was already None; \
              persist proceeds to ensure disk state matches user intent)",
         );
-        app.show_toast("\u{2713} Default model: cleared");
+        let toast = setting_cleared_toast(app.locale.as_ref(), "default_model", "Default model");
+        app.show_toast(&toast);
         return vec![Effect::PersistSetting {
             key: "default_model",
             value: crate::settings::SettingValue::String(String::new()),
@@ -1795,7 +1853,8 @@ pub(in crate::app::dispatch) fn clear_default_model(app: &mut AppView) -> Vec<Ef
         "setting changed",
     );
     refresh_open_settings_modals(app);
-    app.show_toast("\u{2713} Default model: cleared");
+    let toast = setting_cleared_toast(app.locale.as_ref(), "default_model", "Default model");
+    app.show_toast(&toast);
     vec![Effect::PersistSetting {
         key: "default_model",
         value: crate::settings::SettingValue::String(String::new()),
@@ -1818,13 +1877,6 @@ pub(in crate::app::dispatch) fn clear_default_model(app: &mut AppView) -> Vec<Ef
 /// the disk change to any running agents on the next fork.
 pub(super) fn set_fork_secondary_model_inner(app: &mut AppView, value: String) {
     app.current_ui.fork_secondary_model = value;
-}
-
-/// Toast format for `fork_secondary_model`. Mirrors
-/// `save_default_model_toast` — renders the user-friendly model
-/// name (NOT the internal id).
-fn save_fork_secondary_model_toast(value: &str) -> String {
-    format!("\u{2713} Fork secondary model: {value}")
 }
 
 /// Outer dispatcher for `Action::SetForkSecondaryModel`.
@@ -1885,7 +1937,12 @@ pub(in crate::app::dispatch) fn set_fork_secondary_model(
         prev_id = %prev_id_str,
         "setting changed",
     );
-    app.show_toast(&save_fork_secondary_model_toast(&new_display));
+    show_setting_value_toast(
+        app,
+        "fork_secondary_model",
+        "Fork secondary model",
+        &new_display,
+    );
     vec![Effect::PersistSetting {
         key: "fork_secondary_model",
         value: crate::settings::SettingValue::String(new_id_str),
@@ -1901,7 +1958,12 @@ pub(in crate::app::dispatch) fn clear_fork_secondary_model(app: &mut AppView) ->
     let prev_id_str = app.current_ui.fork_secondary_model.clone();
     if prev_id_str == baseline {
         // Idempotent: already at baseline.
-        app.show_toast("\u{2713} Fork secondary model: already at default");
+        let toast = setting_already_default_toast(
+            app.locale.as_ref(),
+            "fork_secondary_model",
+            "Fork secondary model",
+        );
+        app.show_toast(&toast);
         return vec![];
     }
     tracing::info!(
@@ -1913,7 +1975,12 @@ pub(in crate::app::dispatch) fn clear_fork_secondary_model(app: &mut AppView) ->
     );
     set_fork_secondary_model_inner(app, baseline);
     refresh_open_settings_modals(app);
-    app.show_toast("\u{2713} Fork secondary model: cleared");
+    let toast = setting_cleared_toast(
+        app.locale.as_ref(),
+        "fork_secondary_model",
+        "Fork secondary model",
+    );
+    app.show_toast(&toast);
     vec![Effect::PersistSetting {
         key: "fork_secondary_model",
         // Persist payload is the empty-sentinel — the shell helper
@@ -1968,7 +2035,12 @@ pub(in crate::app::dispatch) fn set_max_thoughts_width(app: &mut AppView, new: i
         value = clamped,
         "setting changed",
     );
-    app.show_toast(&format!("\u{2713} Max thoughts width: {clamped}"));
+    show_setting_value_toast(
+        app,
+        "max_thoughts_width",
+        "Max thoughts width",
+        &clamped.to_string(),
+    );
     vec![Effect::PersistSetting {
         key: "max_thoughts_width",
         value: crate::settings::SettingValue::Int(clamped),
@@ -2021,10 +2093,7 @@ pub(in crate::app::dispatch) fn set_show_tips(app: &mut AppView, new: bool) -> V
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "show_tips", value = new, "setting changed");
     // Restart-required: cue in the toast.
-    app.show_toast(&format!(
-        "{} (restart to apply)",
-        save_success_toast("Show tips", new),
-    ));
+    show_restart_required_setting_success_toast(app, "show_tips", "Show tips", new);
     vec![Effect::PersistSetting {
         key: "show_tips",
         value: crate::settings::SettingValue::Bool(new),
@@ -2047,10 +2116,7 @@ pub(in crate::app::dispatch) fn set_auto_update(app: &mut AppView, new: bool) ->
     set_auto_update_inner(app, new);
     refresh_open_settings_modals(app);
     tracing::info!(target: "settings", key = "auto_update", value = new, "setting changed");
-    app.show_toast(&format!(
-        "{} (restart to apply)",
-        save_success_toast("Auto-update", new),
-    ));
+    show_restart_required_setting_success_toast(app, "auto_update", "Auto-update", new);
     vec![Effect::PersistSetting {
         key: "auto_update",
         value: crate::settings::SettingValue::Bool(new),
@@ -2086,10 +2152,12 @@ pub(in crate::app::dispatch) fn set_display_refresh_auto_cadence(
         value = new,
         "setting changed",
     );
-    app.show_toast(&format!(
-        "{} (restart to apply)",
-        save_success_toast("Match display refresh rate", new),
-    ));
+    show_restart_required_setting_success_toast(
+        app,
+        "display_refresh_auto_cadence",
+        "Match display refresh rate",
+        new,
+    );
     vec![Effect::PersistSetting {
         key: "display_refresh_auto_cadence",
         value: crate::settings::SettingValue::Bool(new),

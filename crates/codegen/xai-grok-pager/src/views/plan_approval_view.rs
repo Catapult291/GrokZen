@@ -22,15 +22,43 @@ The agent exited plan mode without writing a plan.
 - **Quit** — abandon and turn plan mode off
 ";
 
+pub fn empty_plan_placeholder_with_locale(locale: Option<&crate::locale::LocaleContext>) -> String {
+    locale
+        .map(|locale| {
+            locale
+                .named_text("plan.approval.empty_placeholder", EMPTY_PLAN_PLACEHOLDER)
+                .into_owned()
+        })
+        .unwrap_or_else(|| EMPTY_PLAN_PLACEHOLDER.to_owned())
+}
+
 /// Status-line label while plan approval is parked.
 ///
 /// Empty plans use an active decision prompt instead of "Waiting…", so the
 /// UI doesn't look stuck when there is no preview body to open.
 pub fn plan_approval_status_label(has_plan: bool) -> &'static str {
+    plan_approval_status_label_with_locale(has_plan, None)
+}
+
+pub fn plan_approval_status_label_with_locale(
+    has_plan: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> &'static str {
     if has_plan {
-        "Waiting on plan approval"
+        locale
+            .map(|locale| {
+                locale.named_static_text("plan.approval.status.waiting", "Waiting on plan approval")
+            })
+            .unwrap_or("Waiting on plan approval")
     } else {
-        "No plan written — approve or request changes"
+        locale
+            .map(|locale| {
+                locale.named_static_text(
+                    "plan.approval.status.empty",
+                    "No plan written — approve or request changes",
+                )
+            })
+            .unwrap_or("No plan written — approve or request changes")
     }
 }
 

@@ -6,28 +6,36 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use xai_grok_config::grok_home;
 
-/// Path to `$GROK_HOME/pager.toml`.
+/// Path to the resolved community-build home `pager.toml`.
 pub fn pager_toml_path() -> PathBuf {
     grok_home().join("pager.toml")
 }
 
-/// User-facing label for the user grok directory (``~/.grok`` or ``$GROK_HOME``).
+/// User-facing label for the community-build data directory.
 ///
 /// Derived from resolved [`grok_home()`] vs `xai_grok_config::default_grok_home()`,
-/// not from whether `GROK_HOME` is set in the environment.
+/// Custom paths retain the name of the override that actually selected them.
 pub fn display_grok_home_prefix() -> String {
     display_grok_home_prefix_for(&grok_home())
 }
 
 fn display_grok_home_prefix_for(home: &Path) -> String {
     if home == xai_grok_config::default_grok_home() {
-        "~/.grok".to_string()
-    } else {
-        "$GROK_HOME".to_string()
+        return format!("~/{}", xai_grok_product::DATA_DIR_NAME);
     }
+    let names = [
+        Some(xai_grok_product::HOME_ENV),
+        cfg!(debug_assertions).then_some(xai_grok_product::COMPAT_HOME_ENV),
+    ];
+    for name in names.into_iter().flatten() {
+        if std::env::var_os(name).is_some_and(|value| PathBuf::from(value) == home) {
+            return format!("${name}");
+        }
+    }
+    format!("${}", xai_grok_product::HOME_ENV)
 }
 
-/// User-facing path under [`grok_home()`], e.g. ``~/.grok/config.toml``.
+/// User-facing path under [`grok_home()`], e.g. ``~/.grok-zh/config.toml``.
 pub fn display_user_grok_path(relative: impl AsRef<Path>) -> String {
     display_user_grok_path_for(&grok_home(), relative)
 }
@@ -426,10 +434,13 @@ mod tests {
 
     #[test]
     fn display_grok_home_prefix_default_install() {
-        if std::env::var("GROK_HOME").is_ok() {
+        if std::env::var_os(xai_grok_product::HOME_ENV).is_some()
+            || (cfg!(debug_assertions)
+                && std::env::var_os(xai_grok_product::COMPAT_HOME_ENV).is_some())
+        {
             return;
         }
-        assert_eq!(display_grok_home_prefix(), "~/.grok");
+        assert_eq!(display_grok_home_prefix(), "~/.grok-zh");
     }
 
     #[test]
@@ -444,11 +455,11 @@ mod tests {
         let custom = std::env::temp_dir().join("grok-home-display-regression");
         assert_eq!(
             display_user_grok_path_for(&custom, "config.toml"),
-            "$GROK_HOME/config.toml"
+            "$GROK_ZH_HOME/config.toml"
         );
         assert_eq!(
             display_user_grok_path_for(&custom, "sandbox.toml"),
-            "$GROK_HOME/sandbox.toml"
+            "$GROK_ZH_HOME/sandbox.toml"
         );
     }
 
@@ -458,7 +469,7 @@ mod tests {
             if home.is_empty() {
                 return;
             }
-            let full = format!("{home}/.grok/memory/MEMORY.md");
+            let full = format!("{home}/.grok-zh/memory/MEMORY.md");
             let abbreviated = abbreviate_path(&full);
             assert!(
                 abbreviated.contains("memory/MEMORY.md"),

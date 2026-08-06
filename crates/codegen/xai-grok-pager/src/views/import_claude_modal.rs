@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use xai_grok_shell::claude_import::{ImportPlan, ImportableItem, PathKind, find_project_root};
 use xai_grok_workspace::permission::types::RuleAction;
 
+use crate::locale::LocaleContext;
 use crate::theme::Theme;
 use crate::views::modal_window::{
     FoldInfo, ModalSizing, ModalWindowConfig, ModalWindowOutcome, ModalWindowState, Shortcut,
@@ -120,12 +121,16 @@ impl ItemKind {
     }
 
     fn label(&self) -> &'static str {
+        self.label_with_locale(None)
+    }
+
+    fn label_with_locale(&self, locale: Option<&LocaleContext>) -> &'static str {
         match self {
-            Self::Permission => "Permissions",
-            Self::EnvVar => "Env vars",
-            Self::McpServer => "MCP servers",
-            Self::Hook => "Hooks",
-            Self::PathEntry => "Paths",
+            Self::Permission => import_static(locale, "import.category.permissions", "Permissions"),
+            Self::EnvVar => import_static(locale, "import.category.env_vars", "Env vars"),
+            Self::McpServer => import_static(locale, "import.category.mcp_servers", "MCP servers"),
+            Self::Hook => import_static(locale, "import.category.hooks", "Hooks"),
+            Self::PathEntry => import_static(locale, "import.category.paths", "Paths"),
         }
     }
 
@@ -139,6 +144,18 @@ impl ItemKind {
             Self::PathEntry => 4,
         }
     }
+}
+
+fn import_static(locale: Option<&LocaleContext>, id: &str, english: &'static str) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn import_text(locale: Option<&LocaleContext>, id: &str, english: &str) -> String {
+    locale
+        .map(|locale| locale.named_text(id, english).into_owned())
+        .unwrap_or_else(|| english.to_owned())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -594,30 +611,46 @@ pub fn render_import_claude_modal(
     theme: &Theme,
     compact: bool,
 ) {
-    let confirm_label = format!("Enter import {}", state.selected_count());
+    render_import_claude_modal_with_locale(buf, area, state, theme, compact, None)
+}
+
+pub fn render_import_claude_modal_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut ImportClaudeModalState,
+    theme: &Theme,
+    compact: bool,
+    locale: Option<&LocaleContext>,
+) {
+    let confirm_label = import_text(locale, "import.shortcut.confirm", "Enter import {count}")
+        .replace("{count}", &state.selected_count().to_string());
     let shortcuts = [
         Shortcut {
-            label: "\u{2191}\u{2193} navigate",
+            label: import_static(
+                locale,
+                "import.shortcut.navigate",
+                "\u{2191}\u{2193} navigate",
+            ),
             clickable: false,
             id: SHORTCUT_ID_HINT,
         },
         Shortcut {
-            label: "space toggle",
+            label: import_static(locale, "import.shortcut.toggle", "space toggle"),
             clickable: false,
             id: SHORTCUT_ID_HINT,
         },
         Shortcut {
-            label: "\u{2190}\u{2192} fold",
+            label: import_static(locale, "import.shortcut.fold", "\u{2190}\u{2192} fold"),
             clickable: false,
             id: SHORTCUT_ID_HINT,
         },
         Shortcut {
-            label: "a all",
+            label: import_static(locale, "import.shortcut.all", "a all"),
             clickable: true,
             id: SHORTCUT_ID_SELECT_ALL,
         },
         Shortcut {
-            label: "n none",
+            label: import_static(locale, "import.shortcut.none", "n none"),
             clickable: true,
             id: SHORTCUT_ID_SELECT_NONE,
         },
@@ -627,13 +660,13 @@ pub fn render_import_claude_modal(
             id: SHORTCUT_ID_CONFIRM,
         },
         Shortcut {
-            label: "Esc cancel",
+            label: import_static(locale, "import.shortcut.cancel", "Esc cancel"),
             clickable: true,
             id: SHORTCUT_ID_CANCEL,
         },
     ];
     let config = ModalWindowConfig {
-        title: "Import Claude settings",
+        title: import_static(locale, "import.title", "Import Claude settings"),
         tabs: None,
         shortcuts: &shortcuts,
         sizing: ModalSizing::default().with_compact(compact),
@@ -683,7 +716,7 @@ pub fn render_import_claude_modal(
                 }
             }
         }
-        let line = render_row_dispatch(
+        let line = render_row_dispatch_with_locale(
             row,
             is_focused,
             &state.plan,
@@ -691,6 +724,7 @@ pub fn render_import_claude_modal(
             theme,
             &state.collapsed,
             is_focused && state.fold_indicator_hovered,
+            locale,
         );
         let row_rect = Rect {
             x: content_area.x,
@@ -714,7 +748,7 @@ fn build_rows(
     if !plan.global_items.is_empty() {
         let scope_start = flat_index;
         let scope_key = format!("scope:{:?}", Scope::Global);
-        let label = "Global  ~/.grok/config.toml".to_string();
+        let label = "Global  ~/.grok-zh/config.toml".to_string();
         // Placeholder header; flat_indices filled after children are pushed.
         let scope_header_pos = rows.len();
         rows.push(Row::ScopeHeader {
@@ -852,28 +886,70 @@ fn render_row_dispatch<'a>(
     collapsed_set: &std::collections::HashSet<String>,
     fold_hovered: bool,
 ) -> Line<'a> {
+    render_row_dispatch_with_locale(
+        row,
+        focused,
+        plan,
+        selected,
+        theme,
+        collapsed_set,
+        fold_hovered,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_row_dispatch_with_locale<'a>(
+    row: &Row,
+    focused: bool,
+    plan: &'a ImportPlan,
+    selected: &[bool],
+    theme: &Theme,
+    collapsed_set: &std::collections::HashSet<String>,
+    fold_hovered: bool,
+    locale: Option<&LocaleContext>,
+) -> Line<'a> {
     match row {
         Row::ScopeHeader {
             label,
             flat_indices,
             section_key,
-        } => render_header_line(
-            label,
-            flat_indices,
-            selected,
-            focused,
-            theme,
-            /* indent: */ 0,
-            true,
-            collapsed_set.contains(section_key),
-            focused && fold_hovered,
-        ),
+        } => {
+            let display_label = if let Some(path) = label.strip_prefix("Global  ") {
+                format!(
+                    "{}  {path}",
+                    import_static(locale, "import.scope.global", "Global")
+                )
+            } else if let Some(path) = label.strip_prefix("Project  ") {
+                format!(
+                    "{}  {path}",
+                    import_static(locale, "import.scope.project", "Project")
+                )
+            } else {
+                label.clone()
+            };
+            render_header_line(
+                &display_label,
+                flat_indices,
+                selected,
+                focused,
+                theme,
+                /* indent: */ 0,
+                true,
+                collapsed_set.contains(section_key),
+                focused && fold_hovered,
+            )
+        }
         Row::TypeHeader {
             kind,
             flat_indices,
             section_key,
         } => {
-            let label = format!("{} ({})", kind.label(), flat_indices.len());
+            let label = format!(
+                "{} ({})",
+                kind.label_with_locale(locale),
+                flat_indices.len()
+            );
             render_header_line(
                 &label,
                 flat_indices,
@@ -897,7 +973,7 @@ fn render_row_dispatch<'a>(
                 Scope::Project => &plan.project_items[*item_index],
             };
             let is_selected = selected.get(*flat_index).copied().unwrap_or(false);
-            render_item_line(item, is_selected, focused, theme)
+            render_item_line_with_locale(item, is_selected, focused, theme, locale)
         }
     }
 }
@@ -972,6 +1048,16 @@ fn render_item_line<'a>(
     focused: bool,
     theme: &Theme,
 ) -> Line<'a> {
+    render_item_line_with_locale(item, selected, focused, theme, None)
+}
+
+fn render_item_line_with_locale<'a>(
+    item: &'a ImportableItem,
+    selected: bool,
+    focused: bool,
+    theme: &Theme,
+    locale: Option<&LocaleContext>,
+) -> Line<'a> {
     // Brackets stay gray; the mark itself is the only colored cell.
     let (mark, mark_base) = if selected {
         (
@@ -983,7 +1069,7 @@ fn render_item_line<'a>(
     };
     let bracket_style = with_bg(Style::default().fg(theme.gray_dim), focused, theme);
     let mark_style = with_bg(mark_base, focused, theme);
-    let label = format_item_label(item);
+    let label = format_item_label_with_locale(item, locale);
     let label_style = with_bg(Style::default().fg(theme.text_primary), focused, theme);
     // Items live under TypeHeaders (indent 2) under ScopeHeaders (indent 0).
     // Indent items at 4 spaces total so they visually nest below their group.
@@ -1012,6 +1098,10 @@ fn with_bg(style: Style, focused: bool, theme: &Theme) -> Style {
 }
 
 fn format_item_label(item: &ImportableItem) -> String {
+    format_item_label_with_locale(item, None)
+}
+
+fn format_item_label_with_locale(item: &ImportableItem, locale: Option<&LocaleContext>) -> String {
     match item {
         ImportableItem::Permission(rule) => {
             let action = match rule.action {
@@ -1041,8 +1131,8 @@ fn format_item_label(item: &ImportableItem) -> String {
         }
         ImportableItem::PathEntry { kind, path } => {
             let kind_str = match kind {
-                PathKind::Skill => "skill dir",
-                PathKind::Rule => "rule dir",
+                PathKind::Skill => import_static(locale, "import.path.skill_dir", "skill dir"),
+                PathKind::Rule => import_static(locale, "import.path.rule_dir", "rule dir"),
             };
             format!("{kind_str}: {path}")
         }

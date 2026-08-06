@@ -116,6 +116,14 @@ impl SubagentCatalogPane {
     // -- Data sync -----------------------------------------------------------
 
     pub fn sync_from_bundle(&mut self, state: &BundleState) {
+        self.sync_from_bundle_with_locale(state, None);
+    }
+
+    pub fn sync_from_bundle_with_locale(
+        &mut self,
+        state: &BundleState,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) {
         self.entries.clear();
         if !state.has_cache {
             return;
@@ -128,19 +136,40 @@ impl SubagentCatalogPane {
         let item_style = Style::default().fg(theme.text_primary);
         let desc_style = Style::default().fg(theme.gray_bright);
 
-        let groups: [(&str, &'static str, &[String]); 3] = [
-            ("Personas", "persona", &state.personas),
-            ("Roles", "role", &state.roles),
-            ("Agents", "agent", &state.agents),
+        let groups: [(&str, &str, &'static str, &[String]); 3] = [
+            (
+                "Personas",
+                locale
+                    .map(|locale| locale.named_static_text("catalog.group.personas", "Personas"))
+                    .unwrap_or("Personas"),
+                "persona",
+                &state.personas,
+            ),
+            (
+                "Roles",
+                locale
+                    .map(|locale| locale.named_static_text("catalog.group.roles", "Roles"))
+                    .unwrap_or("Roles"),
+                "role",
+                &state.roles,
+            ),
+            (
+                "Agents",
+                locale
+                    .map(|locale| locale.named_static_text("catalog.group.agents", "Agents"))
+                    .unwrap_or("Agents"),
+                "agent",
+                &state.agents,
+            ),
         ];
 
-        for (name, kind, items) in &groups {
+        for (canonical_name, display_name, kind, items) in &groups {
             if items.is_empty() {
                 continue;
             }
             let mut hasher = DefaultHasher::new();
-            name.hash(&mut hasher);
-            let owned_name = name.to_string();
+            canonical_name.hash(&mut hasher);
+            let owned_name = display_name.to_string();
             self.entries.push(CatalogEntry {
                 id: hasher.finish(),
                 styled: Line::from(Span::styled(owned_name.clone(), header_style)),
@@ -150,7 +179,7 @@ impl SubagentCatalogPane {
             });
             for item in *items {
                 let mut hasher = DefaultHasher::new();
-                name.hash(&mut hasher);
+                canonical_name.hash(&mut hasher);
                 item.hash(&mut hasher);
                 let desc = lookup_description(kind, item, state);
                 let spans = if let Some(d) = &desc {
@@ -264,12 +293,25 @@ impl SubagentCatalogPane {
         focused: bool,
         layout_cfg: &LayoutConfig,
     ) {
+        self.render_with_locale(area, buf, focused, layout_cfg, None);
+    }
+
+    pub fn render_with_locale(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        focused: bool,
+        layout_cfg: &LayoutConfig,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) {
         let inner = Self::content_area(area, layout_cfg);
         if self.entries.is_empty() {
             if inner.height > 0 && inner.width > 0 {
                 let theme = Theme::current();
-                let span =
-                    Span::styled("No bundled items.", Style::default().fg(theme.gray_bright));
+                let message = locale
+                    .map(|locale| locale.named_static_text("catalog.empty", "No bundled items."))
+                    .unwrap_or("No bundled items.");
+                let span = Span::styled(message, Style::default().fg(theme.gray_bright));
                 buf.set_span(inner.x, inner.y, &span, inner.width);
             }
             return;
@@ -279,6 +321,7 @@ impl SubagentCatalogPane {
         ListPane::new(&self.entries)
             .focused(focused)
             .style(self.list_style)
+            .with_locale(locale)
             .render(inner, buf, &mut self.list_state);
     }
 }

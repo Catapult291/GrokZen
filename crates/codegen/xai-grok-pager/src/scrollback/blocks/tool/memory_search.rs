@@ -73,7 +73,13 @@ impl MemorySearchToolCallBlock {
         })
     }
 
-    fn header_line(&self, theme: &Theme, muted: bool, max_width: Option<usize>) -> Line<'static> {
+    fn header_line(
+        &self,
+        theme: &Theme,
+        muted: bool,
+        max_width: Option<usize>,
+        locale: &crate::locale::LocaleContext,
+    ) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
         } else {
@@ -86,22 +92,30 @@ impl MemorySearchToolCallBlock {
             theme.fg(theme.command)
         };
 
-        let prefix = "Memory Search ";
+        let prefix = locale
+            .named_text("scrollback.tool.memory_search.label", "Memory Search ")
+            .into_owned();
         let count = self.results.len();
         let suffix = if count > 0 {
-            let s = if count == 1 { "" } else { "s" };
-            format!(" ({count} result{s})")
+            if locale.locale() == crate::locale::UiLocale::ZhCn {
+                format!("（{count} 个结果）")
+            } else {
+                let s = if count == 1 { "" } else { "s" };
+                format!(" ({count} result{s})")
+            }
         } else {
             String::new()
         };
 
         match max_width {
             Some(w) => {
-                let suffix_fits = prefix.len() + suffix.len() < w;
+                let prefix_width = unicode_width::UnicodeWidthStr::width(prefix.as_str());
+                let suffix_width = unicode_width::UnicodeWidthStr::width(suffix.as_str());
+                let suffix_fits = prefix_width + suffix_width < w;
                 let effective_suffix = if suffix_fits { &suffix } else { "" };
                 let query_budget = w
-                    .saturating_sub(prefix.len())
-                    .saturating_sub(effective_suffix.len());
+                    .saturating_sub(prefix_width)
+                    .saturating_sub(unicode_width::UnicodeWidthStr::width(effective_suffix));
                 let display_query = truncate_str(&self.query, query_budget);
 
                 let mut spans = vec![
@@ -146,10 +160,11 @@ impl BlockContent for MemorySearchToolCallBlock {
                     &theme,
                     muted_collapsed,
                     Some(ctx.content_width()),
+                    &ctx.locale,
                 ))],
             },
             DisplayMode::Truncated | DisplayMode::Expanded => {
-                let header = self.header_line(&theme, false, None);
+                let header = self.header_line(&theme, false, None, &ctx.locale);
                 let wrapped = crate::render::wrapping::wrap_header_flush(
                     header,
                     ctx.width as usize,
@@ -184,8 +199,12 @@ impl BlockContent for MemorySearchToolCallBlock {
 
                 if self.results.is_empty() && self.error.is_none() {
                     lines.push(BlockLine::separator(Line::from("")));
+                    let no_results = ctx
+                        .locale
+                        .named_text("scrollback.tool.no_results", "  (no results)")
+                        .into_owned();
                     lines.push(BlockLine::separator(Line::from(Span::styled(
-                        "  (no results)",
+                        no_results,
                         theme.muted(),
                     ))));
                 }
@@ -200,10 +219,12 @@ impl BlockContent for MemorySearchToolCallBlock {
                         format!("{path_display}:{}-{}", r.start_line, r.end_line),
                         theme.primary().add_modifier(Modifier::BOLD),
                     );
-                    let meta_span = Span::styled(
-                        format!("  (score: {:.2}, {})", r.score, r.source),
-                        theme.dim(),
-                    );
+                    let meta_text = if ctx.locale.locale() == crate::locale::UiLocale::ZhCn {
+                        format!("  （评分：{:.2}，{}）", r.score, r.source)
+                    } else {
+                        format!("  (score: {:.2}, {})", r.score, r.source)
+                    };
+                    let meta_span = Span::styled(meta_text, theme.dim());
                     lines.push(BlockLine::styled(Line::from(vec![
                         idx_span, path_span, meta_span,
                     ])));

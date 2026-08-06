@@ -11,8 +11,10 @@ const CLAUDE_MANAGED_SETTINGS_PATH: &str =
 #[cfg(target_os = "linux")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
 
-/// The default user grok directory (`~/.grok`, canonicalized) used when
-/// `GROK_HOME` is unset. Exposed so callers (e.g. display helpers) can detect
+/// The default community-build directory (`~/.grok-zh`, canonicalized) used
+/// when `GROK_ZH_HOME` is unset. Debug/test builds additionally accept the
+/// legacy `GROK_HOME` override for upstream harness compatibility. Exposed so
+/// callers (e.g. display helpers) can detect
 /// whether [`grok_home()`] is the default without duplicating the computation.
 ///
 /// Uses [`dunce::canonicalize`] instead of [`std::fs::canonicalize`]: on
@@ -28,18 +30,43 @@ const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.js
 pub fn default_grok_home() -> PathBuf {
     #[allow(deprecated)]
     let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    dunce::canonicalize(&home).unwrap_or(home).join(".grok")
+    dunce::canonicalize(&home)
+        .unwrap_or(home)
+        .join(xai_grok_product::DATA_DIR_NAME)
 }
 
-/// Per-user config directory: `$GROK_HOME` or `~/.grok`. Created if needed.
+fn configured_grok_home() -> Option<PathBuf> {
+    configured_grok_home_from(
+        std::env::var_os(xai_grok_product::HOME_ENV),
+        std::env::var_os(xai_grok_product::COMPAT_HOME_ENV),
+    )
+}
+
+fn configured_grok_home_from(
+    community: Option<std::ffi::OsString>,
+    compatibility: Option<std::ffi::OsString>,
+) -> Option<PathBuf> {
+    community
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            // Upstream tests and developer harnesses still sandbox with
+            // GROK_HOME. Never honor it in release builds: a machine-wide
+            // value may belong to the official product.
+            cfg!(debug_assertions)
+                .then_some(compatibility)
+                .flatten()
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
+}
+
+/// Per-user config directory: `$GROK_ZH_HOME` or `~/.grok-zh`. Debug/test
+/// builds also accept legacy `$GROK_HOME` for upstream harness compatibility.
 pub fn grok_home() -> PathBuf {
     GROK_HOME
         .get_or_init(|| {
-            let grok_home = if let Ok(v) = std::env::var("GROK_HOME") {
-                PathBuf::from(v)
-            } else {
-                default_grok_home()
-            };
+            let grok_home = configured_grok_home().unwrap_or_else(default_grok_home);
             let _ = std::fs::create_dir_all(&grok_home);
             grok_home
         })
@@ -47,31 +74,32 @@ pub fn grok_home() -> PathBuf {
 }
 
 /// The user-global grok home, but only when one genuinely resolves: `Some` when
-/// `$GROK_HOME` is set or a home directory is found, `None` otherwise. Unlike
+/// a supported home override is set or a home directory is found, `None`
+/// otherwise. Unlike
 /// [`grok_home()`], this never falls back to a cwd-relative `.grok`, so callers
 /// that *scan* user-global grok resources (hooks, marketplace sources, ...) don't
 /// mistake a project's `.grok` tree for the user-global one when no home resolves.
 pub fn user_grok_home() -> Option<PathBuf> {
     #[allow(deprecated)]
-    let resolvable = std::env::var_os("GROK_HOME").is_some() || std::env::home_dir().is_some();
+    let resolvable = configured_grok_home().is_some() || std::env::home_dir().is_some();
     resolvable.then(grok_home)
 }
 
-/// Canonical grok application path: `$GROK_HOME/bin/grok` (Unix) or `grok.exe` (Windows).
+/// Canonical community application path: `<grok-home>/bin/grok-zh` (Unix) or
+/// `grok-zh.exe` (Windows).
 pub fn grok_application() -> PathBuf {
     grok_application_in(&grok_home())
 }
 
 /// [`grok_application`] under an explicit home instead of `$GROK_HOME`.
 pub fn grok_application_in(home: &std::path::Path) -> PathBuf {
-    let name = if cfg!(windows) { "grok.exe" } else { "grok" };
-    home.join("bin").join(name)
+    home.join("bin").join(xai_grok_product::executable_name())
 }
 
-/// System-wide config directory: `/etc/grok/` on Unix, `None` on Windows.
+/// System-wide community config directory: `/etc/grok-zh/` on Unix, `None` on Windows.
 pub fn system_config_dir() -> Option<PathBuf> {
     if cfg!(unix) {
-        Some(PathBuf::from("/etc/grok"))
+        Some(PathBuf::from("/etc").join(xai_grok_product::CLI_NAME))
     } else {
         None
     }
@@ -312,7 +340,28 @@ mod tests {
         // canonicalization must yield a plain path. No-op assertion on Unix.
         let home = default_grok_home();
         assert!(!home.to_string_lossy().starts_with(r"\\?\"));
-        assert!(home.ends_with(".grok"));
+        assert!(home.ends_with(xai_grok_product::DATA_DIR_NAME));
+    }
+
+    #[test]
+    fn community_home_override_wins_and_empty_values_fall_through() {
+        use std::ffi::OsString;
+
+        assert_eq!(
+            configured_grok_home_from(
+                Some(OsString::from("community")),
+                Some(OsString::from("compatibility")),
+            ),
+            Some(PathBuf::from("community"))
+        );
+        assert_eq!(
+            configured_grok_home_from(Some(OsString::new()), Some(OsString::from("compatibility")),),
+            cfg!(debug_assertions).then(|| PathBuf::from("compatibility"))
+        );
+        assert_eq!(
+            configured_grok_home_from(Some(OsString::new()), Some(OsString::new())),
+            None
+        );
     }
 
     #[test]

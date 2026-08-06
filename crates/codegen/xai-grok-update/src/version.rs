@@ -122,6 +122,7 @@ async fn fetch_npm_version(channel: &str, npm_registry: Option<&str>) -> Result<
 /// that swap in a fake `npm` via PATH.
 #[doc(hidden)]
 pub async fn fetch_npm_tag_for_test(tag: &str, npm_registry: Option<&str>) -> Result<String> {
+    crate::ensure_updates_enabled()?;
     fetch_npm_tag(tag, npm_registry).await
 }
 
@@ -132,6 +133,7 @@ pub async fn fetch_npm_version_for_test(
     channel: &str,
     npm_registry: Option<&str>,
 ) -> Result<String> {
+    crate::ensure_updates_enabled()?;
     fetch_npm_version(channel, npm_registry).await
 }
 
@@ -177,6 +179,7 @@ async fn fetch_npm_tag(tag: &str, npm_registry: Option<&str>) -> Result<String> 
 /// not semver, so we need both to guarantee correctness.
 #[doc(hidden)]
 pub async fn fetch_gh_release_version(channel: &str) -> Result<String> {
+    crate::ensure_updates_enabled()?;
     if channel == "alpha" {
         let (with_pre, stable_only) = tokio::try_join!(
             fetch_gh_release_latest(false),
@@ -261,6 +264,7 @@ pub(crate) async fn fetch_gcs_version(channel: &str) -> Result<String> {
 /// `base_url` instead of the hardcoded GCS bucket.
 #[doc(hidden)]
 pub async fn fetch_gcs_version_from_base(channel: &str, base_url: &str) -> Result<String> {
+    crate::ensure_updates_enabled()?;
     if channel == "alpha" {
         let (alpha_v, stable_v) = tokio::try_join!(
             fetch_gcs_channel_pointer("alpha", base_url),
@@ -343,6 +347,7 @@ async fn fetch_gcs_channel_pointer(channel: &str, base_url: &str) -> Result<Stri
 /// written (e.g. auto-update should only cache after a successful install or
 /// when no update is needed).
 pub async fn fetch_latest_version(installer: &str, config: &UpdateConfig) -> Result<String> {
+    crate::ensure_updates_enabled()?;
     match installer {
         "npm" => fetch_npm_version(&config.channel, config.npm_registry.as_deref()).await,
         "gh-release" => fetch_gh_release_version(&config.channel).await,
@@ -357,6 +362,9 @@ pub async fn fetch_latest_version(installer: &str, config: &UpdateConfig) -> Res
 /// `stable_version` records the current stable channel pointer so that
 /// `channel_label()` can derive `[alpha]` vs `[stable]` without network I/O.
 pub async fn write_version_cache(version: &str, stable_version: Option<&str>) {
+    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
+        return;
+    }
     let version_path = grok_home().join("version.json");
     let now = time::OffsetDateTime::now_utc();
     let json = GrokVersion::new(
@@ -489,6 +497,9 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
 /// return `None`; the label will populate on the next successful TTL check
 /// (~30 min). This keeps startup and post-install paths fast.
 pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
+    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
+        return None;
+    }
     tokio::time::timeout(Duration::from_millis(500), async {
         for base in CLI_BASE_URLS {
             if let Ok(v) = fetch_gcs_channel_pointer("stable", base).await {

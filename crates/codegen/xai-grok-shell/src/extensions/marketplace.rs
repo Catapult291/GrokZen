@@ -882,7 +882,7 @@ async fn handle_add_source(url: &str) -> xai_hooks_plugins_types::ActionOutcome 
                     status: OutcomeStatus::ValidationError,
                     message: format!(
                         "{e}. Not a reachable git repository — to add it anyway (e.g. a \
-                         VPN-gated host), run: grok plugin marketplace add {url} --force"
+                         VPN-gated host), run: grok-zh plugin marketplace add {url} --force"
                     ),
                     requires_reload: false,
                     requires_restart: false,

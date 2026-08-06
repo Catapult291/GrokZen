@@ -25,6 +25,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
+use crate::locale::LocaleContext;
 
 use crate::render::SafeBuf;
 use crate::render::scrollbar::{ScrollbarClickResult, render_scrollbar, scrollbar_click_to_offset};
@@ -37,6 +38,18 @@ use crate::views::modal_window::{
 const SPLIT_MIN_WIDTH: u16 = 80;
 const LIST_WIDTH_RATIO: f64 = 0.40;
 const MAX_PREVIEW_BYTES: u64 = 1_048_576;
+
+fn memory_static(locale: Option<&LocaleContext>, id: &str, english: &'static str) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn memory_text(locale: Option<&LocaleContext>, id: &str, english: &str) -> String {
+    locale
+        .map(|locale| locale.named_text(id, english).into_owned())
+        .unwrap_or_else(|| english.to_owned())
+}
 
 #[derive(Debug, Clone)]
 pub struct MemoryFileEntry {
@@ -68,6 +81,7 @@ pub struct MemoryModalState {
     pub selected: usize,
     pub scroll_offset: usize,
     pub preview_markdown: Option<MarkdownContent>,
+    preview_too_large: bool,
     pub preview_scroll: usize,
     pub mode: MemoryModalMode,
     query: LineEditor,
@@ -95,6 +109,7 @@ impl MemoryModalState {
             selected: 0,
             scroll_offset: 0,
             preview_markdown: None,
+            preview_too_large: false,
             preview_scroll: 0,
             mode: MemoryModalMode::Browse,
             query: LineEditor::default(),
@@ -231,6 +246,7 @@ impl MemoryModalState {
         if filtered.is_empty() {
             self.selected = 0;
             self.preview_markdown = None;
+            self.preview_too_large = false;
             return;
         }
         if self.selected >= filtered.len() {
@@ -259,19 +275,21 @@ impl MemoryModalState {
 
     fn load_preview(&mut self) {
         self.preview_scroll = 0;
-        self.preview_markdown = self
+        self.preview_too_large = false;
+        let selected_path = self
             .selected_entry()
             .filter(|e| !e.is_header)
-            .and_then(|e| {
-                let path = std::path::Path::new(&e.path);
-                match std::fs::metadata(path) {
-                    Ok(meta) if meta.len() > MAX_PREVIEW_BYTES => {
-                        Some(MarkdownContent::new("*(File too large to preview)*"))
-                    }
-                    Err(_) => None,
-                    _ => std::fs::read_to_string(path).ok().map(MarkdownContent::new),
-                }
-            });
+            .map(|e| e.path.clone());
+        self.preview_markdown = selected_path.and_then(|path| match std::fs::metadata(&path) {
+            Ok(meta) if meta.len() > MAX_PREVIEW_BYTES => {
+                self.preview_too_large = true;
+                None
+            }
+            Err(_) => None,
+            _ => std::fs::read_to_string(&path)
+                .ok()
+                .map(MarkdownContent::new),
+        });
     }
 }
 
@@ -320,6 +338,13 @@ fn compute_filtered(entries: &[MemoryFileEntry], query: &str) -> Vec<usize> {
 pub fn build_entries(
     files: Vec<xai_grok_shell::extensions::notification::MemoryFileInfo>,
 ) -> Vec<MemoryFileEntry> {
+    build_entries_with_locale(files, None)
+}
+
+pub fn build_entries_with_locale(
+    files: Vec<xai_grok_shell::extensions::notification::MemoryFileInfo>,
+    locale: Option<&LocaleContext>,
+) -> Vec<MemoryFileEntry> {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -332,7 +357,7 @@ pub fn build_entries(
     for f in files {
         let label = file_label(&f.path);
         let size = format_size(f.size_bytes);
-        let modified = format_modified(f.modified_epoch_secs, now_secs);
+        let modified = format_modified_with_locale(f.modified_epoch_secs, now_secs, locale);
         let meta_display = format!("{size} \u{00B7} {modified}");
         let bucket = match f.source.as_str() {
             "global" => &mut global,
@@ -364,9 +389,18 @@ pub fn build_entries(
             entries.extend(items);
         }
     };
-    push_section("Global", global);
-    push_section("Workspace", workspace);
-    push_section("Sessions", session);
+    push_section(
+        memory_static(locale, "memory.section.global", "Global"),
+        global,
+    );
+    push_section(
+        memory_static(locale, "memory.section.workspace", "Workspace"),
+        workspace,
+    );
+    push_section(
+        memory_static(locale, "memory.section.sessions", "Sessions"),
+        session,
+    );
     entries
 }
 
@@ -376,11 +410,22 @@ pub fn render_memory_modal(
     state: &mut MemoryModalState,
     compact: bool,
 ) {
+    render_memory_modal_with_locale(buf, full_area, state, compact, None)
+}
+
+pub fn render_memory_modal_with_locale(
+    buf: &mut Buffer,
+    full_area: Rect,
+    state: &mut MemoryModalState,
+    compact: bool,
+    locale: Option<&LocaleContext>,
+) {
     let theme = Theme::current();
-    let shortcuts = build_shortcuts(&state.mode, state.memory_enabled, state.fullscreen);
+    let shortcuts =
+        build_shortcuts_with_locale(&state.mode, state.memory_enabled, state.fullscreen, locale);
 
     let modal_config = ModalWindowConfig {
-        title: "Memory",
+        title: memory_static(locale, "memory.title", "Memory"),
         tabs: None,
         shortcuts: &shortcuts,
         sizing: if state.fullscreen {
@@ -436,7 +481,7 @@ pub fn render_memory_modal(
     };
     state.list_area = list_area;
 
-    render_file_list(buf, list_area, state, &theme);
+    render_file_list_with_locale(buf, list_area, state, &theme, locale);
 
     if show_preview {
         let preview_x = content_area.x + list_width + 1;
@@ -458,7 +503,7 @@ pub fn render_memory_modal(
                 height: content_area.height,
             };
             state.preview_area = preview_area;
-            render_preview(buf, preview_area, state, &theme);
+            render_preview_with_locale(buf, preview_area, state, &theme, locale);
         } else {
             state.preview_area = Rect::default();
             state.preview_scrollbar_area = None;
@@ -470,14 +515,24 @@ pub fn render_memory_modal(
 }
 
 fn render_file_list(buf: &mut Buffer, area: Rect, state: &mut MemoryModalState, theme: &Theme) {
+    render_file_list_with_locale(buf, area, state, theme, None)
+}
+
+fn render_file_list_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut MemoryModalState,
+    theme: &Theme,
+    locale: Option<&LocaleContext>,
+) {
     let search_y = area.y;
     let filter_focused = matches!(state.mode, MemoryModalMode::FilterFocused);
     let viewport = state.query.viewport(area.width as usize);
     if state.query().is_empty() {
         let placeholder = if filter_focused {
-            "type to filter..."
+            memory_static(locale, "memory.filter.type", "type to filter...")
         } else {
-            "/ to filter..."
+            memory_static(locale, "memory.filter.slash", "/ to filter...")
         };
         buf.set_span(
             area.x,
@@ -597,8 +652,8 @@ fn render_file_list(buf: &mut Buffer, area: Rect, state: &mut MemoryModalState, 
             if is_selected
                 && matches!(state.mode, MemoryModalMode::ConfirmingDelete { idx } if idx == filt_idx)
             {
-                let hint = " [x to confirm]";
-                let hint_w = hint.len() as u16;
+                let hint = memory_static(locale, "memory.delete.confirm_inline", " [x to confirm]");
+                let hint_w = hint.width() as u16;
                 let hint_x = (area.x + content_width).saturating_sub(hint_w + 1);
                 buf.set_span(
                     hint_x,
@@ -633,10 +688,28 @@ fn render_file_list(buf: &mut Buffer, area: Rect, state: &mut MemoryModalState, 
 }
 
 fn render_preview(buf: &mut Buffer, area: Rect, state: &mut MemoryModalState, theme: &Theme) {
+    render_preview_with_locale(buf, area, state, theme, None)
+}
+
+fn render_preview_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut MemoryModalState,
+    theme: &Theme,
+    locale: Option<&LocaleContext>,
+) {
     if state.preview_markdown.is_none() {
         state.preview_total_lines = 0;
         state.preview_scrollbar_area = None;
-        let msg = "No file selected";
+        let msg = if state.preview_too_large {
+            memory_static(
+                locale,
+                "memory.preview.too_large",
+                "File too large to preview",
+            )
+        } else {
+            memory_static(locale, "memory.preview.no_file", "No file selected")
+        };
         let style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
         let cy = area.y + area.height / 2;
         let cx = area.x + area.width.saturating_sub(msg.width() as u16) / 2;
@@ -1030,31 +1103,44 @@ fn build_shortcuts(
     memory_enabled: bool,
     fullscreen: bool,
 ) -> Vec<Shortcut<'static>> {
+    build_shortcuts_with_locale(mode, memory_enabled, fullscreen, None)
+}
+
+fn build_shortcuts_with_locale(
+    mode: &MemoryModalMode,
+    memory_enabled: bool,
+    fullscreen: bool,
+    locale: Option<&LocaleContext>,
+) -> Vec<Shortcut<'static>> {
     match mode {
         MemoryModalMode::Browse => {
             let toggle_label = if memory_enabled {
-                "t toggle (on)"
+                memory_static(locale, "memory.shortcut.toggle_on", "t toggle (on)")
             } else {
-                "t toggle (off)"
+                memory_static(locale, "memory.shortcut.toggle_off", "t toggle (off)")
             };
             let mut shortcuts = vec![
                 Shortcut {
-                    label: "\u{2191}/\u{2193} nav",
+                    label: memory_static(
+                        locale,
+                        "memory.shortcut.navigate",
+                        "\u{2191}/\u{2193} nav",
+                    ),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "/ search",
+                    label: memory_static(locale, "memory.shortcut.search", "/ search"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "y copy path",
+                    label: memory_static(locale, "memory.shortcut.copy_path", "y copy path"),
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "x delete",
+                    label: memory_static(locale, "memory.shortcut.delete", "x delete"),
                     clickable: false,
                     id: 0,
                 },
@@ -1065,15 +1151,15 @@ fn build_shortcuts(
                 },
                 Shortcut {
                     label: if fullscreen {
-                        "^F normal"
+                        memory_static(locale, "memory.shortcut.normal", "^F normal")
                     } else {
-                        "^F fullscreen"
+                        memory_static(locale, "memory.shortcut.fullscreen", "^F fullscreen")
                     },
                     clickable: false,
                     id: 0,
                 },
                 Shortcut {
-                    label: "Esc close",
+                    label: memory_static(locale, "memory.shortcut.close", "Esc close"),
                     clickable: false,
                     id: 0,
                 },
@@ -1081,28 +1167,33 @@ fn build_shortcuts(
             // Browse is nav mode (filter inactive), so append `i search` last
             // (matching the shared pickers).
             modal_window::push_vim_nav_search_hint(&mut shortcuts, false);
+            if let Some(last) = shortcuts.last_mut()
+                && last.label == "i search"
+            {
+                last.label = memory_static(locale, "memory.shortcut.search_vim", "i search");
+            }
             shortcuts
         }
         MemoryModalMode::FilterFocused => vec![
             Shortcut {
-                label: "type to filter",
+                label: memory_static(locale, "memory.shortcut.type_filter", "type to filter"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc exit filter",
+                label: memory_static(locale, "memory.shortcut.exit_filter", "Esc exit filter"),
                 clickable: false,
                 id: 0,
             },
         ],
         MemoryModalMode::ConfirmingDelete { .. } => vec![
             Shortcut {
-                label: "x confirm delete",
+                label: memory_static(locale, "memory.shortcut.confirm_delete", "x confirm delete"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "any key cancel",
+                label: memory_static(locale, "memory.shortcut.any_cancel", "any key cancel"),
                 clickable: false,
                 id: 0,
             },
@@ -1138,26 +1229,37 @@ fn format_size(bytes: u64) -> String {
 }
 
 fn format_modified(epoch_secs: Option<u64>, now_secs: u64) -> String {
+    format_modified_with_locale(epoch_secs, now_secs, None)
+}
+
+fn format_modified_with_locale(
+    epoch_secs: Option<u64>,
+    now_secs: u64,
+    locale: Option<&LocaleContext>,
+) -> String {
     let Some(modified) = epoch_secs else {
-        return "unknown".to_string();
+        return memory_static(locale, "memory.time.unknown", "unknown").to_string();
     };
     if now_secs <= modified {
-        return "just now".to_string();
+        return memory_static(locale, "memory.time.just_now", "just now").to_string();
     }
     let delta = now_secs - modified;
     if delta < 60 {
-        return "just now".to_string();
+        return memory_static(locale, "memory.time.just_now", "just now").to_string();
     }
     if delta < 3600 {
         let mins = delta / 60;
-        return format!("{mins}m ago");
+        return memory_text(locale, "memory.time.minutes_ago", "{value}m ago")
+            .replace("{value}", &mins.to_string());
     }
     if delta < 86400 {
         let hours = delta / 3600;
-        return format!("{hours}h ago");
+        return memory_text(locale, "memory.time.hours_ago", "{value}h ago")
+            .replace("{value}", &hours.to_string());
     }
     let days = delta / 86400;
-    format!("{days}d ago")
+    memory_text(locale, "memory.time.days_ago", "{value}d ago")
+        .replace("{value}", &days.to_string())
 }
 
 fn load_fullscreen_pref() -> bool {

@@ -1450,7 +1450,7 @@ fn print_human(r: &InspectReport) {
     if r.mcp_servers.is_empty() {
         println!();
         println!("  MCP Servers (0)");
-        println!("  {TREE} (none) \u{2014} see `grok mcp add --help`");
+        println!("  {TREE} (none) \u{2014} see `grok-zh mcp add --help`");
     } else {
         print_columns(
             "MCP Servers",

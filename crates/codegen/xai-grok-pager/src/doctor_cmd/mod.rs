@@ -13,7 +13,7 @@ pub const SCHEMA_VERSION: &str = "1";
 #[derive(Clone, Debug, Default, Eq, PartialEq, clap::Args)]
 #[command(args_conflicts_with_subcommands = true)]
 pub struct DoctorArgs {
-    /// Print the diagnostic report as JSON.
+    /// 以 JSON 格式输出诊断报告。
     #[arg(long)]
     pub json: bool,
     #[command(subcommand)]
@@ -22,15 +22,15 @@ pub struct DoctorArgs {
 
 #[derive(Clone, Debug, Eq, PartialEq, clap::Subcommand)]
 pub enum DoctorCommand {
-    /// Apply an automatic fix.
+    /// 应用自动修复。
     Fix(FixArgs),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, clap::Args)]
 pub struct FixArgs {
-    /// Named fix to apply. Omit it to list available automatic fixes.
+    /// 要应用的修复名称；省略时列出可用的自动修复。
     pub id: Option<String>,
-    /// Apply the displayed changes without confirmation.
+    /// 不经确认直接应用显示的更改。
     #[arg(long, requires = "id")]
     pub yes: bool,
 }

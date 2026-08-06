@@ -15,6 +15,7 @@
 //! byte-range path and the single-connection path.
 
 #![cfg(unix)]
+#![cfg(not(feature = "community-build"))]
 
 mod common;
 

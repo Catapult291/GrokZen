@@ -2,7 +2,11 @@ use std::collections::HashSet;
 use std::process::{Command, Stdio};
 
 fn pager_binary() -> Result<std::path::PathBuf, String> {
-    for key in ["PAGER_BINARY", "CARGO_BIN_EXE_xai-grok-pager"] {
+    for key in [
+        "PAGER_BINARY",
+        "CARGO_BIN_EXE_grok-zh",
+        "CARGO_BIN_EXE_xai-grok-pager",
+    ] {
         if let Some(value) = std::env::var_os(key) {
             let path = std::path::PathBuf::from(value);
             if path.exists() {
@@ -10,7 +14,7 @@ fn pager_binary() -> Result<std::path::PathBuf, String> {
             }
         }
     }
-    Err("PAGER_BINARY/CARGO_BIN_EXE_xai-grok-pager not set".to_owned())
+    Err("PAGER_BINARY/CARGO_BIN_EXE_grok-zh not set".to_owned())
 }
 
 #[test]

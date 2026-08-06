@@ -79,6 +79,7 @@ impl<B: BlockContent> BlockRenderer<'_, B> {
             appearance: self.appearance.clone(),
             is_selected: false,
             cwd: None,
+            locale: crate::locale::LocaleContext::default(),
         }
     }
 

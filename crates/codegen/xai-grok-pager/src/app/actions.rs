@@ -618,6 +618,11 @@ pub enum Action {
     OpenCommandPalette,
     /// Open the in-TUI How-to Guides doc picker (`/docs`, palette "How-to Guides").
     OpenHowtoGuides,
+    /// Open a bundled How-to Guide by stable identity. The dispatcher resolves
+    /// the localized title and content for the active UI locale.
+    ShowHowtoDoc {
+        id: crate::docs::DocId,
+    },
     /// Open the onboarding tutorial overlay (`/tutorial` or the command
     /// palette).
     OpenTutorial,

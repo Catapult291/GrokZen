@@ -11,6 +11,19 @@ use crate::app::app_view::{ActiveView, AppView, AuthMode, AuthState};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
 
+fn localized_template(
+    locale: &crate::locale::LocaleContext,
+    id: &str,
+    english: &str,
+    replacements: &[(&str, &str)],
+) -> String {
+    let mut message = locale.named_text(id, english).into_owned();
+    for (placeholder, value) in replacements {
+        message = message.replace(placeholder, value);
+    }
+    message
+}
+
 // ---------------------------------------------------------------------------
 // Auth dispatch
 // ---------------------------------------------------------------------------
@@ -50,9 +63,16 @@ pub(super) fn ensure_login_method(app: &mut AppView) {
 /// pin-unavailable copy when the list is empty.
 fn no_login_method_error(app: &AppView) -> String {
     if app.auth_methods.is_empty() {
-        xai_grok_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE.to_string()
+        app.locale
+            .named_text(
+                "auth.preferred_api_key_unavailable",
+                xai_grok_shell::agent::auth_method::PREFERRED_API_KEY_UNAVAILABLE,
+            )
+            .into_owned()
     } else {
-        "No login method available".to_string()
+        app.locale
+            .named_text("auth.no_login_method", "No login method available")
+            .into_owned()
     }
 }
 
@@ -345,6 +365,13 @@ pub(super) fn handle_auth_complete(
             // Auth is global, so handle every agent (the login may
             // have been started from the dashboard, not the agent
             // that 401'd).
+            let retry_message = app
+                .locale
+                .named_text(
+                    "auth.reauthenticated_retrying",
+                    "Re-authenticated. Retrying\u{2026}",
+                )
+                .into_owned();
             let mut retry_effects = Vec::new();
             let mut page_flips = Vec::new();
             for agent in app.agents.values_mut() {
@@ -354,9 +381,9 @@ pub(super) fn handle_auth_complete(
                 // user couldn't have queued another prompt during the
                 // auth detour, so a plain front-enqueue + drain is safe.
                 if let Some(prompt) = agent.reauth_stashed_prompt.take() {
-                    agent.scrollback.push_block(RenderBlock::system(
-                        "Re-authenticated. Retrying\u{2026}".to_string(),
-                    ));
+                    agent
+                        .scrollback
+                        .push_block(RenderBlock::system(retry_message.clone()));
                     agent.session.enqueue_in_flight_prompt_front(prompt);
                     let drain = maybe_drain_queue(agent);
                     retry_effects.extend(drain.effects);
@@ -448,6 +475,7 @@ pub(super) fn handle_mcp_auth_trigger_done(
     server_name: String,
     result: Result<crate::app::actions::McpAuthTriggerOutcome, String>,
 ) -> Vec<Effect> {
+    let locale = app.locale.clone();
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
@@ -472,10 +500,14 @@ pub(super) fn handle_mcp_auth_trigger_done(
                 ) {
                     modal.mcp_setup = Some(form);
                 } else {
+                    let message = localized_template(
+                        locale.as_ref(),
+                        "extensions.mcp.auth.setup_schema_unsupported",
+                        "{server_name}: setup schema is not supported in this UI",
+                        &[("{server_name}", &server_name)],
+                    );
                     modal.modal_message =
-                        Some(crate::views::extensions_modal::ModalMessage::Error(
-                            format!("{server_name}: setup schema is not supported in this UI"),
-                        ));
+                        Some(crate::views::extensions_modal::ModalMessage::Error(message));
                 }
                 return vec![];
             }
@@ -483,9 +515,19 @@ pub(super) fn handle_mcp_auth_trigger_done(
                 let msg = if e.starts_with("To authenticate") {
                     format!("{server_name}: {e}")
                 } else if e.contains(&server_name) {
-                    format!("Auth failed: {e}")
+                    localized_template(
+                        locale.as_ref(),
+                        "extensions.mcp.auth.failed",
+                        "Auth failed: {error}",
+                        &[("{error}", &e)],
+                    )
                 } else {
-                    format!("{server_name} auth failed: {e}")
+                    localized_template(
+                        locale.as_ref(),
+                        "extensions.mcp.auth.failed_with_server",
+                        "{server_name} auth failed: {error}",
+                        &[("{server_name}", &server_name), ("{error}", &e)],
+                    )
                 };
                 modal.modal_message =
                     Some(crate::views::extensions_modal::ModalMessage::Error(msg));
@@ -518,6 +560,13 @@ pub(super) fn handle_mcp_setup_submit_done(
     server_name: String,
     result: Result<(), String>,
 ) -> Vec<Effect> {
+    let locale = app.locale.clone();
+    let authenticating = localized_template(
+        locale.as_ref(),
+        "extensions.pending.authenticating_server",
+        "Authenticating {server_name}...",
+        &[("{server_name}", &server_name)],
+    );
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
@@ -525,20 +574,30 @@ pub(super) fn handle_mcp_setup_submit_done(
         if let Err(e) = result {
             modal.pending_action = None;
             modal.pending_entry_index = None;
-            modal.modal_message = Some(crate::views::extensions_modal::ModalMessage::Error(
-                format!("{server_name} setup failed: {e}"),
-            ));
+            let message = localized_template(
+                locale.as_ref(),
+                "extensions.mcp.setup.failed",
+                "{server_name} setup failed: {error}",
+                &[("{server_name}", &server_name), ("{error}", &e)],
+            );
+            modal.modal_message =
+                Some(crate::views::extensions_modal::ModalMessage::Error(message));
             return vec![];
         }
-        modal.pending_action = Some(format!("Authenticating {server_name}..."));
+        modal.pending_action = Some(authenticating);
         modal.pending_entry_index = None;
     }
     let Some(session_id) = agent.session.session_id.clone() else {
         if let Some(ref mut modal) = agent.extensions_modal {
             modal.pending_action = None;
-            modal.modal_message = Some(crate::views::extensions_modal::ModalMessage::Error(
-                format!("{server_name}: no active session for authentication"),
-            ));
+            let message = localized_template(
+                locale.as_ref(),
+                "extensions.mcp.auth.no_active_session",
+                "{server_name}: no active session for authentication",
+                &[("{server_name}", &server_name)],
+            );
+            modal.modal_message =
+                Some(crate::views::extensions_modal::ModalMessage::Error(message));
         }
         return vec![];
     };

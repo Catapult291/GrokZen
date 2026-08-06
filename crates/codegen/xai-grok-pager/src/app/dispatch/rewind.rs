@@ -85,6 +85,7 @@ pub(in crate::app) fn find_user_prompt_entry_for_shell_index(
 }
 
 pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
+    let locale = app.locale.clone();
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -92,7 +93,7 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
     let Some(session_id) = agent.session.session_id.clone() else {
-        app.show_toast("No active session");
+        app.show_toast(locale.named_static_text("session.no_active", "No active session"));
         return vec![];
     };
 
@@ -130,6 +131,7 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
 }
 
 pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
+    let locale = app.locale.clone();
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -137,7 +139,7 @@ pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
     let Some(session_id) = agent.session.session_id.clone() else {
-        app.show_toast("No active session");
+        app.show_toast(locale.named_static_text("session.no_active", "No active session"));
         return vec![];
     };
 
@@ -498,6 +500,7 @@ fn stash_inline_resubmit_if_editing(agent: &mut crate::app::agent_view::AgentVie
 /// a rewind actually executes, and `dispatch_rewind_success` sends the
 /// edited text from the rewound point.
 pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
+    let locale = app.locale.clone();
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -505,7 +508,7 @@ pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
     let Some(session_id) = agent.session.session_id.clone() else {
-        app.show_toast("No active session");
+        app.show_toast(locale.named_static_text("session.no_active", "No active session"));
         return vec![];
     };
     let Some(edit) = agent.inline_edit.as_ref() else {
@@ -557,6 +560,7 @@ pub(super) fn dispatch_rewind_success(
     agent_id: crate::app::agent::AgentId,
     response: crate::views::rewind::RewindResponse,
 ) -> Vec<Effect> {
+    let locale = app.locale.clone();
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
@@ -614,9 +618,16 @@ pub(super) fn dispatch_rewind_success(
     // it: nothing is resubmitted there, so the revert needs its signal.)
     if inline_resubmit.is_none() || is_files_only {
         let msg = match mode_str {
-            "conversation_only" => "Reverted conversation",
-            "files_only" => "Reverted file changes",
-            _ => "Reverted conversation and file changes",
+            "conversation_only" => {
+                locale.named_static_text("rewind.reverted.conversation", "Reverted conversation")
+            }
+            "files_only" => {
+                locale.named_static_text("rewind.reverted.files", "Reverted file changes")
+            }
+            _ => locale.named_static_text(
+                "rewind.reverted.all",
+                "Reverted conversation and file changes",
+            ),
         };
         if app.screen_mode.is_minimal() {
             // Minimal has no toast surface and can't erase committed lines, so the confirmation stays in scrollback there.
@@ -689,6 +700,7 @@ pub(super) fn handle_rewind_points_loaded(
     agent_id: AgentId,
     points: Vec<crate::views::rewind::RewindPointInfo>,
 ) -> Vec<Effect> {
+    let locale = app.locale.clone();
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
@@ -704,7 +716,9 @@ pub(super) fn handle_rewind_points_loaded(
         if let Some(stashed) = stashed {
             agent.prompt.restore(stashed);
         }
-        app.show_toast("No undoable prompts");
+        app.show_toast(
+            locale.named_static_text("rewind.no_undoable_prompts", "No undoable prompts"),
+        );
         return vec![];
     }
 

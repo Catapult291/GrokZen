@@ -18,6 +18,7 @@ use unicode_width::UnicodeWidthStr;
 use xai_grok_markdown::MarkdownRenderView;
 
 use crate::appearance::RenderMermaid;
+use crate::locale::LocaleContext;
 use crate::scrollback::types::{BlockLine, BlockOutput};
 use crate::theme::ThemeKind;
 
@@ -344,10 +345,36 @@ pub(crate) struct AffordanceRow {
 /// The affordance row's three buttons laid out left-to-right starting at
 /// `start_col` (which leaves room for the leading `◇ mermaid` label).
 fn affordance_buttons(start_col: u16) -> [AffordanceButton; 3] {
+    affordance_buttons_with_locale(start_col, None)
+}
+
+fn affordance_buttons_with_locale(
+    start_col: u16,
+    locale: Option<&LocaleContext>,
+) -> [AffordanceButton; 3] {
     let specs = [
-        (AFFORDANCE_OPEN, AffordanceKind::Open),
-        (AFFORDANCE_COPY_PATH, AffordanceKind::CopyPath),
-        (AFFORDANCE_COPY_SOURCE, AffordanceKind::CopySource),
+        (
+            locale
+                .map(|locale| locale.named_static_text("mermaid.open_image", AFFORDANCE_OPEN))
+                .unwrap_or(AFFORDANCE_OPEN),
+            AffordanceKind::Open,
+        ),
+        (
+            locale
+                .map(|locale| {
+                    locale.named_static_text("mermaid.copy_image_path", AFFORDANCE_COPY_PATH)
+                })
+                .unwrap_or(AFFORDANCE_COPY_PATH),
+            AffordanceKind::CopyPath,
+        ),
+        (
+            locale
+                .map(|locale| {
+                    locale.named_static_text("mermaid.copy_source", AFFORDANCE_COPY_SOURCE)
+                })
+                .unwrap_or(AFFORDANCE_COPY_SOURCE),
+            AffordanceKind::CopySource,
+        ),
     ];
     let mut col = start_col;
     specs.map(|(label, kind)| {
@@ -362,15 +389,28 @@ fn affordance_buttons(start_col: u16) -> [AffordanceButton; 3] {
 /// `rendering…` hint when `rendering` is true. One source of truth shared by the
 /// painter and hit-testing, so the painted columns and click hit-rects align.
 pub(crate) fn affordance_row(rendering: bool) -> AffordanceRow {
-    let buttons_start = UnicodeWidthStr::width(MERMAID_LABEL) as u16 + AFFORDANCE_GAP;
-    let buttons = affordance_buttons(buttons_start);
+    affordance_row_with_locale(rendering, None)
+}
+
+pub(crate) fn affordance_row_with_locale(
+    rendering: bool,
+    locale: Option<&LocaleContext>,
+) -> AffordanceRow {
+    let label = locale
+        .map(|locale| locale.named_static_text("mermaid.label", MERMAID_LABEL))
+        .unwrap_or(MERMAID_LABEL);
+    let rendering_label = locale
+        .map(|locale| locale.named_static_text("mermaid.rendering", MERMAID_RENDERING))
+        .unwrap_or(MERMAID_RENDERING);
+    let buttons_start = UnicodeWidthStr::width(label) as u16 + AFFORDANCE_GAP;
+    let buttons = affordance_buttons_with_locale(buttons_start, locale);
     let status = rendering.then(|| {
         let last = &buttons[buttons.len() - 1];
         let after = last.col + UnicodeWidthStr::width(last.label) as u16 + AFFORDANCE_GAP;
-        (after, MERMAID_RENDERING)
+        (after, rendering_label)
     });
     AffordanceRow {
-        label: (0, MERMAID_LABEL),
+        label: (0, label),
         buttons,
         status,
     }

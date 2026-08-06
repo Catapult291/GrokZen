@@ -151,14 +151,14 @@ fn discover_servers(cwd: &Path) -> (Vec<ConfigSourceStatus>, Vec<DiscoveredServe
     let user_config = grok_home.join("config.toml");
     if user_config.is_file() {
         sources.push(ConfigSourceStatus {
-            path: "~/.grok/config.toml".to_string(),
+            path: "~/.grok-zh/config.toml".to_string(),
             status: ConfigSourceState::Found {
                 server_count: config_count,
             },
         });
     } else {
         sources.push(ConfigSourceStatus {
-            path: "~/.grok/config.toml".to_string(),
+            path: "~/.grok-zh/config.toml".to_string(),
             status: ConfigSourceState::NotFound,
         });
     }
@@ -284,7 +284,7 @@ async fn try_discover_managed_servers() -> (ConfigSourceStatus, Vec<DiscoveredSe
 
     let token = match auth_manager.get_valid_token().await {
         Ok(key) => key,
-        Err(_) => return managed_skipped("auth expired — run `grok login`"),
+        Err(_) => return managed_skipped("auth expired — run `grok-zh login`"),
     };
 
     let proxy_url = crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
@@ -648,7 +648,7 @@ pub fn print_report(report: &DoctorReport) {
 
     if report.servers.is_empty() {
         println!("  No MCP servers configured.");
-        println!("  Run `grok mcp add --help` to get started.");
+        println!("  Run `grok-zh mcp add --help` to get started.");
         println!();
         return;
     }
@@ -678,7 +678,7 @@ pub fn print_report(report: &DoctorReport) {
         report.healthy_count,
         report.failing_count,
         if report.failing_count > 0 {
-            " Run `grok mcp doctor --json` for full diagnostics."
+            " Run `grok-zh mcp doctor --json` for full diagnostics."
         } else {
             ""
         }

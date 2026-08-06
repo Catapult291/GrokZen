@@ -22,7 +22,9 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use crate::theme::Theme;
+#[cfg(test)]
 use crate::tutorial_docs::TUTORIAL_TOPICS;
+use crate::tutorial_docs::topics_for;
 use crate::views::modal_window::{
     self as mw, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
 };
@@ -45,6 +47,8 @@ pub enum TutorialScreen {
 
 /// State for the tutorial overlay.
 pub struct TutorialState {
+    /// Locale captured when the overlay opens.
+    pub locale: std::sync::Arc<crate::locale::LocaleContext>,
     pub screen: TutorialScreen,
     /// Topic indices the user has opened this launch (✓ marks).
     pub viewed: HashSet<usize>,
@@ -61,7 +65,12 @@ pub struct TutorialState {
 
 impl TutorialState {
     pub fn new() -> Self {
+        Self::new_with_locale(std::sync::Arc::new(crate::locale::LocaleContext::default()))
+    }
+
+    pub fn new_with_locale(locale: std::sync::Arc<crate::locale::LocaleContext>) -> Self {
         Self {
+            locale,
             screen: TutorialScreen::List,
             viewed: HashSet::new(),
             picker: PickerState::default(),
@@ -73,7 +82,7 @@ impl TutorialState {
 
     /// Switch to the topic page at `index`, marking it viewed.
     fn open_topic(&mut self, index: usize) {
-        if index >= TUTORIAL_TOPICS.len() {
+        if index >= topics_for(self.locale.locale()).len() {
             return;
         }
         self.viewed.insert(index);
@@ -93,10 +102,10 @@ impl TutorialState {
 
     /// Open the "Go deeper" guide for the topic at `index`, if it has one.
     fn open_guide(&mut self, index: usize) {
-        let has_guide = TUTORIAL_TOPICS
+        let has_guide = topics_for(self.locale.locale())
             .get(index)
             .and_then(|t| t.go_deeper)
-            .and_then(crate::docs::find_doc)
+            .and_then(crate::docs::find_doc_by_id)
             .is_some();
         if has_guide {
             self.screen = TutorialScreen::Guide { topic: index };
@@ -231,7 +240,7 @@ fn handle_topic_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
             if let TutorialScreen::Topic { index } = st.screen {
                 match key.code {
                     crossterm::event::KeyCode::Right => {
-                        if index + 1 < TUTORIAL_TOPICS.len() {
+                        if index + 1 < topics_for(st.locale.locale()).len() {
                             st.open_topic(index + 1);
                         } else {
                             st.back_to_list();
@@ -294,7 +303,8 @@ fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     }
 
     let config = list_picker_config();
-    match handle_picker_input(ev, &mut st.picker, TUTORIAL_TOPICS.len(), &config) {
+    let topic_count = topics_for(st.locale.locale()).len();
+    match handle_picker_input(ev, &mut st.picker, topic_count, &config) {
         PickerOutcome::Selected(i) => {
             st.open_topic(i);
             TutorialOutcome::Consumed
@@ -303,13 +313,6 @@ fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
         _ => TutorialOutcome::Consumed,
     }
 }
-
-/// Intro copy shown above the topic list. No time promises — just what it
-/// is and how to leave.
-const INTRO_LINES: [&str; 2] = [
-    "Quick tips to get the most out of Grok Build.",
-    "Pick a topic. Esc when you're done.",
-];
 
 /// Topic page body: the embedded markdown minus its leading `# ` heading —
 /// the modal window chrome already shows the title, so rendering the H1
@@ -324,19 +327,28 @@ fn topic_body(content: &str) -> &str {
 /// Render the tutorial overlay (list or topic screen) over `area`.
 pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bool) {
     let theme = Theme::current();
+    let locale = st.locale.clone();
+    let topics = topics_for(locale.locale());
     match st.screen {
         TutorialScreen::Topic { index } => {
             // `Topic` is only constructed via `open_topic`, which bounds-checks.
-            let Some(topic) = TUTORIAL_TOPICS.get(index) else {
+            let Some(topic) = topics.get(index) else {
                 return;
             };
-            let next_hint = match TUTORIAL_TOPICS.get(index + 1) {
-                Some(next) => format!("\u{2192} next: {}", next.title),
-                None => "\u{2192} done".to_owned(),
+            let next_hint = match topics.get(index + 1) {
+                Some(next) => locale
+                    .named_text("tutorial.next", "\u{2192} next: {title}")
+                    .replace("{title}", next.title),
+                None => locale
+                    .named_text("tutorial.done", "\u{2192} done")
+                    .into_owned(),
             };
+            let scroll_hint = locale.named_text("tutorial.scroll", "\u{2191}/\u{2193} scroll");
+            let deeper_hint = locale.named_text("tutorial.go_deeper", "d go deeper");
+            let list_hint = locale.named_text("tutorial.back_to_list", "Esc list");
             let mut shortcuts = vec![
                 Shortcut {
-                    label: "\u{2191}/\u{2193} scroll",
+                    label: &scroll_hint,
                     clickable: false,
                     id: 0,
                 },
@@ -348,13 +360,13 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
             ];
             if topic.go_deeper.is_some() {
                 shortcuts.push(Shortcut {
-                    label: "d go deeper",
+                    label: &deeper_hint,
                     clickable: false,
                     id: 0,
                 });
             }
             shortcuts.push(Shortcut {
-                label: "Esc list",
+                label: &list_hint,
                 clickable: false,
                 id: 0,
             });
@@ -372,10 +384,10 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
             );
         }
         TutorialScreen::Guide { topic } => {
-            let Some(doc) = TUTORIAL_TOPICS
+            let Some(doc) = topics
                 .get(topic)
                 .and_then(|t| t.go_deeper)
-                .and_then(crate::docs::find_doc)
+                .and_then(|id| crate::docs::localized_doc(id, locale.locale()))
             else {
                 return;
             };
@@ -383,20 +395,35 @@ pub fn render_tutorial(buf: &mut Buffer, area: Rect, st: &mut TutorialState, com
                 buf,
                 area,
                 &mut st.window,
-                doc.title,
+                &doc.title,
                 doc.content,
                 &mut st.scroll,
                 &mut st.cached_lines,
                 compact,
                 &theme,
+                Some(locale.as_ref()),
             );
         }
-        TutorialScreen::List => render_list(buf, area, st, compact, &theme),
+        TutorialScreen::List => render_list(buf, area, st, compact, &theme, &locale),
     }
 }
 
-fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bool, theme: &Theme) {
-    let progress = format!("{}/{} explored", st.viewed.len(), TUTORIAL_TOPICS.len());
+fn render_list(
+    buf: &mut Buffer,
+    area: Rect,
+    st: &mut TutorialState,
+    compact: bool,
+    theme: &Theme,
+    locale: &crate::locale::LocaleContext,
+) {
+    let topics = topics_for(locale.locale());
+    let progress = locale
+        .named_text("tutorial.explored", "{viewed}/{total} explored")
+        .replace("{viewed}", &st.viewed.len().to_string())
+        .replace("{total}", &topics.len().to_string());
+    let nav_hint = locale.named_text("tutorial.navigate", "\u{2191}/\u{2193} navigate");
+    let open_hint = locale.named_text("tutorial.open", "Enter open");
+    let done_hint = locale.named_text("tutorial.close", "Esc done");
     let shortcuts = [
         Shortcut {
             label: &progress,
@@ -404,23 +431,23 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
             id: 0,
         },
         Shortcut {
-            label: "\u{2191}/\u{2193} navigate",
+            label: &nav_hint,
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter open",
+            label: &open_hint,
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc done",
+            label: &done_hint,
             clickable: false,
             id: 0,
         },
     ];
     let modal_config = ModalWindowConfig {
-        title: "Welcome to Grok Build",
+        title: locale.named_static_text("tutorial.title", "Welcome to Grok Build"),
         tabs: None,
         shortcuts: &shortcuts,
         sizing: ModalSizing {
@@ -442,7 +469,14 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
     // Intro copy, then a blank row, then the topic rows.
     let intro_style = Style::default().fg(theme.gray_bright);
     let mut y = mca.content.y;
-    for line in INTRO_LINES {
+    let intro_lines = [
+        locale.named_text(
+            "tutorial.intro",
+            "Quick tips to get the most out of Grok Build.",
+        ),
+        locale.named_text("tutorial.intro_pick", "Pick a topic. Esc when you're done."),
+    ];
+    for line in intro_lines {
         if y >= mca.content.y + mca.content.height {
             break;
         }
@@ -472,9 +506,9 @@ fn render_list(buf: &mut Buffer, area: Rect, st: &mut TutorialState, compact: bo
     // Narrow modals can't fit title + blurb on one row; stack the blurb below.
     const NARROW_THRESHOLD: u16 = 64;
     let narrow = entries_area.width < NARROW_THRESHOLD;
-    let blurb_slices: Vec<[&str; 1]> = TUTORIAL_TOPICS.iter().map(|t| [t.blurb]).collect();
+    let blurb_slices: Vec<[&str; 1]> = topics.iter().map(|t| [t.blurb]).collect();
 
-    let picker_entries: Vec<PickerEntry<'_>> = TUTORIAL_TOPICS
+    let picker_entries: Vec<PickerEntry<'_>> = topics
         .iter()
         .enumerate()
         .map(|(i, t)| {

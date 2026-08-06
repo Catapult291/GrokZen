@@ -171,7 +171,7 @@ pub fn mic_fix_help() -> &'static str {
 
 /// Human-readable multi-line report for terminal output.
 pub fn format_probe_report(report: &VoiceProbeReport) -> String {
-    let mut out = String::from("=== xai-grok-voice probe ===\n\n");
+    let mut out = format!("=== {} voice probe ===\n\n", xai_grok_product::CLI_NAME);
 
     out.push_str(&format!(
         "Mic capture (streamed)\n  pcm_bytes: {}\n",

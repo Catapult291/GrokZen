@@ -9,8 +9,10 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 use crate::appearance::AppearanceConfig;
+use crate::locale::LocaleContext;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockLine, BlockOutput};
@@ -57,6 +59,9 @@ pub struct ContextInfoBlock {
     pub snapshot: ContextInfo,
     /// Active model name at the time of capture (display-only).
     pub model: String,
+    /// Locale captured when the block is created so later theme-reactive
+    /// redraws keep the language selected for this session.
+    pub locale: LocaleContext,
 }
 
 /// Shape of the categorical bar — how the 100 cells are laid out.
@@ -143,12 +148,12 @@ struct RowLayout {
 
 impl RowLayout {
     /// Measure column widths over every row that will render. Widths are
-    /// in codepoints, not bytes.
+    /// in terminal display cells, not bytes or codepoints.
     fn measure<'a>(rows: impl Iterator<Item = &'a LegendRow> + Clone, total: u64) -> Self {
         Self {
             label_width: rows
                 .clone()
-                .map(|r| r.label.chars().count())
+                .map(|r| UnicodeWidthStr::width(r.label.as_str()))
                 .max()
                 .unwrap_or(0)
                 + 1,
@@ -176,9 +181,9 @@ impl RowLayout {
     }
 
     /// The row's numeric cells: tokens and percent, each right-aligned.
-    fn cells(&self, tokens: u64, total: u64) -> String {
+    fn cells(&self, tokens: u64, total: u64, token_unit: &str) -> String {
         format!(
-            "{:>tokens_width$} tokens   {:>percent_width$}",
+            "{:>tokens_width$} {token_unit}   {:>percent_width$}",
             fmt_tok(tokens),
             Self::percent(tokens, total),
             tokens_width = self.tokens_width,
@@ -210,6 +215,7 @@ impl RowLayout {
         row: &LegendRow,
         bar: BarLayout,
         total: u64,
+        token_unit: &str,
         label_style: Style,
         muted: Style,
     ) -> Vec<Line<'static>> {
@@ -221,7 +227,7 @@ impl RowLayout {
                 Span::raw(" "),
                 Span::styled(
                     format!(
-                        "{} tokens   {}",
+                        "{} {token_unit}   {}",
                         fmt_tok(row.tokens),
                         Self::percent(row.tokens, total)
                     ),
@@ -233,18 +239,17 @@ impl RowLayout {
             }
             vec![first, Line::from(second)]
         } else {
+            let label_padding = self
+                .label_width
+                .saturating_sub(UnicodeWidthStr::width(row.label.as_str()));
             let mut spans = vec![
                 glyph,
                 Span::styled(
-                    format!(
-                        "{:<label_width$}",
-                        row.label,
-                        label_width = self.label_width
-                    ),
+                    format!("{}{}", row.label, " ".repeat(label_padding)),
                     label_style,
                 ),
                 Span::raw(" "),
-                Span::styled(self.cells(row.tokens, total), muted),
+                Span::styled(self.cells(row.tokens, total, token_unit), muted),
             ];
             if let Some(extra) = suffix {
                 spans.push(Span::styled(extra, muted));
@@ -254,12 +259,69 @@ impl RowLayout {
     }
 }
 
+fn localized_count_detail(
+    locale: &LocaleContext,
+    count: u64,
+    id: &str,
+    english_noun: &str,
+) -> String {
+    let english = count_detail(count, english_noun);
+    locale
+        .named_text(id, &english)
+        .replace("{count}", &count.to_string())
+}
+
+fn localized_existing_count_detail(locale: &LocaleContext, detail: &str, id: &str) -> String {
+    let Some((count, _)) = detail.split_once(' ') else {
+        return detail.to_string();
+    };
+    locale.named_text(id, detail).replace("{count}", count)
+}
+
+fn localized_usage_category(
+    locale: &LocaleContext,
+    label: &str,
+    detail: Option<&str>,
+) -> (String, Option<String>) {
+    match label {
+        "Skills" => (
+            locale.named_text("context.skills", "Skills").into_owned(),
+            detail.map(|value| {
+                localized_existing_count_detail(locale, value, "context.detail.skills")
+            }),
+        ),
+        "MCP servers" => (
+            locale
+                .named_text("context.mcp_servers", "MCP servers")
+                .into_owned(),
+            detail.map(|value| {
+                localized_existing_count_detail(locale, value, "context.detail.servers")
+            }),
+        ),
+        _ => (label.to_string(), detail.map(str::to_string)),
+    }
+}
+
 impl ContextInfoBlock {
+    pub(crate) fn set_locale(&mut self, locale: crate::locale::LocaleContext) {
+        self.locale = locale;
+    }
+
     /// Create a new context-info block.
     pub fn new(snapshot: ContextInfo, model: impl Into<String>) -> Self {
+        Self::new_with_locale(snapshot, model, LocaleContext::default())
+    }
+
+    /// Create a context-info block using the selected display locale.
+    pub fn new_with_locale(
+        snapshot: ContextInfo,
+        model: impl Into<String>,
+        locale: LocaleContext,
+    ) -> Self {
         Self {
             snapshot,
             model: model.into(),
+            locale,
         }
     }
 
@@ -277,6 +339,9 @@ impl ContextInfoBlock {
     fn build_lines(&self, theme: &Theme, bar: BarLayout) -> Vec<Line<'static>> {
         let snapshot = &self.snapshot;
         let model = &self.model;
+        let locale = &self.locale;
+        let text = |id: &str, english: &str| locale.named_text(id, english).into_owned();
+        let token_unit = text("context.tokens", "tokens");
 
         let used = snapshot.used;
         let total = snapshot.total;
@@ -375,14 +440,14 @@ impl ContextInfoBlock {
             LegendRow {
                 glyph: system_glyph,
                 color: system_color,
-                label: "System prompt".to_string(),
+                label: text("context.system_prompt", "System prompt"),
                 tokens: system_tokens,
                 detail: None,
             },
             LegendRow {
                 glyph: messages_glyph,
                 color: messages_color,
-                label: "Messages".to_string(),
+                label: text("context.messages", "Messages"),
                 tokens: message_tokens,
                 detail: None,
             },
@@ -391,7 +456,7 @@ impl ContextInfoBlock {
             legend_rows.push(LegendRow {
                 glyph: overhead_glyph,
                 color: overhead_color,
-                label: "Reasoning/overhead".to_string(),
+                label: text("context.reasoning_overhead", "Reasoning/overhead"),
                 tokens: overhead_tokens,
                 detail: None,
             });
@@ -399,23 +464,31 @@ impl ContextInfoBlock {
         legend_rows.push(LegendRow {
             glyph: free_glyph,
             color: empty_color,
-            label: "Free".to_string(),
+            label: text("context.free", "Free"),
             tokens: free_tokens,
             detail: None,
         });
         let info_rows: Vec<LegendRow> = std::iter::once(LegendRow {
             glyph: tools_glyph,
             color: tools_color,
-            label: "Tool definitions".to_string(),
+            label: text("context.tool_definitions", "Tool definitions"),
             tokens: tool_tokens,
-            detail: Some(count_detail(tool_count, "tool")),
+            detail: Some(localized_count_detail(
+                locale,
+                tool_count,
+                "context.detail.tools",
+                "tool",
+            )),
         })
-        .chain(snapshot.usage_categories.iter().map(|c| LegendRow {
-            glyph: tools_glyph,
-            color: tools_color,
-            label: c.label.clone(),
-            tokens: c.tokens,
-            detail: c.detail.clone(),
+        .chain(snapshot.usage_categories.iter().map(|c| {
+            let (label, detail) = localized_usage_category(locale, &c.label, c.detail.as_deref());
+            LegendRow {
+                glyph: tools_glyph,
+                color: tools_color,
+                label,
+                tokens: c.tokens,
+                detail,
+            }
         }))
         .collect();
         let layout = RowLayout::measure(legend_rows.iter().chain(info_rows.iter()), total);
@@ -423,7 +496,7 @@ impl ContextInfoBlock {
 
         let mut lines: Vec<Line<'static>> = vec![
             // Header: bold white "Context"
-            Line::from(Span::styled("Context", primary)),
+            Line::from(Span::styled(text("context.title", "Context"), primary)),
             // Blank row between header and the at-a-glance summary
             Line::from(""),
             // Sub-header: token totals + percent. Uses `text_secondary` for
@@ -436,9 +509,10 @@ impl ContextInfoBlock {
             // `ContextInfo` is pre-rounded to an integer).
             Line::from(Span::styled(
                 format!(
-                    "{} / {} tokens ({:.2}%)",
+                    "{} / {} {} ({:.2}%)",
                     fmt_tok_big(used),
                     fmt_tok_big(total),
+                    token_unit,
                     precise_usage_percent(used, total),
                 ),
                 Style::default().fg(theme.text_secondary),
@@ -455,11 +529,11 @@ impl ContextInfoBlock {
         lines.extend(bar_lines);
         lines.push(Line::from(""));
         for row in &legend_rows {
-            lines.extend(layout.render(row, bar, total, label_style, muted));
+            lines.extend(layout.render(row, bar, total, &token_unit, label_style, muted));
         }
         lines.push(Line::from(""));
         for row in &info_rows {
-            lines.extend(layout.render(row, bar, total, label_style, muted));
+            lines.extend(layout.render(row, bar, total, &token_unit, label_style, muted));
         }
         lines.push(Line::from(""));
 
@@ -482,7 +556,11 @@ impl ContextInfoBlock {
             let remaining = threshold_tokens.saturating_sub(used);
             let (text, style) = if usage_pct >= threshold_percent {
                 (
-                    format!("Auto-compact triggers next turn (at {threshold_percent}%)"),
+                    text(
+                        "context.auto_compact_triggers",
+                        "Auto-compact triggers next turn (at {percent}%)",
+                    )
+                    .replace("{percent}", &threshold_percent.to_string()),
                     Style::default().fg(quantize(theme.warning)),
                 )
             } else {
@@ -491,10 +569,12 @@ impl ContextInfoBlock {
                 // window at 60% reads `~1.0m tokens remaining`, not
                 // `~1000k tokens remaining`.
                 (
-                    format!(
-                        "Auto-compact at {threshold_percent}% \u{00b7} ~{} tokens remaining",
-                        fmt_tok_big(remaining)
-                    ),
+                    text(
+                        "context.auto_compact_remaining",
+                        "Auto-compact at {percent}% \u{00b7} ~{tokens} tokens remaining",
+                    )
+                    .replace("{percent}", &threshold_percent.to_string())
+                    .replace("{tokens}", &fmt_tok_big(remaining)),
                     muted,
                 )
             };
@@ -504,9 +584,13 @@ impl ContextInfoBlock {
 
         // Footer stats
         lines.push(Line::from(Span::styled(
-            format!(
-                "Turns: {turn_count} \u{00b7} Tool calls: {tool_call_count} \u{00b7} Compactions: {compaction_count}"
-            ),
+            text(
+                "context.footer",
+                "Turns: {turns} \u{00b7} Tool calls: {tool_calls} \u{00b7} Compactions: {compactions}",
+            )
+            .replace("{turns}", &turn_count.to_string())
+            .replace("{tool_calls}", &tool_call_count.to_string())
+            .replace("{compactions}", &compaction_count.to_string()),
             muted,
         )));
 
@@ -519,7 +603,10 @@ impl ContextInfoBlock {
         if (80..snapshot.auto_compact_threshold_percent).contains(&usage_pct) {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "Tip: run /compact to free up context space.".to_string(),
+                text(
+                    "context.tip_compact",
+                    "Tip: run /compact to free up context space.",
+                ),
                 Style::default().fg(quantize(theme.warning)),
             )));
         }
@@ -658,6 +745,7 @@ impl BlockContent for ContextInfoBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::{LocaleSource, ResolvedLocale, UiLocale};
     use xai_grok_shell::session::TokenUsageCategory;
 
     fn snapshot() -> ContextInfo {
@@ -702,6 +790,60 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()).chain(["\n"]))
             .collect()
+    }
+
+    fn zh_locale() -> LocaleContext {
+        LocaleContext::new(ResolvedLocale {
+            locale: UiLocale::ZhCn,
+            source: LocaleSource::Cli,
+        })
+    }
+
+    #[test]
+    fn localization_regression_context_chrome_preserves_dynamic_values() {
+        let mut data = snapshot();
+        data.usage_pct = 82;
+        data.usage_categories = vec![
+            TokenUsageCategory::skills_listing("skill body", 21),
+            TokenUsageCategory::mcp_servers("server body", 2),
+            TokenUsageCategory {
+                label: "Provider cache".to_string(),
+                tokens: 42,
+                detail: Some("3 shards".to_string()),
+            },
+        ];
+        let block = ContextInfoBlock::new_with_locale(data, "grok-4.5", zh_locale());
+        let rendered = all_text(&block.build_lines(&test_theme(), BarLayout::WIDE));
+
+        for expected in [
+            "上下文",
+            "Token",
+            "系统提示词",
+            "消息",
+            "推理/额外开销",
+            "可用",
+            "工具定义",
+            "技能",
+            "MCP 服务器",
+            "21 个技能",
+            "2 个服务器",
+            "在 85% 时自动压缩",
+            "轮次：5",
+            "工具调用：12",
+            "压缩次数：0",
+            "提示：运行 /compact 可释放上下文空间。",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?}: {rendered}"
+            );
+        }
+        assert!(rendered.contains("grok-4.5"));
+        assert!(rendered.contains("Provider cache"));
+        assert!(rendered.contains("3 shards"));
+        assert!(!rendered.contains("System prompt"));
+        assert!(!rendered.contains("Tool definitions"));
+        assert!(!rendered.contains("Tool calls:"));
     }
 
     #[test]

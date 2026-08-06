@@ -5,15 +5,15 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AuthError {
-    #[error("Not logged in. Run `grok login`.")]
+    #[error("Not logged in. Run `grok-zh login`.")]
     NotLoggedIn,
 
     /// Token expired and no refresh authority available.
-    #[error("Token expired. Run `grok login` to re-authenticate.")]
+    #[error("Token expired. Run `grok-zh login` to re-authenticate.")]
     TokenExpiredNoRefresh,
 
     /// Server rejected the token (401) with no recovery path.
-    #[error("Authentication rejected by server. Run `grok login` to re-authenticate.")]
+    #[error("Authentication rejected by server. Run `grok-zh login` to re-authenticate.")]
     ServerRejectedNoRecovery,
 
     /// All recovery strategies exhausted.
@@ -22,11 +22,11 @@ pub enum AuthError {
 
     /// A session's team principal violates the `force_login_team_uuid` pin.
     /// `message` states which team is required vs. returned.
-    #[error("{message} Run `grok login` to sign in with the required team.")]
+    #[error("{message} Run `grok-zh login` to sign in with the required team.")]
     PinnedTeamMismatch { message: String },
 
     /// Cached API-key session rejected because API-key auth is disabled.
-    #[error("API-key auth is disabled by your administrator. Run `grok login` to authenticate.")]
+    #[error("API-key auth is disabled by your administrator. Run `grok-zh login` to authenticate.")]
     ApiKeyAuthDisabled,
 
     /// Outcome of a refresh-authority attempt. Recoverability (and, for
@@ -121,15 +121,16 @@ impl RefreshTokenFailedReason {
     pub(crate) fn user_message(self) -> Cow<'static, str> {
         match self {
             Self::RefreshTokenRejected => {
-                "Your session has expired. Run `grok login` to sign in again.".into()
+                "Your session has expired. Run `grok-zh login` to sign in again.".into()
             }
             Self::ClientRejected => {
-                "Authentication is temporarily unavailable. Run `grok login` if this persists."
+                "Authentication is temporarily unavailable. Run `grok-zh login` if this persists."
                     .into()
             }
             Self::ProviderInteractiveRequired => provider_login_message(None),
             Self::Other => {
-                "Authentication could not be refreshed. Run `grok login` to sign in again.".into()
+                "Authentication could not be refreshed. Run `grok-zh login` to sign in again."
+                    .into()
             }
         }
     }

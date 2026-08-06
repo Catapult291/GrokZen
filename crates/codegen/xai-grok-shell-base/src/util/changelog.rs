@@ -63,21 +63,13 @@ impl Default for ChangelogManager {
 
 impl ChangelogManager {
     pub fn new() -> Self {
-        // Prefer live `$GROK_HOME` so harness-injected homes (PTY e2e) always
-        // win over a OnceLock that may have been initialised earlier with a
-        // different path in the same process graph.
-        Self::from_env_home()
+        Self::from_product_home()
     }
 
-    /// Resolve cache paths from the live process environment (not the
-    /// `grok_home()` OnceLock). A seeded `$GROK_HOME` set on the pager
-    /// process is always honoured even if some earlier init path cached a
-    /// different home.
-    fn from_env_home() -> Self {
-        let home = std::env::var_os("GROK_HOME")
-            .map(std::path::PathBuf::from)
-            .filter(|p| !p.as_os_str().is_empty())
-            .unwrap_or_else(crate::util::grok_home::grok_home);
+    /// Resolve cache paths through the product-owned home resolver. Release
+    /// builds never consult the official distribution's `GROK_HOME`.
+    fn from_product_home() -> Self {
+        let home = crate::util::grok_home::grok_home();
         Self {
             md_cache: home.join("CHANGELOG.md"),
             json_cache: home.join("CHANGELOG.json"),
@@ -93,22 +85,23 @@ impl ChangelogManager {
     /// When `GROK_CHANGELOG_OFFLINE` is set (PTY / integration tests), skip
     /// the CDN entirely and read only the disk cache so seeded fixtures win
     /// deterministically without network races. Paths are re-resolved from
-    /// `$GROK_HOME` so harness-injected env always applies.
+    /// the product home so harness-injected overrides apply before first use.
     ///
     /// JSON is only cached after a successful parse to avoid poisoning the
     /// disk cache with malformed content (the markdown cache is write-through
     /// since it's consumed as raw text).
     pub fn fetch(&self) -> Changelog {
-        // Always re-resolve from env so a caller holding an older manager
-        // (or OnceLock lag) still reads the live harness home.
-        Self::from_env_home().fetch_with(changelog_offline(), CHANGELOG_BASE)
+        // Community releases must not fall back to the official changelog CDN.
+        // A locally seeded community changelog remains available offline.
+        let offline = changelog_offline() || !xai_grok_product::OFFICIAL_CHANGELOG_SOURCE_ALLOWED;
+        Self::from_product_home().fetch_with(offline, CHANGELOG_BASE)
     }
 
     /// Fetch using this manager's already-resolved cache paths, an explicit
     /// offline flag, and an explicit CDN base.
     ///
     /// Split out of [`fetch`] so unit tests can drive it against a temp home
-    /// without mutating process-global env (`GROK_HOME` /
+    /// without mutating process-global env (`GROK_ZH_HOME` /
     /// `GROK_CHANGELOG_OFFLINE`), which races across the parallel test
     /// harness. Passing an unreachable `base` lets a test force a
     /// deterministic CDN miss instead of depending on whether the sandbox

@@ -192,14 +192,15 @@ impl BlockContent for UseToolCallBlock {
                     for (i, line) in content_lines.iter().enumerate() {
                         if i >= max_inline {
                             let remaining = content_lines.len() - max_inline;
+                            let truncated = if ctx.locale.locale() == crate::locale::UiLocale::ZhCn
+                            {
+                                format!("{indent}…（还有 {remaining} 行，按 Enter 查看）")
+                            } else {
+                                format!("{indent}... ({remaining} more lines, press Enter to view)",)
+                            };
                             lines.push(
-                                BlockLine::from(Line::from(Span::styled(
-                                    format!(
-                                        "{indent}... ({remaining} more lines, press Enter to view)",
-                                    ),
-                                    theme.dim(),
-                                )))
-                                .with_panel_background(theme.bg_dark),
+                                BlockLine::from(Line::from(Span::styled(truncated, theme.dim())))
+                                    .with_panel_background(theme.bg_dark),
                             );
                             break;
                         }
@@ -305,6 +306,7 @@ mod tests {
             appearance: Default::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

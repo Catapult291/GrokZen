@@ -96,11 +96,22 @@ fn count_hooks(entries: &[&[HookRunEntry]]) -> (usize, usize) {
 /// `[hooks: N/M]` spans (green successes, red failures) with a leading
 /// two-space gap. Returns `None` when nothing ran.
 fn hooks_count_spans(success: usize, failed: usize) -> Option<Vec<Span<'static>>> {
+    hooks_count_spans_with_locale(success, failed, None)
+}
+
+fn hooks_count_spans_with_locale(
+    success: usize,
+    failed: usize,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<Vec<Span<'static>>> {
     if success == 0 && failed == 0 {
         return None;
     }
     let theme = Theme::current();
-    let mut spans = vec![Span::styled("  [hooks: ", theme.muted())];
+    let prefix = locale
+        .map(|locale| locale.named_static_text("scrollback.hooks.prefix", "  [hooks: "))
+        .unwrap_or("  [hooks: ");
+    let mut spans = vec![Span::styled(prefix, theme.muted())];
     if success > 0 {
         spans.push(Span::styled(
             format!("{}", success),
@@ -131,12 +142,19 @@ fn hooks_count_spans(success: usize, failed: usize) -> Option<Vec<Span<'static>>
 /// - If no successes, only show error count
 /// - Returns None if no hooks ran
 pub fn render_hooks_inline_suffix(data: &ToolCallHookData) -> Option<Vec<Span<'static>>> {
+    render_hooks_inline_suffix_with_locale(data, None)
+}
+
+pub fn render_hooks_inline_suffix_with_locale(
+    data: &ToolCallHookData,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<Vec<Span<'static>>> {
     let all_runs: Vec<&[HookRunEntry]> = [data.pre_hooks.as_slice(), data.post_hooks.as_slice()]
         .into_iter()
         .chain(data.lifecycle.iter().map(|(_, runs)| runs.as_slice()))
         .collect();
     let (success, failed) = count_hooks(&all_runs);
-    hooks_count_spans(success, failed)
+    hooks_count_spans_with_locale(success, failed, locale)
 }
 
 /// Right-side summary for stop hooks merged onto a turn-terminal marker line:
@@ -145,11 +163,18 @@ pub fn render_hooks_inline_suffix(data: &ToolCallHookData) -> Option<Vec<Span<'s
 pub fn render_stop_hooks_summary(
     groups: &[(String, Vec<HookRunEntry>)],
 ) -> Option<Vec<Span<'static>>> {
+    render_stop_hooks_summary_with_locale(groups, None)
+}
+
+pub fn render_stop_hooks_summary_with_locale(
+    groups: &[(String, Vec<HookRunEntry>)],
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<Vec<Span<'static>>> {
     let theme = Theme::current();
     let mut spans: Vec<Span<'static>> = Vec::new();
     for (event_name, runs) in groups {
         let (success, failed) = count_hooks(&[runs.as_slice()]);
-        let Some(count_spans) = hooks_count_spans(success, failed) else {
+        let Some(count_spans) = hooks_count_spans_with_locale(success, failed, locale) else {
             continue;
         };
         if !spans.is_empty() {
@@ -183,6 +208,14 @@ fn render_separator() -> BlockLine {
 ///   **post_tool_use**
 ///     \u2713 hook-name (5ms)
 fn render_hooks_expanded(event: &str, runs: &[HookRunEntry]) -> Vec<BlockLine> {
+    render_hooks_expanded_with_locale(event, runs, None)
+}
+
+fn render_hooks_expanded_with_locale(
+    event: &str,
+    runs: &[HookRunEntry],
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<BlockLine> {
     let theme = Theme::current();
     let mut lines = Vec::new();
 
@@ -204,13 +237,20 @@ fn render_hooks_expanded(event: &str, runs: &[HookRunEntry]) -> Vec<BlockLine> {
     );
 
     // Per-hook detail lines
-    lines.extend(render_hooks_expanded_inner(runs));
+    lines.extend(render_hooks_expanded_inner_with_locale(runs, locale));
 
     lines
 }
 
 /// Render per-hook detail lines without a section header.
 fn render_hooks_expanded_inner(runs: &[HookRunEntry]) -> Vec<BlockLine> {
+    render_hooks_expanded_inner_with_locale(runs, None)
+}
+
+fn render_hooks_expanded_inner_with_locale(
+    runs: &[HookRunEntry],
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<BlockLine> {
     let theme = Theme::current();
     let mut lines = Vec::new();
 
@@ -236,7 +276,14 @@ fn render_hooks_expanded_inner(runs: &[HookRunEntry]) -> Vec<BlockLine> {
                         Span::styled(format!("{}  ", INDENT), theme.muted()),
                         Span::styled("- ", theme.muted()),
                         Span::styled(run.name.clone(), theme.muted()),
-                        Span::styled(" skipped", theme.muted()),
+                        Span::styled(
+                            locale
+                                .map(|locale| {
+                                    locale.named_static_text("scrollback.hooks.skipped", " skipped")
+                                })
+                                .unwrap_or(" skipped"),
+                            theme.muted(),
+                        ),
                     ])
                     .into(),
                 );
@@ -316,12 +363,23 @@ pub fn render_hooks_for_mode(
     runs: &[HookRunEntry],
     mode: DisplayMode,
 ) -> Vec<BlockLine> {
+    render_hooks_for_mode_with_locale(event, runs, mode, None)
+}
+
+pub fn render_hooks_for_mode_with_locale(
+    event: &str,
+    runs: &[HookRunEntry],
+    mode: DisplayMode,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<BlockLine> {
     if runs.is_empty() {
         return Vec::new();
     }
     match mode {
         DisplayMode::Collapsed => Vec::new(),
-        DisplayMode::Expanded | DisplayMode::Truncated => render_hooks_expanded(event, runs),
+        DisplayMode::Expanded | DisplayMode::Truncated => {
+            render_hooks_expanded_with_locale(event, runs, locale)
+        }
     }
 }
 
@@ -330,12 +388,22 @@ pub fn render_hooks_for_mode(
 /// Used by lifecycle blocks where the block header already shows the event name,
 /// so repeating it as a section header would be redundant.
 pub fn render_hooks_detail(runs: &[HookRunEntry], mode: DisplayMode) -> Vec<BlockLine> {
+    render_hooks_detail_with_locale(runs, mode, None)
+}
+
+pub fn render_hooks_detail_with_locale(
+    runs: &[HookRunEntry],
+    mode: DisplayMode,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<BlockLine> {
     if runs.is_empty() {
         return Vec::new();
     }
     match mode {
         DisplayMode::Collapsed => Vec::new(),
-        DisplayMode::Expanded | DisplayMode::Truncated => render_hooks_expanded_inner(runs),
+        DisplayMode::Expanded | DisplayMode::Truncated => {
+            render_hooks_expanded_inner_with_locale(runs, locale)
+        }
     }
 }
 

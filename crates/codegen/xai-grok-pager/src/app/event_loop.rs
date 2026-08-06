@@ -724,6 +724,7 @@ pub(crate) async fn run(
     connection: crate::acp::AcpConnection,
     config_watcher: &mut ConfigWatcher,
     args: &PagerArgs,
+    locale: std::sync::Arc<crate::locale::LocaleContext>,
     session_cwd: Option<std::path::PathBuf>,
     remote_settings: Option<xai_grok_shell::util::config::RemoteSettings>,
     term_state: TerminalState,
@@ -745,10 +746,17 @@ pub(crate) async fn run(
 
     crate::unified_log::init(connection.tx.clone());
     crate::unified_log::info("pager started", None, None);
-    let mut app = AppView::new(
+    let resolved_locale = locale.resolved();
+    tracing::info!(
+        locale = resolved_locale.locale.as_bcp47(),
+        source = ?resolved_locale.source,
+        "UI locale resolved"
+    );
+    let mut app = AppView::new_with_locale(
         connection.tx,
         connection.models,
         connection.available_commands,
+        locale,
     );
     app.tracing_rx = Some(tracing_handle.rx);
     // Startup terminal height for the auto-compact derivation; kept fresh by
@@ -772,9 +780,15 @@ pub(crate) async fn run(
         app.minimal_state.welcome_pending = true;
     }
     if term_state.relaunched_into_minimal && app.screen_mode.is_minimal() {
-        app.screen_mode_switch_hint = Some("Switched to minimal mode · /fullscreen to go back");
+        app.screen_mode_switch_hint = Some(
+            app.locale
+                .text(crate::locale::TextKey::ScreenMinimalEnabled),
+        );
     } else if term_state.relaunched_into_fullscreen && !app.screen_mode.is_minimal() {
-        app.screen_mode_switch_hint = Some("Switched to fullscreen mode · /minimal to go back");
+        app.screen_mode_switch_hint = Some(
+            app.locale
+                .text(crate::locale::TextKey::ScreenFullscreenEnabled),
+        );
     }
     let remote_permission_mode = remote_settings
         .as_ref()
@@ -1894,7 +1908,7 @@ pub(crate) async fn run(
             } else if app.voice_cmd_tx.is_none() {
                 app.voice_state = VoiceState::Idle;
                 app.voice_ui_active = false;
-                app.show_toast("Voice could not start. Restart Grok.");
+                app.show_toast("Voice could not start. Restart grok-zh.");
             } else {
                 // Defensive: a queued start with the pipeline already up (which
                 // shouldn't occur) — drop it so we don't re-enter every tick.
@@ -2458,9 +2472,12 @@ pub(crate) async fn run(
                             None,
                             Some(serde_json::json!({ "attempt": attempt })),
                         );
-                        app.show_toast(&format!(
-                            "Disconnected. Reconnecting... (attempt {attempt})"
-                        ));
+                        let attempt = attempt.to_string();
+                        let message = app.locale.format(
+                            crate::locale::TextKey::ReconnectAttempt,
+                            &[("attempt", &attempt)],
+                        );
+                        app.show_toast(&message);
                         presenter.request(false);
                     }
                     ConnectionStatus::Connected { generation }
@@ -2527,6 +2544,10 @@ pub(crate) async fn run(
                             &mut app.dashboard,
                             &mut app.agents,
                         );
+                        let reconnect_reload_message = app
+                            .locale
+                            .text(crate::locale::TextKey::ReconnectReload)
+                            .to_owned();
                         for id in agent_ids {
                             let Some(agent) = app.agents.get_mut(&id) else {
                                 continue;
@@ -2539,7 +2560,10 @@ pub(crate) async fn run(
                             // agent (yolo wins, computed inside `plan_reconnect_load`).
                             agent.session.auto_mode =
                                 plan.meta["autoMode"].as_bool().unwrap_or(false);
-                            agent.begin_session_reload(generation);
+                            agent.begin_session_reload_with_message(
+                                generation,
+                                &reconnect_reload_message,
+                            );
                             // The reload adoption supersedes a pre-disconnect stash.
                             app.pending_running_adoptions.remove(&id);
                             reload_agent_ids.push(id);
@@ -2647,11 +2671,13 @@ pub(crate) async fn run(
                         });
                         reconnect_abort_handle = Some(join_handle.abort_handle());
 
-                        app.show_toast(if any_reload {
-                            "Reconnected. Reloading session..."
+                        let message = if any_reload {
+                            app.locale.text(crate::locale::TextKey::ReconnectReload)
                         } else {
-                            "Reconnected. Re-initializing..."
-                        });
+                            app.locale
+                                .text(crate::locale::TextKey::ReconnectReinitialize)
+                        };
+                        app.show_toast(message);
                         presenter.request(false);
                     }
                     ConnectionStatus::Failed { ref error } => {
@@ -2732,11 +2758,23 @@ pub(crate) async fn run(
 
                 if pending.agent_ids.is_empty() {
                     // Nothing was reloaded (no open sessions at reconnect).
-                    app.show_toast("Reconnected.");
+                    let message = app
+                        .locale
+                        .text(crate::locale::TextKey::ReconnectConnected)
+                        .to_owned();
+                    app.show_toast(&message);
                 } else if restored {
-                    app.show_toast("Session restored. In-progress tools and terminals were lost.");
+                    let message = app
+                        .locale
+                        .text(crate::locale::TextKey::ReconnectRestored)
+                        .to_owned();
+                    app.show_toast(&message);
                 } else {
-                    app.show_toast("Session restore failed. Kept the existing transcript.");
+                    let message = app
+                        .locale
+                        .text(crate::locale::TextKey::ReconnectRestoreFailed)
+                        .to_owned();
+                    app.show_toast(&message);
                 }
 
                 // Re-trigger the queue drain suppressed during the outage: every

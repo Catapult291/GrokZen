@@ -4,6 +4,9 @@ name = "xai-grok-update"
 version = "0.1.220-alpha.4"
 edition.workspace = true
 
+[features]
+community-build = []
+
 [dependencies]
 anyhow = { workspace = true }
 futures = { workspace = true }
@@ -19,6 +22,7 @@ tracing = { workspace = true }
 xai-grok-shell = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-version = { workspace = true }
+xai-grok-product = { path = "../xai-grok-product" }
 
 [dev-dependencies]
 semver = { workspace = true }

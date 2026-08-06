@@ -155,6 +155,7 @@ impl ReadToolCallBlock {
         surface: crate::render::tool_paths::ToolPathSurface,
         cwd: Option<&std::path::Path>,
         width: Option<usize>,
+        locale: &crate::locale::LocaleContext,
     ) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
@@ -175,20 +176,37 @@ impl ReadToolCallBlock {
 
         // SKILL.md reads render as "Skill {skill_name}".
         if let Some(skill) = self.skill_name() {
+            let prefix = locale
+                .named_text("scrollback.tool.read.skill", "Skill ")
+                .into_owned();
+            let skill = width
+                .map(|width| {
+                    let available = width
+                        .saturating_sub(unicode_width::UnicodeWidthStr::width(prefix.as_str()));
+                    crate::render::line_utils::truncate_str(skill, available)
+                })
+                .unwrap_or_else(|| skill.to_owned());
             return Line::from(vec![
-                Span::styled("Skill ", bold_style),
-                Span::styled(skill.to_owned(), path_style),
+                Span::styled(prefix, bold_style),
+                Span::styled(skill, path_style),
             ]);
         }
 
-        let prefix = "Read ";
+        let prefix = locale
+            .named_text("scrollback.tool.read.label", "Read ")
+            .into_owned();
         let range_suffix = self
             .line_range
             .map(|r| {
                 if let Some(total) = self.total_lines
                     && total > r.end.saturating_sub(r.start) + 1
                 {
-                    format!(" ({} of {total})", r)
+                    let range = r.to_string();
+                    let english = format!(" ({range} of {total})");
+                    locale
+                        .named_text("scrollback.tool.read.range_of", &english)
+                        .replace("{range}", &range)
+                        .replace("{total}", &total.to_string())
                 } else {
                     format!(" ({})", r)
                 }
@@ -196,22 +214,33 @@ impl ReadToolCallBlock {
             .unwrap_or_default();
         // Extra suffix for errors or empty content
         let extra_suffix = if self.content.as_ref().is_some_and(|c| c.is_empty()) {
-            " (empty)".to_string()
+            locale
+                .named_text("scrollback.tool.read.empty", " (empty)")
+                .into_owned()
         } else if let Some(media) = &self.media_kind {
             match media {
-                ReadMediaKind::Image => " (image)".to_string(),
-                ReadMediaKind::Pdf { pages } => format!(" ({pages} pages)"),
+                ReadMediaKind::Image => locale
+                    .named_text("scrollback.tool.read.image", " (image)")
+                    .into_owned(),
+                ReadMediaKind::Pdf { pages } => {
+                    if locale.locale() == crate::locale::UiLocale::ZhCn {
+                        format!("（{pages} 页）")
+                    } else {
+                        format!(" ({pages} pages)")
+                    }
+                }
             }
         } else {
             String::new()
         };
-        let total_suffix_len = range_suffix.len() + extra_suffix.len();
+        let total_suffix_width = unicode_width::UnicodeWidthStr::width(range_suffix.as_str())
+            + unicode_width::UnicodeWidthStr::width(extra_suffix.as_str());
         let path = crate::render::tool_paths::path_for_tool_surface(
             &self.path,
             surface,
             cwd,
             width,
-            prefix.len() + total_suffix_len,
+            unicode_width::UnicodeWidthStr::width(prefix.as_str()) + total_suffix_width,
         );
 
         let mut spans = vec![
@@ -366,6 +395,7 @@ impl BlockContent for ReadToolCallBlock {
                         crate::render::tool_paths::ToolPathSurface::Collapsed,
                         cwd,
                         Some(ctx.content_width()),
+                        &ctx.locale,
                     ),
                     cwd,
                 )],
@@ -383,6 +413,7 @@ impl BlockContent for ReadToolCallBlock {
                     crate::render::tool_paths::ToolPathSurface::Expanded,
                     cwd,
                     None,
+                    &ctx.locale,
                 );
                 let mut lines: Vec<BlockLine> = vec![self.header_block_line(header, cwd)];
                 if self.has_content() {
@@ -464,6 +495,7 @@ impl BlockContent for ReadToolCallBlock {
             crate::render::tool_paths::ToolPathSurface::Fullscreen,
             ctx.cwd.as_deref(),
             None,
+            &ctx.locale,
         )))
     }
 }
@@ -483,6 +515,7 @@ mod tests {
             appearance: Default::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

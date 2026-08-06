@@ -133,7 +133,9 @@ impl AgentView {
         } else if approval_empty {
             LineViewerState::open_markdown_content(
                 "plan.md",
-                crate::views::plan_approval_view::EMPTY_PLAN_PLACEHOLDER.to_owned(),
+                crate::views::plan_approval_view::empty_plan_placeholder_with_locale(Some(
+                    self.scrollback.locale(),
+                )),
                 None,
             )
         } else if let Some(plan_path) = self.plan_file_path() {
@@ -141,12 +143,19 @@ impl AgentView {
         } else {
             None
         }) else {
-            self.show_toast("No plan written yet.");
+            let message = self
+                .scrollback
+                .locale()
+                .named_static_text("plan.approval.no_plan", "No plan written yet.");
+            self.show_toast(message);
             return;
         };
         viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
         viewer.title_override = Some(if approval_empty {
-            "plan.md (empty)".to_string()
+            self.scrollback
+                .locale()
+                .named_static_text("plan.approval.empty_title", "plan.md (empty)")
+                .to_string()
         } else {
             "plan.md".to_string()
         });
@@ -265,7 +274,11 @@ impl AgentView {
         self.prompt.restore(pav.stashed_prompt);
         self.line_viewer = None;
         self.prompt.textarea.cancel_undo_group();
-        self.show_toast("Plan revision sent.");
+        let message = self
+            .scrollback
+            .locale()
+            .named_static_text("plan.approval.revision_sent", "Plan revision sent.");
+        self.show_toast(message);
         log_plan_submit("revise");
         InputOutcome::Changed
     }
@@ -382,7 +395,11 @@ impl AgentView {
                     .is_some_and(|pav| pav.focus == PlanApprovalFocus::Prompt);
                 if prompt_focused {
                     if text.trim().is_empty() && !has_comments {
-                        self.show_toast("Type revision notes, or press a to approve.");
+                        let message = self.scrollback.locale().named_static_text(
+                            "plan.approval.type_revision",
+                            "Type revision notes, or press a to approve.",
+                        );
+                        self.show_toast(message);
                         return InputOutcome::Changed;
                     }
                     let freeform = if text.trim().is_empty() {
@@ -667,7 +684,11 @@ impl AgentView {
     }
     pub(super) fn send_casual_plan_comments(&mut self) -> InputOutcome {
         if self.plan_comments.is_empty() {
-            self.show_toast("No comments to send.");
+            let message = self
+                .scrollback
+                .locale()
+                .named_static_text("plan.feedback.no_comments", "No comments to send.");
+            self.show_toast(message);
             return InputOutcome::Changed;
         }
         let plan_content = self.inline_plan_content().map(str::to_owned).or_else(|| {
@@ -682,7 +703,11 @@ impl AgentView {
         self.plan_comments.clear();
         self.plan_next_comment_id = 0;
         self.cancel_line_viewer();
-        self.show_toast("Plan feedback sent.");
+        let message = self
+            .scrollback
+            .locale()
+            .named_static_text("plan.feedback.sent", "Plan feedback sent.");
+        self.show_toast(message);
         InputOutcome::Action(Action::SendPrompt(text))
     }
 }

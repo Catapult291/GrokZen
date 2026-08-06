@@ -27,6 +27,7 @@
 //! `check_update_status`, or the npm dispatch path will surface a diff.
 
 #![cfg(unix)]
+#![cfg(not(feature = "community-build"))]
 
 mod common;
 

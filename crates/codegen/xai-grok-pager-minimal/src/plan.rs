@@ -46,20 +46,37 @@ Approve to leave plan mode and start implementing, request changes to send the \
 agent back to planning, or quit to abandon.";
 
 /// Controls-strip header for the parked plan-approval surface.
-fn plan_header(has_plan: bool) -> &'static str {
-    if has_plan {
-        "Plan ready for review"
+fn plan_header<'a>(
+    has_plan: bool,
+    locale: Option<&'a xai_grok_pager::locale::LocaleContext>,
+) -> std::borrow::Cow<'a, str> {
+    let (key, english) = if has_plan {
+        ("plan.ready", "Plan ready for review")
     } else {
-        "No plan written yet"
-    }
+        ("plan.empty_header", "No plan written yet")
+    };
+    locale
+        .map(|locale| locale.named_text(key, english))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed(english))
 }
 
 /// Body committed into native scrollback for a parked plan approval.
-fn plan_scrollback_body(plan_content: Option<&str>) -> String {
+fn plan_scrollback_body(
+    plan_content: Option<&str>,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
+) -> String {
     plan_content
         .filter(|s| !s.trim().is_empty())
         .map(str::to_owned)
-        .unwrap_or_else(|| EMPTY_PLAN_SCROLLBACK.to_owned())
+        .unwrap_or_else(|| {
+            locale
+                .map(|locale| {
+                    locale
+                        .named_text("plan.empty", EMPTY_PLAN_SCROLLBACK)
+                        .into_owned()
+                })
+                .unwrap_or_else(|| EMPTY_PLAN_SCROLLBACK.to_owned())
+        })
 }
 
 /// Commit the active plan into native scrollback, once per plan (and once per
@@ -90,6 +107,7 @@ fn plan_scrollback_body(plan_content: Option<&str>) -> String {
 ///
 /// Call once per frame from [`crate::draw`], before the commit pass.
 pub fn maybe_commit_plan(app: &mut AppView) {
+    let locale = app.locale.clone();
     let ActiveView::Agent(id) = &app.active_view else {
         return;
     };
@@ -99,7 +117,7 @@ pub fn maybe_commit_plan(app: &mut AppView) {
     // scrollback push and the `minimal_state` read/write below don't overlap it.
     let plan = app.agents.get(&id).and_then(|agent| {
         minimal_api::plan_approval_view(agent).map(|pav| {
-            let content = plan_scrollback_body(pav.plan_content.as_deref());
+            let content = plan_scrollback_body(pav.plan_content.as_deref(), Some(&locale));
             (pav.tool_call_id.clone(), content)
         })
     });
@@ -151,6 +169,7 @@ pub fn render(
     area: Rect,
     agent: &mut AgentView,
     theme: &Theme,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
 ) -> Option<(u16, u16)> {
     if area.height == 0 || area.width < 4 {
         return None;
@@ -180,7 +199,7 @@ pub fn render(
     buf.set_span(
         area.x,
         area.y,
-        &Span::styled(plan_header(has_plan), header_style),
+        &Span::styled(plan_header(has_plan, locale), header_style),
         area.width,
     );
 
@@ -190,14 +209,27 @@ pub fn render(
         .unwrap_or(false)
         || !agent.prompt.text().trim().is_empty();
     // Tab reopens the preview (including the empty-plan placeholder).
-    let hint = match foc {
-        PlanApprovalFocus::Prompt if has_content => {
-            "enter request changes \u{00b7} tab plan \u{00b7} esc back"
-        }
-        PlanApprovalFocus::Prompt => "enter approve \u{00b7} tab plan \u{00b7} esc back",
-        PlanApprovalFocus::Commenting => "enter save comment \u{00b7} esc cancel",
-        PlanApprovalFocus::Preview => "a approve \u{00b7} s revise \u{00b7} q keep planning",
+    let (hint_key, hint_english) = match foc {
+        PlanApprovalFocus::Prompt if has_content => (
+            "plan.controls.request_changes",
+            "enter request changes \u{00b7} tab plan \u{00b7} esc back",
+        ),
+        PlanApprovalFocus::Prompt => (
+            "plan.controls.approve",
+            "enter approve \u{00b7} tab plan \u{00b7} esc back",
+        ),
+        PlanApprovalFocus::Commenting => (
+            "plan.controls.save_comment",
+            "enter save comment \u{00b7} esc cancel",
+        ),
+        PlanApprovalFocus::Preview => (
+            "plan.controls.preview",
+            "a approve \u{00b7} s revise \u{00b7} q keep planning",
+        ),
     };
+    let hint = locale
+        .map(|locale| locale.named_text(hint_key, hint_english))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed(hint_english));
     let hint_style = theme.dim().bg(Color::Reset);
     let controls_rect = Rect {
         x: area.x,
@@ -225,7 +257,7 @@ pub fn render(
         buf.set_style(row, Style::default().bg(theme.bg_visual));
         return agent
             .prompt
-            .draw(buf, row, None, &style, None, None)
+            .draw_with_locale(buf, row, None, &style, None, None, locale)
             .cursor_pos;
     }
     None
@@ -259,20 +291,20 @@ mod tests {
 
     #[test]
     fn empty_plan_header_is_explicit() {
-        assert_eq!(plan_header(true), "Plan ready for review");
-        assert_eq!(plan_header(false), "No plan written yet");
+        assert_eq!(plan_header(true, None), "Plan ready for review");
+        assert_eq!(plan_header(false, None), "No plan written yet");
     }
 
     #[test]
     fn empty_plan_scrollback_uses_notice_not_silence() {
-        let body = plan_scrollback_body(None);
+        let body = plan_scrollback_body(None, None);
         assert!(body.contains("No plan written yet"));
         assert!(body.contains("Approve"));
 
-        let whitespace = plan_scrollback_body(Some("  \n\t  "));
+        let whitespace = plan_scrollback_body(Some("  \n\t  "), None);
         assert_eq!(whitespace, body, "whitespace-only counts as empty");
 
-        let real = plan_scrollback_body(Some("# Plan\n- do it"));
+        let real = plan_scrollback_body(Some("# Plan\n- do it"), None);
         assert_eq!(real, "# Plan\n- do it");
     }
 }

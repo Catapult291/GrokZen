@@ -82,7 +82,15 @@ impl AgentView {
             return false;
         }
         crate::prompt_images::cleanup_temp_file(pasted);
-        self.show_toast("Images can't be attached when editing a shared queued prompt");
+        let message = self
+            .scrollback
+            .locale()
+            .named_static_text(
+                "prompt.image.shared_queue_unsupported",
+                "Images can't be attached when editing a shared queued prompt",
+            )
+            .to_string();
+        self.show_toast(&message);
         true
     }
     /// Enqueue attachment probing off-thread so paste-then-send remains ordered.
@@ -166,7 +174,10 @@ impl AgentView {
                     );
                 }
                 let preparation = pasted.preview_preparation();
-                if let Err(msg) = self.prompt.insert_image(pasted) {
+                if let Err(msg) = self
+                    .prompt
+                    .insert_image_with_locale(pasted, Some(self.scrollback.locale()))
+                {
                     self.show_toast_ticks(&msg, 150);
                     ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported)
                 } else {
@@ -188,7 +199,12 @@ impl AgentView {
                 }
             }
             ProbedAttachment::PersistFailed(_) => {
-                self.show_toast("Couldn't save pasted image");
+                let message = self
+                    .scrollback
+                    .locale()
+                    .named_static_text("prompt.image.save_failed", "Couldn't save pasted image")
+                    .to_string();
+                self.show_toast(&message);
                 ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported)
             }
             ProbedAttachment::NoRaster => ClipboardPasteCompletion::FullMiss,
@@ -348,7 +364,9 @@ impl AgentView {
                     }
                     if self.prompt.images.len() >= PromptWidget::IMAGE_CAP {
                         image_cap_reached = true;
-                        self.show_toast(&PromptWidget::cap_reached_toast());
+                        self.show_toast(&PromptWidget::cap_reached_toast_with_locale(Some(
+                            self.scrollback.locale(),
+                        )));
                         continue;
                     }
                     if !group_open {
@@ -421,10 +439,18 @@ impl AgentView {
         ) && let Err(e) = crate::prompt_images::persist_to_session(&mut pasted, &images_dir)
         {
             tracing::warn!("failed to persist pasted image: {e}");
-            self.show_toast("Couldn't save pasted image");
+            let message = self
+                .scrollback
+                .locale()
+                .named_static_text("prompt.image.save_failed", "Couldn't save pasted image")
+                .to_string();
+            self.show_toast(&message);
             return false;
         }
-        if let Err(msg) = self.prompt.insert_image(pasted) {
+        if let Err(msg) = self
+            .prompt
+            .insert_image_with_locale(pasted, Some(self.scrollback.locale()))
+        {
             self.show_toast_ticks(&msg, 150);
             return false;
         }

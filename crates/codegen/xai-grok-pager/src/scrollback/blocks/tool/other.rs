@@ -167,7 +167,7 @@ impl OtherToolCallBlock {
                     .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
                     .sum();
                 let summary = format!("  {}", self.summary);
-                if used + summary.len() <= w {
+                if used + unicode_width::UnicodeWidthStr::width(summary.as_str()) <= w {
                     spans.push(Span::styled(summary, theme.muted()));
                 }
             } else {
@@ -202,17 +202,7 @@ impl BlockContent for OtherToolCallBlock {
             let path_str = urlencoding::decode(&raw_path)
                 .map(|s| s.into_owned())
                 .unwrap_or(raw_path);
-            // Char-boundary middle-ellipsis (decoded paths may be multibyte).
-            let path_display = if path_str.chars().count() > max_w {
-                let keep = max_w.saturating_sub(3) / 2;
-                let end_keep = max_w.saturating_sub(3) - keep;
-                let chars: Vec<char> = path_str.chars().collect();
-                let head: String = chars[..keep].iter().collect();
-                let tail: String = chars[chars.len() - end_keep..].iter().collect();
-                format!("{head}...{tail}")
-            } else {
-                path_str
-            };
+            let path_display = truncate_middle_to_width(&path_str, max_w);
             let path_line = Line::from(Span::styled(
                 path_display,
                 ratatui::style::Style::default().fg(theme.gray_dim),
@@ -222,10 +212,14 @@ impl BlockContent for OtherToolCallBlock {
             // No inline graphics: centered "[Open]" button between blank
             // spacers (its click target is registered in render.rs).
             if let Some((_, is_video)) = self.inline_open_button() {
-                let label = crate::scrollback::render::media_open_button_label(is_video);
-                let col = crate::scrollback::render::media_open_button_col(
+                let label = crate::scrollback::render::media_open_button_label_with_locale(
+                    is_video,
+                    Some(&ctx.locale),
+                );
+                let col = crate::scrollback::render::media_open_button_col_with_locale(
                     ctx.content_width() as u16,
                     is_video,
+                    Some(&ctx.locale),
                 );
                 let open_line = Line::from(vec![
                     Span::raw(" ".repeat(col as usize)),
@@ -270,7 +264,12 @@ impl BlockContent for OtherToolCallBlock {
                             // "     → answer" or "     (no answer)"
                             let a_line = if answer.is_empty() {
                                 Line::from(Span::styled(
-                                    "     (no answer)".to_string(),
+                                    ctx.locale
+                                        .named_static_text(
+                                            "scrollback.question.no_answer",
+                                            "     (no answer)",
+                                        )
+                                        .to_string(),
                                     theme.dim(),
                                 ))
                             } else {
@@ -425,6 +424,45 @@ impl BlockContent for OtherToolCallBlock {
         }
         None
     }
+}
+
+fn truncate_middle_to_width(text: &str, max_width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_owned();
+    }
+    if max_width <= 3 {
+        return ".".repeat(max_width);
+    }
+
+    let content_width = max_width - 3;
+    let head_width = content_width / 2;
+    let tail_width = content_width - head_width;
+    let mut head = String::new();
+    let mut used = 0usize;
+    for ch in text.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > head_width {
+            break;
+        }
+        head.push(ch);
+        used += width;
+    }
+
+    let mut tail_chars = Vec::new();
+    used = 0;
+    for ch in text.chars().rev() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > tail_width {
+            break;
+        }
+        tail_chars.push(ch);
+        used += width;
+    }
+    tail_chars.reverse();
+    let tail: String = tail_chars.into_iter().collect();
+    format!("{head}...{tail}")
 }
 
 // ── AskUserQuestion output parser ────────────────────────────────────

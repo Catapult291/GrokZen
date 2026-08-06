@@ -7,6 +7,47 @@ use ratatui::text::{Line, Span};
 use crate::theme::Theme;
 use crate::views::prompt_widget::StashedPrompt;
 
+fn rewind_static(
+    locale: Option<&crate::locale::LocaleContext>,
+    id: &str,
+    english: &'static str,
+) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn rewind_text(locale: Option<&crate::locale::LocaleContext>, id: &str, english: &str) -> String {
+    locale
+        .map(|locale| locale.named_text(id, english).into_owned())
+        .unwrap_or_else(|| english.to_owned())
+}
+
+fn localized_conflict_label<'a>(
+    locale: Option<&crate::locale::LocaleContext>,
+    label: &'a str,
+) -> &'a str {
+    let Some(locale) = locale else {
+        return label;
+    };
+    let id = match label {
+        "deleted" => "rewind.conflict.deleted",
+        "added" => "rewind.conflict.added",
+        "modified" => "rewind.conflict.modified",
+        "conflict" => "rewind.conflict.conflict",
+        _ => return label,
+    };
+    locale.named_static_text(
+        id,
+        match label {
+            "deleted" => "deleted",
+            "added" => "added",
+            "modified" => "modified",
+            _ => "conflict",
+        },
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct RewindPointInfo {
     #[serde(alias = "promptIndex")]
@@ -576,7 +617,13 @@ pub fn rewind_overlay_height(phase: &RewindPhase, screen_h: u16) -> u16 {
     content + 1
 }
 
-pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, focused: bool) {
+pub fn render_rewind_overlay(
+    buf: &mut Buffer,
+    area: Rect,
+    phase: &RewindPhase,
+    focused: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
     if area.height == 0 || area.width < 10 {
         return;
     }
@@ -608,7 +655,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 content_x,
                 y,
                 &Line::from(Span::styled(
-                    "Loading rewind points...",
+                    rewind_static(locale, "rewind.loading_points", "Loading rewind points..."),
                     Style::default().fg(theme.gray),
                 )),
                 content_w,
@@ -622,35 +669,46 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 len: points.len(),
                 selected: *selected,
             }
-            .render(buf, area, "Rewind to which turn?", focused, |i, ctx| {
-                let point = &points[i];
-                let dot_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
-                let preview: String = crate::render::line_utils::truncate_str(
-                    point.prompt_preview.as_deref().unwrap_or("(no preview)"),
-                    ctx.content_width.saturating_sub(8) as usize,
-                );
-                let text_style = Style::default()
-                    .fg(theme.text_primary)
-                    .bg(ctx.row_bg)
-                    .add_modifier(if ctx.is_cursor {
-                        Modifier::BOLD
+            .render(
+                buf,
+                area,
+                rewind_static(locale, "rewind.picker.title", "Rewind to which turn?"),
+                focused,
+                |i, ctx| {
+                    let point = &points[i];
+                    let dot_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
+                    let file_info = if point.has_file_changes {
+                        rewind_text(locale, "rewind.files_count", " · {count} files")
+                            .replace("{count}", &point.num_file_snapshots.to_string())
                     } else {
-                        Modifier::empty()
-                    });
-                let meta_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
+                        String::new()
+                    };
+                    let preview_width = ctx.content_width.saturating_sub(2).saturating_sub(
+                        unicode_width::UnicodeWidthStr::width(file_info.as_str()) as u16,
+                    );
+                    let preview: String = crate::render::line_utils::truncate_str(
+                        point.prompt_preview.as_deref().unwrap_or_else(|| {
+                            rewind_static(locale, "rewind.no_preview", "(no preview)")
+                        }),
+                        preview_width as usize,
+                    );
+                    let text_style = Style::default()
+                        .fg(theme.text_primary)
+                        .bg(ctx.row_bg)
+                        .add_modifier(if ctx.is_cursor {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        });
+                    let meta_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
 
-                let file_info = if point.has_file_changes {
-                    format!(" \u{00B7} {} files", point.num_file_snapshots)
-                } else {
-                    String::new()
-                };
-
-                Line::from(vec![
-                    Span::styled("\u{00B7} ", dot_style),
-                    Span::styled(preview, text_style),
-                    Span::styled(file_info, meta_style),
-                ])
-            });
+                    Line::from(vec![
+                        Span::styled("\u{00B7} ", dot_style),
+                        Span::styled(preview, text_style),
+                        Span::styled(file_info, meta_style),
+                    ])
+                },
+            );
             return;
         }
         RewindPhase::CancelOffer { active_idx } => {
@@ -658,7 +716,14 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             buf.set_line(
                 content_x,
                 y,
-                &Line::from(Span::styled("A turn is currently running.", title_style)),
+                &Line::from(Span::styled(
+                    rewind_static(
+                        locale,
+                        "rewind.turn_running",
+                        "A turn is currently running.",
+                    ),
+                    title_style,
+                )),
                 content_w,
             );
             y += 1;
@@ -666,7 +731,11 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 content_x,
                 y,
                 &Line::from(Span::styled(
-                    "Would you like to cancel it before rewinding?",
+                    rewind_static(
+                        locale,
+                        "rewind.cancel_question",
+                        "Would you like to cancel it before rewinding?",
+                    ),
                     Style::default().fg(theme.gray),
                 )),
                 content_w,
@@ -678,7 +747,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 y,
                 content_w,
                 'y',
-                "Cancel turn and rewind",
+                rewind_static(locale, "rewind.cancel_and_rewind", "Cancel turn and rewind"),
                 true,
                 *active_idx == 0,
                 focused,
@@ -691,7 +760,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 y,
                 content_w,
                 'n',
-                "Let it finish",
+                rewind_static(locale, "rewind.let_finish", "Let it finish"),
                 true,
                 *active_idx == 1,
                 focused,
@@ -708,9 +777,13 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             // Inline edit-and-resubmit: the conversation rewind is a given —
             // the only question is whether files come along.
             let title = if *offer_files_only {
-                "What do you want to rewind?"
+                rewind_static(locale, "rewind.mode.title", "What do you want to rewind?")
             } else {
-                "Resubmit from here \u{2014} what should be rewound?"
+                rewind_static(
+                    locale,
+                    "rewind.mode.resubmit_title",
+                    "Resubmit from here \u{2014} what should be rewound?",
+                )
             };
             buf.set_line(
                 content_x,
@@ -725,7 +798,11 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 y,
                 content_w,
                 'a',
-                "Both conversation and file changes",
+                rewind_static(
+                    locale,
+                    "rewind.mode.all",
+                    "Both conversation and file changes",
+                ),
                 true,
                 *active_idx == 0,
                 focused,
@@ -740,7 +817,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 // Sequential lettering in the two-row inline variant; the
                 // mnemonic 'c' only reads right with the 'f' row present.
                 if *offer_files_only { 'c' } else { 'b' },
-                "Conversation only",
+                rewind_static(locale, "rewind.mode.conversation", "Conversation only"),
                 true,
                 *active_idx == 1,
                 focused,
@@ -754,7 +831,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                     y,
                     content_w,
                     'f',
-                    "File changes only",
+                    rewind_static(locale, "rewind.mode.files", "File changes only"),
                     *has_file_changes,
                     *active_idx == 2,
                     focused,
@@ -768,7 +845,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 content_x,
                 y,
                 &Line::from(Span::styled(
-                    "Previewing file changes...",
+                    rewind_static(locale, "rewind.previewing", "Previewing file changes..."),
                     Style::default().fg(theme.gray),
                 )),
                 content_w,
@@ -780,7 +857,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 content_x,
                 y,
                 &Line::from(Span::styled(
-                    "Rewinding...",
+                    rewind_static(locale, "rewind.executing", "Rewinding..."),
                     Style::default().fg(theme.gray),
                 )),
                 content_w,
@@ -796,50 +873,75 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
         } => {
             let mut y = area.y + 1;
             let file_total = clean_files.len() + conflicts.len();
-            let preview_text = prompt_preview.as_deref().unwrap_or("this turn");
+            let preview_text = prompt_preview
+                .as_deref()
+                .unwrap_or_else(|| rewind_static(locale, "rewind.this_turn", "this turn"));
             let (prefix, suffix) = match mode {
                 RewindMode::All => {
                     if file_total > 0 {
                         (
-                            "Rewind file changes and conversation to \u{201C}",
-                            format!("\u{201D}? ({file_total} files)"),
+                            rewind_static(
+                                locale,
+                                "rewind.confirm.all_prefix",
+                                "Rewind file changes and conversation to \u{201C}",
+                            ),
+                            rewind_text(
+                                locale,
+                                "rewind.confirm.files_suffix",
+                                "\u{201D}? ({count} files)",
+                            )
+                            .replace("{count}", &file_total.to_string()),
                         )
                     } else {
                         (
-                            "Rewind file changes and conversation to \u{201C}",
-                            "\u{201D}?".to_string(),
+                            rewind_static(
+                                locale,
+                                "rewind.confirm.all_prefix",
+                                "Rewind file changes and conversation to \u{201C}",
+                            ),
+                            rewind_static(locale, "rewind.confirm.suffix", "\u{201D}?").to_string(),
                         )
                     }
                 }
                 RewindMode::ConversationOnly => (
-                    "Rewind conversation only to \u{201C}",
-                    "\u{201D}?".to_string(),
+                    rewind_static(
+                        locale,
+                        "rewind.confirm.conversation_prefix",
+                        "Rewind conversation only to \u{201C}",
+                    ),
+                    rewind_static(locale, "rewind.confirm.suffix", "\u{201D}?").to_string(),
                 ),
                 RewindMode::FilesOnly => {
                     if file_total > 0 {
                         (
-                            "Rewind file changes only to \u{201C}",
-                            format!("\u{201D}? ({file_total} files)"),
+                            rewind_static(
+                                locale,
+                                "rewind.confirm.files_prefix",
+                                "Rewind file changes only to \u{201C}",
+                            ),
+                            rewind_text(
+                                locale,
+                                "rewind.confirm.files_suffix",
+                                "\u{201D}? ({count} files)",
+                            )
+                            .replace("{count}", &file_total.to_string()),
                         )
                     } else {
                         (
-                            "Rewind file changes only to \u{201C}",
-                            "\u{201D}?".to_string(),
+                            rewind_static(
+                                locale,
+                                "rewind.confirm.files_prefix",
+                                "Rewind file changes only to \u{201C}",
+                            ),
+                            rewind_static(locale, "rewind.confirm.suffix", "\u{201D}?").to_string(),
                         )
                     }
                 }
             };
-            let chrome = prefix.chars().count() + suffix.chars().count();
-            let max_preview = (content_w as usize).saturating_sub(chrome + 1);
-            let preview_trunc: String = if preview_text.chars().count() > max_preview {
-                let truncated: String = preview_text
-                    .chars()
-                    .take(max_preview.saturating_sub(1))
-                    .collect();
-                format!("{truncated}\u{2026}")
-            } else {
-                preview_text.to_string()
-            };
+            let chrome = unicode_width::UnicodeWidthStr::width(prefix)
+                + unicode_width::UnicodeWidthStr::width(suffix.as_str());
+            let max_preview = (content_w as usize).saturating_sub(chrome);
+            let preview_trunc = crate::render::line_utils::truncate_str(preview_text, max_preview);
             let title = format!("{prefix}{preview_trunc}{suffix}");
             buf.set_line(
                 content_x,
@@ -851,7 +953,8 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
 
             for (i, path) in clean_files.iter().enumerate() {
                 if i >= 5 {
-                    let more = format!("+{} more", clean_files.len() - 5);
+                    let more = rewind_text(locale, "rewind.more", "+{count} more")
+                        .replace("{count}", &(clean_files.len() - 5).to_string());
                     buf.set_line(
                         content_x,
                         y,
@@ -874,7 +977,8 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             }
             for (i, conflict) in conflicts.iter().enumerate() {
                 if i >= 5 {
-                    let more = format!("+{} more", conflicts.len() - 5);
+                    let more = rewind_text(locale, "rewind.more", "+{count} more")
+                        .replace("{count}", &(conflicts.len() - 5).to_string());
                     buf.set_line(
                         content_x,
                         y,
@@ -884,7 +988,11 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                     y += 1;
                     break;
                 }
-                let line_text = format!("! {} ({})", conflict.path, conflict.label);
+                let line_text = format!(
+                    "! {} ({})",
+                    conflict.path,
+                    localized_conflict_label(locale, conflict.label)
+                );
                 buf.set_line(
                     content_x,
                     y,
@@ -904,7 +1012,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 y,
                 content_w,
                 'y',
-                "Confirm rewind",
+                rewind_static(locale, "rewind.confirm.action", "Confirm rewind"),
                 true,
                 *active_idx == 0,
                 focused,
@@ -917,7 +1025,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 y,
                 content_w,
                 '\x08',
-                "Back",
+                rewind_static(locale, "rewind.back", "Back"),
                 true,
                 *active_idx == 1,
                 focused,
@@ -930,20 +1038,19 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             ..
         } => {
             let mut y = area.y + 1;
-            let preview_text = prompt_preview.as_deref().unwrap_or("this turn");
-            let prefix = "Rewind conversation only to \u{201C}";
-            let suffix = "\u{201D}?";
-            let chrome = prefix.chars().count() + suffix.chars().count();
-            let max_preview = (content_w as usize).saturating_sub(chrome + 1);
-            let preview_trunc: String = if preview_text.chars().count() > max_preview {
-                let truncated: String = preview_text
-                    .chars()
-                    .take(max_preview.saturating_sub(1))
-                    .collect();
-                format!("{truncated}\u{2026}")
-            } else {
-                preview_text.to_string()
-            };
+            let preview_text = prompt_preview
+                .as_deref()
+                .unwrap_or_else(|| rewind_static(locale, "rewind.this_turn", "this turn"));
+            let prefix = rewind_static(
+                locale,
+                "rewind.confirm.conversation_prefix",
+                "Rewind conversation only to \u{201C}",
+            );
+            let suffix = rewind_static(locale, "rewind.confirm.suffix", "\u{201D}?");
+            let chrome = unicode_width::UnicodeWidthStr::width(prefix)
+                + unicode_width::UnicodeWidthStr::width(suffix);
+            let max_preview = (content_w as usize).saturating_sub(chrome);
+            let preview_trunc = crate::render::line_utils::truncate_str(preview_text, max_preview);
             let title = format!("{prefix}{preview_trunc}{suffix}");
             buf.set_line(
                 content_x,
@@ -956,7 +1063,11 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 content_x,
                 y,
                 &Line::from(Span::styled(
-                    "File effects from removed turns will be orphaned.",
+                    rewind_static(
+                        locale,
+                        "rewind.orphaned_files",
+                        "File effects from removed turns will be orphaned.",
+                    ),
                     Style::default().fg(theme.warning),
                 )),
                 content_w,
@@ -968,7 +1079,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 y,
                 content_w,
                 'y',
-                "Confirm rewind",
+                rewind_static(locale, "rewind.confirm.action", "Confirm rewind"),
                 true,
                 *active_idx == 0,
                 focused,
@@ -981,7 +1092,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 y,
                 content_w,
                 '\x08',
-                "Back",
+                rewind_static(locale, "rewind.back", "Back"),
                 true,
                 *active_idx == 1,
                 focused,
@@ -994,7 +1105,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 content_x,
                 y,
                 &Line::from(Span::styled(
-                    "Rewind failed",
+                    rewind_static(locale, "rewind.failed", "Rewind failed"),
                     Style::default()
                         .fg(theme.accent_error)
                         .add_modifier(Modifier::BOLD),
@@ -1002,7 +1113,7 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
                 content_w,
             );
             y += 1;
-            let truncated: String = message.chars().take(content_w as usize).collect();
+            let truncated = crate::render::line_utils::truncate_str(message, content_w as usize);
             buf.set_line(
                 content_x,
                 y,
@@ -1014,7 +1125,16 @@ pub fn render_rewind_overlay(buf: &mut Buffer, area: Rect, phase: &RewindPhase, 
             );
             y += 1;
             render_radio_row(
-                buf, content_x, y, content_w, '\x1b', "Dismiss", true, true, focused, &theme,
+                buf,
+                content_x,
+                y,
+                content_w,
+                '\x1b',
+                rewind_static(locale, "rewind.dismiss", "Dismiss"),
+                true,
+                true,
+                focused,
+                &theme,
             );
         }
     }

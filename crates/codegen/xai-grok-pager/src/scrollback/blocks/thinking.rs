@@ -28,7 +28,11 @@ const EXPAND_HINT_GAP: &str = "  ";
 /// collapsed renderer for an empty body in other modes, where the hint would be
 /// a lie. Skipping the hint when it does not fit keeps the header out of
 /// truncation and off a second row (K5).
-fn append_expand_hint(line: Line<'static>, ctx: &BlockContext) -> Line<'static> {
+fn append_expand_hint(
+    line: Line<'static>,
+    ctx: &BlockContext,
+    locale: &crate::locale::LocaleContext,
+) -> Line<'static> {
     if !ctx
         .appearance
         .scrollback
@@ -39,7 +43,8 @@ fn append_expand_hint(line: Line<'static>, ctx: &BlockContext) -> Line<'static> 
     {
         return line;
     }
-    let hint = format!("{EXPAND_HINT_GAP}({EXPAND_HINT})");
+    let localized_hint = locale.named_text("scrollback.thinking.expand_hint", EXPAND_HINT);
+    let hint = format!("{EXPAND_HINT_GAP}({localized_hint})");
     let used: usize = line.spans.iter().map(|s| s.content.width()).sum();
     if used + hint.width() > ctx.content_width() {
         return line;
@@ -81,6 +86,11 @@ fn body_emphasis_patch(ctx: &BlockContext) -> Option<Style> {
 pub struct ThinkingBlock {
     content: MarkdownContent,
 
+    /// Display locale captured by the owning scrollback state. The reasoning
+    /// content and timing data remain canonical; only render-time chrome uses
+    /// this context.
+    locale: crate::locale::LocaleContext,
+
     /// Optional elapsed time in milliseconds (from server).
     /// When set, collapsed view shows "Thought for Xs".
     elapsed_time_ms: Option<i64>,
@@ -92,6 +102,7 @@ impl ThinkingBlock {
     pub fn new(text: impl Into<String>) -> Self {
         Self {
             content: MarkdownContent::new(text),
+            locale: crate::locale::LocaleContext::default(),
             elapsed_time_ms: None,
             started_at: None,
         }
@@ -101,6 +112,7 @@ impl ThinkingBlock {
     pub fn streaming() -> Self {
         Self {
             content: MarkdownContent::streaming(),
+            locale: crate::locale::LocaleContext::default(),
             elapsed_time_ms: None,
             started_at: Some(std::time::Instant::now()),
         }
@@ -119,6 +131,7 @@ impl ThinkingBlock {
     pub fn streaming_replay() -> Self {
         Self {
             content: MarkdownContent::streaming(),
+            locale: crate::locale::LocaleContext::default(),
             elapsed_time_ms: None,
             started_at: None,
         }
@@ -174,6 +187,10 @@ impl ThinkingBlock {
     /// When set, the collapsed view will show "Thought for Xs".
     pub fn set_elapsed_time_ms(&mut self, time_ms: Option<i64>) {
         self.elapsed_time_ms = time_ms;
+    }
+
+    pub(crate) fn set_locale(&mut self, locale: crate::locale::LocaleContext) {
+        self.locale = locale;
     }
 
     /// Set the raw mode, re-rendering if it changed.
@@ -243,21 +260,39 @@ impl ThinkingBlock {
         let detail_style = theme.muted();
 
         if ctx.is_running {
-            Line::from(Span::styled("Thinking…", label_style))
+            Line::from(Span::styled(
+                self.locale
+                    .named_text("scrollback.thinking.running", "Thinking…")
+                    .into_owned(),
+                label_style,
+            ))
         } else if let Some(time_str) = self.format_time() {
+            let completed = self
+                .locale
+                .named_text("scrollback.thinking.completed", "Thought")
+                .into_owned();
+            let duration = self
+                .locale
+                .named_text("scrollback.thinking.duration", " for {duration}")
+                .replace("{duration}", &time_str);
             Line::from(vec![
-                Span::styled("Thought", label_style),
-                Span::styled(format!(" for {time_str}"), detail_style),
+                Span::styled(completed, label_style),
+                Span::styled(duration, detail_style),
             ])
         } else {
-            Line::from(Span::styled("Thought", label_style))
+            Line::from(Span::styled(
+                self.locale
+                    .named_text("scrollback.thinking.completed", "Thought")
+                    .into_owned(),
+                label_style,
+            ))
         }
     }
 
     /// Render the collapsed view: header line only, truncated to fit.
     fn render_collapsed(&self, ctx: &BlockContext) -> BlockOutput {
         let line = self.header_line(ctx);
-        let line = append_expand_hint(line, ctx);
+        let line = append_expand_hint(line, ctx, &self.locale);
         let line = crate::render::line_utils::truncate_line(line, ctx.content_width());
         BlockOutput {
             lines: vec![BlockLine::separator(line)],
@@ -555,7 +590,41 @@ mod tests {
             appearance: AppearanceConfig::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
+    }
+
+    fn zh_locale() -> crate::locale::LocaleContext {
+        crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        })
+    }
+
+    #[test]
+    fn localization_regression_thinking_header_uses_display_locale() {
+        let text_of = |output: &BlockOutput| {
+            output
+                .lines
+                .iter()
+                .map(|line| crate::scrollback::types::line_plain_text(&line.content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let mut completed = ThinkingBlock::new("reasoning");
+        completed.set_elapsed_time_ms(Some(3_200));
+        completed.set_locale(zh_locale());
+        assert_eq!(
+            text_of(&completed.output(&ctx(DisplayMode::Collapsed, 40))),
+            "思考用时 3.2s"
+        );
+
+        let mut running = ThinkingBlock::streaming();
+        running.set_locale(zh_locale());
+        let mut running_ctx = ctx(DisplayMode::Collapsed, 40);
+        running_ctx.is_running = true;
+        assert_eq!(text_of(&running.output(&running_ctx)), "思考中…");
     }
 
     #[test]

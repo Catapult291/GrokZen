@@ -13,6 +13,20 @@ use crate::scrollback::blocks::SessionEvent;
 use crate::scrollback::state::ScrollbackState;
 use agent_client_protocol as acp;
 use std::time::Instant;
+
+fn localized_template(
+    locale: &crate::locale::LocaleContext,
+    id: &str,
+    english: &str,
+    replacements: &[(&str, &str)],
+) -> String {
+    let mut message = locale.named_text(id, english).into_owned();
+    for (placeholder, value) in replacements {
+        message = message.replace(placeholder, value);
+    }
+    message
+}
+
 /// Top-level `/fork` dispatcher. Resolves the worktree decision: an
 /// explicit `--worktree` / `--no-worktree` flag short-circuits to
 /// [`dispatch_fork_resolved`]. When no flag is given and a persisted
@@ -44,7 +58,14 @@ pub(in crate::app::dispatch) fn dispatch_fork(
     args: crate::slash::commands::fork::ForkArgs,
 ) -> Vec<Effect> {
     let ActiveView::Agent(parent_id) = app.active_view else {
-        app.show_toast("/fork only works inside a session");
+        let toast = app
+            .locale
+            .named_text(
+                "session.fork.only_inside_session",
+                "/fork only works inside a session",
+            )
+            .into_owned();
+        app.show_toast(&toast);
         return vec![];
     };
     let (has_session, in_git_repo) = app
@@ -53,12 +74,26 @@ pub(in crate::app::dispatch) fn dispatch_fork(
         .map(|a| (a.session.session_id.is_some(), a.current_branch.is_some()))
         .unwrap_or((false, false));
     if !has_session {
-        app.show_toast("Cannot fork: session is still being created");
+        let toast = app
+            .locale
+            .named_text(
+                "session.fork.still_creating",
+                "Cannot fork: session is still being created",
+            )
+            .into_owned();
+        app.show_toast(&toast);
         return vec![];
     }
     match args.worktree_override {
         Some(true) if !in_git_repo => {
-            app.show_toast("Cannot create worktree: not in a git repository");
+            let toast = app
+                .locale
+                .named_text(
+                    "session.worktree.not_git_repo",
+                    "Cannot create worktree: not in a git repository",
+                )
+                .into_owned();
+            app.show_toast(&toast);
             vec![]
         }
         Some(worktree) => dispatch_fork_resolved(app, worktree, args.directive),
@@ -92,19 +127,34 @@ pub(in crate::app::dispatch) fn apply_persist_worktree_mode(
 }
 /// Build the two persistence options shared by the fork and new-session
 /// worktree question modals ("Always worktree" / "Never worktree").
-pub(super) fn worktree_persist_options()
--> [xai_grok_tools::implementations::grok_build::ask_user_question::QuestionOption; 2] {
+pub(super) fn worktree_persist_options(
+    locale: &crate::locale::LocaleContext,
+) -> [xai_grok_tools::implementations::grok_build::ask_user_question::QuestionOption; 2] {
     use xai_grok_tools::implementations::grok_build::ask_user_question::QuestionOption;
     [
         QuestionOption {
-            label: "Always worktree".into(),
-            description: "Use worktree and stop asking (reset in config.toml)".into(),
+            label: locale
+                .named_text("session.worktree.option.always.label", "Always worktree")
+                .into_owned(),
+            description: locale
+                .named_text(
+                    "session.worktree.option.always.description",
+                    "Use worktree and stop asking (reset in config.toml)",
+                )
+                .into_owned(),
             preview: None,
             id: None,
         },
         QuestionOption {
-            label: "Never worktree".into(),
-            description: "Skip worktree and stop asking (reset in config.toml)".into(),
+            label: locale
+                .named_text("session.worktree.option.never.label", "Never worktree")
+                .into_owned(),
+            description: locale
+                .named_text(
+                    "session.worktree.option.never.description",
+                    "Skip worktree and stop asking (reset in config.toml)",
+                )
+                .into_owned(),
             preview: None,
             id: None,
         },
@@ -121,30 +171,49 @@ fn open_fork_question(app: &mut AppView, directive: Option<String>) -> Vec<Effec
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let locale = app.locale.clone();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
     if agent.question_view.is_some() {
-        app.show_toast("Finish answering the current question first");
+        let toast = locale
+            .named_text(
+                "question.finish_current_first",
+                "Finish answering the current question first",
+            )
+            .into_owned();
+        app.show_toast(&toast);
         return vec![];
     }
     let mut options = vec![
         QuestionOption {
-            label: "Yes".into(),
-            description: "Fork in a new isolated git worktree".into(),
+            label: locale.named_text("question.option.yes", "Yes").into_owned(),
+            description: locale
+                .named_text(
+                    "session.fork.option.worktree",
+                    "Fork in a new isolated git worktree",
+                )
+                .into_owned(),
             preview: None,
             id: None,
         },
         QuestionOption {
-            label: "No".into(),
-            description: "Fork in the current cwd".into(),
+            label: locale.named_text("question.option.no", "No").into_owned(),
+            description: locale
+                .named_text("session.fork.option.current_cwd", "Fork in the current cwd")
+                .into_owned(),
             preview: None,
             id: None,
         },
     ];
-    options.extend(worktree_persist_options());
+    options.extend(worktree_persist_options(locale.as_ref()));
     let question = Question {
-        question: "Run this fork in an isolated git worktree?".into(),
+        question: locale
+            .named_text(
+                "session.fork.question.worktree",
+                "Run this fork in an isolated git worktree?",
+            )
+            .into_owned(),
         id: None,
         options,
         multi_select: Some(false),
@@ -177,11 +246,18 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
     let ActiveView::Agent(parent_id) = app.active_view else {
         return vec![];
     };
+    let locale = app.locale.clone();
     let Some(parent) = app.agents.get(&parent_id) else {
         return vec![];
     };
     let Some(parent_session_id) = parent.session.session_id.clone() else {
-        app.show_toast("Cannot fork: session not yet created");
+        let toast = locale
+            .named_text(
+                "session.fork.not_yet_created",
+                "Cannot fork: session not yet created",
+            )
+            .into_owned();
+        app.show_toast(&toast);
         return vec![];
     };
     let parent_cwd = parent.session.cwd.clone();
@@ -190,8 +266,15 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
     app.next_agent_id += 1;
     let new_agent = build_fork_placeholder(app, new_id, parent_id, &parent_cwd, worktree);
     let parent_marker = match directive.as_deref() {
-        Some(d) => format!("Forked: {d}"),
-        None => "Forked".to_string(),
+        Some(d) => localized_template(
+            locale.as_ref(),
+            "session.fork.parent_marker.directive",
+            "Forked: {directive}",
+            &[("{directive}", d)],
+        ),
+        None => locale
+            .named_text("session.fork.parent_marker", "Forked")
+            .into_owned(),
     };
     let parent_chat_kind = parent.chat_kind || app.chat_mode;
     app.agents.insert(new_id, new_agent);
@@ -229,9 +312,10 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             worktree,
         });
         if worktree {
-            agent
-                .scrollback
-                .push_block(RenderBlock::system("Creating worktree\u{2026}".to_string()));
+            let message = locale
+                .named_text("session.worktree.creating", "Creating worktree\u{2026}")
+                .into_owned();
+            agent.scrollback.push_block(RenderBlock::system(message));
         }
         agent.pending_first_prompt = directive;
     }
@@ -344,17 +428,64 @@ pub(in crate::app::dispatch) fn build_child_fork_marker(
     worktree: bool,
     switch_hint: Option<&str>,
 ) -> String {
+    build_child_fork_marker_with_locale(session_id, parent_sid, worktree, switch_hint, None)
+}
+
+pub(in crate::app::dispatch) fn build_child_fork_marker_with_locale(
+    session_id: &str,
+    parent_sid: &str,
+    worktree: bool,
+    switch_hint: Option<&str>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     let header = if let Some(cmd) = switch_hint {
-        format!(
-            "Session {session_id} (forked from {parent_sid}) \u{2014} use {cmd} to switch between sessions",
-        )
+        let english = "Session {session_id} (forked from {parent_sid}) \u{2014} use {command} to switch between sessions";
+        if let Some(locale) = locale {
+            localized_template(
+                locale,
+                "session.fork.child_marker.switch",
+                english,
+                &[
+                    ("{session_id}", session_id),
+                    ("{parent_sid}", parent_sid),
+                    ("{command}", cmd),
+                ],
+            )
+        } else {
+            english
+                .replace("{session_id}", session_id)
+                .replace("{parent_sid}", parent_sid)
+                .replace("{command}", cmd)
+        }
     } else {
-        format!("Session {session_id} (forked from {parent_sid})")
+        let english = "Session {session_id} (forked from {parent_sid})";
+        if let Some(locale) = locale {
+            localized_template(
+                locale,
+                "session.fork.child_marker",
+                english,
+                &[("{session_id}", session_id), ("{parent_sid}", parent_sid)],
+            )
+        } else {
+            english
+                .replace("{session_id}", session_id)
+                .replace("{parent_sid}", parent_sid)
+        }
     };
     if worktree {
         header
     } else {
-        format!("{header}\n  (both agents share cwd)")
+        let suffix = locale
+            .map(|locale| {
+                locale
+                    .named_text(
+                        "session.fork.child_marker.shared_cwd",
+                        "(both agents share cwd)",
+                    )
+                    .into_owned()
+            })
+            .unwrap_or_else(|| "(both agents share cwd)".to_string());
+        format!("{header}\n  {suffix}")
     }
 }
 pub(in crate::app::dispatch) fn dispatch_startup_fork_session(
@@ -404,6 +535,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
     restore_degree: Option<xai_grok_workspace::session::git::RestoreDegree>,
 ) -> Vec<Effect> {
     let session_id_str = session_id.0.to_string();
+    let locale = app.locale.clone();
     let pending_entry = std::mem::take(&mut app.deferred_startup.pending_chat);
     let agent_entry = app.agents.get(&agent_id).is_some_and(|a| a.chat_kind);
     let conversation_entry = pending_entry || agent_entry;
@@ -428,20 +560,32 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         agent.session.is_worktree = true;
         app.restore_code = None;
         agent.prompt.file_search.retarget(&session_cwd);
-        agent.scrollback.push_block(RenderBlock::system(format!(
-            "Worktree ready: {}",
-            worktree_path.display()
-        )));
+        let worktree_path = worktree_path.display().to_string();
+        let message = localized_template(
+            locale.as_ref(),
+            "session.worktree.ready",
+            "Worktree ready: {path}",
+            &[("{path}", &worktree_path)],
+        );
+        agent.scrollback.push_block(RenderBlock::system(message));
         match (code_restored, restore_summary.as_deref()) {
             (true, Some(s)) => {
-                agent
-                    .scrollback
-                    .push_block(RenderBlock::system(format!("\u{2713} Code restored: {s}")));
+                let message = localized_template(
+                    locale.as_ref(),
+                    "session.load.code_restored",
+                    "\u{2713} Code restored: {summary}",
+                    &[("{summary}", s)],
+                );
+                agent.scrollback.push_block(RenderBlock::system(message));
             }
             (false, Some(s)) => {
-                agent.scrollback.push_block(RenderBlock::system(format!(
-                    "\u{26A0} Code restore failed: {s}"
-                )));
+                let message = localized_template(
+                    locale.as_ref(),
+                    "session.load.code_restore_failed",
+                    "\u{26A0} Code restore failed: {summary}",
+                    &[("{summary}", s)],
+                );
+                agent.scrollback.push_block(RenderBlock::system(message));
             }
             _ => {}
         }

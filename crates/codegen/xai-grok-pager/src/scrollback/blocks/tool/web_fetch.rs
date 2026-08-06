@@ -112,7 +112,13 @@ impl WebFetchToolCallBlock {
     ///
     /// When `max_width` is `Some`, the URL is truncated with ellipsis to fit.
     /// When `None`, the full URL is rendered (for expanded view / fullscreen).
-    fn header_line(&self, theme: &Theme, muted: bool, max_width: Option<usize>) -> Line<'static> {
+    fn header_line(
+        &self,
+        theme: &Theme,
+        muted: bool,
+        max_width: Option<usize>,
+        locale: &crate::locale::LocaleContext,
+    ) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
         } else {
@@ -125,9 +131,12 @@ impl WebFetchToolCallBlock {
             theme.fg(theme.command)
         };
 
-        let prefix = "Fetch ";
+        let prefix = locale
+            .named_text("scrollback.tool.fetch.label", "Fetch ")
+            .into_owned();
+        let prefix_width = unicode_width::UnicodeWidthStr::width(prefix.as_str());
         let display_url = match max_width {
-            Some(w) => truncate_str(&self.url, w.saturating_sub(prefix.len())),
+            Some(w) => truncate_str(&self.url, w.saturating_sub(prefix_width)),
             None => self.url.clone(),
         };
 
@@ -150,7 +159,11 @@ impl WebFetchToolCallBlock {
     }
 
     /// Build the metadata line: status, content_type, size.
-    fn metadata_line(&self, theme: &Theme) -> Option<Line<'static>> {
+    fn metadata_line(
+        &self,
+        theme: &Theme,
+        locale: &crate::locale::LocaleContext,
+    ) -> Option<Line<'static>> {
         let label_style = theme.muted();
         let value_style = theme.primary();
 
@@ -158,19 +171,37 @@ impl WebFetchToolCallBlock {
 
         if let Some(code) = self.status_code {
             parts.push(vec![
-                Span::styled("status: ", label_style),
+                Span::styled(
+                    locale
+                        .named_text("scrollback.tool.fetch.metadata.status", "status: ")
+                        .into_owned(),
+                    label_style,
+                ),
                 Span::styled(code.to_string(), value_style),
             ]);
         }
         if let Some(ref ct) = self.content_type {
             parts.push(vec![
-                Span::styled("content_type: ", label_style),
+                Span::styled(
+                    locale
+                        .named_text(
+                            "scrollback.tool.fetch.metadata.content_type",
+                            "content_type: ",
+                        )
+                        .into_owned(),
+                    label_style,
+                ),
                 Span::styled(ct.clone(), value_style),
             ]);
         }
         if let Some(bytes) = self.bytes {
             parts.push(vec![
-                Span::styled("size: ", label_style),
+                Span::styled(
+                    locale
+                        .named_text("scrollback.tool.fetch.metadata.size", "size: ")
+                        .into_owned(),
+                    label_style,
+                ),
                 Span::styled(Self::format_bytes(bytes), value_style),
             ]);
         }
@@ -204,13 +235,14 @@ impl BlockContent for WebFetchToolCallBlock {
                     &theme,
                     muted_collapsed,
                     Some(ctx.content_width()),
+                    &ctx.locale,
                 ))],
             },
             // Fetch completes in one shot (no streaming), so Truncated
             // is never visible in practice. Treat it the same as Expanded
             // to always show the full content the model saw.
             DisplayMode::Truncated | DisplayMode::Expanded => {
-                let header = self.header_line(&theme, false, None);
+                let header = self.header_line(&theme, false, None, &ctx.locale);
                 let wrapped = crate::render::wrapping::wrap_header_flush(
                     header,
                     ctx.width as usize,
@@ -234,7 +266,7 @@ impl BlockContent for WebFetchToolCallBlock {
                     .collect();
 
                 // Metadata line (status, content_type, size).
-                if let Some(meta) = self.metadata_line(&theme) {
+                if let Some(meta) = self.metadata_line(&theme, &ctx.locale) {
                     lines.push(BlockLine::separator(Line::from("")));
                     lines.push(BlockLine::separator(meta));
                 }
@@ -258,10 +290,17 @@ impl BlockContent for WebFetchToolCallBlock {
                         if i >= max_inline {
                             lines.push(
                                 BlockLine::from(Line::from(Span::styled(
-                                    format!(
-                                        "{indent}... ({} more lines, press Enter to view)",
-                                        total_lines - max_inline
-                                    ),
+                                    if ctx.locale.locale() == crate::locale::UiLocale::ZhCn {
+                                        format!(
+                                            "{indent}…（还有 {} 行，按 Enter 查看）",
+                                            total_lines - max_inline
+                                        )
+                                    } else {
+                                        format!(
+                                            "{indent}... ({} more lines, press Enter to view)",
+                                            total_lines - max_inline
+                                        )
+                                    },
                                     theme.dim(),
                                 )))
                                 .with_panel_background(theme.bg_dark),
@@ -282,9 +321,11 @@ impl BlockContent for WebFetchToolCallBlock {
                         .push(BlockLine::from(Line::from("")).with_panel_background(theme.bg_dark));
                 } else if self.error.is_none() {
                     lines.push(Line::from("").into());
-                    lines.push(
-                        Line::from(Span::styled("  (no content)".to_owned(), theme.muted())).into(),
-                    );
+                    let no_content = ctx
+                        .locale
+                        .named_text("scrollback.tool.no_content", "  (no content)")
+                        .into_owned();
+                    lines.push(Line::from(Span::styled(no_content, theme.muted())).into());
                 }
 
                 BlockOutput { lines }
@@ -345,9 +386,14 @@ impl BlockContent for WebFetchToolCallBlock {
         }
     }
 
-    fn preamble(&self, _ctx: &BlockContext) -> Option<Text<'static>> {
+    fn preamble(&self, ctx: &BlockContext) -> Option<Text<'static>> {
         let theme = Theme::current();
-        Some(Text::from(vec![self.header_line(&theme, false, None)]))
+        Some(Text::from(vec![self.header_line(
+            &theme,
+            false,
+            None,
+            &ctx.locale,
+        )]))
     }
 }
 
@@ -366,6 +412,7 @@ mod tests {
             appearance: Default::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

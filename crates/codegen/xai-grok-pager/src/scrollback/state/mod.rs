@@ -223,6 +223,9 @@ pub struct ScrollbackState {
 
     /// Session/worktree cwd (`AgentSession.cwd`) for Expanded tool paths.
     cwd: Option<std::path::PathBuf>,
+
+    /// UI locale used only by structured scrollback chrome.
+    locale: crate::locale::LocaleContext,
 }
 
 impl Default for ScrollbackState {
@@ -269,11 +272,35 @@ impl ScrollbackState {
             layout_rebuilds: 0,
             inline_edit_height: None,
             cwd: None,
+            locale: crate::locale::LocaleContext::default(),
         }
     }
 
     pub fn cwd(&self) -> Option<&std::path::Path> {
         self.cwd.as_deref()
+    }
+
+    /// Apply a display locale to existing and future blocks. The app locale is
+    /// immutable in production, so repeated per-frame synchronization is a
+    /// cheap no-op after the first call.
+    pub fn set_locale(&mut self, locale: &crate::locale::LocaleContext) {
+        if self.locale.locale() == locale.locale() {
+            return;
+        }
+        self.locale = locale.clone();
+        let mut changed = Vec::with_capacity(self.entries.len());
+        for (id, entry) in &mut self.entries {
+            entry.set_locale(locale.clone());
+            changed.push(*id);
+        }
+        self.dirty_heights.extend(changed);
+        self.layout_cache = None;
+        self.gaps_may_be_dirty = true;
+        self.bump_generation();
+    }
+
+    pub(crate) fn locale(&self) -> &crate::locale::LocaleContext {
+        &self.locale
     }
 
     /// Update session cwd; invalidates cwd-dependent paint, layout, and link maps.
@@ -314,6 +341,7 @@ impl ScrollbackState {
         fresh.view_mode = self.view_mode;
         fresh.follow_mode = self.follow_mode;
         fresh.cwd = self.cwd.clone();
+        fresh.locale = self.locale.clone();
         fresh.generation = self.generation.wrapping_add(1);
         fresh.content_generation = self.content_generation.wrapping_add(1);
         fresh
@@ -581,6 +609,7 @@ impl ScrollbackState {
 
         let mut entry = entry;
         entry.id = id;
+        entry.set_locale(self.locale.clone());
 
         self.apply_edit_default_display_mode(&mut entry);
 
@@ -662,6 +691,7 @@ impl ScrollbackState {
         self.next_id += 1;
         let mut entry = ScrollbackEntry::new(block);
         entry.id = id;
+        entry.set_locale(self.locale.clone());
         self.apply_edit_default_display_mode(&mut entry);
         if entry.is_running {
             self.running.insert(id);

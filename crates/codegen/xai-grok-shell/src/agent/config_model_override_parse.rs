@@ -273,7 +273,7 @@ pub(crate) fn log_config_warnings(warnings: &[ConfigWarning]) {
     if !warnings.is_empty() {
         tracing::warn!(
             warnings = warnings.len(),
-            "config: parsed with warnings; run `grok inspect` for details"
+            "config: parsed with warnings; run `grok-zh inspect` for details"
         );
     }
 }

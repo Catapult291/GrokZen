@@ -99,7 +99,13 @@ impl WebSearchToolCallBlock {
     /// In collapsed mode (`max_width` is `Some`), reserves space for the source
     /// count suffix and truncates the query to fit — so the suffix is always
     /// visible. In expanded mode (`None`), renders the full query with no suffix.
-    fn header_line(&self, theme: &Theme, muted: bool, max_width: Option<usize>) -> Line<'static> {
+    fn header_line(
+        &self,
+        theme: &Theme,
+        muted: bool,
+        max_width: Option<usize>,
+        locale: &crate::locale::LocaleContext,
+    ) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
         } else {
@@ -112,7 +118,11 @@ impl WebSearchToolCallBlock {
             theme.fg(theme.command)
         };
 
-        let prefix = self.label.as_deref().unwrap_or("Web Search ").to_owned();
+        let prefix = self.label.clone().unwrap_or_else(|| {
+            locale
+                .named_text("scrollback.tool.web_search.label", "Web Search ")
+                .into_owned()
+        });
 
         match max_width {
             Some(w) => {
@@ -120,20 +130,26 @@ impl WebSearchToolCallBlock {
                 // The fullscreen footer shows raw citation count as "Sources".
                 let site_count = self.unique_domains().len();
                 let suffix = if site_count > 0 {
-                    let s = if site_count == 1 { "" } else { "s" };
-                    format!(" ({site_count} site{s})")
+                    if locale.locale() == crate::locale::UiLocale::ZhCn {
+                        format!("（{site_count} 个网站）")
+                    } else {
+                        let s = if site_count == 1 { "" } else { "s" };
+                        format!(" ({site_count} site{s})")
+                    }
                 } else {
                     String::new()
                 };
 
                 // Only show suffix if prefix + suffix fit within width.
                 // Otherwise drop it to avoid overflow on narrow terminals.
-                let suffix_fits = prefix.len() + suffix.len() < w;
+                let prefix_width = unicode_width::UnicodeWidthStr::width(prefix.as_str());
+                let suffix_width = unicode_width::UnicodeWidthStr::width(suffix.as_str());
+                let suffix_fits = prefix_width + suffix_width < w;
                 let effective_suffix = if suffix_fits { &suffix } else { "" };
 
                 let query_budget = w
-                    .saturating_sub(prefix.len())
-                    .saturating_sub(effective_suffix.len());
+                    .saturating_sub(prefix_width)
+                    .saturating_sub(unicode_width::UnicodeWidthStr::width(effective_suffix));
                 let display_query = truncate_str(&self.query, query_budget);
 
                 let mut spans = vec![
@@ -182,7 +198,11 @@ impl WebSearchToolCallBlock {
     ///
     /// Extracts domain names from URLs and renders a compact one-liner:
     /// `Sources: stripe.com, react.dev, stackoverflow.com (+2 more)`
-    fn sources_line(&self, theme: &Theme) -> Option<Line<'static>> {
+    fn sources_line(
+        &self,
+        theme: &Theme,
+        locale: &crate::locale::LocaleContext,
+    ) -> Option<Line<'static>> {
         let unique = self.unique_domains();
         if unique.is_empty() {
             return None;
@@ -191,7 +211,12 @@ impl WebSearchToolCallBlock {
         let label_style = theme.muted();
         let value_style = theme.primary();
 
-        let mut spans: Vec<Span<'static>> = vec![Span::styled("  Sources: ", label_style)];
+        let mut spans: Vec<Span<'static>> = vec![Span::styled(
+            locale
+                .named_text("scrollback.tool.web_search.sources", "  Sources: ")
+                .into_owned(),
+            label_style,
+        )];
 
         let shown = unique.len().min(MAX_INLINE_SOURCES);
         for (i, domain) in unique.iter().take(shown).enumerate() {
@@ -203,7 +228,12 @@ impl WebSearchToolCallBlock {
 
         let remaining = unique.len().saturating_sub(MAX_INLINE_SOURCES);
         if remaining > 0 {
-            spans.push(Span::styled(format!(" (+{remaining} more)"), label_style));
+            let more = if locale.locale() == crate::locale::UiLocale::ZhCn {
+                format!("（另有 {remaining} 个）")
+            } else {
+                format!(" (+{remaining} more)")
+            };
+            spans.push(Span::styled(more, label_style));
         }
 
         Some(Line::from(spans))
@@ -229,10 +259,11 @@ impl BlockContent for WebSearchToolCallBlock {
                     &theme,
                     muted_collapsed,
                     Some(ctx.content_width()),
+                    &ctx.locale,
                 ))],
             },
             DisplayMode::Truncated | DisplayMode::Expanded => {
-                let header = self.header_line(&theme, false, None);
+                let header = self.header_line(&theme, false, None, &ctx.locale);
                 let wrapped = crate::render::wrapping::wrap_header_flush(
                     header,
                     ctx.width as usize,
@@ -279,9 +310,13 @@ impl BlockContent for WebSearchToolCallBlock {
                             let remaining = content_lines.len() - max_inline;
                             lines.push(
                                 BlockLine::from(Line::from(Span::styled(
-                                    format!(
-                                        "{indent}... ({remaining} more lines, press Enter to view)",
-                                    ),
+                                    if ctx.locale.locale() == crate::locale::UiLocale::ZhCn {
+                                        format!("{indent}…（还有 {remaining} 行，按 Enter 查看）")
+                                    } else {
+                                        format!(
+                                            "{indent}... ({remaining} more lines, press Enter to view)",
+                                        )
+                                    },
                                     theme.dim(),
                                 )))
                                 .with_panel_background(theme.bg_dark),
@@ -311,11 +346,15 @@ impl BlockContent for WebSearchToolCallBlock {
                     );
                 } else if !self.is_x_search {
                     lines.push(Line::from("").into());
-                    lines.push(Line::from(Span::styled("  (no content)", theme.muted())).into());
+                    let no_content = ctx
+                        .locale
+                        .named_text("scrollback.tool.no_content", "  (no content)")
+                        .into_owned();
+                    lines.push(Line::from(Span::styled(no_content, theme.muted())).into());
                 }
 
                 // Sources summary line (after content, matching fullscreen order).
-                if let Some(sources) = self.sources_line(&theme) {
+                if let Some(sources) = self.sources_line(&theme, &ctx.locale) {
                     lines.push(Line::from("").into());
                     lines.push(sources.into());
                 }
@@ -377,9 +416,14 @@ impl BlockContent for WebSearchToolCallBlock {
         }
     }
 
-    fn preamble(&self, _ctx: &BlockContext) -> Option<Text<'static>> {
+    fn preamble(&self, ctx: &BlockContext) -> Option<Text<'static>> {
         let theme = Theme::current();
-        Some(Text::from(vec![self.header_line(&theme, false, None)]))
+        Some(Text::from(vec![self.header_line(
+            &theme,
+            false,
+            None,
+            &ctx.locale,
+        )]))
     }
 }
 
@@ -398,6 +442,7 @@ mod tests {
             appearance: Default::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

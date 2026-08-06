@@ -115,18 +115,36 @@ pub fn jump_overlay_height(state: &JumpState, screen_h: u16) -> u16 {
 }
 
 pub fn render_jump_overlay(buf: &mut Buffer, area: Rect, state: &JumpState, focused: bool) {
+    render_jump_overlay_with_locale(buf, area, state, focused, None)
+}
+
+pub fn render_jump_overlay_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &JumpState,
+    focused: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
     let theme = Theme::current();
     // Ordinal gutter sized to the widest turn number.
     let ord_width = state.entries.len().to_string().len();
 
-    state
-        .list()
-        .render(buf, area, "Jump to which turn?", focused, |i, ctx| {
+    state.list().render(
+        buf,
+        area,
+        locale
+            .map(|locale| locale.named_static_text("jump.title", "Jump to which turn?"))
+            .unwrap_or("Jump to which turn?"),
+        focused,
+        |i, ctx| {
             let entry = &state.entries[i];
             let ordinal = format!("{:>ord_width$} ", entry.turn_idx + 1);
             let ord_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
             let preview: String = if entry.preview.is_empty() {
-                "(no preview)".to_string()
+                locale
+                    .map(|locale| locale.named_static_text("jump.no_preview", "(no preview)"))
+                    .unwrap_or("(no preview)")
+                    .to_string()
             } else {
                 truncate_str(
                     &entry.preview,
@@ -145,7 +163,8 @@ pub fn render_jump_overlay(buf: &mut Buffer, area: Rect, state: &JumpState, focu
                 Span::styled(ordinal, ord_style),
                 Span::styled(preview, text_style),
             ])
-        });
+        },
+    );
 }
 
 #[cfg(test)]

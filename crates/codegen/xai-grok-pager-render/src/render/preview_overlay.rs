@@ -74,6 +74,9 @@ pub struct PreviewConfig {
     /// box is too narrow to fit readable text. `None` (the default)
     /// leaves the plain border.
     pub hint: Option<Line<'static>>,
+
+    /// Optional localized separator template containing `{count}`.
+    pub omitted_lines: Option<String>,
 }
 
 impl Default for PreviewConfig {
@@ -85,6 +88,7 @@ impl Default for PreviewConfig {
             min_width: 20,
             min_height: 5,
             hint: None,
+            omitted_lines: None,
         }
     }
 }
@@ -175,6 +179,7 @@ pub fn render_preview_overlay(
         &lines,
         needs_dots,
         config.preview_lines,
+        config.omitted_lines.as_deref(),
         text_style,
         dots_style,
     );
@@ -196,6 +201,7 @@ fn render_content_lines(
     lines: &[&str],
     needs_dots: bool,
     preview_lines: usize,
+    omitted_lines: Option<&str>,
     text_style: Style,
     dots_style: Style,
 ) {
@@ -216,7 +222,9 @@ fn render_content_lines(
         // Dots separator
         if row < max_rows {
             let omitted = total - preview_lines * 2;
-            let dots_text = format!("⋮ ({omitted} more lines)");
+            let dots_text = omitted_lines
+                .map(|template| template.replace("{count}", &omitted.to_string()))
+                .unwrap_or_else(|| format!("⋮ ({omitted} more lines)"));
             buf.set_span_safe(
                 inner.x,
                 inner.y + row,

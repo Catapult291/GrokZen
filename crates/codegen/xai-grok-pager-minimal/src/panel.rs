@@ -71,10 +71,16 @@ pub(super) fn active(agent: &AgentView) -> Option<ListPanel> {
 /// height, clamped to `[CHROME_ROWS + 1, ceiling]`. Sizing to the exact content
 /// height keeps the footer directly under the last row (no blank band); when the
 /// body exceeds `ceiling` the list scrolls internally.
-pub(super) fn panel_height(agent: &AgentView, kind: ListPanel, width: u16, ceiling: u16) -> u16 {
+pub(super) fn panel_height(
+    agent: &AgentView,
+    kind: ListPanel,
+    width: u16,
+    ceiling: u16,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
+) -> u16 {
     let body = match kind {
-        ListPanel::Resume => resume_body_rows(agent, width),
-        ListPanel::Mcps => mcps_body_rows(agent),
+        ListPanel::Resume => resume_body_rows(agent, width, locale),
+        ListPanel::Mcps => mcps_body_rows(agent, locale),
     };
     CHROME_ROWS
         .saturating_add(body)
@@ -89,13 +95,14 @@ pub(super) fn render(
     agent: &mut AgentView,
     kind: ListPanel,
     theme: &Theme,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
 ) -> Option<(u16, u16)> {
     if area.height < 2 || area.width < 8 {
         return None;
     }
     match kind {
-        ListPanel::Resume => render_resume(buf, area, agent, theme),
-        ListPanel::Mcps => render_mcps(buf, area, agent, theme),
+        ListPanel::Resume => render_resume(buf, area, agent, theme, locale),
+        ListPanel::Mcps => render_mcps(buf, area, agent, theme, locale),
     }
 }
 
@@ -159,7 +166,11 @@ fn render_divider(buf: &mut Buffer, row: Rect, theme: &Theme) {
 // ─────────────────────────────── resume ─────────────────────────────────────
 
 /// Exact body height (display rows) for the session-picker list.
-fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
+fn resume_body_rows(
+    agent: &AgentView,
+    width: u16,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
+) -> u16 {
     let Some(ActiveModal::SessionPicker {
         entries,
         state,
@@ -173,8 +184,13 @@ fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
     let content_width = width.saturating_sub(2);
     let filtered =
         minimal_api::filter_session_entries(entries.as_deref(), state.query(), *source_filter);
-    let built =
-        minimal_api::build_session_entry_data(entries_data, &filtered, state, content_width);
+    let built = minimal_api::build_session_entry_data_with_locale(
+        entries_data,
+        &filtered,
+        state,
+        content_width,
+        locale,
+    );
     let fields_vecs: Vec<Vec<PickerField>> = built
         .iter()
         .map(|b| {
@@ -196,7 +212,12 @@ fn resume_body_rows(agent: &AgentView, width: u16) -> u16 {
     // Reserve a row for the pinned hidden-external hint when shown.
     let hint_row = u16::from(
         !agent.app_chat_mode
-            && minimal_api::hidden_external_hint(entries.as_deref(), *source_filter).is_some(),
+            && minimal_api::hidden_external_hint_with_locale(
+                entries.as_deref(),
+                *source_filter,
+                locale,
+            )
+            .is_some(),
     );
     measure_entries(&picker_entries).saturating_add(hint_row)
 }
@@ -206,6 +227,7 @@ fn render_resume(
     area: Rect,
     agent: &mut AgentView,
     theme: &Theme,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
 ) -> Option<(u16, u16)> {
     let cwd = agent.session.cwd.to_string_lossy().to_string();
     let chat_mode = agent.app_chat_mode;
@@ -224,8 +246,13 @@ fn render_resume(
     let content_width = area.width.saturating_sub(2);
     let filtered =
         minimal_api::filter_session_entries(entries.as_deref(), state.query(), *source_filter);
-    let built =
-        minimal_api::build_session_entry_data(entries_data, &filtered, state, content_width);
+    let built = minimal_api::build_session_entry_data_with_locale(
+        entries_data,
+        &filtered,
+        state,
+        content_width,
+        locale,
+    );
     let fields_vecs: Vec<Vec<PickerField>> = built
         .iter()
         .map(|b| {
@@ -245,12 +272,21 @@ fn render_resume(
         Some(current_repo.as_str()),
     );
     let hidden_hint = (!chat_mode)
-        .then(|| minimal_api::hidden_external_hint(entries.as_deref(), *source_filter))
+        .then(|| {
+            minimal_api::hidden_external_hint_with_locale(
+                entries.as_deref(),
+                *source_filter,
+                locale,
+            )
+        })
         .flatten();
 
-    render_title(buf, title_row, theme, "Resume session");
+    let title = locale
+        .map(|locale| locale.named_text("panel.resume_title", "Resume session"))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Resume session"));
+    render_title(buf, title_row, theme, &title);
     // Focus-aware search bar (cursor only when search is focused).
-    minimal_api::render_picker_search_bar(
+    minimal_api::render_picker_search_bar_with_locale(
         buf,
         Rect::new(
             search_row.x + 1,
@@ -262,6 +298,7 @@ fn render_resume(
         state,
         true,
         None,
+        locale,
     );
     render_divider(buf, divider_row, theme);
 
@@ -301,14 +338,20 @@ fn render_resume(
         filter_rect: None,
     });
 
-    render_footer(buf, footer_row, theme, RESUME_FOOTER);
+    let footer = locale
+        .map(|locale| locale.named_text("panel.resume_footer", RESUME_FOOTER))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed(RESUME_FOOTER));
+    render_footer(buf, footer_row, theme, &footer);
     None
 }
 
 // ──────────────────────────────── mcps ──────────────────────────────────────
 
 /// Exact body height (display rows) for the MCP list: one line per row.
-fn mcps_body_rows(agent: &AgentView) -> u16 {
+fn mcps_body_rows(
+    agent: &AgentView,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
+) -> u16 {
     let Some(s) = minimal_api::extensions_modal(agent) else {
         return 0;
     };
@@ -316,12 +359,13 @@ fn mcps_body_rows(agent: &AgentView) -> u16 {
         TabDataState::Loaded(v) => v.as_slice(),
         _ => return 1, // a single "loading…" / error row
     };
-    let rows = minimal_api::build_mcp_picker_rows(
+    let rows = minimal_api::build_mcp_picker_rows_with_locale(
         servers,
         s.picker_state.query(),
         s.mcps_filter,
         &s.mcps_collapsed_sections,
         &s.mcps_tools_expanded,
+        locale,
     );
     rows.0.len() as u16
 }
@@ -331,9 +375,13 @@ fn render_mcps(
     area: Rect,
     agent: &mut AgentView,
     theme: &Theme,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
 ) -> Option<(u16, u16)> {
     let (title_row, subtitle_row, divider_row, list_area, footer_row) = chrome_layout(area);
-    render_title(buf, title_row, theme, "Manage MCP servers");
+    let title = locale
+        .map(|locale| locale.named_text("panel.mcps_title", "Manage MCP servers"))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Manage MCP servers"));
+    render_title(buf, title_row, theme, &title);
 
     // Phase 1 (immutable): build the row mapping + owned per-row render data.
     let labels: Vec<String>;
@@ -354,12 +402,13 @@ fn render_mcps(
         match &s.mcps_data {
             TabDataState::Loaded(servers) => {
                 let (row_labels, row_group_keys, row_data_indices) =
-                    minimal_api::build_mcp_picker_rows(
+                    minimal_api::build_mcp_picker_rows_with_locale(
                         servers,
                         s.picker_state.query(),
                         s.mcps_filter,
                         &s.mcps_collapsed_sections,
                         &s.mcps_tools_expanded,
+                        locale,
                     );
                 let n = row_labels.len();
                 let mut b = vec![String::new(); n];
@@ -384,31 +433,77 @@ fn render_mcps(
                             exp[i] = s.mcps_tools_expanded.contains(&si);
                             if let Some(srv) = servers.get(si) {
                                 if !srv.enabled {
-                                    b[i] = "disabled".to_string();
+                                    b[i] = locale
+                                        .map(|locale| {
+                                            locale
+                                                .named_text("panel.disabled", "disabled")
+                                                .into_owned()
+                                        })
+                                        .unwrap_or_else(|| "disabled".to_string());
                                     bc[i] = Some(theme.accent_error);
                                 } else {
-                                    b[i] = minimal_api::mcp_status_label(&srv.status).to_string();
+                                    b[i] = minimal_api::mcp_status_label_with_locale(
+                                        &srv.status,
+                                        locale,
+                                    )
+                                    .to_string();
                                     bc[i] = Some(minimal_api::mcp_status_theme_color(
                                         &srv.status,
                                         theme,
                                     ));
                                 }
-                                rl[i] = if srv.tool_count == 1 {
-                                    "1 tool".to_string()
+                                let tool_key = if srv.tool_count == 1 {
+                                    "panel.tool_count_one"
                                 } else {
-                                    format!("{} tools", srv.tool_count)
+                                    "panel.tool_count_many"
                                 };
+                                let tool_english = if srv.tool_count == 1 {
+                                    "{count} tool"
+                                } else {
+                                    "{count} tools"
+                                };
+                                rl[i] = locale
+                                    .map(|locale| {
+                                        locale
+                                            .named_text(tool_key, tool_english)
+                                            .replace("{count}", &srv.tool_count.to_string())
+                                    })
+                                    .unwrap_or_else(|| {
+                                        if srv.tool_count == 1 {
+                                            "1 tool".to_string()
+                                        } else {
+                                            format!("{} tools", srv.tool_count)
+                                        }
+                                    });
                             }
                         }
                     } else {
                         ind[i] = 2; // tool child
                     }
                 }
-                subtitle = format!(
-                    "{} server{}",
-                    servers.len(),
-                    if servers.len() == 1 { "" } else { "s" }
-                );
+                let server_key = if servers.len() == 1 {
+                    "panel.server_count_one"
+                } else {
+                    "panel.server_count_many"
+                };
+                let server_english = if servers.len() == 1 {
+                    "{count} server"
+                } else {
+                    "{count} servers"
+                };
+                subtitle = locale
+                    .map(|locale| {
+                        locale
+                            .named_text(server_key, server_english)
+                            .replace("{count}", &servers.len().to_string())
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "{} server{}",
+                            servers.len(),
+                            if servers.len() == 1 { "" } else { "s" }
+                        )
+                    });
                 labels = row_labels;
                 group_keys = row_group_keys;
                 data_indices = row_data_indices;
@@ -420,7 +515,13 @@ fn render_mcps(
                 expandeds = exp;
             }
             TabDataState::Loading => {
-                subtitle = "loading\u{2026}".to_string();
+                subtitle = locale
+                    .map(|locale| {
+                        locale
+                            .named_text("panel.loading", "loading\u{2026}")
+                            .into_owned()
+                    })
+                    .unwrap_or_else(|| "loading\u{2026}".to_string());
                 labels = vec![];
                 group_keys = vec![];
                 data_indices = vec![];
@@ -432,7 +533,13 @@ fn render_mcps(
                 expandeds = vec![];
             }
             TabDataState::Error(msg) => {
-                subtitle = format!("error: {msg}");
+                subtitle = locale
+                    .map(|locale| {
+                        locale
+                            .named_text("panel.error", "error: {message}")
+                            .replace("{message}", msg)
+                    })
+                    .unwrap_or_else(|| format!("error: {msg}"));
                 labels = vec![];
                 group_keys = vec![];
                 data_indices = vec![];
@@ -511,7 +618,10 @@ fn render_mcps(
         filter_rect: None,
     });
 
-    render_footer(buf, footer_row, theme, MCPS_FOOTER);
+    let footer = locale
+        .map(|locale| locale.named_text("panel.mcps_footer", MCPS_FOOTER))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed(MCPS_FOOTER));
+    render_footer(buf, footer_row, theme, &footer);
     None
 }
 
@@ -664,7 +774,7 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut a, ListPanel::Mcps, &theme);
+        render(&mut buf, area, &mut a, ListPanel::Mcps, &theme, None);
 
         let text = buffer_text(&buf);
         assert!(text.contains("Manage MCP servers"), "title:\n{text}");
@@ -698,7 +808,7 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 24);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut a, ListPanel::Resume, &theme);
+        render(&mut buf, area, &mut a, ListPanel::Resume, &theme, None);
 
         let text = buffer_text(&buf);
         assert!(text.contains("Resume session"), "title:\n{text}");
@@ -724,7 +834,7 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 10);
         let mut buf = Buffer::empty(area);
-        render(&mut buf, area, &mut a, ListPanel::Resume, &theme);
+        render(&mut buf, area, &mut a, ListPanel::Resume, &theme, None);
 
         let text = buffer_text(&buf);
         assert!(
@@ -755,7 +865,14 @@ mod tests {
         let theme = Theme::current();
         let area = Rect::new(0, 0, 14, 5);
         let mut actual = Buffer::empty(area);
-        render(&mut actual, area, &mut agent, ListPanel::Resume, &theme);
+        render(
+            &mut actual,
+            area,
+            &mut agent,
+            ListPanel::Resume,
+            &theme,
+            None,
+        );
 
         let Some(ActiveModal::SessionPicker { state, .. }) = &agent.active_modal else {
             panic!("expected session picker");
@@ -794,8 +911,8 @@ mod tests {
             mcp_server("alpha", McpServerDisplayStatus::Ready, 1),
             mcp_server("bravo", McpServerDisplayStatus::Ready, 2),
         ]);
-        assert_eq!(panel_height(&a, ListPanel::Mcps, 80, 40), 7);
+        assert_eq!(panel_height(&a, ListPanel::Mcps, 80, 40, None), 7);
         // Clamps to the screen ceiling when content is taller.
-        assert_eq!(panel_height(&a, ListPanel::Mcps, 80, 5), 5);
+        assert_eq!(panel_height(&a, ListPanel::Mcps, 80, 5, None), 5);
     }
 }

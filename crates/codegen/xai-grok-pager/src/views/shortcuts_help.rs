@@ -26,6 +26,68 @@ use crate::input::key::KeyShortcut;
 use crate::views::picker::{PickerConfig, PickerOutcome, PickerState, handle_picker_input};
 use crate::views::shortcuts_bar::HintItem;
 
+fn shortcuts_static_text(
+    locale: Option<&crate::locale::LocaleContext>,
+    id: &str,
+    english: &'static str,
+) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn metadata_component(value: &str) -> String {
+    let mut component = String::with_capacity(value.len());
+    let mut last_was_separator = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            component.push(ch.to_ascii_lowercase());
+            last_was_separator = false;
+        } else if !last_was_separator && !component.is_empty() {
+            component.push('_');
+            last_was_separator = true;
+        }
+    }
+    while component.ends_with('_') {
+        component.pop();
+    }
+    component
+}
+
+fn localized_entry_text<'a>(
+    locale: Option<&crate::locale::LocaleContext>,
+    identity: Option<ExpandKey>,
+    field: &str,
+    english: &'a str,
+) -> Cow<'a, str> {
+    let Some(locale) = locale else {
+        return Cow::Borrowed(english);
+    };
+    let id = match identity {
+        Some(ExpandKey::Action(action_id)) => {
+            format!("shortcuts.action.{action_id:?}.{field}")
+        }
+        Some(ExpandKey::Pseudo(label)) => {
+            format!("shortcuts.pseudo.{}.{field}", metadata_component(label))
+        }
+        None => return Cow::Borrowed(english),
+    };
+    locale.named_text(&id, english)
+}
+
+fn localized_category_label<'a>(
+    locale: Option<&crate::locale::LocaleContext>,
+    english: &'a str,
+) -> Cow<'a, str> {
+    let Some(locale) = locale else {
+        return Cow::Borrowed(english);
+    };
+    locale.named_text(
+        &format!("shortcuts.category.{}", metadata_component(english)),
+        english,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Data
 // ---------------------------------------------------------------------------
@@ -402,6 +464,16 @@ pub fn filter_entries(
     hide_dimmed: bool,
     collapsed: &std::collections::HashSet<usize>,
 ) -> Vec<usize> {
+    filter_entries_with_locale(entries, query, hide_dimmed, collapsed, None)
+}
+
+pub fn filter_entries_with_locale(
+    entries: &[ShortcutsHelpEntry],
+    query: &str,
+    hide_dimmed: bool,
+    collapsed: &std::collections::HashSet<usize>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<usize> {
     let searching = !query.is_empty();
     if !searching && !hide_dimmed && collapsed.is_empty() {
         return (0..entries.len()).collect();
@@ -424,7 +496,10 @@ pub fn filter_entries(
                 current_section_collapsed = !searching && collapsed.contains(category_idx);
             }
             ShortcutsHelpEntry::Hint {
-                item: h, dimmed, ..
+                item: h,
+                dimmed,
+                action_id,
+                long_help,
             } => {
                 if current_section_collapsed {
                     continue;
@@ -434,12 +509,24 @@ pub fn filter_entries(
                 }
                 let key_text = hint_key_display(h);
                 let key_pretty = hint_key_pretty(h);
-                let desc = hint_description(h);
+                let identity =
+                    (*action_id)
+                        .map(ExpandKey::Action)
+                        .or_else(|| match (long_help, &h.label) {
+                            (Some(_), Cow::Borrowed(label)) => Some(ExpandKey::Pseudo(label)),
+                            _ => None,
+                        });
+                let english_desc = hint_description(h);
+                let desc =
+                    localized_entry_text(locale, identity, "description", english_desc.as_str());
+                let label = localized_entry_text(locale, identity, "label", h.label.as_ref());
                 let q_matches = q.is_empty()
+                    || label.to_lowercase().contains(&q)
                     || h.label.to_lowercase().contains(&q)
                     || key_text.to_lowercase().contains(&q)
                     || key_pretty.to_lowercase().contains(&q)
-                    || desc.to_lowercase().contains(&q);
+                    || desc.to_lowercase().contains(&q)
+                    || english_desc.to_lowercase().contains(&q);
                 if q_matches {
                     if let Some(idx) = pending_header.take() {
                         result.push(idx);
@@ -488,11 +575,28 @@ fn hint_key_pretty(h: &HintItem) -> String {
 
 /// Get the long description for a hint, falling back to the short label.
 pub fn entry_display(entries: &[ShortcutsHelpEntry], idx: usize) -> (String, String) {
+    entry_display_with_locale(entries, idx, None)
+}
+
+pub fn entry_display_with_locale(
+    entries: &[ShortcutsHelpEntry],
+    idx: usize,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> (String, String) {
     match entries.get(idx) {
-        Some(ShortcutsHelpEntry::Hint { item: h, .. }) => (hint_description(h), hint_key_pretty(h)),
-        Some(ShortcutsHelpEntry::SectionHeader { label, .. }) => {
-            ((*label).to_string(), String::new())
+        Some(entry @ ShortcutsHelpEntry::Hint { item: h, .. }) => {
+            let identity = expand_key(entry);
+            let english_desc = hint_description(h);
+            (
+                localized_entry_text(locale, identity, "description", english_desc.as_str())
+                    .into_owned(),
+                hint_key_pretty(h),
+            )
         }
+        Some(ShortcutsHelpEntry::SectionHeader { label, .. }) => (
+            localized_category_label(locale, label).into_owned(),
+            String::new(),
+        ),
         None => (String::new(), String::new()),
     }
 }
@@ -583,6 +687,7 @@ pub enum ShortcutsHelpMode {
     #[default]
     Browse,
     Detail {
+        identity: Option<ExpandKey>,
         title: String,
         keys_line: String,
         body: String,
@@ -640,6 +745,7 @@ pub fn detail_from_entry(entry: &ShortcutsHelpEntry) -> Option<ShortcutsHelpMode
         .unwrap_or(item.label.as_ref())
         .to_string();
     Some(ShortcutsHelpMode::Detail {
+        identity: expand_key(entry),
         title,
         keys_line,
         body,
@@ -659,20 +765,30 @@ fn enter_detail(state: &mut PickerState, entry: &ShortcutsHelpEntry) -> Option<S
 
 /// Footer shortcuts while viewing a shortcut detail page.
 pub fn modal_footer_detail() -> Vec<crate::views::modal_window::Shortcut<'static>> {
+    modal_footer_detail_with_locale(None)
+}
+
+pub fn modal_footer_detail_with_locale(
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<crate::views::modal_window::Shortcut<'static>> {
     use crate::views::modal_window::Shortcut;
     vec![
         Shortcut {
-            label: "Esc back",
+            label: shortcuts_static_text(locale, "shortcuts.footer.back", "Esc back"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "\u{2191}/\u{2193} scroll",
+            label: shortcuts_static_text(
+                locale,
+                "shortcuts.footer.scroll",
+                "\u{2191}/\u{2193} scroll",
+            ),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Ctrl+./X close",
+            label: shortcuts_static_text(locale, "shortcuts.footer.close_all", "Ctrl+./X close"),
             clickable: false,
             id: 0,
         },
@@ -690,6 +806,31 @@ pub fn render_detail_body<'a>(
     dimmed_note: bool,
     scroll: u16,
     theme: &crate::theme::Theme,
+) {
+    render_detail_body_with_locale(
+        buf,
+        area,
+        title,
+        keys_line,
+        body,
+        dimmed_note,
+        scroll,
+        theme,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_detail_body_with_locale<'a>(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    title: &'a str,
+    keys_line: &'a str,
+    body: &'a str,
+    dimmed_note: bool,
+    scroll: u16,
+    theme: &crate::theme::Theme,
+    locale: Option<&crate::locale::LocaleContext>,
 ) {
     use crate::render::wrapping::word_wrap_lines;
     use ratatui::style::{Modifier, Style};
@@ -730,7 +871,11 @@ pub fn render_detail_body<'a>(
     if dimmed_note {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "(not active in current context)",
+            shortcuts_static_text(
+                locale,
+                "shortcuts.inactive_context",
+                "(not active in current context)",
+            ),
             Style::default().fg(theme.gray_dim),
         )));
     }
@@ -754,8 +899,43 @@ pub fn render_detail(
     theme: &crate::theme::Theme,
     compact: bool,
 ) {
+    render_detail_with_title(
+        buf,
+        area,
+        window,
+        mode,
+        theme,
+        compact,
+        "Keyboard Shortcuts",
+    );
+}
+
+pub fn render_detail_with_title(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    window: &mut crate::views::modal_window::ModalWindowState,
+    mode: &ShortcutsHelpMode,
+    theme: &crate::theme::Theme,
+    compact: bool,
+    modal_title: &str,
+) {
+    render_detail_with_title_and_locale(buf, area, window, mode, theme, compact, modal_title, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_detail_with_title_and_locale(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    window: &mut crate::views::modal_window::ModalWindowState,
+    mode: &ShortcutsHelpMode,
+    theme: &crate::theme::Theme,
+    compact: bool,
+    modal_title: &str,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
     use crate::views::modal_window as mw;
     let ShortcutsHelpMode::Detail {
+        identity,
         title,
         keys_line,
         body,
@@ -765,24 +945,27 @@ pub fn render_detail(
     else {
         return;
     };
-    let footer = modal_footer_detail();
+    let localized_title = localized_entry_text(locale, *identity, "description", title);
+    let localized_body = localized_entry_text(locale, *identity, "long_help", body);
+    let footer = modal_footer_detail_with_locale(locale);
     let modal_config = mw::ModalWindowConfig {
-        title: "Keyboard Shortcuts",
+        title: modal_title,
         tabs: None,
         shortcuts: &footer,
         sizing: modal_sizing(compact),
         fold_info: None,
     };
     if let Some(mca) = mw::render_modal_window(buf, area, window, &modal_config, theme) {
-        render_detail_body(
+        render_detail_body_with_locale(
             buf,
             mca.content,
-            title,
+            localized_title.as_ref(),
             keys_line,
-            body,
+            localized_body.as_ref(),
             *dimmed_note,
             *scroll,
             theme,
+            locale,
         );
     }
 }
@@ -852,6 +1035,29 @@ pub fn handle_input(
     expanded_ids: &std::collections::HashSet<ExpandKey>,
     mode: &mut ShortcutsHelpMode,
 ) -> ShortcutsHelpOutcome {
+    handle_input_with_locale(
+        key,
+        entries,
+        state,
+        hide_dimmed,
+        collapsed,
+        expanded_ids,
+        mode,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn handle_input_with_locale(
+    key: &crossterm::event::KeyEvent,
+    entries: &[ShortcutsHelpEntry],
+    state: &mut PickerState,
+    hide_dimmed: bool,
+    collapsed: &std::collections::HashSet<usize>,
+    expanded_ids: &std::collections::HashSet<ExpandKey>,
+    mode: &mut ShortcutsHelpMode,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> ShortcutsHelpOutcome {
     use crossterm::event::{Event, KeyCode, KeyModifiers};
 
     if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -901,7 +1107,8 @@ pub fn handle_input(
         if key.code == KeyCode::Char('f') {
             return ShortcutsHelpOutcome::ToggleFilter;
         }
-        let filtered = filter_entries(entries, state.query(), hide_dimmed, collapsed);
+        let filtered =
+            filter_entries_with_locale(entries, state.query(), hide_dimmed, collapsed, locale);
         if let Some(ShortcutsHelpEntry::SectionHeader { category_idx, .. }) =
             selected_original_entry(&filtered, entries, state.selected)
         {
@@ -981,7 +1188,8 @@ pub fn handle_input(
         return ShortcutsHelpOutcome::Changed;
     }
 
-    let filtered = filter_entries(entries, state.query(), hide_dimmed, collapsed);
+    let filtered =
+        filter_entries_with_locale(entries, state.query(), hide_dimmed, collapsed, locale);
     let non_sel: Vec<bool> = non_selectable_mask(&filtered, entries);
     let config = picker_config(&non_sel);
 
@@ -1020,6 +1228,18 @@ pub fn handle_mouse(
     collapsed: &std::collections::HashSet<usize>,
     mode: &mut ShortcutsHelpMode,
 ) -> ShortcutsHelpOutcome {
+    handle_mouse_with_locale(mouse, entries, state, hide_dimmed, collapsed, mode, None)
+}
+
+pub fn handle_mouse_with_locale(
+    mouse: &crossterm::event::MouseEvent,
+    entries: &[ShortcutsHelpEntry],
+    state: &mut PickerState,
+    hide_dimmed: bool,
+    collapsed: &std::collections::HashSet<usize>,
+    mode: &mut ShortcutsHelpMode,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> ShortcutsHelpOutcome {
     if mode.is_detail() {
         use crossterm::event::MouseEventKind;
         if let ShortcutsHelpMode::Detail { scroll, .. } = mode {
@@ -1037,7 +1257,8 @@ pub fn handle_mouse(
         }
     }
 
-    let filtered = filter_entries(entries, state.query(), hide_dimmed, collapsed);
+    let filtered =
+        filter_entries_with_locale(entries, state.query(), hide_dimmed, collapsed, locale);
     let non_sel: Vec<bool> = non_selectable_mask(&filtered, entries);
     let config = picker_config(&non_sel);
 
@@ -1076,50 +1297,81 @@ pub fn handle_mouse(
 /// modal. Identical visual vocabulary for the agent view and the
 /// dashboard so muscle memory ports across surfaces.
 pub fn modal_footer(filter_active: bool) -> Vec<crate::views::modal_window::Shortcut<'static>> {
+    modal_footer_with_locale(filter_active, None)
+}
+
+fn localized_hint_inline_help(
+    entry: &ShortcutsHelpEntry,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<String> {
+    let english = hint_inline_help(entry)?;
+    let field = match entry {
+        ShortcutsHelpEntry::Hint {
+            long_help: Some(_), ..
+        } => "long_help",
+        _ => "description",
+    };
+    Some(localized_entry_text(locale, expand_key(entry), field, english).into_owned())
+}
+
+pub fn modal_footer_with_locale(
+    filter_active: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<crate::views::modal_window::Shortcut<'static>> {
     use crate::views::modal_window::Shortcut;
     let mut shortcuts = vec![
         Shortcut {
-            label: "\u{2191}/\u{2193} nav",
+            label: shortcuts_static_text(locale, "shortcuts.footer.nav", "\u{2191}/\u{2193} nav"),
             clickable: false,
             id: 0,
         },
         Shortcut {
             label: if filter_active {
-                "f show all"
+                shortcuts_static_text(locale, "shortcuts.footer.show_all", "f show all")
             } else {
-                "f filter"
+                shortcuts_static_text(locale, "shortcuts.footer.filter", "f filter")
             },
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "e/Space/\u{2192} expand",
+            label: shortcuts_static_text(
+                locale,
+                "shortcuts.footer.expand",
+                "e/Space/\u{2192} expand",
+            ),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "\u{2190} collapse",
+            label: shortcuts_static_text(locale, "shortcuts.footer.collapse", "\u{2190} collapse"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter details",
+            label: shortcuts_static_text(locale, "shortcuts.footer.details", "Enter details"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "/ search",
+            label: shortcuts_static_text(locale, "shortcuts.footer.search", "/ search"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc close",
+            label: shortcuts_static_text(locale, "shortcuts.footer.close", "Esc close"),
             clickable: false,
             id: 0,
         },
     ];
     // Append the `i search` alias last for vim users (matching the other pickers).
     crate::views::modal_window::push_vim_nav_search_hint(&mut shortcuts, false);
+    if let Some(search) = shortcuts
+        .iter_mut()
+        .find(|shortcut| shortcut.label == "i search")
+    {
+        search.label = shortcuts_static_text(locale, "shortcuts.footer.search_insert", "i search");
+    }
     shortcuts
 }
 
@@ -1173,7 +1425,18 @@ impl CheatsheetRows {
         filter_active: bool,
         collapsed_sections: &std::collections::HashSet<usize>,
     ) -> Self {
-        let filtered = filter_entries(entries, query, filter_active, collapsed_sections);
+        Self::build_with_locale(entries, query, filter_active, collapsed_sections, None)
+    }
+
+    pub fn build_with_locale(
+        entries: &[ShortcutsHelpEntry],
+        query: &str,
+        filter_active: bool,
+        collapsed_sections: &std::collections::HashSet<usize>,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> Self {
+        let filtered =
+            filter_entries_with_locale(entries, query, filter_active, collapsed_sections, locale);
         let mut row_strs = Vec::with_capacity(filtered.len());
         let mut help_text = Vec::with_capacity(filtered.len());
         let mut kinds = Vec::with_capacity(filtered.len());
@@ -1185,19 +1448,20 @@ impl CheatsheetRows {
                     category_idx,
                 }) => {
                     let is_collapsed = collapsed_sections.contains(category_idx);
+                    let localized_label = localized_category_label(locale, label);
                     let display = if is_collapsed {
-                        format!("{label} ({entry_count})")
+                        format!("{localized_label} ({entry_count})")
                     } else {
-                        (*label).to_string()
+                        localized_label.into_owned()
                     };
                     row_strs.push((display, String::new()));
                     help_text.push(String::new());
                     kinds.push(CheatsheetRowKind::Header { is_collapsed });
                 }
                 Some(entry @ ShortcutsHelpEntry::Hint { dimmed, .. }) => {
-                    row_strs.push(entry_display(entries, i));
+                    row_strs.push(entry_display_with_locale(entries, i, locale));
                     // Collapse newlines to spaces so the collapsible view shows one wrap-flowed block (no hard breaks).
-                    let help = hint_inline_help(entry)
+                    let help = localized_hint_inline_help(entry, locale)
                         .map(|s| s.replace('\n', " "))
                         .unwrap_or_default();
                     help_text.push(help);
@@ -1207,7 +1471,7 @@ impl CheatsheetRows {
                     });
                 }
                 _ => {
-                    row_strs.push(entry_display(entries, i));
+                    row_strs.push(entry_display_with_locale(entries, i, locale));
                     help_text.push(String::new());
                     kinds.push(CheatsheetRowKind::Other);
                 }
@@ -1335,23 +1599,65 @@ pub fn render_modal(
     theme: &crate::theme::Theme,
     compact: bool,
 ) {
+    render_modal_with_locale(
+        buf,
+        area,
+        entries,
+        state,
+        window,
+        filter_active,
+        collapsed_sections,
+        expanded_ids,
+        mode,
+        theme,
+        compact,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_modal_with_locale(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    entries: &[ShortcutsHelpEntry],
+    state: &mut PickerState,
+    window: &mut crate::views::modal_window::ModalWindowState,
+    filter_active: bool,
+    collapsed_sections: &std::collections::HashSet<usize>,
+    expanded_ids: &std::collections::HashSet<ExpandKey>,
+    mode: &ShortcutsHelpMode,
+    theme: &crate::theme::Theme,
+    compact: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
     use crate::views::modal_window as mw;
     use crate::views::picker::{self, PickerHitAreas};
     use ratatui::layout::Rect;
 
     // Detail screen reuses the same modal chrome with a different footer.
     if mode.is_detail() {
-        render_detail(buf, area, window, mode, theme, compact);
+        let title = locale
+            .map(|locale| locale.text(crate::locale::TextKey::ShortcutsTitle))
+            .unwrap_or("Keyboard Shortcuts");
+        render_detail_with_title_and_locale(buf, area, window, mode, theme, compact, title, locale);
         return;
     }
 
-    let rows = CheatsheetRows::build(entries, state.query(), filter_active, collapsed_sections);
+    let rows = CheatsheetRows::build_with_locale(
+        entries,
+        state.query(),
+        filter_active,
+        collapsed_sections,
+        locale,
+    );
     let help_refs = rows.help_refs();
     let picker_entries = rows.picker_entries(state, expanded_ids, &help_refs);
     let non_sel: Vec<bool> = vec![false; picker_entries.len()];
-    let footer = modal_footer(filter_active);
+    let footer = modal_footer_with_locale(filter_active, locale);
     let modal_config = mw::ModalWindowConfig {
-        title: "Keyboard Shortcuts",
+        title: locale
+            .map(|locale| locale.text(crate::locale::TextKey::ShortcutsTitle))
+            .unwrap_or("Keyboard Shortcuts"),
         tabs: None,
         shortcuts: &footer,
         sizing: modal_sizing(compact),
@@ -1366,7 +1672,7 @@ pub fn render_modal(
     let searching = state.search_active || !state.query().is_empty();
     let show_search_hint = !searching;
 
-    picker::render_picker_search_bar(
+    picker::render_picker_search_bar_with_locale(
         buf,
         content_area.x,
         content_area.y,
@@ -1376,6 +1682,7 @@ pub fn render_modal(
         searching,
         show_search_hint,
         Some(theme.bg_base),
+        locale,
     );
     let sep_y = content_area.y + 1;
     if sep_y < content_area.y + content_area.height {
@@ -1391,7 +1698,7 @@ pub fn render_modal(
             .height
             .saturating_sub(entries_start_y.saturating_sub(content_area.y)),
     };
-    let content_hit = picker::render_picker_content_with_scrollbar_x(
+    let content_hit = picker::render_picker_content_with_scrollbar_x_and_locale(
         buf,
         entries_area,
         theme,
@@ -1403,6 +1710,7 @@ pub fn render_modal(
         false,
         0,
         inner_x + inner_width - 1,
+        locale,
     );
     state.hit_areas = Some(PickerHitAreas {
         close_button: Rect::default(),
@@ -1455,6 +1763,33 @@ pub fn handle_modal_key(
     mode: &mut ShortcutsHelpMode,
     compact: bool,
 ) -> ModalKeyOutcome {
+    handle_modal_key_with_locale(
+        key,
+        entries,
+        state,
+        window,
+        filter_active,
+        collapsed_sections,
+        expanded_ids,
+        mode,
+        compact,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn handle_modal_key_with_locale(
+    key: &crossterm::event::KeyEvent,
+    entries: &[ShortcutsHelpEntry],
+    state: &mut PickerState,
+    window: &mut crate::views::modal_window::ModalWindowState,
+    filter_active: bool,
+    collapsed_sections: &std::collections::HashSet<usize>,
+    expanded_ids: &std::collections::HashSet<ExpandKey>,
+    mode: &mut ShortcutsHelpMode,
+    compact: bool,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> ModalKeyOutcome {
     use crate::views::modal_window as mw;
     use crossterm::event::KeyCode;
 
@@ -1466,12 +1801,14 @@ pub fn handle_modal_key(
         return ModalKeyOutcome::Changed;
     }
     let footer = if mode.is_detail() {
-        modal_footer_detail()
+        modal_footer_detail_with_locale(locale)
     } else {
-        modal_footer(filter_active)
+        modal_footer_with_locale(filter_active, locale)
     };
     let chrome_cfg = mw::ModalWindowConfig {
-        title: "Keyboard Shortcuts",
+        title: locale
+            .map(|locale| locale.named_static_text("shortcuts.title", "Keyboard Shortcuts"))
+            .unwrap_or("Keyboard Shortcuts"),
         tabs: None,
         shortcuts: &footer,
         sizing: modal_sizing(compact),
@@ -1485,7 +1822,7 @@ pub fn handle_modal_key(
             _ => return ModalKeyOutcome::Changed,
         }
     }
-    match handle_input(
+    match handle_input_with_locale(
         key,
         entries,
         state,
@@ -1493,6 +1830,7 @@ pub fn handle_modal_key(
         collapsed_sections,
         expanded_ids,
         mode,
+        locale,
     ) {
         ShortcutsHelpOutcome::Close => ModalKeyOutcome::Close,
         ShortcutsHelpOutcome::ToggleFilter => ModalKeyOutcome::ToggleFilter,
@@ -2962,6 +3300,7 @@ mod tests {
     #[test]
     fn esc_in_detail_returns_to_browse() {
         let mut mode = ShortcutsHelpMode::Detail {
+            identity: None,
             title: "Send".into(),
             keys_line: "Enter".into(),
             body: "Send the message".into(),
@@ -2995,6 +3334,7 @@ mod tests {
             _ => u16::MAX,
         };
         let detail = || ShortcutsHelpMode::Detail {
+            identity: None,
             title: "Send".into(),
             keys_line: "Enter".into(),
             body: "line one\nline two".into(),
@@ -3063,6 +3403,7 @@ mod tests {
         let mut window = crate::views::modal_window::ModalWindowState::default();
         let collapsed = no_collapsed();
         let mut mode = ShortcutsHelpMode::Detail {
+            identity: None,
             title: "Send".into(),
             keys_line: "Enter".into(),
             body: "Send the message".into(),
@@ -3111,6 +3452,7 @@ mod tests {
     fn ctrl_dot_closes_from_detail_mode() {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut mode = ShortcutsHelpMode::Detail {
+            identity: None,
             title: "Send".into(),
             keys_line: "Enter".into(),
             body: "body".into(),

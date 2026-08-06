@@ -23,6 +23,37 @@ pub fn render_prompt(
     pad_left: u16,
     pad_right: u16,
     compact: bool,
+    placeholder: &'static str,
+) -> (
+    Option<(u16, u16)>,
+    Option<crate::terminal::overlay::PostFlush>,
+) {
+    render_prompt_with_locale(
+        area,
+        buf,
+        focus,
+        prompt,
+        info,
+        pad_left,
+        pad_right,
+        compact,
+        placeholder,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_prompt_with_locale(
+    area: Rect,
+    buf: &mut Buffer,
+    focus: WelcomePromptFocus,
+    prompt: &mut PromptWidget,
+    info: &PromptInfo<'_>,
+    pad_left: u16,
+    pad_right: u16,
+    compact: bool,
+    placeholder: &'static str,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> (
     Option<(u16, u16)>,
     Option<crate::terminal::overlay::PostFlush>,
@@ -36,7 +67,7 @@ pub fn render_prompt(
         chrome: true,
         chrome_pad_left: pad_left,
         chrome_pad_right: pad_right,
-        placeholder_override: Some("Type a message..."),
+        placeholder_override: Some(placeholder),
         ..PromptStyle::default()
     };
 
@@ -50,7 +81,7 @@ pub fn render_prompt(
         height: area.height,
     };
 
-    let result = prompt.draw(buf, inset_area, None, &style, Some(info), None);
+    let result = prompt.draw_with_locale(buf, inset_area, None, &style, Some(info), None, locale);
 
     (result.cursor_pos, result.post_flush_escapes.map(Into::into))
 }
@@ -92,6 +123,7 @@ mod tests {
             2,
             2,
             false,
+            "Type a message...",
         );
         let mut post_flush = post_flush.expect("welcome clear");
         let mut cursor_bytes = String::new();

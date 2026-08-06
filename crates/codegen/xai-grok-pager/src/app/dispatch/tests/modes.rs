@@ -1662,6 +1662,22 @@ fn permission_mode_toast_returns_brand_consistent_strings() {
     );
 }
 
+#[test]
+fn localization_regression_always_approve_toast_uses_display_locale() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    assert_eq!(
+        yolo_toast_with_locale(true, Some(&locale)),
+        "⚠ 已开启始终批准：所有工具操作将自动运行"
+    );
+    assert_eq!(
+        yolo_toast_with_locale(false, Some(&locale)),
+        "✓ 始终批准：关闭"
+    );
+}
+
 /// Normal → Plan: cycle_mode requests plan_mode_pending but does
 /// NOT touch YOLO state. Pins the no-yolo-mutation invariant.
 #[test]

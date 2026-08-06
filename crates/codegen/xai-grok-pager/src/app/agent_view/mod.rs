@@ -390,24 +390,63 @@ impl PromptInputMode {
         }
     }
     pub fn placeholder_override(self, multiline: bool) -> Option<&'static str> {
+        self.placeholder_override_with_locale(multiline, None)
+    }
+
+    pub fn placeholder_override_with_locale(
+        self,
+        multiline: bool,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> Option<&'static str> {
         match self {
             PromptInputMode::Normal | PromptInputMode::Bash => None,
-            PromptInputMode::Feedback => Some("Type your feedback..."),
+            PromptInputMode::Feedback => Some(locale.map_or("Type your feedback...", |locale| {
+                locale.named_static_text("prompt.placeholder.feedback", "Type your feedback...")
+            })),
             PromptInputMode::Remember => {
                 if multiline {
-                    Some("Save a memory note... (Enter for newline, Shift+Enter to save)")
+                    Some(locale.map_or(
+                        "Save a memory note... (Enter for newline, Shift+Enter to save)",
+                        |locale| {
+                            locale.named_static_text(
+                                "prompt.placeholder.remember_multiline",
+                                "Save a memory note... (Enter for newline, Shift+Enter to save)",
+                            )
+                        },
+                    ))
                 } else {
-                    Some("Save a memory note... (Shift+Enter for multiline)")
+                    Some(locale.map_or(
+                        "Save a memory note... (Shift+Enter for multiline)",
+                        |locale| {
+                            locale.named_static_text(
+                                "prompt.placeholder.remember_single",
+                                "Save a memory note... (Shift+Enter for multiline)",
+                            )
+                        },
+                    ))
                 }
             }
         }
     }
     pub fn prompt_info_override(self) -> Option<&'static str> {
+        self.prompt_info_override_with_locale(None)
+    }
+
+    pub fn prompt_info_override_with_locale(
+        self,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> Option<&'static str> {
         match self {
             PromptInputMode::Normal => None,
-            PromptInputMode::Bash => Some("Run shell command"),
-            PromptInputMode::Feedback => Some("Send feedback"),
-            PromptInputMode::Remember => Some("Save memory note"),
+            PromptInputMode::Bash => Some(locale.map_or("Run shell command", |locale| {
+                locale.named_static_text("prompt.info.bash", "Run shell command")
+            })),
+            PromptInputMode::Feedback => Some(locale.map_or("Send feedback", |locale| {
+                locale.named_static_text("prompt.info.feedback", "Send feedback")
+            })),
+            PromptInputMode::Remember => Some(locale.map_or("Save memory note", |locale| {
+                locale.named_static_text("prompt.info.remember", "Save memory note")
+            })),
         }
     }
     pub fn send_action(self, text: String) -> Action {
@@ -1775,6 +1814,35 @@ pub(crate) fn render_dropdown_chrome(
     below: bool,
     theme: &Theme,
 ) -> Option<DropdownChrome> {
+    render_dropdown_chrome_with_locale(
+        buf,
+        item_count,
+        item_rows,
+        inline_prompt_area,
+        layout_prompt,
+        area,
+        layout_cfg,
+        compact,
+        below,
+        theme,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_dropdown_chrome_with_locale(
+    buf: &mut Buffer,
+    item_count: usize,
+    item_rows: u16,
+    inline_prompt_area: Option<Rect>,
+    layout_prompt: Rect,
+    area: Rect,
+    layout_cfg: &crate::appearance::LayoutConfig,
+    compact: bool,
+    below: bool,
+    theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<DropdownChrome> {
     let mut panel_height = item_rows + 2;
     let (top_border_y, bottom_border_y) = if below {
         let anchor = inline_prompt_area.unwrap_or(layout_prompt);
@@ -1828,11 +1896,17 @@ pub(crate) fn render_dropdown_chrome(
         let divider_style = Style::default().fg(theme.gray_dim).bg(reset);
         let divider = Line::styled("\u{2500}".repeat(panel_width as usize), divider_style);
         buf.set_line_safe(panel_x, top_border_y, &divider, panel_width);
-        let footer = "\u{2191}/\u{2193} navigate \u{00b7} enter confirm \u{00b7} esc cancel";
-        let footer_line = Line::styled(
-            footer.to_string(),
-            Style::default().fg(theme.gray_dim).bg(reset),
-        );
+        let footer = if let Some(locale) = locale {
+            format!(
+                "{} \u{00b7} {} \u{00b7} {}",
+                locale.named_text("picker.shortcut.nav", "\u{2191}/\u{2193} navigate"),
+                locale.named_text("picker.shortcut.select", "enter confirm"),
+                locale.named_text("picker.shortcut.close", "esc cancel"),
+            )
+        } else {
+            "\u{2191}/\u{2193} navigate \u{00b7} enter confirm \u{00b7} esc cancel".to_string()
+        };
+        let footer_line = Line::styled(footer, Style::default().fg(theme.gray_dim).bg(reset));
         buf.set_line_safe(
             panel_x + 1,
             bottom_border_y,

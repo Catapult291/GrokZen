@@ -193,6 +193,33 @@ pub fn render_btw_panel(
     // Generated-media paths for resolving relative file-path link targets.
     media_paths: &[std::path::PathBuf],
 ) {
+    render_btw_panel_with_locale(
+        buf,
+        state,
+        area,
+        tick,
+        focused,
+        hit_close,
+        selection_model,
+        link_overlay,
+        media_paths,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_btw_panel_with_locale(
+    buf: &mut Buffer,
+    state: &BtwOverlayState,
+    area: Rect,
+    tick: u64,
+    focused: bool,
+    hit_close: Option<&mut crate::app::agent_view::HitArea>,
+    selection_model: &mut ResolvedSelectionModel,
+    link_overlay: Option<&mut LinkOverlay>,
+    media_paths: &[std::path::PathBuf],
+    locale: Option<&crate::locale::LocaleContext>,
+) {
     if area.width < 12 || area.height < 3 {
         return;
     }
@@ -346,7 +373,14 @@ pub fn render_btw_panel(
             let loading_style = Style::default().fg(theme.gray).bg(bg);
             let line = Line::from(vec![
                 Span::styled(format!("{spinner} "), loading_style),
-                Span::styled("Answering\u{2026}", loading_style),
+                Span::styled(
+                    locale
+                        .map(|locale| {
+                            locale.named_static_text("btw.status.answering", "Answering\u{2026}")
+                        })
+                        .unwrap_or("Answering\u{2026}"),
+                    loading_style,
+                ),
             ]);
             buf.set_line(content_x, body_y, &line, content_width as u16);
         }

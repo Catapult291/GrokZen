@@ -7,15 +7,15 @@ use xai_grok_shell::util::grok_home::grok_home;
 
 #[derive(Debug, clap::Args, Clone)]
 pub struct TraceArgs {
-    /// Session ID to export/upload
+    /// 要导出或上传的会话 ID
     pub session_id: String,
-    /// Save locally only, skip remote upload
+    /// 仅保存到本地，跳过远程上传
     #[arg(long)]
     pub local: bool,
-    /// Output path (default: $GROK_HOME/trace-exports/<session-id>.tar.gz)
+    /// 输出路径（默认：$GROK_ZH_HOME/trace-exports/<session-id>.tar.gz）
     #[arg(short, long)]
     pub output: Option<PathBuf>,
-    /// Emit machine-readable JSON output
+    /// 输出机器可读的 JSON
     #[arg(long)]
     pub json: bool,
 }
@@ -427,7 +427,7 @@ async fn run_upload(
                 "trace_cmd: no upload credentials available"
             );
             anyhow::bail!(
-                "No upload credentials. Run `grok login` or set a deployment key. \
+                "No upload credentials. Run `grok-zh login` or set a deployment key. \
                  See {} for upload overrides.",
                 crate::util::display_user_grok_path("docs/user-guide")
             );
@@ -562,7 +562,7 @@ impl UploadAttempt<'_> {
             eprintln!("Trace upload failed: {error}");
             eprintln!("  Bundle: {}", export_path.display());
             eprintln!("  Log:    {}", log_path.display());
-            eprintln!("  Retry:  grok trace {}", self.session_id);
+            eprintln!("  Retry:  grok-zh trace {}", self.session_id);
             println!("{}", export_path.display());
         }
 

@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 
 use indexmap::IndexMap;
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::app_view::SessionPickerEntry;
 use crate::views::picker::{PickerEntry, PickerField, PickerRow, PickerState};
@@ -265,6 +266,21 @@ impl SourceFilter {
             Self::External => "External",
             Self::All => "All",
         }
+    }
+
+    /// Localized display label. The enum value and filtering semantics remain
+    /// stable and are never persisted as translated text.
+    pub fn localized_label(self, locale: Option<&crate::locale::LocaleContext>) -> &'static str {
+        let (id, english) = match self {
+            Self::Grok => ("session.filter.grok", "Grok"),
+            Self::Local => ("session.filter.local", "Local"),
+            Self::Remote => ("session.filter.remote", "Remote"),
+            Self::External => ("session.filter.external", "External"),
+            Self::All => ("session.filter.all", "All"),
+        };
+        locale
+            .map(|locale| locale.named_static_text(id, english))
+            .unwrap_or(english)
     }
 
     pub fn next(self) -> Self {
@@ -718,7 +734,24 @@ pub(crate) fn build_session_entry_data(
     state: &PickerState,
     content_width: u16,
 ) -> Vec<SessionEntryData> {
+    build_session_entry_data_with_locale(entries_data, filtered_indices, state, content_width, None)
+}
+
+pub(crate) fn build_session_entry_data_with_locale(
+    entries_data: &[SessionPickerEntry],
+    filtered_indices: &[usize],
+    state: &PickerState,
+    content_width: u16,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<SessionEntryData> {
     use crate::render::line_utils::truncate_str;
+
+    let label = |id: &str, english: &'static str| {
+        locale
+            .map(|locale| locale.named_static_text(id, english))
+            .unwrap_or(english)
+            .to_string()
+    };
 
     filtered_indices
         .iter()
@@ -726,47 +759,73 @@ pub(crate) fn build_session_entry_data(
         .map(|(fi, &orig_idx)| {
             let entry = &entries_data[orig_idx];
             let summary = if entry.summary.is_empty() {
-                "(no prompt)".to_string()
+                label("session.entry.no_prompt", "(no prompt)")
             } else {
                 entry.summary.clone()
             };
             // Prefer last_active_at; fall back to updated_at (not created_at)
             // so pre-migration sessions don't jump to their creation date.
-            let right_text = format_time_ago(entry.last_active_at.unwrap_or(entry.updated_at));
+            let right_text = format_time_ago_with_locale(
+                entry.last_active_at.unwrap_or(entry.updated_at),
+                locale,
+            );
             let is_selected = !state.selection_hidden && fi == state.selected;
             let is_foreign = crate::app::is_foreign_picker_source(&entry.source);
             let is_expanded = !is_foreign && state.expanded.contains(&orig_idx);
 
             let mut field_data: Vec<(String, String)> = Vec::new();
             if is_expanded {
-                field_data.push(("ID".into(), entry.id.clone()));
-                field_data.push(("CWD".into(), entry.cwd.clone()));
+                field_data.push((label("session.field.id", "ID"), entry.id.clone()));
+                field_data.push((label("session.field.cwd", "CWD"), entry.cwd.clone()));
                 if let Some(ref model) = entry.model_id {
-                    field_data.push(("Model".into(), model.clone()));
+                    field_data.push((label("session.field.model", "Model"), model.clone()));
                 }
                 let fmt_time = |dt: chrono::DateTime<chrono::Utc>| {
-                    dt.with_timezone(&chrono::Local)
-                        .format("%b %d, %l:%M%P")
-                        .to_string()
+                    if locale.is_some_and(|locale| locale.locale() == crate::locale::UiLocale::ZhCn)
+                    {
+                        dt.with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string()
+                    } else {
+                        dt.with_timezone(&chrono::Local)
+                            .format("%b %d, %l:%M%P")
+                            .to_string()
+                    }
                 };
-                field_data.push(("Created".into(), fmt_time(entry.created_at)));
-                field_data.push(("Updated".into(), fmt_time(entry.updated_at)));
-                field_data.push(("Source".into(), entry.source.clone()));
+                field_data.push((
+                    label("session.field.created", "Created"),
+                    fmt_time(entry.created_at),
+                ));
+                field_data.push((
+                    label("session.field.updated", "Updated"),
+                    fmt_time(entry.updated_at),
+                ));
+                field_data.push((
+                    label("session.field.source", "Source"),
+                    entry.source.clone(),
+                ));
                 if let Some(ref host) = entry.hostname {
-                    field_data.push(("Host".into(), host.clone()));
+                    field_data.push((label("session.field.host", "Host"), host.clone()));
                 }
                 if entry.num_messages > 0 {
-                    field_data.push(("Messages".into(), entry.num_messages.to_string()));
+                    field_data.push((
+                        label("session.field.messages", "Messages"),
+                        entry.num_messages.to_string(),
+                    ));
                 }
                 if let Some(ref detail) = entry.card_detail {
+                    let tools = label("session.field.tools", "Tools");
                     field_data.push((
-                        "Turns".into(),
-                        format!("{}    Tools  {}", detail.turn_count, detail.tool_call_count),
+                        label("session.field.turns", "Turns"),
+                        format!(
+                            "{}    {tools}  {}",
+                            detail.turn_count, detail.tool_call_count
+                        ),
                     ));
                     if !detail.first_prompt_preview.is_empty() {
                         let max_w = content_width.saturating_sub(4 + 12) as usize;
                         let preview = truncate_str(&detail.first_prompt_preview, max_w);
-                        field_data.push(("Prompt".into(), preview));
+                        field_data.push((label("session.field.prompt", "Prompt"), preview));
                     }
                 }
             }
@@ -854,6 +913,7 @@ pub(crate) fn build_grouped_picker_entries<'a>(
 ///
 /// Deduplicates hits that already appear in the fuzzy results. The returned
 /// entries should be appended after the fuzzy section (and its header row).
+#[cfg(test)]
 pub(crate) fn build_content_entry_data(
     hits: &[xai_grok_shell::extensions::session_search::SearchSessionHit],
     entries_data: &[SessionPickerEntry],
@@ -861,6 +921,29 @@ pub(crate) fn build_content_entry_data(
     state: &PickerState,
     content_start: usize,
 ) -> Vec<SessionEntryData> {
+    build_content_entry_data_with_locale(
+        hits,
+        entries_data,
+        filtered_indices,
+        state,
+        content_start,
+        None,
+    )
+}
+
+pub(crate) fn build_content_entry_data_with_locale(
+    hits: &[xai_grok_shell::extensions::session_search::SearchSessionHit],
+    entries_data: &[SessionPickerEntry],
+    filtered_indices: &[usize],
+    state: &PickerState,
+    content_start: usize,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<SessionEntryData> {
+    let label = |id: &str, english: &'static str| {
+        locale
+            .map(|locale| locale.named_static_text(id, english))
+            .unwrap_or(english)
+    };
     let fuzzy_ids: HashSet<&str> = entries_data
         .iter()
         .enumerate()
@@ -877,7 +960,7 @@ pub(crate) fn build_content_entry_data(
             let summary = if h.summary.is_empty() {
                 h.snippet
                     .as_deref()
-                    .unwrap_or("(no summary)")
+                    .unwrap_or_else(|| label("session.entry.no_summary", "(no summary)"))
                     .lines()
                     .next()
                     .unwrap_or_default()
@@ -886,7 +969,7 @@ pub(crate) fn build_content_entry_data(
                 h.summary.clone()
             };
             let right_text = if let Ok(dt) = h.updated_at.parse::<chrono::DateTime<chrono::Utc>>() {
-                format_time_ago(dt)
+                format_time_ago_with_locale(dt, locale)
             } else {
                 String::new()
             };
@@ -897,8 +980,8 @@ pub(crate) fn build_content_entry_data(
 
             let mut field_data = Vec::new();
             if is_expanded {
-                field_data.push(("ID".into(), h.session_id.clone()));
-                field_data.push(("CWD".into(), h.cwd.clone()));
+                field_data.push((label("session.field.id", "ID").into(), h.session_id.clone()));
+                field_data.push((label("session.field.cwd", "CWD").into(), h.cwd.clone()));
             }
 
             let snippet_preview = h.snippet.as_deref().and_then(|s| {
@@ -929,20 +1012,43 @@ pub(crate) fn build_content_entry_data(
 ///
 /// Returns an empty string when there are no content rows and no loading
 /// spinner — the caller should skip rendering the header in that case.
+#[cfg(test)]
 pub(crate) fn build_content_header_label(
     content_loading: bool,
     has_content_rows: bool,
     tick: u64,
 ) -> String {
+    build_content_header_label_with_locale(content_loading, has_content_rows, tick, None)
+}
+
+pub(crate) fn build_content_header_label_with_locale(
+    content_loading: bool,
+    has_content_rows: bool,
+    tick: u64,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     if content_loading {
         let spinner_frames = crate::glyphs::dot_spinner_frames();
         let frame_idx = (tick / 4) as usize % spinner_frames.len();
-        format!(
-            "{} Searching session content\u{2026}",
-            spinner_frames[frame_idx]
-        )
+        let label = locale
+            .map(|locale| {
+                locale.named_static_text(
+                    "session.content.searching",
+                    "Searching session content\u{2026}",
+                )
+            })
+            .unwrap_or("Searching session content\u{2026}");
+        format!("{} {label}", spinner_frames[frame_idx],)
     } else if has_content_rows {
-        "Extended search results (remote and local sessions)".to_string()
+        locale
+            .map(|locale| {
+                locale.named_static_text(
+                    "session.content.extended_results",
+                    "Extended search results (remote and local sessions)",
+                )
+            })
+            .unwrap_or("Extended search results (remote and local sessions)")
+            .to_string()
     } else {
         String::new()
     }
@@ -957,6 +1063,14 @@ pub(crate) fn hidden_external_hint(
     entries: Option<&[SessionPickerEntry]>,
     source_filter: SourceFilter,
 ) -> Option<String> {
+    hidden_external_hint_with_locale(entries, source_filter, None)
+}
+
+pub(crate) fn hidden_external_hint_with_locale(
+    entries: Option<&[SessionPickerEntry]>,
+    source_filter: SourceFilter,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<String> {
     if source_filter != SourceFilter::Grok {
         return None;
     }
@@ -966,7 +1080,17 @@ pub(crate) fn hidden_external_hint(
         .count();
     (hidden > 0).then(|| {
         let plural = if hidden == 1 { "" } else { "s" };
-        format!("{hidden} external session{plural} hidden \u{b7} f to show")
+        let english = format!("{hidden} external session{plural} hidden \u{b7} f to show");
+        locale
+            .map(|locale| {
+                locale
+                    .named_text(
+                        "session.hidden_external",
+                        "{count} external sessions hidden \u{b7} f to show",
+                    )
+                    .replace("{count}", &hidden.to_string())
+            })
+            .unwrap_or(english)
     })
 }
 
@@ -975,23 +1099,49 @@ pub(crate) fn hidden_external_hint(
 // ---------------------------------------------------------------------------
 
 /// Format a timestamp as a human-readable relative time.
+#[cfg(test)]
 pub(crate) fn format_time_ago(dt: chrono::DateTime<chrono::Utc>) -> String {
+    format_time_ago_with_locale(dt, None)
+}
+
+pub(crate) fn format_time_ago_with_locale(
+    dt: chrono::DateTime<chrono::Utc>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     let now = chrono::Utc::now();
     let duration = now.signed_duration_since(dt);
 
+    let is_zh = locale.is_some_and(|locale| locale.locale() == crate::locale::UiLocale::ZhCn);
     let raw = if duration.num_minutes() < 1 {
-        "just now".to_string()
+        if is_zh { "刚刚" } else { "just now" }.to_string()
     } else if duration.num_minutes() < 60 {
-        format!("{}m ago", duration.num_minutes())
+        if is_zh {
+            format!("{} 分钟前", duration.num_minutes())
+        } else {
+            format!("{}m ago", duration.num_minutes())
+        }
     } else if duration.num_hours() < 24 {
-        format!("{}h ago", duration.num_hours())
+        if is_zh {
+            format!("{} 小时前", duration.num_hours())
+        } else {
+            format!("{}h ago", duration.num_hours())
+        }
     } else if duration.num_days() < 30 {
-        format!("{}d ago", duration.num_days())
+        if is_zh {
+            format!("{} 天前", duration.num_days())
+        } else {
+            format!("{}d ago", duration.num_days())
+        }
     } else {
-        format!("{}mo ago", duration.num_days() / 30)
+        if is_zh {
+            format!("{} 个月前", duration.num_days() / 30)
+        } else {
+            format!("{}mo ago", duration.num_days() / 30)
+        }
     };
     // Right-align to fixed width so the column doesn't jump
-    format!("{:>8}", raw)
+    let padding = 8usize.saturating_sub(raw.width());
+    format!("{}{raw}", " ".repeat(padding))
 }
 
 // ---------------------------------------------------------------------------

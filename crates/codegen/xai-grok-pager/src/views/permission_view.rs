@@ -512,6 +512,76 @@ pub fn inline_text_width(area_width: u16) -> u16 {
     area_width.saturating_sub(LEFT_PAD + PREFIX_W)
 }
 
+fn localized_permission_static(
+    locale: Option<&crate::locale::LocaleContext>,
+    id: &str,
+    english: &'static str,
+) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn localized_permission_title(
+    locale: Option<&crate::locale::LocaleContext>,
+    english: &str,
+) -> String {
+    if locale.is_none() {
+        return english.to_owned();
+    }
+    let (base, on_machine) = english
+        .strip_suffix(" (on your machine)")
+        .map_or((english, false), |base| (base, true));
+    let localized = match base {
+        "Allow Execute?" => {
+            localized_permission_static(locale, "permission.title.execute", "Allow Execute?")
+                .to_owned()
+        }
+        "Allow Edit?" => {
+            localized_permission_static(locale, "permission.title.edit", "Allow Edit?").to_owned()
+        }
+        "Allow Delete?" => {
+            localized_permission_static(locale, "permission.title.delete", "Allow Delete?")
+                .to_owned()
+        }
+        "Allow?" => {
+            localized_permission_static(locale, "permission.title.generic", "Allow?").to_owned()
+        }
+        _ if base.starts_with("Allow `") && base.ends_with("`?") => {
+            let target = &base[7..base.len().saturating_sub(2)];
+            localized_permission_static(locale, "permission.title.command", "Allow `{target}`?")
+                .replace("{target}", target)
+        }
+        _ if base.starts_with("Allow Edit to ") && base.ends_with('?') => {
+            let target = &base[14..base.len().saturating_sub(1)];
+            localized_permission_static(
+                locale,
+                "permission.title.edit_target",
+                "Allow Edit to {target}?",
+            )
+            .replace("{target}", target)
+        }
+        _ if base.starts_with("Allow ") && base.ends_with('?') => {
+            let action = &base[6..base.len().saturating_sub(1)];
+            localized_permission_static(locale, "permission.title.action", "Allow {action}?")
+                .replace("{action}", action)
+        }
+        _ => base.to_owned(),
+    };
+    if on_machine {
+        format!(
+            "{localized}{}",
+            localized_permission_static(
+                locale,
+                "permission.title.on_machine",
+                " (on your machine)",
+            )
+        )
+    } else {
+        localized
+    }
+}
+
 /// Render the complete permission view into the given area.
 ///
 /// Mirrors `render_question_view`: bg_light background, accent `┃` line,
@@ -530,6 +600,59 @@ pub fn render_permission_view(
     hovered_item: Option<usize>,
     theme: &Theme,
     focused: bool,
+) -> PermissionRenderResult {
+    render_permission_view_with_placeholder(
+        buf,
+        area,
+        state,
+        followup_text,
+        pattern_edit,
+        hovered_item,
+        theme,
+        focused,
+        "No, reject (type to add feedback)",
+    )
+}
+
+/// Locale-aware variant of [`render_permission_view`].
+#[allow(clippy::too_many_arguments)]
+pub fn render_permission_view_with_placeholder(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &PermissionViewState,
+    followup_text: &str,
+    pattern_edit: Option<&PatternEditState>,
+    hovered_item: Option<usize>,
+    theme: &Theme,
+    focused: bool,
+    reject_feedback_placeholder: &str,
+) -> PermissionRenderResult {
+    render_permission_view_with_locale(
+        buf,
+        area,
+        state,
+        followup_text,
+        pattern_edit,
+        hovered_item,
+        theme,
+        focused,
+        reject_feedback_placeholder,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_permission_view_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &PermissionViewState,
+    followup_text: &str,
+    pattern_edit: Option<&PatternEditState>,
+    hovered_item: Option<usize>,
+    theme: &Theme,
+    focused: bool,
+    reject_feedback_placeholder: &str,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> PermissionRenderResult {
     if area.height == 0 || area.width == 0 {
         return PermissionRenderResult {
@@ -589,10 +712,11 @@ pub fn render_permission_view(
         let title_style = Style::default()
             .fg(theme.text_primary)
             .add_modifier(Modifier::BOLD);
+        let title = localized_permission_title(locale, &state.title);
         buf.set_line(
             content_x,
             y,
-            &Line::from(Span::styled(state.title.clone(), title_style)),
+            &Line::from(Span::styled(title, title_style)),
             content_width,
         );
     }
@@ -626,7 +750,7 @@ pub fn render_permission_view(
             args_rows,
         ));
         if indicator {
-            bash_lines.push(truncation_indicator_line(theme));
+            bash_lines.push(truncation_indicator_line(theme, locale));
         }
     }
 
@@ -674,7 +798,16 @@ pub fn render_permission_view(
         }
         if y < area.y + area.height {
             let command = preview_command_text(state);
-            render_pattern_preview_line(buf, content_x, y, content_width, edit, &command, theme);
+            render_pattern_preview_line(
+                buf,
+                content_x,
+                y,
+                content_width,
+                edit,
+                &command,
+                theme,
+                locale,
+            );
             y += 1;
         }
     } else if (show_scope_hint || show_edit_hint) && y < area.y + area.height {
@@ -688,14 +821,20 @@ pub fn render_permission_view(
         let mut spans: Vec<Span<'static>> = Vec::new();
         if show_scope_hint {
             spans.push(Span::styled("\u{2190} \u{2192}", key_style));
-            spans.push(Span::styled(" narrow scope", hint_style));
+            spans.push(Span::styled(
+                localized_permission_static(locale, "permission.scope.narrow", " narrow scope"),
+                hint_style,
+            ));
         }
         if show_edit_hint {
             if show_scope_hint {
                 spans.push(Span::styled("  \u{00b7}  ", hint_style));
             }
             spans.push(Span::styled("e", key_style));
-            spans.push(Span::styled(" edit pattern", hint_style));
+            spans.push(Span::styled(
+                localized_permission_static(locale, "permission.pattern.edit", " edit pattern"),
+                hint_style,
+            ));
         }
         buf.set_line(content_x, y, &Line::from(spans), content_width);
         y += 1;
@@ -803,6 +942,7 @@ pub fn render_permission_view(
             followup_text,
             content_width,
             theme,
+            reject_feedback_placeholder,
         );
 
         let row_rect = Rect {
@@ -900,6 +1040,7 @@ fn render_pattern_preview_line(
     edit: &PatternEditState,
     command: &str,
     theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
 ) {
     let dim = Style::default()
         .fg(theme.text_secondary)
@@ -910,26 +1051,42 @@ fn render_pattern_preview_line(
     match edit.trimmed() {
         None => {
             spans.push(Span::styled(
-                "type a command pattern to allow (e.g. gh api repos/*)",
+                localized_permission_static(
+                    locale,
+                    "permission.pattern.placeholder",
+                    "type a command pattern to allow (e.g. gh api repos/*)",
+                ),
                 dim,
             ));
         }
         Some(pattern) => {
             if xai_grok_workspace::permission::bash_pattern_matches_command(pattern, command) {
                 spans.push(Span::styled(
-                    "\u{2713} matches this command",
+                    localized_permission_static(
+                        locale,
+                        "permission.pattern.matches",
+                        "\u{2713} matches this command",
+                    ),
                     Style::default().fg(theme.accent_success),
                 ));
             } else {
                 spans.push(Span::styled(
-                    "\u{2717} won't match this command",
+                    localized_permission_static(
+                        locale,
+                        "permission.pattern.no_match",
+                        "\u{2717} won't match this command",
+                    ),
                     Style::default().fg(theme.accent_error),
                 ));
             }
             if xai_grok_workspace::permission::bash_pattern_is_broad(pattern) {
                 spans.push(sep.clone());
                 spans.push(Span::styled(
-                    "\u{26a0} very broad",
+                    localized_permission_static(
+                        locale,
+                        "permission.pattern.broad",
+                        "\u{26a0} very broad",
+                    ),
                     Style::default().fg(theme.warning),
                 ));
             }
@@ -938,9 +1095,15 @@ fn render_pattern_preview_line(
                 "Enter",
                 Style::default().fg(theme.accent_user),
             ));
-            spans.push(Span::styled(" save  ", dim));
+            spans.push(Span::styled(
+                localized_permission_static(locale, "permission.pattern.save", " save  "),
+                dim,
+            ));
             spans.push(Span::styled("Esc", Style::default().fg(theme.accent_user)));
-            spans.push(Span::styled(" cancel", dim));
+            spans.push(Span::styled(
+                localized_permission_static(locale, "permission.pattern.cancel", " cancel"),
+                dim,
+            ));
         }
     }
     buf.set_line(content_x, y, &Line::from(spans), content_width);
@@ -1773,7 +1936,10 @@ fn build_mcp_args_lines(
 
 /// The `... Ctrl-F to expand` indicator line for a collapsed args display.
 /// Styling matches the question tool's truncation indicator.
-fn truncation_indicator_line(theme: &Theme) -> Line<'static> {
+fn truncation_indicator_line(
+    theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Line<'static> {
     let style = Style::default().fg(theme.gray).bg(theme.bg_light);
     Line::from(vec![
         Span::styled("... ", style),
@@ -1781,7 +1947,10 @@ fn truncation_indicator_line(theme: &Theme) -> Line<'static> {
             "Ctrl-F",
             Style::default().fg(theme.accent_user).bg(theme.bg_light),
         ),
-        Span::styled(" to expand", style),
+        Span::styled(
+            localized_permission_static(locale, "permission.expand", " to expand"),
+            style,
+        ),
     ])
 }
 
@@ -1887,13 +2056,21 @@ fn build_permission_option_line<'a>(
     followup_text: &str,
     row_width: u16,
     theme: &Theme,
+    reject_feedback_placeholder: &str,
 ) -> Line<'a> {
     let num_style = Style::default().fg(theme.accent_user).bg(row_bg);
 
     let sc = shortcut_char(index);
 
     if option.kind == acp::PermissionOptionKind::RejectOnce {
-        return build_reject_once_line(sc, is_cursor, row_bg, followup_text, theme);
+        return build_reject_once_line(
+            sc,
+            is_cursor,
+            row_bg,
+            followup_text,
+            theme,
+            reject_feedback_placeholder,
+        );
     }
 
     // Dynamic label: AllowAlways/RejectAlways with BashCommandPermission or
@@ -1960,6 +2137,7 @@ fn build_reject_once_line<'a>(
     row_bg: ratatui::style::Color,
     followup_text: &str,
     theme: &Theme,
+    reject_feedback_placeholder: &str,
 ) -> Line<'a> {
     let num_style = Style::default().fg(theme.accent_user).bg(row_bg);
     let has_text = !followup_text.trim().is_empty();
@@ -1991,7 +2169,7 @@ fn build_reject_once_line<'a>(
     } else {
         // Placeholder.
         (
-            "No, reject (type to add feedback)".to_string(),
+            reject_feedback_placeholder.to_string(),
             Style::default().fg(theme.gray).bg(row_bg),
         )
     };
@@ -2082,6 +2260,38 @@ pub(crate) fn option_label_for_selection(
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    fn zh_cn_locale() -> crate::locale::LocaleContext {
+        crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        })
+    }
+
+    #[test]
+    fn localized_permission_titles_preserve_dynamic_targets() {
+        let locale = zh_cn_locale();
+        assert_eq!(
+            localized_permission_title(Some(&locale), "Allow Execute?"),
+            "是否允许执行？"
+        );
+        assert_eq!(
+            localized_permission_title(Some(&locale), "Allow `cargo test`?"),
+            "是否允许运行 `cargo test`？"
+        );
+        assert_eq!(
+            localized_permission_title(Some(&locale), "Allow Edit to src/main.rs?"),
+            "是否允许编辑 src/main.rs？"
+        );
+        assert_eq!(
+            localized_permission_title(Some(&locale), "Allow Delete? (on your machine)"),
+            "是否允许删除？（在你的计算机上）"
+        );
+        assert_eq!(
+            localized_permission_title(None, "Allow Execute?"),
+            "Allow Execute?"
+        );
+    }
 
     #[test]
     fn pattern_edit_edits_at_the_cursor() {

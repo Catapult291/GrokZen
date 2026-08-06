@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
-use xai_grok_test_support::{TestProcessTree, TestSandbox, process_has_exited_without_reap};
+#[cfg(unix)]
+use xai_grok_test_support::process_has_exited_without_reap;
+use xai_grok_test_support::{TestProcessTree, TestSandbox};
 
 const PTY_DROP_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 const PTY_REAP_POLL: Duration = Duration::from_millis(10);
@@ -597,6 +599,9 @@ fn apply_child_env(cmd: &mut CommandBuilder, sandbox: Option<&TestSandbox>, env:
     if let Some(sandbox) = sandbox {
         cmd.env_clear();
         sandbox.apply_to_command_builder(cmd);
+        // Keep upstream PTY assertions deterministic. Individual localization
+        // scenarios can override this through the caller EnvOp list below.
+        cmd.env(xai_grok_product::LOCALE_ENV, "en-US");
     }
     // Set TERM so the pager renders with full color support.
     cmd.env("TERM", "xterm-256color");
@@ -1011,6 +1016,29 @@ mod tests {
             sandbox.grok_home().to_str()
         );
         assert_eq!(cmd.get_env("GROK_LEADER_SOCKET"), None);
+        assert_eq!(
+            cmd.get_env(xai_grok_product::LOCALE_ENV)
+                .and_then(|value| value.to_str()),
+            Some("en-US")
+        );
+    }
+
+    #[test]
+    fn apply_child_env_allows_localization_scenarios_to_override_locale() {
+        let sandbox = TestSandbox::new();
+        let mut cmd = CommandBuilder::new("true");
+
+        apply_child_env(
+            &mut cmd,
+            Some(&sandbox),
+            &[EnvOp::set(xai_grok_product::LOCALE_ENV, "zh-CN")],
+        );
+
+        assert_eq!(
+            cmd.get_env(xai_grok_product::LOCALE_ENV)
+                .and_then(|value| value.to_str()),
+            Some("zh-CN")
+        );
     }
 
     #[test]

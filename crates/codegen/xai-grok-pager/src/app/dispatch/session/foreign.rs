@@ -232,7 +232,14 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
         );
     }
     let empty_notice = partial.map_or_else(
-        || "No sessions found for this directory".to_owned(),
+        || {
+            app.locale
+                .named_text(
+                    "session_picker.no_sessions_directory",
+                    "No sessions found for this directory",
+                )
+                .into_owned()
+        },
         |partial| partial.picker_notice().to_owned(),
     );
     let partial_notice = partial.map(ConversationsPartial::picker_notice);
@@ -302,10 +309,14 @@ pub(in crate::app::dispatch) fn handle_session_list_loaded(
         // Notify once per directory; the browse is scoped to `app.cwd`.
         app.session_picker_relaxed_notified_for = Some(app.cwd.clone());
         let message = match scope {
-            ListScope::Repo => {
-                "No sessions in this directory. Showing other sessions from this repository."
-            }
-            _ => "No sessions in this directory. Showing sessions from other directories.",
+            ListScope::Repo => app.locale.named_static_text(
+                "session_picker.relaxed_repository",
+                "No sessions in this directory. Showing other sessions from this repository.",
+            ),
+            _ => app.locale.named_static_text(
+                "session_picker.relaxed_directories",
+                "No sessions in this directory. Showing sessions from other directories.",
+            ),
         };
         app.show_toast(message);
     }
@@ -328,7 +339,13 @@ pub(in crate::app::dispatch) fn handle_session_list_failed(
     }
     app.session_picker_detail_generation += 1;
     tracing::warn!(error = %error, "session list fetch failed");
-    let error_notice = format!("Couldn't load sessions: {error}");
+    let error_notice = app
+        .locale
+        .named_text(
+            "session_picker.load_failed",
+            "Couldn't load sessions: {error}",
+        )
+        .replace("{error}", &error);
     let is_search = query.is_some();
     let chat_mode = app.chat_mode;
     let mut handled = false;

@@ -28,6 +28,8 @@ pub struct AcpSlashCommand {
     skill_path: Option<String>,
     /// Skill-specific: parsed scope enum. None for shell builtins.
     skill_scope: Option<SkillScope>,
+    /// Stable first-party product marker copied from ACP metadata.
+    product_chat_skill: bool,
     /// True if the ACP meta had skill-like keys but they were invalid.
     meta_malformed: bool,
 }
@@ -61,6 +63,14 @@ impl SlashCommand for AcpSlashCommand {
 
     fn is_skill(&self) -> bool {
         self.skill_path.is_some() && self.skill_scope.is_some()
+    }
+
+    fn is_bundled_skill(&self) -> bool {
+        self.skill_scope == Some(SkillScope::Bundled)
+    }
+
+    fn is_product_chat_skill(&self) -> bool {
+        self.product_chat_skill
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
@@ -117,6 +127,12 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
         //
         // Missing meta → non-skill ACP command (PassThrough).
         // Present but malformed meta → meta_malformed = true (Error on run()).
+        let product_chat_skill = cmd
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("product"))
+            .and_then(|value| value.as_str())
+            == Some("chat");
         let (skill_path, skill_scope, meta_malformed) = match cmd.meta.as_ref() {
             None => (None, None, false),
             Some(m) => {
@@ -150,6 +166,7 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
             arg_hint,
             skill_path,
             skill_scope,
+            product_chat_skill,
             meta_malformed,
         }
     }
@@ -221,6 +238,19 @@ mod tests {
         );
         assert_eq!(acp_cmd.skill_scope, Some(SkillScope::Local));
         assert!(!acp_cmd.meta_malformed);
+    }
+
+    #[test]
+    fn product_chat_marker_is_preserved_for_display_provenance() {
+        let meta = serde_json::json!({
+            "scope": "server",
+            "path": "chat-product://build-with-ai",
+            "product": "chat"
+        });
+        let cmd = make_cmd("build-with-ai", Some(meta));
+        let acp_cmd = AcpSlashCommand::from(&cmd);
+        assert!(acp_cmd.is_product_chat_skill());
+        assert_eq!(acp_cmd.skill_scope, Some(SkillScope::Server));
     }
 
     #[test]
@@ -309,6 +339,7 @@ mod tests {
             arg_hint: None,
             skill_path: Some(path.to_string()),
             skill_scope: serde_json::from_value(serde_json::json!(scope)).ok(),
+            product_chat_skill: false,
             meta_malformed: false,
         }
     }
@@ -341,6 +372,7 @@ mod tests {
             arg_hint: None,
             skill_path: None,
             skill_scope: None,
+            product_chat_skill: false,
             meta_malformed: false,
         };
         let mut ctx = make_exec_ctx();
@@ -357,6 +389,7 @@ mod tests {
             arg_hint: None,
             skill_path: None,
             skill_scope: None,
+            product_chat_skill: false,
             meta_malformed: true,
         };
         let mut ctx = make_exec_ctx();

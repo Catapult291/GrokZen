@@ -99,8 +99,9 @@ use super::settings::ui::{
 use super::status::{
     dispatch_copy_session_id, dispatch_manage_billing, dispatch_open_gboom, dispatch_open_tutorial,
     dispatch_privacy_banner_opt_in, dispatch_privacy_banner_opt_out, dispatch_share_session,
-    dispatch_show_context_info, dispatch_show_queue, dispatch_show_release_notes,
-    dispatch_show_session_info, dispatch_show_tasks, dispatch_show_usage, set_coding_data_sharing,
+    dispatch_show_context_info, dispatch_show_howto_doc, dispatch_show_queue,
+    dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
+    dispatch_show_usage, set_coding_data_sharing,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
@@ -238,7 +239,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 }
                 Err(err) => {
                     tracing::warn!("welcome local-workspace ack: {err}");
-                    app.show_toast(&format!("Local workspace: {err}"));
+                    let message = app
+                        .locale
+                        .named_text("local_workspace.error", "Local workspace: {error}")
+                        .replace("{error}", &err.to_string());
+                    app.show_toast(&message);
                     vec![]
                 }
             }
@@ -1011,6 +1016,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowReleaseNotes { title, content } => {
             dispatch_show_release_notes(app, title, content)
         }
+        Action::ShowHowtoDoc { id } => dispatch_show_howto_doc(app, id),
         Action::OpenTutorial => dispatch_open_tutorial(app),
         Action::RenameSession { title } => dispatch_rename_session(app, title),
         Action::ShowContextInfo => dispatch_show_context_info(app),
@@ -1112,11 +1118,15 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     .ok()
                     .and_then(|u| u.to_file_path().ok())
                     .is_some_and(|path| crate::app::link_opener::open_path(&path));
-                app.show_toast(if opened {
-                    "Opening in default app\u{2026}"
+                let message = if opened {
+                    app.locale
+                        .named_static_text("media.toast.opening", "Opening in default app\u{2026}")
                 } else {
-                    "Could not open file"
-                });
+                    app.locale
+                        .named_static_text("media.toast.open_failed", "Could not open file")
+                }
+                .to_string();
+                app.show_toast(&message);
             } else {
                 open_url_or_show(app, &url);
             }
@@ -1127,11 +1137,17 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             match crate::render::osc8::resolve_link_open_target(&target) {
                 Some(LinkTarget::File(path)) => {
                     let opened = crate::app::link_opener::open_path(&path);
-                    app.show_toast(if opened {
-                        "Opening in default app\u{2026}"
+                    let message = if opened {
+                        app.locale.named_static_text(
+                            "media.toast.opening",
+                            "Opening in default app\u{2026}",
+                        )
                     } else {
-                        "Could not open file"
-                    });
+                        app.locale
+                            .named_static_text("media.toast.open_failed", "Could not open file")
+                    }
+                    .to_string();
+                    app.show_toast(&message);
                 }
                 Some(LinkTarget::Url(url)) => {
                     crate::app::link_opener::open_url(&url);
@@ -1185,11 +1201,19 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return vec![];
             }
             if crate::app::foreign_sessions::is_foreign_picker_source(&source) {
-                app.show_toast("External sessions can't be deleted");
+                let message = app.locale.named_static_text(
+                    "session.delete_external_unsupported",
+                    "External sessions can't be deleted",
+                );
+                app.show_toast(message);
                 return vec![];
             }
             if source == "conversation" {
-                app.show_toast("Deleting chat conversations isn't supported yet");
+                let message = app.locale.named_static_text(
+                    "session.delete_chat_unsupported",
+                    "Deleting chat conversations isn't supported yet",
+                );
+                app.show_toast(message);
                 return vec![];
             }
             if !matches!(source.as_str(), "local" | "remote" | "both")
@@ -1197,7 +1221,10 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             {
                 return vec![];
             }
-            app.show_toast("Deleting session\u{2026}");
+            let message = app
+                .locale
+                .named_static_text("session.deleting", "Deleting session…");
+            app.show_toast(message);
             vec![Effect::DeleteSession {
                 source,
                 session_id,
@@ -1239,30 +1266,35 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::DoctorFixConfirmed { target, plan } => {
             let Some(target) = super::task_result::current_doctor_target(app, &target) else {
+                let message = app.locale.named_text(
+                    "doctor.fix.session_changed",
+                    "This fix was cancelled because the session changed. Run `/doctor fix` again.",
+                );
                 super::task_result::deliver_doctor_message(
                     app,
                     target.agent_id,
-                    "This fix was cancelled because the session changed. Run `/doctor fix` again."
-                        .to_owned(),
+                    message.into_owned(),
                 );
                 return vec![];
             };
+            let fix_id = plan.id().to_string();
+            let message = app
+                .locale
+                .named_text("doctor.fix.applying", "Applying {fix}…")
+                .replace("{fix}", &fix_id);
             if let Some(agent) = app.agents.get_mut(&target.agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Applying {}…",
-                        plan.id()
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
             }
             vec![Effect::ApplyDoctorFix { target, plan }]
         }
         Action::DoctorFixCancelled(target) => {
-            super::task_result::deliver_doctor_message(
-                app,
-                target.agent_id,
-                "Fix cancelled.".to_owned(),
-            );
+            let message = app
+                .locale
+                .named_text("doctor.fix.cancelled", "Fix cancelled.")
+                .into_owned();
+            super::task_result::deliver_doctor_message(app, target.agent_id, message);
             vec![]
         }
         Action::AgentTypeMismatchAnswered {

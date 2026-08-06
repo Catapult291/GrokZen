@@ -8,6 +8,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
+use unicode_width::UnicodeWidthStr;
 
 /// Shares its row with the buttons.
 const PRIVACY_BANNER_TITLE: &str = "Help improve Grok";
@@ -48,6 +49,95 @@ const PRIVACY_BANNER_LEGAL_VARIANTS: [&[LegalSegment]; 3] = [
 const OPT_OUT_LABEL: &str = "[Opt out]";
 const OPT_IN_LABEL: &str = "[Opt in]";
 
+fn banner_static_text(
+    locale: Option<&crate::locale::LocaleContext>,
+    id: &str,
+    english: &'static str,
+) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn banner_title(locale: Option<&crate::locale::LocaleContext>) -> &'static str {
+    banner_static_text(locale, "privacy.banner.title", PRIVACY_BANNER_TITLE)
+}
+
+fn banner_description(locale: Option<&crate::locale::LocaleContext>) -> &'static str {
+    banner_static_text(locale, "privacy.banner.description", PRIVACY_BANNER_DESC)
+}
+
+fn opt_out_label(locale: Option<&crate::locale::LocaleContext>) -> &'static str {
+    banner_static_text(locale, "privacy.banner.opt_out", OPT_OUT_LABEL)
+}
+
+fn opt_in_label(locale: Option<&crate::locale::LocaleContext>) -> &'static str {
+    banner_static_text(locale, "privacy.banner.opt_in", OPT_IN_LABEL)
+}
+
+fn legal_variants(locale: Option<&crate::locale::LocaleContext>) -> Vec<Vec<LegalSegment>> {
+    vec![
+        vec![
+            (
+                banner_static_text(locale, "privacy.banner.legal.read", "Read "),
+                None,
+            ),
+            (
+                banner_static_text(locale, "privacy.banner.legal.terms", "Terms"),
+                Some(PRIVACY_BANNER_TERMS_URL),
+            ),
+            (
+                banner_static_text(locale, "privacy.banner.legal.and", " and "),
+                None,
+            ),
+            (
+                banner_static_text(
+                    locale,
+                    "privacy.banner.legal.privacy_policy",
+                    "Privacy Policy",
+                ),
+                Some(PRIVACY_BANNER_POLICY_URL),
+            ),
+            (
+                banner_static_text(locale, "privacy.banner.legal.period", "."),
+                None,
+            ),
+        ],
+        vec![
+            (
+                banner_static_text(locale, "privacy.banner.legal.terms", "Terms"),
+                Some(PRIVACY_BANNER_TERMS_URL),
+            ),
+            (
+                banner_static_text(locale, "privacy.banner.legal.and", " and "),
+                None,
+            ),
+            (
+                banner_static_text(
+                    locale,
+                    "privacy.banner.legal.privacy_policy",
+                    "Privacy Policy",
+                ),
+                Some(PRIVACY_BANNER_POLICY_URL),
+            ),
+        ],
+        vec![
+            (
+                banner_static_text(locale, "privacy.banner.legal.terms", "Terms"),
+                Some(PRIVACY_BANNER_TERMS_URL),
+            ),
+            (
+                banner_static_text(locale, "privacy.banner.legal.ampersand", " & "),
+                None,
+            ),
+            (
+                banner_static_text(locale, "privacy.banner.legal.privacy", "Privacy"),
+                Some(PRIVACY_BANNER_POLICY_URL),
+            ),
+        ],
+    ]
+}
+
 /// Title + legal.
 const CHROME_ROWS: u16 = 2;
 
@@ -79,43 +169,49 @@ impl PrivacyBannerRects {
     }
 }
 
-fn button_block_width() -> u16 {
-    (OPT_OUT_LABEL.len() + 1 + OPT_IN_LABEL.len()) as u16
+fn button_block_width(locale: Option<&crate::locale::LocaleContext>) -> u16 {
+    (opt_out_label(locale).width() + 1 + opt_in_label(locale).width()) as u16
 }
 
 fn legal_width(variant: &[LegalSegment]) -> u16 {
-    variant.iter().map(|(text, _)| text.len() as u16).sum()
+    variant.iter().map(|(text, _)| text.width() as u16).sum()
 }
 
 /// Buttons render whole or not at all, and never at the cost of the title:
 /// a clipped/overflowing `[Opt in]` must not leave a click target in the
 /// blank margin (a stray click there would silently opt the user in).
-fn buttons_fit(area_width: u16) -> bool {
-    area_width >= PRIVACY_BANNER_TITLE.len() as u16 + 1 + button_block_width()
+fn buttons_fit(area_width: u16, locale: Option<&crate::locale::LocaleContext>) -> bool {
+    area_width >= banner_title(locale).width() as u16 + 1 + button_block_width(locale)
 }
 
-fn title_width(area_width: u16) -> u16 {
-    if buttons_fit(area_width) {
-        area_width - button_block_width() - 1
+fn title_width(area_width: u16, locale: Option<&crate::locale::LocaleContext>) -> u16 {
+    if buttons_fit(area_width, locale) {
+        area_width - button_block_width(locale) - 1
     } else {
         area_width
     }
 }
 
-fn wrap_to(width: usize) -> Vec<std::borrow::Cow<'static, str>> {
+fn wrap_to(
+    width: usize,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<std::borrow::Cow<'static, str>> {
     if width == 0 {
         return vec![];
     }
     let opts = textwrap::Options::new(width).wrap_algorithm(textwrap::WrapAlgorithm::FirstFit);
-    textwrap::wrap(PRIVACY_BANNER_DESC, opts)
+    textwrap::wrap(banner_description(locale), opts)
 }
 
-fn body_lines(area_width: u16) -> Vec<std::borrow::Cow<'static, str>> {
-    let column = wrap_to(title_width(area_width) as usize);
+fn body_lines(
+    area_width: u16,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<std::borrow::Cow<'static, str>> {
+    let column = wrap_to(title_width(area_width, locale) as usize, locale);
     let mut lines = if column.len() <= PREFERRED_BODY_ROWS {
         column
     } else {
-        let full = wrap_to(area_width as usize);
+        let full = wrap_to(area_width as usize, locale);
         if full.len() < column.len() {
             full
         } else {
@@ -126,7 +222,7 @@ fn body_lines(area_width: u16) -> Vec<std::borrow::Cow<'static, str>> {
         lines.truncate(MAX_BODY_ROWS);
         if let Some(last) = lines.last_mut() {
             let mut s = last.trim_end().to_string();
-            while s.chars().count() + 1 > area_width as usize {
+            while s.width() + 1 > area_width as usize {
                 s.pop();
             }
             s.push('\u{2026}');
@@ -139,7 +235,11 @@ fn body_lines(area_width: u16) -> Vec<std::borrow::Cow<'static, str>> {
 /// Rows needed at `width` — the body wraps, so both slot owners must size
 /// from this rather than a constant.
 pub(crate) fn height(width: u16) -> u16 {
-    CHROME_ROWS + (body_lines(width).len() as u16).max(1)
+    height_with_locale(width, None)
+}
+
+pub(crate) fn height_with_locale(width: u16, locale: Option<&crate::locale::LocaleContext>) -> u16 {
+    CHROME_ROWS + (body_lines(width, locale).len() as u16).max(1)
 }
 
 /// Needs `area.height >= MIN_HEIGHT`; give it [`height`] rows for the full
@@ -149,6 +249,16 @@ pub(crate) fn render(
     buf: &mut Buffer,
     theme: &Theme,
     mouse_pos: Option<(u16, u16)>,
+) -> PrivacyBannerRects {
+    render_with_locale(area, buf, theme, mouse_pos, None)
+}
+
+pub(crate) fn render_with_locale(
+    area: Rect,
+    buf: &mut Buffer,
+    theme: &Theme,
+    mouse_pos: Option<(u16, u16)>,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> PrivacyBannerRects {
     if area.height < MIN_HEIGHT || area.width == 0 {
         return PrivacyBannerRects::none();
@@ -162,14 +272,14 @@ pub(crate) fn render(
     buf.set_stringn(
         area.x,
         area.y,
-        PRIVACY_BANNER_TITLE,
-        title_width(area.width) as usize,
+        banner_title(locale),
+        title_width(area.width, locale) as usize,
         Style::default().fg(theme.text_primary),
     );
 
     let body_style = Style::default().fg(theme.gray_bright);
     let body_rows = area.height - CHROME_ROWS;
-    let body: Vec<Line> = body_lines(area.width)
+    let body: Vec<Line> = body_lines(area.width, locale)
         .into_iter()
         .take(body_rows as usize)
         .map(|l| Line::styled(l.into_owned(), body_style))
@@ -189,14 +299,15 @@ pub(crate) fn render(
     let legal_y = area.y + area.height - 1;
     let mut terms_rect = Rect::default();
     let mut policy_rect = Rect::default();
-    if let Some(variant) = PRIVACY_BANNER_LEGAL_VARIANTS
+    let legal_variants = legal_variants(locale);
+    if let Some(variant) = legal_variants
         .into_iter()
-        .find(|v| legal_width(v) <= area.width)
+        .find(|variant| legal_width(variant) <= area.width)
     {
         let mut x = area.x;
         let mut spans = Vec::with_capacity(variant.len());
-        for (text, url) in variant {
-            let w = text.len() as u16;
+        for (text, url) in &variant {
+            let w = text.width() as u16;
             let style = match url {
                 None => gray,
                 Some(url) => {
@@ -233,7 +344,7 @@ pub(crate) fn render(
         );
     }
 
-    if !buttons_fit(area.width) {
+    if !buttons_fit(area.width, locale) {
         return PrivacyBannerRects {
             opt_in: Rect::default(),
             opt_out: Rect::default(),
@@ -241,16 +352,18 @@ pub(crate) fn render(
             policy: policy_rect,
         };
     }
+    let opt_out_label = opt_out_label(locale);
+    let opt_in_label = opt_in_label(locale);
     let opt_out_rect = Rect {
-        x: area.x + area.width - button_block_width(),
+        x: area.x + area.width - button_block_width(locale),
         y: area.y,
-        width: OPT_OUT_LABEL.len() as u16,
+        width: opt_out_label.width() as u16,
         height: 1,
     };
     let opt_in_rect = Rect {
         x: opt_out_rect.x + opt_out_rect.width + 1,
         y: area.y,
-        width: OPT_IN_LABEL.len() as u16,
+        width: opt_in_label.width() as u16,
         height: 1,
     };
     let opt_out_style = if hovered(opt_out_rect) {
@@ -266,14 +379,14 @@ pub(crate) fn render(
     buf.set_stringn(
         opt_out_rect.x,
         opt_out_rect.y,
-        OPT_OUT_LABEL,
+        opt_out_label,
         opt_out_rect.width as usize,
         opt_out_style,
     );
     buf.set_stringn(
         opt_in_rect.x,
         opt_in_rect.y,
-        OPT_IN_LABEL,
+        opt_in_label,
         opt_in_rect.width as usize,
         opt_in_style,
     );
@@ -367,7 +480,7 @@ mod tests {
 
     #[test]
     fn buttons_drop_whole_when_the_row_is_too_narrow() {
-        let width = PRIVACY_BANNER_TITLE.len() as u16 + button_block_width(); // one short
+        let width = PRIVACY_BANNER_TITLE.width() as u16 + button_block_width(None); // one short
         let h = height(width);
         let mut buf = Buffer::empty(Rect::new(0, 0, width, h));
         let rects = render(Rect::new(0, 0, width, h), &mut buf, &Theme::current(), None);
@@ -382,8 +495,8 @@ mod tests {
             let mut buf = Buffer::empty(Rect::new(0, 0, width, h));
             render(Rect::new(0, 0, width, h), &mut buf, &Theme::current(), None)
         };
-        assert_eq!(rects.opt_out.width, OPT_OUT_LABEL.len() as u16);
-        assert_eq!(rects.opt_in.width, OPT_IN_LABEL.len() as u16);
+        assert_eq!(rects.opt_out.width, OPT_OUT_LABEL.width() as u16);
+        assert_eq!(rects.opt_in.width, OPT_IN_LABEL.width() as u16);
     }
 
     #[test]

@@ -76,10 +76,7 @@ impl SlashCommand for DocsCommand {
             return CommandResult::Action(Action::OpenUrl(BUILD_DOCS_URL.into()));
         }
         match find_doc(trimmed) {
-            Some(doc) => CommandResult::Action(Action::ShowReleaseNotes {
-                title: doc.title.into(),
-                content: doc.content.into(),
-            }),
+            Some(doc) => CommandResult::Action(Action::ShowHowtoDoc { id: doc.id }),
             None => CommandResult::Error(format!(
                 "Unknown docs target {trimmed:?}. Try /docs, /docs web, or a guide title (e.g. /docs Getting Started)."
             )),
@@ -178,12 +175,23 @@ mod tests {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
         match DocsCommand.run(&mut ctx, "Getting Started") {
-            CommandResult::Action(Action::ShowReleaseNotes { title, content }) => {
-                assert_eq!(title, "Getting Started");
-                assert!(!content.is_empty());
+            CommandResult::Action(Action::ShowHowtoDoc { id }) => {
+                assert_eq!(id, crate::docs::GETTING_STARTED);
             }
-            other => panic!("expected ShowReleaseNotes, got {other:?}"),
+            other => panic!("expected ShowHowtoDoc, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn chinese_title_opens_same_stable_guide() {
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        assert!(matches!(
+            DocsCommand.run(&mut ctx, "入门指南"),
+            CommandResult::Action(Action::ShowHowtoDoc {
+                id: crate::docs::GETTING_STARTED
+            })
+        ));
     }
 
     #[test]

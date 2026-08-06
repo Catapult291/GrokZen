@@ -25,7 +25,50 @@ use super::context_bar::SEPARATOR;
 use super::turn_status::SPINNER_DIVISOR;
 use crate::app::agent::{GoalDisplayPhase, GoalDisplayState, GoalDisplayStatus};
 use crate::app::agent_view::McpInitProgress;
+use crate::locale::LocaleContext;
 use crate::theme::Theme;
+
+fn goal_static(locale: Option<&LocaleContext>, id: &str, english: &'static str) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn goal_text(locale: Option<&LocaleContext>, id: &str, english: &str) -> String {
+    locale
+        .map(|locale| locale.named_text(id, english).into_owned())
+        .unwrap_or_else(|| english.to_owned())
+}
+
+pub(crate) fn localized_goal_pause_label(
+    status: GoalDisplayStatus,
+    locale: Option<&LocaleContext>,
+) -> &'static str {
+    match status {
+        GoalDisplayStatus::UserPaused => goal_static(locale, "goal.status.paused", "Paused"),
+        GoalDisplayStatus::BackOffPaused => {
+            goal_static(locale, "goal.status.paused_back_off", "Paused (back-off)")
+        }
+        GoalDisplayStatus::NoProgressPaused => goal_static(
+            locale,
+            "goal.status.paused_no_progress",
+            "Paused (no progress)",
+        ),
+        GoalDisplayStatus::InfraPaused => {
+            goal_static(locale, "goal.status.paused_error", "Paused (error)")
+        }
+        GoalDisplayStatus::Blocked => goal_static(
+            locale,
+            "goal.status.paused_verification_blocked",
+            "Paused (verification blocked)",
+        ),
+        GoalDisplayStatus::Active
+        | GoalDisplayStatus::Failed
+        | GoalDisplayStatus::Interrupted
+        | GoalDisplayStatus::BudgetLimited
+        | GoalDisplayStatus::Complete => "",
+    }
+}
 
 /// A named status bar item.
 struct StatusEntry {
@@ -169,17 +212,25 @@ fn format_elapsed_compact(ms: u64) -> String {
 /// `pause_label()`, Budget → "Budget", Done → "Done"; an Active goal
 /// uses the shared [`active_phase_label`] suffix.
 fn goal_phase_label(goal: &GoalDisplayState) -> String {
+    goal_phase_label_with_locale(goal, None)
+}
+
+fn goal_phase_label_with_locale(goal: &GoalDisplayState, locale: Option<&LocaleContext>) -> String {
     match goal.status {
         GoalDisplayStatus::UserPaused
         | GoalDisplayStatus::BackOffPaused
         | GoalDisplayStatus::NoProgressPaused
         | GoalDisplayStatus::InfraPaused
-        | GoalDisplayStatus::Blocked => goal.status.pause_label().into(),
-        GoalDisplayStatus::Failed => "Failed".into(),
-        GoalDisplayStatus::Interrupted => "Interrupted".into(),
-        GoalDisplayStatus::BudgetLimited => "Budget".into(),
-        GoalDisplayStatus::Complete => "Done".into(),
-        GoalDisplayStatus::Active => active_phase_label(goal),
+        | GoalDisplayStatus::Blocked => localized_goal_pause_label(goal.status, locale).into(),
+        GoalDisplayStatus::Failed => goal_static(locale, "goal.status.failed", "Failed").into(),
+        GoalDisplayStatus::Interrupted => {
+            goal_static(locale, "goal.status.interrupted", "Interrupted").into()
+        }
+        GoalDisplayStatus::BudgetLimited => {
+            goal_static(locale, "goal.status.budget", "Budget").into()
+        }
+        GoalDisplayStatus::Complete => goal_static(locale, "goal.status.done", "Done").into(),
+        GoalDisplayStatus::Active => active_phase_label_with_locale(goal, locale),
     }
 }
 
@@ -188,23 +239,37 @@ fn goal_phase_label(goal: &GoalDisplayState) -> String {
 /// disagree. The transient `verifying_completion` overlay wins, then
 /// `planning`, then the steady-state phase.
 pub fn active_phase_label(goal: &GoalDisplayState) -> String {
+    active_phase_label_with_locale(goal, None)
+}
+
+pub fn active_phase_label_with_locale(
+    goal: &GoalDisplayState,
+    locale: Option<&LocaleContext>,
+) -> String {
     if goal.verifying_completion {
         let attempts = classifier_attempts_label(goal);
         // Omit the "(n/m)" suffix until the first counter arrives so the
         // chip reads "Verifying" instead of a confusing "Verifying (0/0)".
         return if attempts.is_empty() {
-            "Verifying".into()
+            goal_static(locale, "goal.phase.verifying", "Verifying").into()
         } else {
-            format!("Verifying ({attempts})")
+            let template = goal_static(
+                locale,
+                "goal.phase.verifying_attempts",
+                "Verifying ({attempts})",
+            );
+            template.replace("{attempts}", &attempts)
         };
     }
     if goal.planning {
-        return "Planning".into();
+        return goal_static(locale, "goal.phase.planning", "Planning").into();
     }
     match goal.phase {
-        GoalDisplayPhase::Idle => "Idle".into(),
-        GoalDisplayPhase::Planning => "Planning".into(),
-        GoalDisplayPhase::Executing => "Executing".into(),
+        GoalDisplayPhase::Idle => goal_static(locale, "goal.phase.idle", "Idle").into(),
+        GoalDisplayPhase::Planning => goal_static(locale, "goal.phase.planning", "Planning").into(),
+        GoalDisplayPhase::Executing => {
+            goal_static(locale, "goal.phase.executing", "Executing").into()
+        }
     }
 }
 
@@ -238,15 +303,45 @@ pub fn goal_status_line(
     context_used: Option<u64>,
     active_subagent_tokens: u64,
 ) -> Line<'static> {
-    let label = goal_phase_label(goal);
+    goal_status_line_with_locale(
+        goal,
+        theme,
+        hovered,
+        tick,
+        context_used,
+        active_subagent_tokens,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn goal_status_line_with_locale(
+    goal: &GoalDisplayState,
+    theme: &Theme,
+    hovered: bool,
+    tick: usize,
+    context_used: Option<u64>,
+    active_subagent_tokens: u64,
+    locale: Option<&LocaleContext>,
+) -> Line<'static> {
+    let label = goal_phase_label_with_locale(goal, locale);
 
     let tokens_str =
         format_tokens_compact(goal.live_tokens_used(context_used, active_subagent_tokens));
     let tokens_display = match goal.token_budget {
         Some(budget) if budget > 0 => {
-            format!("{}/{} tokens", tokens_str, format_tokens_compact(budget))
+            format!(
+                "{}/{} {}",
+                tokens_str,
+                format_tokens_compact(budget),
+                goal_static(locale, "goal.unit.tokens", "tokens")
+            )
         }
-        _ => format!("{} tokens", tokens_str),
+        _ => format!(
+            "{} {}",
+            tokens_str,
+            goal_static(locale, "goal.unit.tokens", "tokens")
+        ),
     };
 
     let elapsed_str = format_elapsed_compact(goal.live_elapsed_ms());
@@ -273,13 +368,16 @@ pub fn goal_status_line(
 
     let is_active = matches!(goal.status, GoalDisplayStatus::Active);
 
-    let chip_name = "Goal";
+    let chip_name = goal_static(locale, "goal.chip.name", "Goal");
+    let chip = goal_text(locale, "goal.chip.template", "{name}: {label}")
+        .replace("{name}", chip_name)
+        .replace("{label}", &label);
     let goal_text = if is_active {
         let frames = crate::glyphs::dot_spinner_frames();
         let frame = frames[(tick / 4) % frames.len()];
-        format!("{frame} {chip_name}: {label}")
+        format!("{frame} {chip}")
     } else {
-        format!("{chip_name}: {label}")
+        chip
     };
 
     Line::from(vec![

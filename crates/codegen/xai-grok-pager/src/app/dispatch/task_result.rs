@@ -43,7 +43,8 @@ use super::session::modal::remove_agent_and_cleanup;
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
     commit_session_usage_block, handle_coding_data_sharing_failed,
-    handle_coding_data_sharing_updated, handle_context_info_complete, scrub_error_for_toast,
+    handle_coding_data_sharing_updated, handle_context_info_complete,
+    scrub_error_for_toast_with_locale,
 };
 use super::transcript::{
     handle_hooks_list_loaded, handle_marketplace_list_loaded, handle_marketplace_updates_available,
@@ -59,6 +60,20 @@ use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
 use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
+
+fn localized_template(
+    locale: &crate::locale::LocaleContext,
+    id: &str,
+    english: &str,
+    replacements: &[(&str, &str)],
+) -> String {
+    let mut message = locale.named_text(id, english).into_owned();
+    for (placeholder, value) in replacements {
+        message = message.replace(placeholder, value);
+    }
+    message
+}
+
 pub(super) fn unregister_session_effect(session_id: Option<acp::SessionId>) -> Vec<Effect> {
     session_id
         .map(|sid| Effect::UnregisterActiveSession { session_id: sid })
@@ -102,7 +117,11 @@ pub(super) fn maybe_show_x11_primary_paste_hint(
     if !eligible || completion != ClipboardPasteCompletion::FullMiss {
         return;
     }
-    show_clipboard_toast(target, X11_PRIMARY_PASTE_HINT, app);
+    let message = app
+        .locale
+        .named_text("clipboard.x11_primary_paste_hint", X11_PRIMARY_PASTE_HINT)
+        .into_owned();
+    show_clipboard_toast(target, &message, app);
 }
 /// Whether a completed clipboard probe should fall through to the `grok wrap`
 /// host-image request. A clean `FullMiss` always qualifies; a remote read
@@ -124,13 +143,23 @@ pub(super) fn show_clipboard_failure(
     failure: ClipboardPasteFailure,
     app: &mut AppView,
 ) {
-    let message = match failure {
+    let (id, english) = match failure {
         ClipboardPasteFailure::AlreadyReported => return,
-        ClipboardPasteFailure::TextRead => "Couldn't read clipboard text",
-        ClipboardPasteFailure::AttachmentRead => "Couldn't read clipboard contents",
-        ClipboardPasteFailure::TargetInsertion => "Couldn't paste clipboard contents",
+        ClipboardPasteFailure::TextRead => (
+            "clipboard.failure.text_read",
+            "Couldn't read clipboard text",
+        ),
+        ClipboardPasteFailure::AttachmentRead => (
+            "clipboard.failure.attachment_read",
+            "Couldn't read clipboard contents",
+        ),
+        ClipboardPasteFailure::TargetInsertion => (
+            "clipboard.failure.target_insertion",
+            "Couldn't paste clipboard contents",
+        ),
     };
-    show_clipboard_toast(target, message, app);
+    let message = app.locale.named_text(id, english).into_owned();
+    show_clipboard_toast(target, &message, app);
 }
 fn apply_clipboard_paste_result(
     ctx: ClipboardPasteContext,
@@ -240,6 +269,7 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
 }
 /// Handle a completed async task result.
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
+    let locale = app.locale.clone();
     match result {
         TaskResult::SessionCreated {
             agent_id,
@@ -313,11 +343,15 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             error,
             silent,
         } => {
+            let message = localized_template(
+                locale.as_ref(),
+                "status.billing.error",
+                "Billing error: {error}",
+                &[("{error}", &error)],
+            );
             if !silent && let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.scrollback.push_block(RenderBlock::System(
-                    crate::scrollback::blocks::SystemMessageBlock::new(format!(
-                        "Billing error: {error}"
-                    )),
+                    crate::scrollback::blocks::SystemMessageBlock::new(message),
                 ));
             }
             vec![]
@@ -463,6 +497,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 &sid,
                 &prompt_id,
             );
+            let failure_message = localized_template(
+                locale.as_ref(),
+                "turn.send_now.failed_requeued",
+                "Send now failed — requeued: {error}",
+                &[("{error}", &error)],
+            );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.shared_queue.retain(|e| e.id != prompt_id);
                 agent.note_queue_echo_retired(&prompt_id);
@@ -492,17 +532,21 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                             crate::app::agent::QueueEntryKind::Prompt,
                         )
                     });
-                agent.show_toast(&format!("Send now failed — requeued: {error}"));
+                agent.show_toast(&failure_message);
             }
             vec![]
         }
         TaskResult::PreferredModelPersisted { result } => {
-            if let Err(err) = result
-                && let Some(agent) = get_active_agent_mut(app)
-            {
-                agent.scrollback.push_block(RenderBlock::system(format!(
-                    "Couldn't save preferred model: {err} (still active for this session)"
-                )));
+            if let Err(err) = result {
+                let message = localized_template(
+                    locale.as_ref(),
+                    "model.preferred.save_failed",
+                    "Couldn't save preferred model: {error} (still active for this session)",
+                    &[("{error}", &err)],
+                );
+                if let Some(agent) = get_active_agent_mut(app) {
+                    agent.scrollback.push_block(RenderBlock::system(message));
+                }
             }
             vec![]
         }
@@ -601,12 +645,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::PromptImagePreviewPrepared => vec![],
         TaskResult::DoctorFixPlanned { target, result } => {
             let Some(target) = current_doctor_target(app, &target) else {
-                deliver_doctor_message(
-                    app,
-                    target.agent_id,
-                    "This fix was cancelled because the session changed. Run `/doctor fix` again."
-                        .to_owned(),
-                );
+                let message = locale
+                    .named_text(
+                        "doctor.fix.cancelled_session_changed",
+                        "This fix was cancelled because the session changed. Run `/doctor fix` again.",
+                    )
+                    .into_owned();
+                deliver_doctor_message(app, target.agent_id, message);
                 return vec![];
             };
             match result {
@@ -617,31 +662,45 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     super::prompt::open_doctor_fix_question(app, target, plan);
                 }
                 Ok(DoctorPlanningOutcome::RunLocally(command)) => {
-                    deliver_doctor_message(
-                        app,
-                        target.agent_id,
-                        format!(
-                            "This fix configures your local computer, not this SSH session.\nOn your local computer, run: {command}"
-                        ),
+                    let message = localized_template(
+                        locale.as_ref(),
+                        "doctor.fix.local_only",
+                        "This fix configures your local computer, not this SSH session.\nOn your local computer, run: {command}",
+                        &[("{command}", &command)],
                     );
+                    deliver_doctor_message(app, target.agent_id, message);
                 }
-                Err(error) => deliver_doctor_message(
-                    app,
-                    target.agent_id,
-                    if error.starts_with("Could not prepare the fix:") {
-                        error
-                    } else {
-                        format!("Could not prepare the fix: {error}")
-                    },
-                ),
+                Err(error) => {
+                    let detail = error
+                        .strip_prefix("Could not prepare the fix:")
+                        .map(str::trim_start)
+                        .unwrap_or(&error);
+                    let message = localized_template(
+                        locale.as_ref(),
+                        "doctor.fix.prepare_failed",
+                        "Could not prepare the fix: {error}",
+                        &[("{error}", detail)],
+                    );
+                    deliver_doctor_message(app, target.agent_id, message);
+                }
             }
             vec![]
         }
         TaskResult::DoctorFixApplied { target, result } => {
             let message = match result {
                 Ok(outcome) => crate::diagnostics::format_fix_success(&outcome),
-                Err(error) if error.starts_with("Could not apply the fix:") => error,
-                Err(error) => format!("Could not apply the fix: {error}"),
+                Err(error) => {
+                    let detail = error
+                        .strip_prefix("Could not apply the fix:")
+                        .map(str::trim_start)
+                        .unwrap_or(&error);
+                    localized_template(
+                        locale.as_ref(),
+                        "doctor.fix.apply_failed",
+                        "Could not apply the fix: {error}",
+                        &[("{error}", detail)],
+                    )
+                }
             };
             deliver_doctor_message(app, target.agent_id, message);
             vec![]
@@ -807,22 +866,30 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             share_url,
         } => {
+            let message = localized_template(
+                locale.as_ref(),
+                "session.share.success",
+                "Session shared: {share_url}",
+                &[("{share_url}", &share_url)],
+            );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Session shared: {share_url}"
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
             }
             vec![]
         }
         TaskResult::ShareSessionFailed { agent_id, error } => {
+            let message = localized_template(
+                locale.as_ref(),
+                "session.share.failed",
+                "Couldn't share session: {error}",
+                &[("{error}", &error)],
+            );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't share session: {error}"
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
             }
             vec![]
         }
@@ -856,12 +923,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             vec![]
         }
         TaskResult::SessionInfoFailed { agent_id, error } => {
+            let message = localized_template(
+                locale.as_ref(),
+                "session.info.load_failed",
+                "Couldn't load session info: {error}",
+                &[("{error}", &error)],
+            );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't load session info: {error}"
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
             }
             vec![]
         }
@@ -877,23 +948,31 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             seq,
         } => handle_coding_data_sharing_failed(app, agent_id, error, rollback_to_opted_in, seq),
         TaskResult::RenameSessionComplete { agent_id, title } => {
+            let safe = crate::views::session_title::sanitize_display_text(&title);
+            let message = localized_template(
+                locale.as_ref(),
+                "session.rename.success",
+                "Session renamed to \"{title}\"",
+                &[("{title}", &safe)],
+            );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
-                let safe = crate::views::session_title::sanitize_display_text(&title);
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Session renamed to \"{safe}\""
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
             }
             vec![]
         }
         TaskResult::RenameSessionFailed { agent_id, error } => {
+            let message = localized_template(
+                locale.as_ref(),
+                "session.rename.failed",
+                "Couldn't rename session: {error}",
+                &[("{error}", &error)],
+            );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't rename session: {error}"
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
             }
             vec![]
         }
@@ -903,6 +982,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             after,
         } => {
             use crate::app::actions::AfterSessionDelete;
+            let deleted_toast = locale
+                .named_text("session.delete.success", "Session deleted")
+                .into_owned();
             remove_session_from_pickers(
                 app,
                 &source,
@@ -914,7 +996,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     .retain(|entry| entry.session_id != session_id);
                 app.leader_roster
                     .retain(|entry| entry.session_id != session_id);
-                app.show_toast("Session deleted");
+                app.show_toast(&deleted_toast);
                 return vec![];
             }
             let sid = acp::SessionId::new(session_id.clone());
@@ -971,7 +1053,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             } else if foreground && after == AfterSessionDelete::Welcome {
                 effects.extend(dispatch_exit_session(app));
             }
-            app.show_toast("Session deleted");
+            app.show_toast(&deleted_toast);
             effects
         }
         TaskResult::DeleteSessionFailed {
@@ -980,19 +1062,29 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             error,
         } => {
             tracing::warn!(source, session_id = %session_id, error = %error, "session delete failed");
-            app.show_toast(&format!("Couldn't delete session: {error}"));
+            let message = localized_template(
+                locale.as_ref(),
+                "session.delete.failed",
+                "Couldn't delete session: {error}",
+                &[("{error}", &error)],
+            );
+            app.show_toast(&message);
             vec![]
         }
         TaskResult::ContextInfoComplete { agent_id, info } => {
             handle_context_info_complete(app, agent_id, info)
         }
         TaskResult::ContextInfoFailed { agent_id, error } => {
+            let message = localized_template(
+                locale.as_ref(),
+                "context.info.load_failed",
+                "Couldn't load context info: {error}",
+                &[("{error}", &error)],
+            );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't load context info: {error}"
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
             }
             vec![]
         }
@@ -1000,30 +1092,39 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             session_id,
             usage,
-        } => commit_session_usage_block(
-            app,
-            agent_id,
-            &session_id,
-            crate::app::status_blocks::session_usage_block_text(&usage),
-        ),
+        } => {
+            let text = crate::app::status_blocks::session_usage_block_text_with_locale(
+                &usage,
+                Some(app.locale.as_ref()),
+            );
+            commit_session_usage_block(app, agent_id, &session_id, text)
+        }
         TaskResult::SessionUsageFailed {
             agent_id,
             session_id,
             error,
-        } => commit_session_usage_block(
-            app,
-            agent_id,
-            &session_id,
-            format!("Couldn't load session usage: {error}"),
-        ),
+        } => {
+            let text = app
+                .locale
+                .named_text(
+                    "status.usage.load_failed",
+                    "Couldn't load session usage: {error}",
+                )
+                .replace("{error}", &error);
+            commit_session_usage_block(app, agent_id, &session_id, text)
+        }
         TaskResult::FeedbackComplete { .. } => vec![],
         TaskResult::FeedbackFailed { agent_id, error } => {
+            let message = localized_template(
+                locale.as_ref(),
+                "feedback.send_failed",
+                "Couldn't send feedback: {error}",
+                &[("{error}", &error)],
+            );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent
                     .scrollback
-                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
-                        "Couldn't send feedback: {error}"
-                    )));
+                    .push_block(crate::scrollback::block::RenderBlock::system(message));
             }
             vec![]
         }
@@ -1091,12 +1192,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::CatalogEntryFailed { error } => {
             tracing::warn!(error = %error, "catalog entry fetch failed");
+            let message = localized_template(
+                locale.as_ref(),
+                "catalog.entry.load_failed",
+                "Couldn't load entry: {error}",
+                &[("{error}", &error)],
+            );
             if let ActiveView::Agent(id) = app.active_view
                 && let Some(agent) = app.agents.get_mut(&id)
             {
-                agent
-                    .scrollback
-                    .push_block(RenderBlock::system(format!("Couldn't load entry: {error}")));
+                agent.scrollback.push_block(RenderBlock::system(message));
             }
             vec![]
         }
@@ -1118,9 +1223,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     && let Some(pending_id) = agent.pending_recap_entry.take()
                 {
                     agent.scrollback.remove_entry(pending_id);
-                    agent.show_toast(super::recap_unavailable_toast(
-                        super::scrollback_has_user_messages(&agent.scrollback),
-                    ));
+                    let has_messages = super::scrollback_has_user_messages(&agent.scrollback);
+                    let toast = super::recap_unavailable_toast_with_locale(
+                        agent.scrollback.locale(),
+                        has_messages,
+                    );
+                    agent.show_toast(toast);
                 }
             }
             vec![]
@@ -1131,6 +1239,12 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             text,
             blocks,
         } => {
+            let failure_message = localized_template(
+                locale.as_ref(),
+                "turn.interject.failed_requeued",
+                "Interjection failed — requeued: {error}",
+                &[("{error}", &error)],
+            );
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
@@ -1150,7 +1264,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         skill_token_ranges: Vec::new(),
                         combined_texts: Vec::new(),
                     });
-                agent.show_toast(&format!("Interjection failed — requeued: {error}"));
+                agent.show_toast(&failure_message);
             }
             vec![]
         }
@@ -1215,7 +1329,13 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 return vec![];
             };
             agent.rewind_state = None;
-            app.show_toast(&format!("Undo failed: {error}"));
+            let message = localized_template(
+                locale.as_ref(),
+                "rewind.undo.failed",
+                "Undo failed: {error}",
+                &[("{error}", &error)],
+            );
+            app.show_toast(&message);
             vec![]
         }
         TaskResult::RewindPreviewComplete {
@@ -1292,8 +1412,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         } => {
             let rollback_effects = apply_setting_rollback(app, key, &rollback_value);
             tracing::warn!(target: "settings", ?key, ?rollback_value, %error, "setting persist failed; rolled back");
-            let scrubbed = scrub_error_for_toast(&error);
-            app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
+            let scrubbed = scrub_error_for_toast_with_locale(&error, locale.as_ref());
+            let message = localized_template(
+                locale.as_ref(),
+                "settings.persist.save_failed",
+                "\u{2717} Could not save {key}: {error}",
+                &[("{key}", key), ("{error}", &scrubbed)],
+            );
+            app.show_toast(&message);
             rollback_effects
         }
         TaskResult::SettingPersistFailedBestEffort { key, error } => {
@@ -1302,8 +1428,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 ?key, %error,
                 "setting persist failed (best-effort); in-memory state stays at optimistic value",
             );
-            let scrubbed = scrub_error_for_toast(&error);
-            app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
+            let scrubbed = scrub_error_for_toast_with_locale(&error, locale.as_ref());
+            let message = localized_template(
+                locale.as_ref(),
+                "settings.persist.save_failed",
+                "\u{2717} Could not save {key}: {error}",
+                &[("{key}", key), ("{error}", &scrubbed)],
+            );
+            app.show_toast(&message);
             vec![]
         }
     }

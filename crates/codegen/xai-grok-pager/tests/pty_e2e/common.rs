@@ -5,6 +5,7 @@
 pub(crate) use serde_json::json;
 pub(crate) use std::path::{Path, PathBuf};
 pub(crate) use std::time::{Duration, Instant};
+use unicode_width::UnicodeWidthStr;
 pub(crate) use xai_grok_pager_pty_harness::{
     AgentTurnExpectation, ContentController, EnvOp, MockModel, PtyExitPoll, PtyHarness,
     ScriptedResponse, SseEvent, keys, oauth_credential_ops, pager_binary, seed_fake_oauth, sse,
@@ -712,7 +713,7 @@ pub(crate) fn mouse_drag_no_release(row: u16, from_col: u16, to_col: u16) -> Str
 pub(crate) fn locate_screen_text(screen: &str, needle: &str) -> Option<(u16, u16)> {
     for (row, line) in screen.lines().enumerate() {
         if let Some(byte) = line.find(needle) {
-            let col = line[..byte].chars().count() as u16;
+            let col = line[..byte].width() as u16;
             return Some((row as u16, col));
         }
     }
@@ -1324,6 +1325,11 @@ pub(crate) use xai_grok_pager_pty_harness::host_clipboard::clipboard_roundtrip_w
 #[cfg(test)]
 mod exit_status_wait_policy_tests {
     use super::*;
+
+    #[test]
+    fn screen_text_locator_uses_terminal_cell_width_for_cjk_prefixes() {
+        assert_eq!(locate_screen_text("中文 target", "target"), Some((0, 5)));
+    }
 
     #[test]
     fn waits_for_running_and_pending_until_deadline_and_propagates_errors() {

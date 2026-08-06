@@ -7,134 +7,133 @@
     <img alt="SpaceXAI logo" src="https://media.x.ai/v1/website/spacexai-symbol-black-transparent-6435cf42.png" width="96">
   </picture>
   <br>
-  Grok Build (<code>grok</code>)
+  Grok Build 简体中文社区版（<code>grok-zh</code>）
 </h1>
 
-**Grok Build** is SpaceXAI's terminal-based AI coding agent. It runs as a
-full-screen TUI that understands your codebase, edits files, executes shell
-commands, searches the web, and manages long-running tasks — interactively,
-headlessly for scripting/CI, or embedded in editors via the Agent Client
-Protocol (ACP).
+这是基于官方 [xai-org/grok-build](https://github.com/xai-org/grok-build) Fork 的非官方简体中文社区版。
 
-[Installing the released binary](#installing-the-released-binary) ·
-[Building from source](#building-from-source) ·
-[Documentation](#documentation) ·
-[Repository layout](#repository-layout) ·
-[Development](#development) ·
-[Contributing](#contributing) ·
-[License](#license)
+本项目在尽量保持原有功能、命令行参数、配置格式和协议兼容性的前提下，为 Grok Build 的 CLI、TUI、设置、提示信息和用户文档提供简体中文支持。它与官方版并行安装，使用独立程序名 `grok-zh` 和独立数据目录 `~/.grok-zh`。
+
+[项目定位](#项目定位) · [当前状态](#当前状态) · [从源码构建](#从源码构建) · [隔离约定](#隔离约定) · [文档](#文档) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
 
 ![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
-
-**Learn more about Grok Build at [x.ai/cli](https://x.ai/cli)**
-
-This repository contains the Rust source for the `grok` CLI/TUI and its agent
-runtime. It is synced periodically from the SpaceXAI monorepo.
-
-A small `SOURCE_REV` file at the root records the full monorepo commit SHA
-for the version of the code present in this tree.
 
 </div>
 
 ---
 
-## Installing the released binary
+## 项目定位
 
-Prebuilt binaries are published for macOS, Linux, and Windows:
+- 官方 Grok Build 的产品介绍与服务说明见 [x.ai/cli](https://x.ai/cli)。
+- 本仓库不是 SpaceXAI 官方发行版，也不代表官方翻译或服务承诺。
+- `SOURCE_REV` 记录本仓库源码所对应的官方 monorepo 提交；发布时还会记录 Fork 的 Git 提交和工作树状态。
+- 模型可用性、账号权限、订阅、远程会话、搜索、语音及其他在线能力依赖官方服务端，社区 Fork 无法保证。
 
-```sh
-curl -fsSL https://x.ai/cli/install.sh | bash   # macOS / Linux / Git Bash
-irm https://x.ai/cli/install.ps1 | iex          # Windows PowerShell
-grok --version
-```
+## 当前状态
 
-See the [changelog](https://x.ai/build/changelog) for the latest fixes,
-features, and improvements in each release.
+本仓库正在进行第一阶段汉化和 Windows 绿色构建验证。当前测试产物属于未签名预览版，不应视为稳定发布版。
 
-## Building from source
+已建立的隔离边界：
 
-Requirements:
+- 可执行文件：`grok-zh.exe`
+- 默认数据目录：`~/.grok-zh`
+- 可选目录覆盖：`GROK_ZH_HOME`
+- 默认界面语言：`zh-CN`，可用 `--locale en-US` 切换英文
+- 社区版独立更新源完成前，内置更新器保持关闭并安全失败
 
-- **Rust** — the toolchain is pinned by [`rust-toolchain.toml`](rust-toolchain.toml);
-  `rustup` installs it automatically on first build.
-- **[DotSlash](https://dotslash-cli.com)** — required so hermetic tools under
-  [`bin/`](bin/) (notably [`bin/protoc`](bin/protoc)) can download and run.
-  Install it and ensure `dotslash` is on your `PATH` **before** building:
+> [!WARNING]
+> `crates/codegen/xai-grok-pager/scripts/` 下的安装脚本及同模块内的 npm 包装仍来自官方上游，可能安装或覆盖官方 `grok`。社区版发布流程完成前，请勿使用这些脚本安装本 Fork。测试时只使用独立绿色测试包中的 `grok-zh.exe`。
 
-  ```sh
-  cargo install dotslash
-  # or: prebuilt packages — https://dotslash-cli.com/docs/installation/
-  /usr/bin/env dotslash --help   # sanity check
-  ```
+## 从源码构建
 
-- **protoc** — proto codegen resolves [`bin/protoc`](bin/protoc) via DotSlash,
-  or falls back to a `protoc` on `PATH` / `$PROTOC`.
-- macOS and Linux are supported build hosts; Windows builds are best-effort
-  and not currently tested from this tree.
+### 通用要求
+
+- Rust：版本由 `rust-toolchain.toml` 固定。
+- `protoc`：构建脚本会依次查找仓库内工具、`PATH` 和 `PROTOC`。
+- 官方仓库主要支持 macOS 与 Linux；本 Fork 另行建设 Windows 构建和验证流程。
+
+常用检查：
 
 ```sh
-cargo run -p xai-grok-pager-bin              # build + launch the TUI
-cargo build -p xai-grok-pager-bin --release  # release binary: target/release/xai-grok-pager
-cargo check -p xai-grok-pager-bin            # fast validation
+cargo check --locked -p xai-grok-pager-bin --bin grok-zh --features release-dist
+cargo test --locked -p xai-grok-locale
+cargo fmt --all --check
 ```
 
-The binary artifact is named `xai-grok-pager`; official installs ship it as
-`grok`. On first launch it opens your browser to authenticate — see the
-[authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
+### Windows 绿色测试构建
 
-## Documentation
+仓库内 `.codex-local/env.ps1` 用于把 Rust 工具链、Cargo 缓存、构建输出和测试数据隔离在项目目录内。它仅用于本地开发测试，不属于正式安装器。
 
-Full online documentation is available at
-[docs.x.ai/build/overview](https://docs.x.ai/build/overview).
-
-The user guide ships with the pager crate:
-[`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
-— getting started, keyboard shortcuts, slash commands, configuration, theming,
-MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
-
-## Repository layout
-
-| Path | Contents |
-|------|----------|
-| `crates/codegen/xai-grok-pager-bin` | Composition-root package; builds the `xai-grok-pager` binary |
-| `crates/codegen/xai-grok-pager` | The TUI: scrollback, prompt, modals, rendering |
-| `crates/codegen/xai-grok-shell` | Agent runtime + leader/stdio/headless entry points |
-| `crates/codegen/xai-grok-tools` | Tool implementations (terminal, file edit, search, ...) |
-| `crates/codegen/xai-grok-workspace` | Host filesystem, VCS, execution, checkpoints |
-| `crates/codegen/...` | The rest of the CLI crate closure (config, MCP, markdown, sandbox, ...) |
-| `crates/common/`, `crates/build/`, `prod/mc/` | Small shared leaf crates pulled in by the closure |
-| `third_party/` | Vendored upstream source (Mermaid diagram stack) — see below |
-
-> [!IMPORTANT]
-> The root `Cargo.toml` (workspace members, dependency versions, lints,
-> profiles) is **generated** — treat it as read-only. Prefer editing per-crate
-> `Cargo.toml` files.
-
-## Development
-
-```sh
-cargo check -p <crate>        # always target specific crates; full-workspace builds are slow
-cargo test -p xai-grok-config # per-crate tests
-cargo clippy -p <crate>       # lint config: clippy.toml at the repo root
-cargo fmt --all               # rustfmt.toml at the repo root
+```powershell
+. .\.codex-local\env.ps1
+$env:GROK_VERSION = "0.2.119-zh.preview.1"
+cargo build --frozen --target x86_64-pc-windows-gnu `
+  -p xai-grok-pager-bin --profile release-dist --features release-dist
 ```
 
-## Contributing
+预期产物：
 
-> [!NOTE]
-> External contributions are not accepted. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+```text
+.codex-local/target/x86_64-pc-windows-gnu/release-dist/grok-zh.exe
+```
 
-## License
+绿色测试包还会在 `grok-zh.exe` 同目录携带 `rg.exe`。社区版搜索入口优先使用该旁载工具，缺失时再回退到系统 `PATH`，因此不需要覆盖或修改官方 Grok 的数据目录。
 
-First-party code in this repository is licensed under the **Apache License,
-Version 2.0** — see [`LICENSE`](LICENSE).
+正式 Windows 发布仍需补齐 MSVC 构建、代码签名、安装包、DLL 闭包验证和独立自动更新流程。
 
-Third-party and vendored code remains under its original licenses. See:
+## 隔离约定
 
-- [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES) — crates.io / git dependencies,
-  bundled UI themes, and **in-tree source ports** (including openai/codex and
-  sst/opencode tool implementations)
+以下名称必须保持稳定，不做翻译：
+
+- CLI 子命令、参数与取值，例如 `agent`、`--resume`、`--output-format json`
+- 配置键、环境变量和序列化字段，例如 `[ui] screen_mode`、`GROK_ZH_HOME`、JSON key
+- MCP、ACP、OAuth、OIDC、OSC 52 等协议名
+- 工具名、模型 ID、会话 ID、路径、URL、日志字段和服务端原始错误
+
+协议身份、遥测字段或兼容性所需的内部 `grok-pager` 名称可能继续保留；用户可见的产品名和安装路径则使用 `grok-zh` / `.grok-zh`。
+
+## 文档
+
+- 内置用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
+- 入门教程：[`crates/codegen/xai-grok-pager/docs/tutorial/`](crates/codegen/xai-grok-pager/docs/tutorial/)
+- 官方在线文档：[docs.x.ai/build/overview](https://docs.x.ai/build/overview)
+
+中文文档将使用稳定文档 ID 和 `zh-CN` 平行目录，不直接改变英文标题所承担的查找身份，以降低合并上游更新时的冲突。
+
+## 仓库结构
+
+| 路径 | 内容 |
+|---|---|
+| `crates/codegen/xai-grok-locale` | 集中式语言目录、locale 解析与回退 |
+| `crates/codegen/xai-grok-product` | 社区版程序名、数据目录与更新隔离策略 |
+| `crates/codegen/xai-grok-pager-bin` | 组合入口，生成 `grok-zh` |
+| `crates/codegen/xai-grok-pager` | TUI、回滚区、提示输入、模态框和渲染 |
+| `crates/codegen/xai-grok-shell` | 智能体运行时及 leader/stdio/headless 入口 |
+| `crates/codegen/xai-grok-tools` | 终端、文件编辑、搜索等工具实现 |
+| `crates/codegen/xai-grok-workspace` | 文件系统、版本控制、执行和检查点 |
+
+根 `Cargo.toml` 的大部分内容由上游生成。新增社区功能应优先放在独立 crate 或局部适配层中，避免对上游文件进行大范围结构改写。
+
+## 上游与发布策略
+
+- `main`：尽量保持官方上游镜像，只用于同步和审查。
+- `zh-dev`：汉化开发、上游合并、构建和测试。
+- `zh-stable`：只有在中文验证通过后才发布给用户。
+- 上游 `main` 更新只能触发审查和测试，不能直接进入用户更新源。
+- 官方 stable 指针、正式更新日志、协议兼容检查和本 Fork 的 Windows 测试结果共同构成发布门槛。
+
+## 贡献
+
+本项目当前处于社区维护准备阶段。提交翻译时请保留命令、配置键、协议字段、代码块、占位符和 URL，并优先修改集中式 locale 目录；不要在业务代码中逐处硬编码中文。
+
+上游仓库的外部贡献政策见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
+## 许可证
+
+本仓库第一方代码采用 **Apache License, Version 2.0**，详见 [`LICENSE`](LICENSE)。本 Fork 的修改继续遵守相同许可证，并保留上游版权和归属说明。
+
+第三方及 vendored 代码保持各自原许可证，详见：
+
+- [`THIRD-PARTY-NOTICES`](THIRD-PARTY-NOTICES)
 - [`crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md`](crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md)
-  — crate-local notice for the codex and opencode ports (license texts +
-  Apache §4(b) change notice)
-- [`third_party/NOTICE`](third_party/NOTICE) — vendored Mermaid-stack index
+- [`third_party/NOTICE`](third_party/NOTICE)

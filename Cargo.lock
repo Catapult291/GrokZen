@@ -13202,6 +13202,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "xai-gix-status",
+ "xai-grok-product",
  "xai-sqlite-journal",
  "xai-test-utils",
  "xai-tty-utils",
@@ -13371,6 +13372,7 @@ dependencies = [
  "tracing",
  "urlencoding",
  "which",
+ "xai-grok-product",
  "xai-grok-version",
  "xai-tty-utils",
 ]
@@ -13442,6 +13444,14 @@ dependencies = [
  "xai-grok-telemetry",
  "xai-grok-version",
  "xai-grok-workspace",
+]
+
+[[package]]
+name = "xai-grok-locale"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -13642,11 +13652,13 @@ dependencies = [
  "xai-grok-agent",
  "xai-grok-announcements",
  "xai-grok-config",
+ "xai-grok-locale",
  "xai-grok-markdown",
  "xai-grok-mermaid",
  "xai-grok-pager-pty-harness",
  "xai-grok-pager-render",
  "xai-grok-plugin-marketplace",
+ "xai-grok-product",
  "xai-grok-sandbox",
  "xai-grok-shell",
  "xai-grok-telemetry",
@@ -13690,6 +13702,7 @@ dependencies = [
  "xai-grok-config",
  "xai-grok-pager",
  "xai-grok-pager-minimal",
+ "xai-grok-product",
  "xai-grok-sandbox",
  "xai-grok-shell",
  "xai-grok-telemetry",
@@ -13708,6 +13721,7 @@ dependencies = [
  "ratatui",
  "similar",
  "tracing",
+ "unicode-width 0.2.0",
  "uuid",
  "xai-grok-pager",
  "xai-grok-shell",
@@ -13737,6 +13751,8 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "unicode-width 0.2.0",
+ "xai-grok-product",
  "xai-grok-test-support",
  "xai-tty-utils",
 ]
@@ -13784,6 +13800,7 @@ dependencies = [
  "xai-grok-config",
  "xai-grok-markdown",
  "xai-grok-paths",
+ "xai-grok-product",
  "xai-grok-shared",
  "xai-grok-telemetry",
  "xai-grok-tools",
@@ -13823,6 +13840,10 @@ dependencies = [
  "xai-hooks-plugins-types",
  "xai-tty-utils",
 ]
+
+[[package]]
+name = "xai-grok-product"
+version = "0.1.0"
 
 [[package]]
 name = "xai-grok-sampler"
@@ -14095,6 +14116,7 @@ dependencies = [
  "windows 0.61.3",
  "xai-grok-config",
  "xai-grok-env",
+ "xai-grok-product",
  "xai-grok-shared",
  "xai-grok-version",
  "xai-tty-utils",
@@ -14341,6 +14363,7 @@ dependencies = [
  "tokio",
  "tracing",
  "wiremock",
+ "xai-grok-product",
  "xai-grok-shell",
  "xai-grok-tools",
  "xai-grok-version",
@@ -14370,6 +14393,8 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "xai-grok-config",
+ "xai-grok-product",
  "xai-tty-utils",
 ]
 

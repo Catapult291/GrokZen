@@ -2,6 +2,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 
+use crate::locale::LocaleContext;
 use crate::render::SafeBuf;
 use crate::theme::Theme;
 use crate::views::agent_status::format_tokens_compact;
@@ -171,70 +172,99 @@ pub fn footer_shortcuts(
     has_run_list: bool,
     run: Option<&WorkflowRunSnapshot>,
 ) -> Vec<crate::views::modal_window::Shortcut<'static>> {
+    footer_shortcuts_with_locale(in_detail, has_run_list, run, None)
+}
+
+fn workflow_static(
+    locale: Option<&LocaleContext>,
+    id: &str,
+    english: &'static str,
+) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn workflow_text(locale: Option<&LocaleContext>, id: &str, english: &str) -> String {
+    locale
+        .map(|locale| locale.named_text(id, english).into_owned())
+        .unwrap_or_else(|| english.to_owned())
+}
+
+pub fn footer_shortcuts_with_locale(
+    in_detail: bool,
+    has_run_list: bool,
+    run: Option<&WorkflowRunSnapshot>,
+    locale: Option<&LocaleContext>,
+) -> Vec<crate::views::modal_window::Shortcut<'static>> {
     use crate::views::modal_window::Shortcut;
     let mut s = Vec::new();
     if in_detail {
         s.push(Shortcut {
-            label: "↑↓ phase · enter agent",
+            label: workflow_static(
+                locale,
+                "workflows.shortcut.phase_agent",
+                "↑↓ phase · enter agent",
+            ),
             clickable: false,
             id: 0,
         });
         if has_run_list {
             s.push(Shortcut {
-                label: "←/tab runs",
+                label: workflow_static(locale, "workflows.shortcut.runs", "←/tab runs"),
                 clickable: true,
                 id: shortcut_ids::RUNS,
             });
         }
         if run.is_some_and(WorkflowRunSnapshot::can_pause) {
             s.push(Shortcut {
-                label: "p pause",
+                label: workflow_static(locale, "workflows.shortcut.pause", "p pause"),
                 clickable: true,
                 id: shortcut_ids::PAUSE,
             });
         }
         if run.is_some_and(WorkflowRunSnapshot::can_resume) {
             s.push(Shortcut {
-                label: "r resume",
+                label: workflow_static(locale, "workflows.shortcut.resume", "r resume"),
                 clickable: true,
                 id: shortcut_ids::RESUME,
             });
         }
         if run.is_some_and(WorkflowRunSnapshot::can_stop) {
             s.push(Shortcut {
-                label: "x stop",
+                label: workflow_static(locale, "workflows.shortcut.stop", "x stop"),
                 clickable: true,
                 id: shortcut_ids::STOP,
             });
         }
         if run.is_some_and(WorkflowRunSnapshot::can_save) {
             s.push(Shortcut {
-                label: "s save",
+                label: workflow_static(locale, "workflows.shortcut.save", "s save"),
                 clickable: true,
                 id: shortcut_ids::SAVE,
             });
         }
     } else {
         s.push(Shortcut {
-            label: "↑↓ select",
+            label: workflow_static(locale, "workflows.shortcut.select", "↑↓ select"),
             clickable: false,
             id: 0,
         });
         s.push(Shortcut {
-            label: "enter open",
+            label: workflow_static(locale, "workflows.shortcut.open", "enter open"),
             clickable: true,
             id: shortcut_ids::OPEN,
         });
         if run.is_some_and(WorkflowRunSnapshot::can_stop) {
             s.push(Shortcut {
-                label: "x stop",
+                label: workflow_static(locale, "workflows.shortcut.stop", "x stop"),
                 clickable: true,
                 id: shortcut_ids::STOP,
             });
         }
     }
     s.push(Shortcut {
-        label: "esc close",
+        label: workflow_static(locale, "workflows.shortcut.close", "esc close"),
         clickable: false,
         id: 0,
     });
@@ -249,8 +279,20 @@ pub fn modal_config(
     Vec<crate::views::modal_window::Shortcut<'static>>,
     crate::views::modal_window::ModalSizing,
 ) {
+    modal_config_with_locale(in_detail, has_run_list, run, None)
+}
+
+pub fn modal_config_with_locale(
+    in_detail: bool,
+    has_run_list: bool,
+    run: Option<&WorkflowRunSnapshot>,
+    locale: Option<&LocaleContext>,
+) -> (
+    Vec<crate::views::modal_window::Shortcut<'static>>,
+    crate::views::modal_window::ModalSizing,
+) {
     (
-        footer_shortcuts(in_detail, has_run_list, run),
+        footer_shortcuts_with_locale(in_detail, has_run_list, run, locale),
         crate::views::modal_window::ModalSizing::large(),
     )
 }
@@ -503,11 +545,11 @@ fn agent_glyph_and_style(state: &str, theme: &Theme) -> (&'static str, Style) {
     }
 }
 
-fn fmt_tokens(tokens: u64) -> String {
+fn fmt_tokens(tokens: u64, locale: Option<&LocaleContext>) -> String {
     if tokens > 0 {
-        format!(
-            "{} tok",
-            format_tokens_compact(i64::try_from(tokens).unwrap_or(i64::MAX))
+        workflow_text(locale, "workflows.tokens", "{tokens} tok").replace(
+            "{tokens}",
+            &format_tokens_compact(i64::try_from(tokens).unwrap_or(i64::MAX)),
         )
     } else {
         String::new()
@@ -522,6 +564,35 @@ fn plural(n: usize, noun: &str) -> String {
     }
 }
 
+fn localized_count(
+    locale: Option<&LocaleContext>,
+    n: usize,
+    id: &str,
+    english_noun: &str,
+) -> String {
+    workflow_text(locale, id, &plural(n, english_noun)).replace("{count}", &n.to_string())
+}
+
+fn localized_status(locale: Option<&LocaleContext>, status: &str) -> String {
+    let english = status.replace('_', " ");
+    let id = match status {
+        "active" => Some("workflows.status.active"),
+        "complete" => Some("workflows.status.complete"),
+        "user_paused" => Some("workflows.status.user_paused"),
+        "back_off_paused" => Some("workflows.status.back_off_paused"),
+        "no_progress_paused" => Some("workflows.status.no_progress_paused"),
+        "infra_paused" => Some("workflows.status.infra_paused"),
+        "blocked" => Some("workflows.status.blocked"),
+        "budget_limited" => Some("workflows.status.budget_limited"),
+        "interrupted" => Some("workflows.status.interrupted"),
+        "failed" => Some("workflows.status.failed"),
+        "cancelled" => Some("workflows.status.cancelled"),
+        _ => None,
+    };
+    id.map(|id| workflow_text(locale, id, &english))
+        .unwrap_or(english)
+}
+
 fn strip_control(text: &str) -> String {
     strip_control_chars(text, false)
 }
@@ -533,6 +604,18 @@ pub fn render_workflows(
     state: &mut WorkflowsViewState,
     tick: usize,
     live: &WorkflowAgentLiveMap,
+) -> Option<Rect> {
+    render_workflows_with_locale(buf, area, runs, state, tick, live, None)
+}
+
+pub fn render_workflows_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    runs: &[&WorkflowRunSnapshot],
+    state: &mut WorkflowsViewState,
+    tick: usize,
+    live: &WorkflowAgentLiveMap,
+    locale: Option<&LocaleContext>,
 ) -> Option<Rect> {
     use crate::views::modal_window::{ModalWindowConfig, render_modal_window};
 
@@ -547,9 +630,10 @@ pub fn render_workflows(
     let in_detail = detail_run.is_some();
     let has_run_list = runs.len() > 1;
     let selected_run = detail_run.or_else(|| runs.get(state.selected_run).copied());
-    let (shortcuts, sizing) = modal_config(in_detail, has_run_list, selected_run);
+    let (shortcuts, sizing) =
+        modal_config_with_locale(in_detail, has_run_list, selected_run, locale);
     let config = ModalWindowConfig {
-        title: "Workflows",
+        title: workflow_static(locale, "workflows.title", "Workflows"),
         tabs: None,
         shortcuts: &shortcuts,
         sizing,
@@ -559,8 +643,8 @@ pub fn render_workflows(
     let inner = content.content;
 
     match state.detail_run(runs) {
-        Some(run) => render_detail(buf, inner, run, state, tick, &theme, live),
-        None => render_list(buf, inner, runs, state, &theme),
+        Some(run) => render_detail(buf, inner, run, state, tick, &theme, live, locale),
+        None => render_list(buf, inner, runs, state, &theme, locale),
     }
     state.window.popup_area
 }
@@ -571,6 +655,7 @@ fn render_list(
     runs: &[&WorkflowRunSnapshot],
     state: &mut WorkflowsViewState,
     theme: &Theme,
+    locale: Option<&LocaleContext>,
 ) {
     let mut y = inner.y;
     if runs.is_empty() {
@@ -578,7 +663,11 @@ fn render_list(
             buf,
             inner.x + 1,
             y + 1,
-            "No workflow runs in this session yet.",
+            workflow_static(
+                locale,
+                "workflows.empty",
+                "No workflow runs in this session yet.",
+            ),
             Style::default().fg(theme.gray_bright),
             inner.right(),
         );
@@ -586,7 +675,11 @@ fn render_list(
             buf,
             inner.x + 1,
             y + 3,
-            "Start one with /deep-research <query> or ask for a workflow.",
+            workflow_static(
+                locale,
+                "workflows.empty_hint",
+                "Start one with /deep-research <query> or ask for a workflow.",
+            ),
             Style::default().fg(theme.gray),
             inner.right(),
         );
@@ -609,28 +702,26 @@ fn render_list(
         let (glyph, glyph_style) = status_glyph_and_style(&run.status, theme);
         let done_phases = run.phases.iter().filter(|(_, s)| s == "done").count();
         let phase_part = if run.phases.is_empty() {
-            run.status.clone()
+            localized_status(locale, &run.status)
         } else {
-            format!(
-                "{}/{} phase{}",
-                done_phases,
-                run.phases.len(),
-                if run.phases.len() == 1 { "" } else { "s" }
-            )
+            workflow_text(locale, "workflows.phase_progress", "{done}/{total} phases")
+                .replace("{done}", &done_phases.to_string())
+                .replace("{total}", &run.phases.len().to_string())
         };
+        let agent_progress =
+            workflow_text(locale, "workflows.agent_progress", "{done}/{total} agents")
+                .replace("{done}", &run.done_agents().to_string())
+                .replace("{total}", &run.agents.len().to_string());
         let meta = format!(
-            "{phase_part} · {}/{} agent{} · {}",
-            run.done_agents(),
-            run.agents.len(),
-            if run.agents.len() == 1 { "" } else { "s" },
-            format_elapsed(run.live_elapsed_ms()),
+            "{phase_part} · {agent_progress} · {}",
+            format_elapsed(run.live_elapsed_ms())
         );
         let label = format!(
             "{} — {}",
             strip_control(&run.name),
             strip_control(&run.objective)
         );
-        let badge = format!("{glyph} {}", run.status.replace('_', " "));
+        let badge = format!("{glyph} {}", localized_status(locale, &run.status));
         let row = PickerRow {
             label: &label,
             right_label: &meta,
@@ -675,6 +766,7 @@ fn render_detail(
     tick: usize,
     theme: &Theme,
     live: &WorkflowAgentLiveMap,
+    locale: Option<&LocaleContext>,
 ) {
     let name = strip_control(&run.name);
     let (glyph, glyph_style) = status_glyph_and_style(&run.status, theme);
@@ -684,12 +776,12 @@ fn render_detail(
     } else {
         format!("{glyph} ")
     };
+    let agent_progress = workflow_text(locale, "workflows.agent_progress", "{done}/{total} agents")
+        .replace("{done}", &run.done_agents().to_string())
+        .replace("{total}", &run.agents.len().to_string());
     let meta = format!(
-        "{}/{} agent{} · {}",
-        run.done_agents(),
-        run.agents.len(),
-        if run.agents.len() == 1 { "" } else { "s" },
-        format_elapsed(run.live_elapsed_ms()),
+        "{agent_progress} · {}",
+        format_elapsed(run.live_elapsed_ms())
     );
     let meta_w = unicode_width::UnicodeWidthStr::width(meta.as_str()) as u16;
     let meta_x = inner.right().saturating_sub(meta_w + 1);
@@ -736,31 +828,43 @@ fn render_detail(
     let mut body_y = inner.y + 2;
     let status_line = if run.status == "budget_limited" {
         let body = if run.agents_used >= 1_024 {
-            "budget limited — maximum agent budget reached; start a new run".to_string()
+            workflow_text(
+                locale,
+                "workflows.budget.maximum",
+                "budget limited — maximum agent budget reached; start a new run",
+            )
         } else if let Some(pause) = run.pause_message.as_deref().filter(|s| !s.is_empty()) {
-            format!(
-                "budget limited — bare resume disabled; raise agent budget via agent/tool — {}",
-                strip_control(pause)
+            workflow_text(
+                locale,
+                "workflows.budget.raise_with_reason",
+                "budget limited — bare resume disabled; raise agent budget via agent/tool — {reason}",
             )
+            .replace("{reason}", &strip_control(pause))
         } else {
-            format!(
-                "budget limited — bare resume disabled; raise agent budget above {} via agent/tool",
-                run.agents_used
+            workflow_text(
+                locale,
+                "workflows.budget.raise_above",
+                "budget limited — bare resume disabled; raise agent budget above {count} via agent/tool",
             )
+            .replace("{count}", &run.agents_used.to_string())
         };
         Some((body, Style::default().fg(theme.warning)))
     } else if let Some(pause) = run.pause_message.as_deref() {
         Some((
             format!(
                 "{} — {}",
-                run.status.replace('_', " "),
+                localized_status(locale, &run.status),
                 strip_control(pause)
             ),
             Style::default().fg(theme.warning),
         ))
     } else if run.status == "failed" {
         Some((
-            "failed — see scrollback for details; r resumes from the journal".to_string(),
+            workflow_text(
+                locale,
+                "workflows.failed_hint",
+                "failed — see scrollback for details; r resumes from the journal",
+            ),
             Style::default().fg(theme.accent_error),
         ))
     } else {
@@ -823,7 +927,7 @@ fn render_detail(
         buf,
         rail_area.x,
         body_y,
-        "Phases",
+        workflow_static(locale, "workflows.phases", "Phases"),
         Style::default().fg(theme.text_secondary),
         rail_area.right(),
     );
@@ -912,7 +1016,14 @@ fn render_detail(
             buf,
             rail_inner.x + 4,
             y,
-            &truncate_to_width(title, count_x.saturating_sub(rail_inner.x + 5) as usize),
+            &truncate_to_width(
+                if all_agents_phase {
+                    workflow_static(locale, "workflows.all_agents", "All agents")
+                } else {
+                    title
+                },
+                count_x.saturating_sub(rail_inner.x + 5) as usize,
+            ),
             title_style,
             count_x,
         );
@@ -948,18 +1059,33 @@ fn render_detail(
     if state.roster_scroll == 0 {
         state.roster_top_agent_id = None;
     }
+    let selected_phase_display = if all_agents_phase {
+        workflow_static(locale, "workflows.all_agents", "All agents")
+    } else {
+        selected_phase_title.as_str()
+    };
     let roster_title = if state.roster_scroll > 0 {
         format!(
             "{} · {} · ↑{}",
-            selected_phase_title,
-            plural(roster_agents.len(), "agent"),
+            selected_phase_display,
+            localized_count(
+                locale,
+                roster_agents.len(),
+                "workflows.agent_count",
+                "agent",
+            ),
             state.roster_scroll,
         )
     } else {
         format!(
             "{} · {}",
-            selected_phase_title,
-            plural(roster_agents.len(), "agent")
+            selected_phase_display,
+            localized_count(
+                locale,
+                roster_agents.len(),
+                "workflows.agent_count",
+                "agent",
+            )
         )
     };
     span_at(
@@ -976,7 +1102,11 @@ fn render_detail(
             buf,
             roster_inner.x,
             roster_inner.y,
-            "No agents in this phase yet.",
+            workflow_static(
+                locale,
+                "workflows.no_agents",
+                "No agents in this phase yet.",
+            ),
             Style::default().fg(theme.gray_dim),
             roster_inner.right(),
         );
@@ -1010,7 +1140,7 @@ fn render_detail(
             agent.duration_ms
         };
         let mut meta_parts: Vec<String> = Vec::new();
-        let tokens_txt = fmt_tokens(tokens_val);
+        let tokens_txt = fmt_tokens(tokens_val, locale);
         if !tokens_txt.is_empty() {
             meta_parts.push(tokens_txt);
         }
@@ -1088,6 +1218,13 @@ fn render_detail(
 mod tests {
     use super::*;
 
+    fn zh_locale() -> LocaleContext {
+        LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        })
+    }
+
     pub(crate) fn make_run(run_id: &str, name: &str, status: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {
             run_id: run_id.to_string(),
@@ -1159,6 +1296,60 @@ mod tests {
             &WorkflowAgentLiveMap::default(),
         );
         buf_text(&buf, area)
+    }
+
+    fn render_to_text_zh(runs: &[&WorkflowRunSnapshot], state: &WorkflowsViewState) -> String {
+        let area = Rect::new(0, 0, 120, 30);
+        let mut buf = Buffer::empty(area);
+        let mut state = state.clone();
+        let locale = zh_locale();
+        render_workflows_with_locale(
+            &mut buf,
+            area,
+            runs,
+            &mut state,
+            0,
+            &WorkflowAgentLiveMap::default(),
+            Some(&locale),
+        );
+        buf_text(&buf, area)
+    }
+
+    #[test]
+    fn localization_regression_workflows_empty_state_and_shortcuts() {
+        let text = render_to_text_zh(&[], &WorkflowsViewState::default());
+        let compact = text.replace(' ', "");
+        assert!(compact.contains("工作流"), "{text}");
+        assert!(compact.contains("当前会话尚无工作流运行记录。"), "{text}");
+        assert!(text.contains("/deep-research <query>"), "{text}");
+        assert!(compact.contains("↑↓选择"), "{text}");
+        assert!(compact.contains("Enter打开"), "{text}");
+        assert!(compact.contains("Esc关闭"), "{text}");
+        assert!(!text.contains("No workflow runs"), "{text}");
+    }
+
+    #[test]
+    fn localization_regression_workflows_chrome_preserves_run_values() {
+        let run = make_run("wf_1", "deep-research", "active");
+        let runs = vec![&run];
+        let mut state = WorkflowsViewState::default();
+        state.normalize(&runs);
+        let text = render_to_text_zh(&runs, &state);
+        let compact = text.replace(' ', "");
+        for expected in ["工作流", "阶段", "1/2个智能体", "p暂停", "s保存"] {
+            assert!(compact.contains(expected), "missing {expected:?}: {text}");
+        }
+        for expected in [
+            "deep-research",
+            "Research the thing thoroughly",
+            "Research",
+            "researcher-1",
+            "grok-4.5",
+        ] {
+            assert!(text.contains(expected), "missing {expected:?}: {text}");
+        }
+        assert!(!text.contains("Phases"), "{text}");
+        assert!(!text.contains("1/2 agents"), "{text}");
     }
 
     #[test]

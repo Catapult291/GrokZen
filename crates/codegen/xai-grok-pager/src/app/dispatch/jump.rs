@@ -6,6 +6,7 @@ use crate::scrollback::entry::EntryId;
 use crate::views::jump::{JumpRestore, JumpState};
 
 pub(super) fn dispatch_jump_show_picker(app: &mut AppView) -> Vec<Effect> {
+    let locale = app.locale.clone();
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -21,7 +22,7 @@ pub(super) fn dispatch_jump_show_picker(app: &mut AppView) -> Vec<Effect> {
 
     let entries = agent.scrollback.timeline_entries();
     if entries.len() < 2 {
-        app.show_toast("Nothing to jump to yet");
+        app.show_toast(locale.named_static_text("jump.nothing_to_jump", "Nothing to jump to yet"));
         return vec![];
     }
 

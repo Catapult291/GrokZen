@@ -35,18 +35,32 @@ fn resolve_bundled_rg() -> std::io::Result<PathBuf> {
     Ok(p)
 }
 
+fn sidecar_or_path_rg() -> PathBuf {
+    let binary_name = if cfg!(windows) { "rg.exe" } else { "rg" };
+    if let Ok(current_exe) = std::env::current_exe()
+        && let Some(parent) = current_exe.parent()
+    {
+        let candidate = parent.join(binary_name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(binary_name)
+}
+
 /// Get the path to the ripgrep executable.
 ///
 /// In release builds with bundling enabled, this extracts the bundled ripgrep
-/// binary to ~/.grok/vendor/ and returns that path.
-/// Otherwise, assumes `rg` is in PATH.
+/// binary into the product data directory. Otherwise, explicit test overrides
+/// win, followed by an `rg` sidecar next to the current executable and then
+/// the system PATH.
 pub fn rg_path() -> PathBuf {
     static RG_EXEC: OnceLock<PathBuf> = OnceLock::new();
     RG_EXEC
         .get_or_init(|| {
             #[cfg(bundle_rg)]
             {
-                resolve_bundled_rg().unwrap_or_else(|_| PathBuf::from("rg"))
+                resolve_bundled_rg().unwrap_or_else(|_| sidecar_or_path_rg())
             }
             #[cfg(not(bundle_rg))]
             {
@@ -74,7 +88,7 @@ pub fn rg_path() -> PathBuf {
                         }
                     }
                 }
-                PathBuf::from("rg")
+                sidecar_or_path_rg()
             }
         })
         .clone()

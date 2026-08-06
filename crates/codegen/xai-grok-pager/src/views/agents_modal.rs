@@ -5,6 +5,8 @@
 //! closed with `Esc`.
 use crate::app::bundle::{BundleState, PersonaDetail};
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
+use crate::locale::LocaleContext;
+use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 use crate::views::modal_window::{
     self, ModalContentArea, ModalSizing, ModalWindowConfig, ModalWindowState, Shortcut,
@@ -33,9 +35,13 @@ impl AgentsTab {
     pub const ALL: &[Self] = &[Self::Agents, Self::Personas];
     /// Display label for the tab bar.
     pub fn label(self) -> &'static str {
+        self.label_with_locale(None)
+    }
+
+    pub fn label_with_locale(self, locale: Option<&LocaleContext>) -> &'static str {
         match self {
-            Self::Agents => "Agents",
-            Self::Personas => "Personas",
+            Self::Agents => agents_static(locale, "agents.tab.agents", "Agents"),
+            Self::Personas => agents_static(locale, "agents.tab.personas", "Personas"),
         }
     }
     /// Next tab (wraps around).
@@ -51,6 +57,115 @@ impl AgentsTab {
             Self::Agents => Self::Personas,
             Self::Personas => Self::Agents,
         }
+    }
+}
+
+fn agents_static(locale: Option<&LocaleContext>, id: &str, english: &'static str) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn agents_text(locale: Option<&LocaleContext>, id: &str, english: &str) -> String {
+    locale
+        .map(|locale| locale.named_text(id, english).into_owned())
+        .unwrap_or_else(|| english.to_owned())
+}
+
+fn localized_agents_error(locale: Option<&LocaleContext>, error: &str) -> String {
+    let exact = match error {
+        "Name must contain at least one alphanumeric character" => Some((
+            "agents.error.name_alphanumeric",
+            "Name must contain at least one alphanumeric character",
+        )),
+        "Cannot delete bundled personas" => Some((
+            "agents.error.delete_bundled_persona",
+            "Cannot delete bundled personas",
+        )),
+        "Persona file is not in a known personas directory" => Some((
+            "agents.error.persona_unknown_directory",
+            "Persona file is not in a known personas directory",
+        )),
+        "Could not read or parse config.toml" => Some((
+            "agents.error.config_read",
+            "Could not read or parse config.toml",
+        )),
+        "[agent] is not a table" => {
+            Some(("agents.error.agent_not_table", "[agent] is not a table"))
+        }
+        "subagents is not a table" => Some((
+            "agents.error.subagents_not_table",
+            "subagents is not a table",
+        )),
+        "subagents.toggle is not a table" => Some((
+            "agents.error.toggle_not_table",
+            "subagents.toggle is not a table",
+        )),
+        _ => None,
+    };
+    if let Some((id, english)) = exact {
+        return agents_text(locale, id, english);
+    }
+    let dynamic = [
+        (
+            "Failed to create personas directory: ",
+            "agents.error.create_directory",
+            "Failed to create personas directory: {error}",
+        ),
+        (
+            "Failed to format persona: ",
+            "agents.error.format_persona",
+            "Failed to format persona: {error}",
+        ),
+        (
+            "Failed to write persona file: ",
+            "agents.error.write_persona",
+            "Failed to write persona file: {error}",
+        ),
+        (
+            "Failed to delete persona file: ",
+            "agents.error.delete_persona",
+            "Failed to delete persona file: {error}",
+        ),
+        (
+            "Failed to write config.toml: ",
+            "agents.error.write_config",
+            "Failed to write config.toml: {error}",
+        ),
+    ];
+    for (prefix, id, english) in dynamic {
+        if let Some(detail) = error.strip_prefix(prefix) {
+            return agents_text(locale, id, english).replace("{error}", detail);
+        }
+    }
+    if let Some(name) = error
+        .strip_prefix("Persona '")
+        .and_then(|rest| rest.strip_suffix("' already exists"))
+    {
+        return agents_text(
+            locale,
+            "agents.error.persona_exists",
+            "Persona '{name}' already exists",
+        )
+        .replace("{name}", name);
+    }
+    error.to_owned()
+}
+
+fn localized_scope_label<'a>(
+    locale: Option<&LocaleContext>,
+    scope: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    let mapped = match scope {
+        "built-in" | "built in" => Some(("agents.scope.built_in", "built-in")),
+        "project" => Some(("agents.scope.project", "project")),
+        "user" => Some(("agents.scope.user", "user")),
+        "bundled" => Some(("agents.scope.bundled", "bundled")),
+        _ => None,
+    };
+    match (locale, mapped) {
+        (Some(locale), Some((id, zh))) => locale.named_text(id, zh),
+        (None, _) | (_, None) => std::borrow::Cow::Borrowed(scope),
     }
 }
 /// A single entry in the agents list.
@@ -775,19 +890,45 @@ pub fn toggle_agent(name: &str, enabled: bool) -> Result<(), String> {
 }
 /// Format detail lines for an expanded agent entry.
 pub fn format_agent_detail(entry: &AgentListEntry) -> Vec<String> {
+    format_agent_detail_with_locale(entry, None)
+}
+
+pub fn format_agent_detail_with_locale(
+    entry: &AgentListEntry,
+    locale: Option<&LocaleContext>,
+) -> Vec<String> {
     let def = &entry.definition;
     let mut lines = Vec::new();
-    lines.push(format!("  Model: {}", def.model));
+    lines.push(format!(
+        "  {}: {}",
+        agents_static(locale, "agents.detail.model", "Model"),
+        def.model
+    ));
     let mode_label = match def.prompt_mode {
-        xai_grok_agent::config::PromptMode::Extend => "extend",
-        xai_grok_agent::config::PromptMode::Full => "full",
+        xai_grok_agent::config::PromptMode::Extend => {
+            agents_static(locale, "agents.prompt_mode.extend", "extend")
+        }
+        xai_grok_agent::config::PromptMode::Full => {
+            agents_static(locale, "agents.prompt_mode.full", "full")
+        }
     };
-    lines.push(format!("  Prompt mode: {mode_label}"));
+    lines.push(format!(
+        "  {}: {mode_label}",
+        agents_static(locale, "agents.detail.prompt_mode", "Prompt mode")
+    ));
     let tools = &def.tool_config.tools;
     if tools.is_empty() {
-        lines.push("  Tools: (none)".to_string());
+        lines.push(format!(
+            "  {}: {}",
+            agents_static(locale, "agents.detail.tools", "Tools"),
+            agents_static(locale, "agents.none", "(none)")
+        ));
     } else {
-        lines.push(format!("  Tools ({}): ", tools.len()));
+        lines.push(format!(
+            "  {} ({}): ",
+            agents_static(locale, "agents.detail.tools", "Tools"),
+            tools.len()
+        ));
         for tool in tools {
             let name = tool.name_override.as_deref().unwrap_or_else(|| {
                 tool.id
@@ -798,26 +939,63 @@ pub fn format_agent_detail(entry: &AgentListEntry) -> Vec<String> {
         }
     }
     if !def.skills.is_empty() {
-        lines.push(format!("  Skills: {}", def.skills.join(", ")));
+        lines.push(format!(
+            "  {}: {}",
+            agents_static(locale, "agents.detail.skills", "Skills"),
+            def.skills.join(", ")
+        ));
     }
     if let Some(ref path) = entry.source_path {
-        lines.push(format!("  Source: {}", path.display()));
+        lines.push(format!(
+            "  {}: {}",
+            agents_static(locale, "agents.detail.source", "Source"),
+            path.display()
+        ));
     }
-    lines.push(format!("  Scope: {}", entry.scope.label()));
+    lines.push(format!(
+        "  {}: {}",
+        agents_static(locale, "agents.detail.scope", "Scope"),
+        localized_scope_label(locale, entry.scope.label())
+    ));
     if let Some(ref body) = def.prompt_body {
         let rendered = render_prompt_body(body, &def.tool_config);
         let char_count = rendered.chars().count();
         let truncated: String = rendered.chars().take(120).collect::<String>();
         if char_count > 120 {
-            lines.push(format!("  Prompt extension: {truncated}..."));
-            lines.push("  (Enter to view full)".to_string());
+            lines.push(format!(
+                "  {}: {truncated}...",
+                agents_static(locale, "agents.detail.prompt_extension", "Prompt extension")
+            ));
+            lines.push(format!(
+                "  {}",
+                agents_static(
+                    locale,
+                    "agents.detail.enter_view_full",
+                    "(Enter to view full)"
+                )
+            ));
         } else {
-            lines.push(format!("  Prompt extension: {truncated}"));
+            lines.push(format!(
+                "  {}: {truncated}",
+                agents_static(locale, "agents.detail.prompt_extension", "Prompt extension")
+            ));
         }
     } else if entry.source_path.is_some() {
-        lines.push("  Prompt extension: (in file — Enter to view)".to_string());
+        lines.push(format!(
+            "  {}: {}",
+            agents_static(locale, "agents.detail.prompt_extension", "Prompt extension"),
+            agents_static(
+                locale,
+                "agents.detail.prompt_in_file",
+                "(in file — Enter to view)"
+            )
+        ));
     } else {
-        lines.push("  Prompt extension: (none)".to_string());
+        lines.push(format!(
+            "  {}: {}",
+            agents_static(locale, "agents.detail.prompt_extension", "Prompt extension"),
+            agents_static(locale, "agents.none", "(none)")
+        ));
     }
     lines
 }
@@ -858,13 +1036,22 @@ fn word_wrap(text: &str, max_width: usize) -> Vec<String> {
 /// `${{ tools.by_kind.read }}` are resolved to actual tool names using
 /// the agent's configured toolset.
 fn synthesize_agent_markdown(entry: &AgentListEntry) -> String {
+    synthesize_agent_markdown_with_locale(entry, None)
+}
+
+fn synthesize_agent_markdown_with_locale(
+    entry: &AgentListEntry,
+    locale: Option<&LocaleContext>,
+) -> String {
     if let Some(ref body) = entry.definition.prompt_body {
         render_prompt_body(body, &entry.definition.tool_config)
     } else {
-        format!(
-            "*{} uses the base system prompt with no additional instructions.*\n",
-            entry.name,
-        )
+        let template = agents_text(
+            locale,
+            "agents.detail.no_additional_instructions",
+            "*{name} uses the base system prompt with no additional instructions.*\n",
+        );
+        template.replace("{name}", &entry.name)
     }
 }
 /// Resolve `${{ tools.by_kind.* }}` template variables in a prompt body
@@ -990,11 +1177,19 @@ fn modal_sizing(compact: bool) -> ModalSizing {
     .with_compact(compact)
 }
 fn scope_badge(scope: AgentScope, theme: &Theme) -> (String, Style) {
+    scope_badge_with_locale(scope, theme, None)
+}
+
+fn scope_badge_with_locale(
+    scope: AgentScope,
+    theme: &Theme,
+    locale: Option<&LocaleContext>,
+) -> (String, Style) {
     let label = match scope {
-        AgentScope::BuiltIn => " built-in ",
-        AgentScope::Project => " project ",
-        AgentScope::User => " user ",
-        AgentScope::Bundled => " bundled ",
+        AgentScope::BuiltIn => agents_static(locale, "agents.badge.built_in", " built-in "),
+        AgentScope::Project => agents_static(locale, "agents.badge.project", " project "),
+        AgentScope::User => agents_static(locale, "agents.badge.user", " user "),
+        AgentScope::Bundled => agents_static(locale, "agents.badge.bundled", " bundled "),
     };
     let fg = match scope {
         AgentScope::BuiltIn => theme.accent_assistant,
@@ -1012,18 +1207,32 @@ pub fn render_agents_modal(
     compact: bool,
     theme: &Theme,
 ) {
+    render_agents_modal_with_locale(buf, area, state, compact, theme, None)
+}
+
+pub fn render_agents_modal_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &mut AgentsModalState,
+    compact: bool,
+    theme: &Theme,
+    locale: Option<&LocaleContext>,
+) {
     let active_idx = AgentsTab::ALL
         .iter()
         .position(|t| *t == state.active_tab)
         .unwrap_or(0);
     state.window.active_tab = active_idx;
-    let tab_labels: Vec<&str> = AgentsTab::ALL.iter().map(|t| t.label()).collect();
+    let tab_labels: Vec<&str> = AgentsTab::ALL
+        .iter()
+        .map(|t| t.label_with_locale(locale))
+        .collect();
     let shortcuts: Vec<Shortcut<'_>> = match state.active_tab {
-        AgentsTab::Agents => build_agents_tab_shortcuts(state),
-        AgentsTab::Personas => build_personas_tab_shortcuts(state),
+        AgentsTab::Agents => build_agents_tab_shortcuts_with_locale(state, locale),
+        AgentsTab::Personas => build_personas_tab_shortcuts_with_locale(state, locale),
     };
     let config = ModalWindowConfig {
-        title: "Agents",
+        title: agents_static(locale, "agents.title", "Agents"),
         tabs: Some(&tab_labels),
         shortcuts: &shortcuts,
         sizing: modal_sizing(compact),
@@ -1041,78 +1250,92 @@ pub fn render_agents_modal(
     state.content_rect = Some(content_area);
     state.row_map.clear();
     match state.active_tab {
-        AgentsTab::Agents => render_agents_tab(buf, &content_area, state, theme),
-        AgentsTab::Personas => render_personas_tab(buf, &content_area, state, theme),
+        AgentsTab::Agents => render_agents_tab(buf, &content_area, state, theme, locale),
+        AgentsTab::Personas => render_personas_tab(buf, &content_area, state, theme, locale),
     }
 }
 /// Build footer shortcuts for the Agents tab.
 fn build_agents_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>> {
+    build_agents_tab_shortcuts_with_locale(state, None)
+}
+
+fn build_agents_tab_shortcuts_with_locale<'a>(
+    state: &AgentsModalState,
+    locale: Option<&LocaleContext>,
+) -> Vec<Shortcut<'a>> {
     let mut shortcuts = vec![
         Shortcut {
-            label: "j/k nav",
+            label: agents_static(locale, "agents.shortcut.navigate", "j/k nav"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "e/\u{2192} expand",
+            label: agents_static(locale, "agents.shortcut.expand", "e/\u{2192} expand"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "E/\u{2190} collapse",
+            label: agents_static(locale, "agents.shortcut.collapse", "E/\u{2190} collapse"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter view",
+            label: agents_static(locale, "agents.shortcut.view", "Enter view"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "/ search",
+            label: agents_static(locale, "agents.shortcut.search", "/ search"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "t toggle",
+            label: agents_static(locale, "agents.shortcut.toggle", "t toggle"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "s default",
+            label: agents_static(locale, "agents.shortcut.default", "s default"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Tab switch tab",
+            label: agents_static(locale, "agents.shortcut.switch_tab", "Tab switch tab"),
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc close",
+            label: agents_static(locale, "agents.shortcut.close", "Esc close"),
             clickable: false,
             id: 0,
         },
     ];
-    modal_window::push_vim_nav_search_hint(&mut shortcuts, state.search_active);
+    modal_window::push_vim_nav_search_hint_with_locale(&mut shortcuts, state.search_active, locale);
     shortcuts
 }
 /// Build footer shortcuts for the Personas tab.
 fn build_personas_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a>> {
+    build_personas_tab_shortcuts_with_locale(state, None)
+}
+
+fn build_personas_tab_shortcuts_with_locale<'a>(
+    state: &AgentsModalState,
+    locale: Option<&LocaleContext>,
+) -> Vec<Shortcut<'a>> {
     if state.persona_input.is_some() {
         vec![
             Shortcut {
-                label: "Tab switch field",
+                label: agents_static(locale, "agents.shortcut.switch_field", "Tab switch field"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Enter create",
+                label: agents_static(locale, "agents.shortcut.create", "Enter create"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc cancel",
+                label: agents_static(locale, "agents.shortcut.cancel", "Esc cancel"),
                 clickable: false,
                 id: 0,
             },
@@ -1120,12 +1343,12 @@ fn build_personas_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a
     } else if state.persona_confirm.is_some() {
         vec![
             Shortcut {
-                label: "y confirm",
+                label: agents_static(locale, "agents.shortcut.confirm", "y confirm"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "n/Esc cancel",
+                label: agents_static(locale, "agents.shortcut.cancel_no", "n/Esc cancel"),
                 clickable: false,
                 id: 0,
             },
@@ -1133,52 +1356,56 @@ fn build_personas_tab_shortcuts<'a>(state: &AgentsModalState) -> Vec<Shortcut<'a
     } else {
         let mut shortcuts = vec![
             Shortcut {
-                label: "j/k nav",
+                label: agents_static(locale, "agents.shortcut.navigate", "j/k nav"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "e/\u{2192} expand",
+                label: agents_static(locale, "agents.shortcut.expand", "e/\u{2192} expand"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "E/\u{2190} collapse",
+                label: agents_static(locale, "agents.shortcut.collapse", "E/\u{2190} collapse"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Enter view",
+                label: agents_static(locale, "agents.shortcut.view", "Enter view"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "/ search",
+                label: agents_static(locale, "agents.shortcut.search", "/ search"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "n new",
+                label: agents_static(locale, "agents.shortcut.new", "n new"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "d delete",
+                label: agents_static(locale, "agents.shortcut.delete", "d delete"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Tab switch tab",
+                label: agents_static(locale, "agents.shortcut.switch_tab", "Tab switch tab"),
                 clickable: false,
                 id: 0,
             },
             Shortcut {
-                label: "Esc close",
+                label: agents_static(locale, "agents.shortcut.close", "Esc close"),
                 clickable: false,
                 id: 0,
             },
         ];
-        modal_window::push_vim_nav_search_hint(&mut shortcuts, state.search_active);
+        modal_window::push_vim_nav_search_hint_with_locale(
+            &mut shortcuts,
+            state.search_active,
+            locale,
+        );
         shortcuts
     }
 }
@@ -1240,6 +1467,7 @@ fn render_agents_tab(
     content_area: &Rect,
     state: &mut AgentsModalState,
     theme: &Theme,
+    locale: Option<&LocaleContext>,
 ) {
     let mut y = content_area.y;
     let w = content_area.width as usize;
@@ -1264,9 +1492,9 @@ fn render_agents_tab(
     let filtered = state.filtered_indices();
     if filtered.is_empty() {
         let msg = if state.search_query().is_empty() {
-            "No agents found"
+            agents_static(locale, "agents.empty", "No agents found")
         } else {
-            "No matching agents"
+            agents_static(locale, "agents.no_matches", "No matching agents")
         };
         buf.set_string(content_area.x, y, msg, Style::default().fg(theme.gray_dim));
         return;
@@ -1291,7 +1519,7 @@ fn render_agents_tab(
             }
         }
         if entry.expanded {
-            let details = format_agent_detail(entry);
+            let details = format_agent_detail_with_locale(entry, locale);
             for line in details {
                 rows.push(FlatRow::Detail(line));
             }
@@ -1333,10 +1561,26 @@ fn render_agents_tab(
         match &rows[ri] {
             FlatRow::ScopeHeader(scope) => {
                 let label = match scope {
-                    AgentScope::BuiltIn => "\u{2500}\u{2500} Built-in \u{2500}\u{2500}",
-                    AgentScope::Project => "\u{2500}\u{2500} Project \u{2500}\u{2500}",
-                    AgentScope::User => "\u{2500}\u{2500} User \u{2500}\u{2500}",
-                    AgentScope::Bundled => "\u{2500}\u{2500} Bundled \u{2500}\u{2500}",
+                    AgentScope::BuiltIn => agents_static(
+                        locale,
+                        "agents.scope_header.built_in",
+                        "\u{2500}\u{2500} Built-in \u{2500}\u{2500}",
+                    ),
+                    AgentScope::Project => agents_static(
+                        locale,
+                        "agents.scope_header.project",
+                        "\u{2500}\u{2500} Project \u{2500}\u{2500}",
+                    ),
+                    AgentScope::User => agents_static(
+                        locale,
+                        "agents.scope_header.user",
+                        "\u{2500}\u{2500} User \u{2500}\u{2500}",
+                    ),
+                    AgentScope::Bundled => agents_static(
+                        locale,
+                        "agents.scope_header.bundled",
+                        "\u{2500}\u{2500} Bundled \u{2500}\u{2500}",
+                    ),
                 };
                 let style = Style::default()
                     .fg(theme.gray_dim)
@@ -1394,7 +1638,7 @@ fn render_agents_tab(
                 x += 2;
                 let name_w = entry.name.width();
                 let remaining = (content_area.x + content_area.width).saturating_sub(x) as usize;
-                let name_display: String = entry.name.chars().take(remaining).collect();
+                let name_display = truncate_str(&entry.name, remaining);
                 let mut name_style = Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD);
@@ -1408,7 +1652,7 @@ fn render_agents_tab(
                     .as_deref()
                     .is_some_and(|a| a == entry.name);
                 if is_active {
-                    let active_label = " active";
+                    let active_label = agents_static(locale, "agents.status.active", " active");
                     let active_remaining =
                         (content_area.x + content_area.width).saturating_sub(x) as usize;
                     if active_remaining >= active_label.width() {
@@ -1424,7 +1668,7 @@ fn render_agents_tab(
                 }
                 let is_default = entry.name == state.default_agent;
                 if is_default {
-                    let default_label = " default";
+                    let default_label = agents_static(locale, "agents.status.default", " default");
                     let default_remaining =
                         (content_area.x + content_area.width).saturating_sub(x) as usize;
                     if default_remaining >= default_label.width() {
@@ -1439,19 +1683,20 @@ fn render_agents_tab(
                     }
                 }
                 if !entry.enabled {
-                    let off_label = " [off]";
+                    let off_label = agents_static(locale, "agents.status.off", " [off]");
                     let off_remaining =
                         (content_area.x + content_area.width).saturating_sub(x) as usize;
-                    if off_remaining >= off_label.len() {
+                    if off_remaining >= off_label.width() {
                         let mut off_style = Style::default().fg(theme.gray_dim);
                         if let Some(bg_color) = bg {
                             off_style = off_style.bg(bg_color);
                         }
                         buf.set_string(x, row_y, off_label, off_style);
-                        x += off_label.len() as u16;
+                        x += off_label.width() as u16;
                     }
                 }
-                let (badge_text, mut badge_style) = scope_badge(entry.scope, theme);
+                let (badge_text, mut badge_style) =
+                    scope_badge_with_locale(entry.scope, theme, locale);
                 if let Some(bg_color) = bg {
                     badge_style = badge_style.bg(bg_color);
                 }
@@ -1483,7 +1728,7 @@ fn render_agents_tab(
             }
             FlatRow::Detail(text) => {
                 let detail_style = Style::default().fg(theme.gray);
-                let display: String = text.chars().take(w).collect();
+                let display = truncate_str(text, w);
                 buf.set_string(content_area.x, row_y, &display, detail_style);
             }
         }
@@ -1495,6 +1740,7 @@ fn render_personas_tab(
     content_area: &Rect,
     state: &mut AgentsModalState,
     theme: &Theme,
+    locale: Option<&LocaleContext>,
 ) {
     if let Some(ref input) = state.persona_input {
         render_persona_create_form(
@@ -1503,11 +1749,12 @@ fn render_personas_tab(
             input,
             state.message.as_ref().map(|m| m.text.as_str()),
             theme,
+            locale,
         );
         return;
     }
     if let Some(ref confirm) = state.persona_confirm {
-        render_persona_confirm_dialog(buf, content_area, confirm, theme);
+        render_persona_confirm_dialog(buf, content_area, confirm, theme, locale);
         return;
     }
     let mut y = content_area.y;
@@ -1515,11 +1762,19 @@ fn render_personas_tab(
     if let Some(ref msg) = state.message {
         y = render_modal_message_line(buf, content_area.x, y, w, msg, theme);
     }
-    let blurb = "Personas shape subagent behavior via the persona parameter on spawn_subagent.";
+    let blurb = agents_static(
+        locale,
+        "agents.personas.description",
+        "Personas shape subagent behavior via the persona parameter on spawn_subagent.",
+    );
     let blurb_style = Style::default().fg(theme.gray_dim);
     buf.set_string(content_area.x, y, blurb, blurb_style);
     y += 1;
-    let blurb2 = "Used by skills (e.g. /implement) and by the model when spawning subagents.";
+    let blurb2 = agents_static(
+        locale,
+        "agents.personas.usage",
+        "Used by skills (e.g. /implement) and by the model when spawning subagents.",
+    );
     buf.set_string(content_area.x, y, blurb2, blurb_style);
     y += 2;
     if state.search_active || !state.search_query().is_empty() {
@@ -1540,9 +1795,9 @@ fn render_personas_tab(
     let filtered = state.filtered_persona_indices();
     if filtered.is_empty() {
         let msg = if state.personas.is_empty() {
-            "No personas available"
+            agents_static(locale, "agents.personas.empty", "No personas available")
         } else {
-            "No matching personas"
+            agents_static(locale, "agents.personas.no_matches", "No matching personas")
         };
         buf.set_string(content_area.x, y, msg, Style::default().fg(theme.gray_dim));
         return;
@@ -1567,16 +1822,29 @@ fn render_personas_tab(
             if persona.has_inputs || persona.has_outputs {
                 let mut tags = Vec::new();
                 if persona.has_inputs {
-                    tags.push("accepts structured inputs");
+                    tags.push(agents_static(
+                        locale,
+                        "agents.personas.accepts_inputs",
+                        "accepts structured inputs",
+                    ));
                 }
                 if persona.has_outputs {
-                    tags.push("produces structured outputs");
+                    tags.push(agents_static(
+                        locale,
+                        "agents.personas.produces_outputs",
+                        "produces structured outputs",
+                    ));
                 }
                 rows.push(PersonaFlatRow::Tags(idx, tags.join(" \u{00b7} ")));
             }
             rows.push(PersonaFlatRow::Hint(
                 idx,
-                "Enter to view full definition".to_string(),
+                agents_static(
+                    locale,
+                    "agents.personas.enter_view_full",
+                    "Enter to view full definition",
+                )
+                .to_string(),
             ));
         }
     }
@@ -1645,7 +1913,7 @@ fn render_personas_tab(
                 x += 2;
                 let persona = &state.personas[*idx];
                 let remaining = (content_area.x + content_area.width).saturating_sub(x) as usize;
-                let name_display: String = persona.name.chars().take(remaining).collect();
+                let name_display = truncate_str(&persona.name, remaining);
                 let mut name_style = Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD);
@@ -1655,7 +1923,7 @@ fn render_personas_tab(
                 buf.set_string(x, row_y, &name_display, name_style);
                 x += name_display.width() as u16;
                 if let Some(ref scope) = persona.scope_label {
-                    let badge = format!(" {scope} ");
+                    let badge = format!(" {} ", localized_scope_label(locale, scope));
                     let mut scope_style = Style::default().fg(theme.accent_user);
                     if let Some(bg_color) = bg {
                         scope_style = scope_style.bg(bg_color);
@@ -1679,7 +1947,7 @@ fn render_personas_tab(
                         x += sep.width() as u16;
                         let max_desc =
                             (content_area.x + content_area.width).saturating_sub(x) as usize;
-                        let truncated: String = desc.chars().take(max_desc).collect();
+                        let truncated = truncate_str(desc, max_desc);
                         buf.set_string(x, row_y, &truncated, desc_style);
                     }
                 }
@@ -1824,10 +2092,11 @@ fn render_persona_create_form(
     input: &PersonaCreateInput,
     message: Option<&str>,
     theme: &Theme,
+    locale: Option<&LocaleContext>,
 ) {
     let mut y = content_area.y;
     let w = content_area.width as usize;
-    let title = "Create New Persona";
+    let title = agents_static(locale, "agents.create.title", "Create New Persona");
     let title_style = Style::default()
         .fg(theme.text_primary)
         .add_modifier(Modifier::BOLD);
@@ -1847,7 +2116,7 @@ fn render_persona_create_form(
         content_area,
         y,
         w,
-        "Name: ",
+        agents_static(locale, "agents.create.name", "Name: "),
         input.name_editor(),
         input.active_field == CreateField::Name,
         theme,
@@ -1857,7 +2126,7 @@ fn render_persona_create_form(
         content_area,
         y,
         w,
-        "Description: ",
+        agents_static(locale, "agents.create.description", "Description: "),
         input.description_editor(),
         input.active_field == CreateField::Description,
         theme,
@@ -1867,12 +2136,12 @@ fn render_persona_create_form(
         content_area,
         y,
         w,
-        "Instructions: ",
+        agents_static(locale, "agents.create.instructions", "Instructions: "),
         input.instructions_editor(),
         input.active_field == CreateField::Instructions,
         theme,
     );
-    let scope_label = "Scope: ";
+    let scope_label = agents_static(locale, "agents.create.scope", "Scope: ");
     let scope_active = input.active_field == CreateField::Scope;
     let label_style = if scope_active {
         Style::default().fg(theme.accent_user)
@@ -1880,15 +2149,19 @@ fn render_persona_create_form(
         Style::default().fg(theme.gray)
     };
     buf.set_string(content_area.x, y, scope_label, label_style);
-    let scope_text = format!("[{}]", input.scope.label());
+    let scope_text = format!("[{}]", localized_scope_label(locale, input.scope.label()));
     buf.set_string(
-        content_area.x + scope_label.len() as u16,
+        content_area.x + scope_label.width() as u16,
         y,
         &scope_text,
         Style::default().fg(theme.text_primary),
     );
     y += 2;
-    let hint = "Tab/↑↓: field | Space/←→ on scope: user/project | Enter: create | Esc: cancel";
+    let hint = agents_static(
+        locale,
+        "agents.create.hint",
+        "Tab/↑↓: field | Space/←→ on scope: user/project | Enter: create | Esc: cancel",
+    );
     buf.set_string(content_area.x, y, hint, Style::default().fg(theme.gray_dim));
 }
 /// Render the confirm-delete persona dialog.
@@ -1897,16 +2170,18 @@ fn render_persona_confirm_dialog(
     content_area: &Rect,
     confirm: &PersonaConfirmAction,
     theme: &Theme,
+    locale: Option<&LocaleContext>,
 ) {
     let PersonaConfirmAction::Delete { name, path } = confirm;
     let mut y = content_area.y;
-    let title = "Delete Persona";
+    let title = agents_static(locale, "agents.delete.title", "Delete Persona");
     let title_style = Style::default()
         .fg(theme.accent_error)
         .add_modifier(Modifier::BOLD);
     buf.set_string(content_area.x, y, title, title_style);
     y += 2;
-    let msg = format!("Delete persona '{name}'?");
+    let msg = agents_text(locale, "agents.delete.confirm", "Delete persona '{name}'?")
+        .replace("{name}", name);
     buf.set_string(
         content_area.x,
         y,
@@ -1922,7 +2197,7 @@ fn render_persona_confirm_dialog(
         Style::default().fg(theme.gray),
     );
     y += 2;
-    let hint = "y: confirm | n/Esc: cancel";
+    let hint = agents_static(locale, "agents.delete.hint", "y: confirm | n/Esc: cancel");
     buf.set_string(content_area.x, y, hint, Style::default().fg(theme.gray_dim));
 }
 enum FlatRow {
@@ -1972,12 +2247,20 @@ fn switch_agents_tab(state: &mut AgentsModalState, tab: AgentsTab) {
 }
 /// Handle a key event while the agents modal is open.
 pub fn handle_agents_key(state: &mut AgentsModalState, key: &KeyEvent) -> AgentsModalOutcome {
+    handle_agents_key_with_locale(state, key, None)
+}
+
+pub fn handle_agents_key_with_locale(
+    state: &mut AgentsModalState,
+    key: &KeyEvent,
+    locale: Option<&LocaleContext>,
+) -> AgentsModalOutcome {
     state.message = None;
     if state.persona_input.is_some() && state.active_tab == AgentsTab::Personas {
-        return handle_persona_create_form_key(state, key);
+        return handle_persona_create_form_key(state, key, locale);
     }
     if state.persona_confirm.is_some() && state.active_tab == AgentsTab::Personas {
-        return handle_persona_confirm_key(state, key);
+        return handle_persona_confirm_key(state, key, locale);
     }
     if state.search_active {
         if key.code == KeyCode::Esc {
@@ -2002,9 +2285,12 @@ pub fn handle_agents_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
         let outcome = state.search.handle_key(key);
         return finish_search_edit(state, outcome);
     }
-    let tab_labels: Vec<&str> = AgentsTab::ALL.iter().map(|t| t.label()).collect();
+    let tab_labels: Vec<&str> = AgentsTab::ALL
+        .iter()
+        .map(|t| t.label_with_locale(locale))
+        .collect();
     let config = ModalWindowConfig {
-        title: "Agents",
+        title: agents_static(locale, "agents.title", "Agents"),
         tabs: Some(&tab_labels),
         shortcuts: &[],
         sizing: modal_sizing(false),
@@ -2034,8 +2320,8 @@ pub fn handle_agents_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
         return AgentsModalOutcome::Changed;
     }
     match state.active_tab {
-        AgentsTab::Agents => handle_agents_tab_key(state, key),
-        AgentsTab::Personas => handle_personas_tab_key(state, key),
+        AgentsTab::Agents => handle_agents_tab_key_with_locale(state, key, locale),
+        AgentsTab::Personas => handle_personas_tab_key_with_locale(state, key, locale),
     }
 }
 pub fn handle_agents_paste(state: &mut AgentsModalState, text: &str) -> AgentsModalOutcome {
@@ -2077,6 +2363,14 @@ fn finish_line_edit(outcome: LineEditOutcome) -> AgentsModalOutcome {
 }
 /// Handle key input specific to the Agents tab.
 fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> AgentsModalOutcome {
+    handle_agents_tab_key_with_locale(state, key, None)
+}
+
+fn handle_agents_tab_key_with_locale(
+    state: &mut AgentsModalState,
+    key: &KeyEvent,
+    locale: Option<&LocaleContext>,
+) -> AgentsModalOutcome {
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
             state.select_next();
@@ -2121,7 +2415,12 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
         KeyCode::Enter | KeyCode::Char('o') => {
             if let Some(entry) = state.agents.get(state.selected) {
                 if let Some(ref path) = entry.source_path {
-                    let title = format!("{} \u{2014} prompt extension", entry.name);
+                    let title = agents_text(
+                        locale,
+                        "agents.detail.viewer_title",
+                        "{name} — prompt extension",
+                    )
+                    .replace("{name}", &entry.name);
                     return AgentsModalOutcome::ViewAgent {
                         title,
                         source_path: Some(path.clone()),
@@ -2129,11 +2428,16 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
                     };
                 }
                 if entry.definition.prompt_body.is_some() {
-                    let title = format!("{} \u{2014} prompt extension", entry.name);
+                    let title = agents_text(
+                        locale,
+                        "agents.detail.viewer_title",
+                        "{name} — prompt extension",
+                    )
+                    .replace("{name}", &entry.name);
                     return AgentsModalOutcome::ViewAgent {
                         title,
                         source_path: None,
-                        content: Some(synthesize_agent_markdown(entry)),
+                        content: Some(synthesize_agent_markdown_with_locale(entry, locale)),
                     };
                 }
                 AgentsModalOutcome::Unchanged
@@ -2159,19 +2463,29 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
                     Ok(()) => {
                         refresh_default_agent(state);
                         state.message = Some(if is_already_default {
-                            AgentsModalMessage::info(format!(
-                                "Cleared \u{2014} new sessions use '{}'",
-                                state.default_agent
-                            ))
+                            AgentsModalMessage::info(
+                                agents_text(
+                                    locale,
+                                    "agents.message.default_cleared",
+                                    "Cleared — new sessions use '{name}'",
+                                )
+                                .replace("{name}", &state.default_agent),
+                            )
                         } else {
-                            AgentsModalMessage::info(format!(
-                                "New sessions will start with '{}'",
-                                state.default_agent
-                            ))
+                            AgentsModalMessage::info(
+                                agents_text(
+                                    locale,
+                                    "agents.message.default_set",
+                                    "New sessions will start with '{name}'",
+                                )
+                                .replace("{name}", &state.default_agent),
+                            )
                         });
                     }
                     Err(e) => {
-                        state.message = Some(AgentsModalMessage::error(e));
+                        state.message = Some(AgentsModalMessage::error(localized_agents_error(
+                            locale, &e,
+                        )));
                     }
                 }
             }
@@ -2186,7 +2500,9 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
                         state.rebuild_agents();
                     }
                     Err(e) => {
-                        state.message = Some(AgentsModalMessage::error(e));
+                        state.message = Some(AgentsModalMessage::error(localized_agents_error(
+                            locale, &e,
+                        )));
                     }
                 }
             }
@@ -2197,6 +2513,14 @@ fn handle_agents_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
 }
 /// Handle key input specific to the Personas tab.
 fn handle_personas_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> AgentsModalOutcome {
+    handle_personas_tab_key_with_locale(state, key, None)
+}
+
+fn handle_personas_tab_key_with_locale(
+    state: &mut AgentsModalState,
+    key: &KeyEvent,
+    locale: Option<&LocaleContext>,
+) -> AgentsModalOutcome {
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
             state.persona_select_next();
@@ -2262,8 +2586,11 @@ fn handle_personas_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agen
         KeyCode::Char('d') => {
             if let Some(persona) = state.personas.get(state.persona_selected) {
                 if !persona_is_deletable(persona) {
-                    state.message =
-                        Some(AgentsModalMessage::error("Cannot delete bundled personas"));
+                    state.message = Some(AgentsModalMessage::error(agents_static(
+                        locale,
+                        "agents.error.cannot_delete_bundled",
+                        "Cannot delete bundled personas",
+                    )));
                     return AgentsModalOutcome::Changed;
                 }
                 if let Some(ref path_str) = persona.source_path {
@@ -2272,7 +2599,11 @@ fn handle_personas_tab_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agen
                         path: PathBuf::from(path_str),
                     });
                 } else {
-                    state.message = Some(AgentsModalMessage::error("Persona has no source file"));
+                    state.message = Some(AgentsModalMessage::error(agents_static(
+                        locale,
+                        "agents.error.no_source",
+                        "Persona has no source file",
+                    )));
                 }
             }
             AgentsModalOutcome::Changed
@@ -2333,6 +2664,7 @@ fn persona_create_form_field_nav_scroll(
 fn handle_persona_create_form_key(
     state: &mut AgentsModalState,
     key: &KeyEvent,
+    locale: Option<&LocaleContext>,
 ) -> AgentsModalOutcome {
     let Some(input) = state.persona_input.as_mut() else {
         return AgentsModalOutcome::Unchanged;
@@ -2363,7 +2695,11 @@ fn handle_persona_create_form_key(
         let instructions = input.instructions().trim().to_string();
         let scope = input.scope;
         if name.is_empty() {
-            state.message = Some(AgentsModalMessage::error("Name is required"));
+            state.message = Some(AgentsModalMessage::error(agents_static(
+                locale,
+                "agents.error.name_required",
+                "Name is required",
+            )));
             return AgentsModalOutcome::Changed;
         }
         match create_persona_template(&name, &description, &instructions, scope, &cwd) {
@@ -2371,12 +2707,15 @@ fn handle_persona_create_form_key(
                 let label = path.file_stem().and_then(|s| s.to_str()).unwrap_or(&name);
                 state.persona_input = None;
                 state.refresh_personas();
-                state.message = Some(AgentsModalMessage::success(format!(
-                    "Created persona '{label}'"
-                )));
+                state.message = Some(AgentsModalMessage::success(
+                    agents_text(locale, "agents.message.created", "Created persona '{name}'")
+                        .replace("{name}", label),
+                ));
             }
             Err(e) => {
-                state.message = Some(AgentsModalMessage::error(e));
+                state.message = Some(AgentsModalMessage::error(localized_agents_error(
+                    locale, &e,
+                )));
             }
         }
         return AgentsModalOutcome::Changed;
@@ -2387,7 +2726,11 @@ fn handle_persona_create_form_key(
     finish_line_edit(editor.handle_key(key))
 }
 /// Handle key input in the persona confirm dialog.
-fn handle_persona_confirm_key(state: &mut AgentsModalState, key: &KeyEvent) -> AgentsModalOutcome {
+fn handle_persona_confirm_key(
+    state: &mut AgentsModalState,
+    key: &KeyEvent,
+    locale: Option<&LocaleContext>,
+) -> AgentsModalOutcome {
     match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => {
             let Some(confirm) = state.persona_confirm.take() else {
@@ -2397,12 +2740,15 @@ fn handle_persona_confirm_key(state: &mut AgentsModalState, key: &KeyEvent) -> A
             match delete_persona_file(&path) {
                 Ok(()) => {
                     state.refresh_personas();
-                    state.message = Some(AgentsModalMessage::success(format!(
-                        "Deleted persona '{name}'"
-                    )));
+                    state.message = Some(AgentsModalMessage::success(
+                        agents_text(locale, "agents.message.deleted", "Deleted persona '{name}'")
+                            .replace("{name}", &name),
+                    ));
                 }
                 Err(e) => {
-                    state.message = Some(AgentsModalMessage::error(e));
+                    state.message = Some(AgentsModalMessage::error(localized_agents_error(
+                        locale, &e,
+                    )));
                 }
             }
             AgentsModalOutcome::Changed
@@ -3297,7 +3643,7 @@ mod tests {
         let _ = input.set_field_cursor_byte(CreateField::Name, text.len() - 1);
         let create_area = Rect::new(0, 0, 24, 12);
         let mut create_buffer = Buffer::empty(create_area);
-        render_persona_create_form(&mut create_buffer, &create_area, &input, None, &theme);
+        render_persona_create_form(&mut create_buffer, &create_area, &input, None, &theme, None);
         let editor_width = create_area.width as usize - "Name: ".len();
         let create_view = input.name_editor().viewport(editor_width);
         let create_visible = &input.name()[create_view.visible_byte_range.clone()];
@@ -3309,7 +3655,14 @@ mod tests {
         input.set_field_text(CreateField::Description, &text);
         let _ = input.set_field_cursor_byte(CreateField::Description, text.len() - 1);
         let mut inactive_buffer = Buffer::empty(create_area);
-        render_persona_create_form(&mut inactive_buffer, &create_area, &input, None, &theme);
+        render_persona_create_form(
+            &mut inactive_buffer,
+            &create_area,
+            &input,
+            None,
+            &theme,
+            None,
+        );
         let description_text = ("Description: ".len() as u16..create_area.width)
             .map(|x| inactive_buffer[(x, 4)].symbol())
             .collect::<String>();

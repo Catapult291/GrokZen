@@ -149,6 +149,61 @@ impl VerbGroupKind {
         };
         if count == 1 { one } else { many }
     }
+
+    /// Locale key for the locally generated verb-group action. Dynamic tool
+    /// names, arguments, and outputs never pass through this mapping.
+    pub fn verb_locale_key(self, running: bool) -> &'static str {
+        let action = match self {
+            VerbGroupKind::File | VerbGroupKind::Skill => "read",
+            VerbGroupKind::Search
+            | VerbGroupKind::WebSearch
+            | VerbGroupKind::MemorySearch
+            | VerbGroupKind::IntegrationSearch => "search",
+            VerbGroupKind::Dir => "list",
+            VerbGroupKind::WebFetch => "fetch",
+            VerbGroupKind::Subagent | VerbGroupKind::Command | VerbGroupKind::OtherTool => "run",
+            VerbGroupKind::EditFile => "edit",
+            VerbGroupKind::McpCall => "call",
+        };
+        match (action, running) {
+            ("read", false) => "scrollback.verb_group.verb.read.completed",
+            ("read", true) => "scrollback.verb_group.verb.read.running",
+            ("search", false) => "scrollback.verb_group.verb.search.completed",
+            ("search", true) => "scrollback.verb_group.verb.search.running",
+            ("list", false) => "scrollback.verb_group.verb.list.completed",
+            ("list", true) => "scrollback.verb_group.verb.list.running",
+            ("fetch", false) => "scrollback.verb_group.verb.fetch.completed",
+            ("fetch", true) => "scrollback.verb_group.verb.fetch.running",
+            ("run", false) => "scrollback.verb_group.verb.run.completed",
+            ("run", true) => "scrollback.verb_group.verb.run.running",
+            ("edit", false) => "scrollback.verb_group.verb.edit.completed",
+            ("edit", true) => "scrollback.verb_group.verb.edit.running",
+            ("call", false) => "scrollback.verb_group.verb.call.completed",
+            ("call", true) => "scrollback.verb_group.verb.call.running",
+            _ => unreachable!("verb-group action is exhaustive"),
+        }
+    }
+
+    /// Locale key for the locally generated verb-group noun. Chinese uses one
+    /// classifier-bearing noun for both singular and plural counts.
+    pub fn noun_locale_key(self) -> &'static str {
+        match self {
+            VerbGroupKind::File | VerbGroupKind::EditFile => "scrollback.verb_group.noun.file",
+            VerbGroupKind::Skill => "scrollback.verb_group.noun.skill",
+            VerbGroupKind::Search => "scrollback.verb_group.noun.pattern",
+            VerbGroupKind::Dir => "scrollback.verb_group.noun.dir",
+            VerbGroupKind::WebFetch | VerbGroupKind::WebSearch => {
+                "scrollback.verb_group.noun.website"
+            }
+            VerbGroupKind::MemorySearch => "scrollback.verb_group.noun.memory",
+            VerbGroupKind::IntegrationSearch | VerbGroupKind::McpCall => {
+                "scrollback.verb_group.noun.mcp_tool"
+            }
+            VerbGroupKind::Subagent => "scrollback.verb_group.noun.subagent",
+            VerbGroupKind::Command => "scrollback.verb_group.noun.command",
+            VerbGroupKind::OtherTool => "scrollback.verb_group.noun.tool",
+        }
+    }
 }
 
 /// Tool call block - a sum type for different tool types.

@@ -220,10 +220,11 @@ impl WorktreeDb {
         })
     }
 
-    /// Open the default DB at `~/.grok/worktrees.db`.
+    /// Open the default DB at `~/.grok-zh/worktrees.db`.
     ///
-    /// Discovers grok home via `$GROK_HOME`, falling back to the canonicalized
-    /// `$HOME/.grok` (matching `xai_grok_config::grok_home`).
+    /// Discovers grok home via `$GROK_ZH_HOME`, falling back to canonicalized
+    /// `$HOME/.grok-zh` (matching `xai_grok_config::grok_home`). Debug/test
+    /// builds also accept legacy `$GROK_HOME` for upstream harnesses.
     /// Path is resolved fresh each call (~1µs env var read) to support
     /// test overrides. Each call opens its own connection — callers in hot
     /// paths should cache the `WorktreeDb` instance.
@@ -386,15 +387,33 @@ pub fn now_epoch_secs() -> i64 {
 }
 
 pub fn resolve_grok_home() -> Result<PathBuf> {
-    if let Ok(v) = std::env::var("GROK_HOME") {
-        return Ok(PathBuf::from(v));
+    let names = [
+        Some(xai_grok_product::HOME_ENV),
+        cfg!(debug_assertions).then_some(xai_grok_product::COMPAT_HOME_ENV),
+    ];
+    for name in names.into_iter().flatten() {
+        if let Some(value) = std::env::var_os(name).filter(|value| !value.is_empty()) {
+            return Ok(PathBuf::from(value));
+        }
     }
-    let home = PathBuf::from(std::env::var("HOME").context("neither $GROK_HOME nor $HOME is set")?);
-    // Canonicalize the home dir so worktree paths share the same physical .grok
+    #[allow(deprecated)]
+    let home = std::env::home_dir()
+        .filter(|path| !path.as_os_str().is_empty())
+        .with_context(|| {
+            format!(
+                "neither ${}, ${}, nor a platform home directory is available",
+                xai_grok_product::HOME_ENV,
+                xai_grok_product::COMPAT_HOME_ENV
+            )
+        })?;
+    // Canonicalize the home dir so worktree paths share the same physical state
     // tree as trust/hooks even when it is symlinked. The dunce canonicalization
     // must stay in sync with xai_grok_config::default_grok_home();
-    // home resolution deliberately differs ($HOME here vs std::env::home_dir()).
-    Ok(dunce::canonicalize(&home).unwrap_or(home).join(".grok"))
+    // Both resolvers use std::env::home_dir() so Windows USERPROFILE and Unix
+    // HOME resolution stay aligned.
+    Ok(dunce::canonicalize(&home)
+        .unwrap_or(home)
+        .join(xai_grok_product::DATA_DIR_NAME))
 }
 
 /// Serializes tests that mutate the process-global `GROK_HOME` env var so they

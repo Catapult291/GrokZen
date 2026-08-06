@@ -31,7 +31,7 @@ mod state;
 mod tests;
 
 pub use input::{handle_settings_key, handle_settings_mouse, handle_settings_paste};
-pub use render::{ResetConfirmOverlay, render_settings_modal};
+pub use render::{ResetConfirmOverlay, render_settings_modal, render_settings_modal_with_locale};
 #[allow(unused_imports)] // re-export for crate path; used by settings/registry tests
 pub(crate) use state::MAX_PICKER_CHOICES;
 pub use state::{MODAL_TITLE, RowEntry, SettingsKeyOutcome, SettingsModalMode, SettingsModalState};

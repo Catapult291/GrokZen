@@ -603,8 +603,9 @@ pub fn draw_active_modal(
     buf: &mut Buffer,
     theme: Theme,
     compact: bool,
+    locale: Option<&crate::locale::LocaleContext>,
 ) {
-    v.draw_active_modal(area, buf, theme, compact);
+    v.draw_active_modal(area, buf, theme, compact, locale);
 }
 
 /// [`AgentView::drain_blocked`].
@@ -665,12 +666,31 @@ pub fn build_mcp_picker_rows(
     collapsed_sections: &HashSet<String>,
     tools_expanded: &HashSet<usize>,
 ) -> (Vec<String>, Vec<Option<String>>, Vec<Option<usize>>) {
-    let rows = crate::views::extensions_modal::build_mcp_servers_picker_rows(
+    build_mcp_picker_rows_with_locale(
         servers,
         query,
         filter,
         collapsed_sections,
         tools_expanded,
+        None,
+    )
+}
+
+pub fn build_mcp_picker_rows_with_locale(
+    servers: &[McpServerInfo],
+    query: &str,
+    filter: StatusFilter,
+    collapsed_sections: &HashSet<String>,
+    tools_expanded: &HashSet<usize>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> (Vec<String>, Vec<Option<String>>, Vec<Option<usize>>) {
+    let rows = crate::views::extensions_modal::build_mcp_servers_picker_rows_with_locale(
+        servers,
+        query,
+        filter,
+        collapsed_sections,
+        tools_expanded,
+        locale,
     );
     (rows.labels, rows.group_keys, rows.data_indices)
 }
@@ -698,6 +718,13 @@ pub fn mcp_status_label(status: &McpServerDisplayStatus) -> &'static str {
     status.label()
 }
 
+pub fn mcp_status_label_with_locale(
+    status: &McpServerDisplayStatus,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> &'static str {
+    status.label_with_locale(locale)
+}
+
 // ── Session picker builders ──────────────────────────────────────────────────
 
 /// Render a search bar from a [`PickerState`] using its grapheme-safe viewport.
@@ -719,6 +746,29 @@ pub fn render_picker_search_bar(
         state.search_active,
         show_hint,
         bg,
+    );
+}
+
+pub fn render_picker_search_bar_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    state: &PickerState,
+    show_hint: bool,
+    bg: Option<Color>,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
+    crate::views::picker::render_picker_search_bar_with_locale(
+        buf,
+        area.x,
+        area.y,
+        area.width,
+        theme,
+        state,
+        state.search_active,
+        show_hint,
+        bg,
+        locale,
     );
 }
 
@@ -751,12 +801,36 @@ pub fn build_session_entry_data(
     )
 }
 
+pub fn build_session_entry_data_with_locale(
+    entries_data: &[SessionPickerEntry],
+    filtered_indices: &[usize],
+    state: &PickerState,
+    content_width: u16,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Vec<SessionEntryData> {
+    crate::views::session_picker::build_session_entry_data_with_locale(
+        entries_data,
+        filtered_indices,
+        state,
+        content_width,
+        locale,
+    )
+}
+
 /// [`crate::views::session_picker::hidden_external_hint`].
 pub fn hidden_external_hint(
     entries: Option<&[SessionPickerEntry]>,
     source_filter: SourceFilter,
 ) -> Option<String> {
     crate::views::session_picker::hidden_external_hint(entries, source_filter)
+}
+
+pub fn hidden_external_hint_with_locale(
+    entries: Option<&[SessionPickerEntry]>,
+    source_filter: SourceFilter,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<String> {
+    crate::views::session_picker::hidden_external_hint_with_locale(entries, source_filter, locale)
 }
 
 /// [`crate::views::session_picker::build_grouped_picker_entries`].

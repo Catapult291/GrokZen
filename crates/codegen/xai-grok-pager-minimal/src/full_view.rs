@@ -123,12 +123,15 @@ pub fn pump_transcript(app: &mut AppView) {
 /// build's owning agent (which may differ from the active view — the user can
 /// tab away while the build runs).
 fn finish_transcript(app: &mut AppView, id: xai_grok_pager::app::agent::AgentId, out: String) {
+    let locale = app.locale.clone();
     if out.is_empty() {
         if let Some(agent) = app.agents.get_mut(&id) {
             agent
                 .scrollback
                 .push_block(xai_grok_pager::scrollback::block::RenderBlock::system(
-                    "No conversation transcript to view yet",
+                    locale
+                        .named_text("transcript.empty", "No conversation transcript to view yet")
+                        .into_owned(),
                 ));
         }
         return;
@@ -142,9 +145,14 @@ fn finish_transcript(app: &mut AppView, id: xai_grok_pager::app::agent::AgentId,
         Err(e) => {
             if let Some(agent) = app.agents.get_mut(&id) {
                 agent.scrollback.push_block(
-                    xai_grok_pager::scrollback::block::RenderBlock::system(format!(
-                        "Failed to write transcript: {e}"
-                    )),
+                    xai_grok_pager::scrollback::block::RenderBlock::system(
+                        locale
+                            .named_text(
+                                "transcript.write_failed",
+                                "Failed to write transcript: {error}",
+                            )
+                            .replace("{error}", &e.to_string()),
+                    ),
                 );
             }
         }
@@ -420,9 +428,13 @@ mod tests {
             &mut out,
         );
 
-        assert!(out.contains("src/main.rs"), "transcript: {out:?}");
+        let normalized_out = out.replace('\\', "/");
         assert!(
-            !out.contains("/alternate/worktree"),
+            normalized_out.contains("src/main.rs"),
+            "transcript: {out:?}"
+        );
+        assert!(
+            !normalized_out.contains("/alternate/worktree"),
             "session prefix should be elided: {out:?}"
         );
     }

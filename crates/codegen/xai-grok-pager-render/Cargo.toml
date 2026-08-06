@@ -68,6 +68,7 @@ xai-grok-workspace = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-paths = { path = "../xai-grok-paths" }
+xai-grok-product = { path = "../xai-grok-product" }
 
 # Base64 encoding for image data
 base64 = { workspace = true }

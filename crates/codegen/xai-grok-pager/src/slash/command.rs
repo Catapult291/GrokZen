@@ -287,6 +287,19 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
+    /// Whether this ACP skill came from the trusted bundled-skill scope.
+    /// Used only to gate exact display-translation allowlists; command
+    /// identity and execution are unaffected.
+    fn is_bundled_skill(&self) -> bool {
+        false
+    }
+
+    /// Whether ACP metadata identifies this as a first-party product-chat
+    /// skill. This is display provenance only; execution remains unchanged.
+    fn is_product_chat_skill(&self) -> bool {
+        false
+    }
+
     /// Tool names the agent must have registered for this command to work.
     ///
     /// Default is empty (no tool dependency). Override for commands that

@@ -27,6 +27,7 @@ crossterm = { workspace = true, features = ["event-stream", "bracketed-paste"] }
 # Transcript temp-file names (`grok-transcript-<uuid>.ansi`).
 uuid = { workspace = true, features = ["v4"] }
 tracing = { workspace = true }
+unicode-width = { workspace = true }
 
 # Native scrollback / inline viewport engine (`insert_before`, viewport sizing).
 # Used only via the pager's re-exported `PagerTerminal`; see the

@@ -98,7 +98,13 @@ impl ListDirToolCallBlock {
         self.output = output.into();
     }
 
-    fn collapsed_line(&self, theme: &Theme, muted: bool, width: Option<usize>) -> Line<'static> {
+    fn collapsed_line(
+        &self,
+        theme: &Theme,
+        muted: bool,
+        width: Option<usize>,
+        locale: &crate::locale::LocaleContext,
+    ) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
         } else {
@@ -111,21 +117,29 @@ impl ListDirToolCallBlock {
             theme.fg(theme.path)
         };
 
-        let prefix = "List ";
+        let prefix = locale
+            .named_text("scrollback.tool.list.label", "List ")
+            .into_owned();
         let entry_count = self.output.lines().filter(|l| !l.trim().is_empty()).count();
         let suffix = if self.error.is_none() && entry_count > 0 {
-            let s = if entry_count == 1 { "y" } else { "ies" };
-            format!(" ({entry_count} entr{s})")
+            if locale.locale() == crate::locale::UiLocale::ZhCn {
+                format!("（{entry_count} 项）")
+            } else {
+                let s = if entry_count == 1 { "y" } else { "ies" };
+                format!(" ({entry_count} entr{s})")
+            }
         } else {
             String::new()
         };
-        let suffix_fits = width.is_none_or(|w| prefix.len() + suffix.len() < w);
+        let prefix_width = unicode_width::UnicodeWidthStr::width(prefix.as_str());
+        let suffix_width = unicode_width::UnicodeWidthStr::width(suffix.as_str());
+        let suffix_fits = width.is_none_or(|w| prefix_width + suffix_width < w);
         let effective_suffix = if suffix_fits { suffix.as_str() } else { "" };
 
         let path_budget = width
             .map(|w| {
-                w.saturating_sub(prefix.len())
-                    .saturating_sub(effective_suffix.len())
+                w.saturating_sub(prefix_width)
+                    .saturating_sub(unicode_width::UnicodeWidthStr::width(effective_suffix))
             })
             .unwrap_or(usize::MAX);
         let path = crate::render::tool_paths::shorten_path(&self.path, path_budget);
@@ -166,11 +180,16 @@ impl BlockContent for ListDirToolCallBlock {
                     &theme,
                     muted_collapsed,
                     Some(ctx.content_width()),
+                    &ctx.locale,
                 ))],
             },
             DisplayMode::Truncated | DisplayMode::Expanded => {
-                let mut lines: Vec<BlockLine> =
-                    vec![self.header_block_line(self.collapsed_line(&theme, false, None))];
+                let mut lines: Vec<BlockLine> = vec![self.header_block_line(self.collapsed_line(
+                    &theme,
+                    false,
+                    None,
+                    &ctx.locale,
+                ))];
 
                 if !self.output.is_empty() {
                     lines.push(BlockLine::separator(Line::from("")));
@@ -255,6 +274,7 @@ mod tests {
             appearance: Default::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

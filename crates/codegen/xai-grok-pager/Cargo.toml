@@ -10,6 +10,8 @@ authors = ["xAI"]
 dunce = { workspace = true }
 xai-tty-utils = { workspace = true }
 xai-grok-version = { workspace = true }
+xai-grok-locale = { path = "../xai-grok-locale" }
+xai-grok-product = { path = "../xai-grok-product" }
 
 # Shared prompt-queue wire types
 xai-prompt-queue = { workspace = true }
@@ -84,7 +86,7 @@ xai-ratatui-textarea = { workspace = true }
 xai-ratatui-inline = { workspace = true }
 
 # Update
-xai-grok-update = { path = "../xai-grok-update" }
+xai-grok-update = { path = "../xai-grok-update", features = ["community-build"] }
 
 # ACP
 agent-client-protocol = { workspace = true }

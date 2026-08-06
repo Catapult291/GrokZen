@@ -44,6 +44,9 @@ pub struct ScrollbackPane {
     /// short relative paths the model prints (`images/1.jpg`) into clickable
     /// `file://` links. Empty disables relative-path resolution.
     pub media_paths: Vec<std::path::PathBuf>,
+    /// Render-only locale context for scrollback chrome. Transcript payloads
+    /// remain untouched.
+    locale: Option<crate::locale::LocaleContext>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -62,6 +65,7 @@ impl ScrollbackPane {
             hovered_entry: None,
             search_highlight: None,
             media_paths: Vec::new(),
+            locale: None,
         }
     }
 
@@ -98,6 +102,11 @@ impl ScrollbackPane {
     /// file-path link targets (`images/1.jpg`) into clickable `file://` links.
     pub fn with_media_paths(mut self, media_paths: Vec<std::path::PathBuf>) -> Self {
         self.media_paths = media_paths;
+        self
+    }
+
+    pub fn with_locale(mut self, locale: Option<&crate::locale::LocaleContext>) -> Self {
+        self.locale = locale.cloned();
         self
     }
 }
@@ -965,6 +974,7 @@ impl ScrollbackPane {
             &self.media_paths,
             Some((state.group_spans(), paint_range.start)),
             state.cwd(),
+            self.locale.as_ref(),
         );
         let result = rendered.result;
         let selection_boundaries = rendered.selection_boundaries;

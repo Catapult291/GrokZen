@@ -103,9 +103,21 @@ pub fn clamp_activity_subject(s: &str) -> String {
 /// Renders as `{subject}…` — no "Waiting for" prefix or quotes — so a
 /// description like `Wait 5 seconds` reads cleanly next to the spinner.
 pub fn format_waiting_for_subject(subject: &str) -> String {
+    format_waiting_for_subject_with_locale(subject, None)
+}
+
+pub fn format_waiting_for_subject_with_locale(
+    subject: &str,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     let clamped = clamp_activity_subject(subject);
     if clamped.is_empty() {
-        "Waiting on task output…".to_string()
+        locale
+            .map(|locale| {
+                locale.named_static_text("turn.waiting.task_output", "Waiting on task output…")
+            })
+            .unwrap_or("Waiting on task output…")
+            .to_string()
     } else {
         format!("{clamped}…")
     }
@@ -122,16 +134,27 @@ impl WaitingReason {
     }
     /// User-facing spinner label.
     pub fn label(&self) -> String {
+        self.label_with_locale(None)
+    }
+
+    /// Localized user-facing spinner label. Task subjects remain verbatim.
+    pub fn label_with_locale(&self, locale: Option<&crate::locale::LocaleContext>) -> String {
+        let text = |id: &str, english: &'static str| {
+            locale
+                .map(|locale| locale.named_static_text(id, english))
+                .unwrap_or(english)
+                .to_string()
+        };
         match self {
-            Self::Model => "Waiting for response…".to_string(),
-            Self::Subagent => "Waiting on subagent…".to_string(),
+            Self::Model => text("turn.waiting.response", "Waiting for response…"),
+            Self::Subagent => text("turn.waiting.subagent", "Waiting on subagent…"),
             Self::TaskOutput {
                 subject: Some(subject),
                 ..
-            } => format_waiting_for_subject(subject),
-            Self::TaskOutput { .. } => "Waiting on task output…".to_string(),
-            Self::TasksComplete => "Waiting on tasks…".to_string(),
-            Self::Sleep => "Sleeping…".to_string(),
+            } => format_waiting_for_subject_with_locale(subject, locale),
+            Self::TaskOutput { .. } => text("turn.waiting.task_output", "Waiting on task output…"),
+            Self::TasksComplete => text("turn.waiting.tasks", "Waiting on tasks…"),
+            Self::Sleep => text("turn.waiting.sleep", "Sleeping…"),
         }
     }
     /// Short, stable snake_case label for telemetry / phase-transition logs.

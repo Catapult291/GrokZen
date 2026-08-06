@@ -23,6 +23,7 @@ urlencoding = { workspace = true }
 which = { workspace = true }
 xai-tty-utils = { workspace = true }
 xai-grok-version = { workspace = true }
+xai-grok-product = { path = "../xai-grok-product" }
 
 # core-foundation: read macOS MDM managed preferences (`ai.x.grok`) for the
 # admin-deployed requirements layer.

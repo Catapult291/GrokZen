@@ -246,6 +246,7 @@ mod tests {
             appearance: AppearanceConfig::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

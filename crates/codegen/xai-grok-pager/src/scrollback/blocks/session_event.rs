@@ -257,6 +257,164 @@ impl SessionEvent {
         }
     }
 
+    /// Format display chrome for the selected UI locale while preserving the
+    /// structured event payload, error text, model ids, paths, and command
+    /// names exactly as received.
+    pub fn message_with_locale(&self, locale: &crate::locale::LocaleContext) -> String {
+        let text = |id: &str, english: &str| locale.named_text(id, english).into_owned();
+        match self {
+            SessionEvent::TurnCompleted {
+                elapsed: Some(elapsed),
+            } => text(
+                "scrollback.session_event.turn_completed_duration",
+                "Worked for {duration}",
+            )
+            .replace("{duration}", &format_duration(*elapsed)),
+            SessionEvent::TurnCompleted { elapsed: None } => {
+                text("scrollback.session_event.turn_completed", "Turn completed.")
+            }
+            SessionEvent::TurnCancelled { elapsed } => text(
+                "scrollback.session_event.turn_cancelled",
+                "Turn cancelled by user in {duration}.",
+            )
+            .replace("{duration}", &format_duration(*elapsed)),
+            SessionEvent::TurnHalted { elapsed } => text(
+                "scrollback.session_event.turn_halted",
+                "Agent was unable to make progress — turn ended in {duration}.",
+            )
+            .replace("{duration}", &format_duration(*elapsed)),
+            SessionEvent::TurnFailed {
+                error,
+                elapsed: Some(elapsed),
+            } => text(
+                "scrollback.session_event.turn_failed_duration",
+                "Turn failed in {duration}: {error}",
+            )
+            .replace("{duration}", &format_duration(*elapsed))
+            .replace("{error}", error),
+            SessionEvent::TurnFailed {
+                error,
+                elapsed: None,
+            } => text(
+                "scrollback.session_event.turn_failed",
+                "Turn failed: {error}",
+            )
+            .replace("{error}", error),
+            SessionEvent::CompactionStarted { percentage } => text(
+                "scrollback.session_event.compaction_started",
+                "Context {percentage}% full. Compacting…",
+            )
+            .replace("{percentage}", &percentage.to_string()),
+            SessionEvent::CompactionCompleted {
+                tokens_before,
+                tokens_after,
+                elapsed_ms,
+            } => {
+                let after = format_tokens(*tokens_after);
+                let body = match tokens_before {
+                    Some(before) if *before > 0 => text(
+                        "scrollback.session_event.compaction_completed_before_after",
+                        "Context compacted: {before} → {after} tokens",
+                    )
+                    .replace("{before}", &format_tokens(*before))
+                    .replace("{after}", &after),
+                    _ => text(
+                        "scrollback.session_event.compaction_completed_after",
+                        "Context compacted → {after} tokens",
+                    )
+                    .replace("{after}", &after),
+                };
+                if let Some(ms) = elapsed_ms {
+                    text(
+                        "scrollback.session_event.duration_suffix",
+                        "{body} ({duration})",
+                    )
+                    .replace("{body}", &body)
+                    .replace("{duration}", &format!("{:.1}s", *ms as f64 / 1000.0))
+                } else {
+                    body
+                }
+            }
+            SessionEvent::CompactionFailed { error } => {
+                if error.trim().is_empty() {
+                    text(
+                        "scrollback.session_event.compaction_failed_empty",
+                        "Compaction failed.",
+                    )
+                } else {
+                    text(
+                        "scrollback.session_event.compaction_failed",
+                        "Compaction failed: {error}",
+                    )
+                    .replace("{error}", error)
+                }
+            }
+            SessionEvent::CompactionCancelled => text(
+                "scrollback.session_event.compaction_cancelled",
+                "Compaction cancelled.",
+            ),
+            SessionEvent::RetryFailed { error, error_type } => {
+                if error_type.as_deref() == Some("encrypted_content_mismatch") {
+                    text(
+                        "scrollback.session_event.history_incompatible",
+                        "This session's conversation history is incompatible with the current model. Please start a new session.",
+                    )
+                } else {
+                    text(
+                        "scrollback.session_event.retry_failed",
+                        "Retry failed: {error}",
+                    )
+                    .replace("{error}", error)
+                }
+            }
+            SessionEvent::ReAuthRequired => text(
+                "scrollback.session_event.reauth_required",
+                "Authentication required — your session has expired or your credentials were rejected. Run /login to re-authenticate, then resend your message.",
+            ),
+            SessionEvent::ContextTooLarge => text(
+                "scrollback.session_event.context_too_large",
+                "This conversation is too large for the model's context window. Use /new to start a new session.",
+            ),
+            SessionEvent::CompactCompleted { elapsed } => text(
+                "scrollback.session_event.compact_completed",
+                "Compaction completed in {duration}.",
+            )
+            .replace("{duration}", &format_duration(*elapsed)),
+            SessionEvent::HookAnnotation { message } => message.clone(),
+            SessionEvent::ModelUnavailable {
+                new_model_id,
+                reason,
+                ..
+            } => {
+                if new_model_id.is_empty() {
+                    reason.clone()
+                } else {
+                    text(
+                        "scrollback.session_event.model_switched",
+                        "{reason} Switched to \"{model}\".",
+                    )
+                    .replace("{reason}", reason)
+                    .replace("{model}", new_model_id)
+                }
+            }
+            SessionEvent::MemorySaved { path, trigger } => text(
+                "scrollback.session_event.memory_saved",
+                "Memory saved ({trigger}) → {path}  ·  /memory to view",
+            )
+            .replace("{trigger}", trigger)
+            .replace("{path}", &crate::util::abbreviate_path(path)),
+            SessionEvent::GoalCompleted { elapsed } => text(
+                "scrollback.session_event.goal_completed",
+                "Goal complete — {duration} end-to-end.",
+            )
+            .replace("{duration}", &format_duration(*elapsed)),
+            SessionEvent::Recap { summary, auto: _ } => {
+                text("scrollback.session_event.recap", "Recap — {summary}")
+                    .replace("{summary}", summary)
+            }
+        }
+    }
+
     /// The recap summary text when this is a [`SessionEvent::Recap`].
     ///
     /// Recap events render in the tool-call visual style (bullet + bold
@@ -310,6 +468,8 @@ pub struct SessionEventBlock {
     /// The prompt turn a terminal marker belongs to, when known. Gates
     /// which stop-hook batches may merge into it.
     pub prompt_id: Option<String>,
+    /// Render-time locale; structured event data remains canonical.
+    locale: crate::locale::LocaleContext,
 }
 
 impl SessionEventBlock {
@@ -319,6 +479,7 @@ impl SessionEventBlock {
             event,
             stop_hooks: Vec::new(),
             prompt_id: None,
+            locale: crate::locale::LocaleContext::default(),
         }
     }
 
@@ -333,7 +494,12 @@ impl SessionEventBlock {
             event,
             stop_hooks,
             prompt_id,
+            locale: crate::locale::LocaleContext::default(),
         }
+    }
+
+    pub(crate) fn set_locale(&mut self, locale: crate::locale::LocaleContext) {
+        self.locale = locale;
     }
 
     /// Whether any attached stop hook actually ran (non-skipped). Gates the
@@ -364,12 +530,17 @@ impl SessionEventBlock {
     /// drag-copy on the marker text only, so a copied "Worked for
     /// 4.4s" never drags the padding and hook counts along.
     fn append_stop_hooks(&self, lines: &mut Vec<BlockLine>, ctx: &BlockContext) {
-        use super::tool::hook::{render_hooks_for_mode, render_stop_hooks_summary};
+        use super::tool::hook::{
+            render_hooks_detail_with_locale, render_hooks_for_mode_with_locale,
+            render_stop_hooks_summary_with_locale,
+        };
 
         if !self.has_stop_hook_content() {
             return;
         }
-        let Some(summary) = render_stop_hooks_summary(&self.stop_hooks) else {
+        let Some(summary) =
+            render_stop_hooks_summary_with_locale(&self.stop_hooks, Some(&ctx.locale))
+        else {
             return;
         };
 
@@ -409,9 +580,9 @@ impl SessionEventBlock {
             let multiple = self.stop_hooks.len() > 1;
             for (event_name, runs) in &self.stop_hooks {
                 let detail = if multiple {
-                    render_hooks_for_mode(event_name, runs, ctx.mode)
+                    render_hooks_for_mode_with_locale(event_name, runs, ctx.mode, Some(&ctx.locale))
                 } else {
-                    super::tool::hook::render_hooks_detail(runs, ctx.mode)
+                    render_hooks_detail_with_locale(runs, ctx.mode, Some(&ctx.locale))
                 };
                 lines.extend(detail);
             }
@@ -447,9 +618,13 @@ impl SessionEventBlock {
             theme.primary()
         };
         let header_style = header_text_style.add_modifier(Modifier::BOLD);
+        let recap_label = self
+            .locale
+            .named_text("scrollback.session_event.recap_label", "Recap")
+            .into_owned();
         // Non-selectable chrome (same as Thinking / tool label prefixes).
         let header_line =
-            || BlockLine::separator(Line::from(Span::styled("Recap".to_string(), header_style)));
+            || BlockLine::separator(Line::from(Span::styled(recap_label.clone(), header_style)));
 
         // Loading: header only; the animated gray sidebar is the feedback.
         if ctx.is_running {
@@ -460,7 +635,7 @@ impl SessionEventBlock {
 
         match ctx.mode {
             DisplayMode::Collapsed => {
-                let mut spans = vec![Span::styled("Recap".to_string(), header_style)];
+                let mut spans = vec![Span::styled(recap_label.clone(), header_style)];
                 let preview = summary.lines().next().unwrap_or(summary).trim();
                 if !preview.is_empty() {
                     spans.push(Span::styled(format!("  {preview}"), theme.muted()));
@@ -530,7 +705,7 @@ impl BlockContent for SessionEventBlock {
             theme.muted()
         };
 
-        let text = self.event.message();
+        let text = self.event.message_with_locale(&self.locale);
         let wrapped = if text.contains('\n') {
             let input_lines = text
                 .split('\n')
@@ -647,12 +822,42 @@ impl BlockContent for SessionEventBlock {
 mod tests {
     use super::*;
 
+    fn zh_locale() -> crate::locale::LocaleContext {
+        crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        })
+    }
+
     #[test]
     fn turn_completed_message() {
         let event = SessionEvent::TurnCompleted {
             elapsed: Some(Duration::from_secs(125)),
         };
         assert_eq!(event.message(), "Worked for 2m5s");
+    }
+
+    #[test]
+    fn localization_regression_session_event_localizes_chrome_only() {
+        let event = SessionEvent::TurnCompleted {
+            elapsed: Some(Duration::from_millis(3_200)),
+        };
+        assert_eq!(event.message(), "Worked for 3.2s");
+        assert_eq!(event.message_with_locale(&zh_locale()), "工作用时 3.2s");
+
+        let compaction = SessionEvent::CompactionCompleted {
+            tokens_before: Some(20_000),
+            tokens_after: 8_000,
+            elapsed_ms: Some(1_500),
+        };
+        assert_eq!(
+            compaction.message_with_locale(&zh_locale()),
+            "上下文已压缩：20.0k → 8.0k Token（1.5s）"
+        );
+
+        let mut block = SessionEventBlock::new(event);
+        block.set_locale(zh_locale());
+        assert_eq!(plain(&block.output(&ctx()).lines[0]), "工作用时 3.2s");
     }
 
     #[test]
@@ -871,6 +1076,7 @@ mod tests {
             appearance: crate::appearance::AppearanceConfig::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

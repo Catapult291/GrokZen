@@ -72,7 +72,7 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
     let mut info: Vec<Line<'static>> = Vec::new();
     info.push(Line::from(vec![
         Span::styled(
-            "Grok Build",
+            app.locale.text(xai_grok_pager::locale::TextKey::AppName),
             Style::default()
                 .fg(theme.accent_user)
                 .add_modifier(Modifier::BOLD),
@@ -84,11 +84,18 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
     }
     if let Some(model) = model {
         info.push(Line::from(Span::styled(
-            format!("Model · {model}"),
+            app.locale.format(
+                xai_grok_pager::locale::TextKey::MinimalModel,
+                &[("model", model.as_str())],
+            ),
             theme.muted(),
         )));
     }
-    info.push(Line::from(Span::styled("/help for commands", theme.dim())));
+    info.push(Line::from(Span::styled(
+        app.locale
+            .text(xai_grok_pager::locale::TextKey::MinimalHelpHint),
+        theme.dim(),
+    )));
 
     let logo_lines = minimal_api::compact_logo_line_count();
     // logo (+ a blank separator row) when present, then the info lines, wrapped

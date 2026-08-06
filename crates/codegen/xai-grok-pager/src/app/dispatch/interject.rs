@@ -26,6 +26,12 @@ pub(super) fn dispatch_interject(
 ) -> Vec<Effect> {
     // Hard-reset only — `text` may not be from the composer.
     let _ = voice_stop_on_submit(app);
+    let no_session = app
+        .locale
+        .named_static_text("session.no_active", "No active session");
+    let interjection_sent = app
+        .locale
+        .named_static_text("interject.sent", "Interjection sent");
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -39,7 +45,7 @@ pub(super) fn dispatch_interject(
     agent.ephemeral_tip.clear_on_submit();
 
     let Some(session_id) = agent.session.session_id.clone() else {
-        agent.show_toast("No active session");
+        agent.show_toast(no_session);
         return vec![];
     };
 
@@ -58,7 +64,7 @@ pub(super) fn dispatch_interject(
     // text (the InterjectPrompt registry arm) clears it at the call site;
     // every other producer (Send now, edit-interject, plan review comments)
     // carries non-composer text and must keep the user's draft/stash.
-    agent.show_toast("Interjection sent");
+    agent.show_toast(interjection_sent);
 
     // Image-bearing interjection: build text + image content blocks via the
     // same helper as the queued-prompt drain path (orphan-placeholder
@@ -92,10 +98,17 @@ pub(super) fn dispatch_send_prompt_now(
 ) -> Vec<Effect> {
     // Hard-reset only — `text` may be a queue row, not the composer.
     let _ = voice_stop_on_submit(app);
+    let no_session = app
+        .locale
+        .named_static_text("session.no_active", "No active session");
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
     let reconnect_pending = app.reconnect_pending;
+    let reconnect_message = app
+        .locale
+        .text(crate::locale::TextKey::ReconnectWait)
+        .to_owned();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -117,7 +130,7 @@ pub(super) fn dispatch_send_prompt_now(
                     crate::app::agent::QueueEntryKind::Prompt,
                 )
             });
-        agent.show_toast("Reconnecting, please wait...");
+        agent.show_toast(&reconnect_message);
         return vec![];
     }
 
@@ -125,7 +138,7 @@ pub(super) fn dispatch_send_prompt_now(
     agent.ephemeral_tip.clear_on_submit();
 
     let Some(session_id) = agent.session.session_id.clone() else {
-        agent.show_toast("No active session");
+        agent.show_toast(no_session);
         return vec![];
     };
 

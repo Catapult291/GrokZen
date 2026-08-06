@@ -39,7 +39,9 @@ mod voice;
 
 pub(crate) use billing::{UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error};
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
-pub(crate) use notes::{recap_unavailable_toast, scrollback_has_user_messages};
+#[cfg(test)]
+pub(crate) use notes::recap_unavailable_toast;
+pub(crate) use notes::{recap_unavailable_toast_with_locale, scrollback_has_user_messages};
 pub(crate) use permissions::resolve_permission_queue_transition;
 pub(crate) use prompt::dispatch_initial_prompt;
 pub(in crate::app) use prompt::{show_small_screen_tip, show_ssh_wrap_tip};

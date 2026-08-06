@@ -5,6 +5,10 @@ use xai_grok_config_types::DisplayRefreshSettings;
 #[serde(default)]
 pub struct UiConfig {
     pub max_thoughts_width: u16,
+    /// Locale for client-owned CLI/TUI text (for example `en-US` or `zh-CN`).
+    /// This is independent from `voice_stt_language`, which is an API setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     /// Model ID to use for the secondary agent when forking.
@@ -245,6 +249,7 @@ impl Default for UiConfig {
     fn default() -> Self {
         Self {
             max_thoughts_width: DEFAULT_MAX_THOUGHTS_WIDTH,
+            locale: None,
             theme: None,
             fork_secondary_model: xai_grok_models::default_model().to_string(),
             yolo: false,

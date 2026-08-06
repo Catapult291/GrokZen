@@ -11,6 +11,7 @@
 //! `#[serial]`.
 
 #![cfg(unix)]
+#![cfg(not(feature = "community-build"))]
 
 mod common;
 

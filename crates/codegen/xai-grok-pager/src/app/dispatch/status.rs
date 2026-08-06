@@ -13,7 +13,11 @@ use crate::scrollback::block::RenderBlock;
 
 /// Temporary kill switch: client share links are disabled.
 pub(super) fn dispatch_share_session(app: &mut AppView) -> Vec<Effect> {
-    app.show_toast("Session sharing is temporarily disabled");
+    let message = app.locale.named_static_text(
+        "session.share_disabled",
+        "Session sharing is temporarily disabled",
+    );
+    app.show_toast(message);
     vec![]
 }
 
@@ -106,7 +110,11 @@ pub(super) fn set_coding_data_sharing(
 ) -> Vec<Effect> {
     // ── Guard 1: Enterprise ZDR ──────────────────────────────────────
     if app.is_zdr {
-        app.show_toast("\u{2717} Cannot change: Zero Data Retention enabled");
+        let message = app.locale.named_static_text(
+            "privacy.zdr_locked",
+            "✗ Cannot change: Zero Data Retention enabled",
+        );
+        app.show_toast(message);
         return vec![];
     }
     // ── Guard 2: Non-admin team member ───────────────────────────────
@@ -116,7 +124,11 @@ pub(super) fn set_coding_data_sharing(
             .as_deref()
             .is_some_and(|r| r.eq_ignore_ascii_case("admin"));
         if !is_admin {
-            app.show_toast("\u{2717} Data sharing is controlled by your team admin");
+            let message = app.locale.named_static_text(
+                "privacy.team_admin_locked",
+                "✗ Data sharing is controlled by your team admin",
+            );
+            app.show_toast(message);
             return vec![];
         }
     }
@@ -166,6 +178,23 @@ pub(super) fn scrub_error_for_toast(error: &str) -> String {
     }
 }
 
+pub(super) fn scrub_error_for_toast_with_locale(
+    error: &str,
+    locale: &crate::locale::LocaleContext,
+) -> String {
+    let scrubbed = scrub_error_for_toast(error);
+    if scrubbed == "server error (see logs for details)" {
+        locale
+            .named_text(
+                "error.server_see_logs",
+                "server error (see logs for details)",
+            )
+            .into_owned()
+    } else {
+        scrubbed
+    }
+}
+
 /// Show context info: fetch via x.ai/session/info and display rich breakdown.
 ///
 /// Produces Effect::ShowContextInfo which spawns an async ACP ext request.
@@ -199,6 +228,7 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         };
         agent.session.session_id.clone()
     };
+    let locale = app.locale.clone();
     match session_id {
         Some(session_id) => vec![Effect::FetchSessionUsage {
             agent_id: id,
@@ -207,7 +237,12 @@ pub(super) fn dispatch_show_usage(app: &mut AppView) -> Vec<Effect> {
         None => {
             if let Some(agent) = app.agents.get_mut(&id) {
                 agent.scrollback.push_block(RenderBlock::system(
-                    "Session usage is unavailable until the session starts.".to_string(),
+                    locale
+                        .named_text(
+                            "status.usage.session_unavailable",
+                            "Session usage is unavailable until the session starts.",
+                        )
+                        .into_owned(),
                 ));
             }
             append_consumer_billing_surface(app, id)
@@ -240,11 +275,13 @@ pub(super) fn append_consumer_billing_surface(app: &mut AppView, agent_id: Agent
     // Remote-settings kill switch (`grok_build_usage_redirect_url`): link out
     // instead of fetching billing from the backend.
     if let Some(url) = app.usage_billing_redirect_url.clone() {
+        let message = app
+            .locale
+            .named_text("status.usage.redirect", "Please check your usage on {url}")
+            .replace("{url}", &url);
         if let Some(agent) = app.agents.get_mut(&agent_id) {
             agent.scrollback.push_block(RenderBlock::System(
-                crate::scrollback::blocks::SystemMessageBlock::new(format!(
-                    "Please check your usage on {url}"
-                )),
+                crate::scrollback::blocks::SystemMessageBlock::new(message),
             ));
         }
         return vec![];
@@ -276,12 +313,17 @@ pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
 /// surface), so the background update check's result is shown here instead
 /// No-op when there is no active agent.
 pub(crate) fn commit_minimal_update_notice(app: &mut AppView, latest_version: &str) {
+    let message = app
+        .locale
+        .named_text(
+            "status.update_available",
+            "Update available: v{version} — restart to apply.",
+        )
+        .replace("{version}", latest_version);
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
-        agent.scrollback.push_block(RenderBlock::system(format!(
-            "Update available: v{latest_version} — restart to apply."
-        )));
+        agent.scrollback.push_block(RenderBlock::system(message));
     }
 }
 
@@ -290,10 +332,12 @@ pub(crate) fn commit_minimal_update_notice(app: &mut AppView, latest_version: &s
 /// just resolves the active agent and pushes it. Works in every render mode; the
 /// primary inspection surface in minimal, which has no interactive `QueuePane`.
 pub(super) fn dispatch_show_queue(app: &mut AppView) -> Vec<Effect> {
+    let locale = app.locale.clone();
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
-        let text = crate::app::status_blocks::queue_block_text(agent);
+        let text =
+            crate::app::status_blocks::queue_block_text_with_locale(agent, Some(locale.as_ref()));
         agent.scrollback.push_block(RenderBlock::system(text));
     }
     vec![]
@@ -305,10 +349,12 @@ pub(super) fn dispatch_show_queue(app: &mut AppView) -> Vec<Effect> {
 /// active agent and pushes it. Works in every render mode; the primary snapshot
 /// surface in minimal, which has no interactive `TasksPane`.
 pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
+    let locale = app.locale.clone();
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
-        let text = crate::app::status_blocks::tasks_block_text(agent);
+        let text =
+            crate::app::status_blocks::tasks_block_text_with_locale(agent, Some(locale.as_ref()));
         agent.scrollback.push_block(RenderBlock::system(text));
     }
     vec![]
@@ -324,6 +370,10 @@ pub(super) fn dispatch_show_tasks(app: &mut AppView) -> Vec<Effect> {
 /// top-level view, mirroring the video viewer.
 pub(super) fn dispatch_open_gboom(app: &mut AppView) -> Vec<Effect> {
     use crate::terminal::image::{GraphicsProtocol, detect_graphics_protocol};
+    let unsupported = app.locale.named_static_text(
+        "gboom.graphics_required",
+        "No demons here — GBOOM needs a graphics-capable terminal (kitty, Ghostty, WezTerm, iTerm2)",
+    );
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -331,10 +381,7 @@ pub(super) fn dispatch_open_gboom(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     };
     if detect_graphics_protocol() == GraphicsProtocol::None {
-        agent.show_toast(
-            "No demons here \u{2014} GBOOM needs a graphics-capable terminal \
-             (kitty, Ghostty, WezTerm, iTerm2)",
-        );
+        agent.show_toast(unsupported);
         return vec![];
     }
     // Close other media modals: they share the kitty placement id. Drop the
@@ -416,10 +463,15 @@ pub(super) fn handle_coding_data_sharing_failed(
     set_coding_data_sharing_inner(app, rollback_to_opted_in);
     refresh_open_settings_modals(app);
     // Scrub long/unsafe error strings before toasting.
-    let scrubbed = scrub_error_for_toast(&error);
-    app.show_toast(&format!(
-        "\u{2717} Couldn't update coding data sharing: {scrubbed}"
-    ));
+    let scrubbed = scrub_error_for_toast_with_locale(&error, app.locale.as_ref());
+    let message = app
+        .locale
+        .named_text(
+            "privacy.update_failed",
+            "✗ Couldn't update coding data sharing: {error}",
+        )
+        .replace("{error}", &scrubbed);
+    app.show_toast(&message);
     tracing::warn!(
         target: "settings",
         key = "coding_data_sharing",
@@ -495,6 +547,7 @@ pub(super) fn handle_context_info_complete(
     agent_id: AgentId,
     info: Box<xai_grok_shell::session::SessionInfoResponse>,
 ) -> Vec<Effect> {
+    let locale = app.locale.as_ref().clone();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         let model = info.data.model.as_deref().unwrap_or("unknown").to_string();
         // Take ownership of the snapshot once, hand a clone to the
@@ -505,11 +558,11 @@ pub(super) fn handle_context_info_complete(
         // copy", which matches the lifetime story.
         let snapshot = info.data.context;
         agent.apply_full_context_info(snapshot.clone());
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::context_info(
-                snapshot, model,
-            ));
+        agent.scrollback.push_block(
+            crate::scrollback::block::RenderBlock::context_info_with_locale(
+                snapshot, model, locale,
+            ),
+        );
     }
     vec![]
 }
@@ -557,7 +610,9 @@ pub(super) fn dispatch_open_tutorial(app: &mut AppView) -> Vec<Effect> {
         app.tutorial = None;
         return vec![];
     }
-    app.tutorial = Some(crate::views::tutorial::TutorialState::new());
+    app.tutorial = Some(crate::views::tutorial::TutorialState::new_with_locale(
+        app.locale.clone(),
+    ));
     vec![]
 }
 
@@ -572,6 +627,7 @@ pub(super) fn dispatch_show_release_notes(
                 agent.active_modal = Some(crate::views::modal::ActiveModal::DocViewer {
                     title,
                     content,
+                    locale: app.locale.locale(),
                     scroll: 0,
                     window: crate::views::modal_window::ModalWindowState::new(),
                     cached_lines: None,
@@ -584,6 +640,7 @@ pub(super) fn dispatch_show_release_notes(
             app.welcome_doc_viewer = Some(crate::views::modal::ActiveModal::DocViewer {
                 title,
                 content,
+                locale: app.locale.locale(),
                 scroll: 0,
                 window: crate::views::modal_window::ModalWindowState::new(),
                 cached_lines: None,
@@ -594,4 +651,11 @@ pub(super) fn dispatch_show_release_notes(
         _ => {}
     }
     vec![]
+}
+
+pub(super) fn dispatch_show_howto_doc(app: &mut AppView, id: crate::docs::DocId) -> Vec<Effect> {
+    let Some(doc) = crate::docs::localized_doc(id, app.locale.locale()) else {
+        return vec![];
+    };
+    dispatch_show_release_notes(app, doc.title, doc.content.to_owned())
 }

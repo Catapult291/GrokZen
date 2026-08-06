@@ -18,6 +18,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::widgets::StatefulWidget;
+use unicode_width::UnicodeWidthStr;
 
 use super::layout::WrapMode;
 use super::state::ListPaneState;
@@ -58,6 +59,7 @@ pub struct ListPane<'a, T: ListItem> {
     focused: bool,
     /// Visual style for framework-level overlays (selection, match highlights).
     style: ListPaneStyle,
+    locale: Option<&'a crate::locale::LocaleContext>,
 }
 
 impl<'a, T: ListItem> ListPane<'a, T> {
@@ -67,6 +69,7 @@ impl<'a, T: ListItem> ListPane<'a, T> {
             items,
             focused: false,
             style: ListPaneStyle::default(),
+            locale: None,
         }
     }
 
@@ -79,6 +82,11 @@ impl<'a, T: ListItem> ListPane<'a, T> {
     /// Set the visual style for selection/highlight overlays.
     pub fn style(mut self, style: ListPaneStyle) -> Self {
         self.style = style;
+        self
+    }
+
+    pub fn with_locale(mut self, locale: Option<&'a crate::locale::LocaleContext>) -> Self {
+        self.locale = locale;
         self
     }
 }
@@ -140,17 +148,23 @@ impl<T: ListItem> StatefulWidget for ListPane<'_, T> {
         // Rendered AFTER indicators so we can skip the bottom-right indicator
         // to avoid overlapping.
         if state.copy_toast_active() && content_area.height > 0 && content_area.width > 8 {
-            let toast_text = " Copied!";
-            let x = content_area.right().saturating_sub(toast_text.len() as u16);
+            let toast_text = self
+                .locale
+                .map(|locale| locale.named_static_text("list_pane.copied", " Copied!"))
+                .unwrap_or(" Copied!");
+            let toast_width = UnicodeWidthStr::width(toast_text) as u16;
+            let x = content_area.right().saturating_sub(toast_width);
             let y = content_area.bottom().saturating_sub(1);
-            // Write each char, keeping bg (selection highlight) but
-            // overriding fg + modifiers so content styles don't leak.
-            for (i, ch) in toast_text.chars().enumerate() {
-                let cell = &mut buf[(x + i as u16, y)];
-                cell.set_char(ch);
-                cell.fg = self.style.toast_fg;
-                cell.modifier = ratatui::style::Modifier::BOLD;
-            }
+            // No background is specified, so the selected-row background is
+            // preserved while Unicode display width remains correct.
+            buf.set_string_safe(
+                x,
+                y,
+                toast_text,
+                Style::default()
+                    .fg(self.style.toast_fg)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            );
         }
 
         // Render scrollbar with style colors.
@@ -170,7 +184,7 @@ impl<T: ListItem> StatefulWidget for ListPane<'_, T> {
 
         // Render bottom bar (input bar when editing, status when accepted).
         if let Some(bar_area) = bottom_bar_area {
-            render_bottom_bar(bar_area, buf, state, &self.style);
+            render_bottom_bar(bar_area, buf, state, &self.style, self.locale);
         }
     }
 }
@@ -541,6 +555,7 @@ fn render_bottom_bar(
     buf: &mut Buffer,
     state: &mut ListPaneState,
     style: &ListPaneStyle,
+    locale: Option<&crate::locale::LocaleContext>,
 ) {
     use ratatui::style::{Modifier, Style};
     use ratatui::text::{Line, Span};
@@ -555,16 +570,19 @@ fn render_bottom_bar(
     if let Some(mode) = state.input_mode() {
         // Active input bar — left-aligned, editable.
         let label = match mode {
-            super::state::InputBarMode::Search => "search: ",
-            super::state::InputBarMode::Filter => "filter: ",
-            super::state::InputBarMode::GotoLine => "go to: ",
-            super::state::InputBarMode::Comment => "comment: ",
+            super::state::InputBarMode::Search => ("list_pane.input.search", "search: "),
+            super::state::InputBarMode::Filter => ("list_pane.input.filter", "filter: "),
+            super::state::InputBarMode::GotoLine => ("list_pane.input.goto", "go to: "),
+            super::state::InputBarMode::Comment => ("list_pane.input.comment", "comment: "),
         };
+        let label = locale
+            .map(|locale| locale.named_static_text(label.0, label.1))
+            .unwrap_or(label.1);
         let label_style = Style::default()
             .fg(style.input_bar_prompt_fg)
             .bg(style.input_bar_bg);
         let label_line = Line::from(Span::styled(label, label_style));
-        let label_w = label.len() as u16;
+        let label_w = UnicodeWidthStr::width(label) as u16;
         buf.set_line_safe(area.x, area.y, &label_line, label_w);
 
         // Textarea fills the rest. Multi-line for comment mode.
@@ -580,11 +598,14 @@ fn render_bottom_bar(
     } else if let Some(matcher) = state.matcher() {
         // Accepted matcher — right-aligned, dim.
         let mode_word = match matcher.mode {
-            super::state::MatchMode::Filter => "filter",
-            super::state::MatchMode::Search => "search",
+            super::state::MatchMode::Filter => ("list_pane.matcher.filter", "filter"),
+            super::state::MatchMode::Search => ("list_pane.matcher.search", "search"),
         };
+        let mode_word = locale
+            .map(|locale| locale.named_static_text(mode_word.0, mode_word.1))
+            .unwrap_or(mode_word.1);
         let status = format!("[{}: {}]  ", mode_word, matcher.query());
-        let status_w = status.len() as u16;
+        let status_w = UnicodeWidthStr::width(status.as_str()) as u16;
         let dim_style = Style::default()
             .fg(style.input_bar_text_fg)
             .bg(style.input_bar_bg)

@@ -3,6 +3,7 @@ use std::path::Path;
 use ratatui::buffer::Buffer;
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::prompt_images::PastedImage;
 use crate::render::SafeBuf;
@@ -13,13 +14,16 @@ pub(super) fn paint_path_line(
     y: u16,
     width: u16,
     path: &Path,
+    path_label: &str,
     text_fg: Color,
     bg: Color,
 ) {
     let raw = path.display().to_string();
+    let prefix_width = UnicodeWidthStr::width(path_label).saturating_add(1);
     let label = format!(
-        "Path: {}",
-        truncate_path_for_overlay(&raw, width.saturating_sub(6) as usize)
+        "{} {}",
+        path_label,
+        truncate_path_for_overlay(&raw, width.saturating_sub(prefix_width as u16) as usize)
     );
     let clipped = crate::render::line_utils::truncate_str(&label, width as usize);
     buf.set_span_safe(
@@ -67,21 +71,42 @@ pub(super) fn format_bytes(bytes: usize) -> String {
     }
 }
 
-pub(super) fn truncate_path_for_overlay(path: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
+pub(super) fn truncate_path_for_overlay(path: &str, max_width: usize) -> String {
+    if max_width == 0 {
         return String::new();
     }
-    let char_count = path.chars().count();
-    if char_count <= max_chars {
+    if UnicodeWidthStr::width(path) <= max_width {
         return path.to_owned();
     }
-    if max_chars <= 3 {
-        return path.chars().take(max_chars).collect();
+    if max_width <= 3 {
+        return crate::render::line_utils::truncate_str(path, max_width);
     }
-    let keep = max_chars.saturating_sub(3) / 2;
-    let end_keep = max_chars.saturating_sub(3) - keep;
-    let chars: Vec<char> = path.chars().collect();
-    let head: String = chars[..keep].iter().collect();
-    let tail: String = chars[chars.len() - end_keep..].iter().collect();
+    let keep_width = max_width.saturating_sub(3);
+    let head_width = keep_width / 2;
+    let tail_width = keep_width - head_width;
+
+    let mut head = String::new();
+    let mut used = 0usize;
+    for ch in path.chars() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > head_width {
+            break;
+        }
+        used += width;
+        head.push(ch);
+    }
+
+    let mut tail_chars = Vec::new();
+    used = 0;
+    for ch in path.chars().rev() {
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + width > tail_width {
+            break;
+        }
+        used += width;
+        tail_chars.push(ch);
+    }
+    tail_chars.reverse();
+    let tail: String = tail_chars.into_iter().collect();
     format!("{head}...{tail}")
 }

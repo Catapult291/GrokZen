@@ -30,6 +30,7 @@ alacritty_terminal = { workspace = true }
 # Shared mock inference server used to drive content into the pager
 # during scenarios (content.rs wraps it).
 xai-grok-test-support = { workspace = true }
+xai-grok-product = { path = "../xai-grok-product" }
 
 # Async runtime + common helpers shared with the pager.
 tokio = { workspace = true, features = [
@@ -50,6 +51,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 image = { workspace = true, features = ["png"] }
 tempfile = { workspace = true }
+unicode-width = { workspace = true }
 xai-tty-utils = { workspace = true }
 
 clap = { workspace = true, features = ["derive"] }

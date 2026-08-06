@@ -81,10 +81,20 @@ pub(super) fn render_todo_panel(
 /// shown directly above the prompt while there are todos. Capped to `max_rows`
 /// (the last row becomes `… +N more` on overflow). Empty when there are no
 /// todos. Mirrors the full-TUI `TodoPane`'s glyphs/colors.
+#[cfg(test)]
 pub(super) fn todo_panel_lines(
     agent: &xai_grok_pager::app::agent_view::AgentView,
     max_rows: u16,
     force: bool,
+) -> Vec<Line<'static>> {
+    todo_panel_lines_with_locale(agent, max_rows, force, None)
+}
+
+pub(super) fn todo_panel_lines_with_locale(
+    agent: &xai_grok_pager::app::agent_view::AgentView,
+    max_rows: u16,
+    force: bool,
+    locale: Option<&xai_grok_pager::locale::LocaleContext>,
 ) -> Vec<Line<'static>> {
     let todos = agent.todo.todos();
     if todos.is_empty() || max_rows == 0 {
@@ -134,11 +144,18 @@ pub(super) fn todo_panel_lines(
         let remaining = todos.len() - shown;
         // When collapsed, advertise the chord that expands the full list; when
         // already forced open (still overflowing a tiny screen) drop the hint.
-        let label = if force {
-            format!("\u{2026} +{remaining} more")
+        let (key, english) = if force {
+            ("minimal.todo.more", "\u{2026} +{remaining} more")
         } else {
-            format!("\u{2026} +{remaining} more \u{00b7} ctrl+t to expand")
+            (
+                "minimal.todo.more_expand",
+                "\u{2026} +{remaining} more \u{00b7} ctrl+t to expand",
+            )
         };
+        let label = locale
+            .map(|locale| locale.named_text(key, english).into_owned())
+            .unwrap_or_else(|| english.to_string())
+            .replace("{remaining}", &remaining.to_string());
         lines.push(Line::from(Span::styled(label, theme.dim())));
     }
     lines

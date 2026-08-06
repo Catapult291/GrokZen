@@ -127,28 +127,45 @@ pub(super) fn open_doctor_fix_question(
         Question, QuestionOption,
     };
 
+    let close_current = app.locale.named_static_text(
+        "doctor.fix.close_current_question",
+        "Close the current question before applying this fix.",
+    );
+    let question_text = app
+        .locale
+        .named_static_text("doctor.fix.question", "Apply this fix?");
+    let apply = app.locale.named_static_text("doctor.fix.apply", "Apply");
+    let apply_description = app.locale.named_static_text(
+        "doctor.fix.apply_description",
+        "Make the changes shown above.",
+    );
+    let cancel = app.locale.named_static_text("doctor.fix.cancel", "Cancel");
+    let cancel_description = app.locale.named_static_text(
+        "doctor.fix.cancel_description",
+        "Do not change the configuration.",
+    );
     let Some(agent) = app.agents.get_mut(&target.agent_id) else {
         return;
     };
     if agent.question_view.is_some() {
-        agent.scrollback.push_block(RenderBlock::system(
-            "Close the current question before applying this fix.",
-        ));
+        agent
+            .scrollback
+            .push_block(RenderBlock::system(close_current));
         return;
     }
     let preview = crate::diagnostics::format_fix_preview(&plan);
     let question = Question {
-        question: "Apply this fix?".to_owned(),
+        question: question_text.to_owned(),
         options: vec![
             QuestionOption {
-                label: "Apply".to_owned(),
-                description: "Make the changes shown above.".to_owned(),
+                label: apply.to_owned(),
+                description: apply_description.to_owned(),
                 preview: Some(preview),
                 id: None,
             },
             QuestionOption {
-                label: "Cancel".to_owned(),
-                description: "Do not change the configuration.".to_owned(),
+                label: cancel.to_owned(),
+                description: cancel_description.to_owned(),
                 preview: None,
                 id: None,
             },
@@ -435,7 +452,11 @@ pub(super) fn dispatch_send_prompt_inner(
     };
 
     if app.reconnect_pending {
-        app.show_toast("Reconnecting, please wait...");
+        let message = app
+            .locale
+            .text(crate::locale::TextKey::ReconnectWait)
+            .to_owned();
+        app.show_toast(&message);
         return vec![];
     }
 
@@ -936,7 +957,11 @@ pub(super) fn dispatch_send_prompt_inner(
 /// the execute block from the shell IS the visual entry.
 pub(super) fn dispatch_send_bash_command(app: &mut AppView, command: String) -> Vec<Effect> {
     if app.reconnect_pending {
-        app.show_toast("Reconnecting, please wait...");
+        let message = app
+            .locale
+            .text(crate::locale::TextKey::ReconnectWait)
+            .to_owned();
+        app.show_toast(&message);
         return vec![];
     }
 
@@ -1073,6 +1098,7 @@ pub(super) fn handle_prompt_response(
     http_status: Option<u16>,
     prompt_id: Option<String>,
 ) -> Vec<Effect> {
+    let locale = app.locale.clone();
     // A server-authoritative queued prompt may have drained into
     // the running slot while this turn was still finishing (the leader's
     // `running_prompt_id` broadcast can arrive before this
@@ -1324,10 +1350,15 @@ pub(super) fn handle_prompt_response(
         let notification = match (&result, was_cancelling) {
             (Ok(_), false) if !agent.bash_turn => {
                 let body = match elapsed {
-                    Some(d) => {
-                        format!("Turn complete in {}.", crate::util::format_duration(d))
-                    }
-                    None => String::from("Turn complete."),
+                    Some(d) => locale
+                        .named_text(
+                            "notification.turn_complete_duration",
+                            "Turn complete in {duration}.",
+                        )
+                        .replace("{duration}", &crate::util::format_duration(d)),
+                    None => locale
+                        .named_text("notification.turn_complete", "Turn complete.")
+                        .into_owned(),
                 };
                 Some((NotificationEventKind::TurnComplete, body))
             }
@@ -1339,7 +1370,12 @@ pub(super) fn handle_prompt_response(
                     && !reauth_prompted
                     && !context_overflow =>
             {
-                Some((NotificationEventKind::AgentError, format!("Error: {err}")))
+                Some((
+                    NotificationEventKind::AgentError,
+                    locale
+                        .named_text("notification.agent_error", "Error: {error}")
+                        .replace("{error}", err),
+                ))
             }
             _ => None,
         };

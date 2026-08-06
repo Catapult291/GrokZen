@@ -14,6 +14,54 @@ use crate::app::agent_view::AgentView;
 use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
 
+fn peek_static(
+    locale: Option<&crate::locale::LocaleContext>,
+    id: &str,
+    english: &'static str,
+) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn localized_response_type<'a>(
+    locale: Option<&crate::locale::LocaleContext>,
+    value: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    let Some(locale) = locale else {
+        return std::borrow::Cow::Borrowed(value);
+    };
+    let key = match value {
+        "Thinking" => "dashboard.peek.status.thinking",
+        "Response" => "dashboard.peek.status.response",
+        "Compacting" => "dashboard.peek.status.compacting",
+        "Retrying" => "dashboard.peek.status.retrying",
+        "Working" => "dashboard.peek.status.working",
+        "Thought" => "dashboard.peek.status.thought",
+        "Idle" => "dashboard.peek.status.idle",
+        "Awaiting your input" => "dashboard.peek.status.awaiting_input",
+        "Bash" => "dashboard.peek.status.bash",
+        "Read" => "dashboard.peek.status.read",
+        "Edit" => "dashboard.peek.status.edit",
+        "List" => "dashboard.peek.status.list",
+        "Search" => "dashboard.peek.status.search",
+        "Fetch" => "dashboard.peek.status.fetch",
+        "Web search" => "dashboard.peek.status.web_search",
+        "Tool search" => "dashboard.peek.status.tool_search",
+        "Tool" => "dashboard.peek.status.tool",
+        "Memory" => "dashboard.peek.status.memory",
+        "Skill" => "dashboard.peek.status.skill",
+        "Subagent" => "dashboard.peek.status.subagent",
+        "Workflow" => "dashboard.peek.status.workflow",
+        "Task" => "dashboard.peek.status.task",
+        "Btw" => "dashboard.peek.status.btw",
+        "Context" => "dashboard.peek.status.context",
+        "Credit limit" => "dashboard.peek.status.credit_limit",
+        _ => return std::borrow::Cow::Borrowed(value),
+    };
+    locale.named_text(key, value)
+}
+
 /// Args for painting a dense bottom-pinned live tail in the peek middle.
 pub struct PeekLiveTailArgs<'a> {
     pub scrollback: &'a crate::scrollback::state::ScrollbackState,
@@ -312,7 +360,14 @@ pub fn compute_peek_fields(
                     let reject = if qv.no_freeform {
                         None
                     } else {
-                        opts.push(("__other__".to_string(), "Other".to_string()));
+                        opts.push((
+                            "__other__".to_string(),
+                            agent
+                                .scrollback
+                                .locale()
+                                .named_static_text("dashboard.peek.other", "Other")
+                                .to_string(),
+                        ));
                         Some(opts.len() - 1)
                     };
                     // Prefix a `(i/N)` position marker for multi-question
@@ -469,6 +524,7 @@ fn paint_peek_config_badge(
     panel: &PeekPanelState,
     reply: &crate::views::prompt_widget::PromptWidget,
     multiline: bool,
+    locale: Option<&crate::locale::LocaleContext>,
 ) {
     use crate::views::prompt_widget::{PromptFlag, PromptInfo};
 
@@ -483,20 +539,24 @@ fn paint_peek_config_badge(
     // honest badge even when yolo stays armed underneath.
     if panel.plan_mode {
         flags.push(PromptFlag {
-            text: "plan",
+            text: peek_static(locale, "mode.plan.label", "plan"),
             color: Some(theme.accent_plan),
             bold: false,
         });
     } else if panel.auto_approve {
         flags.push(PromptFlag {
-            text: "always-approve",
+            text: locale
+                .map(|locale| {
+                    locale.named_static_text("mode.always_approve.label", "always-approve")
+                })
+                .unwrap_or("always-approve"),
             color: None,
             bold: false,
         });
     } else if panel.auto {
         // Auto (LLM classifier) mode. Blue `accent_system`.
         flags.push(PromptFlag {
-            text: "auto",
+            text: peek_static(locale, "mode.auto.label", "auto"),
             color: Some(theme.accent_system),
             bold: false,
         });
@@ -519,7 +579,15 @@ fn paint_peek_config_badge(
         width: area.width.saturating_sub(2),
         height: 1,
     };
-    reply.render_info_line(buf, info_rect, &info, theme.bg_base, theme, panel.focused);
+    reply.render_info_line(
+        buf,
+        info_rect,
+        &info,
+        theme.bg_base,
+        theme,
+        panel.focused,
+        locale,
+    );
 }
 
 /// Render the peek panel inline in place of the dispatch input.
@@ -571,6 +639,37 @@ pub fn render_peek_panel(
     live_tail: Option<PeekLiveTailArgs<'_>>,
     empty_hint: Option<&str>,
 ) -> PeekRenderResult {
+    render_peek_panel_with_locale(
+        buf,
+        area,
+        panel,
+        reply,
+        theme,
+        voice_listening,
+        voice_interim,
+        multiline,
+        overlay_area,
+        live_tail,
+        empty_hint,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn render_peek_panel_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    panel: &PeekPanelState,
+    reply: &mut crate::views::prompt_widget::PromptWidget,
+    theme: &Theme,
+    voice_listening: bool,
+    voice_interim: Option<&str>,
+    multiline: bool,
+    overlay_area: Option<Rect>,
+    live_tail: Option<PeekLiveTailArgs<'_>>,
+    empty_hint: Option<&str>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> PeekRenderResult {
     use crate::views::prompt_widget::{PromptBg, PromptStyle};
     use ratatui::widgets::{Block, BorderType, Borders, Widget};
     use unicode_width::UnicodeWidthStr;
@@ -599,12 +698,12 @@ pub fn render_peek_panel(
     // Covers every peek mode (summary, QA, approval) since it sits on the
     // border, outside the content rows. Painted after the block so it
     // overwrites the plain `╰──╯` fill.
-    paint_peek_config_badge(buf, area, theme, panel, reply, multiline);
+    paint_peek_config_badge(buf, area, theme, panel, reply, multiline, locale);
 
     // Record badge on the top border while the mic is hot — the peek panel
     // replaces the dispatch box, so without this a capture started with a row
     // selected would show no indicator.
-    super::render::paint_record_badge(buf, area, theme, voice_listening);
+    super::render::paint_record_badge(buf, area, theme, voice_listening, locale);
 
     // Add a 1-cell left + right inset inside the rounded chrome so
     // content doesn't hug the border.
@@ -704,9 +803,17 @@ pub fn render_peek_panel(
                         // unfocused-only placeholder) so the hint stays
                         // visible while the caret sits on the row.
                         let placeholder_text = if panel.is_ask_question() {
-                            "Other (type your own answer)"
+                            peek_static(
+                                locale,
+                                "dashboard.peek.other_placeholder",
+                                "Other (type your own answer)",
+                            )
                         } else {
-                            "No, reject (type to add feedback)"
+                            peek_static(
+                                locale,
+                                "dashboard.peek.reject_placeholder",
+                                "No, reject (type to add feedback)",
+                            )
                         };
                         let placeholder = truncate_str(placeholder_text, avail as usize);
                         buf.set_string(
@@ -728,7 +835,15 @@ pub fn render_peek_panel(
                             image_preview: false,
                             ..PromptStyle::default()
                         };
-                        let res = reply.draw(buf, slot, overlay_area, &widget_style, None, None);
+                        let res = reply.draw_with_locale(
+                            buf,
+                            slot,
+                            overlay_area,
+                            &widget_style,
+                            None,
+                            None,
+                            locale,
+                        );
                         if selected && panel.focused {
                             caret = res.cursor_pos;
                         }
@@ -777,7 +892,8 @@ pub fn render_peek_panel(
         } else {
             theme.gray_dim
         };
-        let label_trunc = truncate_str(&panel.response_type, label_avail);
+        let response_type = localized_response_type(locale, &panel.response_type);
+        let label_trunc = truncate_str(response_type.as_ref(), label_avail);
         buf.set_string(
             inner.x,
             inner.y,
@@ -808,7 +924,11 @@ pub fn render_peek_panel(
         if let Some(PeekLiveTailArgs { scrollback }) = live_tail {
             if middle_h > 0 {
                 if scrollback.is_empty() {
-                    if let Some(hint) = empty_hint.or(Some("No activity yet")) {
+                    if let Some(hint) = empty_hint.or(Some(peek_static(
+                        locale,
+                        "dashboard.peek.no_activity_yet",
+                        "No activity yet",
+                    ))) {
                         let trunc = truncate_str(hint, inner.width as usize);
                         buf.set_string(
                             inner.x,
@@ -864,7 +984,11 @@ pub fn render_peek_panel(
         vpad_top: 0,
         chrome: false,
         bg: PromptBg::Canvas(theme.bg_base),
-        placeholder_override: Some("reply\u{2026}"),
+        placeholder_override: Some(peek_static(
+            locale,
+            "dashboard.peek.reply_placeholder",
+            "reply\u{2026}",
+        )),
         image_preview: false,
         ..PromptStyle::default()
     };
@@ -876,13 +1000,14 @@ pub fn render_peek_panel(
         },
     );
     let caret = reply
-        .draw(
+        .draw_with_locale(
             buf,
             text_area,
             overlay_area,
             &widget_style,
             None,
             voice_overlay,
+            locale,
         )
         .cursor_pos;
     // The clickable reply rect spans all reply rows and includes the

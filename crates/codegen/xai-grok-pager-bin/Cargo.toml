@@ -4,15 +4,15 @@ version = "0.2.119"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
-default-run = "xai-grok-pager"
+default-run = "grok-zh"
 
 # Composition-root binary for the Grok Build TUI. The artifact is still named
-# `xai-grok-pager`. This package exists so the binary can link both the pager
+# `grok-zh`. This package exists so the binary can link both the pager
 # library and the optional `xai-grok-pager-minimal` render mode: `minimal`
 # depends on `xai-grok-pager`, so the pager library cannot depend back on it
 # (cargo cycle). The binary installs the minimal-mode IoC hooks at startup.
 [[bin]]
-name = "xai-grok-pager"
+name = "grok-zh"
 path = "src/main.rs"
 
 [dependencies]
@@ -20,10 +20,11 @@ path = "src/main.rs"
 xai-grok-pager = { path = "../xai-grok-pager" }
 # Optional scrollback-native render mode, wired in via the fn-pointer seam.
 xai-grok-pager-minimal = { path = "../xai-grok-pager-minimal" }
+xai-grok-product = { path = "../xai-grok-product" }
 
 # Agent runtime + leader/stdio/headless entry points.
 xai-grok-shell = { workspace = true }
-xai-grok-update = { path = "../xai-grok-update" }
+xai-grok-update = { path = "../xai-grok-update", features = ["community-build"] }
 xai-grok-version = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-grok-workspace = { workspace = true }

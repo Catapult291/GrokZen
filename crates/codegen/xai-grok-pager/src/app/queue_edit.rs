@@ -437,7 +437,15 @@ impl AgentView {
                 // limitation, dropped with an accurate toast.
                 if !self.prompt.images.is_empty() {
                     self.prompt.images.clear();
-                    self.show_toast("Images can't be attached when editing a shared queued prompt");
+                    let message = self
+                        .scrollback
+                        .locale()
+                        .named_static_text(
+                            "prompt.image.shared_queue_unsupported",
+                            "Images can't be attached when editing a shared queued prompt",
+                        )
+                        .to_string();
+                    self.show_toast(&message);
                 }
                 // new_text carries the edit — without it the agent would
                 // interject the original server-side text. Release is safe

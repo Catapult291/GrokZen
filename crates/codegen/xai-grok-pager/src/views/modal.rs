@@ -9,7 +9,7 @@
 //!
 //! `ModalConfirmation<R>` is a small dialog that blocks all input until
 //! the user presses one of the listed keys.
-use crate::docs::{DocEntry, default_howto_entries};
+use crate::docs::{DocEntry, default_howto_entries_for};
 use crate::theme::Theme;
 use crate::views::modal_window::ModalWindowState;
 use ratatui::buffer::Buffer;
@@ -141,12 +141,19 @@ impl CancelTurnChoice {
         CancelTurnChoice::AlwaysContinue,
     ];
     pub fn label(&self) -> &'static str {
-        match self {
-            Self::StopRunning => "Stop running",
-            Self::ContinueToRun => "Continue to run",
-            Self::AlwaysStop => "Always stop",
-            Self::AlwaysContinue => "Always continue",
-        }
+        self.label_with_locale(None)
+    }
+
+    pub fn label_with_locale(&self, locale: Option<&crate::locale::LocaleContext>) -> &'static str {
+        let (id, english) = match self {
+            Self::StopRunning => ("cancel_turn.choice.stop", "Stop running"),
+            Self::ContinueToRun => ("cancel_turn.choice.continue", "Continue to run"),
+            Self::AlwaysStop => ("cancel_turn.choice.always_stop", "Always stop"),
+            Self::AlwaysContinue => ("cancel_turn.choice.always_continue", "Always continue"),
+        };
+        locale
+            .map(|locale| locale.named_static_text(id, english))
+            .unwrap_or(english)
     }
 }
 pub struct CancelTurnViewState {
@@ -159,11 +166,21 @@ pub struct CancelTurnViewState {
 /// pressing Esc in the doc picker restores that palette instead of
 /// closing the modal outright.
 pub fn howto_list_modal(previous_palette: Option<PaletteSnapshot>) -> ActiveModal {
+    let locale = crate::locale::UiLocale::parse(xai_grok_product::DEFAULT_UI_LOCALE)
+        .unwrap_or(crate::locale::UiLocale::EnUs);
+    howto_list_modal_for(previous_palette, locale)
+}
+
+pub fn howto_list_modal_for(
+    previous_palette: Option<PaletteSnapshot>,
+    locale: crate::locale::UiLocale,
+) -> ActiveModal {
     ActiveModal::DocPicker {
-        entries: default_howto_entries(),
+        entries: default_howto_entries_for(locale),
         state: crate::views::picker::PickerState::default(),
         previous_palette,
         window: ModalWindowState::new(),
+        locale,
     }
 }
 /// The currently active modal dialog, if any.
@@ -236,6 +253,7 @@ pub enum ActiveModal {
     /// How-to documentation list modal (wider picker style).
     DocPicker {
         entries: Vec<DocEntry>,
+        locale: crate::locale::UiLocale,
         state: crate::views::picker::PickerState,
         /// Previous command palette state (if opened from palette). Restored on Esc.
         previous_palette: Option<PaletteSnapshot>,
@@ -246,6 +264,7 @@ pub enum ActiveModal {
     DocViewer {
         title: String,
         content: String,
+        locale: crate::locale::UiLocale,
         /// Vertical scroll offset in lines.
         scroll: u16,
         /// Shared modal window chrome state.
@@ -583,12 +602,71 @@ pub(crate) fn default_palette_entries(
     });
     entries
 }
+
+/// Localize command-palette labels for painting only. Commands and shortcut
+/// text remain canonical so dispatch and draft-preserving slash insertion are
+/// unaffected.
+pub(crate) fn localize_palette_entries_for_display(
+    entries: &mut [PaletteEntry],
+    locale: &crate::locale::LocaleContext,
+) {
+    for entry in entries {
+        let id = match entry.label.as_str() {
+            "Session" => "palette.section.session",
+            "New Session" => "palette.new_session",
+            "New Session in Worktree" => "palette.new_session_worktree",
+            "Agent Dashboard" => "palette.agent_dashboard",
+            "Back to Home" => "palette.back_home",
+            "Delete This Session" => "palette.delete_session",
+            "Resume Session" => "palette.resume_session",
+            "Share Session" => "palette.share_session",
+            "Rename Session" => "palette.rename_session",
+            "Session Info" => "palette.session_info",
+            "Send Feedback" => "palette.send_feedback",
+            "Context" => "palette.section.context",
+            "Compact History" => "palette.compact_history",
+            "Context Usage" => "palette.context_usage",
+            "View Plan" => "palette.view_plan",
+            "Memory" => "palette.memory",
+            "Model & Input" => "palette.section.model_input",
+            "Switch Model" => "palette.switch_model",
+            "Always Approve Mode" => "palette.always_approve",
+            "Multiline Input" => "palette.multiline",
+            "Edit Prompt in External Editor" => "palette.edit_external",
+            "Tools" => "palette.section.tools",
+            "Hooks" => "palette.hooks",
+            "Plugins" => "palette.plugins",
+            "Marketplace" => "palette.marketplace",
+            "Skills" => "palette.skills",
+            "MCP Servers" => "palette.mcp_servers",
+            "Manage Agents" => "palette.manage_agents",
+            "Other" => "palette.section.other",
+            "Switch Theme" => "palette.switch_theme",
+            "Settings" => "palette.settings",
+            "Keyboard Shortcuts" => "palette.keyboard_shortcuts",
+            "How-to Guides" => "palette.howto",
+            "Tutorial" => "palette.tutorial",
+            "Quit" => "palette.quit",
+            _ => continue,
+        };
+        entry.label = locale.named_text(id, &entry.label).into_owned();
+    }
+}
 #[allow(clippy::collapsible_if)]
 /// Filter palette entries for search, preserving section headers when any item in the section matches.
 pub(crate) fn filter_palette_entries(
     query: &str,
     sharing_enabled: bool,
     slash: &crate::slash::SlashController,
+) -> Vec<PaletteEntry> {
+    filter_palette_entries_with_locale(query, sharing_enabled, slash, None)
+}
+
+pub(crate) fn filter_palette_entries_with_locale(
+    query: &str,
+    sharing_enabled: bool,
+    slash: &crate::slash::SlashController,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> Vec<PaletteEntry> {
     let all = default_palette_entries(sharing_enabled, slash);
     let query_lower = query.to_lowercase();
@@ -608,7 +686,12 @@ pub(crate) fn filter_palette_entries(
             pending_header = Some(entry);
             section_has_match = false;
         } else {
+            let mut localized = entry.clone();
+            if let Some(locale) = locale {
+                localize_palette_entries_for_display(std::slice::from_mut(&mut localized), locale);
+            }
             let matches = entry.label.to_lowercase().contains(&query_lower)
+                || localized.label.to_lowercase().contains(&query_lower)
                 || entry.shortcut.to_lowercase().contains(&query_lower);
             if matches {
                 if let Some(h) = pending_header.take() {
@@ -684,6 +767,13 @@ impl ActiveModal {
 /// Build the reset-confirmation prompt, e.g. "Reset 'Compact mode' to default (off)?".
 /// Returns `None` if the modal isn't `ResetSettingsConfirm` or the key is unknown.
 pub fn reset_confirm_prompt(modal: &ActiveModal) -> Option<String> {
+    reset_confirm_prompt_with_locale(modal, None)
+}
+
+pub fn reset_confirm_prompt_with_locale(
+    modal: &ActiveModal,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<String> {
     let ActiveModal::ResetSettingsConfirm {
         key,
         settings_state,
@@ -694,14 +784,33 @@ pub fn reset_confirm_prompt(modal: &ActiveModal) -> Option<String> {
     };
     let meta = settings_state.registry.find(key)?;
     let default = crate::settings::default_value_for(meta);
-    Some(format!(
-        "Reset '{}' to default ({})?",
-        meta.label,
-        format_default_for_prompt(&meta.kind, &default),
-    ))
+    let label = locale
+        .map(|locale| locale.setting_label(meta.key, meta.label))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed(meta.label));
+    let default = format_default_for_prompt_with_locale(meta, &default, locale);
+    let template = locale
+        .map(|locale| {
+            locale.named_text(
+                "settings.ui.reset_prompt",
+                "Reset '{label}' to default ({default})?",
+            )
+        })
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Reset '{label}' to default ({default})?"));
+    Some(
+        template
+            .replace("{label}", label.as_ref())
+            .replace("{default}", &default),
+    )
 }
 /// Abbreviated title breadcrumb for the reset-confirm dialog, e.g. "Reset 'Compact mode'".
 pub fn reset_confirm_breadcrumb(modal: &ActiveModal) -> Option<String> {
+    reset_confirm_breadcrumb_with_locale(modal, None)
+}
+
+pub fn reset_confirm_breadcrumb_with_locale(
+    modal: &ActiveModal,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<String> {
     let ActiveModal::ResetSettingsConfirm {
         key,
         settings_state,
@@ -711,7 +820,13 @@ pub fn reset_confirm_breadcrumb(modal: &ActiveModal) -> Option<String> {
         return None;
     };
     let meta = settings_state.registry.find(key)?;
-    Some(format!("Reset '{}'", meta.label))
+    let label = locale
+        .map(|locale| locale.setting_label(meta.key, meta.label))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed(meta.label));
+    let template = locale
+        .map(|locale| locale.named_text("settings.ui.reset_breadcrumb", "Reset '{label}'"))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Reset '{label}'"));
+    Some(template.replace("{label}", label.as_ref()))
 }
 /// Format a `SettingValue` for the prompt's `(<default>)` display.
 fn format_default_for_prompt(
@@ -727,6 +842,47 @@ fn format_default_for_prompt(
                 for c in *choices {
                     if c.canonical == *canonical {
                         return c.display.to_owned();
+                    }
+                }
+            }
+            (*canonical).to_owned()
+        }
+        SettingValue::String(s) => format!("\"{s}\""),
+        SettingValue::Int(i) => i.to_string(),
+    }
+}
+
+fn format_default_for_prompt_with_locale(
+    meta: &crate::settings::SettingMeta,
+    value: &crate::settings::SettingValue,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
+    if locale.is_none() {
+        return format_default_for_prompt(&meta.kind, value);
+    }
+    use crate::settings::{SettingKind, SettingValue};
+    match value {
+        SettingValue::Bool(true) => locale
+            .map(|locale| locale.named_text("settings.ui.value.on", "on").into_owned())
+            .unwrap_or_else(|| "on".to_owned()),
+        SettingValue::Bool(false) => locale
+            .map(|locale| {
+                locale
+                    .named_text("settings.ui.value.off", "off")
+                    .into_owned()
+            })
+            .unwrap_or_else(|| "off".to_owned()),
+        SettingValue::Enum(canonical) => {
+            if let SettingKind::Enum { choices, .. } = &meta.kind {
+                for c in *choices {
+                    if c.canonical == *canonical {
+                        return locale
+                            .map(|locale| {
+                                locale
+                                    .setting_choice_label(meta.key, canonical, c.display)
+                                    .into_owned()
+                            })
+                            .unwrap_or_else(|| c.display.to_owned());
                     }
                 }
             }
@@ -866,6 +1022,17 @@ pub fn render_cancel_turn_panel(
     focused: bool,
     button_rects: &mut Vec<Rect>,
 ) {
+    render_cancel_turn_panel_with_locale(buf, area, state, focused, button_rects, None)
+}
+
+pub fn render_cancel_turn_panel_with_locale(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &CancelTurnViewState,
+    focused: bool,
+    button_rects: &mut Vec<Rect>,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
     button_rects.clear();
     let theme = Theme::current();
     buf.set_style(area, Style::default().bg(theme.bg_light));
@@ -886,17 +1053,28 @@ pub fn render_cancel_turn_panel(
         content_x,
         y,
         &Line::from(Span::styled(
-            "Subagents are still running. Stop them?",
+            locale
+                .map(|locale| {
+                    locale.named_static_text(
+                        "cancel_turn.title",
+                        "Subagents are still running. Stop them?",
+                    )
+                })
+                .unwrap_or("Subagents are still running. Stop them?"),
             title_style,
         )),
         content_w as u16,
     );
     y += 1;
-    let count_text = if state.running_count == 1 {
-        "1 subagent running".to_string()
+    let (count_id, count_english) = if state.running_count == 1 {
+        ("cancel_turn.count.one", "{count} subagent running")
     } else {
-        format!("{} subagents running", state.running_count)
+        ("cancel_turn.count.other", "{count} subagents running")
     };
+    let count_text = locale
+        .map(|locale| locale.named_text(count_id, count_english).into_owned())
+        .unwrap_or_else(|| count_english.to_string())
+        .replace("{count}", &state.running_count.to_string());
     buf.set_line(
         content_x,
         y,
@@ -945,7 +1123,7 @@ pub fn render_cancel_turn_panel(
         let line = Line::from(vec![
             Span::styled(format!("{num} "), num_style),
             Span::styled(format!("({marker}) "), marker_style),
-            Span::styled(choice.label(), label_style),
+            Span::styled(choice.label_with_locale(locale), label_style),
         ]);
         buf.set_line(content_x, y, &line, content_w as u16);
         y += 1;
@@ -1015,30 +1193,61 @@ pub fn apply_doc_mouse_scroll(kind: crossterm::event::MouseEventKind, scroll: &m
 }
 const DOCS_USER_GUIDE_REL: &str = "docs/user-guide";
 /// Prefer keeping the on-disk path when width is tight.
-fn fit_docs_ask_grok_tip(docs_path: &str, width: usize) -> String {
+fn fit_docs_ask_grok_tip(
+    docs_path: &str,
+    width: usize,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     use crate::render::line_utils::truncate_str;
     if width == 0 {
         return String::new();
     }
-    let long =
-        format!("Tip · Ask Grok about the docs ({docs_path}) — e.g. \"how do I set up MCP?\"");
+    let long = locale
+        .map(|locale| {
+            locale
+                .named_text(
+                    "docs.tip.long",
+                    "Tip · Ask Grok about the docs ({path}) — e.g. \"how do I set up MCP?\"",
+                )
+                .replace("{path}", docs_path)
+        })
+        .unwrap_or_else(|| {
+            format!("Tip · Ask Grok about the docs ({docs_path}) — e.g. \"how do I set up MCP?\"")
+        });
     if long.width() <= width {
         return long;
     }
-    let short = format!("Tip · Ask Grok about the docs · {docs_path}");
+    let short = locale
+        .map(|locale| {
+            locale
+                .named_text("docs.tip.short", "Tip · Ask Grok about the docs · {path}")
+                .replace("{path}", docs_path)
+        })
+        .unwrap_or_else(|| format!("Tip · Ask Grok about the docs · {docs_path}"));
     if short.width() <= width {
         return short;
     }
-    let path_only = format!("Tip · {docs_path}");
+    let path_only = locale
+        .map(|locale| {
+            locale
+                .named_text("docs.tip.path", "Tip · {path}")
+                .replace("{path}", docs_path)
+        })
+        .unwrap_or_else(|| format!("Tip · {docs_path}"));
     if path_only.width() <= width {
         return path_only;
     }
-    const PREFIX: &str = "Tip · ";
-    let budget = width.saturating_sub(PREFIX.width());
+    let prefix = locale
+        .map(|locale| locale.named_text("docs.tip.prefix", "Tip · "))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Tip · "));
+    let budget = width.saturating_sub(prefix.width());
     if budget == 0 {
-        return truncate_str("Tip", width);
+        let fallback = locale
+            .map(|locale| locale.named_text("docs.tip.word", "Tip"))
+            .unwrap_or_else(|| std::borrow::Cow::Borrowed("Tip"));
+        return truncate_str(&fallback, width);
     }
-    format!("{PREFIX}{}", truncate_str(docs_path, budget))
+    format!("{prefix}{}", truncate_str(docs_path, budget))
 }
 pub fn render_doc_picker_overlay(
     buf: &mut ratatui::buffer::Buffer,
@@ -1048,6 +1257,7 @@ pub fn render_doc_picker_overlay(
     state: &mut super::picker::PickerState,
     compact: bool,
     theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
 ) {
     use super::modal_window::{
         self as mw, ModalSizing, ModalWindowConfig, Shortcut, footer_lines_with_tip_gap,
@@ -1067,24 +1277,33 @@ pub fn render_doc_picker_overlay(
             .collect()
     };
     let non_sel = vec![false; filtered.len()];
+    let nav = locale
+        .map(|locale| locale.named_text("docs.shortcut.navigate", "\u{2191}/\u{2193} nav"))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("\u{2191}/\u{2193} nav"));
+    let select = locale
+        .map(|locale| locale.named_text("docs.shortcut.select", "Enter select"))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Enter select"));
+    let close = locale
+        .map(|locale| locale.named_text("docs.shortcut.close", "Esc close"))
+        .unwrap_or_else(|| std::borrow::Cow::Borrowed("Esc close"));
     let mut picker_shortcuts: Vec<Shortcut<'_>> = vec![
         Shortcut {
-            label: "\u{2191}/\u{2193} nav",
+            label: &nav,
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Enter select",
+            label: &select,
             clickable: false,
             id: 0,
         },
         Shortcut {
-            label: "Esc close",
+            label: &close,
             clickable: false,
             id: 0,
         },
     ];
-    mw::push_vim_nav_search_hint(&mut picker_shortcuts, state.search_active);
+    mw::push_vim_nav_search_hint_with_locale(&mut picker_shortcuts, state.search_active, locale);
     let base_sizing = ModalSizing {
         width_pct: 0.70,
         max_width: 120,
@@ -1100,7 +1319,9 @@ pub fn render_doc_picker_overlay(
         ..base_sizing
     };
     let modal_config = ModalWindowConfig {
-        title: "How-to Guides",
+        title: locale
+            .map(|locale| locale.named_static_text("docs.title", "How-to Guides"))
+            .unwrap_or("How-to Guides"),
         tabs: None,
         shortcuts: &picker_shortcuts,
         sizing,
@@ -1112,7 +1333,7 @@ pub fn render_doc_picker_overlay(
     let (picker_area, tip_area) = split_content_for_tip_footer(mca.content);
     if let Some(tip_rect) = tip_area {
         let docs_path = crate::util::display_user_grok_path(DOCS_USER_GUIDE_REL);
-        let tip_line = fit_docs_ask_grok_tip(&docs_path, tip_rect.width as usize);
+        let tip_line = fit_docs_ask_grok_tip(&docs_path, tip_rect.width as usize, locale);
         render_centered_tip_footer(buf, tip_rect, theme, &tip_line);
     }
     const NARROW_THRESHOLD: u16 = 70;
@@ -1150,7 +1371,7 @@ pub fn render_doc_picker_overlay(
             })
         })
         .collect();
-    picker::render_picker_in_modal(
+    picker::render_picker_in_modal_with_locale(
         buf,
         picker_area,
         mca.inner_x,
@@ -1160,6 +1381,7 @@ pub fn render_doc_picker_overlay(
         &picker_entries,
         &non_sel,
         false,
+        locale,
     );
 }
 /// Render a DocViewer overlay: modal window chrome + cached markdown content.
@@ -1174,15 +1396,22 @@ pub fn render_doc_viewer_overlay(
     cached_lines: &mut Option<(u16, Vec<ratatui::text::Line<'static>>)>,
     compact: bool,
     theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
 ) {
+    let scroll_label = locale
+        .map(|locale| locale.named_static_text("docs.shortcut.scroll", "\u{2191}/\u{2193} scroll"))
+        .unwrap_or("\u{2191}/\u{2193} scroll");
+    let back_label = locale
+        .map(|locale| locale.named_static_text("docs.shortcut.back", "Esc back"))
+        .unwrap_or("Esc back");
     let doc_shortcuts = [
         super::modal_window::Shortcut {
-            label: "\u{2191}/\u{2193} scroll",
+            label: scroll_label,
             clickable: false,
             id: 0,
         },
         super::modal_window::Shortcut {
-            label: "Esc back",
+            label: back_label,
             clickable: false,
             id: 0,
         },
@@ -1340,6 +1569,42 @@ mod palette_sharing_tests {
             "palette entry must use the 'Agent Dashboard' label"
         );
     }
+
+    #[test]
+    fn localization_regression_palette_changes_labels_only() {
+        let mut entries = default_palette_entries(true, &slash(crate::app::ScreenMode::Fullscreen));
+        let before_shortcuts: Vec<String> =
+            entries.iter().map(|entry| entry.shortcut.clone()).collect();
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        localize_palette_entries_for_display(&mut entries, &locale);
+        let labels: Vec<&str> = entries.iter().map(|entry| entry.label.as_str()).collect();
+        for expected in [
+            "会话",
+            "新建会话",
+            "智能体仪表盘",
+            "上下文用量",
+            "模型与输入",
+            "MCP 服务器",
+            "键盘快捷键",
+            "退出",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "missing {expected:?}: {labels:?}"
+            );
+        }
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.shortcut.clone())
+                .collect::<Vec<_>>(),
+            before_shortcuts,
+            "canonical shortcut and slash text must not be localized"
+        );
+    }
     fn slash_rows(mode: crate::app::ScreenMode) -> Vec<String> {
         default_palette_entries(true, &slash(mode))
             .into_iter()
@@ -1460,10 +1725,7 @@ mod palette_sharing_tests {
         };
         assert!(!state.search_active, "how-to picker must open list-focused");
         assert_eq!(state.selected, 0);
-        assert_eq!(
-            entries.first().map(|e| e.title.as_str()),
-            Some("Getting Started")
-        );
+        assert_eq!(entries.first().map(|e| e.title.as_str()), Some("入门指南"));
     }
 }
 #[cfg(test)]
@@ -1482,11 +1744,14 @@ mod doc_picker_tip_tests {
             format!("Tip · Ask Grok about the docs ({path}) — e.g. \"how do I set up MCP?\"");
         let short = format!("Tip · Ask Grok about the docs · {path}");
         let path_only = format!("Tip · {path}");
-        assert_eq!(fit_docs_ask_grok_tip(&path, long.width()), long);
-        assert_eq!(fit_docs_ask_grok_tip(&path, short.width()), short);
-        assert_eq!(fit_docs_ask_grok_tip(&path, path_only.width()), path_only);
+        assert_eq!(fit_docs_ask_grok_tip(&path, long.width(), None), long);
+        assert_eq!(fit_docs_ask_grok_tip(&path, short.width(), None), short);
+        assert_eq!(
+            fit_docs_ask_grok_tip(&path, path_only.width(), None),
+            path_only
+        );
         for w in [5usize, 12, 20, 30] {
-            let line = fit_docs_ask_grok_tip(&path, w);
+            let line = fit_docs_ask_grok_tip(&path, w, None);
             assert!(line.width() <= w, "overflow at {w}: {line:?}");
         }
     }
@@ -1510,7 +1775,7 @@ mod doc_picker_tip_tests {
         };
         let theme = crate::theme::Theme::current();
         let mut buf = Buffer::empty(area);
-        render_doc_picker_overlay(&mut buf, area, window, entries, state, false, &theme);
+        render_doc_picker_overlay(&mut buf, area, window, entries, state, false, &theme, None);
         let mut all = String::new();
         for y in 0..area.height {
             for x in 0..area.width {

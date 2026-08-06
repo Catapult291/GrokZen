@@ -1,10 +1,10 @@
-//! Built-in files extracted to `~/.grok/` on startup.
+//! Built-in files extracted to `~/.grok-zh/` on startup.
 
-const BUILTIN_FILES: &[(&str, &str)] = &[("README.md", include_str!("../README.md"))];
+const BUILTIN_FILES: &[(&str, &str)] = &[("README.md", include_str!("../README.zh-CN.md"))];
 
-/// Extract built-in metadata files to `~/.grok/` on startup.
+/// Extract built-in metadata files to `~/.grok-zh/` on startup.
 ///
-/// User skills under `~/.grok/skills/` are never managed here. Platform skills
+/// User skills under `~/.grok-zh/skills/` are never managed here. Platform skills
 /// are delivered separately through the bundled skill cache.
 pub fn extract_builtin_files(grok_home: &std::path::Path) {
     let version = xai_grok_version::VERSION;
@@ -37,6 +37,13 @@ pub fn extract_builtin_files(grok_home: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_readme_is_the_community_chinese_guide() {
+        assert_eq!(BUILTIN_FILES[0].0, "README.md");
+        assert!(BUILTIN_FILES[0].1.contains("grok-zh"));
+        assert!(BUILTIN_FILES[0].1.contains("简体中文社区版"));
+    }
 
     #[test]
     fn version_bump_reextracts_metadata_without_touching_skills() {

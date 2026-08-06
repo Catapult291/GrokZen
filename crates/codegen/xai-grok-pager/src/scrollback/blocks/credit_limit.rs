@@ -51,7 +51,7 @@ impl CreditLimitBlock {
 }
 
 impl BlockContent for CreditLimitBlock {
-    fn output(&self, _ctx: &BlockContext) -> BlockOutput {
+    fn output(&self, ctx: &BlockContext) -> BlockOutput {
         let theme = Theme::current();
 
         // Heading in bold warning color (amber/yellow).
@@ -63,15 +63,18 @@ impl BlockContent for CreditLimitBlock {
         // Body copy — contextual message based on billing mode.
         let muted = theme.muted();
         let body = match self.action {
-            CreditLimitCardAction::IncreasePaygLimit => {
-                "You can continue by increasing your spending limit."
-            }
-            CreditLimitCardAction::EnablePayg => {
-                "You can continue by enabling pay-as-you-go usage."
-            }
-            CreditLimitCardAction::PurchaseCredits => {
-                "You can continue by purchasing more credits."
-            }
+            CreditLimitCardAction::IncreasePaygLimit => ctx.locale.named_static_text(
+                "scrollback.credit_limit.increase_payg",
+                "You can continue by increasing your spending limit.",
+            ),
+            CreditLimitCardAction::EnablePayg => ctx.locale.named_static_text(
+                "scrollback.credit_limit.enable_payg",
+                "You can continue by enabling pay-as-you-go usage.",
+            ),
+            CreditLimitCardAction::PurchaseCredits => ctx.locale.named_static_text(
+                "scrollback.credit_limit.purchase_credits",
+                "You can continue by purchasing more credits.",
+            ),
         };
         let body_line = Line::from(Span::styled(body.to_string(), muted));
 
@@ -134,6 +137,7 @@ mod tests {
             appearance: AppearanceConfig::default(),
             is_selected: false,
             cwd: None,
+            locale: Default::default(),
         }
     }
 

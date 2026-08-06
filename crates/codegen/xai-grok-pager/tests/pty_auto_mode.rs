@@ -68,7 +68,7 @@ fn prepare_sandbox(sandbox: &mut TestSandbox, gate_on: bool) -> Vec<(String, Str
             );
         }
     } else {
-        eprintln!("pty_auto_mode: no ~/.grok/auth.json — may hit device login");
+        eprintln!("pty_auto_mode: no ~/.grok-zh/auth.json — may hit device login");
     }
 
     let home_s = home.display().to_string();

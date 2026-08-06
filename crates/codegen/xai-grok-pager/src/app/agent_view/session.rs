@@ -416,6 +416,10 @@ impl AgentView {
     /// recoverable until [`finish_session_reload`](Self::finish_session_reload)
     /// decides the outcome.
     pub(crate) fn begin_session_reload(&mut self, generation: u64) {
+        self.begin_session_reload_with_message(generation, "Reloading session after reconnect...");
+    }
+
+    pub(crate) fn begin_session_reload_with_message(&mut self, generation: u64, message: &str) {
         self.dismiss_jump_picker();
         if let Some(prev) = self.session_reload.take() {
             tracing::warn!(
@@ -457,9 +461,10 @@ impl AgentView {
             saw_replay: false,
             saw_todo_update: false,
         });
-        self.loading_placeholder_id = Some(self.scrollback.push_block(
-            crate::scrollback::block::RenderBlock::system("Reloading session after reconnect..."),
-        ));
+        self.loading_placeholder_id = Some(
+            self.scrollback
+                .push_block(crate::scrollback::block::RenderBlock::system(message)),
+        );
         self.scrollback.begin_batch();
         self.begin_replay_window();
     }

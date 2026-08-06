@@ -16,6 +16,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::prompt_images::PastedImage;
 use crate::terminal::image as terminal_image;
@@ -40,6 +41,33 @@ struct ImageOverlayRender {
     escapes: Option<overlay::Escapes>,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct ImageOverlayLabels {
+    pub image: &'static str,
+    pub format: &'static str,
+    pub dimensions: &'static str,
+    pub preview_unavailable: &'static str,
+    pub preview_pending: &'static str,
+    pub size: &'static str,
+    pub path: &'static str,
+    pub loading: &'static str,
+}
+
+impl Default for ImageOverlayLabels {
+    fn default() -> Self {
+        Self {
+            image: "Image",
+            format: "Format:",
+            dimensions: "Dimensions:",
+            preview_unavailable: "Preview unavailable",
+            preview_pending: "Preview pending",
+            size: "Size:",
+            path: "Path:",
+            loading: "Loading...",
+        }
+    }
+}
+
 /// Render an image preview overlay and return any post-flush pixel escapes.
 pub fn render_image_overlay(
     buf: &mut Buffer,
@@ -53,6 +81,20 @@ pub fn render_image_overlay(
         .and_then(|render| render.escapes)
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn render_image_overlay_with_labels(
+    buf: &mut Buffer,
+    area: Rect,
+    image: &PastedImage,
+    bg: Color,
+    text_fg: Color,
+    border_fg: Color,
+    labels: &ImageOverlayLabels,
+) -> Option<overlay::Escapes> {
+    render_image_overlay_inner_with_labels(buf, area, image, bg, text_fg, border_fg, labels)
+        .and_then(|render| render.escapes)
+}
+
 fn render_image_overlay_inner(
     buf: &mut Buffer,
     area: Rect,
@@ -60,6 +102,27 @@ fn render_image_overlay_inner(
     bg: Color,
     text_fg: Color,
     border_fg: Color,
+) -> Option<ImageOverlayRender> {
+    render_image_overlay_inner_with_labels(
+        buf,
+        area,
+        image,
+        bg,
+        text_fg,
+        border_fg,
+        &ImageOverlayLabels::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_image_overlay_inner_with_labels(
+    buf: &mut Buffer,
+    area: Rect,
+    image: &PastedImage,
+    bg: Color,
+    text_fg: Color,
+    border_fg: Color,
+    labels: &ImageOverlayLabels,
 ) -> Option<ImageOverlayRender> {
     if area.width < MIN_BOX_WIDTH {
         return None;
@@ -97,18 +160,21 @@ fn render_image_overlay_inner(
     let inner = block.inner(overlay_rect);
     block.render(overlay_rect, buf);
 
-    let title_text = format!(" Image #{} ", image.display_number);
+    let title_text = format!(" {} #{} ", labels.image, image.display_number);
     let meta = build_meta_line(image, plan.display_path);
-    let full_title = if meta.len() + title_text.len() + 6 < overlay_rect.width as usize {
-        format!("{}\u{2500} {} ", title_text, meta)
-    } else {
-        title_text.clone()
-    };
+    let full_title =
+        if UnicodeWidthStr::width(meta.as_str()) + UnicodeWidthStr::width(title_text.as_str()) + 6
+            < overlay_rect.width as usize
+        {
+            format!("{}\u{2500} {} ", title_text, meta)
+        } else {
+            title_text.clone()
+        };
     let title_style = Style::default()
         .fg(text_fg)
         .bg(bg)
         .add_modifier(ratatui::style::Modifier::BOLD);
-    let title_width = full_title.len() as u16;
+    let title_width = UnicodeWidthStr::width(full_title.as_str()) as u16;
     let title_x = overlay_rect.x + (overlay_rect.width.saturating_sub(title_width)) / 2;
     buf.set_span(
         title_x,
@@ -129,7 +195,16 @@ fn render_image_overlay_inner(
     let path_footer = plan.display_path.filter(|_| inner.height >= 2);
     let image_inner = if let Some(path) = path_footer {
         let footer_y = inner.y + inner.height - 1;
-        paint_path_line(buf, inner.x, footer_y, inner.width, path, text_fg, bg);
+        paint_path_line(
+            buf,
+            inner.x,
+            footer_y,
+            inner.width,
+            path,
+            labels.path,
+            text_fg,
+            bg,
+        );
         Rect {
             x: inner.x,
             y: inner.y,
@@ -143,29 +218,37 @@ fn render_image_overlay_inner(
     if !plan.show_pixels {
         let mut lines = Vec::new();
         lines.push(Line::from(format!(
-            "Format: {}",
+            "{} {}",
+            labels.format,
             format_mime(&image.mime_type)
         )));
         if let Some((w, h)) = image.preview_dimensions() {
-            lines.push(Line::from(format!("Dimensions: {} x {}", w, h)));
+            lines.push(Line::from(format!("{} {} x {}", labels.dimensions, w, h)));
         }
         let status = if image.preview.is_failed() {
-            Some("Preview unavailable")
+            Some(labels.preview_unavailable)
         } else if image.preview.is_pending() && protocol.supports_images() {
-            Some("Preview pending")
+            Some(labels.preview_pending)
         } else {
             None
         };
         lines.push(Line::from(status.map(str::to_owned).unwrap_or_else(|| {
-            format!("Size: {}", format_bytes(image.byte_len))
+            format!("{} {}", labels.size, format_bytes(image.byte_len))
         })));
         // Short boxes need the path in the body because no footer fits.
         if path_footer.is_none()
             && let Some(path) = plan.display_path
         {
             lines.push(Line::from(format!(
-                "Path: {}",
-                truncate_path_for_overlay(&path.display().to_string(), inner.width as usize)
+                "{} {}",
+                labels.path,
+                truncate_path_for_overlay(
+                    &path.display().to_string(),
+                    inner
+                        .width
+                        .saturating_sub(UnicodeWidthStr::width(labels.path) as u16 + 1)
+                        as usize,
+                )
             )));
         }
 
@@ -188,8 +271,8 @@ fn render_image_overlay_inner(
 
     if image_inner.width > 0 && image_inner.height > 0 {
         use crate::render::SafeBuf;
-        let loading = "Loading...";
-        let lw = loading.len() as u16;
+        let loading = labels.loading;
+        let lw = UnicodeWidthStr::width(loading) as u16;
         let lx = image_inner.x + image_inner.width.saturating_sub(lw) / 2;
         let ly = image_inner.y + image_inner.height / 2;
         buf.set_span_safe(
