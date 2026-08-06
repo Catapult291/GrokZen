@@ -126,6 +126,7 @@ jobs:
           }
           "Validated $count zh-CN entries."
 
+          cargo fetch --locked --target $env:TARGET
           cargo test --frozen -j 1 -p xai-grok-locale
 
       - name: Build low-memory Windows preview
