@@ -486,8 +486,9 @@ pub const MAX_LABEL_LEN: usize = 64;
 pub const MAX_COLLISION_SUFFIX: u32 = 100;
 
 /// Metadata key for the human-readable worktree label.
-pub const META_KEY_LABEL: &str = "label";
-/// Metadata key for whether the label was user-provided.
+pub use xai_fast_worktree::META_KEY_LABEL;
+/// Metadata key for whether the label was user-provided. Unlike
+/// META_KEY_LABEL, no record consumer below this crate reads it.
 pub const META_KEY_USER_PROVIDED: &str = "user_provided";
 
 /// Sanitize a user-provided label into a filesystem-safe directory name.
@@ -620,14 +621,14 @@ pub fn resolve_label_collision(base_dir: &Path, label: &str) -> String {
 
 /// Resolve the grok home for worktree paths via the **same** resolver used for
 /// `worktrees.db` (`xai_fast_worktree::resolve_grok_home`), so checkout dirs and
-/// the metadata DB always live under the same `.grok-zh` tree. That resolver
+/// the metadata DB always live under the same `.grok` tree. That resolver
 /// canonicalizes its platform-home fallback to match `xai_grok_config::grok_home()`,
 /// so worktree paths also agree with trust/hooks and other grok-home paths.
 fn grok_home() -> std::path::PathBuf {
     xai_fast_worktree::resolve_grok_home().unwrap_or_else(|_| xai_grok_config::grok_home())
 }
 
-/// Returns `~/.grok-zh/worktrees/<repo_slug>` for the given git root.
+/// Returns `~/.grok/worktrees/<repo_slug>` for the given git root.
 ///
 /// Uses [`repo_slug`] to derive a collision-resistant directory name from
 /// the last two meaningful path components.
@@ -636,7 +637,7 @@ pub fn worktree_base_dir(git_root: &Path) -> std::path::PathBuf {
     grok_home().join("worktrees").join(slug)
 }
 
-/// Resolves the worktree base directory (`~/.grok-zh/worktrees/<repo_name>`)
+/// Resolves the worktree base directory (`~/.grok/worktrees/<repo_name>`)
 /// for a given source path, correctly handling grok-managed worktrees.
 ///
 /// When `source_path` is already under `~/.grok/worktrees/<repo>/...`, the
@@ -735,12 +736,7 @@ pub(crate) fn source_repo_for_cwd(cwd: &str) -> Option<std::path::PathBuf> {
 /// non-worktree paths or when the DB is unavailable.
 pub fn lookup_worktree_label(cwd: &str) -> Option<String> {
     let (_db, record) = worktree_record_for_cwd(cwd)?;
-    record
-        .metadata
-        .as_ref()
-        .and_then(|m| m.get(META_KEY_LABEL))
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    record.label().map(String::from)
 }
 
 /// Record activity on the worktree containing `cwd` (best-effort, infallible).
@@ -2503,7 +2499,7 @@ pub fn worktree_db_rebuild() -> Result<xai_fast_worktree::RebuildReport> {
 
 pub fn worktree_db_path() -> Result<std::path::PathBuf> {
     let home = resolve_grok_home()?;
-    Ok(home.join("worktrees.db"))
+    Ok(WorktreeDb::resolve_db_path(&home))
 }
 
 /// Resolve an ID-or-path string to a worktree path via DB lookup,

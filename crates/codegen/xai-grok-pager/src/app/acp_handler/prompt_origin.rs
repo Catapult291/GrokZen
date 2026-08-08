@@ -22,7 +22,7 @@ pub(crate) fn is_scheduler_fired_prompt(prompt_id: &str) -> bool {
 }
 
 /// Returns true for the auto-wake turn families (`task-completed-…`,
-/// `subagent-completed-…`, `notifications-…`). These run non-adopted — no
+/// `subagent-completed-…`, `workflow-completed-…`, `notifications-…`). These run non-adopted — no
 /// `PromptResponse`, no viewer finalize — so their durable `TurnCompleted` is
 /// the only signal marking the back-to-idle point (see [`finish_wake_turn`];
 /// a chatty wake closes with a marker, a silent one stays markerless).
@@ -136,16 +136,31 @@ pub(super) fn finish_wake_turn(
         }
         "error" | "rate_limit" => {
             agent.failed_wake_marker_for = Some(prompt_id.to_string());
-            Some(SessionEvent::TurnFailed {
-                error: agent_result.map(str::to_string).unwrap_or_else(|| {
-                    if stop_reason == "error" {
-                        "unknown error".to_string()
-                    } else {
-                        "rate limited".to_string()
-                    }
-                }),
-                elapsed,
-            })
+            // A dedicated banner (re-auth, overflow, disk-full, formatted
+            // request failure) from the retry-state rail already covers this
+            // failure — same dedupe as `turn_failed_event` on the local rails.
+            if crate::app::dispatch::scrollback_has_recent_error_banner(&agent.scrollback) {
+                None
+            } else {
+                let error = if stop_reason == "error" {
+                    crate::app::error_display::format_request_failure_with_locale(
+                        None,
+                        None,
+                        agent_result.unwrap_or("unknown error"),
+                        Some(agent.scrollback.locale()),
+                    )
+                    .message()
+                } else {
+                    agent_result.map(str::to_string).unwrap_or_else(|| {
+                        agent
+                            .scrollback
+                            .locale()
+                            .named_text("session.rate_limit.fallback", "rate limited")
+                            .into_owned()
+                    })
+                };
+                Some(SessionEvent::TurnFailed { error, elapsed })
+            }
         }
         "cancelled" if !had_output => None,
         // Send-now cancel: no marker (the sender's new prompt is the next turn).

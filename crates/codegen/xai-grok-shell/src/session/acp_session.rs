@@ -91,14 +91,17 @@ mod compaction_segments;
 mod types;
 pub(crate) use types::*;
 pub use types::{TodoGateDecision, TodoGateReason};
-#[path = "acp_session_impl/auth_retry.rs"]
-mod auth_retry;
 #[path = "acp_session_impl/goal.rs"]
 mod goal;
+#[path = "acp_session_impl/tool_layer_images.rs"]
+mod tool_layer_images;
 #[path = "acp_session_impl/turn.rs"]
 mod turn;
 #[path = "acp_session_impl/workflow.rs"]
 mod workflow_run;
+use tool_layer_images::*;
+#[path = "acp_session_impl/auth_retry.rs"]
+mod auth_retry;
 pub(crate) use auth_retry::{
     AuthRetryDecision, AuthRetrySchedule, human_duration, pace_uncharged_resubmit,
 };
@@ -111,14 +114,15 @@ pub(crate) use interjection::*;
 mod laziness;
 #[cfg(test)]
 pub(crate) use laziness::*;
+#[path = "acp_session_impl/prompt_queue.rs"]
+mod prompt_queue;
+pub(super) use prompt_queue::QueueInputRequest;
 #[path = "acp_session_impl/hooks_plugins.rs"]
 mod hooks_plugins;
 #[path = "acp_session_impl/mcp.rs"]
 mod mcp;
 #[path = "acp_session_impl/model_switch.rs"]
 mod model_switch;
-#[path = "acp_session_impl/prompt_queue.rs"]
-mod prompt_queue;
 #[path = "acp_session_impl/slash_exec.rs"]
 mod slash_exec;
 use super::PromptOrigin;
@@ -179,8 +183,12 @@ mod rewind;
 mod run_loop;
 #[path = "acp_session_impl/session_setup.rs"]
 mod session_setup;
+#[path = "acp_session_impl/side_call.rs"]
+mod side_call;
 #[path = "acp_session_impl/turn_end.rs"]
 mod turn_end;
+#[path = "acp_session_impl/turn_summary.rs"]
+mod turn_summary;
 #[path = "acp_session_impl/updates.rs"]
 mod updates;
 use run_loop::*;
@@ -207,7 +215,8 @@ pub(crate) struct InputItem {
     /// Who originated this prompt — user or auto-wake system.
     pub(crate) origin: super::PromptOrigin,
     /// Typed deferred completion retained while an admitted task wake is queued.
-    /// Consumed by Ctrl+C if it removes the wake before the turn starts.
+    /// Consumed by an interactive stop if it removes the wake before the
+    /// turn starts.
     pub(crate) task_wake_fallback: Option<TaskWakeFallback>,
     pub(crate) tool_overrides_update: Option<xai_grok_sampling_types::ToolOverridesUpdate>,
     pub(crate) respond_to: oneshot::Sender<PromptTurnResult>,
@@ -291,11 +300,16 @@ pub(crate) struct State {
     /// Prompt ids held out of combine-on-promote (composer edit in progress).
     pub(crate) combine_edit_holds: std::collections::HashSet<String>,
     /// When true, notifications are buffered but not drained until genuine
-    /// user re-engagement. Set by interactive Ctrl+C, cleared by a user prompt.
+    /// user re-engagement. Set by an interactive stop, cleared by a user
+    /// prompt.
     pub(crate) notifications_suppressed: bool,
-    /// Active prompt is still rewindable until the first outbound prompt-scoped
-    /// event is emitted.
+    /// Active prompt is still rewindable until the first outbound
+    /// prompt-scoped event is emitted; armed at promote, cleared at first
+    /// output or by the rewind pop itself.
     pub(crate) rewindable: bool,
+    /// Whether the running front's user message is recorded where the model
+    /// will see it; lifecycle on `mark_front_message_committed`.
+    pub(crate) front_message_committed: bool,
     /// Layer-3 LazinessDetector: number of `<system-reminder>` nudges
     /// injected so far in this (session, model) pair. Reset to 0 by
     /// the actor's main `select!` loop when its `model_switch_rx`
@@ -362,7 +376,7 @@ impl State {
 /// so they share one definition of idleness, with no drift between them.
 ///
 /// Returns `true` exactly when: no turn is running, no user prompt is
-/// queued, and interactive Ctrl+C has not suppressed notifications pending
+/// queued, and an interactive stop has not suppressed notifications pending
 /// genuine user re-engagement.
 pub(crate) fn is_session_idle_for_injection(state: &State) -> bool {
     state.running_task.is_none()
@@ -964,6 +978,18 @@ pub(crate) struct SessionActor {
     /// Bumped on each real user prompt (queue accept + turn start); in-flight
     /// recap suppresses emit if this changes before commit.
     pub(crate) recap_epoch: std::cell::Cell<u64>,
+    /// The in-flight turn-summary side-call, if any. A newer completion (or a
+    /// real prompt / rewind / cancel / shutdown) aborts it — its result would
+    /// describe an older turn — and a completion respawns; see
+    /// `restart_turn_summary`. Cleared when the task finishes so `Some` means
+    /// "still running".
+    pub(crate) turn_summary_task: std::cell::RefCell<Option<tokio::task::JoinHandle<()>>>,
+    /// Generation of the currently registered turn-summary task. Bumped on
+    /// each spawn so a finishing older task cannot clear a newer slot.
+    pub(crate) turn_summary_generation: std::cell::Cell<u64>,
+    /// Turn-summary gate, resolved once at spawn (env / config / remote
+    /// settings — see `Config::resolve_turn_summary`).
+    pub(crate) turn_summary_enabled: bool,
     /// True while THIS session has a prompt turn in flight (RAII-guarded in
     /// `handle_prompt`, like `tool_context.is_turn_active` — which is the
     /// agent-wide coordinator flag shared by all sessions and so unusable
@@ -1758,7 +1784,12 @@ mod tool_meta_stamp_tests {
                         } = cmd
                         {
                             *captured_in_task.lock().await = Some(tool_call_update);
-                            let _ = respond_to.send(Decision::Allow);
+                            let _ = respond_to.send(
+                                xai_grok_workspace::permission::PermissionResolution {
+                                    decision: Decision::Allow,
+                                    event: None,
+                                },
+                            );
                         }
                     }
                 });
@@ -1836,6 +1867,9 @@ mod cancel_running_task_tests;
 #[path = "acp_session_tests/turn/chat_history_integrity_tests.rs"]
 mod chat_history_integrity_tests;
 #[cfg(test)]
+#[path = "acp_session_tests/turn/disk_full_tests.rs"]
+mod disk_full_tests;
+#[cfg(test)]
 #[path = "acp_session_tests/feedback_turn_lookup_tests.rs"]
 mod feedback_turn_lookup_tests;
 #[cfg(test)]
@@ -1877,6 +1911,9 @@ mod reactive_managed_reauth_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/session_thread_tests.rs"]
 mod session_thread_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/tool_layer_images_bridge_tests.rs"]
+mod tool_layer_images_bridge_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/turn/turn_end_guard_tests.rs"]
 mod turn_end_guard_tests;

@@ -562,6 +562,48 @@ pub(super) fn push_marketplace_fetch(
     });
 }
 
+/// Slash-command name for an extensions modal tab (toast when not on an agent).
+fn extensions_tab_slash_name(tab: crate::views::extensions_modal::ExtensionsTab) -> &'static str {
+    use crate::views::extensions_modal::ExtensionsTab;
+    match tab {
+        ExtensionsTab::Hooks => "hooks",
+        ExtensionsTab::Plugins => "plugins",
+        ExtensionsTab::Marketplace => "marketplace",
+        ExtensionsTab::Skills => "skills",
+        ExtensionsTab::McpServers => "mcps",
+    }
+}
+
+/// Slash-command name for the config-agents modal tab.
+fn config_agents_slash_name(tab: Option<crate::views::agents_modal::AgentsTab>) -> &'static str {
+    use crate::views::agents_modal::AgentsTab;
+    match tab {
+        Some(AgentsTab::Personas) => "personas",
+        Some(AgentsTab::Agents) | None => "config-agents",
+    }
+}
+
+/// Toast when a session-hosted modal is opened off the agent view.
+fn toast_session_only_slash(app: &mut AppView, name: &str) {
+    let msg = app
+        .locale
+        .named_text(
+            "dashboard.toast.session_only.open_agent",
+            "/{name} only works in a session. Open an agent first.",
+        )
+        .replace("{name}", name);
+    match app.active_view {
+        ActiveView::AgentDashboard => {
+            if let Some(d) = app.dashboard.as_mut() {
+                d.set_error_toast(&msg);
+            }
+        }
+        ActiveView::Welcome | ActiveView::Agent(_) => {
+            app.show_toast(&msg);
+        }
+    }
+}
+
 /// Open the hooks/plugins modal on the active agent view and fetch list data.
 pub(super) fn dispatch_open_extensions_modal(
     app: &mut AppView,
@@ -571,6 +613,7 @@ pub(super) fn dispatch_open_extensions_modal(
     use crate::views::extensions_modal::ExtensionsModalState;
 
     let ActiveView::Agent(id) = app.active_view else {
+        toast_session_only_slash(app, extensions_tab_slash_name(tab));
         return vec![];
     };
     let Some(agent) = app.agents.get_mut(&id) else {
@@ -607,6 +650,7 @@ pub(super) fn dispatch_open_config_agents_modal(
     use crate::views::agents_modal::{AgentsModalState, load_agent_toggle};
 
     let ActiveView::Agent(id) = app.active_view else {
+        toast_session_only_slash(app, config_agents_slash_name(initial_tab));
         return vec![];
     };
     let bundle = app.bundle_state.clone();
@@ -898,21 +942,7 @@ pub(super) fn handle_marketplace_list_loaded(
                 // expand/collapse choices.
                 let is_first_load = matches!(modal.marketplace_data, TabDataState::Loading);
                 if is_first_load {
-                    // All sources start collapsed, so mark every plugin
-                    // index as collapsed using the same index math as
-                    // the renderer / navigation helpers.
-                    let mut idx = 0usize;
-                    for source in &response.sources {
-                        idx += 1; // header
-                        for _ in &source.plugins {
-                            modal.marketplace_collapsed.insert(idx);
-                            idx += 1;
-                        }
-                        // Empty / error sources still occupy at least 1 slot.
-                        if source.plugins.is_empty() {
-                            idx += 1;
-                        }
-                    }
+                    // All sources start collapsed.
                     modal.marketplace_collapsed_sources = (0..response.sources.len()).collect();
                 }
                 TabDataState::Loaded(response)
@@ -938,11 +968,8 @@ pub(super) fn handle_skills_toggle_done(
         modal.pending_entry_index = None;
         match result {
             Ok(skills) => {
-                let len = skills.len();
+                modal.seed_skills_groups_once(&skills);
                 modal.skills_data = TabDataState::Loaded(skills);
-                if len > 0 && modal.picker_state.selected >= len {
-                    modal.picker_state.selected = len.saturating_sub(1);
-                }
             }
             Err(e) => {
                 modal.modal_message = Some(crate::views::extensions_modal::ModalMessage::Error(e));

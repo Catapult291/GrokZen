@@ -570,12 +570,22 @@ async fn legacy_auth_hint_on_404_model_not_found() {
                 "404 with WebLogin must include deprecation message, got: {msg}"
             );
             assert!(
+                msg.contains("grok-zh update"),
+                "hint must mention `grok-zh update` before re-login, got: {msg}"
+            );
+            assert!(
                 msg.contains("grok-zh logout"),
                 "hint must mention `grok-zh logout`, got: {msg}"
             );
             assert!(
                 msg.contains("grok-zh login"),
                 "hint must mention `grok-zh login`, got: {msg}"
+            );
+            let update_at = msg.find("grok-zh update").expect("grok-zh update");
+            let logout_at = msg.find("grok-zh logout").expect("grok-zh logout");
+            assert!(
+                update_at < logout_at,
+                "update must come before logout, got: {msg}"
             );
             assert!(
                 msg.contains("Version:"),
@@ -641,12 +651,22 @@ async fn legacy_auth_hint_on_401_unauthorized() {
                 "401 with WebLogin must include deprecation message, got: {msg}"
             );
             assert!(
+                msg.contains("grok-zh update"),
+                "hint must mention `grok-zh update` before re-login, got: {msg}"
+            );
+            assert!(
                 msg.contains("grok-zh logout"),
                 "hint must mention `grok-zh logout`, got: {msg}"
             );
             assert!(
                 msg.contains("grok-zh login"),
                 "hint must mention `grok-zh login`, got: {msg}"
+            );
+            let update_at = msg.find("grok-zh update").expect("grok-zh update");
+            let logout_at = msg.find("grok-zh logout").expect("grok-zh logout");
+            assert!(
+                update_at < logout_at,
+                "update must come before logout, got: {msg}"
             );
         })
         .await;

@@ -311,6 +311,54 @@ pub enum PromptOutcome {
     Error(String),
 }
 
+crate::permission::wire_enum! {
+    /// Data-free projection of [`PromptOutcome`] — the single owner of the
+    /// `prompt_outcome` wire vocabulary. The enum, its `ALL` inventory, and
+    /// `wire_str` are generated from one list, and [`PromptOutcome::kind`] is an
+    /// exhaustive `match` into it, so a new payload-bearing `PromptOutcome`
+    /// variant fails to compile until it is mapped here and a brand-new outcome is
+    /// a single list entry that produces variant, `ALL`, and wire together.
+    pub enum PromptOutcomeKind {
+        AllowOnce => "allow_once",
+        AllowAlways => "allow_always",
+        AllowEditsForSession => "allow_edits_for_session",
+        AllowAlwaysBash => "allow_always_bash",
+        AllowAlwaysBashGlob => "allow_always_bash_glob",
+        AllowAlwaysDomain => "allow_always_domain",
+        AllowAlwaysMcpTool => "allow_always_mcp_tool",
+        AllowAlwaysMcpServer => "allow_always_mcp_server",
+        RejectOnce => "reject_once",
+        RejectAlwaysBash => "reject_always_bash",
+        Cancelled => "cancelled",
+        Followup => "followup",
+        Error => "error",
+    }
+}
+
+impl PromptOutcome {
+    /// Data-free owner kind for this outcome. Exhaustive: a new payload-bearing
+    /// `PromptOutcome` variant fails compilation here until it is mapped, and the
+    /// manager emits `prompt_outcome.kind().wire_str()` (never a raw literal), so
+    /// the owner projection is on the production path.
+    pub const fn kind(&self) -> PromptOutcomeKind {
+        match self {
+            Self::AllowOnce => PromptOutcomeKind::AllowOnce,
+            Self::AllowAlways => PromptOutcomeKind::AllowAlways,
+            Self::AllowEditsForSession => PromptOutcomeKind::AllowEditsForSession,
+            Self::AllowAlwaysBashCommand(_) => PromptOutcomeKind::AllowAlwaysBash,
+            Self::AllowAlwaysBashGlob(_) => PromptOutcomeKind::AllowAlwaysBashGlob,
+            Self::AllowAlwaysDomain(_) => PromptOutcomeKind::AllowAlwaysDomain,
+            Self::AllowAlwaysMcpTool(_) => PromptOutcomeKind::AllowAlwaysMcpTool,
+            Self::AllowAlwaysMcpServer(_) => PromptOutcomeKind::AllowAlwaysMcpServer,
+            Self::RejectOnce => PromptOutcomeKind::RejectOnce,
+            Self::RejectAlwaysBashCommand(_) => PromptOutcomeKind::RejectAlwaysBash,
+            Self::Cancelled => PromptOutcomeKind::Cancelled,
+            Self::FollowupMessage(_) => PromptOutcomeKind::Followup,
+            Self::Error(_) => PromptOutcomeKind::Error,
+        }
+    }
+}
+
 pub struct AcpPrompter {
     session_id: acp::SessionId,
     gateway: GatewaySender,
@@ -1017,6 +1065,58 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
+    /// Wire-compatibility pin: `PromptOutcome::kind()` maps each payload-bearing
+    /// variant to the owner [`PromptOutcomeKind`] whose `wire_str` is the exact,
+    /// stable product-event/artifact string. If a variant's kind or a kind's wire ever
+    /// changes, this fails (guarding event-JSON compatibility). Completeness of
+    /// `kind()` is enforced by the compiler (exhaustive match); completeness of
+    /// `PromptOutcomeKind::{ALL, wire_str}` is enforced structurally by
+    /// `wire_enum!`.
+    #[test]
+    fn prompt_outcome_kind_pins_wire_strings() {
+        let cases = [
+            (PromptOutcome::AllowOnce, "allow_once"),
+            (PromptOutcome::AllowAlways, "allow_always"),
+            (
+                PromptOutcome::AllowEditsForSession,
+                "allow_edits_for_session",
+            ),
+            (
+                PromptOutcome::AllowAlwaysBashCommand(String::new()),
+                "allow_always_bash",
+            ),
+            (
+                PromptOutcome::AllowAlwaysBashGlob(String::new()),
+                "allow_always_bash_glob",
+            ),
+            (
+                PromptOutcome::AllowAlwaysDomain(String::new()),
+                "allow_always_domain",
+            ),
+            (
+                PromptOutcome::AllowAlwaysMcpTool(String::new()),
+                "allow_always_mcp_tool",
+            ),
+            (
+                PromptOutcome::AllowAlwaysMcpServer(String::new()),
+                "allow_always_mcp_server",
+            ),
+            (PromptOutcome::RejectOnce, "reject_once"),
+            (
+                PromptOutcome::RejectAlwaysBashCommand(String::new()),
+                "reject_always_bash",
+            ),
+            (PromptOutcome::Cancelled, "cancelled"),
+            (PromptOutcome::FollowupMessage(String::new()), "followup"),
+            (PromptOutcome::Error(String::new()), "error"),
+        ];
+        for (outcome, wire) in &cases {
+            assert_eq!(outcome.kind().wire_str(), *wire);
+        }
+        // Every owner kind is exercised by exactly one case (no kind unmapped).
+        assert_eq!(cases.len(), PromptOutcomeKind::ALL.len());
+    }
+
     fn prompter(client_type: ClientType) -> AcpPrompter {
         // Existing tests assert the always-allow options are present; off-state
         // has dedicated `gate_*` tests.
@@ -1169,6 +1269,111 @@ mod tests {
             ),
             "no meta must fall back to the primary command, got {outcome:?}"
         );
+    }
+
+    #[test]
+    fn parseable_scripts_offer_scoped_rows_and_meta() {
+        let p = prompter(ClientType::GrokPager);
+        for script in [
+            "cargo test --workspace",
+            "cd /tmp && cargo test --workspace",
+            "# build first\n# then test\ncargo test --workspace",
+            "ps aux | grep process",
+            "ls /tmp && ./bazelw test //hw-tests/integration/...",
+        ] {
+            let access = AccessKind::Bash(script.to_owned());
+            let opts = p.build_options(&access);
+            assert!(
+                has_option(&opts, "allow-always-command"),
+                "parseable primary must offer the scoped allow row: {script:?}"
+            );
+            assert!(
+                has_option(&opts, "reject-always-command"),
+                "parseable primary must offer the scoped deny row: {script:?}"
+            );
+            assert!(
+                p.bash_selection_meta(&access).is_some(),
+                "parseable primary must carry selection meta: {script:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unparseable_and_setup_only_scripts_have_no_scoped_rows() {
+        let p = prompter(ClientType::GrokPager);
+        for script in [
+            "cd /tmp && sleep 1",
+            "if true; then ls; fi",
+            "if true; then",
+        ] {
+            let access = AccessKind::Bash(script.to_owned());
+            let opts = p.build_options(&access);
+            assert!(
+                !has_option(&opts, "allow-always-command"),
+                "no primary command to scope: {script:?}"
+            );
+            assert!(
+                !has_option(&opts, "reject-always-command"),
+                "no primary command to scope: {script:?}"
+            );
+            assert!(
+                p.bash_selection_meta(&access).is_none(),
+                "no primary must not leave dangling selection meta: {script:?}"
+            );
+            assert!(has_option(&opts, "allow-once"), "{script:?}");
+            assert!(has_option(&opts, "reject-once"), "{script:?}");
+            assert!(
+                has_option(&opts, ENABLE_ALWAYS_APPROVE_OPTION_ID),
+                "{script:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dump_script_with_redirects_still_offers_scoped_rows() {
+        let script = "# Probe the outputs dir\n\
+                      ls /tmp/hw-test-outputs 2>/dev/null\n\
+                      \n\
+                      # Reset scratch dir and run the suite\n\
+                      rm -rf /tmp/hw-test-outputs && mkdir -p /tmp/hw-test-outputs\n\
+                      ./bazelw test //hw-tests/integration/... --test_output=errors 2>&1 | tee /tmp/hw-test-outputs/run.log | tail -n 40";
+        let p = prompter(ClientType::GrokPager);
+        let access = AccessKind::Bash(script.to_owned());
+        let opts = p.build_options(&access);
+        assert!(has_option(&opts, "allow-always-command"));
+        assert!(has_option(&opts, "reject-always-command"));
+        assert!(p.bash_selection_meta(&access).is_some());
+        assert!(has_option(&opts, "allow-once"));
+        assert!(has_option(&opts, "reject-once"));
+        assert!(has_option(&opts, ENABLE_ALWAYS_APPROVE_OPTION_ID));
+    }
+
+    #[test]
+    fn scoped_rows_appear_and_disappear_together() {
+        let p = prompter(ClientType::GrokPager);
+        for script in [
+            "cargo test --workspace",
+            "ps aux | grep process",
+            "cd /tmp && sleep 1",
+            "if true; then",
+        ] {
+            let opts = p.build_options(&AccessKind::Bash(script.to_owned()));
+            assert_eq!(
+                has_option(&opts, "allow-always-command"),
+                has_option(&opts, "reject-always-command"),
+                "scoped rows must be gated together: {script:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_client_multi_command_keeps_broad_options() {
+        let p = prompter(ClientType::GrokWeb);
+        let opts = p.build_options(&AccessKind::Bash("ls /tmp && cargo test".to_owned()));
+        assert!(has_option(&opts, "always-allow"));
+        assert!(has_option(&opts, "allow-once"));
+        assert!(has_option(&opts, "reject-once"));
+        assert!(has_option(&opts, "reject-always"));
     }
 
     #[test]

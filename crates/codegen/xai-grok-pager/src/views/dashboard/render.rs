@@ -4403,9 +4403,9 @@ pub fn render_popup_overlay_with_locale(
 /// ```
 ///
 /// The agent renders inside the frame's `content` rect — the
-/// agent's own shortcuts bar (with the `Ctrl+\\:dashboard` +
-/// `Ctrl+[/]:agents` hints added by `agent.draw` when overlay is
-/// active) sits at the bottom of the content, inside the frame.
+/// agent's own shortcuts bar (with the `Ctrl+\\:dashboard` hint, and
+/// `Ctrl+[/]:prev/next agent` when the cycle order has more than one
+/// agent) sits at the bottom of the content, inside the frame.
 ///
 /// Returns `None` when the area is too small for the bordered
 /// frame; the caller falls back to a chromeless render so the
@@ -4834,6 +4834,7 @@ mod tests {
             model_id: None,
             yolo: false,
             activity: RosterActivity::Working,
+            last_turn_summary: None,
             resident: true,
             last_change_unix_ms: 1_725_000_000_000,
             origin: RosterOrigin::default(),
@@ -4882,6 +4883,7 @@ mod tests {
                 model_id: None,
                 yolo: false,
                 activity,
+                last_turn_summary: None,
                 resident: true,
                 last_change_unix_ms: 1_725_000_000_000,
                 origin: RosterOrigin::default(),

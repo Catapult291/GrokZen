@@ -66,8 +66,7 @@ impl ChangelogManager {
         Self::from_product_home()
     }
 
-    /// Resolve cache paths through the product-owned home resolver. Release
-    /// builds never consult the official distribution's `GROK_HOME`.
+    /// Resolve cache paths through the shared Grok home resolver.
     fn from_product_home() -> Self {
         let home = crate::util::grok_home::grok_home();
         Self {
@@ -101,7 +100,7 @@ impl ChangelogManager {
     /// offline flag, and an explicit CDN base.
     ///
     /// Split out of [`fetch`] so unit tests can drive it against a temp home
-    /// without mutating process-global env (`GROK_ZH_HOME` /
+    /// without mutating process-global env (`GROK_HOME` /
     /// `GROK_CHANGELOG_OFFLINE`), which races across the parallel test
     /// harness. Passing an unreachable `base` lets a test force a
     /// deterministic CDN miss instead of depending on whether the sandbox

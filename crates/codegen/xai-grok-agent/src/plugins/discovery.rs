@@ -211,11 +211,10 @@ impl DiscoveryConfig {
 /// User plugin directories in priority order: `$GROK_HOME/plugins` then
 /// `~/.claude/plugins`.
 ///
-/// Unlike agent discovery, plugins are intentionally NOT discovered from a
-/// legacy `~/.grok/plugins`: plugin trust, persisted plugin-data, and install
-/// paths all resolve under `grok_home()`, so a plugin scanned from the legacy
-/// tree would appear untrusted and lose its persisted state. Keeping plugins on
-/// `grok_home()` only avoids that half-initialized state.
+/// Plugins are intentionally discovered only from the resolved `grok_home()`.
+/// When `GROK_HOME` points elsewhere, a second fallback `~/.grok/plugins` tree
+/// is not scanned: plugin trust, persisted plugin-data, and install paths must
+/// all use the same root to avoid a half-initialized state.
 fn user_plugin_dirs(home: Option<&Path>, grok: Option<&Path>) -> Vec<(PathBuf, PluginOrigin)> {
     let mut dirs = Vec::new();
     if let Some(g) = grok {
@@ -337,7 +336,7 @@ pub fn discover_plugins(
         }
     }
 
-    // 4-5. User plugins: $GROK_HOME/plugins, legacy ~/.grok/plugins, ~/.claude/plugins.
+    // 4-5. User plugins: resolved $GROK_HOME/plugins, then ~/.claude/plugins.
     // Gate the grok plugins dir on user_grok_home() so a project's .grok/plugins
     // is never scanned as user-global when no home resolves.
     let grok = xai_grok_config::user_grok_home();
@@ -909,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn user_plugin_dirs_are_grok_and_claude_only_no_legacy() {
+    fn user_plugin_dirs_do_not_add_a_second_default_grok_home() {
         let home = Path::new("/home/u");
         let grok = Path::new("/custom/grokhome");
         let dirs = user_plugin_dirs(Some(home), Some(grok));
@@ -918,7 +917,7 @@ mod tests {
             home.join(".claude").join("plugins"),
             PluginOrigin::UserClaude
         )));
-        // Plugins are not discovered from the legacy ~/.grok tree.
+        // A custom GROK_HOME does not also scan the default ~/.grok tree.
         assert!(
             !dirs
                 .iter()

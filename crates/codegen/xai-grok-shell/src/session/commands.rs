@@ -15,9 +15,8 @@ pub struct CancellationContext {
     pub tool_name: Option<String>,
     pub reason: Option<String>,
     pub hook_name: Option<String>,
-    /// What triggered the cancel (`"send_now"`, `"esc"`, `"ctrl_c"`); surfaced
-    /// as `cancelTrigger` on the `PromptResponse`/`TurnCompleted` `_meta`.
-    /// `None` for graceful in-turn cancels and older clients.
+    /// What triggered the cancel (e.g. `"send_now"`, `"esc"`, `"mouse"`);
+    /// surfaced as `cancelTrigger` on the turn-end `_meta`.
     pub trigger: Option<String>,
 }
 /// Failure surface of a `/btw` side question. Kept typed until the ACP
@@ -135,6 +134,59 @@ pub struct TaskWakeFallback {
 pub struct TaskWakeAdmission {
     pub respond_to: oneshot::Sender<bool>,
     pub fallback: TaskWakeFallback,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownKind {
+    /// Running work survives (idle unload, process quiesce, subagent teardown).
+    Graceful,
+    CancelRunningTurn,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CancelTrigger {
+    Esc,
+    CtrlC,
+    SendNow,
+    Shutdown,
+    SessionClose,
+    SessionDelete,
+    Client(String),
+}
+impl CancelTrigger {
+    /// Parse a client's `_meta.cancelTrigger`. Internal spellings land in
+    /// [`Self::Client`], so a client-supplied string never maps to an
+    /// internal trigger.
+    pub fn from_client(s: &str) -> Self {
+        match s {
+            "esc" => Self::Esc,
+            "ctrl_c" => Self::CtrlC,
+            other => Self::Client(other.to_string()),
+        }
+    }
+    /// Stop gesture (Esc/Ctrl+C/`Client`); unrecognized wire names fail closed.
+    pub fn is_stop_gesture(&self) -> bool {
+        matches!(self, Self::Esc | Self::CtrlC | Self::Client(_))
+    }
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Esc => "esc",
+            Self::CtrlC => "ctrl_c",
+            Self::SendNow => "send_now",
+            Self::Shutdown => "shutdown",
+            Self::SessionClose => "session_close",
+            Self::SessionDelete => "session_delete",
+            Self::Client(s) => s,
+        }
+    }
+}
+#[derive(Debug, Clone, Default)]
+pub struct CancelOptions {
+    pub cancel_subagents: bool,
+    pub kill_background_tasks: bool,
+    pub rewind_if_no_output: bool,
+    /// [`CancelTrigger::is_stop_gesture`] arms the task-wake barrier.
+    pub trigger: Option<CancelTrigger>,
+    /// Drives the cancel-rate metric.
+    pub user_initiated: bool,
 }
 pub enum SessionCommand {
     Initialize {
@@ -386,7 +438,7 @@ pub enum SessionCommand {
     /// Flush the replay buffer and persistence, then signal completion.
     /// Used during reconnect to ensure all buffered content is persisted before replay.
     FlushComplete {
-        respond_to: oneshot::Sender<()>,
+        respond_to: oneshot::Sender<std::io::Result<()>>,
     },
     /// Update MCP servers for an existing session (used during reconnect or
     /// mid-session via the `x.ai/session/update_mcp_servers` extension method).
@@ -619,24 +671,8 @@ pub enum SessionCommand {
         /// no-ops the whole thing, edited text included).
         new_text: Option<String>,
     },
-    /// Cancel the running turn. `kill_background_tasks` distinguishes a hard
-    /// teardown (subagent shutdown — drains the whole queue) from a normal
-    /// interactive cancel (Ctrl+C — preserves queued user prompts so the next
-    /// one auto-runs). Ctrl+C tears down the running turn and queued terminal
-    /// task-completion wakes; other cancel triggers tear down only the running
-    /// turn. The follow-up `maybe_start_running_task` promotes the next item.
-    Cancel {
-        cancel_subagents: bool,
-        kill_background_tasks: bool,
-        rewind_if_pristine: bool,
-        /// Free-form discriminator for *what* triggered the cancel, taken from
-        /// the `session/cancel` request `_meta.cancelTrigger` (e.g. `"esc"`,
-        /// `"ctrl_c"`). `None` for older clients and programmatic teardowns
-        /// (subagent shutdown). Recorded in the `mid_turn_abort` turn-end's
-        /// `cancellation_context` JSON; the category stays `MidTurnAbort`.
-        trigger: Option<String>,
-    },
-    Shutdown,
+    Cancel(CancelOptions),
+    Shutdown(ShutdownKind),
     /// Force-trigger a feedback request notification for local client testing.
     /// Bypasses all heuristics, sampling, and cooldown checks.
     TriggerTestFeedback {
@@ -794,4 +830,19 @@ pub enum SessionCommand {
         commit: Option<String>,
         branch: Option<String>,
     },
+}
+#[cfg(test)]
+mod cancel_trigger_tests {
+    use super::CancelTrigger;
+    #[test]
+    fn only_stop_gestures_arm_the_wake_barrier() {
+        assert!(!CancelTrigger::SendNow.is_stop_gesture());
+        assert!(!CancelTrigger::SessionDelete.is_stop_gesture());
+        assert!(!CancelTrigger::Shutdown.is_stop_gesture());
+        assert!(!CancelTrigger::SessionClose.is_stop_gesture());
+        assert!(CancelTrigger::Esc.is_stop_gesture());
+        assert!(CancelTrigger::CtrlC.is_stop_gesture());
+        assert!(CancelTrigger::from_client("mouse").is_stop_gesture());
+        assert!(CancelTrigger::from_client("some_future_gesture").is_stop_gesture());
+    }
 }

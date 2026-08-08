@@ -227,6 +227,13 @@ pub struct SubagentsConfig {
     /// Raw `[subagents] max_depth` (i64 so out-of-range parses; clamped ≥1 at resolve).
     #[serde(default)]
     pub max_depth: Option<i64>,
+    #[serde(default)]
+    pub max_concurrent: Option<i64>,
+    /// `"queue"` or `"fail"`.
+    #[serde(default)]
+    pub limit_behavior: Option<String>,
+    #[serde(default)]
+    pub workflow_max_concurrent: Option<i64>,
     /// Per-subagent model ID overrides.
     /// Keys are agent names, values are model IDs that must exist in the
     /// available models registry. Parsed from `[subagents.models]` in config.toml.
@@ -485,6 +492,94 @@ impl SubagentsConfig {
         }
         Self::DEFAULT_MAX_DEPTH
     }
+    pub const ENV_MAX_CONCURRENT: &'static str = "GROK_MAX_CONCURRENT_SUBAGENTS";
+    pub const ENV_LIMIT_BEHAVIOR: &'static str = "GROK_SUBAGENT_LIMIT_BEHAVIOR";
+    pub const ENV_WORKFLOW_MAX_CONCURRENT: &'static str = "GROK_WORKFLOW_MAX_CONCURRENT_AGENTS";
+    /// Clamp to `1..`; a limit can be adjusted but never disabled.
+    fn clamp_count(value: i64, source: &str, name: &str) -> usize {
+        if value < 1 {
+            tracing::warn!(source, name, value, "subagent limit < 1; clamping to 1");
+            1
+        } else {
+            usize::try_from(value).unwrap_or(usize::MAX)
+        }
+    }
+    /// Precedence: env > TOML > remote > default; invalid layers warn and fall through.
+    fn resolve_count(
+        env_name: &str,
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+        default: usize,
+    ) -> usize {
+        if let Some(value) = env {
+            match xai_grok_tools::util::env::parse_positive(value.trim()) {
+                Some(parsed) => return usize::try_from(parsed).unwrap_or(usize::MAX),
+                None => {
+                    tracing::warn!(
+                        name = env_name,
+                        %value,
+                        "invalid env value (expected a positive whole number); ignoring"
+                    );
+                }
+            }
+        }
+        if let Some(v) = config {
+            return Self::clamp_count(v, "config", env_name);
+        }
+        if let Some(v) = remote {
+            return Self::clamp_count(i64::from(v), "remote", env_name);
+        }
+        default
+    }
+    pub(crate) fn resolve_max_concurrent(
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+    ) -> usize {
+        Self::resolve_count(
+            Self::ENV_MAX_CONCURRENT,
+            env,
+            config,
+            remote,
+            xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
+        )
+    }
+    pub(crate) fn resolve_workflow_max_concurrent(
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+    ) -> usize {
+        Self::resolve_count(
+            Self::ENV_WORKFLOW_MAX_CONCURRENT,
+            env,
+            config,
+            remote,
+            crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS,
+        )
+    }
+    pub(crate) fn resolve_limit_behavior(
+        env: Option<&str>,
+        config: Option<&str>,
+        remote: Option<&str>,
+    ) -> xai_grok_tools::implementations::grok_build::task::admission::LimitBehavior {
+        use xai_grok_tools::implementations::grok_build::task::admission::LimitBehavior;
+        for (source, value) in [("env", env), ("config", config), ("remote", remote)] {
+            let Some(value) = value else { continue };
+            if value.eq_ignore_ascii_case("fail") {
+                return LimitBehavior::Fail;
+            }
+            if value.eq_ignore_ascii_case("queue") {
+                return LimitBehavior::Queue;
+            }
+            tracing::warn!(
+                source,
+                %value,
+                "subagent limit_behavior is neither `queue` nor `fail`; ignoring"
+            );
+        }
+        LimitBehavior::Queue
+    }
     /// Resolve the final subagents config from all sources (in priority order):
     /// 1. CLI flag `--subagents` (absolute highest — always enables)
     /// 2. `GROK_SUBAGENTS` env var: `1`/`true` enables, `0`/`false` force-disables
@@ -686,7 +781,7 @@ impl ModelOverrideConfig {
     /// `prompt_suggestion` resolves to a [`PromptSuggestModelPin`] instead of
     /// a model string (no CLI flag; the default and the catalog guard live at
     /// the consumer, `handle_suggest_prompt`).
-    pub fn resolve(
+    pub(crate) fn resolve(
         cli_web_search_model: Option<&str>,
         cli_session_summary_model: Option<&str>,
         config: &toml::Value,
@@ -1391,13 +1486,10 @@ pub fn apply_sandbox(
     let requires_bwrap = requires_read_deny || requires_hook_write_deny;
     #[cfg(target_os = "linux")]
     {
-        let refuse_unprotected = |detail: &str| {
+        let refuse_unprotected = |cause: &str| {
             eprintln!(
-                "error: this sandbox could not enforce its mount-namespace deny set \
-                 on Linux (bubblewrap missing/unusable, or a deny glob exceeded its \
-                 expansion limit — see any message above). Install bubblewrap with \
-                 `apt install -y bubblewrap` if needed. Refusing to start with denied \
-                 paths unprotected.{detail}"
+                "error: this sandbox could not enforce its deny list on Linux: \
+                 {cause} Refusing to start with denied paths unprotected."
             );
         };
         match xai_grok_sandbox::bwrap_reexec_for_profile(&sandbox_profile, &workspace) {
@@ -1405,7 +1497,10 @@ pub fn apply_sandbox(
                 use std::os::unix::process::CommandExt;
                 let err = cmd.exec();
                 if requires_bwrap {
-                    refuse_unprotected(&format!(" (bwrap exec failed: {err})"));
+                    refuse_unprotected(&format!(
+                        "bwrap exec failed: {err}. Install bubblewrap with \
+                         `apt install -y bubblewrap`."
+                    ));
                     std::process::exit(1);
                 }
                 eprintln!(
@@ -1427,7 +1522,10 @@ pub fn apply_sandbox(
                 }
             }
             None if requires_bwrap => {
-                refuse_unprotected("");
+                refuse_unprotected(
+                    "the deny list could not be prepared; see the error above \
+                     for the specific cause.",
+                );
                 std::process::exit(1);
             }
             None => {}
@@ -1455,8 +1553,9 @@ pub fn apply_sandbox(
                 && !xai_grok_sandbox::is_inside_bwrap();
             if unappliable {
                 eprintln!(
-                    "error: could not apply the '{}' sandbox profile (including \
-                     direct global-hook write protection); refusing to start.",
+                    "error: could not apply the '{}' sandbox profile; see the \
+                     warning above for the cause. Refusing to start with its \
+                     protections missing.",
                     sandbox.profile()
                 );
                 std::process::exit(1);
@@ -1763,7 +1862,7 @@ pub(crate) fn validate_hooks_path(path: &str) -> Result<(), Box<dyn std::error::
     let canonical_home = dunce::canonicalize(&grok_home).unwrap_or_else(|_| grok_home.clone());
     if !canonical.starts_with(&canonical_home) {
         return Err(format!(
-            "Hook path must be under ~/.grok-zh/ ({}). Got: {}",
+            "Hook path must be under ~/.grok/ ({}). Got: {}",
             canonical_home.display(),
             canonical.display()
         )

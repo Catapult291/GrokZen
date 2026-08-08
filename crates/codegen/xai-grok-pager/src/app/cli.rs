@@ -56,7 +56,7 @@ pub enum Command {
     Sessions(crate::sessions_cmd::SessionsArgs),
     /// 获取并安装托管配置
     Setup {
-        /// 将获取的配置作为 JSON 输出而不安装；不会写入 ~/.grok-zh。
+        /// 将获取的配置作为 JSON 输出而不安装；不会写入 ~/.grok。
         #[arg(long)]
         json: bool,
     },
@@ -77,7 +77,7 @@ Terminal）时，这会让复制功能正常工作。包装命令的终端也会
   grok-zh wrap docker exec -it my-container bash
   grok-zh wrap kubectl exec -it my-pod -- bash
 
-更多信息见 ~/.grok-zh/README.md。
+更多信息见 ~/.grok/README.md。
 ")]
     Wrap(WrapArgs),
     /// 将会话记录导出为 Markdown
@@ -123,6 +123,9 @@ Terminal）时，这会让复制功能正常工作。包装命令的终端也会
     },
     /// 管理 git worktree
     Worktree(crate::worktree_cmd::WorktreeArgs),
+    /// 显示共享 Grok 数据目录（~/.grok）的磁盘占用
+    #[command(name = "du", visible_alias = "disk-usage")]
+    DiskUsage(crate::disk_usage_cmd::DiskUsageArgs),
     /// 通过 leader 将此 workspace 暴露给 Computer Hub。
     ///
     /// 默认禁用，按帐户在服务端启用；本地测试时设置
@@ -132,7 +135,7 @@ Terminal）时，这会让复制功能正常工作。包装命令的终端也会
     /// 启动时打开 Agent Dashboard 视图。
     ///
     /// 集中、agent 原生地概览所有会话（顶层和 subagents）。当
-    /// `~/.grok-zh/config.toml` 中 `[dashboard].enabled = false`，或设置
+    /// `~/.grok/config.toml` 中 `[dashboard].enabled = false`，或设置
     /// `GROK_AGENT_DASHBOARD=0` 时禁用。
     Dashboard,
 }
@@ -417,7 +420,7 @@ pub struct PagerArgs {
     /// UI locale（`zh-CN` 或 `en-US`）。重启后生效。
     #[arg(long, value_name = "LOCALE", global = true)]
     pub locale: Option<String>,
-    /// 使用自定义 leader socket 路径，而不是默认的 `~/.grok-zh/leader.sock`。
+    /// 使用自定义 leader socket 路径，而不是默认的 `~/.grok/leader.sock`。
     #[arg(
         long = "leader-socket",
         value_name = "PATH",
@@ -584,14 +587,17 @@ pub struct PagerArgs {
     /// （可通过 `--session-id` 设置）。
     #[arg(long = "fork-session")]
     pub fork_session: bool,
-    /// 在新的 git worktree 中启动会话，可选择名称。
+    /// 在新的 git worktree 中启动会话，可选择名称。恢复远程会话时，传入
+    /// `--restore-code` 可应用快照代码库（无论是否传入，对话都会恢复）。
+    /// 无头模式（`-p`）不会根据此参数创建 worktree。
     #[arg(short = 'w', long = "worktree", num_args = 0..= 1, default_missing_value = "")]
     pub worktree: Option<String>,
     /// 指定用于创建 worktree 的分支、标签或提交（配合 `--worktree`）。省略时默认
     /// 使用源代码检出的当前 HEAD。
     #[arg(long = "worktree-ref", visible_alias = "ref", requires = "worktree")]
     pub worktree_ref: Option<String>,
-    /// 恢复会话时检出原会话的提交。
+    /// 恢复会话时还原原会话的仓库快照。远程会话必须同时指定 `--worktree`
+    /// （绝不会检出到当前目录）。不传此参数时，仅恢复对话。
     #[arg(long = "restore-code", requires = "resume_session")]
     pub restore_code: bool,
     /// 禁用计划模式。
@@ -729,7 +735,7 @@ pub struct PagerArgs {
     pub no_alt_screen: bool,
     /// 实验性：滚动区原生渲染。已完成的区块会打印到终端原生滚动区（使用终端自身的
     /// 滚动和选择）；小型固定区域保留提示和运行中的回合。仅限会话范围，不写入配置。
-    /// 若要让普通 `grok-zh` 默认使用 minimal，请在 ~/.grok-zh/config.toml 中设置
+    /// 若要让普通 `grok-zh` 默认使用 minimal，请在 ~/.grok/config.toml 中设置
     /// `[ui] screen_mode = "minimal"`。
     #[arg(long = "minimal")]
     pub minimal: bool,

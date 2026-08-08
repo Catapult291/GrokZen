@@ -1069,6 +1069,51 @@ fn subagents_config_parses_max_depth_from_toml() {
     });
 }
 #[test]
+fn subagent_limit_counts_resolve_env_over_toml_over_remote_over_default() {
+    use xai_grok_tools::implementations::grok_build::task::admission;
+    let resolve = SubagentsConfig::resolve_max_concurrent;
+    assert_eq!(resolve(Some("3"), Some(2), Some(4)), 3);
+    assert_eq!(resolve(None, Some(2), Some(4)), 2);
+    assert_eq!(resolve(None, None, Some(5)), 5);
+    assert_eq!(resolve(None, None, None), admission::DEFAULT_MAX_CONCURRENT);
+    assert_eq!(resolve(Some("-2"), Some(2), None), 2);
+    assert_eq!(resolve(None, Some(0), Some(3)), 1);
+    assert_eq!(
+            SubagentsConfig::resolve_workflow_max_concurrent(None, None, None),
+            crate::session::workflow::host_service::DEFAULT_WORKFLOW_MAX_CONCURRENT_AGENTS
+        );
+}
+#[test]
+fn subagent_limit_behavior_resolves_env_over_toml_over_remote_over_queue() {
+    use xai_grok_tools::implementations::grok_build::task::admission::LimitBehavior;
+    let resolve = SubagentsConfig::resolve_limit_behavior;
+    assert_eq!(
+            resolve(Some("fail"), Some("queue"), Some("queue")),
+            LimitBehavior::Fail
+        );
+    assert_eq!(resolve(None, Some("FAIL"), Some("queue")), LimitBehavior::Fail);
+    assert_eq!(resolve(None, None, Some("fail")), LimitBehavior::Fail);
+    assert_eq!(resolve(None, None, None), LimitBehavior::Queue);
+    assert_eq!(
+            resolve(Some("sometimes"), Some("fail"), None),
+            LimitBehavior::Fail
+        );
+    assert_eq!(resolve(None, Some("sometimes"), None), LimitBehavior::Queue);
+}
+#[test]
+fn subagents_config_parses_limits_from_toml() {
+    without_grok_subagents(|| {
+        let config: toml::Value = toml::from_str(
+                "[subagents]\nmax_concurrent = 4\nlimit_behavior = \"fail\"\nworkflow_max_concurrent = 8\n",
+            )
+            .unwrap();
+        let sa = SubagentsConfig::resolve(false, &config);
+        assert_eq!(sa.max_concurrent, Some(4));
+        assert_eq!(sa.limit_behavior.as_deref(), Some("fail"));
+        assert_eq!(sa.workflow_max_concurrent, Some(8));
+    });
+}
+#[test]
 fn subagents_config_parses_negative_max_depth_without_dropping_section() {
     without_grok_subagents(|| {
         let config: toml::Value = toml::from_str(
@@ -3329,8 +3374,8 @@ fn validate_hooks_path_rejects_outside_grok_home() {
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
-            msg.contains("must be under ~/.grok-zh/"),
-            "should mention ~/.grok-zh/ restriction, got: {msg}"
+            msg.contains("must be under ~/.grok/"),
+            "should mention ~/.grok/ restriction, got: {msg}"
         );
 }
 #[test]
@@ -3341,7 +3386,7 @@ fn validate_hooks_path_rejects_traversal_attack() {
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
-            msg.contains("must be under ~/.grok-zh/"),
+            msg.contains("must be under ~/.grok/"),
             "traversal should be rejected, got: {msg}"
         );
 }
@@ -3351,7 +3396,7 @@ fn validate_hooks_path_accepts_grok_hooks_subdir() {
     let valid_path = grok_home.join("hooks").join("my-hooks");
     let _ = std::fs::create_dir_all(&valid_path);
     let result = validate_hooks_path(valid_path.to_str().unwrap());
-    assert!(result.is_ok(), "path under ~/.grok-zh/ should be accepted");
+    assert!(result.is_ok(), "path under ~/.grok/ should be accepted");
 }
 #[test]
 fn managed_settings_disables_features_and_requirements_overrides() {

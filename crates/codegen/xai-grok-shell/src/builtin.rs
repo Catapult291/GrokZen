@@ -1,10 +1,10 @@
-//! Built-in files extracted to `~/.grok-zh/` on startup.
+//! Built-in files extracted to `~/.grok/` on startup.
 
 const BUILTIN_FILES: &[(&str, &str)] = &[("README.md", include_str!("../README.zh-CN.md"))];
 
-/// Extract built-in metadata files to `~/.grok-zh/` on startup.
+/// Extract built-in metadata files to `~/.grok/` on startup.
 ///
-/// User skills under `~/.grok-zh/skills/` are never managed here. Platform skills
+/// User skills under `~/.grok/skills/` are never managed here. Platform skills
 /// are delivered separately through the bundled skill cache.
 pub fn extract_builtin_files(grok_home: &std::path::Path) {
     let version = xai_grok_version::VERSION;

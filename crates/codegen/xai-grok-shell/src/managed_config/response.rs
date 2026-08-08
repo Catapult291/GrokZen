@@ -58,7 +58,7 @@ pub enum ManagedConfigError {
     )]
     SignatureRejected,
     #[error(
-        "Can't save the configuration to ~/.grok-zh. Make sure the directory exists and is writable.\n  ({0})"
+        "Can't save the configuration to ~/.grok. Make sure the directory exists and is writable.\n  ({0})"
     )]
     DiskWrite(#[from] std::io::Error),
 }

@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 
 use crate::acp::meta::NotificationMeta;
 use crate::acp::tracker::AcpUpdateTracker;
+use crate::locale::LocaleContext;
 use crate::scrollback::export::render_blocks_to_markdown;
 use crate::scrollback::state::ScrollbackState;
 
@@ -20,10 +21,21 @@ pub struct ExportArgs {
 }
 
 pub fn run(args: ExportArgs) -> Result<()> {
+    run_with_locale(args, &LocaleContext::default())
+}
+
+pub fn run_with_locale(args: ExportArgs, locale: &LocaleContext) -> Result<()> {
     tracing::info!(session_id = %args.session_id, "export_cmd: starting session export");
 
     let updates = xai_grok_shell::session::storage::load_updates_for_replay(&args.session_id)?
-        .with_context(|| format!("Session '{}' not found.", args.session_id))?;
+        .with_context(|| {
+            locale
+                .named_text(
+                    "transcript.export.session_not_found",
+                    "Session '{session_id}' not found.",
+                )
+                .replace("{session_id}", &args.session_id)
+        })?;
 
     let mut tracker = AcpUpdateTracker::new();
     let mut scrollback = ScrollbackState::new();
@@ -43,26 +55,48 @@ pub fn run(args: ExportArgs) -> Result<()> {
 
     if md.is_empty() {
         anyhow::bail!(
-            "Session '{}' has no conversation content to export",
-            args.session_id
+            "{}",
+            locale
+                .named_text(
+                    "transcript.export.no_content_for_session",
+                    "Session '{session_id}' has no conversation content to export"
+                )
+                .replace("{session_id}", &args.session_id)
         );
     }
 
     if let Some(path) = args.output {
         let expanded = PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).as_ref());
         if let Some(parent) = expanded.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create {}", parent.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                locale
+                    .named_text(
+                        "transcript.export.create_directory_failed",
+                        "Failed to create {path}",
+                    )
+                    .replace("{path}", &parent.display().to_string())
+            })?;
         }
-        std::fs::write(&expanded, &md)
-            .with_context(|| format!("Failed to write {}", expanded.display()))?;
+        std::fs::write(&expanded, &md).with_context(|| {
+            locale
+                .named_text("transcript.export.write_failed", "Failed to write {path}")
+                .replace("{path}", &expanded.display().to_string())
+        })?;
         tracing::info!(
             session_id = %args.session_id,
             path = %expanded.display(),
             bytes = md.len(),
             "export_cmd: wrote transcript to file"
         );
-        eprintln!("Conversation exported to {}", expanded.display());
+        eprintln!(
+            "{}",
+            locale
+                .named_text(
+                    "transcript.export.to_file",
+                    "Conversation exported to {path}"
+                )
+                .replace("{path}", &expanded.display().to_string())
+        );
     } else if args.clipboard {
         let _ = crate::clipboard::copy_text(&md);
         let lines = md.lines().count();
@@ -72,10 +106,18 @@ pub fn run(args: ExportArgs) -> Result<()> {
             lines,
             "export_cmd: copied transcript to clipboard"
         );
+        let stats = locale
+            .named_text("transcript.stats.many", "({chars} chars, {lines} lines)")
+            .replace("{chars}", &md.len().to_string())
+            .replace("{lines}", &lines.to_string());
         eprintln!(
-            "Conversation copied to clipboard ({} chars, {} lines)",
-            md.len(),
-            lines
+            "{}",
+            locale
+                .named_text(
+                    "transcript.export.clipboard",
+                    "Conversation copied to clipboard {stats}"
+                )
+                .replace("{stats}", &stats)
         );
     } else {
         std::io::stdout().write_all(md.as_bytes())?;

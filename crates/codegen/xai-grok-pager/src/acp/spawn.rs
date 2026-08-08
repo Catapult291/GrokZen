@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
+use xai_grok_telemetry::startup::{self, StartupPhase};
 
 use xai_acp_lib::{
     AcpAgentChannel, AcpClientChannel, AcpClientTx, AcpGatewayReceiver, AcpGatewaySender,
@@ -32,11 +33,16 @@ const AGENT_JOIN_SLACK: Duration = Duration::from_secs(2);
 /// is taking a moment. Short joins (the common case) print nothing.
 const JOIN_NOTICE_AFTER: Duration = Duration::from_millis(1500);
 
+/// Stderr notice after a slow join. Covers the whole SessionEnd pipeline
+/// (hooks, telemetry sync, upload drain, memory, optional dream) — not
+/// hooks alone, so the copy is intentionally not "session hooks".
+const JOIN_NOTICE: &str = "Finishing session…";
+
 /// Result of spawning a child agent.
 pub struct SpawnedAgent {
     /// Agent worker OS thread. Hand to [`AgentShutdownGuard`] so the worker is
-    /// cancelled and joined — letting session actors flush SessionEnd hooks —
-    /// on every exit path.
+    /// cancelled and joined — letting session actors finish SessionEnd teardown
+    /// (hooks, telemetry, uploads, memory) — on every exit path.
     pub thread_handle: thread::JoinHandle<Result<()>>,
     pub channel: AcpClientChannel,
     pub cancel: CancellationToken,
@@ -47,8 +53,8 @@ pub struct SpawnedAgent {
 
 /// The single teardown mechanism for an in-process agent: cancels the worker
 /// and joins it on drop, so session actors always get
-/// `SessionCommand::Shutdown` (SessionEnd hooks, memory save) before the
-/// process exits — on normal return, `?` bail, or panic unwind alike.
+/// `SessionCommand::Shutdown` (SessionEnd hooks, telemetry drain, memory)
+/// before the process exits — on normal return, `?` bail, or panic unwind alike.
 ///
 /// Hold one from every site that calls [`spawn_grok_shell`] (headless, the TUI,
 /// `models`, `worktree`, `share`). Scope-end drop is the default; the TUI is the
@@ -57,13 +63,30 @@ pub struct SpawnedAgent {
 pub struct AgentShutdownGuard {
     cancel: CancellationToken,
     thread: Option<thread::JoinHandle<Result<()>>>,
+    join_notice: &'static str,
 }
 
 impl AgentShutdownGuard {
     /// Guard an in-process agent worker. A `None` thread makes the guard a
     /// no-op cancel (leader mode has no in-process worker to join).
     pub fn new(cancel: CancellationToken, thread: Option<thread::JoinHandle<Result<()>>>) -> Self {
-        Self { cancel, thread }
+        Self {
+            cancel,
+            thread,
+            join_notice: JOIN_NOTICE,
+        }
+    }
+
+    pub fn new_with_locale(
+        cancel: CancellationToken,
+        thread: Option<thread::JoinHandle<Result<()>>>,
+        locale: &crate::locale::LocaleContext,
+    ) -> Self {
+        Self {
+            cancel,
+            thread,
+            join_notice: locale.named_static_text("session.finishing", JOIN_NOTICE),
+        }
     }
 }
 
@@ -74,7 +97,7 @@ impl Drop for AgentShutdownGuard {
             return;
         };
         let timeout = SESSION_FLUSH_GRACE + AGENT_JOIN_SLACK;
-        match join_agent_thread(handle, timeout) {
+        match join_agent_thread_with_notice(handle, timeout, self.join_notice) {
             JoinOutcome::Joined => {}
             JoinOutcome::Failed(error) => {
                 tracing::warn!(%error, "agent worker exited with error after cancel");
@@ -86,7 +109,7 @@ impl Drop for AgentShutdownGuard {
                 tracing::warn!(
                     timeout_ms = timeout.as_millis() as u64,
                     "agent worker did not exit within grace after cancel; \
-                     session hooks may be incomplete"
+                     SessionEnd teardown (hooks/telemetry/uploads) may be incomplete"
                 );
             }
             JoinOutcome::HelperLost => {
@@ -120,6 +143,14 @@ enum JoinOutcome {
 /// because every caller is on its way out of the process**, so the OS reaps the
 /// thread at exit. Do not reuse this outside teardown.
 fn join_agent_thread(handle: thread::JoinHandle<Result<()>>, timeout: Duration) -> JoinOutcome {
+    join_agent_thread_with_notice(handle, timeout, JOIN_NOTICE)
+}
+
+fn join_agent_thread_with_notice(
+    handle: thread::JoinHandle<Result<()>>,
+    timeout: Duration,
+    join_notice: &str,
+) -> JoinOutcome {
     use std::sync::mpsc::RecvTimeoutError;
 
     let (tx, rx) = std::sync::mpsc::channel();
@@ -128,14 +159,14 @@ fn join_agent_thread(handle: thread::JoinHandle<Result<()>>, timeout: Duration) 
     });
 
     // Two-phase wait: silent for a short join (overwhelmingly the common case),
-    // then a one-line notice so a slow SessionEnd hook does not look like a
+    // then a one-line notice so a slow SessionEnd pipeline does not look like a
     // frozen exit. Only for a terminal — piped/JSON consumers stay clean.
     let quiet = timeout.min(JOIN_NOTICE_AFTER);
     match rx.recv_timeout(quiet) {
         Ok(result) => return classify_join(result),
         Err(RecvTimeoutError::Timeout) => {
             if std::io::stderr().is_terminal() {
-                eprintln!("Finishing session hooks…");
+                eprintln!("{join_notice}");
             }
         }
         Err(RecvTimeoutError::Disconnected) => return JoinOutcome::HelperLost,
@@ -168,8 +199,6 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 /// Spawn a GrokShell agent in a background thread.
-///
-/// Returns the ACP client channel for communication and a cancellation token.
 pub async fn spawn_grok_shell(
     agent_config: AgentConfig,
     cancel: &CancellationToken,
@@ -196,6 +225,7 @@ pub async fn spawn_grok_shell(
     // wrong-identity/missing cache). Never errors — the OS-protected system/MDM
     // layers still apply, and every network step inside is bounded
     // (SESSION_START_AUTH_DEADLINE / SyncBudget::SessionStart).
+    startup::enter(StartupPhase::ManagedPolicy);
     xai_grok_shell::managed_config::ensure_managed_policy_present(&auth_manager).await;
 
     // Run the full bootstrap sequence: config resolution, process-level
@@ -233,6 +263,7 @@ pub async fn spawn_grok_shell(
     };
 
     // Spawn the agent thread with direct dispatch
+    startup::enter(StartupPhase::SpawnWorker);
     let handle =
         spawn_agent_thread_direct(spawn_fn, acp_agent, agent_cancel.clone(), skills_paths)?;
 

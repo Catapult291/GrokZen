@@ -320,6 +320,83 @@
     }
 
     #[test]
+    fn wake_turn_stop_affordance_offered_then_cleared_at_terminal() {
+        // The pane stays Idle around a wake turn, so the stop affordance is
+        // keyed on `running_wake_turn`: set by the first live wake delta,
+        // cleared by the wake terminal.
+        let mut app = make_app_with_agent("sess-wake");
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            matches!(agent.wake_display_state(), Some(AgentState::TurnRunning)),
+            "a streaming wake turn must offer the running chrome (and [stop])"
+        );
+
+        // A delta arriving mid-cancel must not reset the cancelling phase.
+        if let Some(wake) = app
+            .agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .running_wake_turn
+            .as_mut()
+        {
+            wake.cancel_sent = true;
+        }
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 6_000),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            matches!(agent.wake_display_state(), Some(AgentState::TurnCancelling)),
+            "a later delta must not clobber the cancelling phase"
+        );
+
+        let _ = handle_ext_notification(
+            &xai_wake_turn_completed_notif("sess-wake", "task-completed-bg1", None),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            agent.running_wake_turn.is_none() && agent.wake_display_state().is_none(),
+            "the wake terminal must retire the stop affordance"
+        );
+
+        // Deltas and the terminal ride separate channels: a late delta for
+        // the finished wake must not revive the affordance.
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 7_000),
+            &mut app,
+        );
+        assert!(
+            app.agents[&AgentId(0)].running_wake_turn.is_none(),
+            "a late delta after the terminal must not revive the stop affordance"
+        );
+
+        // A second wake finishing must not forget the first: bg1's late
+        // delta stays dead after bg2's terminal lands too.
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg2", 8_000),
+            &mut app,
+        );
+        let _ = handle_ext_notification(
+            &xai_wake_turn_completed_notif("sess-wake", "task-completed-bg2", None),
+            &mut app,
+        );
+        let _ = handle(
+            make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 9_000),
+            &mut app,
+        );
+        assert!(
+            app.agents[&AgentId(0)].running_wake_turn.is_none(),
+            "an earlier finished wake stays finished after later terminals"
+        );
+    }
+
+    #[test]
     fn wake_terminal_finishes_in_flight_streamed_entry() {
         // The terminal is a wake's ONLY flush site (wakes skip PromptResponse).
         let mut app = make_app_with_agent("sess-wake");
@@ -409,6 +486,121 @@
             last_session_event(&agent.scrollback),
             Some(SessionEvent::TurnFailed { .. })
         ));
+    }
+
+    #[test]
+    fn rate_limited_wake_during_local_turn_keeps_rate_limit_copy() {
+        // The busy-wake piercing path must pass rate-limit copy through
+        // untouched like `finish_wake_turn` does — the generic formatter
+        // would strip the upgrade URL and headline it "Request failed".
+        let mut app = make_app_with_agent("sess-wake");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+        }
+        let rate_limit_copy = "You've hit the rate limit for your plan. Upgrade your \
+                               subscription for higher limits: https://grok.com/supergrok";
+        let payload = SessionNotification {
+            session_id: acp::SessionId::new("sess-wake"),
+            update: XaiSessionUpdate::TurnCompleted {
+                prompt_id: "task-completed-bg1".into(),
+                stop_reason: "rate_limit".into(),
+                agent_result: Some(rate_limit_copy.into()),
+                usage: None,
+            },
+            meta: Some(serde_json::json!({ "isReplay": false })),
+        };
+        let notif = acp::ExtNotification::new(
+            "x.ai/session/update",
+            std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+        );
+
+        let _ = handle_ext_notification(&notif, &mut app);
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        match last_session_event(&agent.scrollback) {
+            Some(SessionEvent::TurnFailed { error, .. }) => {
+                assert_eq!(error, rate_limit_copy, "copy must pass through untouched");
+            }
+            other => panic!("expected TurnFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn errored_wake_skips_marker_when_banner_already_on_screen() {
+        // The retry-state rail already pushed the formatted RequestFailed
+        // banner for this failure; the wake rail must not add a second
+        // near-identical warning line — same dedupe as the local rails.
+        let mut app = make_app_with_agent("sess-wake");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::session_event(
+                    SessionEvent::RequestFailed {
+                        status: Some(400),
+                        headline: "Bad request (400)".into(),
+                        detail: "The server rejected this request.".into(),
+                    },
+                ));
+        }
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.scrollback.len(),
+            len_before,
+            "banner already covers the failure; no TurnFailed marker"
+        );
+        // The failure is still recorded, so the other wake rail stays quiet too.
+        assert_eq!(
+            agent.failed_wake_marker_for.as_deref(),
+            Some("task-completed-bg1")
+        );
+    }
+
+    /// Same dedupe on the busy-wake rail (a local turn is running, so the
+    /// terminal takes the `is_busy` branch instead of `finish_wake_turn`).
+    #[test]
+    fn errored_wake_during_local_turn_skips_marker_when_banner_on_screen() {
+        use crate::app::agent::AgentState;
+
+        let mut app = make_app_with_agent("sess-wake");
+        {
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent
+                .scrollback
+                .push_block(crate::scrollback::block::RenderBlock::session_event(
+                    SessionEvent::RequestFailed {
+                        status: Some(500),
+                        headline: "Server error (500)".into(),
+                        detail: String::new(),
+                    },
+                ));
+        }
+        let len_before = app.agents[&AgentId(0)].scrollback.len();
+
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
+            &mut app,
+        );
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(
+            agent.scrollback.len(),
+            len_before,
+            "banner already covers the failure; no TurnFailed marker"
+        );
+        assert_eq!(
+            agent.failed_wake_marker_for.as_deref(),
+            Some("task-completed-bg1")
+        );
     }
 
     #[test]
@@ -1447,7 +1639,17 @@
                 .contains("p-first")
         );
 
-        // A second load (reconnect) enters a fresh replay window.
+        // A second load (reconnect) enters a fresh replay window. An armed
+        // cancel resend belongs to the pre-reload turn and must drop with it.
+        app.agents.get_mut(&id).unwrap().pending_cancel_resend =
+            Some(crate::app::agent_view::PendingCancelResend {
+                prompt_id: Some("p-first".into()),
+                sent_at: std::time::Instant::now(),
+                attempts: 1,
+                confirmed: false,
+                cancel_subagents: true,
+                trigger: crate::app::actions::CancelTrigger::Esc,
+            });
         app.agents.get_mut(&id).unwrap().begin_session_reload(1);
         let agent = &app.agents[&id];
         assert!(
@@ -1457,6 +1659,10 @@
         assert_eq!(
             agent.unexpected_replay_drops, 0,
             "begin_replay_window must reset every replay-coupled field together"
+        );
+        assert!(
+            agent.pending_cancel_resend.is_none(),
+            "an armed cancel resend must not survive into the reload window"
         );
         assert!(agent.session.loading_replay);
     }
@@ -1534,3 +1740,87 @@
         );
     }
 
+    /// Builds a live `LastTurnSummary` notification.
+    fn xai_last_turn_summary_notif(
+        session_id: &str,
+        summary: &str,
+        prompt_id: Option<&str>,
+    ) -> acp::ExtNotification {
+        let payload = SessionNotification {
+            session_id: acp::SessionId::new(session_id),
+            update: XaiSessionUpdate::LastTurnSummary {
+                summary: summary.into(),
+                prompt_id: prompt_id.map(String::from),
+            },
+            meta: None,
+        };
+        acp::ExtNotification::new(
+            "x.ai/session/update",
+            std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+        )
+    }
+
+    /// Show-until-replaced: a summary stays on the row across a later
+    /// cancelled turn (the shell generates none for it), survives turn
+    /// start/finish untouched, and is replaced by the next delivery.
+    /// Viewer-mode, mirroring `live_turn_completed_finalizes_viewer_turn`.
+    #[test]
+    fn last_turn_summary_shows_until_replaced() {
+        let mut app = make_app_with_agent("sess-lts");
+        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
+
+        // Turn A runs, completes, and its summary arrives.
+        let _ = handle(
+            make_agent_chunk_message_with_prompt("sess-lts", "chunk", "pid-a", false),
+            &mut app,
+        );
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-lts", "pid-a", "end_turn", false),
+            &mut app,
+        );
+        let affected = handle_ext_notification(
+            &xai_last_turn_summary_notif("sess-lts", "Did the thing", Some("pid-a")),
+            &mut app,
+        );
+        assert!(affected);
+        assert_eq!(
+            app.agents.get(&AgentId(0)).unwrap().last_turn_summary.as_deref(),
+            Some("Did the thing")
+        );
+
+        // Turn B runs and is cancelled (no replacement summary): A's summary
+        // stays — the row keeps showing the last successful turn's work.
+        let _ = handle(
+            make_agent_chunk_message_with_prompt("sess-lts", "chunk", "pid-b", false),
+            &mut app,
+        );
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-lts", "pid-b", "cancelled", false),
+            &mut app,
+        );
+        assert!(app.agents.get(&AgentId(0)).unwrap().session.state.is_idle());
+        assert_eq!(
+            app.agents.get(&AgentId(0)).unwrap().last_turn_summary.as_deref(),
+            Some("Did the thing"),
+            "a cancelled turn must not blank the previous summary"
+        );
+
+        // Turn C succeeds; its summary replaces A's.
+        let _ = handle(
+            make_agent_chunk_message_with_prompt("sess-lts", "chunk", "pid-c", false),
+            &mut app,
+        );
+        let _ = handle_ext_notification(
+            &xai_turn_completed_notif("sess-lts", "pid-c", "end_turn", false),
+            &mut app,
+        );
+        let affected = handle_ext_notification(
+            &xai_last_turn_summary_notif("sess-lts", "Did the next thing", Some("pid-c")),
+            &mut app,
+        );
+        assert!(affected);
+        assert_eq!(
+            app.agents.get(&AgentId(0)).unwrap().last_turn_summary.as_deref(),
+            Some("Did the next thing")
+        );
+    }

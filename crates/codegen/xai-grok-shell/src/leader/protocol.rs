@@ -407,7 +407,7 @@ pub(crate) enum InternalMethod {
 }
 
 impl InternalMethod {
-    pub const fn name(self) -> &'static str {
+    pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::AuthCleared => "x.ai/internal/auth_cleared",
             Self::EvictSessions => "x.ai/internal/evict_sessions",
@@ -420,7 +420,7 @@ impl InternalMethod {
         }
     }
 
-    pub fn from_name(name: &str) -> Option<Self> {
+    pub(crate) fn from_name(name: &str) -> Option<Self> {
         use strum::IntoEnumIterator;
 
         Self::iter().find(|method| method.name() == name)

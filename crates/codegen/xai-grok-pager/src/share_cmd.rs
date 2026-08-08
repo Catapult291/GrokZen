@@ -8,6 +8,20 @@ pub struct ShareArgs {
 }
 
 pub async fn run(args: &ShareArgs, agent_config: &AgentConfig) -> Result<()> {
+    run_with_locale(args, agent_config, &crate::locale::LocaleContext::default()).await
+}
+
+pub async fn run_with_locale(
+    args: &ShareArgs,
+    agent_config: &AgentConfig,
+    locale: &crate::locale::LocaleContext,
+) -> Result<()> {
     let _ = (args, agent_config);
-    anyhow::bail!("Session sharing is temporarily disabled");
+    anyhow::bail!(
+        "{}",
+        locale.named_text(
+            "session.share_disabled",
+            "Session sharing is temporarily disabled"
+        )
+    );
 }

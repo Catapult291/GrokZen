@@ -12,9 +12,9 @@
 
 这是基于官方 [xai-org/grok-build](https://github.com/xai-org/grok-build) Fork 的非官方简体中文社区版。
 
-本项目在尽量保持原有功能、命令行参数、配置格式和协议兼容性的前提下，为 Grok Build 的 CLI、TUI、设置、提示信息和用户文档提供简体中文支持。它与官方版并行安装，使用独立程序名 `grok-zh` 和独立数据目录 `~/.grok-zh`。
+本项目在尽量保持原有功能、命令行参数、配置格式和协议兼容性的前提下，为 Grok Build 的 CLI、TUI、设置、提示信息和用户文档提供简体中文支持。它以独立程序名 `grok-zh` 与官方版并行使用，但有意共用 `~/.grok` 数据目录：会话、登录状态、配置、第三方 API、插件与本地状态在两个入口之间保持一致。
 
-[项目定位](#项目定位) · [当前状态](#当前状态) · [从源码构建](#从源码构建) · [隔离约定](#隔离约定) · [文档](#文档) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
+[项目定位](#项目定位) · [当前状态](#当前状态) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
 
 ![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
 
@@ -33,11 +33,11 @@
 
 本仓库正在进行第一阶段汉化和 Windows 绿色构建验证。当前测试产物属于未签名预览版，不应视为稳定发布版。
 
-已建立的隔离边界：
+已建立的产品与数据边界：
 
 - 可执行文件：`grok-zh.exe`
-- 默认数据目录：`~/.grok-zh`
-- 可选目录覆盖：`GROK_ZH_HOME`
+- 与官方版共用的默认数据目录：`~/.grok`
+- 两个程序共同使用的目录覆盖：`GROK_HOME`
 - 默认界面语言：`zh-CN`，可用 `--locale en-US` 切换英文
 - 社区版独立更新源完成前，内置更新器保持关闭并安全失败
 
@@ -77,20 +77,22 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 .codex-local/target/x86_64-pc-windows-gnu/release-dist/grok-zh.exe
 ```
 
-绿色测试包还会在 `grok-zh.exe` 同目录携带 `rg.exe`。社区版搜索入口优先使用该旁载工具，缺失时再回退到系统 `PATH`，因此不需要覆盖或修改官方 Grok 的数据目录。
+绿色测试包还会在 `grok-zh.exe` 同目录携带 `rg.exe`。社区版搜索入口优先使用该旁载工具，缺失时再回退到系统 `PATH`；这只隔离程序安装文件，不改变两个程序共用 `~/.grok` 数据的约定。
 
 正式 Windows 发布仍需补齐 MSVC 构建、代码签名、安装包、DLL 闭包验证和独立自动更新流程。
 
-## 隔离约定
+## 共享数据与兼容约定
+
+`grok` 与 `grok-zh` 直接读写同一个 `~/.grok`（或 `GROK_HOME`）目录，不使用复制或双向同步层。因此在任一入口创建、恢复、重命名或删除会话，登录或退出账号，修改模型、第三方 API、MCP、插件和用户配置，另一入口都会看到相同结果。若两个程序同时运行，它们也遵循上游已有的文件锁与并发规则。
 
 以下名称必须保持稳定，不做翻译：
 
 - CLI 子命令、参数与取值，例如 `agent`、`--resume`、`--output-format json`
-- 配置键、环境变量和序列化字段，例如 `[ui] screen_mode`、`GROK_ZH_HOME`、JSON key
+- 配置键、环境变量和序列化字段，例如 `[ui] screen_mode`、`GROK_HOME`、JSON key
 - MCP、ACP、OAuth、OIDC、OSC 52 等协议名
 - 工具名、模型 ID、会话 ID、路径、URL、日志字段和服务端原始错误
 
-协议身份、遥测字段或兼容性所需的内部 `grok-pager` 名称可能继续保留；用户可见的产品名和安装路径则使用 `grok-zh` / `.grok-zh`。
+协议身份、遥测字段或兼容性所需的内部 `grok-pager` 名称可能继续保留；中文版的程序名使用 `grok-zh`，用户数据路径与官方版共同使用 `.grok`。
 
 ## 文档
 
@@ -105,7 +107,7 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 | 路径 | 内容 |
 |---|---|
 | `crates/codegen/xai-grok-locale` | 集中式语言目录、locale 解析与回退 |
-| `crates/codegen/xai-grok-product` | 社区版程序名、数据目录与更新隔离策略 |
+| `crates/codegen/xai-grok-product` | 社区版程序名、共享数据目录与更新安全策略 |
 | `crates/codegen/xai-grok-pager-bin` | 组合入口，生成 `grok-zh` |
 | `crates/codegen/xai-grok-pager` | TUI、回滚区、提示输入、模态框和渲染 |
 | `crates/codegen/xai-grok-shell` | 智能体运行时及 leader/stdio/headless 入口 |

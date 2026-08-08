@@ -8,6 +8,7 @@ use super::agent::AgentId;
 use crate::unified_log as ulog;
 use xai_grok_shell::sampling::error::{
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, format_rate_limited_user_message,
+    http_status_from_error,
 };
 use xai_grok_shell::session::ExtMethodResult;
 use xai_grok_shell::session::unified_list::ListScope;
@@ -16,6 +17,19 @@ use xai_grok_shell::session::unified_list::ListScope;
 pub(crate) struct RestoreProgressMsg {
     pub agent_id: AgentId,
     pub message: String,
+}
+
+pub(super) fn localized_named(
+    locale: &crate::locale::LocaleContext,
+    id: &str,
+    english: &str,
+    arguments: &[(&str, &str)],
+) -> String {
+    let mut output = locale.named_text(id, english).into_owned();
+    for (name, value) in arguments {
+        output = output.replace(&format!("{{{name}}}"), value);
+    }
+    output
 }
 pub(super) fn log_prompt_result(
     session_id: &acp::SessionId,
@@ -52,6 +66,7 @@ pub(super) async fn fetch_plugin_cta_mcps(
     session_id: acp::SessionId,
     plugin_name: String,
     tx: AcpAgentTx,
+    locale: std::sync::Arc<crate::locale::LocaleContext>,
 ) -> TaskResult {
     let params = serde_json::json!({
         "sessionId": session_id.0.to_string(),
@@ -72,10 +87,20 @@ pub(super) async fn fetch_plugin_cta_mcps(
                 crate::views::mcps_modal::McpsListResponse,
             >(inner.clone())
                 .map(crate::views::mcps_modal::convert_list_response)
-                .map_err(|_| "couldn't load server list".to_string())
+                .map_err(|_| {
+                    locale
+                        .named_text(
+                            "extensions.error.server_list",
+                            "couldn't load server list",
+                        )
+                        .into_owned()
+                })
         }
-        Err(e) => Err(sanitize_user_error(&format!(
-            "couldn't load server list: {e}"
+        Err(e) => Err(sanitize_user_error(&localized_named(
+            locale.as_ref(),
+            "extensions.error.server_list_detail",
+            "couldn't load server list: {error}",
+            &[("error", &e.to_string())],
         ))),
     };
     TaskResult::PluginCtaMcpsLoaded {
@@ -88,8 +113,21 @@ pub(super) async fn fetch_plugin_cta_mcps(
 /// Rate-limit errors: free-usage paywall, else server detail (with API-key
 /// rewrite when the body pushes personal SuperGrok), else auth-aware fallback
 /// (see [`format_rate_limited_user_message`]).
-/// All other errors are sanitized to remove internal service names and jargon.
+/// All other errors render as the formatted request-failure banner text
+/// (status headline + sanitized detail).
 pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> String {
+    format_acp_error_with_locale(
+        err,
+        is_api_key_auth,
+        &crate::locale::LocaleContext::default(),
+    )
+}
+
+pub(super) fn format_acp_error_with_locale(
+    err: &acp::Error,
+    is_api_key_auth: bool,
+    locale: &crate::locale::LocaleContext,
+) -> String {
     if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
         let detail = err.data.as_ref().and_then(error_detail_from_data);
         return sanitize_user_error(
@@ -99,9 +137,21 @@ pub(super) fn format_acp_error(err: &acp::Error, is_api_key_auth: bool) -> Strin
     if err.code == acp::ErrorCode::InvalidParams && let Some(data) = &err.data
         && let Some(msg) = error_detail_from_data(data) && !msg.is_empty()
     {
-        return msg;
+        return sanitize_user_error(&msg);
     }
-    sanitize_user_error(&err.to_string())
+    let raw = err
+        .data
+        .as_ref()
+        .and_then(error_detail_from_data)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| err.to_string());
+    crate::app::error_display::format_request_failure_with_locale(
+        http_status_from_error(err),
+        None,
+        &raw,
+        Some(locale),
+    )
+    .message()
 }
 /// Format a Duration for user-visible restore progress messages.
 pub(super) fn format_restore_elapsed(d: std::time::Duration) -> String {
@@ -188,7 +238,7 @@ pub(crate) fn parse_session_scheduler_background_loops(
         .and_then(|v| v.as_bool())
 }
 /// Whether `raw` is (or wraps) a disk-full / ENOSPC failure.
-fn is_disk_full_error(raw: &str) -> bool {
+pub(crate) fn is_disk_full_error(raw: &str) -> bool {
     raw.contains(xai_fast_worktree::OUT_OF_DISK_CONTEXT)
         || raw.contains(xai_fast_worktree::ENOSPC_OS_MESSAGE)
         || raw.contains("Disk quota exceeded") || raw.contains("Out of disk space")
@@ -286,6 +336,9 @@ pub(crate) struct SessionFlags {
     /// local id/title resolution. Worktree failure messages append the
     /// no-match hint only when the failing target equals this value.
     pub resume_local_miss: Option<String>,
+    /// Immutable UI locale captured at the composition boundary. Async effect
+    /// tasks use it to format fixed client-owned copy before returning results.
+    pub locale: std::sync::Arc<crate::locale::LocaleContext>,
 }
 impl SessionFlags {
     /// Resolve the agent profile name from the flags.
@@ -784,6 +837,11 @@ pub(super) fn parse_session_picker_entries(
                 .or_else(|| v.get("worktree_label"))
                 .and_then(|s| s.as_str())
                 .map(String::from);
+            let last_turn_summary = v
+                .get("lastTurnSummary")
+                .or_else(|| v.get("last_turn_summary"))
+                .and_then(|s| s.as_str())
+                .map(String::from);
             let repo_name = crate::views::session_picker::repo_name_from_cwd(&cwd_str);
             Some(SessionPickerEntry {
                 id,
@@ -799,6 +857,7 @@ pub(super) fn parse_session_picker_entries(
                 branch,
                 repo_name,
                 worktree_label,
+                last_turn_summary,
                 card_detail: None,
             })
         })
@@ -839,6 +898,7 @@ pub(super) fn session_picker_entry_to_roster(
         model_id: e.model_id.clone(),
         yolo: false,
         activity: RosterActivity::Dormant,
+        last_turn_summary: e.last_turn_summary.clone(),
         resident: false,
         last_change_unix_ms: last_change.timestamp_millis(),
         origin: RosterOrigin {
@@ -1016,6 +1076,14 @@ pub(crate) async fn persist_setting(
                 return Err(kind_mismatch("page_flip_on_send", "Bool", &value));
             };
             xai_grok_shell::util::config::set_page_flip_on_send(b)
+                .await
+                .map_err(|e| e.to_string())
+        }
+        "confirm_before_rewind" => {
+            let SettingValue::Bool(b) = value else {
+                return Err(kind_mismatch("confirm_before_rewind", "Bool", &value));
+            };
+            xai_grok_shell::util::config::set_confirm_before_rewind(b)
                 .await
                 .map_err(|e| e.to_string())
         }

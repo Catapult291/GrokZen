@@ -710,6 +710,15 @@ fn run_pending_suspends(
     Ok(())
 }
 
+/// Minimal mode opens an empty session after the welcome branch (now, or
+/// post-auth via the deferred drain), so that session create owns the
+/// startup latch.
+fn minimal_will_open_session(term_state: &TerminalState, app: &AppView) -> bool {
+    term_state.screen_mode.is_minimal()
+        && matches!(app.active_view, ActiveView::Welcome)
+        && !app.is_zdr_blocked()
+}
+
 /// Run the main event loop until quit.
 ///
 /// Returns a [`RunResult`] with optional exit info (for the resume hint)
@@ -752,6 +761,7 @@ pub(crate) async fn run(
         source = ?resolved_locale.source,
         "UI locale resolved"
     );
+    xai_grok_telemetry::startup::enter(xai_grok_telemetry::startup::StartupPhase::AppInit);
     let mut app = AppView::new_with_locale(
         connection.tx,
         connection.models,
@@ -1640,6 +1650,7 @@ pub(crate) async fn run(
         MaterializedStartup::Resume {
             session_id,
             deferred_local_miss,
+            suppress_code_restore,
             ..
         } if args.worktree.is_some() => {
             tracing::info!(
@@ -1650,17 +1661,27 @@ pub(crate) async fn run(
             // Materialization-time provenance for the worktree failure hint;
             // the effect matches it against the exact deferred target.
             app.resume_local_miss = deferred_local_miss.then(|| session_id.clone());
+            if *suppress_code_restore {
+                app.suppress_code_restore_once = Some(session_id.clone());
+            }
             Some(Action::NewWorktreeSession {
                 load_session_id: Some(session_id.clone()),
                 label: args.worktree.as_ref().filter(|s| !s.is_empty()).cloned(),
                 git_ref: args.worktree_ref.clone(),
             })
         }
-        MaterializedStartup::Resume { session_id, .. } => {
+        MaterializedStartup::Resume {
+            session_id,
+            suppress_code_restore,
+            ..
+        } => {
             // CLI resume has no roster entry: `chat_kind` on LoadSession is the
             // conversation-entry bit only (false here). Process-wide `--chat`
             // still stamps kind=chat via SessionFlags.chat_mode in the load
             // effect; local Build disk rows are refused in dispatch / startup.
+            if *suppress_code_restore {
+                app.suppress_code_restore_once = Some(session_id.clone());
+            }
             Some(Action::LoadSession(
                 session_id.clone(),
                 session_cwd.clone(),
@@ -1685,12 +1706,18 @@ pub(crate) async fn run(
             parent_session_id,
             parent_cwd,
             new_session_id,
+            suppress_code_restore,
             ..
-        } => Some(Action::StartupForkSession {
-            parent_session_id: parent_session_id.clone(),
-            parent_cwd: parent_cwd.clone().or(session_cwd.clone()),
-            new_session_id: new_session_id.clone(),
-        }),
+        } => {
+            if *suppress_code_restore {
+                app.suppress_code_restore_once = Some(parent_session_id.clone());
+            }
+            Some(Action::StartupForkSession {
+                parent_session_id: parent_session_id.clone(),
+                parent_cwd: parent_cwd.clone().or(session_cwd.clone()),
+                new_session_id: new_session_id.clone(),
+            })
+        }
         MaterializedStartup::NewAuto if args.worktree.is_some() => {
             Some(Action::NewWorktreeSession {
                 load_session_id: None,
@@ -1721,6 +1748,9 @@ pub(crate) async fn run(
             return Ok(make_run_result(&app));
         }
         presenter.request_presentation(&mut app, terminal, false);
+    } else if args.initial_prompt().is_none() && !minimal_will_open_session(&term_state, &app) {
+        // No session work follows: latch at interactive.
+        xai_grok_telemetry::startup::report_total(xai_grok_telemetry::startup::StartupOutcome::Ok);
     }
 
     // Initial prompt from the CLI positional (`grok "fix the bug"`). When
@@ -1738,6 +1768,11 @@ pub(crate) async fn run(
                 return Ok(make_run_result(&app));
             }
             presenter.request_presentation(&mut app, terminal, false);
+        } else {
+            // ZDR drops the prompt; no session will latch, so latch at interactive.
+            xai_grok_telemetry::startup::report_total(
+                xai_grok_telemetry::startup::StartupOutcome::Ok,
+            );
         }
     }
 
@@ -1769,10 +1804,7 @@ pub(crate) async fn run(
     // empty one so the user lands directly at the prompt. Unauthenticated /
     // ZDR-blocked startup stays on Welcome, where `crate::minimal::live` shows
     // a sign-in hint instead of a blank region.
-    if term_state.screen_mode.is_minimal()
-        && matches!(app.active_view, ActiveView::Welcome)
-        && !app.is_zdr_blocked()
-    {
+    if minimal_will_open_session(&term_state, &app) {
         if app.session_startup_allowed() {
             // Already authenticated + trusted: open the empty session now so the
             // user lands directly at the prompt.
@@ -2294,16 +2326,19 @@ pub(crate) async fn run(
 
             _ = animation_tick => {
                 animation_tick_at = None;
+                // Lost-cancel recovery: re-send cancels for panes still
+                // cancelling past the grace (`dispatch::reconcile_overdue_cancels`).
+                // `needs_animation()` keeps ticks alive while either recovery
+                // is armed, so these checks cannot be starved.
+                if let Some(resends) = dispatch::reconcile_overdue_cancels(&mut app)
+                    && process_effects(resends, &mut tasks, &mut app, &progress_tx)
+                {
+                    break;
+                }
                 // Lost-response recovery: finish any turn whose
                 // `prompt_complete` broadcast outlived the grace window
                 // without its `session/prompt` RPC response arriving
                 // (see `dispatch::reconcile_overdue_turn_ends`).
-                // `needs_animation()` keeps ticks alive while a reconcile
-                // is armed, so this check cannot be starved.
-                // Lost-response recovery: finish turns whose terminal armed
-                // reconcile and grace expired without PromptResponse
-                // (`dispatch::reconcile_overdue_turn_ends`). `needs_animation()`
-                // keeps ticks alive while reconcile is armed.
                 let reconciled = dispatch::reconcile_overdue_turn_ends(&mut app);
                 if let Some(effs) = reconciled {
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
@@ -3752,6 +3787,45 @@ pub(crate) fn welcome_history_build_bypass_consume(
     })
 }
 
+/// Consume id-keyed code-restore suppression on a matching `LoadSession` or
+/// worktree resume. Leaves `app.restore_code` unchanged for other loads.
+pub(crate) fn take_load_restore_code(
+    app: &mut AppView,
+    effs: &[super::actions::Effect],
+) -> Option<bool> {
+    let Some(target) = app.suppress_code_restore_once.clone() else {
+        return app.restore_code;
+    };
+    let hit_load = effs.iter().any(|e| match e {
+        super::actions::Effect::LoadSession { session_id, .. } => session_id == &target,
+        _ => false,
+    });
+    let hit_worktree = effs.iter().any(|e| match e {
+        super::actions::Effect::CreateWorktreeSession {
+            load_session_id: Some(sid),
+            ..
+        } => sid == &target,
+        _ => false,
+    });
+    if hit_load {
+        app.suppress_code_restore_once = None;
+        return Some(false);
+    }
+    if hit_worktree {
+        // Peek only: worktree resume sends restoreCode:false, then
+        // WorktreeForked retargets suppress to the child LoadSession.
+        return Some(false);
+    }
+    app.restore_code
+}
+
+/// If one-shot suppress is armed for `from`, point it at `to`.
+pub(crate) fn retarget_suppress_code_restore(app: &mut AppView, from: &str, to: impl Into<String>) {
+    if app.suppress_code_restore_once.as_deref() == Some(from) {
+        app.suppress_code_restore_once = Some(to.into());
+    }
+}
+
 /// Shared [`SessionFlags`] builder (interactive loop + leader-cluster).
 pub(crate) fn session_flags_for_effects(
     app: &mut AppView,
@@ -3762,7 +3836,7 @@ pub(crate) fn session_flags_for_effects(
         plan_mode: app.plan_mode,
         subagents: app.subagents,
         ask_user: app.ask_user,
-        restore_code: app.restore_code,
+        restore_code: take_load_restore_code(app, effs),
         agent_override: app.agent_override.clone(),
         yolo_mode: app.default_yolo,
         auto_mode: super::dispatch::effective_auto(
@@ -3803,6 +3877,7 @@ pub(crate) fn session_flags_for_effects(
         screen_mode_label: Some(app.screen_mode.meta_label()),
         is_api_key_auth: app.is_api_key_auth,
         resume_local_miss: app.resume_local_miss.clone(),
+        locale: app.locale.clone(),
     }
 }
 
@@ -3921,6 +3996,62 @@ mod tests {
         assert!(
             flags.local_workspace.is_none(),
             "conversation load must strip local stamp"
+        );
+    }
+
+    #[test]
+    fn take_load_restore_code_is_oneshot_on_matching_session_only() {
+        use crate::app::actions::Effect;
+        use crate::app::agent::AgentId;
+        let mut app = crate::app::app_view::tests::test_app();
+        app.restore_code = None;
+        app.suppress_code_restore_once = Some("child".into());
+        let other_load = Effect::LoadSession {
+            agent_id: AgentId(0),
+            session_id: "other".into(),
+            session_cwd: None,
+            chat_kind: false,
+        };
+        assert_eq!(
+            take_load_restore_code(&mut app, std::slice::from_ref(&other_load)),
+            None
+        );
+        assert_eq!(app.suppress_code_restore_once.as_deref(), Some("child"));
+        let wt = Effect::CreateWorktreeSession {
+            agent_id: AgentId(0),
+            load_session_id: Some("child".into()),
+            label: None,
+            git_ref: None,
+            model_id: None,
+            preferred_session_id: None,
+            chat_kind: false,
+        };
+        assert_eq!(
+            take_load_restore_code(&mut app, std::slice::from_ref(&wt)),
+            Some(false)
+        );
+        assert_eq!(
+            app.suppress_code_restore_once.as_deref(),
+            Some("child"),
+            "worktree resume peeks suppress without consuming"
+        );
+
+        let load = Effect::LoadSession {
+            agent_id: AgentId(0),
+            session_id: "child".into(),
+            session_cwd: None,
+            chat_kind: false,
+        };
+        assert_eq!(
+            take_load_restore_code(&mut app, std::slice::from_ref(&load)),
+            Some(false)
+        );
+        assert!(app.suppress_code_restore_once.is_none());
+        app.restore_code = Some(true);
+        assert_eq!(
+            take_load_restore_code(&mut app, std::slice::from_ref(&load)),
+            Some(true),
+            "later loads must use app.restore_code, not sticky false"
         );
     }
 

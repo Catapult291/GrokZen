@@ -37,6 +37,7 @@ use xai_grok_pager::app::{
 };
 use xai_grok_pager::app::{WorkspaceMgmtArgs, WorkspaceMgmtCommand, WorkspaceStartArgs};
 use xai_grok_pager::client_identity::PAGER_CLIENT_VERSION;
+use xai_grok_pager::locale::LocaleContext;
 use xai_grok_shell::agent::app::{run_headless, run_leader, run_stdio_agent};
 use xai_grok_shell::agent::config::Config as AgentConfig;
 use xai_grok_shell::leader::{
@@ -47,6 +48,38 @@ use xai_grok_shell::leader::{
     ControlPayload, LeaderClient, LeaderEnvUrls, connect_or_spawn, socket_path_for_ws_url,
 };
 use xai_grok_update::{UpdateConfig, auto_update, enforce_version_policy_or_exit};
+
+fn localized_cli_template(
+    locale: &LocaleContext,
+    id: &str,
+    english: &str,
+    replacements: &[(&str, &str)],
+) -> String {
+    let mut text = locale.named_text(id, english).into_owned();
+    for (placeholder, value) in replacements {
+        text = text.replace(placeholder, value);
+    }
+    text
+}
+
+fn load_disk_agent_config(locale: &LocaleContext) -> Result<AgentConfig> {
+    let config = xai_grok_shell::config::load_effective_config_disk_only().map_err(|e| {
+        anyhow::anyhow!(localized_cli_template(
+            locale,
+            "cli.config.load_failed",
+            "Failed to load config: {error}",
+            &[("{error}", &e.to_string())],
+        ))
+    })?;
+    AgentConfig::new_from_toml_cfg(&config).map_err(|e| {
+        anyhow::anyhow!(localized_cli_template(
+            locale,
+            "cli.config.agent_failed",
+            "Failed to create agent config: {error}",
+            &[("{error}", &e.to_string())],
+        ))
+    })
+}
 /// Apply headless args to an existing config, only overriding values that are
 /// explicitly set. This allows environment defaults to be preserved when
 /// specific args are not provided.
@@ -154,16 +187,30 @@ fn init_tracing_simple(app_entrypoint: &'static str) {
 }
 /// `grok-zh setup`: rendering + exit codes only; fetch logic lives in `xai_grok_shell::managed_config`.
 /// `json` prints the served configuration instead of installing it.
-async fn run_setup_command(json: bool) {
+async fn run_setup_command(json: bool, locale: &LocaleContext) {
     use xai_grok_shell::managed_config::{self, SetupOutcome};
     if !managed_config::has_principal() {
-        eprintln!("No deployment key or team sign-in found.");
+        eprintln!(
+            "{}",
+            locale.named_text(
+                "cli.setup.no_principal",
+                "No deployment key or team sign-in found."
+            )
+        );
         eprintln!();
         eprintln!(
-            "To install managed configuration, sign in with a team using `{} login`,",
-            xai_grok_product::CLI_NAME
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.setup.sign_in_hint",
+                "To install managed configuration, sign in with a team using `{cli} login`,",
+                &[("{cli}", xai_grok_product::CLI_NAME)],
+            )
         );
-        eprintln!("or set a deployment key:");
+        eprintln!(
+            "{}",
+            locale.named_text("cli.setup.deployment_key_hint", "or set a deployment key:")
+        );
         eprintln!();
         if cfg!(unix) {
             eprintln!("  export GROK_DEPLOYMENT_KEY=<your-key>");
@@ -173,15 +220,24 @@ async fn run_setup_command(json: bool) {
         eprintln!("  {} setup", xai_grok_product::CLI_NAME);
         eprintln!();
         eprintln!(
-            "Or add the key to ~/{}/config.toml:",
-            xai_grok_product::DATA_DIR_NAME
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.setup.config_hint",
+                "Or add the key to ~/{data_dir}/config.toml:",
+                &[("{data_dir}", xai_grok_product::DATA_DIR_NAME)],
+            )
         );
         eprintln!();
         eprintln!("  [endpoints]");
         eprintln!("  deployment_key = \"<your-key>\"");
         eprintln!();
         eprintln!(
-            "If you don't have a deployment key, contact your organization's Grok administrator."
+            "{}",
+            locale.named_text(
+                "cli.setup.admin_hint",
+                "If you don't have a deployment key, contact your organization's Grok administrator."
+            )
         );
         std::process::exit(1);
     }
@@ -193,39 +249,71 @@ async fn run_setup_command(json: bool) {
                 println!("{out}");
                 if !report.configured {
                     eprintln!(
-                        "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                        "{}",
+                        locale.named_text(
+                            "cli.setup.not_configured",
+                            "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                        )
                     );
                 }
             }
             Err(e) => {
-                eprintln!("Couldn't fetch managed configuration. {e}");
+                eprintln!(
+                    "{}",
+                    localized_cli_template(
+                        locale,
+                        "cli.setup.fetch_failed",
+                        "Couldn't fetch managed configuration. {error}",
+                        &[("{error}", &e.to_string())],
+                    )
+                );
                 std::process::exit(1);
             }
         }
         return;
     }
     match managed_config::run_setup().await {
-        SetupOutcome::Installed => eprintln!("Applied managed configuration."),
+        SetupOutcome::Installed => eprintln!(
+            "{}",
+            locale.named_text("cli.setup.applied", "Applied managed configuration.")
+        ),
         SetupOutcome::NothingConfigured => {
             eprintln!(
-                "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                "{}",
+                locale.named_text(
+                    "cli.setup.not_configured",
+                    "Your team doesn't have a managed configuration yet. A team admin can set one up at console.x.ai."
+                )
             );
         }
         SetupOutcome::Skipped => {
             eprintln!(
-                "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `{} setup` again.",
-                xai_grok_product::CLI_NAME
+                "{}",
+                localized_cli_template(
+                    locale,
+                    "cli.setup.skipped",
+                    "Managed configuration was not applied this run (another process held the apply lock, or the credential changed during the fetch). Run `{cli} setup` again.",
+                    &[("{cli}", xai_grok_product::CLI_NAME)],
+                )
             );
         }
         SetupOutcome::Failed(e) => {
-            eprintln!("Couldn't apply managed configuration. {e}");
+            eprintln!(
+                "{}",
+                localized_cli_template(
+                    locale,
+                    "cli.setup.apply_failed",
+                    "Couldn't apply managed configuration. {error}",
+                    &[("{error}", &e.to_string())],
+                )
+            );
             std::process::exit(1);
         }
     }
 }
-async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
+async fn run_leader_mgmt(args: LeaderMgmtArgs, locale: &LocaleContext) -> Result<()> {
     match args.command {
-        LeaderMgmtCommand::Kill => kill_leaders().await,
+        LeaderMgmtCommand::Kill => kill_leaders(locale).await,
         LeaderMgmtCommand::List { json } => {
             let leaders = xai_grok_shell::leader::discover_leaders().await;
             if json {
@@ -235,10 +323,13 @@ async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
                     serde_json::to_string(&serde_json::Value::Array(payload))?
                 );
             } else if leaders.is_empty() {
-                println!("No leader candidates found.");
+                println!(
+                    "{}",
+                    locale.named_text("cli.leader.none", "No leader candidates found.")
+                );
             } else {
                 for d in &leaders {
-                    print_leader_descriptor(d);
+                    print_leader_descriptor(d, locale);
                 }
             }
             Ok(())
@@ -259,9 +350,13 @@ async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
             } else if let Some(info) = info {
                 println!("{info:#?}");
             } else {
-                print_leader_descriptor(&descriptor);
+                print_leader_descriptor(&descriptor, locale);
                 eprintln!(
-                    "  (detailed info unavailable — leader does not advertise control capabilities)"
+                    "{}",
+                    locale.named_text(
+                        "cli.leader.info.unavailable",
+                        "  (detailed info unavailable — leader does not advertise control capabilities)"
+                    )
                 );
             }
             client.cancel();
@@ -269,10 +364,13 @@ async fn run_leader_mgmt(args: LeaderMgmtArgs) -> Result<()> {
         }
     }
 }
-async fn kill_leaders() -> Result<()> {
+async fn kill_leaders(locale: &LocaleContext) -> Result<()> {
     let leaders = xai_grok_shell::leader::discover_leaders().await;
     if leaders.is_empty() {
-        eprintln!("No leader candidates found.");
+        eprintln!(
+            "{}",
+            locale.named_text("cli.leader.none", "No leader candidates found.")
+        );
         return Ok(());
     }
     let mut killed = 0u32;
@@ -283,7 +381,15 @@ async fn kill_leaders() -> Result<()> {
         };
         if !xai_grok_shell::util::is_grok_process(pid) {
             if let Some(ref lock) = d.lock_path {
-                eprintln!("  PID {pid} is not a grok-zh process, removing stale lock");
+                eprintln!(
+                    "{}",
+                    localized_cli_template(
+                        locale,
+                        "cli.leader.kill.stale_lock",
+                        "  PID {pid} is not a grok-zh process, removing stale lock",
+                        &[("{pid}", &pid.to_string())],
+                    )
+                );
                 let _ = std::fs::remove_file(lock);
                 cleaned += 1;
             }
@@ -292,19 +398,54 @@ async fn kill_leaders() -> Result<()> {
             }
             continue;
         }
-        eprintln!("  Killing leader PID {pid}");
+        eprintln!(
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.leader.kill.stopping",
+                "  Killing leader PID {pid}",
+                &[("{pid}", &pid.to_string())],
+            )
+        );
         if let Err(e) = xai_grok_shell::util::kill_process_by_pid(pid) {
-            eprintln!("  warning: failed to terminate PID {pid}: {e}");
+            eprintln!(
+                "{}",
+                localized_cli_template(
+                    locale,
+                    "cli.leader.kill.terminate_failed",
+                    "  warning: failed to terminate PID {pid}: {error}",
+                    &[("{pid}", &pid.to_string()), ("{error}", &e.to_string())],
+                )
+            );
             continue;
         }
         killed += 1;
     }
     if killed > 0 {
-        eprintln!("Killed {killed} leader process(es).");
+        eprintln!(
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.leader.kill.completed",
+                "Killed {count} leader process(es).",
+                &[("{count}", &killed.to_string())],
+            )
+        );
     } else if cleaned > 0 {
-        eprintln!("No live leader processes found (cleaned up {cleaned} stale lock(s)).");
+        eprintln!(
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.leader.kill.none_cleaned",
+                "No live leader processes found (cleaned up {count} stale lock(s)).",
+                &[("{count}", &cleaned.to_string())],
+            )
+        );
     } else {
-        eprintln!("No live leader processes found.");
+        eprintln!(
+            "{}",
+            locale.named_text("cli.leader.kill.none", "No live leader processes found.")
+        );
     }
     Ok(())
 }
@@ -337,7 +478,7 @@ async fn connect_to_leader(
 fn leader_pid(d: &LeaderDescriptor) -> Option<u32> {
     d.live_info.as_ref().map(|li| li.pid).or(d.pid_from_lock)
 }
-fn print_leader_descriptor(d: &LeaderDescriptor) {
+fn print_leader_descriptor(d: &LeaderDescriptor, locale: &LocaleContext) {
     let pid = leader_pid(d)
         .map(|p| p.to_string())
         .unwrap_or_else(|| "?".into());
@@ -347,7 +488,15 @@ fn print_leader_descriptor(d: &LeaderDescriptor) {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "?".into());
     let state = format!("{:?}", d.classification);
-    eprintln!("  PID {pid} ({state}) -- {sock}");
+    eprintln!(
+        "{}",
+        localized_cli_template(
+            locale,
+            "cli.leader.descriptor",
+            "  PID {pid} ({state}) -- {socket}",
+            &[("{pid}", &pid), ("{state}", &state), ("{socket}", &sock)],
+        )
+    );
 }
 fn leader_descriptor_json(d: &LeaderDescriptor) -> serde_json::Value {
     serde_json::json!({
@@ -427,7 +576,7 @@ fn env_flag_enabled(value: &str) -> bool {
 fn fetch_remote_settings() -> Option<xai_grok_shell::util::config::RemoteSettings> {
     join_early_prefetch(xai_grok_shell::agent::models::start_early_prefetch(None))
 }
-async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
+async fn run_workspace_mgmt(args: WorkspaceMgmtArgs, locale: &LocaleContext) -> Result<()> {
     if matches!(
         &args.command,
         WorkspaceMgmtCommand::Start(_)
@@ -435,11 +584,15 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
             | WorkspaceMgmtCommand::Resume { .. }
     ) && let Some(profile) = xai_grok_sandbox::requested_confinement_profile()
     {
+        let profile_label = profile.to_string();
         anyhow::bail!(
-            "`grok-zh workspace` start/restart/resume is unavailable under sandbox profile '{profile}': \
-             those commands (re)activate shared-leader workspace exposure that this session cannot \
-             prove is confined by that profile. Disable the profile at the source that selected it \
-             (CLI, env, config, or a managed requirement)."
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.workspace.sandbox_blocked",
+                "`grok-zh workspace` start/restart/resume is unavailable under sandbox profile '{profile}': those commands (re)activate shared-leader workspace exposure that this session cannot prove is confined by that profile. Disable the profile at the source that selected it (CLI, env, config, or a managed requirement).",
+                &[("{profile}", &profile_label)],
+            )
         );
     }
     let env_override = workspace_command_env_override();
@@ -452,45 +605,65 @@ async fn run_workspace_mgmt(args: WorkspaceMgmtArgs) -> Result<()> {
         WorkspaceGate::Enabled => {}
         WorkspaceGate::Disabled => {
             anyhow::bail!(
-                "`grok-zh workspace` is not enabled for this account \
-             (gated by a server-side feature flag that is currently off)."
+                "{}",
+                locale.named_text(
+                    "cli.workspace.gate.disabled",
+                    "`grok-zh workspace` is not enabled for this account (gated by a server-side feature flag that is currently off)."
+                )
             )
         }
         WorkspaceGate::Unknown => {
             anyhow::bail!(
-                "Could not load your settings for `grok-zh workspace`. Check your \
-             network connection (run `grok-zh login` if you are signed out), then \
-             try again."
+                "{}",
+                locale.named_text(
+                    "cli.workspace.settings_unknown",
+                    "Could not load your settings for `grok-zh workspace`. Check your network connection (run `grok-zh login` if you are signed out), then try again."
+                )
             )
         }
     }
     match args.command {
         WorkspaceMgmtCommand::Start(a) => {
-            workspace_start(a, false, remote_settings.or_else(fetch_remote_settings)).await
+            workspace_start(
+                a,
+                false,
+                remote_settings.or_else(fetch_remote_settings),
+                locale,
+            )
+            .await
         }
         WorkspaceMgmtCommand::Restart(a) => {
-            workspace_start(a, true, remote_settings.or_else(fetch_remote_settings)).await
+            workspace_start(
+                a,
+                true,
+                remote_settings.or_else(fetch_remote_settings),
+                locale,
+            )
+            .await
         }
         WorkspaceMgmtCommand::Pause { target, json } => {
-            workspace_control(&target, json, ControlCommand::WorkspacePause).await
+            workspace_control(&target, json, ControlCommand::WorkspacePause, locale).await
         }
         WorkspaceMgmtCommand::Resume { target, json } => {
-            workspace_control(&target, json, ControlCommand::WorkspaceResume).await
+            workspace_control(&target, json, ControlCommand::WorkspaceResume, locale).await
         }
         WorkspaceMgmtCommand::Stop { target, json } => {
-            workspace_control(&target, json, ControlCommand::WorkspaceStop).await
+            workspace_control(&target, json, ControlCommand::WorkspaceStop, locale).await
         }
         WorkspaceMgmtCommand::Status { target, json } => {
-            workspace_control(&target, json, ControlCommand::WorkspaceStatus).await
+            workspace_control(&target, json, ControlCommand::WorkspaceStatus, locale).await
         }
     }
 }
-fn ensure_workspace_caps(reg: &LeaderRegistration) -> Result<()> {
+fn ensure_workspace_caps(reg: &LeaderRegistration, locale: &LocaleContext) -> Result<()> {
     let caps = ensure_control_caps(reg)?;
     if !caps.workspace_exposure {
         anyhow::bail!(
-            "the running leader does not support workspace exposure — stop the \
-             leader process and re-run to pick up the new version"
+            "{}",
+            locale.named_text(
+                "cli.workspace.capabilities_missing",
+                "the running leader does not support workspace exposure — stop the leader process and re-run to pick up the new version"
+            )
         );
     }
     Ok(())
@@ -498,6 +671,7 @@ fn ensure_workspace_caps(reg: &LeaderRegistration) -> Result<()> {
 async fn connect_workspace_control(
     agent_config: &AgentConfig,
     target: &LeaderTargetArgs,
+    locale: &LocaleContext,
 ) -> Result<LeaderClient> {
     if target.pid.is_some() {
         let (_descriptor, client) = connect_to_leader(target).await?;
@@ -513,25 +687,40 @@ async fn connect_workspace_control(
     )
     .await
     .map_err(|e| {
-        anyhow::anyhow!(
-            "no running leader for this environment ({e}). \
-             Start a grok-zh session, or run `grok-zh workspace start`."
-        )
+        anyhow::anyhow!(localized_cli_template(
+            locale,
+            "cli.workspace.leader_missing",
+            "no running leader for this environment ({error}). Start a grok-zh session, or run `grok-zh workspace start`.",
+            &[("{error}", &e.to_string())],
+        ))
     })
 }
 async fn workspace_control(
     target: &LeaderTargetArgs,
     json: bool,
     command: ControlCommand,
+    locale: &LocaleContext,
 ) -> Result<()> {
-    let raw_config = xai_grok_shell::config::load_effective_config_disk_only()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
-        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-    let client = connect_workspace_control(&agent_config, target).await?;
-    ensure_workspace_caps(client.registration())?;
+    let raw_config = xai_grok_shell::config::load_effective_config_disk_only().map_err(|e| {
+        anyhow::anyhow!(localized_cli_template(
+            locale,
+            "cli.workspace.config.load_failed",
+            "Failed to load config: {error}",
+            &[("{error}", &e.to_string())],
+        ))
+    })?;
+    let agent_config = AgentConfig::new_from_toml_cfg(&raw_config).map_err(|e| {
+        anyhow::anyhow!(localized_cli_template(
+            locale,
+            "cli.workspace.config.agent_failed",
+            "Failed to create agent config: {error}",
+            &[("{error}", &e.to_string())],
+        ))
+    })?;
+    let client = connect_workspace_control(&agent_config, target, locale).await?;
+    ensure_workspace_caps(client.registration(), locale)?;
     let payload = client.send_control(command).await??;
-    render_workspace_payload(&payload, json);
+    render_workspace_payload(&payload, json, locale);
     client.cancel();
     Ok(())
 }
@@ -539,13 +728,26 @@ async fn workspace_start(
     args: WorkspaceStartArgs,
     restart: bool,
     remote_settings: Option<xai_grok_shell::util::config::RemoteSettings>,
+    locale: &LocaleContext,
 ) -> Result<()> {
     use xai_grok_shell::auth::ensure_authenticated;
     xai_grok_shell::util::config::set_remote_campaigns_from_settings(remote_settings.as_ref());
-    let raw_config = xai_grok_shell::config::load_effective_config()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-    let agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
-        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+    let raw_config = xai_grok_shell::config::load_effective_config().map_err(|e| {
+        anyhow::anyhow!(localized_cli_template(
+            locale,
+            "cli.workspace.config.load_failed",
+            "Failed to load config: {error}",
+            &[("{error}", &e.to_string())],
+        ))
+    })?;
+    let agent_config = AgentConfig::new_from_toml_cfg(&raw_config).map_err(|e| {
+        anyhow::anyhow!(localized_cli_template(
+            locale,
+            "cli.workspace.config.agent_failed",
+            "Failed to create agent config: {error}",
+            &[("{error}", &e.to_string())],
+        ))
+    })?;
     let (use_leader, _) = resolve_use_leader(
         args.leader,
         args.no_leader,
@@ -556,16 +758,20 @@ async fn workspace_start(
     );
     if !use_leader {
         anyhow::bail!(
-            "`grok-zh workspace` requires leader mode (the workspace is shared via the leader).\n\
-             Enable it with `[cli] use_leader = true` in ~/.grok-zh/config.toml, or pass --leader."
+            "{}",
+            locale.named_text(
+                "cli.workspace.requires_leader",
+                "`grok-zh workspace` requires leader mode (the workspace is shared via the leader).\nEnable it with `[cli] use_leader = true` in ~/.grok/config.toml, or pass --leader."
+            )
         );
     }
-    ensure_authenticated(
-        &agent_config.grok_com_config,
-        false,
-        Some("No cached credentials found. Run `grok-zh login` first."),
-    )
-    .await?;
+    let auth_hint = locale
+        .named_text(
+            "cli.workspace.auth.required",
+            "No cached credentials found. Run `grok-zh login` first.",
+        )
+        .into_owned();
+    ensure_authenticated(&agent_config.grok_com_config, false, Some(&auth_hint)).await?;
     let env_urls = LeaderEnvUrls::from(&agent_config.grok_com_config);
     let capabilities = ClientCapabilities {
         client_version: Some(PAGER_CLIENT_VERSION.to_string()),
@@ -578,18 +784,31 @@ async fn workspace_start(
         capabilities,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("failed to start or connect to leader: {e}"))?;
+    .map_err(|e| {
+        anyhow::anyhow!(localized_cli_template(
+            locale,
+            "cli.workspace.leader.start_connect_failed",
+            "failed to start or connect to leader: {error}",
+            &[("{error}", &e.to_string())],
+        ))
+    })?;
     drop(conn);
     let target = LeaderTargetArgs::default();
-    let client = connect_workspace_control(&agent_config, &target).await?;
-    ensure_workspace_caps(client.registration())?;
+    let client = connect_workspace_control(&agent_config, &target, locale).await?;
+    ensure_workspace_caps(client.registration(), locale)?;
     if restart {
         let _ = client.send_control(ControlCommand::WorkspaceStop).await;
     }
     let cwd = match args.cwd {
         Some(p) => p,
-        None => std::env::current_dir()
-            .map_err(|e| anyhow::anyhow!("cannot determine current directory: {e}"))?,
+        None => std::env::current_dir().map_err(|e| {
+            anyhow::anyhow!(localized_cli_template(
+                locale,
+                "cli.workspace.cwd.resolve_failed",
+                "cannot determine current directory: {error}",
+                &[("{error}", &e.to_string())],
+            ))
+        })?,
     };
     let cwd = std::path::absolute(&cwd).unwrap_or(cwd);
     let payload = client
@@ -598,11 +817,11 @@ async fn workspace_start(
             cwd: cwd.display().to_string(),
         })
         .await??;
-    render_workspace_payload(&payload, args.json);
+    render_workspace_payload(&payload, args.json, locale);
     client.cancel();
     Ok(())
 }
-fn render_workspace_payload(payload: &ControlPayload, json: bool) {
+fn render_workspace_payload(payload: &ControlPayload, json: bool, locale: &LocaleContext) {
     let ControlPayload::WorkspaceStatus {
         state,
         hub_url,
@@ -613,7 +832,15 @@ fn render_workspace_payload(payload: &ControlPayload, json: bool) {
         pid,
     } = payload
     else {
-        eprintln!("unexpected control response: {payload:?}");
+        eprintln!(
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.workspace.response.unexpected",
+                "unexpected control response: {payload}",
+                &[("{payload}", &format!("{payload:?}"))],
+            )
+        );
         return;
     };
     if json {
@@ -630,25 +857,97 @@ fn render_workspace_payload(payload: &ControlPayload, json: bool) {
         return;
     }
     if state == "none" {
-        println!("Workspace exposure: not running (leader PID {pid})");
+        println!(
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.workspace.status.not_running",
+                "Workspace exposure: not running (leader PID {pid})",
+                &[("{pid}", &pid.to_string())],
+            )
+        );
         return;
     }
-    println!("Workspace exposure: {state}");
+    let state_label = match state.as_str() {
+        "running" => locale.named_text("cli.workspace.state.running", "running"),
+        "paused" => locale.named_text("cli.workspace.state.paused", "paused"),
+        _ => std::borrow::Cow::Borrowed(state.as_str()),
+    };
+    println!(
+        "{}",
+        localized_cli_template(
+            locale,
+            "cli.workspace.status.state",
+            "Workspace exposure: {state}",
+            &[("{state}", state_label.as_ref())],
+        )
+    );
     if let Some(url) = hub_url {
-        println!("  hub:      {url}");
+        println!(
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.workspace.status.hub",
+                "  hub:      {url}",
+                &[("{url}", url)],
+            )
+        );
     }
     if let Some(dir) = cwd {
-        println!("  cwd:      {dir}");
+        println!(
+            "{}",
+            localized_cli_template(
+                locale,
+                "cli.workspace.status.cwd",
+                "  cwd:      {cwd}",
+                &[("{cwd}", dir)],
+            )
+        );
     }
-    println!("  uptime:   {}s", uptime_ms / 1000);
-    println!("  active:   {active_tool_calls} tool call(s)");
+    println!(
+        "{}",
+        localized_cli_template(
+            locale,
+            "cli.workspace.status.uptime",
+            "  uptime:   {seconds}s",
+            &[("{seconds}", &(uptime_ms / 1000).to_string())],
+        )
+    );
+    println!(
+        "{}",
+        localized_cli_template(
+            locale,
+            "cli.workspace.status.active",
+            "  active:   {count} tool call(s)",
+            &[("{count}", &active_tool_calls.to_string())],
+        )
+    );
     let session_list = if sessions.is_empty() {
         "-".to_string()
     } else {
         sessions.join(", ")
     };
-    println!("  sessions: {} ({session_list})", sessions.len());
-    println!("  leader:   PID {pid}");
+    println!(
+        "{}",
+        localized_cli_template(
+            locale,
+            "cli.workspace.status.sessions",
+            "  sessions: {count} ({sessions})",
+            &[
+                ("{count}", &sessions.len().to_string()),
+                ("{sessions}", &session_list),
+            ],
+        )
+    );
+    println!(
+        "{}",
+        localized_cli_template(
+            locale,
+            "cli.workspace.status.leader",
+            "  leader:   PID {pid}",
+            &[("{pid}", &pid.to_string())],
+        )
+    );
 }
 /// How to rebuild one session's `session/load` after a leader reconnect.
 #[derive(Default, Clone)]
@@ -698,8 +997,54 @@ impl StdioReplayState {
             self.last_session_id = None;
         }
     }
+    /// A resume names a session the client is already attached to, so an entry
+    /// from its original `session/load` is the better one to replay: it carries
+    /// the client's `_meta`, which a synthesized load cannot reproduce.
+    fn insert_session_if_new(&mut self, sid: &str, cached: CachedSession) {
+        if !self.sessions.iter().any(|(id, _)| id == sid) {
+            self.sessions.push((sid.to_string(), cached));
+        }
+    }
 }
+/// `sessionId`, `cwd`, and `mcpServers` off a session request's params.
+fn cached_session_from_params(
+    params: &serde_json::Value,
+    verbatim: Option<&str>,
+) -> Option<(String, CachedSession)> {
+    let sid = params
+        .get("sessionId")
+        .or_else(|| params.get("session_id"))
+        .and_then(|v| v.as_str())?;
+    Some((
+        sid.to_string(),
+        CachedSession {
+            load_request_json: verbatim.map(str::to_string),
+            cwd: params
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            mcp_servers_json: params
+                .get("mcpServers")
+                .and_then(|m| serde_json::to_string(m).ok()),
+        },
+    ))
+}
+/// Methods whose requests the replay cache reads. One list shared by the
+/// prefilter and the match below so the two cannot drift apart; quoted JSON
+/// spellings so prose mentioning a method does not trigger a parse.
+const CACHED_METHODS: &[&str] = &[
+    "\"initialize\"",
+    "\"session/new\"",
+    "\"session/load\"",
+    "\"session/resume\"",
+    "\"session/close\"",
+    "\"x.ai/session/close\"",
+    "\"_x.ai/session/close\"",
+];
 fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState>) {
+    if !CACHED_METHODS.iter().any(|m| msg.contains(m)) {
+        return;
+    }
     let Ok(json) = serde_json::from_str::<serde_json::Value>(msg) else {
         return;
     };
@@ -713,27 +1058,26 @@ fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState
             s.initialize_json = Some(msg.to_string());
         }
         "session/load" => {
+            let Some(params) = json.get("params") else {
+                return;
+            };
+            let Some((sid, cached)) = cached_session_from_params(params, Some(msg)) else {
+                return;
+            };
             let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(params) = json.get("params") {
-                let sid = params
-                    .get("sessionId")
-                    .or_else(|| params.get("session_id"))
-                    .and_then(|v| v.as_str());
-                if let Some(sid) = sid {
-                    let cached = CachedSession {
-                        load_request_json: Some(msg.to_string()),
-                        cwd: params
-                            .get("cwd")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        mcp_servers_json: params
-                            .get("mcpServers")
-                            .and_then(|m| serde_json::to_string(m).ok()),
-                    };
-                    s.upsert_session(sid, cached);
-                    s.last_session_id = Some(sid.to_string());
-                }
-            }
+            s.upsert_session(&sid, cached);
+            s.last_session_id = Some(sid);
+        }
+        "session/resume" => {
+            let Some(params) = json.get("params") else {
+                return;
+            };
+            let Some((sid, cached)) = cached_session_from_params(params, None) else {
+                return;
+            };
+            let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
+            s.insert_session_if_new(&sid, cached);
+            s.last_session_id = Some(sid);
         }
         "session/new" => {
             let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -749,7 +1093,7 @@ fn cache_outgoing_acp_state(msg: &str, state: &std::sync::Mutex<StdioReplayState
                     .and_then(|m| serde_json::to_string(m).ok()),
             });
         }
-        "x.ai/session/close" | "_x.ai/session/close" => {
+        "session/close" | "x.ai/session/close" | "_x.ai/session/close" => {
             if let Some(sid) = json
                 .get("params")
                 .and_then(|p| p.get("sessionId").or_else(|| p.get("session_id")))
@@ -999,12 +1343,7 @@ async fn forward_stdio_line_to_leader(
     if trimmed.is_empty() {
         return;
     }
-    if trimmed.contains("\"initialize\"")
-        || trimmed.contains("\"session/load\"")
-        || trimmed.contains("\"session/new\"")
-    {
-        cache_outgoing_acp_state(&trimmed, replay_state);
-    }
+    cache_outgoing_acp_state(&trimmed, replay_state);
     let send_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(300);
     loop {
         {
@@ -1532,7 +1871,7 @@ fn flag_dashboard_at_startup_if_requested(args: &mut PagerArgs) -> Result<()> {
     if !xai_grok_pager::views::dashboard::dashboard_enabled() {
         anyhow::bail!(
             "the Agent Dashboard is disabled. Enable it by removing \
-             `[dashboard] enabled = false` from ~/.grok-zh/config.toml and \
+             `[dashboard] enabled = false` from ~/.grok/config.toml and \
              unsetting GROK_AGENT_DASHBOARD=0."
         );
     }
@@ -1791,7 +2130,61 @@ fn dispatch_doctor_if_requested(args: &PagerArgs) -> bool {
     }
     true
 }
+
+/// Resolve enough locale state for filesystem utility commands without loading
+/// config layers (which would initialize the community data directory).
+fn resolve_read_only_utility_locale(args: &PagerArgs) -> xai_grok_pager::locale::LocaleContext {
+    let environment = std::env::var(xai_grok_product::LOCALE_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let system = xai_grok_pager::locale::system_locale();
+    let resolved = xai_grok_pager::locale::ResolvedLocale::resolve(
+        xai_grok_pager::locale::LocalePreferences {
+            requirement: None,
+            cli: args.locale.as_deref(),
+            environment: environment.as_deref(),
+            config: None,
+            managed: None,
+            system: system.as_deref(),
+            product_default: Some(xai_grok_product::DEFAULT_UI_LOCALE),
+        },
+    );
+    xai_grok_pager::locale::LocaleContext::new(resolved)
+}
+
+/// Minimal stderr-only tracing for read-only utilities. The regular CLI
+/// subscriber installs file/telemetry sinks under the application home.
+fn init_read_only_utility_tracing() {
+    use tracing_subscriber::{
+        EnvFilter, Layer as _, layer::SubscriberExt as _, util::SubscriberInitExt as _,
+    };
+
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("error"));
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_target(false)
+        .with_ansi(true)
+        .with_writer(std::io::stderr);
+    let _ = tracing_subscriber::registry()
+        .with(fmt_layer.with_filter(env_filter))
+        .try_init();
+}
+
+fn dispatch_read_only_utility(args: &PagerArgs) -> Option<Result<()>> {
+    let locale = resolve_read_only_utility_locale(args);
+    match &args.command {
+        Some(Command::DiskUsage(disk_usage_args)) => {
+            init_read_only_utility_tracing();
+            Some(xai_grok_pager::disk_usage_cmd::run_with_locale(
+                disk_usage_args.clone(),
+                Some(&locale),
+            ))
+        }
+        _ => None,
+    }
+}
+
 fn main() {
+    xai_grok_telemetry::startup::mark_process_start();
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
     }
@@ -1800,6 +2193,13 @@ fn main() {
     }
     let args = PagerArgs::parse_cli();
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
+        return;
+    }
+    if let Some(result) = dispatch_read_only_utility(&args) {
+        if let Err(error) = result {
+            eprintln!("Error: {error:#}");
+            std::process::exit(1);
+        }
         return;
     }
     xai_grok_pager_minimal::install();
@@ -1872,7 +2272,11 @@ fn main() {
             eprintln!("grok-zh: failed to start tokio runtime with {workers} workers: {e}");
             shutdown_and_flush_telemetry(1);
         });
-    let result = run_and_shutdown(runtime, async_main(args), RUNTIME_SHUTDOWN_GRACE);
+    let result = run_and_shutdown(
+        runtime,
+        async_main(args, startup_locale),
+        RUNTIME_SHUTDOWN_GRACE,
+    );
     xai_grok_telemetry::debug_log::flush();
     if let Err(e) = result {
         xai_tty_utils::restore_native_stderr();
@@ -1881,7 +2285,10 @@ fn main() {
         std::process::exit(1);
     }
 }
-async fn async_main(args: PagerArgs) -> Result<()> {
+async fn async_main(
+    args: PagerArgs,
+    startup_locale: std::sync::Arc<xai_grok_pager::locale::LocaleContext>,
+) -> Result<()> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut args = args.apply_cwd()?;
     if let Some(ref mode) = args.compaction_mode {
@@ -2000,12 +2407,13 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Setup { json } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                run_setup_command(json).await;
+                run_setup_command(json, startup_locale.as_ref()).await;
                 return Ok(());
             }
             Command::Mcp(mcp_args) => {
                 init_tracing_simple("cli");
-                return xai_grok_pager::mcp_cmd::run(mcp_args).await;
+                return xai_grok_pager::mcp_cmd::run_with_locale(mcp_args, startup_locale.as_ref())
+                    .await;
             }
             Command::Plugin(plugin_args) => {
                 init_tracing_simple("cli");
@@ -2015,64 +2423,82 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             Command::Models => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                return xai_grok_pager::models::list_available_models(&agent_config).await;
+                let agent_config = load_disk_agent_config(startup_locale.as_ref())?;
+                return xai_grok_pager::models::list_available_models_with_locale(
+                    &agent_config,
+                    startup_locale.as_ref(),
+                )
+                .await;
             }
             Command::Leader(leader_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                return run_leader_mgmt(leader_args).await;
+                return run_leader_mgmt(leader_args, startup_locale.as_ref()).await;
             }
             Command::Worktree(worktree_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                return xai_grok_pager::worktree_cmd::run(worktree_args, &agent_config).await;
+                let agent_config = load_disk_agent_config(startup_locale.as_ref())?;
+                return xai_grok_pager::worktree_cmd::run_with_locale(
+                    worktree_args,
+                    &agent_config,
+                    startup_locale.as_ref(),
+                )
+                .await;
+            }
+            Command::DiskUsage(disk_usage_args) => {
+                init_tracing_simple("cli");
+                let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                return xai_grok_pager::disk_usage_cmd::run_with_locale(
+                    disk_usage_args,
+                    Some(startup_locale.as_ref()),
+                );
             }
             Command::Workspace(workspace_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                return run_workspace_mgmt(workspace_args).await;
+                return run_workspace_mgmt(workspace_args, startup_locale.as_ref()).await;
             }
             Command::Sessions(sessions_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                return xai_grok_pager::sessions_cmd::run(sessions_args, &agent_config).await;
+                let agent_config = load_disk_agent_config(startup_locale.as_ref())?;
+                return xai_grok_pager::sessions_cmd::run(
+                    sessions_args,
+                    &agent_config,
+                    startup_locale.as_ref(),
+                )
+                .await;
             }
             Command::Share(ref share_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
-                return xai_grok_pager::share_cmd::run(share_args, &agent_config).await;
+                let agent_config = load_disk_agent_config(startup_locale.as_ref())?;
+                return xai_grok_pager::share_cmd::run_with_locale(
+                    share_args,
+                    &agent_config,
+                    startup_locale.as_ref(),
+                )
+                .await;
             }
             Command::Export(export_args) => {
                 init_tracing_simple("cli");
-                return xai_grok_pager::export_cmd::run(export_args);
+                return xai_grok_pager::export_cmd::run_with_locale(
+                    export_args,
+                    startup_locale.as_ref(),
+                );
             }
             Command::Trace(trace_args) => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let agent_config = AgentConfig::new_from_toml_cfg(&config)
-                    .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
+                let agent_config = load_disk_agent_config(startup_locale.as_ref())?;
                 return xai_grok_pager::trace_cmd::run(trace_args, &agent_config).await;
             }
             Command::Memory(memory_args) => {
-                return xai_grok_pager::memory_cmd::run(memory_args);
+                return xai_grok_pager::memory_cmd::run_with_locale(
+                    memory_args,
+                    startup_locale.as_ref(),
+                );
             }
             Command::Update {
                 check,
@@ -2165,6 +2591,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             prompt,
             args.verbatim,
             xai_grok_pager::headless::HeadlessOptions {
+                locale: startup_locale.clone(),
                 session_id: args.session_id.clone(),
                 resume: args.resume_session.or(args.load_session),
                 resume_title_pinned: args.resume_target_pinned,
@@ -2953,6 +3380,62 @@ mod tests {
         let s = state.lock().unwrap();
         assert!(s.sessions.is_empty(), "closed session must not be replayed");
         assert!(s.last_session_id.is_none());
+    }
+    /// The standard close spelling must stop the replay exactly like the ext
+    /// spelling: adopting `session/close` without teaching the cache would
+    /// resurrect closed sessions on every leader reconnect.
+    #[test]
+    fn cache_standard_session_close_stops_replaying_it() {
+        let state = make_state();
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp"}}"#,
+            &state,
+        );
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":3,"method":"session/close","params":{"sessionId":"s1"}}"#,
+            &state,
+        );
+        let s = state.lock().unwrap();
+        assert!(s.sessions.is_empty(), "closed session must not be replayed");
+        assert!(s.last_session_id.is_none());
+    }
+    /// A resume-only session must survive a leader restart: the cache
+    /// synthesizes a load entry, since a new leader has no turn to reattach to.
+    #[test]
+    fn cache_session_resume_registers_unknown_sessions_for_replay() {
+        let state = make_state();
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":2,"method":"session/resume","params":{"sessionId":"s1","cwd":"/proj"}}"#,
+            &state,
+        );
+        let s = state.lock().unwrap();
+        let (sid, cached) = &s.sessions[0];
+        assert_eq!(sid, "s1");
+        assert_eq!(
+            cached.load_request_json, None,
+            "a resume must not be replayed verbatim; the replay synthesizes a load"
+        );
+        assert_eq!(cached.cwd.as_deref(), Some("/proj"));
+        assert_eq!(s.last_session_id.as_deref(), Some("s1"));
+    }
+    /// A resume must not displace the original load's entry: that entry
+    /// carries the client's `_meta`, which a synthesized load cannot reproduce.
+    #[test]
+    fn cache_session_resume_does_not_displace_the_original_load() {
+        let state = make_state();
+        let load = r#"{"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"s1","cwd":"/tmp","_meta":{"noReplay":true}}}"#;
+        cache_outgoing_acp_state(load, &state);
+        cache_outgoing_acp_state(
+            r#"{"jsonrpc":"2.0","id":3,"method":"session/resume","params":{"sessionId":"s1","cwd":"/tmp"}}"#,
+            &state,
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.sessions.len(), 1, "one session, one replay entry");
+        assert_eq!(
+            s.sessions[0].1.load_request_json.as_deref(),
+            Some(load),
+            "the original load, with its _meta, must survive the resume"
+        );
     }
     /// An UNCONFIRMED `session/new` (leader died before its response) must not
     /// be replayed — its id was never assigned — but previously loaded

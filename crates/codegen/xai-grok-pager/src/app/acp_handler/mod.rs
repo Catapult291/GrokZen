@@ -390,16 +390,36 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             // the turn is current.
                             agent.flush_pending_follow_ups(notif_pid);
                         }
+                        // A live delta for a wake prompt id: record the
+                        // streaming wake turn so the stop affordance can offer
+                        // a cancel for it. Lifecycle on
+                        // `note_streaming_wake_turn`.
+                        if !meta.is_replay
+                            && let Some(notif_pid) = meta.prompt_id.as_deref()
+                            && is_wake_prompt(notif_pid)
+                        {
+                            agent.note_streaming_wake_turn(notif_pid);
+                        }
+
                         // Detect plan mode transitions from tool call completions.
                         plan_mode_modal_refresh_needed |=
                             detect_plan_mode_change(&notif.request.update, agent);
 
                         let had_activity_before = agent.session.tracker.activity().is_some();
-                        agent.session.handle_update(
-                            notif.request.update,
-                            &meta,
-                            &mut agent.scrollback,
-                        );
+                        let update = notif.request.update;
+                        let user_echo = matches!(update, acp::SessionUpdate::UserMessageChunk(_));
+                        agent
+                            .session
+                            .handle_update(update, &meta, &mut agent.scrollback);
+                        // Skip user echo: shell broadcasts it before history commit.
+                        if !user_echo
+                            && !meta.is_replay
+                            && !agent.session.loading_replay
+                            && meta.prompt_id.as_deref()
+                                == agent.session.current_prompt_id.as_deref()
+                        {
+                            agent.front_message_committed = true;
+                        }
                         // Once the server has emitted any activity (chunk, tool,
                         // retry, etc.), the in-flight prompt can no longer be
                         // "rewound" by Ctrl+C. Clear the stash on the transition.
@@ -687,6 +707,7 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "x.ai/scheduled_task_inject_prompt" => handle_scheduled_task_inject_prompt(notif, app),
         "x.ai/announcements/update" => handle_announcements_update(notif, app),
         "x.ai/git_head_changed" => handle_git_head_changed(notif, app),
+        "x.ai/leader/version_mismatch" => handle_version_mismatch(notif, app),
         "x.ai/mcp/init_progress" => handle_mcp_init_progress(notif, app),
         "x.ai/mcp/tools_changed" | "x.ai/mcp_initialized" => handle_mcp_tools_changed(notif, app),
         "x.ai/mcp/server_status" if push_server_status_enabled() => {
@@ -695,6 +716,18 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "x.ai/mcp/servers_updated" => handle_mcp_servers_updated(notif, app),
         _ => false,
     }
+}
+
+fn handle_version_mismatch(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    let Some(banner) = crate::acp::version_mismatch_banner_with_locale(
+        notif.params.get(),
+        Some(app.locale.as_ref()),
+    ) else {
+        tracing::warn!("ignoring x.ai/leader/version_mismatch without usable versions");
+        return false;
+    };
+    app.show_toast(&banner);
+    true
 }
 
 /// Handle `x.ai/session/interjection` — the leader broadcasts this

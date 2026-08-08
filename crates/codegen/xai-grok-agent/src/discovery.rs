@@ -185,15 +185,15 @@ fn merge_subagents(
 ///
 /// Search order (highest priority first):
 /// 1. `.grok/agents/` walking from `cwd` up to repo root
-/// 2. `~/.grok-zh/agents/` (user-level; or `GROK_ZH_HOME`)
+/// 2. `~/.grok/agents/` (user-level; or `GROK_HOME`)
 /// 3. `~/.claude/agents/` (compat user-level)
-/// 4. `~/.grok-zh/bundled/agents/` (bundled, lowest priority)
+/// 4. `~/.grok/bundled/agents/` (bundled, lowest priority)
 ///
 /// Deduplicates by name — higher-priority definitions win.
 /// User-level agent directories in priority order: user grok agents, `.claude`
 /// compat agents, then bundled. Product-owned directories resolve only from
-/// `grok_home`; the official distribution's literal `~/.grok` is never
-/// scanned. `.claude` remains an explicit compatibility source.
+/// the configured `grok_home`; a second fallback home is never scanned.
+/// `.claude` remains an explicit compatibility source.
 pub(crate) fn user_agent_dirs(
     home: Option<&Path>,
     grok_home: Option<&Path>,
@@ -765,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_dirs_never_include_official_grok_home() {
+    fn user_agent_dirs_use_only_the_configured_grok_home() {
         let home = Path::new("/home/u");
         let grok = Path::new("/custom/grokhome");
         let paths: Vec<_> = user_agent_dirs(Some(home), Some(grok))

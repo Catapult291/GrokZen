@@ -287,6 +287,36 @@ pub fn kill_current_process_on_parent_death() -> io::Result<()> {
 // Process group lifecycle
 // ---------------------------------------------------------------------------
 
+/// Bound on waiting for an already-killed child (or its pipe readers) before
+/// abandoning it.
+///
+/// A kill normally makes `child.wait()` resolve in milliseconds, but a child
+/// wedged in an uninterruptible kernel syscall (D-state — e.g. a read on a
+/// hard NFS mount whose server stopped responding) only observes the signal
+/// when that syscall returns, which can be effectively never. Callers that
+/// must not block (tool futures, turn loops) wait at most this long, then
+/// abandon the corpse to the runtime's orphan reaper.
+pub const KILL_REAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Reap an already-killed child, waiting at most `bound` (usually
+/// [`KILL_REAP_TIMEOUT`]).
+///
+/// Returns the exit status when the child was reaped in time. `None` covers
+/// both failure shapes — the bound expired (see [`KILL_REAP_TIMEOUT`]) and
+/// `wait()` itself erred (e.g. the child was already reaped elsewhere) — the
+/// caller's obligation is identical in either case: the kill signal is
+/// already delivered, there is no status to report, and the corpse is left
+/// to tokio's orphan reaper. Callers should log the `None` case.
+pub async fn reap_killed_bounded(
+    child: &mut tokio::process::Child,
+    bound: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    match tokio::time::timeout(bound, child.wait()).await {
+        Ok(res) => res.ok(),
+        Err(_elapsed) => None,
+    }
+}
+
 /// Configure a command so the spawned child becomes the leader of a new
 /// process group.
 pub fn new_process_group(cmd: &mut tokio::process::Command) {
@@ -606,7 +636,26 @@ pub const GIT_AUTH_SUPPRESSION_ENVS: [(&str, &str); 4] = [
 /// Git command with auth/LFS/SSH prompt suppression and `--no-optional-locks`.
 ///
 /// Respects `GIT_BIN_PATH` for hermetic git in Bazel test sandboxes.
+///
+/// `--no-optional-locks` skips *optional* maintenance locks only (for example
+/// `status` refreshing the index). Required locks for the requested operation
+/// are still taken. Prefer this for readers (`status`, `cat-file`, `rev-parse`).
 pub fn git_command() -> std::process::Command {
+    let mut cmd = git_command_base();
+    cmd.arg("--no-optional-locks");
+    cmd
+}
+
+/// Like [`git_command`], but omits `--no-optional-locks`.
+///
+/// Writers such as `fetch` may take optional maintenance locks (packed-refs
+/// refresh, etc.) in addition to required locks. Use this for mutating git
+/// that should not skip those optional locks under concurrent restore.
+pub fn git_command_locking() -> std::process::Command {
+    git_command_base()
+}
+
+fn git_command_base() -> std::process::Command {
     let mut hermetic_exec_path: Option<std::path::PathBuf> = None;
     let git = match std::env::var("GIT_BIN_PATH") {
         Ok(p) => {
@@ -638,7 +687,6 @@ pub fn git_command() -> std::process::Command {
     if let Some(exec_path) = hermetic_exec_path {
         cmd.env("GIT_EXEC_PATH", exec_path);
     }
-    cmd.arg("--no-optional-locks");
     cmd
 }
 
@@ -839,6 +887,31 @@ mod tests {
     fn detach_std_command_does_not_panic() {
         let mut cmd = std::process::Command::new("echo");
         detach_std_command(&mut cmd);
+    }
+
+    #[test]
+    fn git_command_locking_matches_reader_except_optional_locks_flag() {
+        use std::collections::HashMap;
+        use std::ffi::{OsStr, OsString};
+
+        let locking = git_command_locking();
+        let reading = git_command();
+        assert_eq!(locking.get_program(), reading.get_program());
+
+        let lock_args: Vec<OsString> = locking.get_args().map(OsStr::to_os_string).collect();
+        let read_args: Vec<OsString> = reading.get_args().map(OsStr::to_os_string).collect();
+        assert_eq!(
+            read_args.last().map(OsString::as_os_str),
+            Some(OsStr::new("--no-optional-locks"))
+        );
+        assert_eq!(
+            &read_args[..read_args.len().saturating_sub(1)],
+            lock_args.as_slice()
+        );
+
+        let lock_envs: HashMap<_, _> = locking.get_envs().collect();
+        let read_envs: HashMap<_, _> = reading.get_envs().collect();
+        assert_eq!(lock_envs, read_envs);
     }
 
     #[test]

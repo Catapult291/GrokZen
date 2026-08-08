@@ -4,6 +4,9 @@ use xai_grok_shell::agent::config::Config as AgentConfig;
 use xai_grok_shell::auth::{AuthManager, try_ensure_fresh_auth};
 use xai_grok_shell::session::merge::MergedSession;
 use xai_grok_shell::util::grok_home::grok_home;
+
+use crate::locale::LocaleContext;
+
 #[derive(Debug, clap::Args, Clone)]
 pub struct SessionsArgs {
     #[command(subcommand)]
@@ -33,7 +36,11 @@ enum SessionsCommand {
     },
 }
 
-pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
+pub async fn run(
+    args: SessionsArgs,
+    agent_config: &AgentConfig,
+    locale: &LocaleContext,
+) -> Result<()> {
     // Best-effort only. Do not force an interactive public login for enterprise
     // deployments that only configure a deployment_key + custom xai_api_base_url.
     // If the user has previously run the interactive `grok` TUI (which succeeds
@@ -67,7 +74,7 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                 limit,
             )
             .await;
-            print_sessions_grouped(&sessions);
+            print_sessions_grouped(&sessions, locale);
         }
         SessionsCommand::Search { query, limit } => {
             use std::collections::HashSet;
@@ -92,12 +99,24 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                 .await
                 .unwrap_or_else(|_| {
                     eprintln!(
-                        "warning: remote session search timed out, showing local results only"
+                        "{}",
+                        locale.named_text(
+                            "sessions.search.remote_timeout",
+                            "warning: remote session search timed out, showing local results only"
+                        )
                     );
                     Ok(Vec::new())
                 })
                 .unwrap_or_else(|e| {
-                    eprintln!("warning: remote session search failed: {e}");
+                    eprintln!(
+                        "{}",
+                        locale
+                            .named_text(
+                                "sessions.search.remote_failed",
+                                "warning: remote session search failed: {error}"
+                            )
+                            .replace("{error}", &e.to_string())
+                    );
                     Vec::new()
                 })
             });
@@ -108,7 +127,7 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
 
             for hit in &resp.results {
                 let title = if hit.title.is_empty() {
-                    "(untitled)"
+                    locale.named_static_text("sessions.common.untitled", "(untitled)")
                 } else {
                     &hit.title
                 };
@@ -120,8 +139,9 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                     })
                     .unwrap_or_default();
                 println!(
-                    "{} (score: {:.2})  {}\n  {}\n  {}",
+                    "{} ({}: {:.2})  {}\n  {}\n  {}",
                     hit.session_id,
+                    locale.named_text("sessions.search.score", "score"),
                     hit.score,
                     time,
                     title,
@@ -139,7 +159,7 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                     continue;
                 }
                 let title = if r.summary.is_empty() {
-                    "(untitled)"
+                    locale.named_static_text("sessions.common.untitled", "(untitled)")
                 } else {
                     &r.summary
                 };
@@ -158,15 +178,39 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
                     .take(80)
                     .collect();
                 println!(
-                    "{} (remote)  {}\n  {}\n  {}",
-                    r.session_id, time, title, snippet
+                    "{} ({})  {}\n  {}\n  {}",
+                    r.session_id,
+                    locale.named_text("sessions.common.remote", "remote"),
+                    time,
+                    title,
+                    snippet
                 );
                 remote_shown += 1;
             }
 
-            println!("\nTotal: {}", resp.results.len() + remote_shown);
+            println!(
+                "\n{} {}",
+                locale.named_text("sessions.search.total", "Total:"),
+                resp.results.len() + remote_shown
+            );
         }
         SessionsCommand::Delete { id } => {
+            let local_matches = xai_grok_shell::session::persistence::list_summaries(None)
+                .await?
+                .into_iter()
+                .filter(|summary| summary.info.id.0.as_ref() == id.as_str())
+                .count();
+            if local_matches > 1 {
+                anyhow::bail!(
+                    "{}",
+                    locale
+                        .named_text(
+                            "sessions.delete.ambiguous_id",
+                            "Session id {id} exists in multiple workspaces. Delete it from a specific workspace to avoid removing the wrong local or cloud copy."
+                        )
+                        .replace("{id}", &id)
+                );
+            }
             // Always attempt the remote delete when authenticated and not
             // ZDR — `list` / `search` likewise query remote unconditionally
             // rather than gating on storage mode (which the CLI cannot
@@ -188,9 +232,22 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
             .await?;
 
             if deletion.any_removed() {
-                println!("Deleted session {id}");
+                println!(
+                    "{}",
+                    locale
+                        .named_text("sessions.delete.deleted", "Deleted session {id}")
+                        .replace("{id}", &id)
+                );
             } else {
-                println!("No session found with id {id}.");
+                println!(
+                    "{}",
+                    locale
+                        .named_text(
+                            "sessions.delete.not_found",
+                            "No session found with id {id}."
+                        )
+                        .replace("{id}", &id)
+                );
             }
         }
     }
@@ -200,9 +257,12 @@ pub async fn run(args: SessionsArgs, agent_config: &AgentConfig) -> Result<()> {
 
 /// Print sessions grouped by worktree label, preserving the original table
 /// format with a `Label: <label>` header before each group.
-fn print_sessions_grouped(sessions: &[MergedSession]) {
+fn print_sessions_grouped(sessions: &[MergedSession], locale: &LocaleContext) {
     if sessions.is_empty() {
-        println!("No sessions found.");
+        println!(
+            "{}",
+            locale.named_text("sessions.list.empty", "No sessions found.")
+        );
         return;
     }
 
@@ -218,7 +278,11 @@ fn print_sessions_grouped(sessions: &[MergedSession]) {
 
     let header = format!(
         "{:<36}  {:<10}  {:<10}  {:<10}  {}",
-        "SESSION ID", "CREATED", "UPDATED", "STATUS", "SUMMARY"
+        locale.named_text("sessions.list.column.id", "SESSION ID"),
+        locale.named_text("sessions.list.column.created", "CREATED"),
+        locale.named_text("sessions.list.column.updated", "UPDATED"),
+        locale.named_text("sessions.list.column.source", "SOURCE"),
+        locale.named_text("sessions.list.column.summary", "SUMMARY")
     );
 
     // Labeled groups first (alphabetical), then unlabeled last.
@@ -236,23 +300,34 @@ fn print_sessions_grouped(sessions: &[MergedSession]) {
                 first_line = line.trim().to_string();
                 &first_line
             } else {
-                "(no summary)"
+                locale.named_static_text("sessions.list.no_summary", "(no summary)")
             };
             let truncated: String = summary.chars().take(50).collect();
             let created = &s.created_at[..s.created_at.len().min(10)];
             let updated = &s.updated_at[..s.updated_at.len().min(10)];
+            let source = match s.source.as_str() {
+                "local" => locale.named_static_text("sessions.source.local", "local"),
+                "remote" => locale.named_static_text("sessions.source.remote", "remote"),
+                "both" => locale.named_static_text("sessions.source.both", "both"),
+                _ => &s.source,
+            };
             println!(
                 "{}  {}  {}  {}  {}",
-                s.session_id, created, updated, s.source, truncated
+                s.session_id, created, updated, source, truncated
             );
         }
     };
 
     for (label, members) in &groups {
-        let line = format!("Label: {}", label.unwrap_or(""));
+        let line = locale
+            .named_text("sessions.list.label", "Label: {label}")
+            .replace("{label}", label.unwrap_or(""));
         print_group(&line, members);
     }
     if let Some(members) = &none_group {
-        print_group("(no label)", members);
+        print_group(
+            locale.named_static_text("sessions.list.no_label", "(no label)"),
+            members,
+        );
     }
 }

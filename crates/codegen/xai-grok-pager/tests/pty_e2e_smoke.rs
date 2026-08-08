@@ -19,6 +19,8 @@ mod basename_path_demo_pty;
 mod doubled_lines_out_of_band_repro;
 #[path = "pty_e2e/embedded_mode_boots_without_hanging_on_blocked_backend.rs"]
 mod embedded_mode_boots_without_hanging_on_blocked_backend;
+#[path = "pty_e2e/feedback_slash_opens_descriptive_pane.rs"]
+mod feedback_slash_opens_descriptive_pane;
 #[path = "pty_e2e/initial_prompt_positional_auto_submits.rs"]
 mod initial_prompt_positional_auto_submits;
 #[path = "pty_e2e/input_echoes_at_idle_prompt.rs"]
@@ -45,6 +47,8 @@ mod waiting_for_model_label;
 mod welcome_screen;
 #[path = "pty_e2e/welcome_screen_braille_logo_renders_correctly.rs"]
 mod welcome_screen_braille_logo_renders_correctly;
+#[path = "pty_e2e/wrap_appearance_env_advertised_through_shell.rs"]
+mod wrap_appearance_env_advertised_through_shell;
 #[path = "pty_e2e/wrap_child_killed_with_latched_modes_restores_terminal.rs"]
 mod wrap_child_killed_with_latched_modes_restores_terminal;
 #[path = "pty_e2e/wrap_clean_exit_stays_byte_transparent.rs"]

@@ -1,89 +1,253 @@
-use std::borrow::Cow;
+use std::io::Write;
 use std::path::Path;
 
-use super::{DbStats, GcReport, RebuildReport};
+use unicode_width::UnicodeWidthStr;
 use xai_fast_worktree::WorktreeRecord;
-use xai_grok_shell::session::worktree::META_KEY_LABEL;
 
-/// Extract the label from a worktree record's metadata JSON.
-fn extract_label(rec: &WorktreeRecord) -> &str {
-    rec.metadata
-        .as_ref()
-        .and_then(|m| m.get(META_KEY_LABEL))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
+use super::{DbStats, GcReport, RebuildReport};
+use crate::fs_size::{Volume, physical_dir_size};
+use crate::locale::LocaleContext;
+use crate::util::{format_bytes, pad_to_width, truncate_to_width, unix_now};
+
+const REPO_WIDTH: usize = 6;
+const BRANCH_WIDTH: usize = 20;
+const AGE_WIDTH: usize = 10;
+
+/// Truncate-then-pad to exactly `width` display columns; headers and data
+/// share it so the two stay aligned.
+fn cell(s: &str, width: usize) -> String {
+    pad_to_width(&truncate_to_width(s, width), width)
 }
 
-pub fn print_table(records: &[WorktreeRecord]) {
+fn localized_named(
+    locale: &LocaleContext,
+    id: &str,
+    english: &str,
+    arguments: &[(&str, &str)],
+) -> String {
+    let mut output = locale.named_text(id, english).into_owned();
+    for (name, value) in arguments {
+        output = output.replace(&format!("{{{name}}}"), value);
+    }
+    output
+}
+
+fn kind_label(kind: &str, locale: &LocaleContext) -> String {
+    let id = match kind {
+        "session" => "du.kind.session",
+        "ab" => "du.kind.ab",
+        "pool" => "du.kind.pool",
+        "fork" => "du.kind.fork",
+        "manual" => "du.kind.manual",
+        "subagent" => "du.kind.subagent",
+        _ => return kind.to_string(),
+    };
+    locale.named_text(id, kind).into_owned()
+}
+
+fn status_label(status: &str, locale: &LocaleContext) -> String {
+    match status {
+        "alive" => locale
+            .named_text("worktree.status.alive", "alive")
+            .into_owned(),
+        "dead" => locale
+            .named_text("worktree.status.dead", "dead")
+            .into_owned(),
+        _ => status.to_string(),
+    }
+}
+
+fn format_age_with_locale(created_at: i64, now: i64, locale: &LocaleContext) -> String {
+    let delta = now.saturating_sub(created_at).max(0);
+    let (id, count, suffix) = if delta < 60 {
+        ("du.age.seconds", delta, "s ago")
+    } else if delta < 3600 {
+        ("du.age.minutes", delta / 60, "m ago")
+    } else if delta < 86400 {
+        ("du.age.hours", delta / 3600, "h ago")
+    } else {
+        ("du.age.days", delta / 86400, "d ago")
+    };
+    let count = count.to_string();
+    localized_named(
+        locale,
+        id,
+        &format!("{{count}}{suffix}"),
+        &[("count", &count)],
+    )
+}
+
+pub fn print_table(records: &[WorktreeRecord], out: &mut impl Write) -> std::io::Result<()> {
+    print_table_with_locale(records, out, &LocaleContext::default())
+}
+
+pub fn print_table_with_locale(
+    records: &[WorktreeRecord],
+    out: &mut impl Write,
+    locale: &LocaleContext,
+) -> std::io::Result<()> {
     if records.is_empty() {
-        println!("No worktrees found.");
-        return;
+        writeln!(
+            out,
+            "{}",
+            locale.named_text("worktree.empty", "No worktrees found.")
+        )?;
+        return Ok(());
     }
 
-    // Compute dynamic ID column width so long IDs are never truncated
+    let id_header = locale.named_text("worktree.column.id", "ID");
+    let type_header = locale.named_text("worktree.column.type", "TYPE");
+    let repo_header = locale.named_text("worktree.column.repo", "REPO");
+    let label_header = locale.named_text("worktree.column.label", "LABEL");
+    let branch_header = locale.named_text("worktree.column.branch", "BRANCH");
+    let age_header = locale.named_text("worktree.column.age", "AGE");
+    let path_header = locale.named_text("worktree.column.path", "PATH");
+
     let id_width = records
         .iter()
-        .map(|r| r.id.len())
+        .map(|r| UnicodeWidthStr::width(r.id.as_str()))
         .max()
         .unwrap_or(0)
         .max(16);
 
-    // Compute dynamic label column width (min 5 for header "LABEL")
     let label_width = records
         .iter()
-        .map(|r| extract_label(r).len())
+        .map(|r| r.label().map_or(0, UnicodeWidthStr::width))
         .max()
         .unwrap_or(0)
         .clamp(5, 24);
 
-    let header = format!(
-        "  {:<id_width$} {:<8} {:<6} {:<label_width$} {:<20} {:<10} PATH",
-        "ID", "TYPE", "REPO", "LABEL", "BRANCH", "AGE",
-    );
-    println!("{header}");
+    // Derived, not fixed: `cell` truncates rather than shifting, and
+    // `subagent` already fills 8 columns.
+    let type_width = records
+        .iter()
+        .map(|r| UnicodeWidthStr::width(kind_label(r.kind.as_str(), locale).as_str()))
+        .fold(UnicodeWidthStr::width(type_header.as_ref()), usize::max);
+
+    writeln!(
+        out,
+        "  {} {} {} {} {} {} {}",
+        pad_to_width(id_header.as_ref(), id_width),
+        cell(type_header.as_ref(), type_width),
+        cell(repo_header.as_ref(), REPO_WIDTH),
+        cell(label_header.as_ref(), label_width),
+        cell(branch_header.as_ref(), BRANCH_WIDTH),
+        pad_to_width(age_header.as_ref(), AGE_WIDTH),
+        path_header,
+    )?;
+    let now = unix_now();
     for rec in records {
-        let age = format_age(rec.created_at);
-        let branch = rec.git_ref.as_deref().unwrap_or("(detached)");
-        let label = extract_label(rec);
+        let age = format_age_with_locale(rec.created_at, now, locale);
+        let detached = locale.named_text("worktree.detached", "(detached)");
+        let branch = rec.git_ref.as_deref().unwrap_or(detached.as_ref());
+        let label = rec.label().unwrap_or("");
         let path = abbreviate_home(&rec.path);
-        let row = format!(
-            "  {:<id_width$} {:<8} {:<6} {:<label_width$} {:<20} {:<10} {}",
-            rec.id,
-            rec.kind.as_str(),
-            truncate(&rec.repo_name, 6),
-            truncate(label, label_width),
-            truncate(branch, 20),
+        let kind = kind_label(rec.kind.as_str(), locale);
+        // AGE is ASCII, so format-width padding is width-true; every other
+        // cell pads by display width.
+        writeln!(
+            out,
+            "  {} {} {} {} {} {:<AGE_WIDTH$} {}",
+            pad_to_width(&rec.id, id_width),
+            cell(&kind, type_width),
+            cell(&rec.repo_name, REPO_WIDTH),
+            cell(label, label_width),
+            cell(branch, BRANCH_WIDTH),
             age,
             path,
-        );
-        println!("{row}");
+        )?;
     }
 
     let total = records.len();
-    let by_kind: std::collections::HashMap<&str, usize> =
+    let by_kind: std::collections::BTreeMap<&str, usize> =
         records
             .iter()
-            .fold(std::collections::HashMap::new(), |mut m, r| {
+            .fold(std::collections::BTreeMap::new(), |mut m, r| {
                 *m.entry(r.kind.as_str()).or_default() += 1;
                 m
             });
-    let breakdown: Vec<String> = by_kind.iter().map(|(k, v)| format!("{v} {k}")).collect();
-    println!("  {} worktrees ({})", total, breakdown.join(", "));
+    let breakdown: Vec<String> = by_kind
+        .iter()
+        .map(|(kind, count)| {
+            let count = count.to_string();
+            let kind = kind_label(kind, locale);
+            localized_named(
+                locale,
+                "worktree.summary.kind",
+                "{count} {kind}",
+                &[("count", &count), ("kind", &kind)],
+            )
+        })
+        .collect();
+    let total = total.to_string();
+    writeln!(
+        out,
+        "  {}",
+        localized_named(
+            locale,
+            "worktree.summary",
+            "{count} worktrees ({breakdown})",
+            &[("count", &total), ("breakdown", &breakdown.join(", "))],
+        )
+    )
 }
 
-pub fn print_json(records: &[WorktreeRecord]) {
+pub fn print_json(records: &[WorktreeRecord], out: &mut impl Write) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(records).unwrap_or_else(|_| "[]".to_string());
-    println!("{json}");
+    writeln!(out, "{json}")
 }
 
-pub fn print_show(rec: &WorktreeRecord) {
-    println!("  Path:           {}", rec.path.display());
-    println!("  ID:             {}", rec.id);
-    println!("  Type:           {}", rec.kind.as_str());
-    println!("  Source Repo:    {}", rec.source_repo.display());
-    println!("  Creation Mode:  {}", rec.creation_mode);
+pub fn print_show(rec: &WorktreeRecord, out: &mut impl Write) -> std::io::Result<()> {
+    print_show_with_locale(rec, out, &LocaleContext::default())
+}
+
+fn write_show_field(
+    out: &mut impl Write,
+    locale: &LocaleContext,
+    id: &str,
+    english: &str,
+    value: impl std::fmt::Display,
+) -> std::io::Result<()> {
+    let label = format!("{}:", locale.named_text(id, english));
+    writeln!(out, "  {} {value}", pad_to_width(&label, 16))
+}
+
+pub fn print_show_with_locale(
+    rec: &WorktreeRecord,
+    out: &mut impl Write,
+    locale: &LocaleContext,
+) -> std::io::Result<()> {
+    write_show_field(
+        out,
+        locale,
+        "worktree.show.path",
+        "Path",
+        rec.path.display(),
+    )?;
+    write_show_field(out, locale, "worktree.show.id", "ID", &rec.id)?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.show.type",
+        "Type",
+        kind_label(rec.kind.as_str(), locale),
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.show.source_repo",
+        "Source Repo",
+        rec.source_repo.display(),
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.show.creation_mode",
+        "Creation Mode",
+        &rec.creation_mode,
+    )?;
     if let Some(ref git_ref) = rec.git_ref {
-        println!("  Git Ref:        {git_ref}");
+        write_show_field(out, locale, "worktree.show.git_ref", "Git Ref", git_ref)?;
     }
     if let Some(ref commit) = rec.head_commit {
         let short = if commit.len() > 12 {
@@ -91,72 +255,197 @@ pub fn print_show(rec: &WorktreeRecord) {
         } else {
             commit
         };
-        println!("  HEAD:           {short}");
+        write_show_field(out, locale, "worktree.show.head", "HEAD", short)?;
     }
-    println!("  Created:        {}", format_timestamp(rec.created_at));
+    write_show_field(
+        out,
+        locale,
+        "worktree.show.created",
+        "Created",
+        format_timestamp(rec.created_at),
+    )?;
     if let Some(ts) = rec.last_accessed_at {
-        println!("  Last Accessed:  {}", format_timestamp(ts));
+        write_show_field(
+            out,
+            locale,
+            "worktree.show.last_accessed",
+            "Last Accessed",
+            format_timestamp(ts),
+        )?;
     }
     if let Some(ref sid) = rec.session_id {
-        println!("  Session ID:     {sid}");
+        write_show_field(out, locale, "worktree.show.session_id", "Session ID", sid)?;
     }
     if let Some(pid) = rec.creator_pid {
-        println!("  Creator PID:    {pid}");
+        write_show_field(out, locale, "worktree.show.creator_pid", "Creator PID", pid)?;
     }
-    println!("  Status:         {}", rec.status.as_str());
-    let label = extract_label(rec);
-    if !label.is_empty() {
-        println!("  Label:          {label}");
+    write_show_field(
+        out,
+        locale,
+        "worktree.show.status",
+        "Status",
+        status_label(rec.status.as_str(), locale),
+    )?;
+    if let Some(label) = rec.label() {
+        write_show_field(out, locale, "worktree.show.label", "Label", label)?;
     }
 
-    if rec.path.exists()
-        && let Ok(size) = dir_size(&rec.path)
-    {
-        println!("  Disk Usage:     {}", format_bytes(size));
+    if rec.path.exists() {
+        // Anchored to the worktree's own volume: one tree, not a share of
+        // some other total.
+        let size = physical_dir_size(&rec.path, Volume::of(&rec.path));
+        let bytes = size.measure.bytes().unwrap_or_default();
+        let label = format!(
+            "{}:",
+            locale.named_text("worktree.show.disk_usage", "Disk Usage")
+        );
+        write!(
+            out,
+            "  {} {}",
+            pad_to_width(&label, 16),
+            format_bytes(bytes)
+        )?;
+        let skipped = size.issues.skipped();
+        if skipped > 0 {
+            let skipped = skipped.to_string();
+            write!(
+                out,
+                " {}",
+                localized_named(
+                    locale,
+                    "worktree.disk_usage.skipped",
+                    "({count} entries skipped)",
+                    &[("count", &skipped)],
+                )
+            )?;
+        }
+        writeln!(out)?;
     }
+    Ok(())
 }
 
-pub fn print_stats(stats: &DbStats) {
-    println!("Worktree DB Statistics");
-    println!("======================");
-    println!("  Total records:  {}", stats.total_records);
-    println!("  Alive:          {}", stats.alive_count);
-    println!("  Dead:           {}", stats.dead_count);
-    println!("  DB size:        {}", format_bytes(stats.db_file_bytes));
+pub fn print_stats(stats: &DbStats, out: &mut impl Write) -> std::io::Result<()> {
+    print_stats_with_locale(stats, out, &LocaleContext::default())
 }
 
-pub fn print_gc(report: &GcReport) {
-    println!("GC report:");
-    println!("  Dead records removed:    {}", report.dead_removed);
-    println!("  Expired worktrees removed: {}", report.expired_removed);
-    println!("  Skipped (alive process): {}", report.skipped_alive);
+pub fn print_stats_with_locale(
+    stats: &DbStats,
+    out: &mut impl Write,
+    locale: &LocaleContext,
+) -> std::io::Result<()> {
+    let title = locale.named_text("worktree.stats.title", "Worktree DB Statistics");
+    writeln!(out, "{title}")?;
+    writeln!(
+        out,
+        "{}",
+        "=".repeat(UnicodeWidthStr::width(title.as_ref()))
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.stats.total_records",
+        "Total records",
+        stats.total_records,
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.stats.alive",
+        "Alive",
+        stats.alive_count,
+    )?;
+    write_show_field(out, locale, "worktree.stats.dead", "Dead", stats.dead_count)?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.stats.db_size",
+        "DB size",
+        format_bytes(stats.db_file_bytes),
+    )
+}
+
+pub fn print_gc(report: &GcReport, out: &mut impl Write) -> std::io::Result<()> {
+    print_gc_with_locale(report, out, &LocaleContext::default())
+}
+
+pub fn print_gc_with_locale(
+    report: &GcReport,
+    out: &mut impl Write,
+    locale: &LocaleContext,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}",
+        locale.named_text("worktree.gc.title", "GC report:")
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.gc.dead_removed",
+        "Dead records removed",
+        report.dead_removed,
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.gc.expired_removed",
+        "Expired worktrees removed",
+        report.expired_removed,
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.gc.skipped_alive",
+        "Skipped (alive process)",
+        report.skipped_alive,
+    )?;
     if report.remove_failed > 0 {
-        println!("  Removal failures:        {}", report.remove_failed);
+        write_show_field(
+            out,
+            locale,
+            "worktree.gc.remove_failed",
+            "Removal failures",
+            report.remove_failed,
+        )?;
     }
+    Ok(())
 }
 
-pub fn print_rebuild(report: &RebuildReport) {
-    println!("Rebuild report:");
-    println!("  Discovered:      {}", report.discovered);
-    println!("  Registered:      {}", report.registered);
-    println!("  Already tracked: {}", report.already_tracked);
+pub fn print_rebuild(report: &RebuildReport, out: &mut impl Write) -> std::io::Result<()> {
+    print_rebuild_with_locale(report, out, &LocaleContext::default())
 }
 
-fn format_age(created_at: i64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let delta = now.saturating_sub(created_at);
-    if delta < 60 {
-        format!("{delta}s ago")
-    } else if delta < 3600 {
-        format!("{}m ago", delta / 60)
-    } else if delta < 86400 {
-        format!("{}h ago", delta / 3600)
-    } else {
-        format!("{}d ago", delta / 86400)
-    }
+pub fn print_rebuild_with_locale(
+    report: &RebuildReport,
+    out: &mut impl Write,
+    locale: &LocaleContext,
+) -> std::io::Result<()> {
+    writeln!(
+        out,
+        "{}",
+        locale.named_text("worktree.rebuild.title", "Rebuild report:")
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.rebuild.discovered",
+        "Discovered",
+        report.discovered,
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.rebuild.registered",
+        "Registered",
+        report.registered,
+    )?;
+    write_show_field(
+        out,
+        locale,
+        "worktree.rebuild.already_tracked",
+        "Already tracked",
+        report.already_tracked,
+    )
 }
 
 fn format_timestamp(ts: i64) -> String {
@@ -167,57 +456,8 @@ fn format_timestamp(ts: i64) -> String {
     }
 }
 
-fn format_bytes(bytes: u64) -> String {
-    if bytes == 0 {
-        return "0 B".to_string();
-    }
-    const UNITS: &[&str] = &["B", "KB", "MB", "GB"];
-    let mut val = bytes as f64;
-    for unit in UNITS {
-        if val < 1024.0 {
-            return format!("{val:.1} {unit}");
-        }
-        val /= 1024.0;
-    }
-    format!("{val:.1} TB")
-}
-
-fn truncate(s: &str, max: usize) -> Cow<'_, str> {
-    if s.chars().count() <= max {
-        Cow::Borrowed(s)
-    } else {
-        let end = s
-            .char_indices()
-            .nth(max.saturating_sub(1))
-            .map_or(s.len(), |(i, _)| i);
-        Cow::Owned(format!("{}…", &s[..end]))
-    }
-}
-
 fn abbreviate_home(path: &Path) -> String {
     crate::util::abbreviate_path(&path.to_string_lossy()).into_owned()
-}
-
-fn dir_size(path: &Path) -> std::io::Result<u64> {
-    let mut total = 0u64;
-    dir_size_recurse(path, &mut total);
-    Ok(total)
-}
-
-fn dir_size_recurse(dir: &Path, total: &mut u64) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let Ok(ft) = entry.file_type() else { continue };
-        if ft.is_file() {
-            if let Ok(meta) = entry.metadata() {
-                *total += meta.len();
-            }
-        } else if ft.is_dir() {
-            dir_size_recurse(&entry.path(), total);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -225,101 +465,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_format_bytes() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(512), "512.0 B");
-        assert_eq!(format_bytes(1024), "1.0 KB");
-        assert_eq!(format_bytes(1048576), "1.0 MB");
-        assert_eq!(format_bytes(1073741824), "1.0 GB");
-    }
-
-    #[test]
-    fn test_format_age() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        assert!(format_age(now - 30).ends_with("s ago"));
-        assert!(format_age(now - 120).ends_with("m ago"));
-        assert!(format_age(now - 7200).ends_with("h ago"));
-        assert!(format_age(now - 172800).ends_with("d ago"));
-    }
-
-    #[test]
-    fn test_truncate_no_truncation() {
-        assert_eq!(truncate("hello", 10).as_ref(), "hello");
-        assert!(matches!(truncate("hello", 10), Cow::Borrowed(_)));
-    }
-
-    #[test]
-    fn test_truncate_with_truncation() {
-        let result = truncate("hello world", 5);
-        assert_eq!(result.as_ref(), "hell…");
-        assert!(matches!(result, Cow::Owned(_)));
-    }
-
-    #[test]
-    fn test_truncate_utf8_safe() {
-        let result = truncate("héllo wörld", 5);
-        assert_eq!(result.as_ref(), "héll…");
-    }
-
-    #[test]
-    fn test_abbreviate_home() {
-        if let Ok(home) = std::env::var("HOME") {
-            let path = std::path::PathBuf::from(format!("{home}/work/xai"));
-            assert_eq!(abbreviate_home(&path), "~/work/xai");
-        }
-    }
-
-    #[test]
-    fn test_print_table_long_id_not_truncated() {
+    fn print_table_never_truncates_long_ids() {
         let long_id = "a".repeat(40);
-
-        // Verify width computation: ID longer than 16 should determine column width
-        let id_width = long_id.len().max(16);
-        let formatted = format!("{:<id_width$}", long_id, id_width = id_width);
-        assert!(formatted.len() >= 40, "ID should not be truncated");
-        assert!(formatted.contains(&long_id), "Full ID must be present");
+        let mut out = Vec::new();
+        print_table(&[make_record(&long_id, "lbl")], &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains(&long_id), "full ID must be present: {text}");
     }
 
-    fn make_test_record(metadata: Option<serde_json::Value>) -> xai_fast_worktree::WorktreeRecord {
-        use xai_fast_worktree::{WorktreeKind, WorktreeRecord, WorktreeStatus};
-        WorktreeRecord {
-            id: "test".into(),
-            path: "/tmp/wt".into(),
-            source_repo: "/repo".into(),
-            repo_name: "repo".into(),
-            kind: WorktreeKind::Session,
-            creation_mode: "linked".into(),
-            git_ref: None,
-            head_commit: None,
-            session_id: None,
-            creator_pid: None,
-            created_at: 0,
-            last_accessed_at: None,
-            status: WorktreeStatus::Alive,
-            metadata,
-        }
+    fn make_record(id: &str, label: &str) -> WorktreeRecord {
+        crate::test_util::make_worktree_record(
+            id,
+            std::path::Path::new(&format!("/tmp/wt-{id}")),
+            label,
+        )
     }
 
     #[test]
-    fn test_extract_label_present() {
-        let rec = make_test_record(Some(
-            serde_json::json!({"label": "my-feature", "user_provided": true}),
-        ));
-        assert_eq!(extract_label(&rec), "my-feature");
-    }
-
-    #[test]
-    fn test_extract_label_missing_metadata() {
-        let rec = make_test_record(None);
-        assert_eq!(extract_label(&rec), "");
-    }
-
-    #[test]
-    fn test_extract_label_no_label_key() {
-        let rec = make_test_record(Some(serde_json::json!({"other": "data"})));
-        assert_eq!(extract_label(&rec), "");
+    fn print_table_pads_cjk_labels_by_display_width() {
+        let records = vec![
+            make_record("wt-cjk", "组件更新"),
+            make_record("wt-ascii", "plain-label"),
+        ];
+        let mut out = Vec::new();
+        print_table(&records, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("组件更新"));
+        crate::test_util::assert_path_column_aligned(&text, "/tmp/wt-");
     }
 }

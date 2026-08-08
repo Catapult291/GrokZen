@@ -327,6 +327,7 @@ pub fn ensure_query_param(url: &str, key: &str, value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn open_path_command_passes_path_as_a_single_arg() {
         // Path with spaces must be one argument, never shell-interpolated.

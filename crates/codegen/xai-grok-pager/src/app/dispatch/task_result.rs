@@ -21,7 +21,6 @@ use super::prompt::{
 };
 use super::rewind::{
     dispatch_rewind_success, handle_rewind_execute_failed, handle_rewind_points_loaded,
-    handle_rewind_preview_complete, handle_rewind_preview_failed,
 };
 use super::router::{dispatch, dispatch_action_result};
 use super::session::foreign::{
@@ -310,6 +309,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             code_restored,
             restore_summary,
             restore_degree,
+            resume_session_id,
         } => handle_worktree_forked(
             app,
             agent_id,
@@ -319,6 +319,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             code_restored,
             restore_summary,
             restore_degree,
+            resume_session_id,
         ),
         TaskResult::WorktreeSessionFailed { agent_id, error } => {
             handle_worktree_session_failed(app, agent_id, error)
@@ -327,7 +328,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             agent_id,
             new_session_id,
             cwd,
-        } => handle_fork_session_ready(app, agent_id, new_session_id, cwd),
+            parent_session_id,
+        } => handle_fork_session_ready(app, agent_id, new_session_id, cwd, parent_session_id),
         TaskResult::ForkSessionFailed { agent_id, error } => {
             handle_fork_session_failed(app, agent_id, error)
         }
@@ -382,14 +384,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             running_prompt_id,
             scheduler_background_loops,
         ),
-        TaskResult::SessionTitleFromDisk { agent_id, title } => {
-            if let Some(agent) = app.agents.get_mut(&agent_id)
-                && let Some((t, is_manual)) = title.filter(|(s, _)| !s.trim().is_empty())
-            {
-                if is_manual && agent.display_name.is_none() {
-                    agent.display_name = Some(t.clone());
+        TaskResult::SessionMetaFromDisk {
+            agent_id,
+            title,
+            last_turn_summary,
+            last_turn_summary_gen,
+        } => {
+            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                if let Some((t, is_manual)) = title.filter(|(s, _)| !s.trim().is_empty()) {
+                    if is_manual && agent.display_name.is_none() {
+                        agent.display_name = Some(t.clone());
+                    }
+                    agent.generated_session_title = Some(t);
                 }
-                agent.generated_session_title = Some(t);
+                if agent.last_turn_summary_gen == last_turn_summary_gen
+                    && agent.last_turn_summary.is_none()
+                {
+                    agent.last_turn_summary = last_turn_summary;
+                }
             }
             vec![]
         }
@@ -834,7 +846,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && let Some(ref mut modal) = agent.extensions_modal
             {
                 modal.skills_data = match result {
-                    Ok(skills) => TabDataState::Loaded(skills),
+                    Ok(skills) => {
+                        modal.seed_skills_groups_once(&skills);
+                        TabDataState::Loaded(skills)
+                    }
                     Err(e) => TabDataState::Error(e),
                 };
                 modal.pending_action = None;
@@ -852,6 +867,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && agent.session.session_id.as_ref() == Some(&session_id)
                 && let Some(ref mut modal) = agent.extensions_modal
             {
+                modal.seed_workflows_group_once();
                 modal.workflows_data = match result {
                     Ok(workflows) => TabDataState::Loaded(workflows),
                     Err(e) => TabDataState::Error(e),
@@ -1029,6 +1045,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 .retain(|entry| entry.session_id != session_id);
             app.leader_roster
                 .retain(|entry| entry.session_id != session_id);
+            let attached_was_removed = app
+                .dashboard
+                .as_ref()
+                .and_then(|d| d.attached_agent)
+                .is_some_and(|id| to_remove.contains(&id));
             for id in to_remove {
                 remove_agent_and_cleanup(app, id);
             }
@@ -1036,6 +1057,9 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if after == AfterSessionDelete::Dashboard {
                 if let Some(d) = app.dashboard.as_mut() {
                     d.delete_confirm = None;
+                    if attached_was_removed {
+                        d.close_popup();
+                    }
                     let selected_closed = d
                         .selected
                         .as_ref()
@@ -1337,15 +1361,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             );
             app.show_toast(&message);
             vec![]
-        }
-        TaskResult::RewindPreviewComplete {
-            agent_id,
-            response,
-            target_prompt_index,
-            mode,
-        } => handle_rewind_preview_complete(app, agent_id, response, target_prompt_index, mode),
-        TaskResult::RewindPreviewFailed { agent_id, error } => {
-            handle_rewind_preview_failed(app, agent_id, error)
         }
         TaskResult::RewindExecuteComplete { agent_id, response } => {
             dispatch_rewind_success(app, agent_id, response)

@@ -4,7 +4,21 @@
 //! loop, and headless mode so resume / new-with-id / fork are not re-derived
 //! in three places.
 use super::cli::PagerArgs;
+use crate::locale::LocaleContext;
 use std::path::{Path, PathBuf};
+
+fn localized_named(
+    locale: &LocaleContext,
+    id: &str,
+    english: &str,
+    arguments: &[(&str, &str)],
+) -> String {
+    let mut output = locale.named_text(id, english).into_owned();
+    for (name, value) in arguments {
+        output = output.replace(&format!("{{{name}}}"), value);
+    }
+    output
+}
 /// Session-create intent deferred until [`AppView::session_startup_allowed`].
 ///
 /// Replaces the prior matrix of `startup_load_session` + cwd + `startup_fork`
@@ -682,6 +696,10 @@ pub enum MaterializedStartup {
         /// the worktree resume handler; worktree failure messages append the
         /// no-match hint only for this outcome (never inferred from shape).
         deferred_local_miss: bool,
+        /// Pre-TUI conversation-only remote restore: follow-up `LoadSession`
+        /// must send `x.ai/restore_code: false` so agent `[cli] restore_code`
+        /// cannot checkout in-place on the new local child.
+        suppress_code_restore: bool,
     },
     /// Fork from a resolved parent, then load the child.
     Fork {
@@ -689,6 +707,9 @@ pub enum MaterializedStartup {
         parent_cwd: Option<PathBuf>,
         parent_title: Option<String>,
         new_session_id: Option<String>,
+        /// Same one-shot as [`Self::Resume::suppress_code_restore`]: the
+        /// follow-up child `LoadSession` must not inherit agent restore-code.
+        suppress_code_restore: bool,
     },
 }
 /// Whether materialization may resolve a non-id resume arg by title locally.
@@ -718,6 +739,12 @@ pub struct MaterializeCtx {
     pub chat_mode: bool,
     /// See [`TitleResolution`]; carried from the pre-sandbox pin outcome.
     pub title_resolution: TitleResolution,
+    /// CLI `--restore-code`. Remote codebase restore is never applied in-place;
+    /// this flag either defers to `--worktree` or refuses the in-place path.
+    pub restore_code: bool,
+    /// Pre-TUI restore progress on stdout (interactive tty). Headless keeps
+    /// stdout as JSON/NDJSON and uses stderr instead.
+    pub restore_progress_on_stdout: bool,
 }
 impl MaterializeCtx {
     /// `--resume` miss bails fast.
@@ -734,6 +761,8 @@ impl MaterializeCtx {
             } else {
                 TitleResolution::Allowed
             },
+            restore_code: args.restore_code,
+            restore_progress_on_stdout: false,
         }
     }
 }
@@ -747,13 +776,16 @@ pub fn effective_fork_new_cwd(process_cwd: &str, parent_cwd: Option<&Path>) -> S
         .unwrap_or_else(|| process_cwd.to_string())
 }
 /// Resolve most-recent session id for cwd, or error.
-async fn most_recent_session_id(cwd: &str) -> anyhow::Result<(String, Option<String>)> {
+async fn most_recent_session_id(
+    cwd: &str,
+    locale: &LocaleContext,
+) -> anyhow::Result<(String, Option<String>)> {
     let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
     let first = summaries.first().ok_or_else(|| {
-        anyhow::anyhow!(
-            "No session found for current directory. \
-             Use 'grok-zh' to start a new session."
-        )
+        anyhow::anyhow!(locale.named_text(
+            "session.startup.no_session_for_cwd",
+            "No session found for current directory. Use 'grok-zh' to start a new session.",
+        ))
     })?;
     Ok((first.info.id.to_string(), first.display_title_opt()))
 }
@@ -774,6 +806,15 @@ pub(crate) fn pre_acp_auth_manager(
     );
     auth
 }
+/// Pre-TUI remote restore (session state + memory only). Codebase checkout is
+/// never applied on this path; `--restore-code` requires `--worktree`.
+const REMOTE_RESTORE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// `--restore-code` without `--worktree` on a remote miss: refuse in-place checkout.
+const REMOTE_RESTORE_NEEDS_WORKTREE: &str = "--restore-code on a remote session requires --worktree \
+     (refusing to check out snapshot code into the current directory)";
+/// `--worktree` resume without `--restore-code`: conversation only.
+pub(crate) const WORKTREE_NO_RESTORE_CODE_NOTICE: &str =
+    "Snapshot code will not be restored into the worktree; pass --restore-code to restore it.";
 /// Preflight: preferred id must be a UUID and not a persisted session under `cwd`.
 ///
 /// Agent `session/new` rejects non-UUID `_meta.sessionId`; fail fast here so
@@ -792,17 +833,36 @@ pub async fn materialize_startup(
     ctx: MaterializeCtx,
     intent: SessionStartupIntent,
 ) -> anyhow::Result<MaterializedStartup> {
+    let locale = LocaleContext::default();
+    materialize_startup_with_locale(ctx, intent, &locale).await
+}
+
+pub async fn materialize_startup_with_locale(
+    ctx: MaterializeCtx,
+    intent: SessionStartupIntent,
+    locale: &LocaleContext,
+) -> anyhow::Result<MaterializedStartup> {
     let cwd = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("Failed to get cwd: {e}"))?
         .to_string_lossy()
         .to_string();
-    materialize_startup_for_cwd(ctx, intent, &cwd).await
+    materialize_startup_for_cwd_with_locale(ctx, intent, &cwd, locale).await
 }
 /// Same as [`materialize_startup`] but with an explicit process cwd (tests / headless).
 pub async fn materialize_startup_for_cwd(
     ctx: MaterializeCtx,
     intent: SessionStartupIntent,
     cwd: &str,
+) -> anyhow::Result<MaterializedStartup> {
+    let locale = LocaleContext::default();
+    materialize_startup_for_cwd_with_locale(ctx, intent, cwd, &locale).await
+}
+
+pub async fn materialize_startup_for_cwd_with_locale(
+    ctx: MaterializeCtx,
+    intent: SessionStartupIntent,
+    cwd: &str,
+    locale: &LocaleContext,
 ) -> anyhow::Result<MaterializedStartup> {
     if ctx.chat_mode && matches!(intent, SessionStartupIntent::ForkFrom { .. }) {
         anyhow::bail!("{CHAT_MODE_FORK_CONFLICT}");
@@ -825,7 +885,7 @@ pub async fn materialize_startup_for_cwd(
                 anyhow::bail!("chat-mode resume requires a build with the `chat` cargo feature");
             }
             let started = std::time::Instant::now();
-            let (id, title) = most_recent_session_id(cwd).await?;
+            let (id, title) = most_recent_session_id(cwd, locale).await?;
             tracing::info!(
                 source = "local",
                 elapsed_ms = started.elapsed().as_millis() as u64,
@@ -836,6 +896,7 @@ pub async fn materialize_startup_for_cwd(
                 original_cwd: None,
                 title,
                 deferred_local_miss: false,
+                suppress_code_restore: false,
             })
         }
         SessionStartupIntent::ForkFrom {
@@ -846,12 +907,13 @@ pub async fn materialize_startup_for_cwd(
             if let Some(ref nid) = new_session_id {
                 ensure_session_id_available(nid, cwd)?;
             }
-            let (id, title) = most_recent_session_id(cwd).await?;
+            let (id, title) = most_recent_session_id(cwd, locale).await?;
             Ok(MaterializedStartup::Fork {
                 parent_session_id: id,
                 parent_cwd: None,
                 parent_title: title,
                 new_session_id,
+                suppress_code_restore: false,
             })
         }
         SessionStartupIntent::Resume {
@@ -867,14 +929,16 @@ pub async fn materialize_startup_for_cwd(
                     original_cwd: None,
                     title: None,
                     deferred_local_miss: false,
+                    suppress_code_restore: false,
                 });
             }
-            let r = resolve_existing_session(ctx, &session_id, cwd).await?;
+            let r = resolve_existing_session(ctx, &session_id, cwd, locale).await?;
             Ok(MaterializedStartup::Resume {
                 session_id: r.id,
                 original_cwd: r.original_cwd,
                 title: r.title,
                 deferred_local_miss: r.deferred_local_miss,
+                suppress_code_restore: r.suppress_code_restore,
             })
         }
         SessionStartupIntent::ForkFrom {
@@ -882,7 +946,7 @@ pub async fn materialize_startup_for_cwd(
             new_session_id,
             ..
         } => {
-            let r = resolve_existing_session(ctx, &session_id, cwd).await?;
+            let r = resolve_existing_session(ctx, &session_id, cwd, locale).await?;
             if let Some(ref nid) = new_session_id {
                 let new_cwd = effective_fork_new_cwd(cwd, r.original_cwd.as_deref());
                 ensure_session_id_available(nid, &new_cwd)?;
@@ -892,6 +956,7 @@ pub async fn materialize_startup_for_cwd(
                 parent_cwd: r.original_cwd,
                 parent_title: r.title,
                 new_session_id,
+                suppress_code_restore: r.suppress_code_restore,
             })
         }
         SessionStartupIntent::Resume {
@@ -914,20 +979,30 @@ struct ResolvedExisting {
     /// True only for the worktree-defer arm: the target missed local
     /// id/title resolution.
     deferred_local_miss: bool,
+    suppress_code_restore: bool,
 }
 /// Resolve an existing session for strict resume (local / any-cwd / remote / worktree defer).
 async fn resolve_existing_session(
     ctx: MaterializeCtx,
     session_id: &str,
     cwd: &str,
+    locale: &LocaleContext,
 ) -> anyhow::Result<ResolvedExisting> {
     if let Some(local_id) = xai_grok_shell::session::resolve_local_session(session_id, cwd) {
         tracing::info!(session_id = %session_id, local_id = %local_id, "Session found locally");
+        if !in_place_restore_code_allowed(ctx.restore_code, ctx.has_worktree, session_id, &local_id)
+        {
+            anyhow::bail!(locale.named_text(
+                "session.startup.remote_restore.needs_worktree",
+                REMOTE_RESTORE_NEEDS_WORKTREE,
+            ));
+        }
         return Ok(ResolvedExisting {
             id: local_id,
             original_cwd: None,
             title: None,
             deferred_local_miss: false,
+            suppress_code_restore: false,
         });
     }
     if let Some(original_cwd) = xai_grok_shell::session::resolve_local_session_any_cwd(session_id) {
@@ -937,84 +1012,213 @@ async fn resolve_existing_session(
             "Session found locally under different CWD"
         );
         eprintln!(
-            "Session {} found locally (originally in {})",
-            session_id, original_cwd
+            "{}",
+            localized_named(
+                locale,
+                "session.startup.local_found_other_cwd",
+                "Session {session_id} found locally (originally in {cwd})",
+                &[("session_id", session_id), ("cwd", &original_cwd)],
+            )
         );
         return Ok(ResolvedExisting {
             id: session_id.to_string(),
             original_cwd: Some(PathBuf::from(original_cwd)),
             title: None,
             deferred_local_miss: false,
+            suppress_code_restore: false,
         });
     }
     let arg_is_uuid = super::session_title_resolve::is_uuid_shaped(session_id);
     if !arg_is_uuid
         && ctx.title_resolution == TitleResolution::Allowed
-        && let Some(resolved) = resolve_session_by_title(session_id, cwd).await?
+        && let Some(resolved) = resolve_session_by_title(session_id, cwd, locale).await?
     {
         return Ok(resolved);
     }
+    match plan_remote_miss(ctx, arg_is_uuid) {
+        RemoteMissPlan::DeferToWorktree {
+            deferred_local_miss,
+        } => {
+            tracing::info!(
+                session_id = %session_id,
+                restore_code = ctx.restore_code,
+                "Session not found locally; deferring restore to worktree resume handler"
+            );
+            eprintln!(
+                "{}",
+                localized_named(
+                    locale,
+                    "session.startup.remote_restore.not_found_local",
+                    "Session {session_id} not found locally; it will be restored into the new worktree.",
+                    &[("session_id", session_id)],
+                )
+            );
+            if !ctx.restore_code {
+                eprintln!(
+                    "{}",
+                    locale.named_text(
+                        "session.startup.remote_restore.worktree_no_code",
+                        WORKTREE_NO_RESTORE_CODE_NOTICE,
+                    )
+                );
+            }
+            Ok(ResolvedExisting {
+                id: session_id.to_string(),
+                original_cwd: None,
+                title: None,
+                deferred_local_miss,
+                suppress_code_restore: !ctx.restore_code,
+            })
+        }
+        RemoteMissPlan::RejectInPlaceCodeRestore { title_miss_hint } => {
+            if title_miss_hint {
+                let hint = super::session_title_resolve::title_miss_hint(session_id);
+                anyhow::bail!(
+                    "{}; {hint}",
+                    locale.named_text(
+                        "session.startup.remote_restore.needs_worktree",
+                        REMOTE_RESTORE_NEEDS_WORKTREE,
+                    )
+                );
+            }
+            anyhow::bail!(locale.named_text(
+                "session.startup.remote_restore.needs_worktree",
+                REMOTE_RESTORE_NEEDS_WORKTREE,
+            ))
+        }
+        RemoteMissPlan::NotFound { title_miss_hint } => {
+            if title_miss_hint {
+                let hint = super::session_title_resolve::title_miss_hint(session_id);
+                anyhow::bail!(localized_named(
+                    locale,
+                    "session.startup.not_found_with_hint",
+                    "Session does not exist: {hint}",
+                    &[("hint", &hint)],
+                ));
+            }
+            anyhow::bail!(locale.named_text("session.startup.not_found", "Session does not exist",))
+        }
+        RemoteMissPlan::RestoreConversation => {
+            let restored = restore_session_from_remote(
+                session_id,
+                cwd,
+                ctx.restore_progress_on_stdout,
+                locale,
+            )
+            .await;
+            if arg_is_uuid {
+                return restored;
+            }
+            restored.map_err(|e| {
+                anyhow::anyhow!(
+                    "{e:#}; {}",
+                    super::session_title_resolve::title_miss_hint(session_id)
+                )
+            })
+        }
+    }
+}
+/// Policy after local id/title resolution misses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RemoteMissPlan {
+    DeferToWorktree {
+        deferred_local_miss: bool,
+    },
+    RejectInPlaceCodeRestore {
+        title_miss_hint: bool,
+    },
+    /// Pre-TUI restore of session state + memory only (never codebase).
+    RestoreConversation,
+    NotFound {
+        title_miss_hint: bool,
+    },
+}
+/// Whether `--restore-code` may run in-place for this local hit.
+///
+/// `resolved_id != requested_id` means the CLI handle was a remote UUID that
+/// only exists as a previously restored child — still a remote session, so
+/// snapshot checkout requires `--worktree`.
+pub(crate) fn in_place_restore_code_allowed(
+    restore_code: bool,
+    has_worktree: bool,
+    requested_id: &str,
+    resolved_id: &str,
+) -> bool {
+    if !restore_code || has_worktree {
+        return true;
+    }
+    requested_id == resolved_id
+}
+pub(crate) fn plan_remote_miss(ctx: MaterializeCtx, arg_is_uuid: bool) -> RemoteMissPlan {
     if ctx.has_worktree {
-        tracing::info!(
-            session_id = %session_id,
-            "Session not found locally; deferring restore to worktree resume handler"
-        );
-        eprintln!(
-            "Session {:?} not found locally; it will be restored into the new worktree.",
-            session_id
-        );
-        return Ok(ResolvedExisting {
-            id: session_id.to_string(),
-            original_cwd: None,
-            title: None,
+        return RemoteMissPlan::DeferToWorktree {
             deferred_local_miss: !arg_is_uuid,
-        });
+        };
     }
     if !ctx.allow_remote_restore {
-        if !arg_is_uuid {
-            anyhow::bail!(
-                "Session does not exist: {}",
-                super::session_title_resolve::title_miss_hint(session_id)
-            );
-        }
-        anyhow::bail!("Session does not exist");
+        return RemoteMissPlan::NotFound {
+            title_miss_hint: !arg_is_uuid,
+        };
     }
-    let restored = restore_session_from_remote(session_id, cwd).await;
-    if arg_is_uuid {
-        return restored;
+    if ctx.restore_code {
+        return RemoteMissPlan::RejectInPlaceCodeRestore {
+            title_miss_hint: !arg_is_uuid,
+        };
     }
-    restored.map_err(|e| {
-        anyhow::anyhow!(
-            "{e:#}; {}",
-            super::session_title_resolve::title_miss_hint(session_id)
-        )
-    })
+    RemoteMissPlan::RestoreConversation
 }
 /// Remote-restore tail of [`resolve_existing_session`], split out so non-id
 /// targets can wrap every failure with the title-miss hint.
+///
+/// Always restores session state + memory only. Codebase checkout is refused
+/// in-place ([`RemoteMissPlan::RejectInPlaceCodeRestore`]) or deferred to the
+/// worktree handler.
+///
+/// On timeout the future is cancelled; partial JSONL may already be on disk
+/// and is recovered via a local-child scan of the remote id.
 async fn restore_session_from_remote(
     session_id: &str,
     cwd: &str,
+    progress_on_stdout: bool,
+    locale: &LocaleContext,
 ) -> anyhow::Result<ResolvedExisting> {
-    let raw_config = xai_grok_shell::config::load_effective_config()
-        .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
+    let raw_config = xai_grok_shell::config::load_effective_config().map_err(|e| {
+        anyhow::anyhow!(localized_named(
+            locale,
+            "session.startup.remote_restore.load_config_failed",
+            "Failed to load config: {error}",
+            &[("error", &e.to_string())],
+        ))
+    })?;
     if let Some((false, source)) =
         xai_grok_shell::util::config::session_registry_local_override_sourced(Some(&raw_config))
     {
-        anyhow::bail!(
-            "Session does not exist locally (session registry is disabled by {})",
-            source.label()
-        );
+        anyhow::bail!(localized_named(
+            locale,
+            "session.startup.remote_restore.registry_disabled",
+            "Session does not exist locally (session registry is disabled by {source})",
+            &[("source", source.label())],
+        ));
     }
-    eprintln!(
-        "Session {:?} not found locally, restoring from remote...",
-        session_id
+    let started_message = localized_named(
+        locale,
+        "session.startup.remote_restore.started",
+        "Session {session_id} not found locally, restoring conversation from remote...",
+        &[("session_id", session_id)],
     );
+    emit_pre_tui_restore_line(progress_on_stdout, &started_message);
     let agent_config = xai_grok_shell::agent::config::Config::new_from_toml_cfg(&raw_config)
-        .map_err(|e| anyhow::anyhow!("Failed to create agent config: {}", e))?;
+        .map_err(|e| {
+            anyhow::anyhow!(localized_named(
+                locale,
+                "session.startup.remote_restore.agent_config_failed",
+                "Failed to create agent config: {error}",
+                &[("error", &e.to_string())],
+            ))
+        })?;
     use xai_grok_shell::agent::session_registry_client::SessionRegistryClient;
     use xai_grok_shell::auth::{AuthManager, ensure_authenticated_or_noninteractive};
-    use xai_grok_shell::session::restore::restore_session_with_storage;
+    use xai_grok_shell::session::restore::{RestoreSessionOpts, restore_session_with_storage};
     use xai_grok_shell::util::grok_home::grok_home;
     let deployment_key = agent_config.endpoints.deployment_key.clone();
     ensure_authenticated_or_noninteractive(
@@ -1023,7 +1227,14 @@ async fn restore_session_from_remote(
         None,
     )
     .await
-    .map_err(|e| anyhow::anyhow!("Failed to authenticate for session restore: {}", e))?;
+    .map_err(|e| {
+        anyhow::anyhow!(localized_named(
+            locale,
+            "session.startup.remote_restore.auth_failed",
+            "Failed to authenticate for session restore: {error}",
+            &[("error", &e.to_string())],
+        ))
+    })?;
     let auth_manager = std::sync::Arc::new(AuthManager::new(
         &grok_home(),
         agent_config.grok_com_config.clone(),
@@ -1042,30 +1253,163 @@ async fn restore_session_from_remote(
         None,
         "grok-pager",
     );
-    let progress: xai_grok_shell::session::restore::ProgressCallback =
-        Box::new(|event| eprintln!("  {}", event.display_line()));
-    let result = restore_session_with_storage(
-        &registry_client,
-        &storage_client,
-        session_id,
-        cwd,
-        None,
-        Some(progress),
+    let progress: xai_grok_shell::session::restore::ProgressCallback = Box::new(move |event| {
+        emit_pre_tui_restore_line(progress_on_stdout, &format!("  {}", event.display_line()));
+    });
+    let timed = tokio::time::timeout(
+        REMOTE_RESTORE_TIMEOUT,
+        restore_session_with_storage(
+            &registry_client,
+            &storage_client,
+            session_id,
+            cwd,
+            RestoreSessionOpts {
+                turn_override: None,
+                progress: Some(progress),
+                restore_code: false,
+            },
+        ),
     )
-    .await
-    .map_err(|e| anyhow::anyhow!("Failed to restore session from remote: {:#}", e))?;
-    let effective_id = if result.local_session_id.is_empty() {
-        session_id.to_string()
-    } else {
-        result.local_session_id
+    .await;
+    let (timed_out, restore_result) = match timed {
+        Ok(inner) => (false, Some(inner)),
+        Err(_) => (true, None),
     };
-    eprintln!("  Restored as local session {}", effective_id);
-    Ok(ResolvedExisting {
-        id: effective_id,
-        original_cwd: None,
-        title: None,
-        deferred_local_miss: false,
-    })
+    let recovered_local_id = xai_grok_shell::session::find_local_child_for_remote(session_id, cwd);
+    let restore_error = restore_result
+        .as_ref()
+        .and_then(|r| r.as_ref().err())
+        .map(|e| format!("{e:#}"));
+    match classify_remote_restore(
+        timed_out,
+        restore_result
+            .as_ref()
+            .and_then(|r| r.as_ref().ok())
+            .map(|r| r.local_session_id.as_str()),
+        restore_error.as_deref(),
+        recovered_local_id.as_deref(),
+    ) {
+        RemoteRestoreOutcome::Restored { local_session_id } => {
+            let message = localized_named(
+                locale,
+                "session.startup.remote_restore.success",
+                "Restored conversation as local session {local_session_id}",
+                &[("local_session_id", &local_session_id)],
+            );
+            emit_pre_tui_restore_line(progress_on_stdout, &format!("  {message}"));
+            Ok(ResolvedExisting {
+                id: local_session_id,
+                original_cwd: None,
+                title: None,
+                deferred_local_miss: false,
+                suppress_code_restore: true,
+            })
+        }
+        RemoteRestoreOutcome::RecoveredAfterFailure { local_session_id } => {
+            let msg = if timed_out {
+                let seconds = REMOTE_RESTORE_TIMEOUT.as_secs().to_string();
+                localized_named(
+                    locale,
+                    "session.startup.remote_restore.recovered_timeout",
+                    "Remote restore timed out after {seconds}s; continuing with conversation {local_session_id}.",
+                    &[
+                        ("seconds", &seconds),
+                        ("local_session_id", &local_session_id),
+                    ],
+                )
+            } else if let Some(error) = restore_error.as_deref() {
+                localized_named(
+                    locale,
+                    "session.startup.remote_restore.recovered_failed",
+                    "Remote restore failed ({error}); continuing with conversation {local_session_id}.",
+                    &[("error", error), ("local_session_id", &local_session_id)],
+                )
+            } else {
+                localized_named(
+                    locale,
+                    "session.startup.remote_restore.recovered_incomplete",
+                    "Remote restore incomplete; continuing with conversation {local_session_id}.",
+                    &[("local_session_id", &local_session_id)],
+                )
+            };
+            emit_pre_tui_restore_line(progress_on_stdout, &msg);
+            Ok(ResolvedExisting {
+                id: local_session_id,
+                original_cwd: None,
+                title: None,
+                deferred_local_miss: false,
+                suppress_code_restore: true,
+            })
+        }
+        RemoteRestoreOutcome::Failed(_msg) => {
+            if timed_out {
+                let seconds = REMOTE_RESTORE_TIMEOUT.as_secs().to_string();
+                anyhow::bail!(localized_named(
+                    locale,
+                    "session.startup.remote_restore.timeout_failed",
+                    "Timed out restoring session from remote after {seconds}s. Conversation cannot be recovered.",
+                    &[("seconds", &seconds)],
+                ));
+            }
+            if let Some(error) = restore_error.as_deref() {
+                anyhow::bail!(localized_named(
+                    locale,
+                    "session.startup.remote_restore.failed",
+                    "Failed to restore session from remote: {error}",
+                    &[("error", error)],
+                ));
+            }
+            anyhow::bail!(locale.named_text(
+                "session.startup.remote_restore.history_unavailable",
+                "Failed to restore session from remote: conversation history was unavailable.",
+            ));
+        }
+    }
+}
+fn emit_pre_tui_restore_line(on_stdout: bool, line: &str) {
+    use std::io::Write;
+    if on_stdout {
+        println!("{line}");
+        let _ = std::io::stdout().flush();
+    } else {
+        eprintln!("{line}");
+        let _ = std::io::stderr().flush();
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RemoteRestoreOutcome {
+    Restored { local_session_id: String },
+    RecoveredAfterFailure { local_session_id: String },
+    Failed(String),
+}
+pub(crate) fn classify_remote_restore(
+    timed_out: bool,
+    local_session_id: Option<&str>,
+    restore_err: Option<&str>,
+    recovered_local_id: Option<&str>,
+) -> RemoteRestoreOutcome {
+    if let Some(id) = local_session_id.filter(|s| !s.is_empty()) {
+        return RemoteRestoreOutcome::Restored {
+            local_session_id: id.to_string(),
+        };
+    }
+    if let Some(id) = recovered_local_id.filter(|s| !s.is_empty()) {
+        return RemoteRestoreOutcome::RecoveredAfterFailure {
+            local_session_id: id.to_string(),
+        };
+    }
+    if timed_out {
+        return RemoteRestoreOutcome::Failed(format!(
+            "Timed out restoring session from remote after {}s. Conversation cannot be recovered.",
+            REMOTE_RESTORE_TIMEOUT.as_secs()
+        ));
+    }
+    if let Some(e) = restore_err {
+        return RemoteRestoreOutcome::Failed(format!("Failed to restore session from remote: {e}"));
+    }
+    RemoteRestoreOutcome::Failed(
+        "Failed to restore session from remote: conversation history was unavailable.".to_string(),
+    )
 }
 /// Resolve a non-id resume arg as a session title among local sessions for `cwd`.
 ///
@@ -1076,6 +1420,7 @@ async fn restore_session_from_remote(
 async fn resolve_session_by_title(
     arg: &str,
     cwd: &str,
+    locale: &LocaleContext,
 ) -> anyhow::Result<Option<ResolvedExisting>> {
     let summaries = xai_grok_shell::session::persistence::list_summaries(Some(cwd)).await?;
     let Some(chosen) = super::session_title_resolve::select_by_title(arg, &summaries)? else {
@@ -1083,12 +1428,21 @@ async fn resolve_session_by_title(
     };
     let id = chosen.info.id.to_string();
     tracing::info!(session_id = %id, "Session resolved by title");
-    eprintln!("Resuming session {} (matched by title)", id);
+    eprintln!(
+        "{}",
+        localized_named(
+            locale,
+            "session.startup.resuming_by_title",
+            "Resuming session {session_id} (matched by title)",
+            &[("session_id", &id)],
+        )
+    );
     Ok(Some(ResolvedExisting {
         id,
         original_cwd: None,
         title: chosen.display_title_opt(),
         deferred_local_miss: false,
+        suppress_code_restore: false,
     }))
 }
 #[cfg(test)]
@@ -1305,6 +1659,8 @@ mod tests {
             allow_remote_restore: true,
             chat_mode: true,
             title_resolution: TitleResolution::Allowed,
+            restore_code: false,
+            restore_progress_on_stdout: false,
         }
     }
     #[test]
@@ -1335,6 +1691,261 @@ mod tests {
             MaterializeCtx::from_pager_args(&parse(&["grok"])).allow_remote_restore,
             false
         );
+    }
+    #[test]
+    fn from_pager_args_does_not_probe_tty_for_progress() {
+        assert!(
+            !MaterializeCtx::from_pager_args(&parse(&["grok"])).restore_progress_on_stdout,
+            "stdout vs stderr is decided at the composition root, not from_pager_args"
+        );
+    }
+    #[test]
+    fn materialize_ctx_restore_code_follows_cli_flag() {
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok"])).restore_code);
+        assert!(!MaterializeCtx::from_pager_args(&parse(&["grok", "-r", "abc"])).restore_code);
+        assert!(
+            MaterializeCtx::from_pager_args(&parse(&["grok", "-r", "abc", "--restore-code"]))
+                .restore_code
+        );
+        let wt = MaterializeCtx::from_pager_args(&parse(&[
+            "grok",
+            "-r",
+            "abc",
+            "--restore-code",
+            "--worktree",
+        ]));
+        assert!(wt.restore_code);
+        assert!(wt.has_worktree);
+    }
+    fn remote_miss_ctx(restore_code: bool, has_worktree: bool) -> MaterializeCtx {
+        MaterializeCtx {
+            has_worktree,
+            allow_remote_restore: true,
+            chat_mode: false,
+            title_resolution: TitleResolution::Allowed,
+            restore_code,
+            restore_progress_on_stdout: false,
+        }
+    }
+    #[test]
+    fn in_place_restore_code_allowed_blocks_restored_remote_child() {
+        assert!(in_place_restore_code_allowed(
+            true, false, "local-id", "local-id"
+        ));
+        assert!(!in_place_restore_code_allowed(
+            true,
+            false,
+            "remote-uuid",
+            "restored-child"
+        ));
+        assert!(in_place_restore_code_allowed(
+            true,
+            true,
+            "remote-uuid",
+            "restored-child"
+        ));
+        assert!(in_place_restore_code_allowed(
+            false,
+            false,
+            "remote-uuid",
+            "restored-child"
+        ));
+    }
+    #[test]
+    fn plan_remote_miss_restore_code_false_restores_conversation_only() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(false, false), true),
+            RemoteMissPlan::RestoreConversation
+        );
+    }
+    #[test]
+    fn plan_remote_miss_restore_code_true_without_worktree_is_rejected() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, false), true),
+            RemoteMissPlan::RejectInPlaceCodeRestore {
+                title_miss_hint: false,
+            }
+        );
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, false), false),
+            RemoteMissPlan::RejectInPlaceCodeRestore {
+                title_miss_hint: true,
+            }
+        );
+    }
+    #[test]
+    fn plan_remote_miss_worktree_defers_without_restore_code() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(false, true), true),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: false,
+            }
+        );
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(false, true), false),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: true,
+            }
+        );
+    }
+    #[test]
+    fn plan_remote_miss_restore_code_true_with_worktree_defers() {
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, true), true),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: false,
+            }
+        );
+        assert_eq!(
+            plan_remote_miss(remote_miss_ctx(true, true), false),
+            RemoteMissPlan::DeferToWorktree {
+                deferred_local_miss: true,
+            }
+        );
+    }
+    #[test]
+    fn classify_remote_restore_prefers_returned_local_id() {
+        assert_eq!(
+            classify_remote_restore(false, Some("child"), Some("boom"), Some("other")),
+            RemoteRestoreOutcome::Restored {
+                local_session_id: "child".into(),
+            }
+        );
+    }
+    #[test]
+    fn classify_remote_restore_recovers_disk_child_on_timeout_or_error() {
+        assert_eq!(
+            classify_remote_restore(true, None, None, Some("child")),
+            RemoteRestoreOutcome::RecoveredAfterFailure {
+                local_session_id: "child".into(),
+            }
+        );
+        assert_eq!(
+            classify_remote_restore(false, Some(""), Some("network"), Some("child")),
+            RemoteRestoreOutcome::RecoveredAfterFailure {
+                local_session_id: "child".into(),
+            }
+        );
+    }
+    #[test]
+    fn classify_remote_restore_errors_when_conversation_missing() {
+        match classify_remote_restore(true, None, None, None) {
+            RemoteRestoreOutcome::Failed(msg) => {
+                assert!(msg.contains("Timed out"), "{msg}");
+                assert!(msg.contains("cannot be recovered"), "{msg}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        match classify_remote_restore(false, None, Some("registry 404"), None) {
+            RemoteRestoreOutcome::Failed(msg) => {
+                assert!(msg.contains("Failed to restore"), "{msg}");
+                assert!(msg.contains("registry 404"), "{msg}");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        match classify_remote_restore(false, Some(""), None, None) {
+            RemoteRestoreOutcome::Failed(msg) => {
+                assert!(
+                    msg.contains("conversation history was unavailable"),
+                    "{msg}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+    #[test]
+    fn worktree_no_restore_code_notice_mentions_flag() {
+        assert!(WORKTREE_NO_RESTORE_CODE_NOTICE.contains("--restore-code"));
+    }
+    /// `--restore-code` without `--worktree` must fail before any in-place checkout.
+    #[tokio::test]
+    async fn remote_miss_restore_code_without_worktree_errors() {
+        let err = materialize_startup_for_cwd(
+            remote_miss_ctx(true, false),
+            SessionStartupIntent::Resume {
+                session_id: Some("99999999-9999-4999-8999-999999999999".into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-code-no-wt",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("--worktree"),
+            "unexpected error: {err}"
+        );
+        let title_err = materialize_startup_for_cwd(
+            remote_miss_ctx(true, false),
+            SessionStartupIntent::Resume {
+                session_id: Some("no such title".into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-code-no-wt-title",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(title_err.contains("--worktree"), "{title_err}");
+        assert!(
+            title_err.contains("no session id or title matched"),
+            "{title_err}"
+        );
+    }
+    /// `--restore-code --worktree` stays on the existing defer path.
+    #[tokio::test]
+    async fn remote_miss_restore_code_with_worktree_defers() {
+        let id = "no such remote target";
+        let out = materialize_startup_for_cwd(
+            remote_miss_ctx(true, true),
+            SessionStartupIntent::Resume {
+                session_id: Some(id.into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-code-wt",
+        )
+        .await
+        .unwrap();
+        match out {
+            MaterializedStartup::Resume {
+                session_id,
+                deferred_local_miss,
+                suppress_code_restore,
+                ..
+            } => {
+                assert_eq!(session_id, id);
+                assert!(deferred_local_miss, "non-uuid defer must flag a title miss");
+                assert!(
+                    !suppress_code_restore,
+                    "--restore-code --worktree must still restore snapshot code"
+                );
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
+    }
+    #[tokio::test]
+    async fn remote_miss_worktree_without_restore_code_suppresses_snapshot() {
+        let id = "no such remote target";
+        let out = materialize_startup_for_cwd(
+            remote_miss_ctx(false, true),
+            SessionStartupIntent::Resume {
+                session_id: Some(id.into()),
+                most_recent_for_cwd: false,
+            },
+            "/nonexistent/cwd/for/remote-miss-wt-no-code",
+        )
+        .await
+        .unwrap();
+        match out {
+            MaterializedStartup::Resume {
+                session_id,
+                suppress_code_restore,
+                ..
+            } => {
+                assert_eq!(session_id, id);
+                assert!(suppress_code_restore);
+            }
+            other => panic!("expected Resume, got {other:?}"),
+        }
     }
     /// Explicit-id resume under `--chat` passes the id through untouched:
     /// no disk resolution, no GCS restore (the cwd does not even exist).
@@ -1414,6 +2025,8 @@ mod tests {
             allow_remote_restore: false,
             chat_mode: false,
             title_resolution: TitleResolution::Allowed,
+            restore_code: false,
+            restore_progress_on_stdout: false,
         };
         let err = materialize_startup_for_cwd(
             ctx,
@@ -1504,6 +2117,8 @@ mod tests {
                 allow_remote_restore: false,
                 chat_mode: false,
                 title_resolution: TitleResolution::Allowed,
+                restore_code: false,
+                restore_progress_on_stdout: false,
             }
         }
         async fn resume(arg: &str, cwd: &str) -> anyhow::Result<MaterializedStartup> {

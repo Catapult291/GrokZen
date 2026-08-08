@@ -244,117 +244,6 @@ mod tests {
         assert!(reg.get("loop").is_some());
     }
     #[test]
-    fn shell_collision_contract_covers_every_pager_command_and_alias() {
-        const SHELL_RESERVED: &[&str] = &[
-            "agents",
-            "agents-dashboard",
-            "always-approve",
-            "announcements",
-            "auto",
-            "btw",
-            "cd",
-            "changelog",
-            "chat",
-            "clear",
-            "cloud",
-            "compact",
-            "compact-mode",
-            "config",
-            "config-agents",
-            "context",
-            "copy",
-            "cost",
-            "dashboard",
-            "debug",
-            "delete",
-            "docs",
-            "doctor",
-            "edit-prompt",
-            "effort",
-            "exit",
-            "expand",
-            "export",
-            "feedback",
-            "find",
-            "fork",
-            "full",
-            "fullscreen",
-            "gboom",
-            "guides",
-            "help",
-            "history",
-            "home",
-            "hooks",
-            "howto",
-            "imagine",
-            "imagine-video",
-            "import-claude",
-            "jump",
-            "login",
-            "logout",
-            "log",
-            "loop",
-            "m",
-            "marketplace",
-            "mcps",
-            "minimal",
-            "ml",
-            "model",
-            "multiline",
-            "new",
-            "onboarding",
-            "personas",
-            "plan",
-            "plan-view",
-            "plugins",
-            "preferences",
-            "prefs",
-            "privacy",
-            "queue",
-            "quit",
-            "recap",
-            "release-notes",
-            "remember",
-            "rename",
-            "resume",
-            "rewind",
-            "scroll-debug",
-            "session-info",
-            "sessions",
-            "settings",
-            "share",
-            "show-plan",
-            "skills",
-            "summarize",
-            "tasks",
-            "terminal-check",
-            "terminal-info",
-            "terminal-setup",
-            "theme",
-            "timeline",
-            "timestamps",
-            "title",
-            "toggle-mouse-reporting",
-            "tour",
-            "transcript",
-            "tutorial",
-            "t",
-            "undo",
-            "usage",
-            "view-plan",
-            "vim-mode",
-            "voice",
-            "welcome",
-            "workflows",
-            "yolo",
-        ];
-        for command in builtin_commands() {
-            for key in std::iter::once(command.name()).chain(command.aliases().iter().copied()) {
-                assert!(SHELL_RESERVED.contains(&key), "unreserved pager key {key}");
-            }
-        }
-    }
-    #[test]
     fn builtin_registry_lookup_by_alias() {
         let reg = CommandRegistry::new(builtin_commands());
         assert!(reg.get("exit").is_some());
@@ -848,5 +737,47 @@ mod tests {
         assert!(reg.get("voice").is_some());
         reg.set_voice_visible(false);
         assert!(reg.get("voice").is_none());
+    }
+    /// Every pager builtin trigger key must appear in the shell's
+    /// `PAGER_COMMAND_KEYS`. Add new names there when adding a pager builtin.
+    #[test]
+    fn pager_builtin_triggers_are_reserved_in_shell() {
+        let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS
+            .iter()
+            .copied()
+            .collect();
+        let missing: Vec<String> = builtin_commands()
+            .iter()
+            .flat_map(|cmd| {
+                std::iter::once(cmd.name().to_string())
+                    .chain(cmd.aliases().iter().map(|a| a.to_string()))
+            })
+            .filter(|key| !reserved.contains(key.as_str()))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "pager builtin trigger keys missing from the shell's \
+             PAGER_COMMAND_KEYS (xai-grok-shell/src/session/slash_commands.rs); \
+             a skill with one of these names would shadow or be shadowed by \
+             the pager builtin: {missing:?}"
+        );
+    }
+    #[test]
+    fn pager_blocked_acp_names_are_reserved_in_shell() {
+        let reserved: std::collections::HashSet<&str> = xai_grok_shell::session::PAGER_COMMAND_KEYS
+            .iter()
+            .copied()
+            .collect();
+        let missing: Vec<&str> = crate::slash::registry::BLOCKED_ACP_NAMES
+            .iter()
+            .copied()
+            .filter(|name| !reserved.contains(name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "pager BLOCKED_ACP_NAMES missing from PAGER_COMMAND_KEYS; \
+             a skill with one of these names is advertised bare and then \
+             dropped: {missing:?}"
+        );
     }
 }

@@ -29,9 +29,9 @@ use xai_grok_sampling_types::{
     is_check_event, messages, rs,
 };
 
-use crate::attribution::bearer_tail_fragment;
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
 use crate::events::SamplingErrorInfo;
+use xai_grok_auth::bearer_suffix;
 
 // Re-export ApiBackend from the shared types crate for downstream callers.
 pub use xai_grok_sampling_types::ApiBackend;
@@ -742,7 +742,7 @@ impl SamplingClient {
 
     /// Tail fragment of the credential in `headers` — `x-api-key`
     /// (Messages-API scheme) or `Authorization` — per
-    /// [`crate::attribution::SENT_BEARER_PREFIX_LEN`].
+    /// [`crate::attribution::BEARER_SUFFIX_LEN`].
     fn sent_fragment_from_headers(headers: &HeaderMap, scheme: &AuthScheme) -> Option<String> {
         let raw = match scheme {
             AuthScheme::XApiKey => headers
@@ -753,20 +753,20 @@ impl SamplingClient {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.strip_prefix("Bearer ")),
         };
-        raw.map(|s| bearer_tail_fragment(s).to_string())
+        raw.map(|s| bearer_suffix(s).to_string())
     }
 
     /// Best-effort *build-time* view of what the next request would carry
     /// (resolver-authoritative). For request-start diagnostics
     /// ([`Self::auth_info`]) only — 401 attribution must use the fragment
     /// captured by [`Self::post`] instead, which cannot race a recovery.
-    fn current_sent_bearer_prefix(&self) -> Option<String> {
+    fn current_sent_bearer_suffix(&self) -> Option<String> {
         if self.bearer_resolver.is_some() {
             return self
                 .bearer_resolver
                 .as_ref()
                 .and_then(|r| r.current_bearer())
-                .map(|s| bearer_tail_fragment(&s).to_string());
+                .map(|s| bearer_suffix(&s).to_string());
         }
         Self::sent_fragment_from_headers(&self.default_headers, &self.defaults.auth_scheme)
     }
@@ -778,21 +778,21 @@ impl SamplingClient {
     /// that saw the status, so higher layers that react to a 401 must
     /// not emit a duplicate event.
     ///
-    /// `sent_prefix` is the fragment [`Self::post`] captured for the
+    /// `sent_suffix` is the fragment [`Self::post`] captured for the
     /// rejected request (already tail-truncated; the full bearer never
     /// crosses this boundary).
     fn record_401_attribution(
         &self,
         consumer: crate::attribution::SamplingConsumer,
-        sent_prefix: Option<&str>,
+        sent_suffix: Option<&str>,
     ) {
         if let Some(cb) = self.attribution_callback.as_ref() {
-            cb.record_401(consumer, sent_prefix);
+            cb.record_401(consumer, sent_suffix);
         }
     }
 
     pub fn auth_info(&self) -> crate::sampling_log::AuthInfo {
-        let auth_prefix = self.current_sent_bearer_prefix();
+        let auth_prefix = self.current_sent_bearer_suffix();
         let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
             (AuthScheme::XApiKey, Some(_)) => "x-api-key",
             (AuthScheme::Bearer, Some(_)) => "bearer",
@@ -2487,7 +2487,7 @@ mod tests {
     }
 
     /// `post()` strips the `"Bearer "` scheme prefix off `Authorization`
-    /// and captures the tail fragment (see `SENT_BEARER_PREFIX_LEN`).
+    /// and captures the tail fragment (see `BEARER_SUFFIX_LEN`).
     #[test]
     fn post_captures_bearer_tail_for_openai_compat() {
         let cfg = SamplerConfig {
@@ -2503,7 +2503,7 @@ mod tests {
         assert_eq!(bearer.as_deref(), Some("r-1234567890"));
         assert_eq!(
             bearer.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            Some(crate::attribution::BEARER_SUFFIX_LEN),
         );
     }
 
@@ -2525,7 +2525,7 @@ mod tests {
         assert_eq!(bearer.as_deref(), Some("c-key-abc123"));
         assert_eq!(
             bearer.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            Some(crate::attribution::BEARER_SUFFIX_LEN),
         );
     }
 
@@ -2585,7 +2585,7 @@ mod tests {
         // A record-time re-read (the pre-fix behavior) would report the
         // rotated token instead:
         assert_eq!(
-            client.current_sent_bearer_prefix().as_deref(),
+            client.current_sent_bearer_suffix().as_deref(),
             Some("en-newtail99"),
             "sanity: the build-time capture and a live re-read now differ"
         );
@@ -2692,7 +2692,7 @@ mod tests {
         assert_eq!(calls[0].1.as_deref(), Some("0-extra-tail"));
         assert_eq!(
             calls[0].1.as_deref().map(str::len),
-            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
+            Some(crate::attribution::BEARER_SUFFIX_LEN),
         );
     }
 
@@ -2716,7 +2716,7 @@ mod tests {
         };
         let client = SamplingClient::new(cfg).expect("client should build");
         assert_eq!(
-            client.current_sent_bearer_prefix(),
+            client.current_sent_bearer_suffix(),
             None,
             "resolver None must not attribute a stripped default seed"
         );

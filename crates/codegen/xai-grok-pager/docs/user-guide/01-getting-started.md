@@ -1,9 +1,10 @@
 # Getting Started
 
 > **Community build notice:** This is the unofficial Simplified Chinese
-> distribution. Its command is `grok-zh` and its user data is stored under
-> `~/.grok-zh`. The official xAI installer installs a different product into
-> `~/.grok`; do not use it to install or update this community build.
+> distribution. Its command is `grok-zh`; it intentionally shares `~/.grok`
+> and `GROK_HOME` with the official executable so sessions, credentials, and
+> configuration remain identical. The official xAI installer does not install
+> or update the `grok-zh` executable.
 
 Grok Build is a terminal-based AI coding assistant from SpaceXAI. It runs as a TUI (Terminal User Interface) that understands your codebase, executes shell commands, edits files, searches the web, and manages tasks.
 
@@ -38,7 +39,7 @@ Start Grok by running:
 grok-zh
 ```
 
-On first launch, Grok opens your browser to authenticate with grok.com. After you sign in, Grok stores your credentials in `~/.grok-zh/auth.json`, where they persist across sessions. Grok refreshes your credentials automatically and prompts you to sign in again when they can no longer be renewed.
+On first launch, Grok opens your browser to authenticate with grok.com. After you sign in, Grok stores your credentials in `~/.grok/auth.json`, where they persist across sessions and are shared by `grok` and `grok-zh`. Grok refreshes your credentials automatically and prompts you to sign in again when they can no longer be renewed.
 
 If you prefer API key authentication (e.g., for CI/CD or environments without a browser), set the `XAI_API_KEY` environment variable instead:
 
@@ -93,7 +94,7 @@ By default, Grok asks for permission before executing shell commands or editing 
 
 ### Sessions
 
-Every conversation is a **session**. Sessions are automatically saved to `~/.grok-zh/sessions/` and can be resumed later. Each session tracks the full conversation history, tool calls, file edits, and task state.
+Every conversation is a **session**. Sessions are automatically saved to `~/.grok/sessions/`, shared by `grok` and `grok-zh`, and can be resumed later. Each session tracks the full conversation history, tool calls, file edits, and task state.
 
 - Start a new session: `Ctrl+N` or `/new`
 - Resume a previous session: `/resume` in the TUI, or `--resume <ID>` from the CLI
@@ -218,7 +219,7 @@ grok-zh -p "Review changes for bugs" --output-format json --yolo | jq -r '.text'
 Add per-project instructions by creating an `AGENTS.md` file in your repository. Grok reads these files and injects their contents as a project-instructions message at the start of the conversation:
 
 ```
-~/.grok-zh/AGENTS.md        # Global rules (apply to all projects)
+~/.grok/AGENTS.md           # Global rules (apply to all projects)
 <repo-root>/AGENTS.md       # Repository-level rules
 <cwd>/AGENTS.md             # Directory-level rules (highest priority)
 ```

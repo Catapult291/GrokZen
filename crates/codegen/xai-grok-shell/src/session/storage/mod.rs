@@ -19,9 +19,11 @@ pub mod jsonl;
 #[allow(dead_code)] // Transaction APIs remain deferred until later protocol wiring.
 pub(crate) mod relocation;
 pub mod search;
+mod search_bootstrap;
+mod search_content;
+mod search_db;
 pub mod search_fts;
 mod search_recovery;
-pub mod search_remote_sync;
 pub(crate) mod summary_write;
 
 /// On-disk file names, relative to a session directory. Single source of truth for
@@ -40,13 +42,60 @@ pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
 /// torn file. The temp is removed on failure.
 pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = temp_sibling(path);
-    match std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, path)) {
+    match std::fs::write(&tmp, bytes).and_then(|()| replace_file(&tmp, path)) {
         Ok(()) => Ok(()),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
         }
     }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn extended_path(path: &Path) -> io::Result<Vec<u16>> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let path = std::path::absolute(path)?;
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if wide.contains(&0) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "path contains NUL",
+        ));
+    }
+    const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+    if wide.starts_with(VERBATIM_PREFIX) {
+        wide.push(0);
+        return Ok(wide);
+    }
+    let unc = wide.starts_with(&[b'\\' as u16, b'\\' as u16]);
+    let mut result = if unc { r"\\?\UNC\" } else { r"\\?\" }
+        .encode_utf16()
+        .collect::<Vec<_>>();
+    if unc {
+        wide.drain(..2);
+    }
+    result.extend(wide);
+    result.push(0);
+    Ok(result)
+}
+
+#[cfg(windows)]
+pub(crate) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use windows::Win32::Storage::FileSystem::{MOVE_FILE_FLAGS, MoveFileExW};
+    use windows::core::PCWSTR;
+
+    let source = extended_path(source)?;
+    let destination = extended_path(destination)?;
+    // MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH.
+    let flags = MOVE_FILE_FLAGS(1 | 8);
+    unsafe { MoveFileExW(PCWSTR(source.as_ptr()), PCWSTR(destination.as_ptr()), flags) }
+        .map_err(io::Error::other)
 }
 
 #[cfg(target_os = "macos")]
@@ -83,7 +132,14 @@ pub(crate) fn sync_file_durable(_file: &std::fs::File) -> io::Result<()> {
 pub(crate) async fn write_bytes_atomic_async(path: &Path, bytes: Vec<u8>) -> io::Result<()> {
     let tmp = temp_sibling(path);
     let result = match tokio::fs::write(&tmp, bytes).await {
-        Ok(()) => tokio::fs::rename(&tmp, path).await,
+        Ok(()) => {
+            let source = tmp.clone();
+            let destination = path.to_path_buf();
+            match tokio::task::spawn_blocking(move || replace_file(&source, &destination)).await {
+                Ok(result) => result,
+                Err(error) => Err(io::Error::other(error)),
+            }
+        }
         Err(e) => Err(e),
     };
     if result.is_err() {
@@ -133,7 +189,7 @@ pub(crate) mod chat_rebuild {
 
     use agent_client_protocol as acp;
 
-    use super::{CHAT_HISTORY_FILE, SessionUpdate, UPDATES_FILE, UpdatesIterator};
+    use super::{CHAT_HISTORY_FILE, SessionUpdate, UPDATES_FILE, UpdatesIterator, replace_file};
     use crate::sampling::{AssistantItem, ContentPart, ConversationItem, ToolCall};
 
     /// Rebuild `chat_history.jsonl` from `updates.jsonl` alone. Builds a temp file and
@@ -149,48 +205,49 @@ pub(crate) mod chat_rebuild {
 
         let chat_path = dir.join(CHAT_HISTORY_FILE);
         let tmp_path = dir.join(format!("{CHAT_HISTORY_FILE}.{}.tmp", uuid::Uuid::now_v7()));
-        let file = std::fs::File::create(&tmp_path)?;
-        let mut writer = std::io::BufWriter::new(file);
-        let mut reducer = ChatReducer::new();
+        let result = (|| {
+            let file = std::fs::File::create(&tmp_path)?;
+            let mut writer = std::io::BufWriter::new(file);
+            let mut reducer = ChatReducer::new();
 
-        for result in iter {
-            let update = match result {
-                Ok(u) => u,
-                Err(_) => continue,
-            };
+            for result in iter {
+                let update = match result {
+                    Ok(u) => u,
+                    Err(_) => continue,
+                };
 
-            for item in reducer.process(&update) {
-                if let Ok(line) = serde_json::to_string(&item) {
-                    let _ = writer.write_all(line.as_bytes());
-                    let _ = writer.write_all(b"\n");
+                for item in reducer.process(&update) {
+                    let line = serde_json::to_string(&item)
+                        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                    writer.write_all(line.as_bytes())?;
+                    writer.write_all(b"\n")?;
+                }
+
+                // CompactionCheckpoint: truncate file and reset
+                if reducer.should_truncate() {
+                    reducer.clear_truncate_flag();
+                    writer.seek(std::io::SeekFrom::Start(0))?;
+                    writer.get_mut().set_len(0)?;
                 }
             }
 
-            // CompactionCheckpoint: truncate file and reset
-            if reducer.should_truncate() {
-                reducer.clear_truncate_flag();
-                let _ = writer.seek(std::io::SeekFrom::Start(0));
-                let _ = writer.get_mut().set_len(0);
+            for item in reducer.flush() {
+                let line = serde_json::to_string(&item)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                writer.write_all(line.as_bytes())?;
+                writer.write_all(b"\n")?;
             }
-        }
 
-        for item in reducer.flush() {
-            if let Ok(line) = serde_json::to_string(&item) {
-                let _ = writer.write_all(line.as_bytes());
-                let _ = writer.write_all(b"\n");
-            }
-        }
-
-        if let Err(e) = writer.flush() {
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+            drop(writer);
+            replace_file(&tmp_path, &chat_path)?;
+            Ok(reducer.count())
+        })();
+        if result.is_err() {
             let _ = std::fs::remove_file(&tmp_path);
-            return Err(e);
         }
-        drop(writer);
-        if let Err(e) = std::fs::rename(&tmp_path, &chat_path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(e);
-        }
-        Ok(reducer.count())
+        result
     }
 
     /// Reduces ACP session updates into conversation items.
@@ -473,8 +530,10 @@ pub(crate) mod chat_rebuild {
 /// Each call to `next()` reads and parses one line.
 pub struct UpdatesIterator {
     reader: BufReader<std::fs::File>,
-    line_buffer: String,
+    line_buffer: Vec<u8>,
 }
+
+const MAX_UPDATE_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 impl UpdatesIterator {
     /// Create a new iterator over updates in the given file.
@@ -486,7 +545,7 @@ impl UpdatesIterator {
         let file = std::fs::File::open(path)?;
         Ok(Some(Self {
             reader: BufReader::new(file),
-            line_buffer: String::new(),
+            line_buffer: Vec::new(),
         }))
     }
 
@@ -497,17 +556,57 @@ impl UpdatesIterator {
     pub fn stream_position(&mut self) -> io::Result<u64> {
         self.reader.stream_position()
     }
+
+    fn read_bounded_line(&mut self) -> io::Result<usize> {
+        self.line_buffer.clear();
+        loop {
+            let available = self.reader.fill_buf()?;
+            if available.is_empty() {
+                return Ok(self.line_buffer.len());
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let take = newline.map_or(available.len(), |index| index + 1);
+            if self.line_buffer.len().saturating_add(take) > MAX_UPDATE_LINE_BYTES {
+                self.reader.consume(take);
+                while newline.is_none() {
+                    let available = self.reader.fill_buf()?;
+                    if available.is_empty() {
+                        break;
+                    }
+                    let next_newline = available.iter().position(|byte| *byte == b'\n');
+                    let consume = next_newline.map_or(available.len(), |index| index + 1);
+                    self.reader.consume(consume);
+                    if next_newline.is_some() {
+                        break;
+                    }
+                }
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "session update line exceeds the 64 MiB safety limit",
+                ));
+            }
+            self.line_buffer.extend_from_slice(&available[..take]);
+            self.reader.consume(take);
+            if newline.is_some() {
+                return Ok(self.line_buffer.len());
+            }
+        }
+    }
 }
 
 impl Iterator for UpdatesIterator {
     type Item = io::Result<SessionUpdate>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.line_buffer.clear();
-        match self.reader.read_line(&mut self.line_buffer) {
+        match self.read_bounded_line() {
             Ok(0) => None, // EOF
             Ok(_) => {
-                let line = self.line_buffer.trim();
+                let line = match std::str::from_utf8(&self.line_buffer) {
+                    Ok(line) => line.trim(),
+                    Err(error) => {
+                        return Some(Err(io::Error::new(io::ErrorKind::InvalidData, error)));
+                    }
+                };
                 if line.is_empty() {
                     return self.next();
                 }
@@ -919,28 +1018,32 @@ impl UserRunTurnTracker {
     }
 }
 
-/// Calculate how many updates to keep for a given target prompt index (0-based, inclusive).
-///
-/// Progressive: unmarked user runs before the first `_meta.promptIndex` count
-/// as turns; after the first marker only marked runs count (phantoms omit it).
-pub fn updates_truncate_for_prompt(updates: &[SessionUpdate], target_prompt_index: usize) -> usize {
+/// How many items to keep for `target_prompt_index` (0-based, inclusive):
+/// the scan cuts at the opening chunk of the next counted turn. Unmarked
+/// user runs count as turns only before the first `_meta.promptIndex`.
+fn truncate_for_prompt_by<T>(
+    items: &[T],
+    target_prompt_index: usize,
+    classify: impl Fn(&T) -> RewindStep,
+) -> usize {
     let mut user_turn_count = 0;
     let mut tracker = UserRunTurnTracker::new();
 
-    for (i, update) in updates.iter().enumerate() {
-        if is_acp_user_message_chunk(update) && !is_host_turn_update(update) {
-            if tracker.on_user_chunk(acp_user_chunk_prompt_index(update)) {
-                user_turn_count += 1;
-                if user_turn_count > target_prompt_index + 1 {
-                    return i;
+    for (i, item) in items.iter().enumerate() {
+        match classify(item) {
+            RewindStep::UserChunk { prompt_index } => {
+                if tracker.on_user_chunk(prompt_index) {
+                    user_turn_count += 1;
+                    if user_turn_count > target_prompt_index + 1 {
+                        return i;
+                    }
                 }
             }
-        } else {
-            tracker.on_non_user();
+            RewindStep::Rewind { .. } | RewindStep::Other => tracker.on_non_user(),
         }
     }
 
-    updates.len()
+    items.len()
 }
 
 #[derive(Debug)]
@@ -998,6 +1101,14 @@ pub trait StorageAdapter: Send + Sync {
         info: &Info,
         session_title: String,
     ) -> io::Result<bool>;
+
+    /// Replace or clear (`None`) the per-turn dashboard summary
+    /// (`(text, prompt_id)`) in `summary.json`; last-writer-wins.
+    async fn set_last_turn_summary(
+        &self,
+        info: &Info,
+        summary: Option<(String, String)>,
+    ) -> io::Result<()>;
 
     /// Append a session update (ACP update or xAI extension update) and increment counter
     async fn append_update(&self, info: &Info, update: &SessionUpdate) -> io::Result<()>;
@@ -1294,6 +1405,7 @@ pub(crate) struct RawChunkMetaPeek {
 }
 
 /// Role of one item in the rewind timeline, as seen by [`filter_rewind_by`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RewindStep {
     /// Rewind marker: truncate survivors back to `target`'s prompt boundary.
     Rewind { target: usize },
@@ -2763,6 +2875,48 @@ mod tests {
         )))
     }
 
+    /// The fork copy classifies raw lines while replay parity tests classify
+    /// typed updates; a divergence between the two classifiers would silently
+    /// shift fork truncation boundaries.
+    #[test]
+    fn rewind_step_classifiers_agree_on_serialized_updates() {
+        let rewind = SessionUpdate::Xai(Box::new(
+            crate::extensions::notification::SessionNotification {
+                session_id: acp::SessionId::new("s"),
+                update: crate::extensions::notification::SessionUpdate::RewindMarker {
+                    target_prompt_index: 2,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                },
+                meta: None,
+            },
+        ));
+        let host_turn_chunk = {
+            let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
+                "host".to_string(),
+            )))
+            .meta(serde_json::json!({ "hostTurn": true }).as_object().cloned());
+            SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+                acp::SessionId::new("s"),
+                acp::SessionUpdate::UserMessageChunk(chunk),
+            )))
+        };
+        for update in [
+            user_chunk("plain", None),
+            user_chunk("marked", Some(4)),
+            host_turn_chunk,
+            agent_chunk("agent"),
+            rewind,
+        ] {
+            let envelope = SessionUpdateEnvelope::from_update(&update).unwrap();
+            let line = serde_json::to_string(&envelope).unwrap();
+            assert_eq!(
+                rewind_step_for_line(&line),
+                rewind_step_for_update(&update),
+                "raw and typed classification must agree for {line}"
+            );
+        }
+    }
+
     #[test]
     fn updates_truncate_ignores_unmarked_phantoms_when_markers_present() {
         let updates = vec![
@@ -2776,7 +2930,7 @@ mod tests {
             agent_chunk("A2"),
         ];
         // Keep through P1 (indices 0,1); cut at start of P2 run.
-        let cut = updates_truncate_for_prompt(&updates, 1);
+        let cut = truncate_for_prompt_by(&updates, 1, rewind_step_for_update);
         assert_eq!(cut, 6);
         assert!(matches!(
             &updates[cut],
@@ -2794,9 +2948,18 @@ mod tests {
             .map(|i| user_chunk(&format!("P{i}"), Some(i)))
             .collect();
         // Target 2 keeps turns 0 and 1; cut at P2 (index 2).
-        assert_eq!(updates_truncate_for_prompt(&updates, 1), 2);
-        assert_eq!(updates_truncate_for_prompt(&updates, 2), 3);
-        assert_eq!(updates_truncate_for_prompt(&updates, 5), 6);
+        assert_eq!(
+            truncate_for_prompt_by(&updates, 1, rewind_step_for_update),
+            2
+        );
+        assert_eq!(
+            truncate_for_prompt_by(&updates, 2, rewind_step_for_update),
+            3
+        );
+        assert_eq!(
+            truncate_for_prompt_by(&updates, 5, rewind_step_for_update),
+            6
+        );
     }
 
     /// Mixed stream: unmarked runs before the first promptIndex still count.
@@ -2815,10 +2978,19 @@ mod tests {
             agent_chunk("A3"),
         ];
         // Target 1 keeps old0+old1; cut at new2.
-        assert_eq!(updates_truncate_for_prompt(&updates, 1), 4);
+        assert_eq!(
+            truncate_for_prompt_by(&updates, 1, rewind_step_for_update),
+            4
+        );
         // Target 2 keeps through A2 (and phantom run does not add a turn); cut at new3.
-        assert_eq!(updates_truncate_for_prompt(&updates, 2), 8);
-        assert_eq!(updates_truncate_for_prompt(&updates, 0), 2);
+        assert_eq!(
+            truncate_for_prompt_by(&updates, 2, rewind_step_for_update),
+            8
+        );
+        assert_eq!(
+            truncate_for_prompt_by(&updates, 0, rewind_step_for_update),
+            2
+        );
     }
 
     #[test]

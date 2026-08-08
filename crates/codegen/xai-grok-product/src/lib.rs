@@ -12,14 +12,13 @@ pub const PRODUCT_ID: &str = "grok-build-zh";
 pub const DISPLAY_NAME: &str = "Grok Build 中文社区版";
 /// Command and executable stem for the community distribution.
 pub const CLI_NAME: &str = "grok-zh";
-/// Per-user data directory, relative to the user's home directory.
-pub const DATA_DIR_NAME: &str = ".grok-zh";
-/// Distribution-specific home override. This wins over the compatibility env.
-pub const HOME_ENV: &str = "GROK_ZH_HOME";
-/// Legacy override retained only for debug/test compatibility with upstream
-/// harnesses. Release builds must never consult it, because it may point at an
-/// official installation's data tree.
-pub const COMPAT_HOME_ENV: &str = "GROK_HOME";
+/// Shared per-user data directory, relative to the user's home directory.
+///
+/// The official and Simplified Chinese executables intentionally use the same
+/// sessions, credentials, configuration, plugins, caches, and local state.
+pub const DATA_DIR_NAME: &str = ".grok";
+/// Shared user-data override used by both the official and Chinese executables.
+pub const HOME_ENV: &str = "GROK_HOME";
 /// Distribution-specific UI locale override.
 pub const LOCALE_ENV: &str = "GROK_ZH_LOCALE";
 /// Default UI locale for this distribution.
@@ -47,12 +46,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn community_identity_is_isolated_from_official_install() {
+    fn community_ui_identity_uses_the_shared_official_data_home() {
         assert_eq!(PRODUCT_ID, "grok-build-zh");
-        assert_eq!(DATA_DIR_NAME, ".grok-zh");
-        assert_eq!(HOME_ENV, "GROK_ZH_HOME");
+        assert_eq!(DATA_DIR_NAME, ".grok");
+        assert_eq!(HOME_ENV, "GROK_HOME");
         assert_eq!(LOCALE_ENV, "GROK_ZH_LOCALE");
-        assert_ne!(HOME_ENV, COMPAT_HOME_ENV);
         assert_ne!(
             executable_name(),
             if cfg!(windows) { "grok.exe" } else { "grok" }

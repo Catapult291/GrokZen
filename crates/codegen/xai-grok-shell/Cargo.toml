@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-shell"
-version = "0.2.119"
+version = "0.2.121"
 edition.workspace = true
 
 [features]
@@ -189,7 +189,7 @@ nix = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 siphasher = { workspace = true }
-windows = { workspace = true }
+windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -239,6 +239,10 @@ required-features = ["test-support"]
 
 [[test]]
 name = "test_session_load_memory"
+required-features = ["test-support"]
+
+[[test]]
+name = "test_fork_copy_memory"
 required-features = ["test-support"]
 
 [[test]]

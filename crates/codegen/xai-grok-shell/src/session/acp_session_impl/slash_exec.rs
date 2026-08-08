@@ -6,6 +6,8 @@ impl SessionActor {
         self: &Arc<Self>,
         action: BuiltinAction,
     ) -> PromptTurnResult {
+        // Builtin turns carry no user message, so a send-now may cancel from the start.
+        self.mark_front_message_committed().await;
         xai_grok_telemetry::session_ctx::log_event(xai_grok_telemetry::events::SlashCommandUsed {
             command: action.command_name().to_string(),
             args_provided: action.args_provided(),
@@ -138,12 +140,12 @@ impl SessionActor {
             BuiltinAction::HooksAdd { path } => {
                 if path.is_empty() {
                     self.send_host_turn_slash_command_output(
-                        "Usage: /hooks add <path>\nProvide a path to a hook JSON file or directory under ~/.grok-zh/.",
+                        "Usage: /hooks add <path>\nProvide a path to a hook JSON file or directory under ~/.grok/.",
                     )
                     .await;
                 } else {
                     // CWE-427: Use shared add_hooks_path() which validates
-                    // paths are under ~/.grok-zh/ to prevent hook path injection.
+                    // paths are under ~/.grok/ to prevent hook path injection.
                     match crate::config::add_hooks_path(&path) {
                         Ok(()) => {
                             xai_grok_telemetry::session_ctx::log_event(

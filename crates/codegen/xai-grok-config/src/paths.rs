@@ -1,6 +1,7 @@
 //! Filesystem locations for grok config files and binaries.
 
-use std::path::PathBuf;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 static GROK_HOME: OnceLock<PathBuf> = OnceLock::new();
@@ -11,9 +12,8 @@ const CLAUDE_MANAGED_SETTINGS_PATH: &str =
 #[cfg(target_os = "linux")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
 
-/// The default community-build directory (`~/.grok-zh`, canonicalized) used
-/// when `GROK_ZH_HOME` is unset. Debug/test builds additionally accept the
-/// legacy `GROK_HOME` override for upstream harness compatibility. Exposed so
+/// The shared Grok data directory (`~/.grok`, canonicalized) used when
+/// `GROK_HOME` is unset. Exposed so
 /// callers (e.g. display helpers) can detect
 /// whether [`grok_home()`] is the default without duplicating the computation.
 ///
@@ -36,33 +36,14 @@ pub fn default_grok_home() -> PathBuf {
 }
 
 fn configured_grok_home() -> Option<PathBuf> {
-    configured_grok_home_from(
-        std::env::var_os(xai_grok_product::HOME_ENV),
-        std::env::var_os(xai_grok_product::COMPAT_HOME_ENV),
-    )
+    configured_grok_home_from(std::env::var_os(xai_grok_product::HOME_ENV))
 }
 
-fn configured_grok_home_from(
-    community: Option<std::ffi::OsString>,
-    compatibility: Option<std::ffi::OsString>,
-) -> Option<PathBuf> {
-    community
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            // Upstream tests and developer harnesses still sandbox with
-            // GROK_HOME. Never honor it in release builds: a machine-wide
-            // value may belong to the official product.
-            cfg!(debug_assertions)
-                .then_some(compatibility)
-                .flatten()
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-        })
+fn configured_grok_home_from(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
-/// Per-user config directory: `$GROK_ZH_HOME` or `~/.grok-zh`. Debug/test
-/// builds also accept legacy `$GROK_HOME` for upstream harness compatibility.
+/// Shared per-user data directory: `$GROK_HOME` or `~/.grok`.
 pub fn grok_home() -> PathBuf {
     GROK_HOME
         .get_or_init(|| {
@@ -85,7 +66,7 @@ pub fn user_grok_home() -> Option<PathBuf> {
     resolvable.then(grok_home)
 }
 
-/// Canonical community application path: `<grok-home>/bin/grok-zh` (Unix) or
+/// Canonical Chinese application path: `<grok-home>/bin/grok-zh` (Unix) or
 /// `grok-zh.exe` (Windows).
 pub fn grok_application() -> PathBuf {
     grok_application_in(&grok_home())
@@ -96,10 +77,10 @@ pub fn grok_application_in(home: &std::path::Path) -> PathBuf {
     home.join("bin").join(xai_grok_product::executable_name())
 }
 
-/// System-wide community config directory: `/etc/grok-zh/` on Unix, `None` on Windows.
+/// Shared system-wide Grok config directory: `/etc/grok/` on Unix, `None` on Windows.
 pub fn system_config_dir() -> Option<PathBuf> {
     if cfg!(unix) {
-        Some(PathBuf::from("/etc").join(xai_grok_product::CLI_NAME))
+        Some(PathBuf::from("/etc/grok"))
     } else {
         None
     }
@@ -167,16 +148,29 @@ pub fn decode_cwd_from_dirname(dir: &std::path::Path) -> Option<String> {
     let name = dir.file_name()?.to_str()?;
     if let Ok(decoded) = urlencoding::decode(name) {
         let s = decoded.into_owned();
-        // URL-decoded absolute CWDs always start with `/` (Unix) or a drive
-        // letter (Windows).  The slug-hash form never does, so this
-        // distinguishes the two encodings unambiguously.
-        if s.starts_with('/') || (cfg!(windows) && s.chars().nth(1) == Some(':')) {
+        // Accept Unix-rooted paths even when a Windows build is reading a
+        // portable fixture, plus native drive-letter and UNC paths. The
+        // slug-hash form is never absolute, so the encodings stay unambiguous.
+        if s.starts_with('/') || Path::new(&s).is_absolute() {
             return Some(s);
         }
     }
-    std::fs::read_to_string(dir.join(".cwd"))
-        .ok()
-        .map(|s| s.trim().to_string())
+    const MAX_CWD_MARKER_BYTES: u64 = 64 * 1024;
+    let marker = dir.join(".cwd");
+    let metadata = std::fs::symlink_metadata(&marker).ok()?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > MAX_CWD_MARKER_BYTES
+    {
+        return None;
+    }
+    let mut value = String::new();
+    std::fs::File::open(marker)
+        .ok()?
+        .take(MAX_CWD_MARKER_BYTES + 1)
+        .read_to_string(&mut value)
+        .ok()?;
+    (value.len() as u64 <= MAX_CWD_MARKER_BYTES).then(|| value.trim().to_string())
 }
 
 /// Build the CWD-level session directory path:
@@ -333,6 +327,18 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn short_unc_cwd_uses_url_encoding_and_roundtrips() {
+        let tmp = TempDir::new().unwrap();
+        let cwd = r"\\server\share\project";
+        let encoded = encode_cwd_dirname(cwd);
+        assert_eq!(encoded, urlencoding::encode(cwd).into_owned());
+        let dir = tmp.path().join(encoded);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(decode_cwd_from_dirname(&dir).as_deref(), Some(cwd));
+    }
+
     #[test]
     fn default_grok_home_has_no_verbatim_prefix() {
         // On Windows, std::fs::canonicalize returns `\\?\C:\...` verbatim
@@ -344,24 +350,15 @@ mod tests {
     }
 
     #[test]
-    fn community_home_override_wins_and_empty_values_fall_through() {
+    fn grok_home_override_is_used_and_empty_values_fall_through() {
         use std::ffi::OsString;
 
         assert_eq!(
-            configured_grok_home_from(
-                Some(OsString::from("community")),
-                Some(OsString::from("compatibility")),
-            ),
-            Some(PathBuf::from("community"))
+            configured_grok_home_from(Some(OsString::from("shared"))),
+            Some(PathBuf::from("shared"))
         );
-        assert_eq!(
-            configured_grok_home_from(Some(OsString::new()), Some(OsString::from("compatibility")),),
-            cfg!(debug_assertions).then(|| PathBuf::from("compatibility"))
-        );
-        assert_eq!(
-            configured_grok_home_from(Some(OsString::new()), Some(OsString::new())),
-            None
-        );
+        assert_eq!(configured_grok_home_from(Some(OsString::new())), None);
+        assert_eq!(configured_grok_home_from(None), None);
     }
 
     #[test]
