@@ -67,6 +67,8 @@
   "welcome.logout": "Logout",
   "welcome.api_key_auth": "Logged in with API key",
   "welcome.beta": "Beta",
+  "welcome.channel.alpha": "alpha",
+  "welcome.channel.stable": "stable",
   "welcome.prompt_placeholder": "Type a message...",
   "welcome.product_name": "Grok Build",
   "welcome.quit": "Quit",

@@ -98,6 +98,8 @@ pub(crate) fn localized_argument_display(
     // label together with its built-in description so a dynamic ACP option
     // that merely reuses a word such as `high` remains opaque.
     let label_id = match (base, description) {
+        ("how-to", "Browse in-TUI How-to Guides") => Some("slash.command.docs.arg.how-to.label"),
+        ("web", "Open docs.x.ai/build in the browser") => Some("slash.command.docs.arg.web.label"),
         ("High Effort", "Highest implementation quality with extensive reasoning") => {
             Some("slash.arg.model_effort.high.label")
         }
@@ -114,8 +116,16 @@ pub(crate) fn localized_argument_display(
         ("max", "Maximum reasoning") => Some("reasoning_effort.max.label"),
         _ => None,
     };
+    let localized_doc_title = description
+        .strip_prefix("Open \"")
+        .and_then(|rest| rest.strip_suffix('"'))
+        .filter(|title| *title == base)
+        .and_then(crate::docs::find_doc)
+        .and_then(|doc| crate::docs::localized_doc(doc.id, locale.locale()))
+        .map(|doc| doc.title);
     let base = label_id
         .map(|id| locale.named_text(id, base).into_owned())
+        .or(localized_doc_title)
         .unwrap_or_else(|| base.to_string());
     match marker_id {
         Some(id) => format!("{base}（{}）", locale.named_text(id, marker_english)),
@@ -167,9 +177,13 @@ pub(crate) fn localized_argument_description(
         .strip_prefix("Open \"")
         .and_then(|rest| rest.strip_suffix('"'))
     {
+        let title = crate::docs::find_doc(title)
+            .and_then(|doc| crate::docs::localized_doc(doc.id, locale.locale()))
+            .map(|doc| doc.title)
+            .unwrap_or_else(|| title.to_string());
         return locale
             .named_text("slash.command.docs.arg.open_template", "Open “{title}”")
-            .replace("{title}", title);
+            .replace("{title}", &title);
     }
 
     if english == "auto (follow system)" {
@@ -917,6 +931,40 @@ mod tests {
             "在 SpaceXAI 上构建 AI 应用（XAI_API_KEY + api.x.ai）"
         );
         assert_eq!(localized.matches[8].insert_text, raw.matches[8].insert_text);
+    }
+
+    #[test]
+    fn docs_argument_labels_are_localized_without_changing_insert_text() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let raw = SlashSnapshot {
+            open: true,
+            matches: vec![
+                row("how-to", "Browse in-TUI How-to Guides"),
+                row("web", "Open docs.x.ai/build in the browser"),
+                row("Getting Started", "Open \"Getting Started\""),
+            ],
+            ..Default::default()
+        };
+
+        let localized = localized_snapshot(raw.clone(), Some(&locale));
+        assert_eq!(localized.matches[0].display, "操作指南");
+        assert_eq!(localized.matches[1].display, "在线文档");
+        assert_eq!(localized.matches[2].display, "入门指南");
+        assert_eq!(localized.matches[0].description, "浏览 TUI 内的操作指南");
+        assert_eq!(
+            localized.matches[1].description,
+            "在浏览器中打开 docs.x.ai/build"
+        );
+        assert_eq!(localized.matches[2].description, "打开“入门指南”");
+        for (localized, canonical) in localized.matches.iter().zip(raw.matches.iter()) {
+            assert_eq!(
+                localized.insert_text, canonical.insert_text,
+                "render-only localization must keep accepted slash input canonical"
+            );
+        }
     }
 
     /// Degenerate geometry sweep: tiny/zero widths and heights, over-wide

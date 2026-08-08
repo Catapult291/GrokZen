@@ -275,12 +275,25 @@ macro_rules! zh_doc {
             content: None,
         }
     };
+    ($id:expr, $title:literal, $description:literal, $file:literal) => {
+        DocTranslation {
+            id: $id,
+            title: $title,
+            description: $description,
+            content: Some(include_str!(concat!("../docs/user-guide/zh-CN/", $file))),
+        }
+    };
 }
 
 /// Chinese display metadata for the complete guide catalog. Long-form bodies
 /// can land incrementally without changing IDs or the English source table.
 static ZH_CN_DOCS: &[DocTranslation] = &[
-    zh_doc!(GETTING_STARTED, "入门指南", "安装、首次启动和基本交互"),
+    zh_doc!(
+        GETTING_STARTED,
+        "入门指南",
+        "安装、首次启动和基本交互",
+        "01-getting-started.md"
+    ),
     zh_doc!(
         AUTHENTICATION,
         "身份验证",
@@ -573,15 +586,21 @@ mod tests {
     }
 
     #[test]
-    fn stable_id_and_chinese_metadata_do_not_depend_on_english_title() {
+    fn stable_id_and_chinese_content_do_not_depend_on_english_title() {
         let canonical = find_doc_by_id(GETTING_STARTED).expect("stable id resolves");
         assert_eq!(canonical.title, "Getting Started");
         let chinese = localized_doc(GETTING_STARTED, crate::locale::UiLocale::ZhCn).unwrap();
         assert_eq!(chinese.id, GETTING_STARTED);
         assert_eq!(chinese.title, "入门指南");
+        assert_ne!(chinese.content, canonical.content);
+        assert!(chinese.content.starts_with("# 入门指南"));
+        assert!(chinese.content.contains("社区构建说明"));
+
+        let fallback = localized_doc(AUTHENTICATION, crate::locale::UiLocale::ZhCn).unwrap();
         assert_eq!(
-            chinese.content, canonical.content,
-            "missing body falls back"
+            fallback.content,
+            find_doc_by_id(AUTHENTICATION).unwrap().content,
+            "guides without a translated body still fall back one at a time"
         );
     }
 
@@ -636,7 +655,7 @@ mod tests {
     }
 
     #[test]
-    fn locale_extraction_keeps_runtime_path_and_falls_back_per_document() {
+    fn locale_extraction_keeps_runtime_path_and_writes_translated_content() {
         let tmp = tempfile::tempdir().unwrap();
         extract_user_guide_docs_for_locale(tmp.path(), crate::locale::UiLocale::ZhCn);
         let path = tmp
@@ -646,7 +665,9 @@ mod tests {
             .join("01-getting-started.md");
         assert_eq!(
             std::fs::read_to_string(path).unwrap(),
-            USER_GUIDE[0].content
+            localized_doc(GETTING_STARTED, crate::locale::UiLocale::ZhCn)
+                .unwrap()
+                .content
         );
         assert!(!tmp.path().join("docs").join("zh-CN").exists());
     }

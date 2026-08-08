@@ -67,6 +67,8 @@
   "welcome.logout": "退出登录",
   "welcome.api_key_auth": "已使用 API 密钥登录",
   "welcome.beta": "测试版",
+  "welcome.channel.alpha": "测试版",
+  "welcome.channel.stable": "稳定版",
   "welcome.prompt_placeholder": "输入消息…",
   "welcome.product_name": "Grok Build",
   "welcome.quit": "退出",

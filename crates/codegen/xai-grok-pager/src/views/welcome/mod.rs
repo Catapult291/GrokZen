@@ -417,6 +417,18 @@ pub(super) enum VersionBadgeMode<'a> {
     HeroInline,
 }
 
+fn localized_channel_label(
+    locale: &crate::locale::LocaleContext,
+    channel: Option<&str>,
+) -> Option<String> {
+    let label = match channel? {
+        "alpha" => locale.text(crate::locale::TextKey::WelcomeChannelAlpha),
+        "stable" => locale.text(crate::locale::TextKey::WelcomeChannelStable),
+        other => other,
+    };
+    Some(format!("[{label}]"))
+}
+
 pub(super) fn render_version_badge(
     version_rect: Rect,
     buf: &mut Buffer,
@@ -467,7 +479,7 @@ pub(super) fn render_version_badge(
         spans.push(sep);
     }
 
-    let channel = xai_grok_update::channel_label();
+    let channel = localized_channel_label(locale, xai_grok_update::channel_name());
     match &mode {
         VersionBadgeMode::Full { .. } => {
             spans.push(Span::styled(
@@ -480,16 +492,16 @@ pub(super) fn render_version_badge(
                     .add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
-                format!("{}{}", xai_grok_version::VERSION, channel),
+                match channel.as_deref() {
+                    Some(channel) => format!("{} {channel}", xai_grok_version::VERSION),
+                    None => xai_grok_version::VERSION.to_string(),
+                },
                 Style::default().fg(theme.gray),
             ));
         }
         VersionBadgeMode::HeroFooter => {
-            if !channel.is_empty() {
-                spans.push(Span::styled(
-                    channel.trim(),
-                    Style::default().fg(theme.gray),
-                ));
+            if let Some(channel) = channel {
+                spans.push(Span::styled(channel, Style::default().fg(theme.gray)));
             }
         }
         VersionBadgeMode::HeroInline => {
@@ -509,7 +521,8 @@ pub(super) fn render_version_badge(
         }
     }
 
-    // Only alpha and beta builds print a channel, so on stable the spans can end on a separator.
+    // The channel is absent until a stable pointer has been cached, so the spans can end on a
+    // separator on first launch or when the cache is unavailable.
     if spans.last().is_some_and(|s| s.content == SEP) {
         spans.pop();
     }
@@ -3023,7 +3036,7 @@ mod tests {
     }
 
     /// The badge carries the product name, the version, and the channel, and never a release label.
-    /// The hero footer prints a channel only on alpha and beta builds, so on stable it must not end on a separator.
+    /// The hero footer prints a channel only when a stable pointer is cached, so it must not end on a separator otherwise.
     #[test]
     fn version_badge_carries_no_release_label() {
         let full = badge_text(
@@ -3048,6 +3061,23 @@ mod tests {
             !footer.ends_with('\u{2502}'),
             "footer must not end on a separator: {footer:?}"
         );
+    }
+
+    #[test]
+    fn release_channel_labels_are_localized_for_welcome_display_only() {
+        assert_eq!(
+            localized_channel_label(&ZH_TEST_LOCALE, Some("stable")).as_deref(),
+            Some("[稳定版]")
+        );
+        assert_eq!(
+            localized_channel_label(&ZH_TEST_LOCALE, Some("alpha")).as_deref(),
+            Some("[测试版]")
+        );
+        assert_eq!(
+            localized_channel_label(&TEST_LOCALE, Some("stable")).as_deref(),
+            Some("[stable]")
+        );
+        assert_eq!(localized_channel_label(&ZH_TEST_LOCALE, None), None);
     }
 
     #[test]
