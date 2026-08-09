@@ -5,7 +5,7 @@
 
 ## 下载与解压
 
-1. 在仓库的 **Actions → zh-dev Windows preview** 中下载本次运行的
+1. 在仓库的 **Actions → zh-dev Windows 预览版** 中下载本次运行的
    `grok-zh-windows-<run-number>` Artifact。
 2. 解压一次。新流水线直接上传包目录，不再让 Artifact ZIP 内再套一层 ZIP。
 3. 确认目录中至少包含：

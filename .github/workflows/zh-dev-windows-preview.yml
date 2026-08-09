@@ -1,4 +1,4 @@
-name: zh-dev Windows preview
+name: zh-dev Windows 预览版
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Optional embedded version (defaults to a CI build number)
+        description: 可选的内嵌版本（默认为 CI 构建编号）
         required: false
         type: string
 
@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   windows-gnu-preview:
-    name: Windows x64 GNU preview
+    name: Windows x64 GNU 预览版
     runs-on: windows-2022
     timeout-minutes: 180
     env:
@@ -31,10 +31,10 @@ jobs:
       TARGET: x86_64-pc-windows-gnu
 
     steps:
-      - name: Check out zh-dev
+      - name: 检出 zh-dev
         uses: actions/checkout@v4
 
-      - name: Select preview version
+      - name: 选择预览版本
         id: preview
         shell: pwsh
         env:
@@ -48,14 +48,14 @@ jobs:
               Where-Object { $_ -match '^version\s*=\s*"([^"]+)"\s*$' } |
               Select-Object -First 1
             if (!$versionLine -or $versionLine -notmatch '^version\s*=\s*"([^"]+)"\s*$') {
-              throw 'Unable to read the pager-bin package version.'
+              throw '无法读取 pager-bin 软件包版本。'
             }
             $version = "$($matches[1])-zh.ci.$env:GITHUB_RUN_NUMBER"
           } else {
             $version = $requested.Trim()
           }
           if ($version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {
-            throw "Invalid version: $version"
+            throw "版本无效：$version"
           }
           "GROK_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "PACKAGE_NAME=grok-zh-$version-windows-x86_64-gnu" |
@@ -63,7 +63,7 @@ jobs:
           "package_name=grok-zh-$version-windows-x86_64-gnu" |
             Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Configure pinned Rust, MinGW and protoc
+      - name: 配置固定版本的 Rust、MinGW 和 protoc
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -75,7 +75,7 @@ jobs:
           $rustc = Join-Path $sysroot 'bin\rustc.exe'
           $rustdoc = Join-Path $sysroot 'bin\rustdoc.exe'
           if (!(Test-Path -LiteralPath $rustc)) {
-            throw "Pinned rustc is missing: $rustc"
+            throw "缺少固定版本的 rustc：$rustc"
           }
 
           $mingw = 'C:\mingw64\bin'
@@ -84,7 +84,7 @@ jobs:
           $ar = Join-Path $mingw 'ar.exe'
           foreach ($tool in @($gcc, $gxx, $ar)) {
             if (!(Test-Path -LiteralPath $tool)) {
-              throw "Required MinGW tool is missing: $tool"
+              throw "缺少必需的 MinGW 工具：$tool"
             }
           }
 
@@ -95,12 +95,12 @@ jobs:
           Invoke-WebRequest -Uri $protocUri -OutFile $protocArchive
           $protocHash = (Get-FileHash -LiteralPath $protocArchive -Algorithm SHA256).Hash
           if ($protocHash -ne '57EA59E9F551AD8D71FFAA9B5CFBE0CA1F4E720972A1DB7EC2D12AB44BFF9383') {
-            throw "Unexpected protoc SHA-256: $protocHash"
+            throw "protoc SHA-256 校验值异常：$protocHash"
           }
           Expand-Archive -LiteralPath $protocArchive -DestinationPath $protocRoot
           $protoc = Join-Path $protocRoot 'bin\protoc.exe'
           if (!(Test-Path -LiteralPath $protoc)) {
-            throw "Downloaded protoc is missing: $protoc"
+            throw "下载的 protoc 缺失：$protoc"
           }
 
           $targetDir = Join-Path $env:RUNNER_TEMP 'grok-zh-target'
@@ -122,7 +122,7 @@ jobs:
           & $gcc --version
           & $protoc --version
 
-      - name: Validate localization metadata
+      - name: 验证本地化元数据
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -132,17 +132,17 @@ jobs:
           $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
           $count = @($metadata.PSObject.Properties).Count
           if ($count -lt 2000) {
-            throw "Unexpectedly small zh-CN catalog: $count keys"
+            throw "zh-CN 目录条目数异常偏少：$count 个键"
           }
           if (Select-String -LiteralPath $metadataPath -SimpleMatch '词元' -Quiet) {
-            throw 'The zh-CN catalog must keep Token instead of 词元.'
+            throw 'zh-CN 目录必须保留 Token，而不是“词元”。'
           }
-          "Validated $count zh-CN entries."
+          "已验证 $count 个 zh-CN 条目。"
 
           cargo fetch --locked --target $env:TARGET
           cargo test --frozen -j 1 -p xai-grok-locale
 
-      - name: Validate Windows installer
+      - name: 验证 Windows 安装程序
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -150,10 +150,10 @@ jobs:
           & powershell.exe -NoProfile -NonInteractive `
             -File .\packaging\windows\tests\Test-Install-GrokZh.ps1
           if ($LASTEXITCODE -ne 0) {
-            throw "Windows PowerShell 5.1 installer tests failed: $LASTEXITCODE"
+            throw "Windows PowerShell 5.1 安装程序测试失败：$LASTEXITCODE"
           }
 
-      - name: Build low-memory Windows preview
+      - name: 构建低内存 Windows 预览版
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -168,7 +168,7 @@ jobs:
             --config profile.release.package.xai-grok-shell.opt-level=1 `
             --config profile.release.package.xai-grok-shell.codegen-units=16
 
-      - name: Package unsigned green preview
+      - name: 打包未签名绿色预览版
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -179,7 +179,7 @@ jobs:
 
           $builtExe = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release\grok-zh.exe"
           if (!(Test-Path -LiteralPath $builtExe)) {
-            throw "Built executable is missing: $builtExe"
+            throw "缺少构建出的可执行文件：$builtExe"
           }
           $packageExe = Join-Path $package 'grok-zh.exe'
           Copy-Item -LiteralPath $builtExe -Destination $packageExe
@@ -188,7 +188,7 @@ jobs:
           $objdump = 'C:\mingw64\bin\objdump.exe'
           & $strip --strip-debug $packageExe
           if ($LASTEXITCODE -ne 0) {
-            throw "strip failed: $LASTEXITCODE"
+            throw "strip 失败：$LASTEXITCODE"
           }
 
           Copy-Item -LiteralPath 'packaging\windows\agent-zh.cmd' `
@@ -207,11 +207,11 @@ jobs:
           $rgSource = Get-ChildItem -LiteralPath $rgExtract -Filter rg.exe -Recurse -File |
             Select-Object -First 1
           if (!$rgSource) {
-            throw 'Downloaded ripgrep archive does not contain rg.exe.'
+            throw '下载的 ripgrep 压缩包不包含 rg.exe。'
           }
           $rgHash = (Get-FileHash -LiteralPath $rgSource.FullName -Algorithm SHA256).Hash
           if ($rgHash -ne 'DECDD4992F3F1B9A5EF9898F1B40AB16886D579D6516B4EFD3D5EAA19364E408') {
-            throw "Unexpected ripgrep SHA-256: $rgHash"
+            throw "ripgrep SHA-256 校验值异常：$rgHash"
           }
           Copy-Item -LiteralPath $rgSource.FullName -Destination (Join-Path $package 'rg.exe')
 
@@ -258,14 +258,14 @@ jobs:
 
           $topLevelEntries = @(Get-ChildItem -LiteralPath $dist -Force)
           if ($topLevelEntries.Count -ne 1 -or !$topLevelEntries[0].PSIsContainer) {
-            throw 'dist must contain exactly one unpacked package directory.'
+            throw 'dist 必须只包含一个解压后的软件包目录。'
           }
           if (Get-ChildItem -LiteralPath $dist -Filter '*.zip' -Recurse -File) {
-            throw 'Preview artifacts must not contain a nested ZIP archive.'
+            throw '预览制品不得包含嵌套 ZIP 压缩包。'
           }
-          "Prepared unpacked package directory: $package"
+          "已准备解压后的软件包目录：$package"
 
-      - name: Upload green preview
+      - name: 上传绿色预览版
         id: preview_artifact
         uses: actions/upload-artifact@v4
         with:
@@ -275,18 +275,18 @@ jobs:
           compression-level: 6
           retention-days: 7
 
-      - name: Publish artifact details in summary
+      - name: 在摘要中发布制品详情
         shell: pwsh
         run: |
           $artifactUrl = '${{ steps.preview_artifact.outputs.artifact-url }}'
           $artifactDigest = '${{ steps.preview_artifact.outputs.artifact-digest }}'
           @"
-          ## Windows GNU preview
+          ## Windows GNU 预览版
 
-          - Version: ``$env:GROK_VERSION``
-          - Artifact: [$env:PACKAGE_NAME]($artifactUrl)
-          - Artifact SHA-256: ``$artifactDigest``
-          - Single archive layer: unzip the downloaded artifact once to install or run it.
-          - Package file hashes: ``SHA256SUMS.txt``
-          - Unsigned low-memory CI preview; the executable was not started.
+          - 版本：``$env:GROK_VERSION``
+          - 制品：[$env:PACKAGE_NAME]($artifactUrl)
+          - 制品 SHA-256：``$artifactDigest``
+          - 仅一层压缩：下载的制品解压一次即可安装或运行。
+          - 软件包文件哈希：``SHA256SUMS.txt``
+          - 未签名的低内存 CI 预览版；可执行文件未启动。
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

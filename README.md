@@ -46,7 +46,7 @@
 
 ## Windows 安装
 
-`zh-dev Windows preview` 云构建现在直接上传包目录。下载 GitHub Artifact 后只需
+`zh-dev Windows 预览版` 云构建现在直接上传包目录。下载 GitHub Artifact 后只需
 解压一次，即可在包内运行社区安装器：
 
 ```powershell
