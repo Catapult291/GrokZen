@@ -24,11 +24,12 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 180
     env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_CACHE_SCHEMA: v1
+      CARGO_BUILD_JOBS: "3"
+      CARGO_CACHE_SCHEMA: v2
       CARGO_INCREMENTAL: "0"
       CARGO_NET_RETRY: "10"
       CARGO_HTTP_TIMEOUT: "120"
+      RESOURCE_SAMPLE_SECONDS: "5"
       RUSTUP_TOOLCHAIN: 1.94.0-x86_64-pc-windows-gnu
       TARGET: x86_64-pc-windows-gnu
 
@@ -126,23 +127,28 @@ jobs:
 
       - name: 恢复 Cargo 依赖缓存
         id: cargo_home_cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             ${{ runner.temp }}/grok-zh-cargo/registry
             ${{ runner.temp }}/grok-zh-cargo/git
-          key: grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          key: grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
+            grok-zh-cargo-home-v1-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
 
       - name: 恢复 Cargo GNU release 缓存
         id: cargo_target_cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release
-          key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-
 
       - name: 验证本地化元数据
         shell: pwsh
@@ -175,28 +181,185 @@ jobs:
             throw "Windows PowerShell 5.1 安装程序测试失败：$LASTEXITCODE"
           }
 
-      - name: 构建 Windows 预览版（2 路并行）
+      - name: 构建并监控 Windows 预览版（J${{ env.CARGO_BUILD_JOBS }}）
+        id: windows_build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $buildStartedAt = Get-Date
-          "使用 $env:CARGO_BUILD_JOBS 路 Cargo 并行任务。"
-          cargo build --frozen -j $env:CARGO_BUILD_JOBS `
-            --target $env:TARGET `
-            -p xai-grok-pager-bin `
-            --profile release `
-            --features release-dist `
-            --config profile.release.lto=false `
-            --config profile.release.debug=0 `
-            --config profile.release.codegen-units=16 `
-            --config profile.release.package.xai-grok-shell.opt-level=1 `
-            --config profile.release.package.xai-grok-shell.codegen-units=16
-          if ($LASTEXITCODE -ne 0) {
-            throw "Cargo 构建失败：$LASTEXITCODE"
+
+          $monitorRoot = Join-Path $env:RUNNER_TEMP `
+            "grok-resource-monitor-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Path $monitorRoot -Force | Out-Null
+          $monitorScript = (Resolve-Path -LiteralPath `
+            '.github\scripts\windows-build-resource-monitor.ps1').Path
+          $csv = Join-Path $monitorRoot 'samples.csv'
+          $stop = Join-Path $monitorRoot 'stop.signal'
+          $ready = Join-Path $monitorRoot 'ready.signal'
+          $metaPath = Join-Path $monitorRoot 'meta.json'
+          $stdout = Join-Path $monitorRoot 'monitor.stdout.log'
+          $stderr = Join-Path $monitorRoot 'monitor.stderr.log'
+          $summary = Join-Path $monitorRoot 'summary.json'
+
+          $pwsh = Join-Path $PSHOME 'pwsh.exe'
+          $arguments = @(
+            '-NoLogo', '-NoProfile', '-NonInteractive',
+            '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $monitorScript),
+            '-Mode', 'Monitor',
+            '-CsvPath', ('"{0}"' -f $csv),
+            '-StopPath', ('"{0}"' -f $stop),
+            '-ReadyPath', ('"{0}"' -f $ready),
+            '-TargetPath', ('"{0}"' -f $env:CARGO_TARGET_DIR),
+            '-IntervalSeconds', $env:RESOURCE_SAMPLE_SECONDS,
+            '-MaxRuntimeSeconds', '10800'
+          )
+          $monitor = Start-Process -FilePath $pwsh -ArgumentList $arguments `
+            -WorkingDirectory $env:GITHUB_WORKSPACE -WindowStyle Hidden `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr `
+            -PassThru
+          [ordered]@{
+            Root = $monitorRoot
+            MonitorScript = $monitorScript
+            CsvPath = $csv
+            StopPath = $stop
+            ReadyPath = $ready
+            StdoutPath = $stdout
+            StderrPath = $stderr
+            SummaryPath = $summary
+            Pid = [int]$monitor.Id
+            StartedAtUtc = [DateTime]::UtcNow.ToString('o')
+          } | ConvertTo-Json | Set-Content -LiteralPath $metaPath -Encoding utf8
+          @(
+            "RESOURCE_MONITOR_ROOT=$monitorRoot"
+            "RESOURCE_MONITOR_CSV=$csv"
+            "RESOURCE_MONITOR_SUMMARY=$summary"
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $buildStartedAt = $null
+          $cargoExitCode = $null
+          $caughtError = $null
+          try {
+            $readyDeadline = [DateTime]::UtcNow.AddSeconds(30)
+            while (!(Test-Path -LiteralPath $ready) -and
+              [DateTime]::UtcNow -lt $readyDeadline -and !$monitor.HasExited) {
+              Start-Sleep -Milliseconds 250
+              $monitor.Refresh()
+            }
+            if (!(Test-Path -LiteralPath $ready)) {
+              $monitorError = if (Test-Path -LiteralPath $stderr) {
+                Get-Content -LiteralPath $stderr -Raw
+              } else {
+                '无 stderr。'
+              }
+              throw "资源监控未能采集首个样本：$monitorError"
+            }
+
+            $buildStartedAt = Get-Date
+            "使用 $env:CARGO_BUILD_JOBS 路 Cargo 并行任务。"
+            cargo build --frozen -j $env:CARGO_BUILD_JOBS `
+              --target $env:TARGET `
+              -p xai-grok-pager-bin `
+              --profile release `
+              --features release-dist `
+              --timings `
+              --config profile.release.lto=false `
+              --config profile.release.debug=0 `
+              --config profile.release.codegen-units=16 `
+              --config profile.release.package.xai-grok-shell.opt-level=1 `
+              --config profile.release.package.xai-grok-shell.codegen-units=16
+            $cargoExitCode = if ($null -eq $LASTEXITCODE) {
+              0
+            } else {
+              [int]$LASTEXITCODE
+            }
+          } catch {
+            $caughtError = $_
+            if ($null -eq $cargoExitCode -and $null -ne $LASTEXITCODE) {
+              $cargoExitCode = [int]$LASTEXITCODE
+            }
+          } finally {
+            $buildDurationSeconds = if ($null -eq $buildStartedAt) {
+              0
+            } else {
+              [int][Math]::Ceiling(((Get-Date) - $buildStartedAt).TotalSeconds)
+            }
+            "BUILD_DURATION_SECONDS=$buildDurationSeconds" |
+              Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+            try {
+              New-Item -ItemType File -Path $stop -Force | Out-Null
+            } catch {
+              Write-Warning "无法通知资源监控停止：$($_.Exception.Message)"
+            }
+
+            $stopDeadline = [DateTime]::UtcNow.AddSeconds(20)
+            $liveMonitor = Get-Process -Id $monitor.Id -ErrorAction SilentlyContinue
+            while ($liveMonitor -and !$liveMonitor.HasExited -and
+              [DateTime]::UtcNow -lt $stopDeadline) {
+              Start-Sleep -Milliseconds 250
+              $liveMonitor = Get-Process -Id $monitor.Id -ErrorAction SilentlyContinue
+            }
+            if ($liveMonitor -and !$liveMonitor.HasExited) {
+              $win32Process = Get-CimInstance Win32_Process `
+                -Filter "ProcessId=$($monitor.Id)" -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+              $sameMonitor = $win32Process -and
+                $win32Process.Name -ieq 'pwsh.exe' -and
+                $win32Process.CommandLine -and
+                $win32Process.CommandLine.IndexOf(
+                  $monitorScript, [StringComparison]::OrdinalIgnoreCase
+                ) -ge 0
+              if ($sameMonitor) {
+                Stop-Process -Id $monitor.Id -Force -ErrorAction SilentlyContinue
+                Write-Warning '资源监控未及时退出，已验证身份后停止。'
+              } else {
+                Write-Warning "PID $($monitor.Id) 身份无法确认，未强制停止。"
+              }
+            }
           }
-          $buildDurationSeconds = [int][Math]::Ceiling(((Get-Date) - $buildStartedAt).TotalSeconds)
-          "BUILD_DURATION_SECONDS=$buildDurationSeconds" |
-            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          if ($null -ne $cargoExitCode -and $cargoExitCode -ne 0) {
+            throw "Cargo 构建失败：$cargoExitCode"
+          }
+          if ($null -ne $caughtError) {
+            throw $caughtError
+          }
+
+      - name: 汇总并验证构建资源监控
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        env:
+          BUILD_OUTCOME: ${{ steps.windows_build.outcome }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:RESOURCE_MONITOR_CSV)) {
+            Write-Warning '构建步骤未生成资源监控路径。'
+            exit 0
+          }
+          $duration = 0
+          if (![int]::TryParse($env:BUILD_DURATION_SECONDS, [ref]$duration)) {
+            $duration = 0
+          }
+          & .\.github\scripts\windows-build-resource-monitor.ps1 `
+            -Mode Summarize `
+            -CsvPath $env:RESOURCE_MONITOR_CSV `
+            -SummaryPath $env:RESOURCE_MONITOR_SUMMARY `
+            -StepSummaryPath $env:GITHUB_STEP_SUMMARY `
+            -BuildOutcome $env:BUILD_OUTCOME `
+            -BuildDurationSeconds $duration `
+            -IntervalSeconds ([int]$env:RESOURCE_SAMPLE_SECONDS)
+
+      - name: 上传构建资源监控与 Cargo timings
+        id: monitor_artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-zh-build-monitor-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/grok-resource-monitor-${{ github.run_id }}-${{ github.run_attempt }}
+            ${{ runner.temp }}/grok-zh-target/cargo-timings
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 7
 
       - name: 打包未签名绿色预览版
         shell: pwsh
@@ -278,7 +441,7 @@ jobs:
           Version: $env:GROK_VERSION
           Commit: $env:GITHUB_SHA
           Target: $env:TARGET
-          Profile: 2-way parallel release with release-dist features (LTO disabled, debug disabled, codegen-units=16; not canonical Thin-LTO release-dist)
+          Profile: $($env:CARGO_BUILD_JOBS)-way parallel release with release-dist features (LTO disabled, debug disabled, codegen-units=16; not canonical Thin-LTO release-dist)
           PE: $pe
           Authenticode: $signature
           Executable started by CI: false
@@ -310,8 +473,11 @@ jobs:
         run: |
           $artifactUrl = '${{ steps.preview_artifact.outputs.artifact-url }}'
           $artifactDigest = '${{ steps.preview_artifact.outputs.artifact-digest }}'
+          $monitorArtifactUrl = '${{ steps.monitor_artifact.outputs.artifact-url }}'
           $cargoHomeCacheHit = '${{ steps.cargo_home_cache.outputs.cache-hit }}'
           $cargoTargetCacheHit = '${{ steps.cargo_target_cache.outputs.cache-hit }}'
+          $cargoHomeMatchedKey = '${{ steps.cargo_home_cache.outputs.cache-matched-key }}'
+          $cargoTargetMatchedKey = '${{ steps.cargo_target_cache.outputs.cache-matched-key }}'
           if ($cargoHomeCacheHit -eq 'true') {
             $cargoHomeCacheStatus = '精确命中'
           } elseif ($cargoHomeCacheHit -eq 'false') {
@@ -334,9 +500,28 @@ jobs:
           - 制品 SHA-256：``$artifactDigest``
           - Cargo 并行任务数：``$env:CARGO_BUILD_JOBS``
           - Cargo 依赖缓存：$cargoHomeCacheStatus
+          - Cargo 依赖缓存匹配键：``$cargoHomeMatchedKey``
           - Cargo GNU release 缓存：$cargoTargetCacheStatus
+          - Cargo GNU release 缓存匹配键：``$cargoTargetMatchedKey``
           - Cargo 构建耗时：``$env:BUILD_DURATION_SECONDS`` 秒
+          - 构建资源监控与 Cargo timings：[$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT]($monitorArtifactUrl)
           - 仅一层压缩：下载的制品解压一次即可安装或运行。
           - 软件包文件哈希：``SHA256SUMS.txt``
-          - 未签名的 2 路并行 CI 预览版；可执行文件未启动。
+          - 未签名的 $($env:CARGO_BUILD_JOBS) 路并行 CI 预览版；可执行文件未启动。
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: 保存 Cargo GNU release 缓存
+        if: ${{ success() && github.ref_name == 'zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release
+          key: ${{ steps.cargo_target_cache.outputs.cache-primary-key }}
+
+      - name: 保存 Cargo 依赖缓存
+        if: ${{ success() && github.ref_name == 'zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ${{ runner.temp }}/grok-zh-cargo/registry
+            ${{ runner.temp }}/grok-zh-cargo/git
+          key: ${{ steps.cargo_home_cache.outputs.cache-primary-key }}
