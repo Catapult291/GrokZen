@@ -122,7 +122,7 @@ grok-zh mcp doctor --json        # 机器可读输出
 
 `grok-zh mcp enable` / `disable` 会将个人开关状态持久化到用户的 `~/.grok/config.toml`（`disabled_mcp_servers`，以及条目存在时的 `[mcp_servers.<name>].enabled`）。作用域包括：
 
-- **已知名称：** 用户/项目 Grok TOML、已在禁用列表中的名称、兼容来源（`.mcp.json`、Claude、Cursor）、**插件** MCP 服务器（与 doctor/`/mcps` 使用相同发现逻辑），以及旧版受管 `grok_com_*`（不要求存在本地条目）。
+- **已知名称：** 用户/项目 Grok TOML、已在禁用列表中的名称、兼容来源（`.mcp.json`、Claude、Cursor）以及**插件** MCP 服务器（与 doctor/`/mcps` 使用相同发现逻辑）。
 - **仅启用操作：** 如果 cwd 最近的项目定义带有粘滞的 `enabled = false`，只清除该键（保留注释）；禁用操作不会重写项目配置。
 - **不与 `/mcps` 完全对等：** 网关连接器（`managed_gateway:…`，存储在 `disabled_mcp_tools.__managed_gateway_connectors` 下）在 TUI 中仍仅能通过 Space 操作。操作幂等；未知名称退出码为 1。
 

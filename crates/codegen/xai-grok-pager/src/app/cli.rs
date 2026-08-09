@@ -77,7 +77,7 @@ Terminal）时，这会让复制功能正常工作。包装命令的终端也会
   grok-zh wrap docker exec -it my-container bash
   grok-zh wrap kubectl exec -it my-pod -- bash
 
-更多信息见 ~/.grok/README.md。
+更多信息见 ~/.grok/README.grok-build-zh.md。
 ")]
     Wrap(WrapArgs),
     /// 将会话记录导出为 Markdown

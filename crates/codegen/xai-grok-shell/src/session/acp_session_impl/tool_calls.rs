@@ -630,7 +630,7 @@ impl SessionActor {
             .in_current_span(),
         );
         let _drainer_guard = crate::util::AbortOnDrop(drainer);
-        while let Some((idx, mut result, mut duration_ms)) = dispatch_rx.recv().await {
+        while let Some((idx, result, duration_ms)) = dispatch_rx.recv().await {
             let prepared = approved_slots[idx]
                 .take()
                 .expect("dispatch index should match an approved slot exactly once");
@@ -651,42 +651,6 @@ impl SessionActor {
                 duration_ms,
             );
             let mut post_tool_use_result: Option<serde_json::Value> = None;
-            if let Some((server, _)) =
-                crate::session::mcp_servers::parse_mcp_tool_name(&prepared.tool_name)
-                && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-            {
-                let auth_rejected = match &result {
-                    Err(err) => xai_grok_mcp::servers::is_auth_rejection_message(&err.to_string()),
-                    Ok(tool_result) => {
-                        tool_result.output.is_error()
-                            && xai_grok_mcp::servers::is_auth_rejection_message(
-                                &tool_result.prompt_text,
-                            )
-                    }
-                };
-                if auth_rejected && self.reactive_managed_reauth(&server).await.is_ok() {
-                    let retry_start = std::time::Instant::now();
-                    let retry_span = tool_execution_span(
-                        &tracing::Span::current(),
-                        &self.session_info.id.0,
-                        &prepared,
-                        &tool_call_id,
-                        true,
-                    );
-                    let retry_span_for_record = retry_span.clone();
-                    result = dispatch_tool(&self.workspace_ops, &prepared, &self.session_info.id.0)
-                        .instrument(retry_span)
-                        .await;
-                    duration_ms =
-                        duration_ms.saturating_add(retry_start.elapsed().as_millis() as u64);
-                    record_tool_span_outcome(retry_span_for_record, &result);
-                    self.events.tool_started(
-                        prepared.tool_name.clone(),
-                        tool_call_id.clone(),
-                        duration_ms,
-                    );
-                }
-            }
             let tool_result_size_bytes = match &result {
                 Ok(tool_result) => tool_result.prompt_text.len() as i64,
                 Err(_) => 0,
@@ -940,14 +904,8 @@ impl SessionActor {
         }
         let mcp_parts = parse_mcp_tool_name(&call.function.name);
         let is_mcp_tool = mcp_parts.is_some();
-        if let Some((ref server, _)) = mcp_parts
-            && server.starts_with(crate::session::managed_mcp::MANAGED_MCP_PREFIX)
-        {
-            let _span = tracing::info_span!("tool.refresh_managed_mcp").entered();
-            self.refresh_managed_mcp_if_stale().await;
-        }
         if is_mcp_tool && !self.mcp_state.lock().await.is_initialized() {
-            match self.mcp_strategy {
+            match self.mcp_strategy.get() {
                 McpInitStrategy::Blocking => {
                     let _span = tracing::info_span!("tool.wait_mcp_init").entered();
                     self.wait_for_mcp_initialized().await;

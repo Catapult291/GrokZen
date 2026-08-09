@@ -879,6 +879,11 @@ pub struct AgentView {
     /// drop log to one `warn!` per incident (a late replay is one line per
     /// event — thousands for a large transcript).
     pub(crate) unexpected_replay_drops: u32,
+    /// After `SessionLoaded` clears `loading_replay`, keep accepting this-session
+    /// `isReplay` until this instant (or the first this-session live update).
+    /// The load barrier may release on an Unrelated firehose timeout while
+    /// remaining replay still sits behind the ACP peek.
+    pub(crate) late_replay_until: Option<std::time::Instant>,
     /// Prompt ids whose durable `TurnCompleted` terminal arrived during THIS
     /// load's replay window (`loading_replay`). The running turn is not adopted
     /// until replay finishes, so a terminal seen mid-replay can't be finalized

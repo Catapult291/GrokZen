@@ -10,7 +10,8 @@ use super::interject;
 use super::permissions::drain_permission_queue;
 use super::queue::{
     apply_turn_start_shim, drain_prompt_state_to_last_queued, immediate_server_send_eligible,
-    maybe_drain_queue, note_peek_page_flip, push_server_queue_echo, retire_optimistic_echo,
+    maybe_drain_queue, note_peek_page_flip, push_and_page_flip, push_server_queue_echo,
+    retire_optimistic_echo,
 };
 use super::router::dispatch;
 use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
@@ -650,14 +651,14 @@ pub(super) fn dispatch_send_prompt_inner(
                     agent.prompt.set_text("");
                 }
                 let message = crate::slash::localize_command_error(&msg, agent.scrollback.locale());
-                agent.scrollback.push_block(RenderBlock::system(message));
+                push_and_page_flip(&mut agent.scrollback, RenderBlock::system(message));
                 return vec![];
             }
             CommandResult::Message(msg) => {
                 if consume_input {
                     agent.prompt.set_text("");
                 }
-                agent.scrollback.push_block(RenderBlock::system(msg));
+                push_and_page_flip(&mut agent.scrollback, RenderBlock::system(msg));
                 return vec![];
             }
             CommandResult::Doctor(request) => {
@@ -1189,7 +1190,15 @@ pub(super) fn handle_prompt_response(
                 }
                 // Resolved-without-running never adopts; explicit for the
                 // session-less arm (no note_queue_echo_retired above).
-                agent.retire_send_now_painted_block(response_pid);
+                // Exception: an active-goal Send Now painted block still awaiting
+                // its interjection claim stays put — the `RemovedFromQueue`
+                // response is the expected outcome of routing the Send Now as an
+                // interjection, and `handle_interjection` converts the block in
+                // place. Retiring it here (before that claim wins the race) would
+                // drop and re-push the message at the scrollback end.
+                if !agent.is_send_now_awaiting_interjection_claim(response_pid) {
+                    agent.retire_send_now_painted_block(response_pid);
+                }
                 return vec![];
             }
         }
@@ -1602,6 +1611,7 @@ pub(super) fn handle_prompt_response(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
         });
         note_peek_page_flip(app, agent_id, page_flip_entry);
         return effects;

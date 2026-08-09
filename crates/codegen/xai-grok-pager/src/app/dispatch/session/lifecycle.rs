@@ -1256,6 +1256,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
         });
         if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {
@@ -1309,6 +1310,10 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         agent.scheduler_background_loops = scheduler_background_loops;
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
+        agent.current_branch = None;
+        agent.main_repo = None;
+        agent.is_worktree = true;
+        crate::git_info::populate_from_cwd_async(session_cwd.clone());
         if let Some(m) = new_models {
             app.models = Some(m).into();
             agent.session.models = app.models.clone();
@@ -1368,6 +1373,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
+            nonce: 0,
         });
         if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {

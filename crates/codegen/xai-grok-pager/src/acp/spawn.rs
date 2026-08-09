@@ -17,10 +17,7 @@ use xai_acp_lib::{
     acp_channels,
 };
 use xai_grok_shell::{
-    agent::{
-        MvpAgent, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig,
-        models::RefreshStrategy,
-    },
+    agent::{MvpAgent, activity::SESSION_FLUSH_GRACE, config::Config as AgentConfig},
     auth::AuthManager,
     util::grok_home::grok_home,
 };
@@ -233,11 +230,6 @@ pub async fn spawn_grok_shell(
     let (agent_config, models_manager) =
         xai_grok_shell::agent::init::bootstrap(&agent_config, &auth_manager, None)
             .map_err(|e| anyhow::anyhow!(e))?;
-    models_manager
-        .list_models(RefreshStrategy::OnlineIfUncached)
-        .await;
-    // Self-heal a cold-cache/failed boot fetch once the backend recovers,
-    // matching the leader and stdio paths.
     models_manager.spawn_background_refresh();
 
     let agent_cancel = cancel.child_token();

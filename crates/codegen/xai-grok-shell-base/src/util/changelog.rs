@@ -14,6 +14,18 @@ use std::path::PathBuf;
 /// CDN base for all changelogs (proxies to GCS, cache-friendly).
 const CHANGELOG_BASE: &str = "https://x.ai/cli/changelogs";
 const FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const OFFICIAL_CHANGELOG_MD: &str = "CHANGELOG.md";
+const OFFICIAL_CHANGELOG_JSON: &str = "CHANGELOG.json";
+const COMMUNITY_CHANGELOG_MD: &str = "CHANGELOG.grok-build-zh.md";
+const COMMUNITY_CHANGELOG_JSON: &str = "CHANGELOG.grok-build-zh.json";
+
+fn changelog_cache_names() -> (&'static str, &'static str) {
+    if xai_grok_product::OFFICIAL_CHANGELOG_SOURCE_ALLOWED {
+        (OFFICIAL_CHANGELOG_MD, OFFICIAL_CHANGELOG_JSON)
+    } else {
+        (COMMUNITY_CHANGELOG_MD, COMMUNITY_CHANGELOG_JSON)
+    }
+}
 
 /// A single structured changelog entry from the published JSON changelog.
 ///
@@ -69,9 +81,10 @@ impl ChangelogManager {
     /// Resolve cache paths through the shared Grok home resolver.
     fn from_product_home() -> Self {
         let home = crate::util::grok_home::grok_home();
+        let (md_name, json_name) = changelog_cache_names();
         Self {
-            md_cache: home.join("CHANGELOG.md"),
-            json_cache: home.join("CHANGELOG.json"),
+            md_cache: home.join(md_name),
+            json_cache: home.join(json_name),
         }
     }
 
@@ -245,6 +258,15 @@ mod tests {
             md_cache: home.join("CHANGELOG.md"),
             json_cache: home.join("CHANGELOG.json"),
         }
+    }
+
+    #[test]
+    fn community_build_uses_distribution_scoped_changelog_cache_names() {
+        assert!(!xai_grok_product::OFFICIAL_CHANGELOG_SOURCE_ALLOWED);
+        assert_eq!(
+            changelog_cache_names(),
+            (COMMUNITY_CHANGELOG_MD, COMMUNITY_CHANGELOG_JSON)
+        );
     }
 
     #[test]

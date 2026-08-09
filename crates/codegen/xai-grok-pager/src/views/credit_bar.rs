@@ -47,7 +47,7 @@ impl CreditBalance {
         }
     }
 
-    fn usage_label_with_locale<'a>(
+    pub(crate) fn usage_label_with_locale<'a>(
         &self,
         locale: Option<&'a crate::locale::LocaleContext>,
     ) -> Cow<'static, str> {
@@ -72,7 +72,10 @@ fn billing_text<'a>(
         .unwrap_or(Cow::Borrowed(english))
 }
 
-fn localized_reset_display(reset: &str, locale: Option<&crate::locale::LocaleContext>) -> String {
+pub(crate) fn localized_reset_display(
+    reset: &str,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
     if !locale.is_some_and(|locale| locale.locale() == crate::locale::UiLocale::ZhCn) {
         return reset.to_string();
     }

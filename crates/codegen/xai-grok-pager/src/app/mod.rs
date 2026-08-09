@@ -36,6 +36,7 @@ pub mod subagent;
 pub mod subscription;
 pub(crate) use effects::sanitize_user_error;
 mod event_loop;
+mod exit_timeout;
 pub(crate) mod external_editor;
 mod foreign_sessions;
 mod inline_edit;
@@ -45,6 +46,7 @@ mod modals;
 mod mouse;
 mod queue_edit;
 pub(crate) mod screen_mode_relaunch;
+mod session_load_barrier;
 pub mod signal_handler;
 mod turn_completion;
 mod xt_filter;
@@ -376,7 +378,7 @@ pub(crate) struct ExitInfo {
     pub session_id: String,
     pub minimal: bool,
     /// Glanceable session tail; `Some` exactly when it should print. The
-    /// presence policy lives at the sole construction site, `make_run_result`.
+    /// presence policy lives at the sole construction site, `finish_run`.
     pub summary: Option<ExitSummary>,
 }
 /// Session tail printed above the resume command on fullscreen quits.
@@ -965,6 +967,7 @@ pub async fn run(
             },
         ),
     );
+    let pending_startup = xai_grok_telemetry::startup::PendingStartup::new();
     let timer = xai_grok_telemetry::startup::begin(crate::acp::Owner::Client);
     let connect_result =
         bounded_connect(&cancel, CONNECT_UI_TIMEOUT, primary_target, &timer, async {
@@ -1010,9 +1013,9 @@ pub async fn run(
         Err(f) => {
             timer.emit_telemetry(connect_target, f.outcome, f.timeout_secs, embedded_fallback);
             if f.outcome == crate::acp::StartupOutcome::Cancelled {
-                xai_grok_telemetry::startup::clear();
+                pending_startup.abandon();
             } else {
-                xai_grok_telemetry::startup::report_total(f.outcome);
+                pending_startup.finish(f.outcome);
             }
             crate::unified_log::flush_blocking().await;
             let _ = restore_terminal(terminal, writer_thread, screen_mode);
@@ -1043,6 +1046,7 @@ pub async fn run(
     let result = event_loop::run(
         &mut terminal,
         connection,
+        pending_startup,
         &mut config_watcher,
         &effective_args,
         locale,
@@ -1054,6 +1058,16 @@ pub async fn run(
         writer_event_rx,
     )
     .await;
+    signal_handler::clear_quit_notify();
+    let forced_exit_code = match &result {
+        Ok(run_result) if run_result.quit_for_update || run_result.relaunch.is_some() => None,
+        Ok(_) => Some(0),
+        Err(_) => Some(1),
+    };
+    if let Some(code) = forced_exit_code {
+        exit_timeout::arm(code);
+        exit_timeout::hold_teardown_for_test();
+    }
     crate::unified_log::flush_blocking().await;
     let restore_result = restore_terminal(terminal, writer_thread, screen_mode);
     drop(agent_guard);
@@ -1741,6 +1755,7 @@ fn set_panic_hook(mode: ScreenMode) {
         xai_crash_handler::disable_terminal_escape_restore();
         xai_tty_utils::restore_native_stderr();
         xai_tty_utils::global_process_scope().kill_all();
+        crate::memory_trace::record_crash_sample();
         hook(info);
     }));
 }

@@ -553,6 +553,10 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         agent.session.restore_degree = restore_degree;
         agent.session.cwd = session_cwd.clone();
         agent.session.is_worktree = true;
+        agent.current_branch = None;
+        agent.main_repo = None;
+        agent.is_worktree = true;
+        crate::git_info::populate_from_cwd_async(session_cwd.clone());
         app.restore_code = None;
         agent.prompt.file_search.retarget(&session_cwd);
         let worktree_path = worktree_path.display().to_string();

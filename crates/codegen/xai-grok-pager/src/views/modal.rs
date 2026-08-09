@@ -307,6 +307,11 @@ pub enum ActiveModal {
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
     },
+    /// Tabbed usage / session-info modal (`/usage`, `/session-info`,
+    /// `/context`, context-bar click). Boxed — holds fetched snapshots.
+    UsageInfo {
+        state: Box<crate::views::usage_modal::UsageInfoModalState>,
+    },
     /// Reset-settings confirmation, stacked above Settings.
     ///
     /// The underlying `SettingsModalState` is moved in/out so cancel
@@ -730,6 +735,7 @@ impl ActiveModal {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
+            | ActiveModal::UsageInfo { .. }
             | ActiveModal::RememberNoteReview { .. } => vec![],
         }
     }
@@ -761,6 +767,7 @@ impl ActiveModal {
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
+            ActiveModal::UsageInfo { .. } => "Usage",
         }
     }
 }

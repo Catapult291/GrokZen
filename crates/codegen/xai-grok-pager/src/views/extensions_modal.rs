@@ -3138,7 +3138,7 @@ pub fn render_extensions_modal_with_locale(
                             } else {
                                 entry_badge_text.push(String::new());
                                 entry_badge_color.push(None);
-                        }
+                            }
                         }
                     }
                 } else if let TabDataState::Error(ref msg) = state.skills_data {

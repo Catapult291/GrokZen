@@ -12,6 +12,64 @@ use xai_grok_shell::sampling::error::{
 };
 use xai_grok_shell::session::ExtMethodResult;
 use xai_grok_shell::session::unified_list::ListScope;
+/// Floor for the session create/load RPCs.
+const SESSION_RPC_FLOOR: std::time::Duration = std::time::Duration::from_secs(180);
+/// Headroom over the agent-side `.envrc` budget for the rest of session setup.
+const SESSION_RPC_SLACK: std::time::Duration = std::time::Duration::from_secs(50);
+/// Always covers the agent-side `.envrc` budget so the backstop cannot fire
+/// before the agent's own deadline. Reads `GROK_ENVRC_TIMEOUT_SECS` in this
+/// process; the agent inherits the same environment.
+pub(super) fn session_rpc_timeout() -> std::time::Duration {
+    SESSION_RPC_FLOOR.max(xai_grok_workspace::envrc::loader_budget() + SESSION_RPC_SLACK)
+}
+/// `acp_send` bounded by [`session_rpc_timeout`]; on expiry, an error naming
+/// `action` instead of an eternal spinner.
+pub(super) async fn acp_send_bounded<R, T>(
+    request: T,
+    tx: &tokio::sync::mpsc::UnboundedSender<R>,
+    action: &str,
+    locale: &crate::locale::LocaleContext,
+) -> Result<T::Response, acp::Error>
+where
+    T: xai_acp_lib::AcpRequest,
+    R: From<xai_acp_lib::AcpArgs<T>> + std::fmt::Debug,
+{
+    let timeout = session_rpc_timeout();
+    match tokio::time::timeout(timeout, acp_send(request, tx)).await {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            let localized_action = match action {
+                "Session creation" => Some(("session.rpc_action.create", "Session creation")),
+                "Worktree session resume" => Some((
+                    "session.rpc_action.worktree_resume",
+                    "Worktree session resume",
+                )),
+                "Worktree session creation" => Some((
+                    "session.rpc_action.worktree_create",
+                    "Worktree session creation",
+                )),
+                "Session loading" => Some(("session.rpc_action.load", "Session loading")),
+                _ => None,
+            };
+            let action = localized_action
+                .map(|(id, english)| locale.named_text(id, english).into_owned())
+                .unwrap_or_else(|| action.to_string());
+            let seconds = timeout.as_secs().to_string();
+            Err(
+                acp::Error::new(
+                    acp::ErrorCode::InternalError.into(),
+                    localized_named(
+                        locale,
+                        "error.session_rpc_timeout",
+                        "{action} timed out after {seconds}s. It may still finish in the \
+                         background; retrying right away can run into the same delay.",
+                        &[("action", &action), ("seconds", &seconds)],
+                    ),
+                ),
+            )
+        }
+    }
+}
 /// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
 pub(crate) struct RestoreProgressMsg {

@@ -751,6 +751,7 @@ disable_plugins = false               # 完全隐藏钩子/插件 UI
 | `GROK_WEB_FETCH_ALLOW_LOCAL` | 仅允许 `web_fetch` 访问明确指定的环回主机（`localhost` / `127.0.0.0/8` / `::1`）。等同于 `[toolset.web_fetch] allow_local`。默认关闭；私有/元数据网段仍会被阻止。 |
 | `GROK_AGENT` | 自定义智能体定义路径或名称 |
 | `GROK_SANDBOX` | 沙箱配置文件（off、workspace、devbox、read-only、strict；或自定义配置文件名） |
+| `GROK_EXIT_TIMEOUT_SECS` | 请求退出后若清理卡住，经过多少秒强制退出（默认：20；设为 `0` 禁用；再过 5 秒仍未退出则执行硬退出） |
 
 <a id="logging"></a>
 ### 日志

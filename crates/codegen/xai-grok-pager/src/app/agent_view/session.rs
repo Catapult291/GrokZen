@@ -105,6 +105,7 @@ impl AgentView {
             last_seen_event_id: None,
             session_reload: None,
             unexpected_replay_drops: 0,
+            late_replay_until: None,
             replayed_terminal_prompts: HashSet::new(),
             failed_wake_marker_for: None,
             running_wake_turn: None,
@@ -404,6 +405,12 @@ impl AgentView {
     pub(crate) fn clear_minimal_btw_lifecycle(&mut self) {
         crate::minimal_api::clear_minimal_btw(self);
     }
+    /// Accept leftover `isReplay` after `loading_replay` clears. Long enough
+    /// for FIFO drain of a foreign ACP head after the Unrelated firehose timeout.
+    pub(crate) const LATE_REPLAY_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+    pub(crate) fn arm_late_replay_grace(&mut self) {
+        self.late_replay_until = Some(std::time::Instant::now() + Self::LATE_REPLAY_GRACE);
+    }
     /// Enter a `session/load` replay window: flip `loading_replay` on and reset
     /// every field coupled to that transition together, so no site can drift
     /// (e.g. reset one coupled field but miss another). Called at every
@@ -414,6 +421,7 @@ impl AgentView {
         self.session.loading_replay = true;
         self.replayed_terminal_prompts.clear();
         self.unexpected_replay_drops = 0;
+        self.late_replay_until = None;
         self.running_wake_turn = None;
         self.finished_wake_prompts.clear();
         self.pending_cancel_resend = None;
@@ -746,6 +754,11 @@ impl AgentView {
             dropped_heavy = true;
         }
         self.session.loading_replay = false;
+        if success {
+            self.arm_late_replay_grace();
+        } else {
+            self.late_replay_until = None;
+        }
         self.session.prompt_history_loading = false;
         self.session.tracker.clear_user_echo_skip();
         self.session.finish_turn(&mut self.scrollback);

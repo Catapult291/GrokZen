@@ -14,7 +14,7 @@
 
 本项目在尽量保持原有功能、命令行参数、配置格式和协议兼容性的前提下，为 Grok Build 的 CLI、TUI、设置、提示信息和用户文档提供简体中文支持。它以独立程序名 `grok-zh` 与官方版并行使用，但有意共用 `~/.grok` 数据目录：会话、登录状态、配置、第三方 API、插件与本地状态在两个入口之间保持一致。
 
-[项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
+[项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [开发](#开发) · [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
 
 ![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
 
@@ -63,16 +63,28 @@ Set-ExecutionPolicy -Scope Process Bypass
 ### 通用要求
 
 - Rust：版本由 `rust-toolchain.toml` 固定。
-- `protoc`：构建脚本会依次查找仓库内工具、`PATH` 和 `PROTOC`。
+- [DotSlash](https://dotslash-cli.com)：用于下载并运行 `bin/` 下的密封工具，尤其是 `bin/protoc`。构建前请确保 `dotslash` 已加入 `PATH`：
+
+  ```sh
+  cargo install dotslash
+  # 或使用预编译软件包：https://dotslash-cli.com/docs/installation/
+  dotslash --help
+  ```
+
+- `protoc`：构建脚本优先通过 DotSlash 解析仓库内的 `bin/protoc`，也会回退到 `PATH` 或 `PROTOC` 指定的程序。
 - 官方仓库主要支持 macOS 与 Linux；本 Fork 另行建设 Windows 构建和验证流程。
 
 常用检查：
 
 ```sh
+cargo run -p xai-grok-pager-bin
+cargo build --locked -p xai-grok-pager-bin --release
 cargo check --locked -p xai-grok-pager-bin --bin grok-zh --features release-dist
 cargo test --locked -p xai-grok-locale
 cargo fmt --all --check
 ```
+
+普通 release 构建的产物为 `target/release/grok-zh`（Windows 为 `grok-zh.exe`）。首次启动会打开浏览器完成身份验证；详见[身份验证指南](crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/02-authentication.md)。
 
 ### Windows 绿色测试构建
 
@@ -84,7 +96,7 @@ $localRoot = Join-Path $PWD '.codex-local'
 $env:CARGO_HOME = Join-Path $localRoot 'cargo-home'
 $env:CARGO_TARGET_DIR = Join-Path $localRoot 'target'
 $env:GROK_HOME = Join-Path $localRoot 'test-home'
-$env:GROK_VERSION = "0.2.121-zh.preview.1"
+$env:GROK_VERSION = "1.0.0-zh.preview.1"
 cargo build --frozen --target x86_64-pc-windows-gnu `
   -p xai-grok-pager-bin --profile release-dist --features release-dist
 ```
@@ -120,6 +132,7 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 - 英文上游用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/README.md)
 - 贡献说明：[`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)
 - 安全策略：[`SECURITY.zh-CN.md`](SECURITY.zh-CN.md)
+- 1.0.0 简体中文发行说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.0.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.0.zh-CN.md)
 - 版本发布：[`Releases`](https://github.com/ljy6-6-6/grok-build-Chinese/releases)
 - 官方在线文档：[docs.x.ai/build/overview](https://docs.x.ai/build/overview)
 
@@ -136,8 +149,25 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 | `crates/codegen/xai-grok-shell` | 智能体运行时及 leader/stdio/headless 入口 |
 | `crates/codegen/xai-grok-tools` | 终端、文件编辑、搜索等工具实现 |
 | `crates/codegen/xai-grok-workspace` | 文件系统、版本控制、执行和检查点 |
+| `crates/codegen/...` | CLI 依赖闭包中的其他配置、MCP、Markdown、沙箱等 crate |
+| `crates/common/`、`crates/build/`、`prod/mc/` | 依赖闭包中少量共享与构建辅助 crate |
+| `third_party/` | 仓库内 vendored 的 Mermaid 相关源码；归属见其中的 `NOTICE` |
 
-根 `Cargo.toml` 的大部分内容由上游生成。新增社区功能应优先放在独立 crate 或局部适配层中，避免对上游文件进行大范围结构改写。
+> [!IMPORTANT]
+> 根 `Cargo.toml`（工作区成员、依赖版本、lint 和 profile）由上游生成，应视为只读。新增社区功能应优先放在独立 crate 或局部适配层中，避免对上游文件进行大范围结构改写。
+
+## 开发
+
+工作区很大，日常检查应优先指定具体 crate：
+
+```sh
+cargo check -p <crate>
+cargo test -p xai-grok-config
+cargo clippy -p <crate>
+cargo fmt --all
+```
+
+上游仓库不接受外部拉取请求；本社区 Fork 尚未公布独立贡献流程。开始修改前请先阅读[中文贡献说明](CONTRIBUTING.zh-CN.md)，并通过本仓库 Issue 与维护者沟通。
 
 ## 上游与发布策略
 

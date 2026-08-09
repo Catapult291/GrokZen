@@ -1017,6 +1017,7 @@ pub(crate) async fn run_shell_child(
         crate::session::StartupHints {
             inherited_prefix_len: Some(inherited_prefix_len),
             is_subagent: true,
+            non_interactive: ctx.parent_non_interactive,
             parent_session_id: Some(ctx.parent_session_id.clone()),
             subagent_type: Some(request.subagent_type.clone()),
             preserve_inherited_system: verbatim_mirror_fork,
@@ -1079,7 +1080,6 @@ pub(crate) async fn run_shell_child(
         false,
         Default::default(),
         ctx.managed_mcp_state.clone(),
-        None,
         ctx.managed_mcp_proxy_base_url.clone(),
         effective_model_id,
         ctx.yolo_mode
