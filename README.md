@@ -14,7 +14,7 @@
 
 本项目在尽量保持原有功能、命令行参数、配置格式和协议兼容性的前提下，为 Grok Build 的 CLI、TUI、设置、提示信息和用户文档提供简体中文支持。它以独立程序名 `grok-zh` 与官方版并行使用，但有意共用 `~/.grok` 数据目录：会话、登录状态、配置、第三方 API、插件与本地状态在两个入口之间保持一致。
 
-[项目定位](#项目定位) · [当前状态](#当前状态) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
+[项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
 
 ![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
 
@@ -44,6 +44,20 @@
 > [!WARNING]
 > `crates/codegen/xai-grok-pager/scripts/` 下的安装脚本及同模块内的 npm 包装仍来自官方上游，可能安装或覆盖官方 `grok`。社区版发布流程完成前，请勿使用这些脚本安装本 Fork。测试时只使用独立绿色测试包中的 `grok-zh.exe`。
 
+## Windows 安装
+
+`zh-dev Windows preview` 云构建现在直接上传包目录。下载 GitHub Artifact 后只需
+解压一次，即可在包内运行社区安装器：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+& .\Install-GrokZh.ps1
+```
+
+默认安装会把 `grok-zh`、`agent-zh` 加入当前用户 `Path`，与官方命令共存；可选
+接管 `grok`、`agent`，也可将官方命令备份后移走。完整参数、回滚方式和共享数据
+边界见 [Windows 自动安装说明](packaging/windows/INSTALL-WINDOWS.md)。
+
 ## 从源码构建
 
 ### 通用要求
@@ -62,11 +76,15 @@ cargo fmt --all --check
 
 ### Windows 绿色测试构建
 
-仓库内 `.codex-local/env.ps1` 用于把 Rust 工具链、Cargo 缓存、构建输出和测试数据隔离在项目目录内。它仅用于本地开发测试，不属于正式安装器。
+下面的命令把 Cargo 缓存、构建输出和测试数据放在仓库忽略的
+`.codex-local` 目录中。它仅用于本地开发测试，不属于正式安装器。
 
 ```powershell
-. .\.codex-local\env.ps1
-$env:GROK_VERSION = "0.2.119-zh.preview.1"
+$localRoot = Join-Path $PWD '.codex-local'
+$env:CARGO_HOME = Join-Path $localRoot 'cargo-home'
+$env:CARGO_TARGET_DIR = Join-Path $localRoot 'target'
+$env:GROK_HOME = Join-Path $localRoot 'test-home'
+$env:GROK_VERSION = "0.2.121-zh.preview.1"
 cargo build --frozen --target x86_64-pc-windows-gnu `
   -p xai-grok-pager-bin --profile release-dist --features release-dist
 ```
@@ -96,6 +114,7 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 
 ## 文档
 
+- Windows 自动安装：[`packaging/windows/INSTALL-WINDOWS.md`](packaging/windows/INSTALL-WINDOWS.md)
 - 内置用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
 - 入门教程：[`crates/codegen/xai-grok-pager/docs/tutorial/`](crates/codegen/xai-grok-pager/docs/tutorial/)
 - 官方在线文档：[docs.x.ai/build/overview](https://docs.x.ai/build/overview)

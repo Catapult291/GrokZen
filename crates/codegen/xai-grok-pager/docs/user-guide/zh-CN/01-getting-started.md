@@ -14,9 +14,15 @@ Agent Client Protocol（ACP）集成到编辑器中。
 
 ## 安装
 
-社区签名安装包和社区自有更新源尚未发布。在它们可用之前，请只使用本仓库文档
-所述构建流水线生成的产物。上游的 `install.sh`、`install.ps1` 和
-`@xai-official/grok` 包不能用于安装此发行版。
+社区签名安装包和社区自有更新源尚未发布。在它们可用之前，请只使用本仓库
+`zh-dev Windows preview` 构建流水线生成的产物。Windows Artifact 下载后只需
+解压一次；包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
+`grok-zh`、`agent-zh`，并支持由用户显式接管 `grok`、`agent`。完整说明也会
+作为包内的 `INSTALL-WINDOWS.md` 提供，并可在
+[仓库中在线查看](https://github.com/ljy6-6-6/grok-build-Chinese/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
+
+上游的 `install.sh`、`install.ps1` 和 `@xai-official/grok` 包不能用于安装此
+发行版。
 
 验证安装：
 

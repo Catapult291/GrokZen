@@ -27,7 +27,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
       CARGO_NET_RETRY: "10"
       CARGO_HTTP_TIMEOUT: "120"
-      RUSTUP_TOOLCHAIN: 1.93.0-x86_64-pc-windows-gnu
+      RUSTUP_TOOLCHAIN: 1.94.0-x86_64-pc-windows-gnu
       TARGET: x86_64-pc-windows-gnu
 
     steps:
@@ -35,11 +35,22 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Select preview version
+        id: preview
         shell: pwsh
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
         run: |
-          $requested = '${{ inputs.version }}'
+          $requested = $env:REQUESTED_VERSION
           if ([string]::IsNullOrWhiteSpace($requested)) {
-            $version = "0.2.119-zh.ci.$env:GITHUB_RUN_NUMBER"
+            $manifest = Get-Content `
+              -LiteralPath 'crates/codegen/xai-grok-pager-bin/Cargo.toml'
+            $versionLine = $manifest |
+              Where-Object { $_ -match '^version\s*=\s*"([^"]+)"\s*$' } |
+              Select-Object -First 1
+            if (!$versionLine -or $versionLine -notmatch '^version\s*=\s*"([^"]+)"\s*$') {
+              throw 'Unable to read the pager-bin package version.'
+            }
+            $version = "$($matches[1])-zh.ci.$env:GITHUB_RUN_NUMBER"
           } else {
             $version = $requested.Trim()
           }
@@ -49,6 +60,8 @@ jobs:
           "GROK_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "PACKAGE_NAME=grok-zh-$version-windows-x86_64-gnu" |
             Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "package_name=grok-zh-$version-windows-x86_64-gnu" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Configure pinned Rust, MinGW and protoc
         shell: pwsh
@@ -129,6 +142,17 @@ jobs:
           cargo fetch --locked --target $env:TARGET
           cargo test --frozen -j 1 -p xai-grok-locale
 
+      - name: Validate Windows installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\packaging\windows\tests\Test-Install-GrokZh.ps1
+          & powershell.exe -NoProfile -NonInteractive `
+            -File .\packaging\windows\tests\Test-Install-GrokZh.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell 5.1 installer tests failed: $LASTEXITCODE"
+          }
+
       - name: Build low-memory Windows preview
         shell: pwsh
         run: |
@@ -167,6 +191,13 @@ jobs:
             throw "strip failed: $LASTEXITCODE"
           }
 
+          Copy-Item -LiteralPath 'packaging\windows\agent-zh.cmd' `
+            -Destination (Join-Path $package 'agent-zh.cmd')
+          Copy-Item -LiteralPath 'packaging\windows\Install-GrokZh.ps1' `
+            -Destination (Join-Path $package 'Install-GrokZh.ps1')
+          Copy-Item -LiteralPath 'packaging\windows\INSTALL-WINDOWS.md' `
+            -Destination (Join-Path $package 'INSTALL-WINDOWS.md')
+
           $rgVersion = '15.1.0'
           $rgArchive = Join-Path $env:RUNNER_TEMP 'ripgrep.zip'
           $rgExtract = Join-Path $env:RUNNER_TEMP 'ripgrep'
@@ -195,11 +226,20 @@ jobs:
             }
           }
 
-          $exeHash = (Get-FileHash -LiteralPath $packageExe -Algorithm SHA256).Hash
-          @"
-          $exeHash  grok-zh.exe
-          $rgHash  rg.exe
-          "@.Trim() | Set-Content -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
+          $manifestNames = @(
+            'grok-zh.exe',
+            'agent-zh.cmd',
+            'rg.exe',
+            'Install-GrokZh.ps1',
+            'INSTALL-WINDOWS.md'
+          )
+          $manifestLines = foreach ($name in $manifestNames) {
+            $path = Join-Path $package $name
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            "$hash  $name"
+          }
+          $manifestLines | Set-Content `
+            -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
 
           $signature = (Get-AuthenticodeSignature -LiteralPath $packageExe).Status
           $pe = (& $objdump -f $packageExe | Select-String 'file format').Line.Trim()
@@ -212,30 +252,41 @@ jobs:
           PE: $pe
           Authenticode: $signature
           Executable started by CI: false
+          Default commands after installation: grok-zh, agent-zh
+          Optional command takeover: grok, agent
           "@.Trim() | Set-Content -LiteralPath (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
 
-          $zip = Join-Path $dist "$env:PACKAGE_NAME.zip"
-          Compress-Archive -Path (Join-Path $package '*') -DestinationPath $zip -CompressionLevel Optimal
-          $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-          "ZIP_SHA256=$zipHash" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "Created $zip ($zipHash)"
+          $topLevelEntries = @(Get-ChildItem -LiteralPath $dist -Force)
+          if ($topLevelEntries.Count -ne 1 -or !$topLevelEntries[0].PSIsContainer) {
+            throw 'dist must contain exactly one unpacked package directory.'
+          }
+          if (Get-ChildItem -LiteralPath $dist -Filter '*.zip' -Recurse -File) {
+            throw 'Preview artifacts must not contain a nested ZIP archive.'
+          }
+          "Prepared unpacked package directory: $package"
 
       - name: Upload green preview
+        id: preview_artifact
         uses: actions/upload-artifact@v4
         with:
           name: grok-zh-windows-${{ github.run_number }}
-          path: dist/*.zip
+          path: dist/${{ steps.preview.outputs.package_name }}
           if-no-files-found: error
-          compression-level: 0
+          compression-level: 6
           retention-days: 7
 
-      - name: Publish artifact hash in summary
+      - name: Publish artifact details in summary
         shell: pwsh
         run: |
+          $artifactUrl = '${{ steps.preview_artifact.outputs.artifact-url }}'
+          $artifactDigest = '${{ steps.preview_artifact.outputs.artifact-digest }}'
           @"
           ## Windows GNU preview
 
           - Version: ``$env:GROK_VERSION``
-          - ZIP SHA-256: ``$env:ZIP_SHA256``
+          - Artifact: [$env:PACKAGE_NAME]($artifactUrl)
+          - Artifact SHA-256: ``$artifactDigest``
+          - Single archive layer: unzip the downloaded artifact once to install or run it.
+          - Package file hashes: ``SHA256SUMS.txt``
           - Unsigned low-memory CI preview; the executable was not started.
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
