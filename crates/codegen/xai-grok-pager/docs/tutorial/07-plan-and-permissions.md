@@ -1,5 +1,7 @@
 # Plan Mode & Permissions
 
+[简体中文](zh-CN/07-plan-and-permissions.md)
+
 Grok asks before doing anything risky — and can plan before it codes.
 
 ## Permissions

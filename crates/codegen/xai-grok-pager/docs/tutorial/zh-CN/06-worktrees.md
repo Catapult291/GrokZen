@@ -7,7 +7,7 @@
 ## 在工作树中启动会话
 
 - **从任意位置：**按 `Ctrl+N`（按两次确认）新建会话，然后选择工作树选项。
-- **从欢迎屏幕：**（在 Git 仓库内）按 `Ctrl+W` 打开 New Worktree 对话框。
+- **从欢迎屏幕：**（在 Git 仓库内）按 `Ctrl+W` 打开“新建工作树”对话框。
 - **从 Shell：**
 
   ```bash
@@ -25,7 +25,7 @@
 **`/fork`** 会将当前对话复制到一个并行会话中——添加指令将其指向具体任务：
 `/fork try the async approach`。
 
-要运行多个代理？**Agent Dashboard**（`/dashboard` 或 `Ctrl+\`）会按状态
+要运行多个智能体？**智能体面板**（`/dashboard` 或 `Ctrl+\`）会按状态
 显示所有会话——哪些需要输入、哪些正在工作、哪些已经完成。
 
 *深入了解：`/docs Session Management`*

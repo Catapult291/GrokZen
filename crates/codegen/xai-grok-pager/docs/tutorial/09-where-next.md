@@ -1,5 +1,7 @@
 # Where to Go Next
 
+[简体中文](zh-CN/09-where-next.md)
+
 You know enough to be productive. When you want more:
 
 ## Built-in help

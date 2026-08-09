@@ -1,5 +1,7 @@
 # Your First Prompt
 
+[简体中文](zh-CN/02-first-prompt.md)
+
 Grok Build is a conversation with an agent that can read your code, run
 commands, and edit files — right here in your terminal.
 

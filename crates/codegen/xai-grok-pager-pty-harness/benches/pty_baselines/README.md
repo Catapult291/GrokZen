@@ -1,5 +1,7 @@
 # PTY benchmark baselines
 
+[简体中文](README.zh-CN.md)
+
 Baselines are per-platform (macOS arm64 has very different timing from an
 Linux arm64 CI runner) and per-scenario. CI compares the current run
 against the matching platform file and fails if any scenario's p99 frame

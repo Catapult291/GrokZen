@@ -1,5 +1,7 @@
 # Grok Build User Guide
 
+[简体中文](zh-CN/README.md)
+
 Learn how to install, configure, and extend Grok Build, the terminal-based AI coding assistant from SpaceXAI.
 
 ---

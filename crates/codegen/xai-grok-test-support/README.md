@@ -1,5 +1,7 @@
 # xai-grok-test-support
 
+[简体中文](README.zh-CN.md)
+
 Shared test infrastructure for the grok-build crates: mock inference server,
 SSE wire-format generators, ACP stdio clients, headless runner, and the shared
 `TestSandbox` filesystem/environment plus `TestProcess` subprocess owners. PR3

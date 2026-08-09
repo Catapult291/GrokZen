@@ -1,5 +1,7 @@
 # Custom Hooks Guide
 
+[简体中文](zh-CN/custom-hooks.md)
+
 Hooks let you run custom scripts or HTTP requests at key moments during a Grok session — for example, before or after a tool runs, when a session starts or ends, or when the agent sends a notification.
 
 They are perfect for automation, safety checks, logging, notifications, and integrating with your own tools.
@@ -263,10 +265,10 @@ The full event envelope is POSTed as JSON. Useful for webhooks, analytics, or se
 
 See the built-in examples in the `xai-grok-hooks` crate:
 
-- [Safe Shell Guard](../../../xai-grok-hooks/examples/hooks/safe-shell.json)
-- [No Recursive Grep](../../../xai-grok-hooks/examples/hooks/no-recursive-grep.json) — hard-blocks `grep -r`/`grep -R`/`rgrep` (OOM guard)
-- [Session Audit Log](../../../xai-grok-hooks/examples/hooks/session-log.json)
-- [Tool Activity Logger](../../../xai-grok-hooks/examples/hooks/tool-logger.json)
+- [Safe Shell Guard](../../xai-grok-hooks/examples/hooks/safe-shell.json)
+- [No Recursive Grep](../../xai-grok-hooks/examples/hooks/no-recursive-grep.json) — hard-blocks `grep -r`/`grep -R`/`rgrep` (OOM guard)
+- [Session Audit Log](../../xai-grok-hooks/examples/hooks/session-log.json)
+- [Tool Activity Logger](../../xai-grok-hooks/examples/hooks/tool-logger.json)
 
 Copy them to `~/.grok/hooks/` and customize.
 

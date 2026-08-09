@@ -1,5 +1,7 @@
 # xai-grok-pager
 
+[简体中文](README.zh-CN.md)
+
 Terminal UI (TUI) for Grok Build. Provides the interactive full-screen interface
 including the scrollback view, prompt input, session management, and all modal
 dialogs.

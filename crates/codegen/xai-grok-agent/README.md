@@ -1,5 +1,7 @@
 # `xai-grok-agent`
 
+[简体中文](README.zh-CN.md)
+
 Agent builder, definition parsing, and system prompt assembly.
 
 This crate extracts a first-class `Agent` type from `xai-grok-shell`.

@@ -1,5 +1,7 @@
 # Contributing
 
+简体中文版本：[`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)
+
 This repository does **not** accept external pull requests or unsolicited
 patches.
 

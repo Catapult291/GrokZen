@@ -1,5 +1,7 @@
 # Parallel Work: Worktrees
 
+[简体中文](zh-CN/06-worktrees.md)
+
 Want Grok working on a feature while you (or another Grok session) work on
 something else in the same repo? **Git worktrees** give each session its own
 isolated checkout — no stepping on each other's changes, no stashing.

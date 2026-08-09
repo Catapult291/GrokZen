@@ -1,5 +1,7 @@
 # xai-crash-handler
 
+[简体中文](README.zh-CN.md)
+
 Crash handler for SIGBUS/SIGSEGV with best-effort backtrace capture.
 
 ## How it works

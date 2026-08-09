@@ -1,5 +1,7 @@
 # Make It Yours
 
+[简体中文](zh-CN/08-make-it-yours.md)
+
 ## The easiest way: just ask
 
 Grok knows its own capabilities and can configure itself. Try:

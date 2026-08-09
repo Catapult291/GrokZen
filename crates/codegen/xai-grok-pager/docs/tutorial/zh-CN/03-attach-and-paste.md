@@ -7,9 +7,9 @@
 输入 `@` 打开模糊文件选择器，也支持行范围：
 
 ```
-@src/main.rs          attach a file
-@src/main.rs:10-50    attach specific lines
-@!.env                reach hidden files with @!
+@src/main.rs          附加文件
+@src/main.rs:10-50    附加指定行
+@!.env                使用 @! 访问隐藏文件
 ```
 
 ## 粘贴图像

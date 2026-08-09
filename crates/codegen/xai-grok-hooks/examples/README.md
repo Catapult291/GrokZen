@@ -1,5 +1,7 @@
 # Hook Examples
 
+[简体中文](README.zh-CN.md)
+
 Sample hooks for Grok. Copy to `~/.grok/hooks/` to enable globally, or to `<project>/.grok/hooks/` for project-scoped hooks (requires `/hooks-trust`).
 
 ## Available Examples

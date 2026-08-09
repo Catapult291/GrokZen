@@ -4,6 +4,8 @@
 
 > 这是社区构建，不代表 xAI 官方发布。登录、模型、计费、云端会话、共享链接和服务可用性仍由官方服务端决定。
 
+> 完整中文用户指南见 [GitHub 在线文档](https://github.com/ljy6-6-6/grok-build-Chinese/blob/zh-dev/crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/README.md)；可下载版本见 [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases)。
+
 ## 快速开始
 
 Windows 云构建包下载后只需解压一次。要自动安装并把 `grok-zh`、`agent-zh`
@@ -165,7 +167,7 @@ MCP server、技能、插件和 Hooks 继续使用官方兼容格式：
 
 社区预览构建默认关闭官方自动更新器和官方更新日志入口。不要运行官方安装脚本来“更新”社区版，否则可能安装或覆盖官方程序而不是 `grok-zh.exe`。
 
-正式社区更新应来自独立的中文社区发布源，并经过 `zh-dev` 测试后进入 `zh-stable`。上游 `main` 只触发合并审查和测试，不应直接推送给用户。
+正式社区更新应来自独立的中文社区发布源，并经过 `zh-dev` 测试；计划中的 `zh-stable` 尚未建立。上游 `main` 只触发合并审查和测试，不应直接推送给用户。
 
 在独立更新源上线前，请下载新的社区测试包并校验 SHA-256。Windows 预览包附带
 社区安装器，可默认安装为 `grok-zh`、`agent-zh`，或由用户显式选择接管

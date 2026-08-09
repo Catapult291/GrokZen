@@ -1,5 +1,7 @@
 # Attach Files, Images & Paste
 
+[简体中文](zh-CN/03-attach-and-paste.md)
+
 The more precisely you point Grok at the right context, the better the
 result. Three ways to get things into the prompt:
 

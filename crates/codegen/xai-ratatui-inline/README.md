@@ -1,5 +1,7 @@
 # ratatui-inline
 
+[简体中文](README.zh-CN.md)
+
 A Rust library for building terminal applications with inline viewports - dynamic UI elements that stay at the bottom of the terminal while preserving scrollback history above them. Perfect for building chat-like interfaces, command prompts, and interactive terminal tools.
 
 ## What is this?

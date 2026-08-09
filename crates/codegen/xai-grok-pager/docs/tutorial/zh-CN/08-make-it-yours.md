@@ -4,7 +4,7 @@
 
 Grok 了解自身能力，也能自行配置。试试：
 
-- *“为我们的 staging db 添加 Postgres MCP server”*
+- *“为我们的预发布数据库添加 Postgres MCP 服务器”*
 - *“切换到浅色主题”*
 - *“为此仓库编写一个 AGENTS.md”*
 
@@ -16,23 +16,23 @@ Grok 了解自身能力，也能自行配置。试试：
 Grok 会在每次会话中自动读取它——这是投入产出比最高的自定义方式：
 
 ```markdown
-# My Project
-- Run tests with `pnpm test`
-- Never edit files under generated/
+# 我的项目
+- 使用 `pnpm test` 运行测试
+- 切勿编辑 `generated/` 下的文件
 ```
 
-## 教 Grok 记住你的事实：memory
+## 教 Grok 记住你的事实：记忆
 
 在提示开头输入 `#`（或使用 `/remember`），为后续会话保存一条备注：
-`# the staging deploy uses eu-west`。
+`# 预发布部署使用 eu-west`。
 
 ## 外观、快捷键和扩展
 
 - **`/theme`** — 配色主题（或使用 `auto` 跟随操作系统）；其他所有设置请用
   **`/settings`**（或 `F2`）；如果你喜欢 Vim 风格，则使用 **`/vim-mode`**。
-- **Skills**（`/skills`）— 可复用的提示包；用户可调用的 skills
+- **技能**（`/skills`）— 可复用的提示包；用户可调用的技能
   会自动成为斜杠命令。
-- **MCP servers**（`/mcps`）以及 **plugins & hooks**（`/plugins`、`/hooks`）。
+- **MCP 服务器**（`/mcps`）以及 **插件和钩子**（`/plugins`、`/hooks`）。
 
 从 `AGENTS.md` 和主题开始；需要时再添加其余内容。
 

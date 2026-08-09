@@ -1,5 +1,7 @@
 # 🚀 Architecture Overview — `xai-grok-pager` Rendering Engine
 
+[简体中文](bench.zh-CN.md)
+
 The **xai-grok-pager** rendering engine is built on a layered pipeline that transforms raw markdown into terminal-ready cells. This document covers every major subsystem — from markdown parsing through syntax highlighting, word wrapping, block layout, viewport clipping, and final buffer composition. Understanding these layers is critical for anyone profiling or optimising the renderer.
 
 ---

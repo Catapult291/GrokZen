@@ -1,5 +1,7 @@
 # Finding Your Way Around
 
+[简体中文](zh-CN/04-navigation.md)
+
 The screen has three parts: the **scrollback** (the conversation), the
 **prompt** below it, and the **shortcuts bar** at the bottom. Panes for
 todos and background tasks slide in when you need them.

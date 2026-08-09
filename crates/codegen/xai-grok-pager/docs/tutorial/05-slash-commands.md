@@ -1,5 +1,7 @@
 # Slash Commands
 
+[简体中文](zh-CN/05-slash-commands.md)
+
 Type `/` on an empty prompt and a searchable dropdown of commands appears.
 A few worth knowing on day one:
 

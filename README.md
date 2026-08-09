@@ -14,7 +14,7 @@
 
 本项目在尽量保持原有功能、命令行参数、配置格式和协议兼容性的前提下，为 Grok Build 的 CLI、TUI、设置、提示信息和用户文档提供简体中文支持。它以独立程序名 `grok-zh` 与官方版并行使用，但有意共用 `~/.grok` 数据目录：会话、登录状态、配置、第三方 API、插件与本地状态在两个入口之间保持一致。
 
-[项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
+[项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
 
 ![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
 
@@ -115,8 +115,12 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 ## 文档
 
 - Windows 自动安装：[`packaging/windows/INSTALL-WINDOWS.md`](packaging/windows/INSTALL-WINDOWS.md)
-- 内置用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/`](crates/codegen/xai-grok-pager/docs/user-guide/)
-- 入门教程：[`crates/codegen/xai-grok-pager/docs/tutorial/`](crates/codegen/xai-grok-pager/docs/tutorial/)
+- 中文用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/README.md)
+- 中文入门教程：[`crates/codegen/xai-grok-pager/docs/tutorial/zh-CN/`](crates/codegen/xai-grok-pager/docs/tutorial/zh-CN/)
+- 英文上游用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/README.md)
+- 贡献说明：[`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)
+- 安全策略：[`SECURITY.zh-CN.md`](SECURITY.zh-CN.md)
+- 版本发布：[`Releases`](https://github.com/ljy6-6-6/grok-build-Chinese/releases)
 - 官方在线文档：[docs.x.ai/build/overview](https://docs.x.ai/build/overview)
 
 中文文档将使用稳定文档 ID 和 `zh-CN` 平行目录，不直接改变英文标题所承担的查找身份，以降低合并上游更新时的冲突。
@@ -139,7 +143,7 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 
 - `main`：尽量保持官方上游镜像，只用于同步和审查。
 - `zh-dev`：汉化开发、上游合并、构建和测试。
-- `zh-stable`：只有在中文验证通过后才发布给用户。
+- 计划中的 `zh-stable`：只有在中文验证通过后才建立并用于稳定发布；当前尚未创建。
 - 上游 `main` 更新只能触发审查和测试，不能直接进入用户更新源。
 - 官方 stable 指针、正式更新日志、协议兼容检查和本 Fork 的 Windows 测试结果共同构成发布门槛。
 

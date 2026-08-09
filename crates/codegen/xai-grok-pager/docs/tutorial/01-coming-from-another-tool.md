@@ -1,5 +1,7 @@
 # Coming from Claude, Cursor, or Codex?
 
+[简体中文](zh-CN/01-coming-from-another-tool.md)
+
 Fear not — your settings, rules, and skills come with you. Grok Build
 reads the same project conventions other agents use, and imports the rest.
 

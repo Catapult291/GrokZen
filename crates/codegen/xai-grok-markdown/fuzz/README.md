@@ -1,5 +1,7 @@
 # Fuzzing xai-grok-markdown
 
+[简体中文](README.zh-CN.md)
+
 Coverage-guided fuzzing for the markdown renderer using [cargo-fuzz](https://rust-fuzz.github.io/book/cargo-fuzz.html) (libFuzzer).
 
 ## Prerequisites

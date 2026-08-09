@@ -285,8 +285,19 @@ macro_rules! zh_doc {
     };
 }
 
-/// Chinese display metadata for the complete guide catalog. Long-form bodies
-/// can land incrementally without changing IDs or the English source table.
+macro_rules! zh_reference_doc {
+    ($id:expr, $title:literal, $description:literal, $file:literal) => {
+        DocTranslation {
+            id: $id,
+            title: $title,
+            description: $description,
+            content: Some(include_str!(concat!("../docs/zh-CN/", $file))),
+        }
+    };
+}
+
+/// Chinese display metadata and long-form bodies for the complete guide
+/// catalog. Stable IDs and the canonical English source table remain unchanged.
 static ZH_CN_DOCS: &[DocTranslation] = &[
     zh_doc!(
         GETTING_STARTED,
@@ -297,84 +308,143 @@ static ZH_CN_DOCS: &[DocTranslation] = &[
     zh_doc!(
         AUTHENTICATION,
         "身份验证",
-        "浏览器登录、API 密钥、OIDC 和外部身份提供方"
+        "浏览器登录、API 密钥、OIDC 和外部身份提供方",
+        "02-authentication.md"
     ),
-    zh_doc!(KEYBOARD_SHORTCUTS, "键盘快捷键", "完整的 TUI 按键绑定参考"),
+    zh_doc!(
+        KEYBOARD_SHORTCUTS,
+        "键盘快捷键",
+        "完整的 TUI 按键绑定参考",
+        "03-keyboard-shortcuts.md"
+    ),
     zh_doc!(
         SLASH_COMMANDS,
         "斜杠命令",
-        "全部 / 命令，包括目标、研究和工作流管理"
+        "全部 / 命令，包括目标、研究和工作流管理",
+        "04-slash-commands.md"
     ),
     zh_doc!(
         CONFIGURATION,
         "配置",
-        "config.toml、pager.toml、环境变量和文件位置"
+        "config.toml、pager.toml、环境变量和文件位置",
+        "05-configuration.md"
     ),
-    zh_doc!(THEMING, "主题与外观", "主题、颜色支持和 pager.toml 自定义"),
-    zh_doc!(MCP_SERVERS, "MCP 服务器", "通过 MCP 设置外部工具集成"),
-    zh_doc!(SKILLS, "技能", "创建并使用可复用的提示包"),
-    zh_doc!(PLUGINS, "插件与市场", "安装、管理和创建插件包"),
-    zh_doc!(HOOKS, "钩子", "工具使用前后事件的项目生命周期脚本"),
+    zh_doc!(
+        THEMING,
+        "主题与外观",
+        "主题、颜色支持和 pager.toml 自定义",
+        "06-theming.md"
+    ),
+    zh_doc!(
+        MCP_SERVERS,
+        "MCP 服务器",
+        "通过 MCP 设置外部工具集成",
+        "07-mcp-servers.md"
+    ),
+    zh_doc!(SKILLS, "技能", "创建并使用可复用的提示包", "08-skills.md"),
+    zh_doc!(
+        PLUGINS,
+        "插件与市场",
+        "安装、管理和创建插件包",
+        "09-plugins.md"
+    ),
+    zh_doc!(
+        HOOKS,
+        "钩子",
+        "工具使用前后事件的项目生命周期脚本",
+        "10-hooks.md"
+    ),
     zh_doc!(
         CUSTOM_MODELS,
         "自定义模型",
-        "BYOK、Ollama 和 OpenAI 兼容端点"
+        "BYOK、Ollama 和 OpenAI 兼容端点",
+        "11-custom-models.md"
     ),
     zh_doc!(
         PROJECT_RULES,
         "项目规则（AGENTS.md）",
-        "按目录生效的指令与优先级规则"
+        "按目录生效的指令与优先级规则",
+        "12-project-rules.md"
     ),
-    zh_doc!(MEMORY, "记忆", "跨会话知识持久化与搜索"),
+    zh_doc!(MEMORY, "记忆", "跨会话知识持久化与搜索", "13-memory.md"),
     zh_doc!(
         HEADLESS_MODE,
         "无头模式与脚本",
-        "用于自动化和 CI/CD 的非交互式 CLI"
+        "用于自动化和 CI/CD 的非交互式 CLI",
+        "14-headless-mode.md"
     ),
     zh_doc!(
         AGENT_MODE,
-        "Agent 模式与 IDE 集成",
-        "ACP stdio 传输、WebSocket 中继和 SDK 集成"
+        "智能体模式与 IDE 集成",
+        "ACP stdio 传输、WebSocket 中继和 SDK 集成",
+        "15-agent-mode.md"
     ),
     zh_doc!(
         SUBAGENTS,
         "子智能体与角色",
-        "生成具有专门角色的并行子智能体"
+        "生成具有专门角色的并行子智能体",
+        "16-subagents.md"
     ),
-    zh_doc!(SESSIONS, "会话管理", "保存、加载、恢复、回退和压缩会话"),
-    zh_doc!(SANDBOX, "沙箱模式", "操作系统级文件系统与网络隔离"),
-    zh_doc!(PLAN_MODE, "计划模式", "通过审批对话框进行结构化规划"),
+    zh_doc!(
+        SESSIONS,
+        "会话管理",
+        "保存、加载、恢复、回退和压缩会话",
+        "17-sessions.md"
+    ),
+    zh_doc!(
+        SANDBOX,
+        "沙箱模式",
+        "操作系统级文件系统与网络隔离",
+        "18-sandbox.md"
+    ),
+    zh_doc!(
+        PLAN_MODE,
+        "计划模式",
+        "通过审批对话框进行结构化规划",
+        "19-plan-mode.md"
+    ),
     zh_doc!(
         BACKGROUND_TASKS,
         "后台任务与监控",
-        "后台命令、/loop、监视器和调度器"
+        "后台命令、/loop、监视器和调度器",
+        "20-background-tasks.md"
     ),
     zh_doc!(
         TERMINAL_SUPPORT,
         "终端支持与故障排查",
-        "tmux、Byobu、Zellij、SSH、真彩色、剪贴板和诊断"
+        "tmux、Byobu、Zellij、SSH、真彩色、剪贴板和诊断",
+        "21-terminal-support.md"
     ),
     zh_doc!(
         PERMISSIONS,
         "权限与安全",
-        "模式、授权顺序、allow/ask/deny 规则、匹配和钩子"
+        "模式、授权顺序、allow/ask/deny 规则、匹配和钩子",
+        "22-permissions-and-safety.md"
     ),
     zh_doc!(
         DASHBOARD,
         "智能体面板",
-        "实时多会话列表：查看、派发、固定、停止和搜索"
+        "实时多会话列表：查看、派发、固定、停止和搜索",
+        "23-dashboard.md"
     ),
     zh_doc!(
         MONITORING_USAGE,
         "使用量监控（外部 OpenTelemetry）",
-        "将使用量指标导出到用户的 OpenTelemetry 收集器"
+        "将使用量指标导出到用户的 OpenTelemetry 收集器",
+        "24-monitoring-usage.md"
     ),
-    zh_doc!(
+    zh_reference_doc!(
         HOOKS_AND_PLUGINS,
         "钩子与插件指南",
-        "使用钩子、插件和插件市场"
+        "使用钩子、插件和插件市场",
+        "hooks-and-plugins.md"
     ),
-    zh_doc!(CUSTOM_HOOKS, "创建自定义钩子", "编写自己的钩子和匹配器"),
+    zh_reference_doc!(
+        CUSTOM_HOOKS,
+        "创建自定义钩子",
+        "编写自己的钩子和匹配器",
+        "custom-hooks.md"
+    ),
 ];
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -562,6 +632,27 @@ mod tests {
     }
 
     #[test]
+    fn chinese_catalog_has_a_localized_body_for_every_document() {
+        for translation in ZH_CN_DOCS {
+            let content = translation
+                .content
+                .unwrap_or_else(|| panic!("Missing Chinese body for {}", translation.id.as_str()));
+            assert!(
+                content.lines().any(|line| line.starts_with("# ")),
+                "Chinese body for {} should contain a top-level Markdown heading",
+                translation.id.as_str()
+            );
+            assert!(
+                content
+                    .chars()
+                    .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
+                "Chinese body for {} should contain Han characters",
+                translation.id.as_str()
+            );
+        }
+    }
+
+    #[test]
     fn default_howto_entries_includes_all_user_guide_docs() {
         let entries = default_howto_entries();
         assert_eq!(entries.len(), USER_GUIDE.len() + REFERENCE_DOCS.len());
@@ -596,12 +687,12 @@ mod tests {
         assert!(chinese.content.starts_with("# 入门指南"));
         assert!(chinese.content.contains("社区构建说明"));
 
-        let fallback = localized_doc(AUTHENTICATION, crate::locale::UiLocale::ZhCn).unwrap();
-        assert_eq!(
-            fallback.content,
-            find_doc_by_id(AUTHENTICATION).unwrap().content,
-            "guides without a translated body still fall back one at a time"
+        let authentication = localized_doc(AUTHENTICATION, crate::locale::UiLocale::ZhCn).unwrap();
+        assert_ne!(
+            authentication.content,
+            find_doc_by_id(AUTHENTICATION).unwrap().content
         );
+        assert!(authentication.content.starts_with("# 身份验证"));
     }
 
     #[test]
@@ -658,17 +749,17 @@ mod tests {
     fn locale_extraction_keeps_runtime_path_and_writes_translated_content() {
         let tmp = tempfile::tempdir().unwrap();
         extract_user_guide_docs_for_locale(tmp.path(), crate::locale::UiLocale::ZhCn);
-        let path = tmp
-            .path()
-            .join("docs")
-            .join("user-guide")
-            .join("01-getting-started.md");
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            localized_doc(GETTING_STARTED, crate::locale::UiLocale::ZhCn)
-                .unwrap()
-                .content
-        );
+        let docs_dir = tmp.path().join("docs").join("user-guide");
+        for doc in USER_GUIDE {
+            assert_eq!(
+                std::fs::read_to_string(docs_dir.join(doc.filename)).unwrap(),
+                localized_doc(doc.id, crate::locale::UiLocale::ZhCn)
+                    .unwrap()
+                    .content,
+                "localized extraction mismatch for {}",
+                doc.filename
+            );
+        }
         assert!(!tmp.path().join("docs").join("zh-CN").exists());
     }
 }

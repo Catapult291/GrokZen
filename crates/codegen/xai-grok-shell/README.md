@@ -1,5 +1,8 @@
 # Grok
 
+> Simplified Chinese community edition: [`README.zh-CN.md`](README.zh-CN.md).
+> Its installation and release chain is independent; the upstream commands below do not install `grok-zh`.
+
 A terminal-based AI coding assistant and agentic harness.
 
 Use it interactively as a TUI, or integrate it into your own apps via headless mode and the Agent Client Protocol (ACP).
