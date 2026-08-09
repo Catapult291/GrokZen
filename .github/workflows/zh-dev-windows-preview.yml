@@ -24,6 +24,8 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 180
     env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_CACHE_SCHEMA: v1
       CARGO_INCREMENTAL: "0"
       CARGO_NET_RETRY: "10"
       CARGO_HTTP_TIMEOUT: "120"
@@ -122,6 +124,26 @@ jobs:
           & $gcc --version
           & $protoc --version
 
+      - name: 恢复 Cargo 依赖缓存
+        id: cargo_home_cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/grok-zh-cargo/registry
+            ${{ runner.temp }}/grok-zh-cargo/git
+          key: grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+
+      - name: 恢复 Cargo GNU release 缓存
+        id: cargo_target_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release
+          key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('Cargo.toml', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+
       - name: 验证本地化元数据
         shell: pwsh
         run: |
@@ -153,11 +175,13 @@ jobs:
             throw "Windows PowerShell 5.1 安装程序测试失败：$LASTEXITCODE"
           }
 
-      - name: 构建低内存 Windows 预览版
+      - name: 构建 Windows 预览版（2 路并行）
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          cargo build --frozen -j 1 `
+          $buildStartedAt = Get-Date
+          "使用 $env:CARGO_BUILD_JOBS 路 Cargo 并行任务。"
+          cargo build --frozen -j $env:CARGO_BUILD_JOBS `
             --target $env:TARGET `
             -p xai-grok-pager-bin `
             --profile release `
@@ -167,6 +191,12 @@ jobs:
             --config profile.release.codegen-units=16 `
             --config profile.release.package.xai-grok-shell.opt-level=1 `
             --config profile.release.package.xai-grok-shell.codegen-units=16
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cargo 构建失败：$LASTEXITCODE"
+          }
+          $buildDurationSeconds = [int][Math]::Ceiling(((Get-Date) - $buildStartedAt).TotalSeconds)
+          "BUILD_DURATION_SECONDS=$buildDurationSeconds" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: 打包未签名绿色预览版
         shell: pwsh
@@ -248,7 +278,7 @@ jobs:
           Version: $env:GROK_VERSION
           Commit: $env:GITHUB_SHA
           Target: $env:TARGET
-          Profile: low-memory release with release-dist features (not canonical Thin-LTO release-dist)
+          Profile: 2-way parallel release with release-dist features (LTO disabled, debug disabled, codegen-units=16; not canonical Thin-LTO release-dist)
           PE: $pe
           Authenticode: $signature
           Executable started by CI: false
@@ -280,13 +310,33 @@ jobs:
         run: |
           $artifactUrl = '${{ steps.preview_artifact.outputs.artifact-url }}'
           $artifactDigest = '${{ steps.preview_artifact.outputs.artifact-digest }}'
+          $cargoHomeCacheHit = '${{ steps.cargo_home_cache.outputs.cache-hit }}'
+          $cargoTargetCacheHit = '${{ steps.cargo_target_cache.outputs.cache-hit }}'
+          if ($cargoHomeCacheHit -eq 'true') {
+            $cargoHomeCacheStatus = '精确命中'
+          } elseif ($cargoHomeCacheHit -eq 'false') {
+            $cargoHomeCacheStatus = '部分恢复'
+          } else {
+            $cargoHomeCacheStatus = '未命中（首次或缓存已失效）'
+          }
+          if ($cargoTargetCacheHit -eq 'true') {
+            $cargoTargetCacheStatus = '精确命中'
+          } elseif ($cargoTargetCacheHit -eq 'false') {
+            $cargoTargetCacheStatus = '部分恢复'
+          } else {
+            $cargoTargetCacheStatus = '未命中（首次或缓存已失效）'
+          }
           @"
           ## Windows GNU 预览版
 
           - 版本：``$env:GROK_VERSION``
           - 制品：[$env:PACKAGE_NAME]($artifactUrl)
           - 制品 SHA-256：``$artifactDigest``
+          - Cargo 并行任务数：``$env:CARGO_BUILD_JOBS``
+          - Cargo 依赖缓存：$cargoHomeCacheStatus
+          - Cargo GNU release 缓存：$cargoTargetCacheStatus
+          - Cargo 构建耗时：``$env:BUILD_DURATION_SECONDS`` 秒
           - 仅一层压缩：下载的制品解压一次即可安装或运行。
           - 软件包文件哈希：``SHA256SUMS.txt``
-          - 未签名的低内存 CI 预览版；可执行文件未启动。
+          - 未签名的 2 路并行 CI 预览版；可执行文件未启动。
           "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
