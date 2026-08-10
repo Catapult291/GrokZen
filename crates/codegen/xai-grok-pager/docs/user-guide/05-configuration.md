@@ -25,6 +25,7 @@ Location: `~/.grok/config.toml`. If the file is missing, Grok uses its built-in 
 ```toml
 [cli]
 auto_update = true                     # check for updates on launch
+channel = "stable"                    # stable (default) | alpha (pre-release)
 
 [models]
 default = "grok-4.5"                   # model used for new sessions

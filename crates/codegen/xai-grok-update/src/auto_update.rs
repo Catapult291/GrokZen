@@ -25,9 +25,15 @@ pub enum UpdateRunMode {
 
 const PROMPT_UPDATE_NOW: &str = "Update now? [Y/n/d]";
 const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
+#[cfg(feature = "community-build")]
+const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok-zh update` to get the latest version.";
+#[cfg(not(feature = "community-build"))]
 const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version.";
-/// Manual-install one-liner for this platform's bootstrap installer.
+/// Manual-install command or distribution-owned download page.
 fn manual_install_cmd() -> &'static str {
+    if cfg!(feature = "community-build") {
+        return "https://github.com/ljy6-6-6/grok-build-Chinese/releases";
+    }
     if cfg!(windows) {
         "irm https://x.ai/cli/install.ps1 | iex"
     } else {
@@ -37,6 +43,12 @@ fn manual_install_cmd() -> &'static str {
 
 /// Build a reinstall hint for a known installer type.
 fn reinstall_hint(installer: &str) -> String {
+    if cfg!(feature = "community-build") {
+        return format!(
+            "Please download the latest grok-zh package from this project's Releases page:\n  {}",
+            manual_install_cmd()
+        );
+    }
     match installer {
         "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
         "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/grok-build --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
@@ -112,7 +124,7 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
     let current_version = get_installed_grok_version();
     let channel = update_config.channel.clone();
 
-    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
+    if crate::ensure_selected_updates_enabled().is_err() {
         return UpdateStatus {
             current_version,
             latest_version: None,
@@ -383,17 +395,23 @@ fn env_installer() -> Option<&'static str> {
 }
 
 pub async fn get_installer() -> Option<&'static str> {
-    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
-        return None;
+    #[cfg(feature = "community-build")]
+    {
+        crate::ensure_community_updates_enabled().ok()?;
+        return Some(crate::community_release::COMMUNITY_INSTALLER);
     }
-    if let Some(i) = env_installer() {
-        return Some(i);
-    }
-    let cfg = config::load_config().await;
-    match cfg.cli.installer.as_deref() {
-        Some("npm") => Some("npm"),
-        Some("gh-release") => Some("gh-release"),
-        _ => Some("internal"),
+    #[cfg(not(feature = "community-build"))]
+    {
+        crate::ensure_updates_enabled().ok()?;
+        if let Some(i) = env_installer() {
+            return Some(i);
+        }
+        let cfg = config::load_config().await;
+        match cfg.cli.installer.as_deref() {
+            Some("npm") => Some("npm"),
+            Some("gh-release") => Some("gh-release"),
+            _ => Some("internal"),
+        }
     }
 }
 
@@ -791,7 +809,16 @@ pub async fn run_install_script(
     target: Option<&str>,
     update_config: &UpdateConfig,
 ) -> Result<()> {
-    crate::ensure_updates_enabled()?;
+    crate::ensure_selected_updates_enabled()?;
+    #[cfg(feature = "community-build")]
+    let result = if installer == crate::community_release::COMMUNITY_INSTALLER {
+        install_community_release(target, update_config).await
+    } else {
+        Err(anyhow::anyhow!(
+            "unsupported installer for the community distribution: {installer}"
+        ))
+    };
+    #[cfg(not(feature = "community-build"))]
     let result = match installer {
         "npm" => install_npm(
             target,
@@ -799,7 +826,8 @@ pub async fn run_install_script(
             update_config.npm_registry.as_deref(),
         ),
         "gh-release" => install_gh_release(target).await,
-        _ => install_internal(target, update_config).await,
+        "internal" => install_internal(target, update_config).await,
+        _ => Err(anyhow::anyhow!("unsupported installer: {installer}")),
     };
     if result.is_ok() {
         remove_stale_models_cache().await;
@@ -811,6 +839,81 @@ pub async fn run_install_script(
             reinstall_hint(installer)
         )
     })
+}
+
+/// Install the exact raw executable recorded by an immutable Release in the
+/// community repository. The download is kept beside the running executable,
+/// verified before execution, smoke-tested, and only then swapped into place.
+/// The existing Windows replacement helper preserves a running old image and
+/// restores it if copying the verified candidate fails.
+#[cfg(feature = "community-build")]
+async fn install_community_release(
+    target: Option<&str>,
+    update_config: &UpdateConfig,
+) -> Result<()> {
+    crate::ensure_community_updates_enabled()?;
+
+    #[cfg(not(windows))]
+    {
+        let _ = (target, update_config);
+        anyhow::bail!("community self-update currently supports only x86_64-pc-windows-gnu");
+    }
+
+    #[cfg(windows)]
+    {
+        let version = match target {
+            Some(version) => version.to_string(),
+            None => crate::community_release::fetch_latest_version(&update_config.channel).await?,
+        };
+        semver::Version::parse(&version)
+            .with_context(|| format!("invalid community release version: {version}"))?;
+
+        let destination = std::env::current_exe().context("locating the running grok-zh.exe")?;
+        let destination_name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow::anyhow!("running executable has no valid filename"))?;
+        if !destination_name.eq_ignore_ascii_case(xai_grok_product::executable_name()) {
+            anyhow::bail!(
+                "refusing to update renamed executable {}; expected {}",
+                destination.display(),
+                xai_grok_product::executable_name()
+            );
+        }
+
+        let asset = crate::community_release::fetch_asset(&version).await?;
+        if asset.version != version {
+            anyhow::bail!("release asset version does not match the requested version");
+        }
+        let candidate = unique_temp_sibling(&destination, "download.exe");
+        crate::community_release::download_verified(&asset, &candidate).await?;
+
+        let version_output = match smoke_test_binary(&candidate).await {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&candidate).await;
+                anyhow::bail!("downloaded community binary failed verification: {error}");
+            }
+        };
+        if !community_version_output_matches(&version_output, &version) {
+            let _ = tokio::fs::remove_file(&candidate).await;
+            anyhow::bail!(
+                "downloaded community binary reported an unexpected version: {}",
+                truncate_err(&version_output, 200)
+            );
+        }
+
+        let replace_result = windows_replace_exe(&candidate, &destination).await;
+        let _ = tokio::fs::remove_file(&candidate).await;
+        replace_result?;
+        eprintln!(
+            "  Installed {} v{} from {}/releases.",
+            xai_grok_product::CLI_NAME,
+            version,
+            xai_grok_product::COMMUNITY_RELEASE_REPO
+        );
+        Ok(())
+    }
 }
 
 /// Detect the current platform (os, arch) for binary downloads.
@@ -1296,7 +1399,7 @@ fn nonzero_message(status: &str, stderr: &str) -> String {
     )
 }
 
-async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<(), SmokeTestFailure> {
+async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<String, SmokeTestFailure> {
     // ETXTBSY race: while a concurrent updater in this process is between
     // fork and exec (pre_exec in detach_command forces the fork/exec path),
     // its child briefly holds every open fd — including the write-side fd of
@@ -1309,13 +1412,15 @@ async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<(), SmokeTes
         let mut cmd = tokio::process::Command::new(binary_path);
         cmd.arg("--version")
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         xai_grok_tools::util::detach_command(&mut cmd);
         match tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.output()).await {
             Err(_) => return Err(SmokeTestFailure::Timeout),
-            Ok(Ok(output)) if output.status.success() => return Ok(()),
+            Ok(Ok(output)) if output.status.success() => {
+                return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+            }
             Ok(Ok(output)) => {
                 let status = output
                     .status
@@ -1337,6 +1442,15 @@ async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<(), SmokeTes
     // Reached only when every attempt hit ETXTBSY; `last_spawn` holds the
     // final spawn error.
     Err(SmokeTestFailure::Spawn(last_spawn))
+}
+
+#[cfg(feature = "community-build")]
+fn community_version_output_matches(output: &str, expected_version: &str) -> bool {
+    let expected_prefix = format!("{} {expected_version} (", xai_grok_product::CLI_NAME);
+    output
+        .lines()
+        .next()
+        .is_some_and(|line| line.trim().starts_with(&expected_prefix))
 }
 
 /// Test-only entry point: same as [`install_internal`] but reads from
@@ -2428,7 +2542,7 @@ fn install_npm(target: Option<&str>, channel: &str, npm_registry: Option<&str>) 
 }
 
 pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &mut UpdateConfig) {
-    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
+    if crate::ensure_selected_updates_enabled().is_err() {
         return;
     }
     if let Some(ch) = channel_switch
@@ -2457,7 +2571,7 @@ pub async fn run_update(
     channel_switch: Option<&str>,
     update_config: &mut UpdateConfig,
 ) -> Result<Option<String>> {
-    crate::ensure_updates_enabled()?;
+    crate::ensure_selected_updates_enabled()?;
     apply_channel_switch(channel_switch, update_config).await;
     let installer = match get_installer().await {
         Some(i) => i,
@@ -2468,12 +2582,15 @@ pub async fn run_update(
     };
 
     // Persist installer if not already saved
-    let cfg = config::load_config().await;
-    if cfg.cli.installer.is_none() {
-        let _ = config::update_config(|st| {
-            st.cli.installer = Some(installer.to_string());
-        })
-        .await;
+    #[cfg(not(feature = "community-build"))]
+    {
+        let cfg = config::load_config().await;
+        if cfg.cli.installer.is_none() {
+            let _ = config::update_config(|st| {
+                st.cli.installer = Some(installer.to_string());
+            })
+            .await;
+        }
     }
 
     heal_managed_install(installer).await;
@@ -3655,6 +3772,7 @@ mod tests {
     // reinstall_hint
     // ──────────────────────────────────────────────────────────────────────
 
+    #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_npm_mentions_npm_command() {
         let hint = reinstall_hint("npm");
@@ -3665,6 +3783,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_gh_release_mentions_gh_command() {
         let hint = reinstall_hint("gh-release");
@@ -3678,6 +3797,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_internal_mentions_platform_installer() {
         let hint = reinstall_hint("internal");
@@ -3696,6 +3816,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_unknown_falls_back_to_internal() {
         // Unknown installer falls back to the same hint as "internal".
@@ -3704,10 +3825,24 @@ mod tests {
         assert_eq!(unknown, internal);
     }
 
+    #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_empty_falls_back_to_internal() {
         let hint = reinstall_hint("");
         assert_eq!(hint, reinstall_hint("internal"));
+    }
+
+    #[cfg(feature = "community-build")]
+    #[test]
+    fn test_reinstall_hint_community_never_names_official_sources() {
+        let hint = reinstall_hint(crate::community_release::COMMUNITY_INSTALLER);
+        assert!(hint.contains(xai_grok_product::COMMUNITY_RELEASE_REPO));
+        for forbidden in ["x.ai", "@xai-official", "xai-org-shared"] {
+            assert!(
+                !hint.contains(forbidden),
+                "unexpected official source: {hint}"
+            );
+        }
     }
 
     #[test]
@@ -3729,6 +3864,23 @@ mod tests {
         .to_string();
         assert!(nz.contains("exited 137"), "{nz}");
         assert!(nz.contains("stderr: killed"), "{nz}");
+    }
+
+    #[cfg(feature = "community-build")]
+    #[test]
+    fn test_community_version_output_must_match_release_version() {
+        assert!(community_version_output_matches(
+            "grok-zh 1.2.3 (abcdef0) [stable]\n",
+            "1.2.3"
+        ));
+        assert!(!community_version_output_matches(
+            "grok-zh 1.2.2 (abcdef0)\n",
+            "1.2.3"
+        ));
+        assert!(!community_version_output_matches(
+            "grok 1.2.3 (abcdef0)\n",
+            "1.2.3"
+        ));
     }
 
     #[test]
@@ -4440,7 +4592,11 @@ mod tests {
         );
         assert_eq!(
             MSG_RUN_UPDATE_MANUAL,
-            "Run `grok update` to get the latest version."
+            if cfg!(feature = "community-build") {
+                "Run `grok-zh update` to get the latest version."
+            } else {
+                "Run `grok update` to get the latest version."
+            }
         );
     }
 

@@ -31,7 +31,7 @@
 
 ## 当前状态
 
-本仓库正在进行第一阶段汉化和 Windows 绿色构建验证。当前测试产物属于未签名预览版，不应视为稳定发布版。
+本仓库正在进行第一阶段汉化、Windows 绿色构建和社区 Release 更新链验证。当前 Windows 产物仍未经过 Authenticode 签名，不应把预发布包视为正式签名安装包。
 
 已建立的产品与数据边界：
 
@@ -39,15 +39,16 @@
 - 与官方版共用的默认数据目录：`~/.grok`
 - 两个程序共同使用的目录覆盖：`GROK_HOME`
 - 默认界面语言：`zh-CN`，可用 `--locale en-US` 切换英文
-- 社区版独立更新源完成前，内置更新器保持关闭并安全失败
+- 内置更新器只读取本仓库的 Immutable GitHub Releases；官方 npm、GitHub、x.ai 和 GCS 更新源始终禁用
 
 > [!WARNING]
 > `crates/codegen/xai-grok-pager/scripts/` 下的安装脚本及同模块内的 npm 包装仍来自官方上游，可能安装或覆盖官方 `grok`。社区版发布流程完成前，请勿使用这些脚本安装本 Fork。测试时只使用独立绿色测试包中的 `grok-zh.exe`。
 
 ## Windows 安装
 
-`zh-dev Windows 预览版` 云构建现在直接上传包目录。下载 GitHub Artifact 后只需
-解压一次，即可在包内运行社区安装器：
+正式 Tag 工作流会在 [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases)
+中发布完整 Windows ZIP；`zh-dev Windows 预览版` 仍会上传短期 Actions Artifact。
+解压完整包后，在包内运行社区安装器：
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -57,6 +58,24 @@ Set-ExecutionPolicy -Scope Process Bypass
 默认安装会把 `grok-zh`、`agent-zh` 加入当前用户 `Path`，与官方命令共存；可选
 接管 `grok`、`agent`，也可将官方命令备份后移走。完整参数、回滚方式和共享数据
 边界见 [Windows 自动安装说明](packaging/windows/INSTALL-WINDOWS.md)。
+
+### 自动更新
+
+- 默认使用 `stable` 通道，只接受 `vX.Y.Z`、非 Draft、非 prerelease 且已经进入
+  GitHub immutable 状态的本仓库 Release。
+- `alpha` 通道可通过 `grok-zh update --alpha` 显式选择；它也只接受 immutable
+  Release，并按 SemVer 选择稳定版与预发布版中的较新版本。
+- 发布资产必须精确包含
+  `grok-zh-<version>-windows-x86_64-gnu.exe`。更新器核对 Release、固定下载 URL、
+  资产大小和 GitHub 记录的 SHA-256，运行候选程序的 `--version` 后才替换当前 EXE。
+- 打开程序后若欢迎页显示新版本提示，可按 `Ctrl+U` 退出旧进程并完成更新；随后重新运行
+  `grok-zh`。下载、校验或替换失败时保留当前版本。
+- 旧版社区程序没有这套更新器，第一次升级到带更新器的版本仍需手工下载完整 ZIP 安装；
+  之后才会跟随 Releases。
+
+不满足上述契约的旧预览 Release、可变 Release、ZIP-only Release 和官方 xAI 资产都不会
+被自动更新器接受。Immutable Release 与 SHA-256 提供发布对象和传输完整性校验，但不等同于
+Windows Authenticode 签名。
 
 ## 从源码构建
 
@@ -109,7 +128,8 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 
 绿色测试包还会在 `grok-zh.exe` 同目录携带 `rg.exe`。社区版搜索入口优先使用该旁载工具，缺失时再回退到系统 `PATH`；这只隔离程序安装文件，不改变两个程序共用 `~/.grok` 数据的约定。
 
-正式 Windows 发布仍需补齐 MSVC 构建、代码签名、安装包、DLL 闭包验证和独立自动更新流程。
+正式 Windows 发布仍需补齐 MSVC 构建、代码签名、安装包和 DLL 闭包验证；社区自动更新链
+已经接入本仓库 Releases，但只覆盖精确的 Windows GNU `grok-zh.exe` 资产。
 
 ## 共享数据与兼容约定
 
@@ -173,9 +193,11 @@ cargo fmt --all
 
 - `main`：尽量保持官方上游镜像，只用于同步和审查。
 - `zh-dev`：汉化开发、上游合并、构建和测试。
-- 计划中的 `zh-stable`：只有在中文验证通过后才建立并用于稳定发布；当前尚未创建。
+- 计划中的 `zh-stable`：只有在中文验证通过后才建立；稳定 Release 由指向已审核提交的纯
+  SemVer Tag（`vX.Y.Z`）触发。
 - 上游 `main` 更新只能触发审查和测试，不能直接进入用户更新源。
-- 官方 stable 指针、正式更新日志、协议兼容检查和本 Fork 的 Windows 测试结果共同构成发布门槛。
+- 正式更新日志、协议兼容检查、本 Fork 的 Windows 测试结果、Immutable Releases 开关和
+  精确资产摘要共同构成发布门槛；官方 stable 指针不参与社区更新。
 
 ## 贡献
 

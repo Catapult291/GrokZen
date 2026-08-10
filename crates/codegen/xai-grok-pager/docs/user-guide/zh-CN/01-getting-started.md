@@ -14,9 +14,8 @@ Agent Client Protocol（ACP）集成到编辑器中。
 
 ## 安装
 
-社区签名安装包和社区自有更新源尚未发布。在它们可用之前，请只使用本仓库
-`zh-dev Windows preview` 构建流水线生成的产物。Windows Artifact 下载后只需
-解压一次；包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
+社区 Windows 包由本仓库 Releases 和 `zh-dev Windows preview` 构建流水线生成。
+Release ZIP 下载后只需解压一次；包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
 `grok-zh`、`agent-zh`，并支持由用户显式接管 `grok`、`agent`。完整说明也会
 作为包内的 `INSTALL-WINDOWS.md` 提供，并可在
 [仓库中在线查看](https://github.com/ljy6-6-6/grok-build-Chinese/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
@@ -30,8 +29,13 @@ Agent Client Protocol（ACP）集成到编辑器中。
 grok-zh --version
 ```
 
-在配置好已签名的社区更新源之前，内置更新器会安全失败，绝不会回退到 xAI
-官方发布渠道。
+带更新器的版本只读取本仓库的 Immutable GitHub Releases，核对精确的 Windows GNU
+EXE 资产、大小和 GitHub SHA-256；绝不会回退到 xAI 官方发布渠道。旧版需要先手工安装
+一次带更新器的桥接 Release。
+
+程序启动后若欢迎页显示新版本提示，可按 `Ctrl+U` 退出旧 TUI 并完成更新，随后重新运行
+`grok-zh`。默认通道为稳定版；`grok-zh update --alpha` 可显式选择预发布版，
+`grok-zh update --stable` 可切回稳定版。
 
 ---
 

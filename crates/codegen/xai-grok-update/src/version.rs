@@ -347,11 +347,31 @@ async fn fetch_gcs_channel_pointer(channel: &str, base_url: &str) -> Result<Stri
 /// written (e.g. auto-update should only cache after a successful install or
 /// when no update is needed).
 pub async fn fetch_latest_version(installer: &str, config: &UpdateConfig) -> Result<String> {
-    crate::ensure_updates_enabled()?;
-    match installer {
-        "npm" => fetch_npm_version(&config.channel, config.npm_registry.as_deref()).await,
-        "gh-release" => fetch_gh_release_version(&config.channel).await,
-        _ => fetch_gcs_version(&config.channel).await,
+    #[cfg(feature = "community-build")]
+    {
+        crate::ensure_community_updates_enabled()?;
+        if installer != crate::community_release::COMMUNITY_INSTALLER {
+            anyhow::bail!("unsupported installer for the community distribution: {installer}");
+        }
+        return crate::community_release::fetch_latest_version(&config.channel).await;
+    }
+    #[cfg(not(feature = "community-build"))]
+    {
+        crate::ensure_updates_enabled()?;
+        match installer {
+            "npm" => fetch_npm_version(&config.channel, config.npm_registry.as_deref()).await,
+            "gh-release" => fetch_gh_release_version(&config.channel).await,
+            "internal" => fetch_gcs_version(&config.channel).await,
+            _ => anyhow::bail!("unsupported installer: {installer}"),
+        }
+    }
+}
+
+fn version_cache_path() -> std::path::PathBuf {
+    if cfg!(feature = "community-build") {
+        grok_home().join("version.grok-build-zh.json")
+    } else {
+        grok_home().join("version.json")
     }
 }
 
@@ -362,10 +382,10 @@ pub async fn fetch_latest_version(installer: &str, config: &UpdateConfig) -> Res
 /// `stable_version` records the current stable channel pointer so that
 /// `channel_label()` can derive `[alpha]` vs `[stable]` without network I/O.
 pub async fn write_version_cache(version: &str, stable_version: Option<&str>) {
-    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
+    if crate::ensure_selected_updates_enabled().is_err() {
         return;
     }
-    let version_path = grok_home().join("version.json");
+    let version_path = version_cache_path();
     let now = time::OffsetDateTime::now_utc();
     let json = GrokVersion::new(
         version.to_string(),
@@ -411,7 +431,7 @@ pub async fn get_latest_version(installer: &str, config: &UpdateConfig) -> Resul
 
 /// True if `version.json` exists and is within TTL.
 pub async fn is_version_cache_fresh() -> bool {
-    let version_path = grok_home().join("version.json");
+    let version_path = version_cache_path();
     let now = time::OffsetDateTime::now_utc();
     if let Ok(version_str) = fs::read_to_string(&version_path).await
         && let Ok(version) = serde_json::from_str::<GrokVersion>(&version_str)
@@ -497,19 +517,35 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
 /// return `None`; the label will populate on the next successful TTL check
 /// (~30 min). This keeps startup and post-install paths fast.
 pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
-    if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
-        return None;
-    }
-    tokio::time::timeout(Duration::from_millis(500), async {
-        for base in CLI_BASE_URLS {
-            if let Ok(v) = fetch_gcs_channel_pointer("stable", base).await {
-                return Some(v);
-            }
+    #[cfg(feature = "community-build")]
+    {
+        if crate::ensure_community_updates_enabled().is_err() {
+            return None;
         }
-        None
-    })
-    .await
-    .unwrap_or(None)
+        return tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::community_release::fetch_latest_version("stable"),
+        )
+        .await
+        .ok()
+        .and_then(|result| result.ok());
+    }
+    #[cfg(not(feature = "community-build"))]
+    {
+        if !crate::updates_enabled() || !crate::official_update_sources_allowed() {
+            return None;
+        }
+        tokio::time::timeout(Duration::from_millis(500), async {
+            for base in CLI_BASE_URLS {
+                if let Ok(v) = fetch_gcs_channel_pointer("stable", base).await {
+                    return Some(v);
+                }
+            }
+            None
+        })
+        .await
+        .unwrap_or(None)
+    }
 }
 
 /// Read the cached stable version from `~/.grok/version.json` (sync, for display).
@@ -517,7 +553,7 @@ pub(crate) async fn try_fetch_stable_pointer() -> Option<String> {
 /// Returns `None` if the file doesn't exist, can't be parsed, or has no
 /// `stable_version` field (e.g. written by an older binary).
 pub fn cached_stable_version() -> Option<String> {
-    let version_path = grok_home().join("version.json");
+    let version_path = version_cache_path();
     let content = std::fs::read_to_string(&version_path).ok()?;
     let gv: GrokVersion = serde_json::from_str(&content).ok()?;
     gv.stable_version

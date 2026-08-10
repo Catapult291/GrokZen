@@ -2737,8 +2737,7 @@ fn build_update_config() -> UpdateConfig {
 /// Central gate for auto-update checks; add new suppression rules here,
 /// not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
-    if !xai_grok_product::AUTO_UPDATE_ENABLED || !xai_grok_product::OFFICIAL_UPDATE_SOURCES_ALLOWED
-    {
+    if !xai_grok_update::updates_enabled() {
         return false;
     }
     if cfg!(debug_assertions) {
@@ -3182,8 +3181,19 @@ mod tests {
     }
 
     #[test]
-    fn community_product_never_checks_for_official_updates() {
-        assert!(!should_check_for_updates(false));
+    fn community_product_uses_its_own_updater_policy() {
+        let supported_target = cfg!(all(
+            target_os = "windows",
+            target_arch = "x86_64",
+            target_env = "gnu"
+        ));
+        assert_eq!(xai_grok_update::updates_enabled(), supported_target);
+        assert!(!xai_grok_update::official_update_sources_allowed());
+        // Debug binaries still suppress background update checks.
+        assert_eq!(
+            should_check_for_updates(false),
+            supported_target && !cfg!(debug_assertions)
+        );
         assert!(!should_check_for_updates(true));
     }
     /// Pins the gate composition; a dropped conjunct fails its named case.

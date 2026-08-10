@@ -14,9 +14,8 @@ You can use it interactively as a full-screen TUI, run it headlessly for scripti
 
 ## Installation
 
-Signed community packages and the community-owned update source are not yet
-published. Until they are available, use only artifacts produced by this
-repository's documented build pipeline. The upstream `install.sh`,
+Community Windows packages are produced by this repository's Releases and
+documented preview build pipeline. The upstream `install.sh`,
 `install.ps1`, and `@xai-official/grok` package are intentionally not valid
 installers for this distribution.
 
@@ -26,8 +25,12 @@ Verify the installation:
 grok-zh --version
 ```
 
-The built-in updater is fail-closed until a signed community update source is
-configured. It never falls back to the official xAI release channels.
+Updater-enabled builds accept only immutable Releases from this repository and
+verify the exact Windows GNU executable's size and GitHub SHA-256. They never
+fall back to official xAI release channels. Existing builds without this
+updater require one manual bridge Release installation. When the welcome view
+shows an update, press `Ctrl+U` to exit the old TUI and finish the update, then
+run `grok-zh` again.
 
 ---
 

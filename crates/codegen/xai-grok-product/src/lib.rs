@@ -24,9 +24,12 @@ pub const LOCALE_ENV: &str = "GROK_ZH_LOCALE";
 /// Default UI locale for this distribution.
 pub const DEFAULT_UI_LOCALE: &str = "zh-CN";
 
-/// The community updater remains disabled until a signed, fork-owned manifest
-/// and artifact source are configured. It must never fall back to xAI sources.
-pub const AUTO_UPDATE_ENABLED: bool = false;
+/// Repository that owns every update accepted by the community distribution.
+pub const COMMUNITY_RELEASE_REPO: &str = "ljy6-6-6/grok-build-Chinese";
+/// The community updater uses immutable GitHub Releases from the repository
+/// above. Release assets are selected by an exact platform-specific name and
+/// verified against GitHub's recorded size and SHA-256 before activation.
+pub const AUTO_UPDATE_ENABLED: bool = true;
 /// Whether the official npm/GitHub/CDN/GCS update sources may be consulted.
 pub const OFFICIAL_UPDATE_SOURCES_ALLOWED: bool = false;
 /// Whether release notes may be fetched from the official xAI changelog CDN.
@@ -58,8 +61,9 @@ mod tests {
     }
 
     #[test]
-    fn updater_is_fail_closed_until_a_trusted_source_exists() {
-        assert!(!AUTO_UPDATE_ENABLED);
+    fn updater_uses_only_the_community_release_source() {
+        assert!(AUTO_UPDATE_ENABLED);
+        assert_eq!(COMMUNITY_RELEASE_REPO, "ljy6-6-6/grok-build-Chinese");
         assert!(!OFFICIAL_UPDATE_SOURCES_ALLOWED);
         assert!(!OFFICIAL_CHANGELOG_SOURCE_ALLOWED);
     }

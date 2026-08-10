@@ -29,6 +29,7 @@ Grok 会从配置文件、环境变量和 CLI 标志中读取设置。本页介�
 ```toml
 [cli]
 auto_update = true                     # 启动时检查更新
+channel = "stable"                    # stable（默认）| alpha（预发布）
 
 [models]
 default = "grok-4.5"                   # 新会话使用的模型

@@ -1,0 +1,401 @@
+name: Grok Build 中文社区版 Windows Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: zh-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  windows-x64-gnu:
+    name: Windows x64 GNU Release
+    runs-on: windows-2022
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: "3"
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      GH_TOKEN: ${{ github.token }}
+      RUSTUP_TOOLCHAIN: 1.94.0-x86_64-pc-windows-gnu
+      TARGET: x86_64-pc-windows-gnu
+
+    steps:
+      - name: 检出 Release Tag
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+
+      - name: 验证 Tag、版本与不可变发布策略
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $tag = $env:GITHUB_REF_NAME.Trim()
+          if ($tag -notmatch '^v(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$') {
+            throw "Release Tag 必须是无 build metadata 的 SemVer：$tag"
+          }
+          $version = $matches.version
+          if ($version.Contains('-')) {
+            $prerelease = ($version -split '-', 2)[1]
+            foreach ($identifier in ($prerelease -split '\.')) {
+              if ($identifier -match '^\d+$' -and $identifier.Length -gt 1 -and $identifier.StartsWith('0')) {
+                throw "SemVer 数字预发布标识不得包含前导零：$identifier"
+              }
+            }
+          }
+          $baseVersion = ($version -split '-', 2)[0]
+
+          function Read-PackageVersion([string]$path) {
+            $line = Get-Content -LiteralPath $path |
+              Where-Object { $_ -match '^version\s*=\s*"([^"]+)"\s*$' } |
+              Select-Object -First 1
+            if (!$line -or $line -notmatch '^version\s*=\s*"([^"]+)"\s*$') {
+              throw "无法从 $path 读取版本。"
+            }
+            return $matches[1]
+          }
+
+          $pagerVersion = Read-PackageVersion 'crates/codegen/xai-grok-pager-bin/Cargo.toml'
+          $coreVersion = Read-PackageVersion 'crates/codegen/xai-grok-version/Cargo.toml'
+          if ($pagerVersion -ne $coreVersion -or $baseVersion -ne $pagerVersion) {
+            throw "Tag 基线、pager-bin 与 xai-grok-version 必须一致：tag=$baseVersion pager=$pagerVersion core=$coreVersion"
+          }
+
+          $tagCommit = (& git rev-list -n 1 $tag).Trim()
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $env:GITHUB_SHA) {
+            throw "Tag 必须直接构建其所指提交：tag=$tagCommit workflow=$env:GITHUB_SHA"
+          }
+
+          $immutable = gh api "repos/$env:GITHUB_REPOSITORY/immutable-releases" |
+            ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$immutable.enabled) {
+            throw '仓库必须先在 Settings > Releases 中启用 Immutable Releases。'
+          }
+
+          & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            throw "Release $tag 已存在；不可变发布不得覆盖。"
+          }
+
+          $packageName = "grok-zh-$version-windows-x86_64-gnu"
+          "RELEASE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "GROK_VERSION=$version" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PACKAGE_NAME=$packageName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RAW_EXE_NAME=$packageName.exe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "IS_PRERELEASE=$($version.Contains('-').ToString().ToLowerInvariant())" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 配置固定版本的 Rust、MinGW 和 protoc
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup toolchain install $env:RUSTUP_TOOLCHAIN `
+            --profile minimal --component rustfmt --component rust-src
+
+          $sysroot = (& rustc --print sysroot).Trim()
+          $rustc = Join-Path $sysroot 'bin\rustc.exe'
+          $rustdoc = Join-Path $sysroot 'bin\rustdoc.exe'
+          $mingw = 'C:\mingw64\bin'
+          $gcc = Join-Path $mingw 'gcc.exe'
+          $gxx = Join-Path $mingw 'g++.exe'
+          $ar = Join-Path $mingw 'ar.exe'
+          foreach ($tool in @($rustc, $rustdoc, $gcc, $gxx, $ar)) {
+            if (!(Test-Path -LiteralPath $tool)) {
+              throw "缺少固定构建工具：$tool"
+            }
+          }
+
+          $protocVersion = '29.3'
+          $archive = Join-Path $env:RUNNER_TEMP "protoc-$protocVersion-win64.zip"
+          $root = Join-Path $env:RUNNER_TEMP "protoc-$protocVersion"
+          Invoke-WebRequest `
+            -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v$protocVersion/protoc-$protocVersion-win64.zip" `
+            -OutFile $archive
+          $hash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+          if ($hash -ne '57EA59E9F551AD8D71FFAA9B5CFBE0CA1F4E720972A1DB7EC2D12AB44BFF9383') {
+            throw "protoc SHA-256 校验值异常：$hash"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $root
+          $protoc = Join-Path $root 'bin\protoc.exe'
+
+          $cargoHome = Join-Path $env:RUNNER_TEMP 'grok-zh-cargo'
+          $targetDir = Join-Path $env:RUNNER_TEMP 'grok-zh-target'
+          $mingw | Out-File $env:GITHUB_PATH -Append -Encoding utf8
+          "RUSTC=$rustc" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "RUSTDOC=$rustdoc" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "PROTOC=$protoc" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_HOME=$cargoHome" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_TARGET_DIR=$targetDir" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=$gcc" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "CC=$gcc" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "CXX=$gxx" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "AR=$ar" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 恢复 Cargo 依赖缓存
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ${{ runner.temp }}/grok-zh-cargo/registry
+            ${{ runner.temp }}/grok-zh-cargo/git
+          key: grok-zh-release-cargo-${{ runner.os }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-cargo-home-v2-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
+
+      - name: 恢复 GNU Release 构建缓存
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release
+          key: grok-zh-release-target-${{ runner.os }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', '**/build.rs') }}
+          restore-keys: |
+            grok-zh-target-v2-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-
+
+      - name: 运行离线发布门
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { throw "cargo fmt 失败：$LASTEXITCODE" }
+          cargo fetch --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { throw "cargo fetch 失败：$LASTEXITCODE" }
+          cargo test --frozen -j 1 -p xai-grok-product
+          if ($LASTEXITCODE -ne 0) { throw "xai-grok-product 测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j 1 -p xai-grok-update --features community-build --lib
+          if ($LASTEXITCODE -ne 0) { throw "xai-grok-update 测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j 1 -p xai-grok-locale
+          if ($LASTEXITCODE -ne 0) { throw "xai-grok-locale 测试失败：$LASTEXITCODE" }
+          & .\packaging\windows\tests\Test-Install-GrokZh.ps1
+          & powershell.exe -NoProfile -NonInteractive `
+            -File .\packaging\windows\tests\Test-Install-GrokZh.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell 5.1 安装程序测试失败：$LASTEXITCODE"
+          }
+
+      - name: 构建 grok-zh
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo build --frozen -j $env:CARGO_BUILD_JOBS `
+            --target $env:TARGET `
+            -p xai-grok-pager-bin `
+            --profile release `
+            --features release-dist `
+            --config profile.release.lto=false `
+            --config profile.release.debug=0 `
+            --config profile.release.codegen-units=16 `
+            --config profile.release.package.xai-grok-shell.opt-level=1 `
+            --config profile.release.package.xai-grok-shell.codegen-units=16
+          if ($LASTEXITCODE -ne 0) {
+            throw "Cargo Release 构建失败：$LASTEXITCODE"
+          }
+
+      - name: 生成完整安装包和自动更新 EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          $package = Join-Path $dist $env:PACKAGE_NAME
+          New-Item -ItemType Directory -Path $package -Force | Out-Null
+
+          $builtExe = Join-Path $env:CARGO_TARGET_DIR "$env:TARGET\release\grok-zh.exe"
+          if (!(Test-Path -LiteralPath $builtExe)) {
+            throw "缺少构建出的可执行文件：$builtExe"
+          }
+          $packageExe = Join-Path $package 'grok-zh.exe'
+          Copy-Item -LiteralPath $builtExe -Destination $packageExe
+          & 'C:\mingw64\bin\strip.exe' --strip-debug $packageExe
+          if ($LASTEXITCODE -ne 0) {
+            throw "strip 失败：$LASTEXITCODE"
+          }
+
+          Copy-Item 'packaging\windows\agent-zh.cmd' $package
+          Copy-Item 'packaging\windows\Install-GrokZh.ps1' $package
+          Copy-Item 'packaging\windows\INSTALL-WINDOWS.md' $package
+
+          $rgVersion = '15.1.0'
+          $rgArchive = Join-Path $env:RUNNER_TEMP 'ripgrep.zip'
+          $rgExtract = Join-Path $env:RUNNER_TEMP 'ripgrep'
+          Invoke-WebRequest `
+            -Uri "https://github.com/BurntSushi/ripgrep/releases/download/$rgVersion/ripgrep-$rgVersion-x86_64-pc-windows-msvc.zip" `
+            -OutFile $rgArchive
+          Expand-Archive -LiteralPath $rgArchive -DestinationPath $rgExtract
+          $rgSource = Get-ChildItem $rgExtract -Filter rg.exe -Recurse -File |
+            Select-Object -First 1
+          if (!$rgSource) {
+            throw '下载的 ripgrep 压缩包不包含 rg.exe。'
+          }
+          $rgHash = (Get-FileHash $rgSource.FullName -Algorithm SHA256).Hash
+          if ($rgHash -ne 'DECDD4992F3F1B9A5EF9898F1B40AB16886D579D6516B4EFD3D5EAA19364E408') {
+            throw "ripgrep SHA-256 校验值异常：$rgHash"
+          }
+          Copy-Item $rgSource.FullName (Join-Path $package 'rg.exe')
+
+          Copy-Item 'LICENSE' (Join-Path $package 'LICENSE-grok-build.txt')
+          $licenseRoot = Join-Path $package 'licenses'
+          $rgLicenseDir = Join-Path $licenseRoot 'ripgrep'
+          $projectNoticeDir = Join-Path $licenseRoot 'project'
+          New-Item -ItemType Directory -Path $rgLicenseDir,$projectNoticeDir -Force | Out-Null
+          foreach ($licenseName in @('COPYING', 'LICENSE-MIT', 'UNLICENSE')) {
+            $license = Get-ChildItem $rgExtract -Filter $licenseName -Recurse -File |
+              Select-Object -First 1
+            if ($license) {
+              Copy-Item $license.FullName $rgLicenseDir
+            }
+          }
+          Copy-Item 'THIRD-PARTY-NOTICES' $projectNoticeDir
+          Copy-Item 'crates\codegen\xai-grok-tools\THIRD_PARTY_NOTICES.md' $projectNoticeDir
+          Copy-Item 'third_party\NOTICE' $projectNoticeDir
+
+          $manifestNames = @(
+            'grok-zh.exe',
+            'agent-zh.cmd',
+            'rg.exe',
+            'Install-GrokZh.ps1',
+            'INSTALL-WINDOWS.md'
+          )
+          $manifest = foreach ($name in $manifestNames) {
+            $hash = (Get-FileHash (Join-Path $package $name) -Algorithm SHA256).Hash
+            "$hash  $name"
+          }
+          $manifest | Set-Content (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
+
+          $signature = (Get-AuthenticodeSignature $packageExe).Status
+          $pe = (& 'C:\mingw64\bin\objdump.exe' -f $packageExe |
+            Select-String 'file format').Line.Trim()
+          $sourceRev = (Get-Content -LiteralPath 'SOURCE_REV' -Raw).Trim()
+          @"
+          Grok Build 中文社区版 GitHub Release
+          Version: $env:GROK_VERSION
+          Tag: $env:RELEASE_TAG
+          Commit: $env:GITHUB_SHA
+          Upstream source revision: $sourceRev
+          Repository: $env:GITHUB_REPOSITORY
+          Target: $env:TARGET
+          Profile: low-memory GNU release (LTO disabled, debug disabled, codegen-units=16)
+          PE: $pe
+          Authenticode: $signature
+          GitHub Immutable Release required: true
+          Executable started by CI: false
+          Default commands after installation: grok-zh, agent-zh
+          "@.Trim() | Set-Content (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
+
+          if (Get-ChildItem $package -Filter '*.zip' -Recurse -File) {
+            throw '安装包目录不得包含嵌套 ZIP。'
+          }
+
+          $rawExe = Join-Path $dist $env:RAW_EXE_NAME
+          Copy-Item $packageExe $rawExe
+          $zipName = "$env:PACKAGE_NAME.zip"
+          $zipPath = Join-Path $dist $zipName
+          Compress-Archive -Path (Join-Path $package '*') `
+            -DestinationPath $zipPath -CompressionLevel Optimal
+
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          foreach ($asset in @($rawExe, $zipPath)) {
+            $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+            $name = Split-Path $asset -Leaf
+            [IO.File]::WriteAllText("$asset.sha256", "$hash  $name", $utf8NoBom)
+          }
+          "DIST_DIR=$dist" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "ZIP_NAME=$zipName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 创建 Draft、核验资产并发布
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = $env:DIST_DIR
+          $assets = @(
+            (Join-Path $dist $env:ZIP_NAME),
+            (Join-Path $dist "$env:ZIP_NAME.sha256"),
+            (Join-Path $dist $env:RAW_EXE_NAME),
+            (Join-Path $dist "$env:RAW_EXE_NAME.sha256")
+          )
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          $baseVersion = ($env:GROK_VERSION -split '-', 2)[0]
+          $changelog = "crates/codegen/xai-grok-shell/changelogs/$baseVersion.zh-CN.md"
+          if (Test-Path -LiteralPath $changelog) {
+            Get-Content -LiteralPath $changelog -Raw | Set-Content $notes -Encoding utf8
+          } else {
+            "# Grok Build 中文社区版 $env:GROK_VERSION" | Set-Content $notes -Encoding utf8
+          }
+          @"
+
+          ## Windows 资产说明
+
+          - 完整安装包：``$env:ZIP_NAME``
+          - 自动更新资产：``$env:RAW_EXE_NAME``
+          - 此构建为未签名的 x86_64 GNU 版本；请结合 Immutable Release 和 SHA-256 核验来源。
+          - CI 未启动完整 TUI；维护者在发布后执行人工冒烟验证。
+          "@ | Add-Content $notes -Encoding utf8
+
+          $createArgs = @(
+            'release', 'create', $env:RELEASE_TAG
+          ) + $assets + @(
+            '--repo', $env:GITHUB_REPOSITORY,
+            '--verify-tag', '--draft',
+            '--title', "Grok Build 中文社区版 $env:GROK_VERSION",
+            '--notes-file', $notes
+          )
+          & gh @createArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "创建 Draft Release 失败：$LASTEXITCODE"
+          }
+
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" |
+            ConvertFrom-Json
+          if (!$release.draft -or $release.tag_name -ne $env:RELEASE_TAG) {
+            throw 'Draft Release 元数据与 Tag 不一致。'
+          }
+          $expectedNames = @(
+            $env:ZIP_NAME,
+            "$env:ZIP_NAME.sha256",
+            $env:RAW_EXE_NAME,
+            "$env:RAW_EXE_NAME.sha256"
+          ) | Sort-Object
+          $actualNames = @($release.assets | ForEach-Object name | Sort-Object)
+          if (($expectedNames -join "`n") -ne ($actualNames -join "`n")) {
+            throw "Release 资产集合不匹配：$($actualNames -join ', ')"
+          }
+          foreach ($asset in $release.assets) {
+            if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') {
+              throw "GitHub 未记录 $($asset.name) 的 SHA-256。"
+            }
+            $remoteHash = $asset.digest.Substring('sha256:'.Length)
+            $localHash = (Get-FileHash (Join-Path $dist $asset.name) -Algorithm SHA256).Hash
+            if ($remoteHash -ne $localHash.ToLowerInvariant()) {
+              throw "$($asset.name) 的本地哈希与 GitHub digest 不一致。"
+            }
+          }
+
+          $editArgs = @('release', 'edit', $env:RELEASE_TAG, '--repo', $env:GITHUB_REPOSITORY, '--draft=false')
+          if ($env:IS_PRERELEASE -eq 'true') {
+            $editArgs += @('--prerelease', '--latest=false')
+          } else {
+            $editArgs += '--latest'
+          }
+          & gh @editArgs
+          if ($LASTEXITCODE -ne 0) {
+            throw "发布 Release 失败：$LASTEXITCODE"
+          }
+
+          $published = $null
+          for ($attempt = 0; $attempt -lt 10; $attempt++) {
+            $published = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" |
+              ConvertFrom-Json
+            if ($published.immutable) { break }
+            Start-Sleep -Seconds 2
+          }
+          if ($published.draft -or !$published.immutable) {
+            throw 'Release 发布后未进入 immutable 状态。'
+          }
+          if ([bool]$published.prerelease -ne [bool]($env:IS_PRERELEASE -eq 'true')) {
+            throw 'Release prerelease 状态与 SemVer 不一致。'
+          }

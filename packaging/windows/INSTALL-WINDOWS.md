@@ -1,13 +1,14 @@
 # Windows 自动安装说明
 
-本说明适用于 `zh-dev` GitHub Actions 生成的未签名 Windows x64 GNU 预览包。
-它不是 xAI 官方安装器，也不是稳定版签名安装包。
+本说明适用于本仓库 GitHub Releases 或 `zh-dev` Actions 生成的未签名 Windows x64 GNU 包。
+它不是 xAI 官方安装器，也不是 Authenticode 签名安装包。
 
 ## 下载与解压
 
-1. 在仓库的 **Actions → zh-dev Windows 预览版** 中下载本次运行的
-   `grok-zh-windows-<run-number>` Artifact。
-2. 解压一次。新流水线直接上传包目录，不再让 Artifact ZIP 内再套一层 ZIP。
+1. 推荐从本仓库 [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases)
+   下载 `grok-zh-<version>-windows-x86_64-gnu.zip`。开发测试也可从
+   **Actions → zh-dev Windows 预览版** 下载短期 Artifact。
+2. 解压一次；Release ZIP 内直接是安装包内容。
 3. 确认目录中至少包含：
 
    ```text
@@ -21,7 +22,7 @@
    ```
 
 `Install-GrokZh.ps1` 会在写入任何安装目录前，自动核对 `SHA256SUMS.txt` 中的
-文件哈希。Artifact 本身的 SHA-256 也会显示在 Actions 构建摘要中。
+文件哈希。Release 还会提供 ZIP/EXE 的 `.sha256` 旁车文件，GitHub API 会记录资产 digest。
 
 ## 默认安装：与官方版共存
 
@@ -150,6 +151,27 @@ npm uninstall -g @xai-official/grok
 安装器只用该参数定位可选的官方 `grok.exe`、`agent.exe`，不会替你持久化
 `GROK_HOME`；若程序运行时也要使用自定义数据根，请另行设置同值的环境变量。
 
+## 通过 GitHub Releases 自动更新
+
+安装带社区更新器的版本后，程序启动时会在后台查询固定仓库
+`ljy6-6-6/grok-build-Chinese`：
+
+- 默认 `stable` 只接受 immutable、非 Draft、非 prerelease 的 `vX.Y.Z` Release；
+- `grok-zh update --alpha` 可选择预发布通道，`grok-zh update --stable` 可切回稳定通道；
+- 自动更新只下载精确命名的
+  `grok-zh-<version>-windows-x86_64-gnu.exe`，并验证固定 URL、大小和 GitHub SHA-256；
+- 候选 EXE 必须通过 `--version`，之后才使用 Windows 的重命名旁置和失败回滚逻辑替换
+  当前 `grok-zh.exe`；不会强制结束其他会话；
+- 欢迎页出现更新提示时，按 `Ctrl+U` 会退出旧 TUI 并等待更新完成。完成后重新运行
+  `grok-zh`；失败时继续保留当前版本。
+
+自动更新沿用原版的单 EXE 语义，不改写 `agent-zh.cmd`、`rg.exe`、安装文档、Path 或官方
+`grok`/`agent`。若某个版本要求同步升级这些旁载文件，应重新下载完整 ZIP 运行安装器。
+旧版程序本身没有社区更新器，因此迁移到首个桥接 Release 仍需手工安装一次。
+
+更新器不会读取 `GROK_INSTALLER` 来切换来源，也不会回退到 xAI npm、官方 GitHub、x.ai
+或 GCS。网络、元数据、digest、候选运行或文件替换任一步失败都会保持当前 EXE。
+
 ## 数据共享与安全边界
 
 程序安装目录和用户数据目录是两件事：
@@ -160,8 +182,9 @@ npm uninstall -g @xai-official/grok
   立即同步，不存在复制或双向同步层；
 - 不要为了卸载任一程序而删除整个 `~/.grok`。
 
-本预览包没有 Authenticode 签名，CI 只构建、剥离、校验和打包，不会启动生成的
-可执行文件。首次运行前请查看 `BUILD-INFO.txt`、Actions 构建提交和哈希记录。
+当前 Windows 包没有 Authenticode 签名，CI 只构建、剥离、校验和打包，不启动完整 TUI。
+Immutable Release 与 SHA-256 不能替代代码签名；首次运行前请查看 `BUILD-INFO.txt`、
+Release Tag、构建提交和哈希记录。
 
 > 仓库中的 `crates/codegen/xai-grok-pager/scripts/install.ps1`、`install.sh` 与
 > `@xai-official/grok` 属于官方上游安装链，不能用于安装或更新本社区版。

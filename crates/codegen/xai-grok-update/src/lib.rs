@@ -1,4 +1,6 @@
 pub mod auto_update;
+#[cfg(feature = "community-build")]
+mod community_release;
 pub mod version;
 mod version_policy;
 
@@ -6,21 +8,37 @@ pub use auto_update::UpdateStatus;
 pub use version::{UpdateConfig, channel_label, channel_name, write_version_cache};
 pub use version_policy::enforce_version_policy_or_exit;
 
-/// User-facing reason returned by every update entry point until the community
-/// distribution has a signed, fork-owned manifest and artifact source.
+/// User-facing reason returned when the selected distribution source is not
+/// enabled. Community builds never use the official xAI update sources.
 pub const UPDATE_DISABLED_REASON: &str =
-    "The community build updater is disabled until a signed community update source is configured.";
+    "The selected update source is disabled for this distribution.";
 
 /// Compile-time distribution policy. Keeping this in one leaf crate prevents
 /// an upstream updater refactor from accidentally re-enabling official sources.
 pub const fn updates_enabled() -> bool {
-    !cfg!(feature = "community-build") || xai_grok_product::AUTO_UPDATE_ENABLED
+    if cfg!(feature = "community-build") {
+        community_updates_enabled()
+    } else {
+        true
+    }
 }
 
 /// The upstream updater implementation only contains official xAI backends.
 /// Community builds keep them unavailable even after their own updater exists.
 pub const fn official_update_sources_allowed() -> bool {
     !cfg!(feature = "community-build") || xai_grok_product::OFFICIAL_UPDATE_SOURCES_ALLOWED
+}
+
+/// Whether this binary is the community distribution with its fixed Releases
+/// backend enabled.
+pub const fn community_updates_enabled() -> bool {
+    cfg!(feature = "community-build")
+        && xai_grok_product::AUTO_UPDATE_ENABLED
+        && cfg!(all(
+            target_os = "windows",
+            target_arch = "x86_64",
+            target_env = "gnu"
+        ))
 }
 
 pub(crate) fn ensure_updates_enabled() -> anyhow::Result<()> {
@@ -30,14 +48,38 @@ pub(crate) fn ensure_updates_enabled() -> anyhow::Result<()> {
     Ok(())
 }
 
+pub(crate) fn ensure_community_updates_enabled() -> anyhow::Result<()> {
+    if !community_updates_enabled() {
+        anyhow::bail!(UPDATE_DISABLED_REASON);
+    }
+    Ok(())
+}
+
+/// Gate the backend selected at compile time. Official helper entry points keep
+/// using [`ensure_updates_enabled`] so community builds cannot reach them.
+pub(crate) fn ensure_selected_updates_enabled() -> anyhow::Result<()> {
+    if cfg!(feature = "community-build") {
+        ensure_community_updates_enabled()
+    } else {
+        ensure_updates_enabled()
+    }
+}
+
 #[cfg(all(test, feature = "community-build"))]
 mod community_build_tests {
     use super::*;
 
     #[test]
-    fn community_build_fails_closed_before_using_official_sources() {
-        assert!(!updates_enabled());
+    fn community_build_enables_only_its_fixed_release_source() {
+        let supported_target = cfg!(all(
+            target_os = "windows",
+            target_arch = "x86_64",
+            target_env = "gnu"
+        ));
+        assert_eq!(updates_enabled(), supported_target);
+        assert_eq!(community_updates_enabled(), supported_target);
         assert!(!official_update_sources_allowed());
+        assert_eq!(ensure_community_updates_enabled().is_ok(), supported_target);
         assert_eq!(
             ensure_updates_enabled().unwrap_err().to_string(),
             UPDATE_DISABLED_REASON
@@ -45,7 +87,7 @@ mod community_build_tests {
     }
 
     #[tokio::test]
-    async fn community_entry_points_do_not_download_or_mutate_channel() {
+    async fn official_download_is_blocked_and_fixed_installer_is_selected() {
         let temp = tempfile::tempdir().expect("tempdir");
         let destination = temp.path().join("must-not-exist");
         let error =
@@ -54,16 +96,9 @@ mod community_build_tests {
                 .expect_err("community download must be disabled");
         assert_eq!(error.to_string(), UPDATE_DISABLED_REASON);
         assert!(!destination.exists());
-
-        let mut config = UpdateConfig {
-            proxy_base_url: "http://127.0.0.1:1".to_string(),
-            auth_scope: "test".to_string(),
-            deployment_key: None,
-            alpha_test_key: None,
-            channel: "stable".to_string(),
-            npm_registry: None,
-        };
-        auto_update::apply_channel_switch(Some("alpha"), &mut config).await;
-        assert_eq!(config.channel, "stable");
+        assert_eq!(
+            auto_update::get_installer().await,
+            Some(community_release::COMMUNITY_INSTALLER)
+        );
     }
 }
