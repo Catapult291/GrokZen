@@ -32,7 +32,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 验证 Tag、版本与不可变发布策略
+      - name: 验证 Tag、版本与发布冲突
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -71,12 +71,6 @@ jobs:
           $tagCommit = (& git rev-list -n 1 $tag).Trim()
           if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $env:GITHUB_SHA) {
             throw "Tag 必须直接构建其所指提交：tag=$tagCommit workflow=$env:GITHUB_SHA"
-          }
-
-          $immutable = gh api "repos/$env:GITHUB_REPOSITORY/immutable-releases" |
-            ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or !$immutable.enabled) {
-            throw '仓库必须先在 Settings > Releases 中启用 Immutable Releases。'
           }
 
           & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
