@@ -74,7 +74,9 @@ jobs:
           }
 
           & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $releaseExists = $LASTEXITCODE -eq 0
+          $global:LASTEXITCODE = 0
+          if ($releaseExists) {
             throw "Release $tag 已存在；不可变发布不得覆盖。"
           }
 
