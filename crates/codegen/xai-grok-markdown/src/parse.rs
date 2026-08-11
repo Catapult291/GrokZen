@@ -8,7 +8,7 @@
 
 use std::ops::Range;
 
-use anstyle::{Effects, Style};
+use anstyle::Style;
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Tag, TagEnd, TextMergeWithOffset};
 use ratatui::style::Stylize as RatatuiStylize;
 use ratatui::text::{Line, Span};
@@ -245,64 +245,6 @@ fn is_br_tag(html: &str) -> bool {
     let tag = inner.trim();
     let tag = tag.strip_suffix('/').map_or(tag, str::trim);
     tag.eq_ignore_ascii_case("br")
-}
-
-/// Return the source range of a standalone, empty named anchor such as
-/// `<a id="available-themes"></a>` when `event_range` belongs to that line.
-///
-/// The localized user guide keeps these anchors for web deep links. The TUI has
-/// no HTML anchor surface, so rendering them as syntax-highlighted text only
-/// leaks implementation markup into the document viewer. Keep the match narrow:
-/// generic HTML-like text (for example `<PathBuf>` and `<decl>`) must remain
-/// visible.
-fn standalone_empty_anchor_range(text: &str, event_range: &Range<usize>) -> Option<Range<usize>> {
-    if event_range.start > event_range.end || event_range.end > text.len() {
-        return None;
-    }
-
-    let line_start = text[..event_range.start]
-        .rfind('\n')
-        .map_or(0, |index| index + 1);
-    let line_end = text[line_start..]
-        .find('\n')
-        .map_or(text.len(), |offset| line_start + offset);
-    let line = &text[line_start..line_end];
-    let trimmed_start = line.trim_start();
-    let leading_bytes = line.len() - trimmed_start.len();
-    let trimmed = trimmed_start.trim_end();
-
-    let open_end = trimmed.find('>')?;
-    let open = trimmed[..open_end].trim();
-    let close = trimmed[open_end + 1..].trim();
-    if !open
-        .get(..2)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("<a"))
-        || !close.eq_ignore_ascii_case("</a>")
-    {
-        return None;
-    }
-
-    let attributes = open[2..].trim();
-    let (name, value) = attributes.split_once('=')?;
-    if !name.trim().eq_ignore_ascii_case("id") {
-        return None;
-    }
-    let value = value.trim();
-    let quoted_id = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .or_else(|| {
-            value
-                .strip_prefix('\'')
-                .and_then(|value| value.strip_suffix('\''))
-        })?;
-    if quoted_id.is_empty() {
-        return None;
-    }
-
-    let start = line_start + leading_bytes;
-    let end = start + trimmed.len();
-    (event_range.start < end && event_range.end > start).then_some(start..end)
 }
 
 /// URLs (validated via `url::Url::parse`) are treated as unbreakable
@@ -567,18 +509,6 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
         });
     }
 
-    fn hide_standalone_anchor(&mut self, range: Range<usize>) {
-        if self.buffers.highlights.iter().any(|highlight| {
-            highlight.range == range
-                && highlight
-                    .style
-                    .is_some_and(|style| style.get_effects().contains(Effects::HIDDEN))
-        }) {
-            return;
-        }
-        self.push_highlight(Some(Style::new().effects(Effects::HIDDEN)), &range);
-    }
-
     fn on_event(&mut self, event: Event<'a>, range: Range<usize>) {
         let mut parent_code_block = None;
 
@@ -810,19 +740,13 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                 self.push_highlight(None, &range);
             }
             Event::Html(_) => {
-                if let Some(anchor_range) = standalone_empty_anchor_range(self.text, &range) {
-                    self.hide_standalone_anchor(anchor_range);
-                } else {
-                    // Render HTML block content as regular text (not code).
-                    // pulldown-cmark treats XML-like tags (e.g. <example>) as HTML
-                    // blocks, which previously got code-block styling via Replace.
-                    self.push_highlight(Some(self.ms.text), &range);
-                }
+                // Render HTML block content as regular text (not code).
+                // pulldown-cmark treats XML-like tags (e.g. <example>) as HTML
+                // blocks, which previously got code-block styling via Replace.
+                self.push_highlight(Some(self.ms.text), &range);
             }
             Event::InlineHtml(html) => {
-                if let Some(anchor_range) = standalone_empty_anchor_range(self.text, &range) {
-                    self.hide_standalone_anchor(anchor_range);
-                } else if is_br_tag(&html) {
+                if is_br_tag(&html) {
                     if let Some(ref mut state) = self.table_state {
                         state.push_text("\n");
                         self.push_highlight(Some(self.ms.text), &range);

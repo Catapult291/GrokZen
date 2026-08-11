@@ -321,53 +321,10 @@ fn suspend_for_child(
 }
 
 /// Coalesces draw requests, gates in-flight frames, and owns draw cadence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DocViewerOwner {
-    Welcome,
-    Agent(usize),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct DocViewerFrameKey {
-    owner: DocViewerOwner,
-    scroll: u16,
-    title_ptr: usize,
-    content_ptr: usize,
-    content_len: usize,
-}
-
-fn active_doc_viewer_frame_key(app: &AppView) -> Option<DocViewerFrameKey> {
-    let (owner, modal) = match app.active_view {
-        ActiveView::Welcome => (DocViewerOwner::Welcome, app.welcome_doc_viewer.as_ref()?),
-        ActiveView::Agent(id) => (
-            DocViewerOwner::Agent(id.0),
-            app.agents.get(&id)?.active_modal.as_ref()?,
-        ),
-        ActiveView::AgentDashboard => return None,
-    };
-    let crate::views::modal::ActiveModal::DocViewer {
-        title,
-        content,
-        scroll,
-        ..
-    } = modal
-    else {
-        return None;
-    };
-    Some(DocViewerFrameKey {
-        owner,
-        scroll: *scroll,
-        title_ptr: title.as_ptr() as usize,
-        content_ptr: content.as_ptr() as usize,
-        content_len: content.len(),
-    })
-}
-
 #[derive(Debug)]
 struct Presenter {
     dirty: bool,
     force_full_repaint: bool,
-    last_doc_viewer_frame: Option<DocViewerFrameKey>,
     in_flight_target: Option<u64>,
     last_draw_at: Instant,
     draw_scheduled_at: Option<Instant>,
@@ -378,7 +335,6 @@ impl Presenter {
         Self {
             dirty: false,
             force_full_repaint: false,
-            last_doc_viewer_frame: None,
             in_flight_target: None,
             last_draw_at: Instant::now(),
             draw_scheduled_at: None,
@@ -438,18 +394,10 @@ impl Presenter {
     fn present_if_dirty(&mut self, app: &mut AppView, terminal: &mut PagerTerminal) {
         let sync = terminal.backend_mut().writer_mut().writer_sync().clone();
         let queued_before = sync.queued();
-        let doc_viewer_frame = active_doc_viewer_frame_key(app);
-        let doc_viewer_changed = self.last_doc_viewer_frame != doc_viewer_frame
-            && (self.last_doc_viewer_frame.is_some() || doc_viewer_frame.is_some());
         let drew = self.try_present(
             queued_before,
             |force| {
-                // A DocViewer is a centered overlay drawn on top of an already
-                // rendered frame. Windows terminals can retain physical wide
-                // glyph cells that the logical diff believes are blank, so its
-                // open/scroll/close transitions need the same heal used after
-                // an out-of-band pane repaint.
-                if force || doc_viewer_changed {
+                if force {
                     let _ = terminal.clear();
                 }
                 app.draw(terminal);
@@ -457,7 +405,6 @@ impl Presenter {
             || sync.queued(),
         );
         if drew {
-            self.last_doc_viewer_frame = doc_viewer_frame;
             self.mark_drawn(Instant::now());
         }
     }
@@ -4763,39 +4710,6 @@ mod tests {
         .expect_err("writer failure must terminate the event loop");
 
         assert_eq!(error.to_string(), "injected writer failure");
-    }
-
-    #[test]
-    fn doc_viewer_frame_key_changes_on_open_scroll_and_close() {
-        let mut app = crate::app::app_view::tests::test_app();
-        app.active_view = ActiveView::Welcome;
-        assert_eq!(active_doc_viewer_frame_key(&app), None);
-
-        app.welcome_doc_viewer = Some(crate::views::modal::ActiveModal::DocViewer {
-            title: "Release Notes".into(),
-            content: "第一行\n第二行\n".into(),
-            locale: crate::locale::UiLocale::ZhCn,
-            scroll: 0,
-            window: crate::views::modal_window::ModalWindowState::new(),
-            cached_lines: None,
-            previous_palette: None,
-            standalone: true,
-        });
-        let opened = active_doc_viewer_frame_key(&app).expect("viewer is open");
-
-        if let Some(crate::views::modal::ActiveModal::DocViewer { scroll, .. }) =
-            app.welcome_doc_viewer.as_mut()
-        {
-            *scroll = 3;
-        }
-        let scrolled = active_doc_viewer_frame_key(&app).expect("viewer remains open");
-        assert_ne!(
-            opened, scrolled,
-            "scrolling must request a physical repaint"
-        );
-
-        app.welcome_doc_viewer = None;
-        assert_eq!(active_doc_viewer_frame_key(&app), None);
     }
 
     #[test]
