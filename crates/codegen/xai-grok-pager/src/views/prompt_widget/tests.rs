@@ -3796,7 +3796,11 @@
         pw.draw_with_locale(&mut buf, area, None, &style, None, None, Some(&locale));
 
         let rendered = buf_text_at(&buf, 0, area.width, 0);
-        assert!(rendered.contains("告诉我你想做些什么…"), "rendered={rendered:?}");
+        // Ratatui stores the trailing cell of each double-width CJK glyph as
+        // a blank symbol. Remove only that cell padding before checking the
+        // exact no-space placeholder chosen for the Chinese UI.
+        let rendered_without_cell_padding = rendered.replace(' ', "");
+        assert_eq!(rendered_without_cell_padding, "告诉我你想做些什么…");
         assert!(!rendered.contains("Build anything"));
     }
 
