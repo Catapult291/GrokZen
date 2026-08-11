@@ -1,3 +1,41 @@
+﻿<#
+.SYNOPSIS
+安装或升级 Grok Build 中文社区版的 Windows 完整安装包。
+
+.DESCRIPTION
+安装前校验 SHA256SUMS.txt 及必需文件，将程序部署到独立安装目录，并可选择更新用户 Path、提供 grok/agent 兼容命令，或备份现有官方命令。共享的 GROK_HOME 用户数据不会被删除。
+
+.PARAMETER PackageDir
+已解压安装包的根目录。默认使用本脚本所在目录。
+
+.PARAMETER InstallDir
+程序安装目录。默认使用当前用户 LocalAppData 下的 Programs\grok-zh\bin。
+
+.PARAMETER GrokHome
+共享 GROK_HOME 数据目录。默认读取 GROK_HOME 环境变量，否则使用当前用户目录下的 .grok。
+
+.PARAMETER OverrideOfficialCommands
+额外创建 grok 和 agent 兼容命令，但不移动已有官方可执行文件。
+
+.PARAMETER UninstallOfficial
+先备份再移走 GROK_HOME\bin 中现有的官方 grok.exe/agent.exe，并创建对应兼容命令。不会删除共享用户数据。
+
+.PARAMETER NoPathUpdate
+不修改当前用户 Path。
+
+.PARAMETER Force
+允许安装到缺少本安装器归属标记的现有目录。使用前请先检查目录内容。
+
+.EXAMPLE
+& .\Install-GrokZh.ps1
+
+使用默认路径安装，并将安装目录置于当前用户 Path 首位。
+
+.EXAMPLE
+& .\Install-GrokZh.ps1 -NoPathUpdate -WhatIf
+
+预览安装操作，不修改用户 Path，也不写入文件。
+#>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [string]$PackageDir = $PSScriptRoot,
@@ -17,7 +55,7 @@ function Resolve-FullPath {
 
     $expanded = $Path.Trim().Trim('"')
     if ([string]::IsNullOrWhiteSpace($expanded)) {
-        throw 'Path must not be empty.'
+        throw '路径不能为空。'
     }
     $full = [IO.Path]::GetFullPath($expanded)
     $root = [IO.Path]::GetPathRoot($full)
@@ -66,7 +104,7 @@ function Get-DefaultInstallDir {
         $localAppData = $env:LOCALAPPDATA
     }
     if ([string]::IsNullOrWhiteSpace($localAppData)) {
-        throw 'Unable to resolve the current user LocalAppData directory.'
+        throw '无法确定当前用户的 LocalAppData 目录。'
     }
     return Join-Path $localAppData 'Programs\grok-zh\bin'
 }
@@ -80,7 +118,7 @@ function Get-DefaultGrokHome {
         $profile = $env:USERPROFILE
     }
     if ([string]::IsNullOrWhiteSpace($profile)) {
-        throw 'Unable to resolve the current user profile directory.'
+        throw '无法确定当前用户的个人资料目录。'
     }
     return Join-Path $profile '.grok'
 }
@@ -90,7 +128,7 @@ function Read-AndVerifyManifest {
 
     $manifestPath = Join-Path $Root 'SHA256SUMS.txt'
     if (!(Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-        throw "Package manifest is missing: $manifestPath"
+        throw "安装包缺少校验清单：$manifestPath"
     }
 
     $hashes = @{}
@@ -99,15 +137,15 @@ function Read-AndVerifyManifest {
             continue
         }
         if ($line -notmatch '^\s*([0-9A-Fa-f]{64})\s+\*?(.+?)\s*$') {
-            throw "Malformed SHA256SUMS.txt line: $line"
+            throw "SHA256SUMS.txt 行格式无效：$line"
         }
         $expected = $matches[1].ToUpperInvariant()
         $name = $matches[2].Trim()
         if ($name -ne [IO.Path]::GetFileName($name) -or $name.Contains(':')) {
-            throw "Package manifest contains a non-root path: $name"
+            throw "安装包校验清单包含非根目录路径：$name"
         }
         if ($hashes.ContainsKey($name)) {
-            throw "Package manifest contains a duplicate entry: $name"
+            throw "安装包校验清单包含重复条目：$name"
         }
         $hashes[$name] = $expected
     }
@@ -121,18 +159,18 @@ function Read-AndVerifyManifest {
     )
     foreach ($name in $required) {
         if (!$hashes.ContainsKey($name)) {
-            throw "Package manifest is missing required entry: $name"
+            throw "安装包校验清单缺少必需条目：$name"
         }
     }
 
     foreach ($name in $hashes.Keys) {
         $source = Join-Path $Root $name
         if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
-            throw "Package file is missing: $source"
+            throw "安装包缺少文件：$source"
         }
         $actual = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToUpperInvariant()
         if ($actual -ne $hashes[$name]) {
-            throw "SHA-256 mismatch for $name. Expected $($hashes[$name]), got $actual."
+            throw "$name 的 SHA-256 不匹配。预期 $($hashes[$name])，实际 $actual。"
         }
     }
 
@@ -217,7 +255,7 @@ function Add-UserPathEntry {
             [Environment]::SetEnvironmentVariable('Path', $userPath, 'User')
             $env:Path = $oldProcessPath
         } catch {
-            Write-Warning "Failed to restore the previous user Path: $($_.Exception.Message)"
+            Write-Warning "恢复原用户 Path 失败：$($_.Exception.Message)"
         }
         throw
     }
@@ -234,7 +272,7 @@ function Move-OfficialCommandsToBackup {
         Test-Path -LiteralPath (Join-Path $OfficialBin $_) -PathType Leaf
     })
     if ($existing.Count -eq 0) {
-        Write-Host "No official grok.exe or agent.exe was found in $OfficialBin."
+        Write-Host "在 $OfficialBin 中未找到官方 grok.exe 或 agent.exe。"
         return @()
     }
 
@@ -268,7 +306,7 @@ function Move-OfficialCommandsToBackup {
         $manifestTemp = Join-Path $backupDir 'official-backup.json.tmp'
         [ordered]@{
             moved_at = (Get-Date).ToString('o')
-            note = 'Only command executables were moved. Shared GROK_HOME data was not changed.'
+            note = '仅移动了命令可执行文件；共享的 GROK_HOME 数据未更改。'
             files = @($records)
         } | ConvertTo-Json -Depth 5 | Set-Content `
             -LiteralPath $manifestTemp -Encoding UTF8
@@ -282,15 +320,15 @@ function Move-OfficialCommandsToBackup {
                 try {
                     Move-Item -LiteralPath $record.backup_path -Destination $record.original_path
                 } catch {
-                    Write-Warning "Failed to restore $($record.original_path): $($_.Exception.Message)"
+                    Write-Warning "恢复 $($record.original_path) 失败：$($_.Exception.Message)"
                 }
             }
         }
-        throw "Unable to back up the official commands. Existing files were retained or restored. $($_.Exception.Message)"
+        throw "无法备份官方命令；现有文件已保留或恢复。请关闭正在使用 grok.exe/agent.exe 的进程后重试。详细信息：$($_.Exception.Message)"
     }
 
     foreach ($record in $records) {
-        Write-Host "Backed up and removed the official command from its PATH directory: $($record.original_path)"
+        Write-Host "已备份并从 PATH 所在目录移除官方命令：$($record.original_path)"
     }
     return @($records)
 }
@@ -304,17 +342,17 @@ if ([string]::IsNullOrWhiteSpace($GrokHome)) {
     $GrokHome = Get-DefaultGrokHome
 }
 if (![IO.Path]::IsPathRooted($GrokHome)) {
-    throw 'GrokHome/GROK_HOME must be an absolute, already-expanded path.'
+    throw 'GrokHome/GROK_HOME 必须是绝对路径，且不得包含未展开的环境变量。'
 }
 $GrokHome = Resolve-FullPath $GrokHome
 $officialBin = Resolve-FullPath (Join-Path $GrokHome 'bin')
 $provideOfficialNames = $OverrideOfficialCommands.IsPresent -or $UninstallOfficial.IsPresent
 
 if (Test-PathsOverlap $PackageDir $InstallDir) {
-    throw 'PackageDir and InstallDir must not be the same or contain one another.'
+    throw 'PackageDir 与 InstallDir 不能相同，也不能互相包含。'
 }
 if (Test-PathsOverlap $InstallDir $GrokHome) {
-    throw 'InstallDir must not overlap the shared GROK_HOME data tree. Use the separate default program directory.'
+    throw 'InstallDir 不能与共享的 GROK_HOME 数据目录重叠；请使用独立的默认程序目录。'
 }
 
 $manifest = Read-AndVerifyManifest $PackageDir
@@ -322,19 +360,19 @@ $installMarker = Join-Path $InstallDir '.grok-zh-install.json'
 if ((Test-Path -LiteralPath $InstallDir) -and
     !(Test-Path -LiteralPath $installMarker -PathType Leaf) -and
     !$Force.IsPresent) {
-    throw "InstallDir already exists but is not owned by this installer: $InstallDir. Use -Force only after reviewing it."
+    throw "InstallDir 已存在，但不归本安装器管理：$InstallDir。请先检查目录内容，确认安全后再使用 -Force。"
 }
 
 $operationParts = [Collections.Generic.List[string]]::new()
-$operationParts.Add('install grok-zh and agent-zh')
+$operationParts.Add('安装 grok-zh 和 agent-zh')
 if ($provideOfficialNames) {
-    $operationParts.Add('provide grok and agent command shims')
+    $operationParts.Add('提供 grok 和 agent 兼容命令')
 }
 if (!$NoPathUpdate.IsPresent) {
-    $operationParts.Add('prepend the install directory to the user Path')
+    $operationParts.Add('将安装目录置于用户 Path 首位')
 }
 if ($UninstallOfficial.IsPresent) {
-    $operationParts.Add('back up and remove exact official grok.exe/agent.exe commands')
+    $operationParts.Add('备份并移除指定的官方 grok.exe/agent.exe 命令')
 }
 $operation = ($operationParts -join ', ')
 if (!$PSCmdlet.ShouldProcess($InstallDir, $operation)) {
@@ -430,17 +468,17 @@ if ($UninstallOfficial.IsPresent) {
 }
 
 Write-Host ''
-Write-Host "Installation complete: $InstallDir"
-Write-Host 'Default commands: grok-zh, agent-zh'
+Write-Host "安装完成：$InstallDir"
+Write-Host '默认命令：grok-zh、agent-zh'
 if ($provideOfficialNames) {
-    Write-Host 'Command takeover enabled: grok and agent now use reversible shims in this install directory.'
+    Write-Host '已启用命令接管：grok 和 agent 现在使用本安装目录中的可恢复兼容脚本。'
 }
 if ($UninstallOfficial.IsPresent) {
-    Write-Host "Official command result: moved $($movedOfficial.Count) file(s) into backup; shared data at $GrokHome was unchanged."
+    Write-Host "官方命令处理结果：已将 $($movedOfficial.Count) 个文件移入备份；共享数据目录 $GrokHome 未更改。"
 }
 if ($NoPathUpdate.IsPresent) {
-    Write-Host 'The user Path was not changed (-NoPathUpdate).'
+    Write-Host '未修改用户 Path（-NoPathUpdate）。'
 } else {
-    Write-Host 'The install directory is first in the user Path. Reopen other terminal windows.'
+    Write-Host '安装目录已置于用户 Path 首位。请重新打开其他终端窗口。'
 }
-Write-Host 'Verify with: grok-zh --version; agent-zh --help'
+Write-Host '验证命令：grok-zh --version; agent-zh --help'

@@ -1,4 +1,4 @@
-name: Grok Build 中文社区版 Windows Release
+name: Grok Build 中文社区版 Windows 发布
 
 on:
   push:
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   windows-x64-gnu:
-    name: Windows x64 GNU Release
+    name: Windows x64 GNU 发布
     runs-on: windows-2022
     timeout-minutes: 180
     env:
@@ -27,12 +27,12 @@ jobs:
       TARGET: x86_64-pc-windows-gnu
 
     steps:
-      - name: 检出 Release Tag
+      - name: 检出发布标签
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
 
-      - name: 验证 Tag、版本与发布冲突
+      - name: 验证标签、版本与发布冲突
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
