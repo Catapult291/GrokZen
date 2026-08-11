@@ -84,7 +84,6 @@ jobs:
           "RELEASE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "GROK_VERSION=$version" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "PACKAGE_NAME=$packageName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "RAW_EXE_NAME=$packageName.exe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "IS_PRERELEASE=$($version.Contains('-').ToString().ToLowerInvariant())" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
@@ -192,7 +191,7 @@ jobs:
             throw "Cargo Release 构建失败：$LASTEXITCODE"
           }
 
-      - name: 生成完整安装包和自动更新 EXE
+      - name: 生成并验证完整安装 ZIP
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -279,7 +278,7 @@ jobs:
           PE: $pe
           Authenticode: $signature
           GitHub Immutable Release required: true
-          Executable started by CI: false
+          Executable smoke-tested by CI: true (--version only)
           Default commands after installation: grok-zh, agent-zh
           "@.Trim() | Set-Content (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
 
@@ -287,15 +286,66 @@ jobs:
             throw '安装包目录不得包含嵌套 ZIP。'
           }
 
-          $rawExe = Join-Path $dist $env:RAW_EXE_NAME
-          Copy-Item $packageExe $rawExe
           $zipName = "$env:PACKAGE_NAME.zip"
           $zipPath = Join-Path $dist $zipName
           Compress-Archive -Path (Join-Path $package '*') `
             -DestinationPath $zipPath -CompressionLevel Optimal
 
+          $verifyRoot = Join-Path $env:RUNNER_TEMP "grok-zh-release-zip-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          if (Test-Path -LiteralPath $verifyRoot) {
+            throw "ZIP 验证目录已存在：$verifyRoot"
+          }
+          New-Item -ItemType Directory -Path $verifyRoot | Out-Null
+          Expand-Archive -LiteralPath $zipPath -DestinationPath $verifyRoot
+          $required = @(
+            'grok-zh.exe',
+            'agent-zh.cmd',
+            'rg.exe',
+            'Install-GrokZh.ps1',
+            'INSTALL-WINDOWS.md'
+          )
+          $manifestPath = Join-Path $verifyRoot 'SHA256SUMS.txt'
+          if (!(Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw 'Release ZIP 根目录缺少 SHA256SUMS.txt。'
+          }
+          $manifestHashes = @{}
+          $lineNumber = 0
+          foreach ($rawLine in (Get-Content -LiteralPath $manifestPath)) {
+            $lineNumber++
+            $line = $rawLine.TrimStart([char]0xFEFF)
+            $match = [regex]::Match($line, '^(?<hash>[0-9A-Fa-f]{64})  (?<name>[^\\/]+)$')
+            if (!$match.Success) {
+              throw "SHA256SUMS.txt 第 $lineNumber 行格式无效。"
+            }
+            $name = $match.Groups['name'].Value
+            $key = $name.ToLowerInvariant()
+            if ($manifestHashes.ContainsKey($key)) {
+              throw "SHA256SUMS.txt 包含重复文件名：$name"
+            }
+            $file = Join-Path $verifyRoot $name
+            if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Release ZIP 缺少清单文件：$name"
+            }
+            $actualHash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+            if ($actualHash -ne $match.Groups['hash'].Value) {
+              throw "Release ZIP 内层 SHA-256 不匹配：$name"
+            }
+            $manifestHashes[$key] = $actualHash
+          }
+          foreach ($name in $required) {
+            if (!$manifestHashes.ContainsKey($name.ToLowerInvariant())) {
+              throw "Release ZIP 清单缺少必需文件：$name"
+            }
+          }
+          $verifyExe = Join-Path $verifyRoot 'grok-zh.exe'
+          $versionOutput = (& $verifyExe --version | Select-Object -First 1).Trim()
+          if ($LASTEXITCODE -ne 0 -or
+              $versionOutput -notmatch "^grok-zh $([regex]::Escape($env:GROK_VERSION)) \(") {
+            throw "Release ZIP 中的 grok-zh.exe 版本冒烟失败：$versionOutput"
+          }
+
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-          foreach ($asset in @($rawExe, $zipPath)) {
+          foreach ($asset in @($zipPath)) {
             $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
             $name = Split-Path $asset -Leaf
             [IO.File]::WriteAllText("$asset.sha256", "$hash  $name", $utf8NoBom)
@@ -310,9 +360,7 @@ jobs:
           $dist = $env:DIST_DIR
           $assets = @(
             (Join-Path $dist $env:ZIP_NAME),
-            (Join-Path $dist "$env:ZIP_NAME.sha256"),
-            (Join-Path $dist $env:RAW_EXE_NAME),
-            (Join-Path $dist "$env:RAW_EXE_NAME.sha256")
+            (Join-Path $dist "$env:ZIP_NAME.sha256")
           )
           $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
           $baseVersion = ($env:GROK_VERSION -split '-', 2)[0]
@@ -326,10 +374,10 @@ jobs:
 
           ## Windows 资产说明
 
-          - 完整安装包：``$env:ZIP_NAME``
-          - 自动更新资产：``$env:RAW_EXE_NAME``
+          - 完整安装与自动更新包：``$env:ZIP_NAME``
+          - Release 仅发布 ZIP 与其 SHA-256 sidecar，不发布单独的裸 EXE。
           - 此构建为未签名的 x86_64 GNU 版本；请结合 Immutable Release 和 SHA-256 核验来源。
-          - CI 未启动完整 TUI；维护者在发布后执行人工冒烟验证。
+          - CI 仅执行 ``grok-zh.exe --version`` 冒烟；完整 TUI 仍由维护者在发布后人工验证。
           "@ | Add-Content $notes -Encoding utf8
 
           $createArgs = @(
@@ -363,9 +411,7 @@ jobs:
           }
           $expectedNames = @(
             $env:ZIP_NAME,
-            "$env:ZIP_NAME.sha256",
-            $env:RAW_EXE_NAME,
-            "$env:RAW_EXE_NAME.sha256"
+            "$env:ZIP_NAME.sha256"
           ) | Sort-Object
           $actualNames = @($release.assets | ForEach-Object name | Sort-Object)
           if (($expectedNames -join "`n") -ne ($actualNames -join "`n")) {

@@ -14392,6 +14392,7 @@ dependencies = [
  "xai-grok-shell",
  "xai-grok-tools",
  "xai-grok-version",
+ "zip",
 ]
 
 [[package]]

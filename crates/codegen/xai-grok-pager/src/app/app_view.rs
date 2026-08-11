@@ -1121,7 +1121,7 @@ pub struct AppView {
     pub coding_data_write_seq: u64,
     /// Persisted `[cli].show_tips` mirror. `None` = no override (default `true`).
     pub show_tips: Option<bool>,
-    /// Persisted `[cli].auto_update` mirror. `None` = no override (default `true`).
+    /// Persisted `[cli].auto_update` mirror. `None` uses the distribution default.
     pub auto_update: Option<bool>,
     /// Persisted `[toolset.ask_user_question].timeout_enabled` mirror, seeded
     /// from the effective TOML merge like `show_tips`. `None` = unset in TOML

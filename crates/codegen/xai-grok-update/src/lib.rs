@@ -23,6 +23,17 @@ pub const fn updates_enabled() -> bool {
     }
 }
 
+/// Effective default for `[cli].auto_update` in the selected distribution.
+/// Official builds retain their upstream default; the community build is
+/// opt-in while still allowing metadata-only availability checks.
+pub const fn default_auto_update_enabled() -> bool {
+    if cfg!(feature = "community-build") {
+        xai_grok_product::AUTO_UPDATE_DEFAULT_ENABLED
+    } else {
+        true
+    }
+}
+
 /// The upstream updater implementation only contains official xAI backends.
 /// Community builds keep them unavailable even after their own updater exists.
 pub const fn official_update_sources_allowed() -> bool {
@@ -77,6 +88,7 @@ mod community_build_tests {
             target_env = "gnu"
         ));
         assert_eq!(updates_enabled(), supported_target);
+        assert!(!default_auto_update_enabled());
         assert_eq!(community_updates_enabled(), supported_target);
         assert!(!official_update_sources_allowed());
         assert_eq!(ensure_community_updates_enabled().is_ok(), supported_target);

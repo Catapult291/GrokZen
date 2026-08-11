@@ -29,12 +29,13 @@ Release ZIP 下载后只需解压一次；包内的 `Install-GrokZh.ps1` 可自�
 grok-zh --version
 ```
 
-带更新器的版本只读取本仓库的 Immutable GitHub Releases，核对精确的 Windows GNU
-EXE 资产、大小和 GitHub SHA-256；绝不会回退到 xAI 官方发布渠道。旧版需要先手工安装
-一次带更新器的桥接 Release。
+带更新器的版本只读取本仓库的 Immutable GitHub Releases，只接受完整 Windows GNU ZIP
+及其 `.sha256` sidecar，并核对 GitHub SHA-256、安全 ZIP 布局和包内 `SHA256SUMS.txt`；
+绝不会回退到 xAI 官方发布渠道。旧的裸 EXE 更新版本需要先手工安装一次 ZIP-only 桥接版。
 
-程序启动后若欢迎页显示新版本提示，可按 `Ctrl+U` 退出旧 TUI 并完成更新，随后重新运行
-`grok-zh`。默认通道为稳定版；`grok-zh update --alpha` 可显式选择预发布版，
+社区版默认关闭后台自动更新：程序启动时只检查版本并显示提示，不下载文件。欢迎页按
+`Ctrl+U` 才会退出旧 TUI、下载并安装；显式开启设置中的“自动更新”后才允许后台预下载。
+随后重新运行 `grok-zh`。默认通道为稳定版；`grok-zh update --alpha` 可显式选择预发布版，
 `grok-zh update --stable` 可切回稳定版。
 
 ---

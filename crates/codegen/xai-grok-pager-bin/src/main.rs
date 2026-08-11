@@ -1755,7 +1755,11 @@ async fn run_agent_command(
                         let uc = update_config_for_leader.clone();
                         Box::pin(async move {
                             let current_config = xai_grok_shell::util::config::load_config().await;
-                            if current_config.cli.auto_update == Some(false) {
+                            if !current_config
+                                .cli
+                                .auto_update
+                                .unwrap_or_else(xai_grok_update::default_auto_update_enabled)
+                            {
                                 return false;
                             }
                             match auto_update::ensure_latest_on_disk(&uc).await {
@@ -2650,7 +2654,7 @@ async fn async_main(
     match result {
         Ok(true) => {
             let adopted = bg_update_wait.lock().await.take();
-            if finish_update_on_exit(adopted, &update_config).await {
+            if finish_update_on_exit(adopted).await {
                 eprintln!("Update installed. Run `grok-zh` to start.");
             } else {
                 eprintln!("Update did not complete. Run `grok-zh update` to retry.");
@@ -2664,27 +2668,21 @@ async fn async_main(
 /// Complete the update after a quit-for-update (Ctrl+U) exit. Returns `true`
 /// when an update path completed without a reported failure.
 ///
-/// Prefers awaiting the parked waiter for the background `grok update` child
-/// spawned at startup — the download is usually already done or in flight.
+/// When automatic updates are explicitly enabled, prefers awaiting the parked
+/// `grok update` child spawned at startup. With the community default-off
+/// policy there is no waiter, so Ctrl+U starts the blocking update itself.
 /// Only when there is no waiter (spawn failed, or no download was needed
 /// because the target was already on disk) or the child failed does this
 /// fall back to a fresh blocking `grok update`, which itself resolves to
 /// "Already up to date" without downloading when the disk is current.
 async fn finish_update_on_exit(
     adopted: Option<tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>>,
-    update_config: &UpdateConfig,
 ) -> bool {
     let run_blocking = |reason: Option<String>| async move {
         if let Some(reason) = reason {
             eprintln!("{reason}");
         }
-        auto_update::run_update_if_available(
-            auto_update::UpdateRunMode::Blocking,
-            false,
-            update_config,
-        )
-        .await
-        .is_ok()
+        auto_update::run_user_approved_update().await.is_ok()
     };
     match adopted {
         Some(handle) => {

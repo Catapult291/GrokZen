@@ -277,7 +277,7 @@ pub struct PagerLocalSnapshot {
     pub plan_mode_active: bool,
     /// `[cli].show_tips` mirror. `None` = no TOML override → default `true`.
     pub show_tips: Option<bool>,
-    /// `[cli].auto_update` mirror. `None` = no TOML override → default `true`.
+    /// `[cli].auto_update` mirror. `None` uses the distribution default.
     pub auto_update: Option<bool>,
     /// Process-wide vim-mode scrollback flag. Mirrors
     /// `appearance::cache::load_vim_mode()` at snapshot time.
@@ -694,9 +694,13 @@ pub fn current_value_for(
         "plan_mode" => Some(SettingValue::Enum(
             crate::app::actions::PlanModeKind::from_bool(pager.plan_mode_active).as_canonical(),
         )),
-        // CLI batch: snapshot mirrors; `None` → effective default `true`.
+        // CLI batch: snapshot mirrors; `None` uses each setting's distribution default.
         "show_tips" => Some(SettingValue::Bool(pager.show_tips.unwrap_or(true))),
-        "auto_update" => Some(SettingValue::Bool(pager.auto_update.unwrap_or(true))),
+        "auto_update" => {
+            Some(SettingValue::Bool(pager.auto_update.unwrap_or_else(
+                xai_grok_update::default_auto_update_enabled,
+            )))
+        }
         // fork_secondary_model: baseline value folds to empty string. The
         // mirror persists the ModelId slug but the DynamicEnum canonicals
         // are catalog display names, so resolve via the snapshot; a stale
@@ -957,10 +961,10 @@ mod tests {
                     assert!(*default, "show_tips registry default must be true");
                 }
                 ("auto_update", SettingKind::Bool { default }) => {
-                    assert!(
+                    assert_eq!(
                         *default,
-                        "auto_update registry default must be true \
-                         (matches auto_update.rs's `.unwrap_or(true)`)"
+                        xai_grok_update::default_auto_update_enabled(),
+                        "auto_update registry default must match the selected distribution"
                     );
                 }
                 // vim_mode: Option<bool>; None → false.

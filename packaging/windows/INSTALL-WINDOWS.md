@@ -22,7 +22,8 @@
    ```
 
 `Install-GrokZh.ps1` 会在写入任何安装目录前，自动核对 `SHA256SUMS.txt` 中的
-文件哈希。Release 还会提供 ZIP/EXE 的 `.sha256` 旁车文件，GitHub API 会记录资产 digest。
+文件哈希。Release 只提供 ZIP 的 `.sha256` 旁车文件，GitHub API 也会记录 ZIP 资产 digest；
+不会再额外发布一份版本化裸 EXE。
 
 ## 默认安装：与官方版共存
 
@@ -153,24 +154,28 @@ npm uninstall -g @xai-official/grok
 
 ## 通过 GitHub Releases 自动更新
 
-安装带社区更新器的版本后，程序启动时会在后台查询固定仓库
+安装带社区更新器的版本后，程序启动时会查询固定仓库
 `ljy6-6-6/grok-build-Chinese`：
 
 - 默认 `stable` 只接受 immutable、非 Draft、非 prerelease 的 `vX.Y.Z` Release；
 - `grok-zh update --alpha` 可选择预发布通道，`grok-zh update --stable` 可切回稳定通道；
-- 自动更新只下载精确命名的
-  `grok-zh-<version>-windows-x86_64-gnu.exe`，并验证固定 URL、大小和 GitHub SHA-256；
-- 候选 EXE 必须通过 `--version`，之后才使用 Windows 的重命名旁置和失败回滚逻辑替换
-  当前 `grok-zh.exe`；不会强制结束其他会话；
-- 欢迎页出现更新提示时，按 `Ctrl+U` 会退出旧 TUI 并等待更新完成。完成后重新运行
-  `grok-zh`；失败时继续保留当前版本。
+- Release 只接受精确命名的完整
+  `grok-zh-<version>-windows-x86_64-gnu.zip` 及其 `.sha256` sidecar；更新器验证固定 URL、
+  大小、GitHub SHA-256、安全 ZIP 布局和包内 `SHA256SUMS.txt`；
+- 社区版的“自动更新”设置默认关闭。此时启动只查询版本并显示提示，不下载；欢迎页按
+  `Ctrl+U` 后才退出旧 TUI、下载 ZIP 并执行更新。显式开启该设置后才允许后台预下载；
+- ZIP 中的候选 EXE 必须通过 `--version`，之后才使用 Windows 的重命名旁置和失败回滚逻辑
+  替换当前 `grok-zh.exe`；不会强制结束其他会话；完成后重新运行 `grok-zh`；
+- `v1.0.0-zh.preview.3` 的旧更新器只认识裸 EXE，因此迁移到首个 ZIP-only 版本时需要手工
+  下载完整 ZIP 并运行安装器一次。
 
-自动更新沿用原版的单 EXE 语义，不改写 `agent-zh.cmd`、`rg.exe`、安装文档、Path 或官方
-`grok`/`agent`。若某个版本要求同步升级这些旁载文件，应重新下载完整 ZIP 运行安装器。
-旧版程序本身没有社区更新器，因此迁移到首个桥接 Release 仍需手工安装一次。
+自动激活仍沿用原版的单 EXE 替换语义，但传输与验证只使用完整 ZIP；不会在运行中的安装
+目录内逐个改写 `agent-zh.cmd`、`rg.exe`、安装文档、Path 或官方 `grok`/`agent`。若某个版本
+要求同步升级这些旁载文件，应重新运行已下载 ZIP 内的安装器。
 
 更新器不会读取 `GROK_INSTALLER` 来切换来源，也不会回退到 xAI npm、官方 GitHub、x.ai
-或 GCS。网络、元数据、digest、候选运行或文件替换任一步失败都会保持当前 EXE。
+或 GCS。网络、元数据、digest、解压、内层清单、候选运行或文件替换任一步失败都会保持
+当前 EXE。
 
 ## 数据共享与安全边界
 

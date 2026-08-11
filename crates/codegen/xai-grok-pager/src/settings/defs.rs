@@ -1339,12 +1339,15 @@ pub fn default_settings() -> Vec<SettingMeta> {
             category: SettingCategory::Advanced,
             owner: SettingOwner::Shell,
             label: "Auto-update",
-            description: "Automatically download and install pager updates on startup. \
+            description: "Allow updates to download and install in the background. \
+                          When off, startup only checks and Ctrl+U starts the download. \
                           Restart required.",
             keywords: &[
                 "auto", "update", "updates", "upgrade", "version", "install", "channel",
             ],
-            kind: SettingKind::Bool { default: true },
+            kind: SettingKind::Bool {
+                default: xai_grok_update::default_auto_update_enabled(),
+            },
             restart_required: true,
             hidden_in_minimal: false,
         },

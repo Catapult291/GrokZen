@@ -65,17 +65,23 @@ Set-ExecutionPolicy -Scope Process Bypass
   GitHub immutable 状态的本仓库 Release。
 - `alpha` 通道可通过 `grok-zh update --alpha` 显式选择；它也只接受 immutable
   Release，并按 SemVer 选择稳定版与预发布版中的较新版本。
-- 发布资产必须精确包含
-  `grok-zh-<version>-windows-x86_64-gnu.exe`。更新器核对 Release、固定下载 URL、
-  资产大小和 GitHub 记录的 SHA-256，运行候选程序的 `--version` 后才替换当前 EXE。
-- 打开程序后若欢迎页显示新版本提示，可按 `Ctrl+U` 退出旧进程并完成更新；随后重新运行
-  `grok-zh`。下载、校验或替换失败时保留当前版本。
+- Release 资产必须精确包含完整
+  `grok-zh-<version>-windows-x86_64-gnu.zip` 及其 `.sha256` sidecar，不再发布单独的
+  版本化裸 EXE。更新器核对固定 URL、大小、GitHub SHA-256、ZIP 安全布局和包内
+  `SHA256SUMS.txt`，再运行候选 `grok-zh.exe --version`。
+- 社区版默认关闭后台自动更新：启动时只检查 Release 元数据并显示欢迎页提示，不下载文件。
+  按 `Ctrl+U` 是对本次下载和安装的明确授权；随后重新运行 `grok-zh`。只有在设置中显式
+  开启“自动更新”后，启动流程才可在后台预下载和安装。
+- 自动激活只替换已验证的 `grok-zh.exe`，不会在仍有进程运行时冒险逐个覆盖
+  `agent-zh.cmd`、`rg.exe`、安装器或文档；需要同步旁载文件的版本应重新运行 ZIP 内安装器。
+  下载、解压、校验、冒烟或替换失败时保留当前版本。
 - 旧版社区程序没有这套更新器，第一次升级到带更新器的版本仍需手工下载完整 ZIP 安装；
   之后才会跟随 Releases。
 
-不满足上述契约的旧预览 Release、可变 Release、ZIP-only Release 和官方 xAI 资产都不会
-被自动更新器接受。Immutable Release 与 SHA-256 提供发布对象和传输完整性校验，但不等同于
-Windows Authenticode 签名。
+不满足上述契约的旧预览 Release、可变 Release、含额外裸 EXE 的 Release 和官方 xAI 资产
+都不会被自动更新器接受。`v1.0.0-zh.preview.3` 使用旧的裸 EXE 更新契约，因此迁移到首个
+ZIP-only 版本需要手工下载完整 ZIP 安装一次。Immutable Release 与 SHA-256 提供发布对象和
+传输完整性校验，但不等同于 Windows Authenticode 签名。
 
 ## 从源码构建
 
@@ -129,7 +135,7 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 绿色测试包还会在 `grok-zh.exe` 同目录携带 `rg.exe`。社区版搜索入口优先使用该旁载工具，缺失时再回退到系统 `PATH`；这只隔离程序安装文件，不改变两个程序共用 `~/.grok` 数据的约定。
 
 正式 Windows 发布仍需补齐 MSVC 构建、代码签名、安装包和 DLL 闭包验证；社区自动更新链
-已经接入本仓库 Releases，但只覆盖精确的 Windows GNU `grok-zh.exe` 资产。
+已经接入本仓库 Releases，并只消费经过双层校验的 Windows GNU 完整 ZIP。
 
 ## 共享数据与兼容约定
 

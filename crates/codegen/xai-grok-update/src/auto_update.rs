@@ -488,6 +488,18 @@ impl BackgroundUpdateCheck {
     }
 }
 
+fn effective_auto_update_enabled(configured: Option<bool>) -> bool {
+    configured.unwrap_or_else(crate::default_auto_update_enabled)
+}
+
+fn should_skip_cached_background_check(auto_update: bool, cache_fresh: bool) -> bool {
+    auto_update && cache_fresh
+}
+
+fn should_start_background_download(auto_update: bool, disk_needs_download: bool) -> bool {
+    auto_update && disk_needs_download
+}
+
 /// Check for available updates without blocking the TUI startup.
 ///
 /// Sets [`BackgroundUpdateCheck::update`] when the running binary is older
@@ -504,12 +516,18 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
 
     heal_managed_install(installer).await;
 
-    if is_version_cache_fresh().await {
+    let current_config = config::load_config().await;
+    let auto_update = effective_auto_update_enabled(current_config.cli.auto_update);
+    #[cfg(not(feature = "community-build"))]
+    if !auto_update {
         return BackgroundUpdateCheck::none();
     }
 
-    let current_config = config::load_config().await;
-    if current_config.cli.auto_update == Some(false) {
+    // A fresh cache can suppress work after an automatic updater has already
+    // prepared the target. In the community default-off mode we still query
+    // metadata on each launch so dismissing one prompt cannot hide it for the
+    // cache TTL while no package has been downloaded.
+    if should_skip_cached_background_check(auto_update, is_version_cache_fresh().await) {
         return BackgroundUpdateCheck::none();
     }
 
@@ -553,9 +571,10 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
         None => true,
     };
 
-    // Kick off a non-blocking download so the binary is ready when the
-    // user restarts (or accepts the in-TUI restart prompt).
-    let download = if disk_needs_download {
+    // Community builds default to a metadata-only check. They download here
+    // only after the user explicitly enables auto-update; otherwise Ctrl+U
+    // starts the same update subprocess after the TUI exits.
+    let download = if should_start_background_download(auto_update, disk_needs_download) {
         match run_update_subcommand(UpdateRunMode::NonBlocking).await {
             Ok(child) => child,
             Err(e) => {
@@ -563,6 +582,12 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
                 None
             }
         }
+    } else if !auto_update {
+        tracing::info!(
+            target_version = %target_version,
+            "Background update: automatic download disabled; waiting for explicit user action"
+        );
+        None
     } else {
         tracing::info!(
             target_version = %target_version,
@@ -598,23 +623,9 @@ pub async fn run_update_if_available(
 
     let current_config = config::load_config().await;
 
-    // Skip update check if auto-update is explicitly disabled.
-    if current_config.cli.auto_update == Some(false) {
+    let auto_update = effective_auto_update_enabled(current_config.cli.auto_update);
+    if !auto_update {
         return Ok(false);
-    }
-
-    // Resolve effective auto_update: None defaults to true (first-run).
-    let auto_update = current_config.cli.auto_update.unwrap_or(true);
-
-    if current_config.cli.auto_update.is_none()
-        && let Err(e) = config::update_config(|st| {
-            if st.cli.auto_update.is_none() {
-                st.cli.auto_update = Some(true);
-            }
-        })
-        .await
-    {
-        tracing::warn!("Failed to save auto-update setting: {}", e);
     }
 
     let current_version = get_installed_grok_version();
@@ -754,6 +765,15 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
     }
 }
 
+/// Run the explicit update command after the user accepts the welcome-screen
+/// prompt. Unlike automatic startup paths, this intentionally ignores the
+/// persisted `auto_update` preference: Ctrl+U is the user's authorization for
+/// this one download and install.
+pub async fn run_user_approved_update() -> Result<()> {
+    run_update_subcommand(UpdateRunMode::Blocking).await?;
+    Ok(())
+}
+
 /// Resolve the grok binary path for re-execution after an update.
 ///
 /// `current_exe()` resolves symlinks via `/proc/self/exe` (see proc(5)),
@@ -841,11 +861,11 @@ pub async fn run_install_script(
     })
 }
 
-/// Install the exact raw executable recorded by an immutable Release in the
-/// community repository. The download is kept beside the running executable,
-/// verified before execution, smoke-tested, and only then swapped into place.
-/// The existing Windows replacement helper preserves a running old image and
-/// restores it if copying the verified candidate fails.
+/// Install from the exact complete ZIP package recorded by an immutable
+/// community Release. The archive is verified against GitHub metadata, its
+/// layout and inner SHA256SUMS are checked, and the extracted executable is
+/// smoke-tested before activation. Companion files remain managed by the full
+/// Windows installer; the updater never accepts a separate raw EXE asset.
 #[cfg(feature = "community-build")]
 async fn install_community_release(
     target: Option<&str>,
@@ -885,8 +905,31 @@ async fn install_community_release(
         if asset.version != version {
             anyhow::bail!("release asset version does not match the requested version");
         }
-        let candidate = unique_temp_sibling(&destination, "download.exe");
-        crate::community_release::download_verified(&asset, &candidate).await?;
+        let archive = unique_temp_sibling(&destination, "download.zip");
+        let candidate = unique_temp_sibling(&destination, "candidate.exe");
+        crate::community_release::download_verified(&asset, &archive).await?;
+
+        let archive_for_extract = archive.clone();
+        let candidate_for_extract = candidate.clone();
+        let extract_result = tokio::task::spawn_blocking(move || {
+            crate::community_release::extract_verified_executable(
+                &archive_for_extract,
+                &candidate_for_extract,
+            )
+        })
+        .await;
+        let _ = tokio::fs::remove_file(&archive).await;
+        match extract_result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let _ = tokio::fs::remove_file(&candidate).await;
+                return Err(error).context("validating the community release ZIP");
+            }
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&candidate).await;
+                anyhow::bail!("community release ZIP verifier failed: {error}");
+            }
+        }
 
         let version_output = match smoke_test_binary(&candidate).await {
             Ok(output) => output,
@@ -3881,6 +3924,29 @@ mod tests {
             "grok 1.2.3 (abcdef0)\n",
             "1.2.3"
         ));
+    }
+
+    #[test]
+    fn test_effective_auto_update_respects_distribution_default_and_overrides() {
+        assert_eq!(
+            effective_auto_update_enabled(None),
+            crate::default_auto_update_enabled()
+        );
+        assert!(effective_auto_update_enabled(Some(true)));
+        assert!(!effective_auto_update_enabled(Some(false)));
+        #[cfg(feature = "community-build")]
+        assert!(!effective_auto_update_enabled(None));
+        #[cfg(not(feature = "community-build"))]
+        assert!(effective_auto_update_enabled(None));
+    }
+
+    #[test]
+    fn test_background_update_decisions_keep_default_off_metadata_only() {
+        assert!(!should_skip_cached_background_check(false, true));
+        assert!(!should_start_background_download(false, true));
+        assert!(should_skip_cached_background_check(true, true));
+        assert!(should_start_background_download(true, true));
+        assert!(!should_start_background_download(true, false));
     }
 
     #[test]

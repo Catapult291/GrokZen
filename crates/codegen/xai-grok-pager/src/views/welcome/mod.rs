@@ -2349,7 +2349,7 @@ fn render_welcome_done(
                 .named_static_text("welcome.update.prefix", "Update: ");
             let update_template = p.locale.named_text(
                 "welcome.update.available",
-                "v{version} available — press {key} to restart",
+                "v{version} available — press {key} to download and install",
             );
             let update_text = update_template
                 .replace("{version}", ver)
@@ -3354,14 +3354,20 @@ mod tests {
         assert!(ready.contains("测试版"), "{ready}");
         assert!(!ready.contains("中文社区版"), "{ready}");
         assert!(!ready.contains("Beta"), "{ready}");
+    }
 
+    #[test]
+    fn simplified_chinese_update_prompt_describes_download() {
+        let auth = AuthState::Done;
+        let trust = TrustState::Done;
         let mut params = render_params(&auth, &trust, None);
         params.locale = &ZH_TEST_LOCALE;
         params.pending_update_version = Some("9.9.9");
+
         let update = render_done_text(&params);
         assert!(update.contains("更新："), "{update}");
         assert!(
-            update.contains("v9.9.9 已可用 — 按 ctrl+u 重启"),
+            update.contains("v9.9.9 已可用 — 按 ctrl+u 下载并安装"),
             "{update}"
         );
     }

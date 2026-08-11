@@ -25,12 +25,13 @@ Verify the installation:
 grok-zh --version
 ```
 
-Updater-enabled builds accept only immutable Releases from this repository and
-verify the exact Windows GNU executable's size and GitHub SHA-256. They never
-fall back to official xAI release channels. Existing builds without this
-updater require one manual bridge Release installation. When the welcome view
-shows an update, press `Ctrl+U` to exit the old TUI and finish the update, then
-run `grok-zh` again.
+Updater-enabled builds accept only the exact complete Windows GNU ZIP and its
+checksum sidecar from immutable Releases in this repository. They verify the
+GitHub SHA-256, safe archive layout, and the package's inner `SHA256SUMS.txt`,
+and never fall back to official xAI release channels. Background downloads are
+off by default: startup checks metadata and shows a notice, while `Ctrl+U`
+authorizes that one download and install. Existing raw-asset builds require one
+manual ZIP installation to cross the ZIP-only bridge.
 
 ---
 

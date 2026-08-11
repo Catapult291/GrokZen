@@ -1338,7 +1338,7 @@ Each feature section below documents its own config. This section covers the gen
 
 ```toml
 [cli]
-auto_update = true                     # check for updates on launch
+auto_update = false                    # community default: notify only; Ctrl+U downloads
 
 [models]
 default = "grok-4.5"                   # model used for new sessions
