@@ -1,4 +1,4 @@
-name: Grok Build 中文社区版 Windows 发布
+name: Release
 
 on:
   push:

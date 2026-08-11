@@ -7,7 +7,7 @@
 
 1. 推荐从本仓库 [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases)
    下载 `grok-zh-<version>-windows-x86_64-gnu.zip`。开发测试也可从
-   **Actions → zh-dev Windows 预览版** 下载短期 Artifact。
+   **Actions → CI** 下载短期 Artifact。
 2. 解压一次；Release ZIP 内直接是安装包内容。
 3. 确认目录中至少包含：
 

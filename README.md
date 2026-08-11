@@ -47,7 +47,7 @@
 ## Windows 安装
 
 正式 Tag 工作流会在 [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases)
-中发布完整 Windows ZIP；`zh-dev Windows 预览版` 仍会上传短期 Actions Artifact。
+中发布完整 Windows ZIP；`CI` 工作流仍会上传短期 Actions Artifact。
 解压完整包后，在包内运行社区安装器：
 
 ```powershell

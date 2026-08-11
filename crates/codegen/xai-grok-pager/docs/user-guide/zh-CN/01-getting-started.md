@@ -14,7 +14,7 @@ Agent Client Protocol（ACP）集成到编辑器中。
 
 ## 安装
 
-社区 Windows 包由本仓库 Releases 和 `zh-dev Windows preview` 构建流水线生成。
+社区 Windows 包由本仓库 Releases 和 `CI` 工作流生成。
 Release ZIP 下载后只需解压一次；包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
 `grok-zh`、`agent-zh`，并支持由用户显式接管 `grok`、`agent`。完整说明也会
 作为包内的 `INSTALL-WINDOWS.md` 提供，并可在

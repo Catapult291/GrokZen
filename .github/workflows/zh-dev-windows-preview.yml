@@ -1,4 +1,4 @@
-name: zh-dev Windows 预览版
+name: CI
 
 on:
   push:
