@@ -752,29 +752,33 @@ mod link_click_tests {
     #[test]
     fn watching_cue_click_opens_tasks_pane_with_one_time_shortcut_toast() {
         let reg = ActionRegistry::defaults();
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
         let mut agent = make_agent();
         agent.last_terminal_size = (80, 30);
         super::test_fixtures::add_running_bg_task(&mut agent);
         draw_banner_frame(&mut agent, &reg, &[], 0);
         let rect = agent.hit_watching_cue.rect.expect("cue rect must be armed");
         let click = Event::Mouse(mouse_down(rect.x + 1, rect.y));
-        let _ = agent.handle_input(&click, &reg);
+        let _ = agent.handle_input_with_locale(&click, &reg, &locale);
         assert!(agent.tasks.overlay.focused);
         assert!(agent.toast.is_none(), "focus-only click must not toast");
         agent.tasks.overlay.hide();
         agent.tasks.on_state_change();
         draw_banner_frame(&mut agent, &reg, &[], 0);
-        let _ = agent.handle_input(&click, &reg);
+        let _ = agent.handle_input_with_locale(&click, &reg, &locale);
         assert!(agent.tasks.overlay.visible && agent.tasks.overlay.focused);
         assert_eq!(agent.active_pane, AgentPane::Tasks);
         let toast = agent.toast.clone().map(|(msg, _)| msg);
-        assert_eq!(toast.as_deref(), Some("Tip: Ctrl+G toggles the tasks pane"));
+        assert_eq!(toast.as_deref(), Some("提示：按 Ctrl+G 可切换任务面板"));
         agent.toast = None;
         draw_banner_frame(&mut agent, &reg, &[], 0);
-        let _ = agent.handle_input(&click, &reg);
+        let _ = agent.handle_input_with_locale(&click, &reg, &locale);
         assert!(!agent.tasks.overlay.visible);
         draw_banner_frame(&mut agent, &reg, &[], 0);
-        let _ = agent.handle_input(&click, &reg);
+        let _ = agent.handle_input_with_locale(&click, &reg, &locale);
         assert!(agent.tasks.overlay.visible);
         assert!(agent.toast.is_none(), "toast fires only once per session");
     }

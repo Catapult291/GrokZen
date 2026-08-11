@@ -34,6 +34,13 @@ impl AgentView {
     ///
     /// Scroll events are handled at app level (not here).
     pub(super) fn handle_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
+        self.handle_mouse_with_locale(mouse, None)
+    }
+    pub(super) fn handle_mouse_with_locale(
+        &mut self,
+        mouse: &MouseEvent,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> InputOutcome {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
@@ -185,10 +192,13 @@ impl AgentView {
                     }
                     if !was_visible && !self.watching_cue_toast_shown {
                         self.watching_cue_toast_shown = true;
-                        let message = self.locale.named_static_text(
-                            "tasks.toast.toggle_hint",
-                            "Tip: Ctrl+G toggles the tasks pane",
-                        );
+                        let message =
+                            locale.map_or("Tip: Ctrl+G toggles the tasks pane", |locale| {
+                                locale.named_static_text(
+                                    "tasks.toast.toggle_hint",
+                                    "Tip: Ctrl+G toggles the tasks pane",
+                                )
+                            });
                         self.show_toast(message);
                     }
                     return InputOutcome::Changed;

@@ -325,7 +325,15 @@ impl AgentView {
     /// 2. Agent-level (cancel, yolo -- checked if pane didn't consume)
     /// 3. Return Unchanged (bubbles to app_view for global actions)
     pub fn handle_input(&mut self, ev: &Event, registry: &ActionRegistry) -> InputOutcome {
-        self.handle_input_inner(ev, registry, false)
+        self.handle_input_inner(ev, registry, false, None)
+    }
+    pub(in crate::app) fn handle_input_with_locale(
+        &mut self,
+        ev: &Event,
+        registry: &ActionRegistry,
+        locale: &crate::locale::LocaleContext,
+    ) -> InputOutcome {
+        self.handle_input_inner(ev, registry, false, Some(locale))
     }
     /// Enable prompt-focused conversation paging on a normal full-TUI agent surface.
     pub(in crate::app) fn handle_input_with_prompt_paging(
@@ -333,13 +341,37 @@ impl AgentView {
         ev: &Event,
         registry: &ActionRegistry,
     ) -> InputOutcome {
-        self.handle_input_inner(ev, registry, true)
+        self.handle_input_inner(ev, registry, true, None)
+    }
+    pub(in crate::app) fn handle_input_with_prompt_paging_and_locale(
+        &mut self,
+        ev: &Event,
+        registry: &ActionRegistry,
+        locale: &crate::locale::LocaleContext,
+    ) -> InputOutcome {
+        self.handle_input_inner(ev, registry, true, Some(locale))
     }
     /// Route minimal-only `/btw` ownership before the unchanged shared router.
     pub(in crate::app) fn handle_minimal_input(
         &mut self,
         ev: &Event,
         registry: &ActionRegistry,
+    ) -> InputOutcome {
+        self.handle_minimal_input_inner(ev, registry, None)
+    }
+    pub(in crate::app) fn handle_minimal_input_with_locale(
+        &mut self,
+        ev: &Event,
+        registry: &ActionRegistry,
+        locale: &crate::locale::LocaleContext,
+    ) -> InputOutcome {
+        self.handle_minimal_input_inner(ev, registry, Some(locale))
+    }
+    fn handle_minimal_input_inner(
+        &mut self,
+        ev: &Event,
+        registry: &ActionRegistry,
+        locale: Option<&crate::locale::LocaleContext>,
     ) -> InputOutcome {
         match self.handle_minimal_btw_input(ev) {
             crate::minimal_api::MinimalBtwInput::Handled(outcome) => *outcome,
@@ -356,14 +388,16 @@ impl AgentView {
                     ) {
                     InputOutcome::Changed
                 } else {
-                    self.handle_input(ev, registry)
+                    self.handle_input_inner(ev, registry, false, locale)
                 };
                 if let Some(suspended) = suspended {
                     crate::minimal_api::restore_minimal_btw(self, suspended);
                 }
                 outcome
             }
-            crate::minimal_api::MinimalBtwInput::Delegate => self.handle_input(ev, registry),
+            crate::minimal_api::MinimalBtwInput::Delegate => {
+                self.handle_input_inner(ev, registry, false, locale)
+            }
         }
     }
     /// Handle only minimal `/btw` dismissal and keyboard scrolling.
@@ -423,6 +457,7 @@ impl AgentView {
         ev: &Event,
         registry: &ActionRegistry,
         prompt_paging: bool,
+        locale: Option<&crate::locale::LocaleContext>,
     ) -> InputOutcome {
         if self.scrollback_drag_latched() {
             let live_drag_event = matches!(
@@ -476,7 +511,7 @@ impl AgentView {
             }
             if let Some(child_view) = self.subagent_views.get_mut(child_sid) {
                 child_view.mark_as_subagent_view();
-                return child_view.handle_input_inner(ev, registry, prompt_paging);
+                return child_view.handle_input_inner(ev, registry, prompt_paging, locale);
             }
             return InputOutcome::Unchanged;
         }
@@ -1121,7 +1156,7 @@ impl AgentView {
                     }
                 }
             }
-            Event::Mouse(mouse) => self.handle_mouse(mouse),
+            Event::Mouse(mouse) => self.handle_mouse_with_locale(mouse, locale),
             _ => InputOutcome::Unchanged,
         };
         if !matches!(outcome, InputOutcome::Unchanged) {

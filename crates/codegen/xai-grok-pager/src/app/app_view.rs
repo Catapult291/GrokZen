@@ -2806,11 +2806,19 @@ impl AppView {
                         let transcript_before = agent.active_subagent.clone();
                         let workflows_before = agent.show_workflows;
                         let outcome = if self.screen_mode.is_minimal() {
-                            agent.handle_minimal_input(ev, &self.registry)
+                            agent.handle_minimal_input_with_locale(
+                                ev,
+                                &self.registry,
+                                self.locale.as_ref(),
+                            )
                         } else if prompt_paging {
-                            agent.handle_input_with_prompt_paging(ev, &self.registry)
+                            agent.handle_input_with_prompt_paging_and_locale(
+                                ev,
+                                &self.registry,
+                                self.locale.as_ref(),
+                            )
                         } else {
-                            agent.handle_input(ev, &self.registry)
+                            agent.handle_input_with_locale(ev, &self.registry, self.locale.as_ref())
                         };
                         let transcript_opened =
                             transcript_before.is_none() && agent.active_subagent.is_some();
@@ -2934,7 +2942,11 @@ impl AppView {
                         Some(agent) => {
                             let transcript_before = agent.active_subagent.clone();
                             let workflows_before = agent.show_workflows;
-                            let outcome = agent.handle_input(ev, &self.registry);
+                            let outcome = agent.handle_input_with_locale(
+                                ev,
+                                &self.registry,
+                                self.locale.as_ref(),
+                            );
                             let transcript_opened =
                                 transcript_before.is_none() && agent.active_subagent.is_some();
                             let workflows_opened = !workflows_before && agent.show_workflows;
