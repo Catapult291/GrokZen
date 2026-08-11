@@ -3782,7 +3782,7 @@
     }
 
     #[test]
-    fn default_placeholder_uses_the_chinese_ui_locale() {
+    fn zh_localization_default_placeholder_uses_ui_locale() {
         let mut pw = PromptWidget::new();
         let mut style = ghost_test_style();
         style.focused = false;

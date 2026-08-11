@@ -24,7 +24,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 180
     env:
-      CARGO_BUILD_JOBS: "3"
+      CARGO_BUILD_JOBS: "4"
       CARGO_CACHE_SCHEMA: v2
       CARGO_INCREMENTAL: "0"
       CARGO_NET_RETRY: "10"
@@ -168,7 +168,13 @@ jobs:
           "已验证 $count 个 zh-CN 条目。"
 
           cargo fetch --locked --target $env:TARGET
-          cargo test --frozen -j 1 -p xai-grok-locale
+          if ($LASTEXITCODE -ne 0) { throw "cargo fetch 失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-locale
+          if ($LASTEXITCODE -ne 0) { throw "xai-grok-locale 测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib session_summary
+          if ($LASTEXITCODE -ne 0) { throw "中文会话标题测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
+          if ($LASTEXITCODE -ne 0) { throw "中文界面定向测试失败：$LASTEXITCODE" }
 
       - name: 验证 Windows 安装程序
         shell: pwsh

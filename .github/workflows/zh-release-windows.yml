@@ -18,7 +18,7 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 180
     env:
-      CARGO_BUILD_JOBS: "3"
+      CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
       CARGO_NET_RETRY: "10"
       CARGO_HTTP_TIMEOUT: "120"
@@ -160,12 +160,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cargo fmt 失败：$LASTEXITCODE" }
           cargo fetch --locked --target $env:TARGET
           if ($LASTEXITCODE -ne 0) { throw "cargo fetch 失败：$LASTEXITCODE" }
-          cargo test --frozen -j 1 -p xai-grok-product
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-product
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-product 测试失败：$LASTEXITCODE" }
-          cargo test --frozen -j 1 -p xai-grok-update --features community-build --lib
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-update --features community-build --lib
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-update 测试失败：$LASTEXITCODE" }
-          cargo test --frozen -j 1 -p xai-grok-locale
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-locale
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-locale 测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib session_summary
+          if ($LASTEXITCODE -ne 0) { throw "中文会话标题测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
+          if ($LASTEXITCODE -ne 0) { throw "中文界面定向测试失败：$LASTEXITCODE" }
           & .\packaging\windows\tests\Test-Install-GrokZh.ps1
           & powershell.exe -NoProfile -NonInteractive `
             -File .\packaging\windows\tests\Test-Install-GrokZh.ps1
@@ -274,7 +278,8 @@ jobs:
           Upstream source revision: $sourceRev
           Repository: $env:GITHUB_REPOSITORY
           Target: $env:TARGET
-          Profile: low-memory GNU release (LTO disabled, debug disabled, codegen-units=16)
+          Profile: GitHub 4-core parallel GNU release (LTO disabled, debug disabled, codegen-units=16)
+          Cargo jobs: $env:CARGO_BUILD_JOBS
           PE: $pe
           Authenticode: $signature
           GitHub Immutable Release required: true

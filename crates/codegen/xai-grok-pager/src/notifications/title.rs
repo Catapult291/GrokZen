@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn chinese_terminal_title_localizes_fixed_chrome_and_keeps_tool_detail() {
+    fn zh_localization_terminal_title_keeps_dynamic_tool_detail() {
         let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
             locale: crate::locale::UiLocale::ZhCn,
             source: crate::locale::LocaleSource::Cli,
@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn chinese_terminal_title_localizes_action_required() {
+    fn zh_localization_terminal_title_action_required() {
         let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
             locale: crate::locale::UiLocale::ZhCn,
             source: crate::locale::LocaleSource::Cli,

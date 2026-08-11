@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn chinese_media_tool_prefix_is_localized_but_dynamic_prompt_is_opaque() {
+    fn zh_localization_media_prefix_keeps_dynamic_prompt_opaque() {
         let block = OtherToolCallBlock::new(
             "image-to-video: Keep API_KEY and C:\\images\\1.jpg unchanged",
             "",
@@ -662,7 +662,7 @@ mod tests {
     }
 
     #[test]
-    fn english_and_unknown_tool_titles_keep_their_original_identity() {
+    fn zh_localization_media_keeps_english_and_unknown_identity() {
         let media = OtherToolCallBlock::new("reference-to-video: a robot waves", "");
         assert_eq!(
             media.localized_name(&locale(crate::locale::UiLocale::EnUs)),
