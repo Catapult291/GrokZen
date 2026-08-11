@@ -100,10 +100,7 @@ impl OtherToolCallBlock {
             ("image-gen", "scrollback.tool.imagine"),
             ("image_gen", "scrollback.tool.imagine"),
             ("image-to-video", "scrollback.tool.image_to_video"),
-            (
-                "reference-to-video",
-                "scrollback.tool.reference_to_video",
-            ),
+            ("reference-to-video", "scrollback.tool.reference_to_video"),
         ];
 
         for &(english, key) in PREFIXES {
@@ -302,14 +299,12 @@ impl BlockContent for OtherToolCallBlock {
                         Some(ctx.content_width()),
                         &ctx.locale,
                     )
-                        .into(),
+                    .into(),
                 ],
             },
             DisplayMode::Truncated | DisplayMode::Expanded => {
                 let mut lines: Vec<BlockLine> =
-                    vec![self
-                        .collapsed_line(&theme, false, None, &ctx.locale)
-                        .into()];
+                    vec![self.collapsed_line(&theme, false, None, &ctx.locale).into()];
 
                 if let Some(output) = &self.output {
                     // Try to render as structured Q&A (AskUserQuestion output).
