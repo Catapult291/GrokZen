@@ -282,6 +282,33 @@ pub enum ModalWindowOutcome {
 // Rendering
 // ---------------------------------------------------------------------------
 
+/// Remove a wide glyph whose leading cell sits immediately left of a popup.
+///
+/// Ratatui's diff assumes that a double-width lead cell is followed by its
+/// blank continuation cell. A centered overlay can otherwise replace only the
+/// continuation with its left border, producing a malformed `[宽, │]` row. The
+/// diff then skips the border cell and its logical back buffer diverges from the
+/// physical terminal. Normalizing the clipped glyph before `Clear` keeps the
+/// buffer well-formed; the underlying view redraws it after the modal closes.
+fn clear_wide_glyphs_crossing_left_edge(buf: &mut Buffer, modal_area: Rect) {
+    let Some(lead_x) = modal_area.x.checked_sub(1) else {
+        return;
+    };
+    if lead_x < buf.area.x || modal_area.x >= buf.area.right() {
+        return;
+    }
+
+    for y in modal_area.top()..modal_area.bottom().min(buf.area.bottom()) {
+        if buf
+            .cell((lead_x, y))
+            .is_some_and(|cell| cell.symbol().width() > 1)
+            && let Some(cell) = buf.cell_mut((lead_x, y))
+        {
+            cell.reset();
+        }
+    }
+}
+
 /// Render the modal window chrome and return the content area for the
 /// caller to render into.
 ///
@@ -334,6 +361,10 @@ pub fn render_modal_window(
         }
     };
     state.popup_area = Some(modal_area);
+
+    if !is_embedded {
+        clear_wide_glyphs_crossing_left_edge(buf, modal_area);
+    }
 
     // Clear cells under the modal so content behind doesn't bleed through.
     Clear.render(modal_area, buf);
@@ -1143,6 +1174,42 @@ mod tests {
             sizing: ModalSizing::default(),
             fold_info: None,
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn modal_normalizes_wide_glyph_crossing_its_left_border() {
+        let area = Rect::new(0, 0, 80, 24);
+        let config = dummy_config();
+        let (modal_width, modal_height) = compute_modal_dims(area, &config.sizing);
+        let modal = Rect::new(
+            (area.width - modal_width) / 2,
+            (area.height - modal_height) / 2,
+            modal_width,
+            modal_height,
+        );
+        assert!(modal.x > 0, "fixture needs a centered left edge");
+
+        let row = modal.y + 2;
+        let mut buf = Buffer::empty(area);
+        buf.set_string(modal.x - 1, row, "中", Style::default());
+        assert_eq!(buf[(modal.x - 1, row)].symbol().width(), 2);
+
+        set_embedded(false);
+        let mut state = ModalWindowState::new();
+        render_modal_window(&mut buf, area, &mut state, &config, &Theme::current())
+            .expect("modal renders");
+
+        assert_eq!(
+            buf[(modal.x - 1, row)].symbol(),
+            " ",
+            "the clipped wide lead must be cleared before the border is drawn"
+        );
+        assert_ne!(
+            buf[(modal.x, row)].symbol(),
+            " ",
+            "the left border must occupy the former continuation cell"
+        );
     }
 
     /// The `i search` footer hint appears only in vim NAV mode (vim-mode on,

@@ -2112,6 +2112,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_standalone_empty_id_anchor_is_hidden_in_pretty_output() {
+        let md = "<a id=\"available-themes\"></a>\n## 可用主题\n\n保留普通标签 <decl>。\n";
+
+        let (output, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
+        let text = lines_to_text(&output.lines).join("\n");
+
+        assert!(text.contains("可用主题"), "heading disappeared: {text:?}");
+        assert!(
+            text.contains("<decl>"),
+            "generic HTML-like text disappeared: {text:?}"
+        );
+        assert!(!text.contains("<a"), "empty anchor leaked: {text:?}");
+        assert!(
+            !text.contains("available-themes"),
+            "anchor id leaked: {text:?}"
+        );
+        assert!(!text.contains("</a>"), "closing anchor leaked: {text:?}");
+    }
+
+    #[test]
+    fn test_standalone_empty_id_anchor_at_eof_respects_pretty_mode() {
+        let md = "<a id=\"tail-anchor\"></a>";
+
+        let (pretty_output, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
+        let pretty_text = lines_to_text(&pretty_output.lines).join("\n");
+        assert!(
+            !pretty_text.contains("tail-anchor"),
+            "EOF anchor leaked in pretty ratatui output: {pretty_text:?}"
+        );
+
+        let (raw_output, _) = render_markdown_ratatui_full(md, test_style::STYLE, false, None);
+        let raw_text = lines_to_text(&raw_output.lines).join("\n");
+        assert!(
+            raw_text.contains("tail-anchor"),
+            "raw ratatui output must preserve source anchors: {raw_text:?}"
+        );
+
+        let (pretty_ansi, _) = crate::render_markdown(md, test_style::STYLE, true, None);
+        assert!(
+            !pretty_ansi.contains("tail-anchor"),
+            "EOF anchor leaked in pretty ANSI output: {pretty_ansi:?}"
+        );
+
+        let (raw_ansi, _) = crate::render_markdown(md, test_style::STYLE, false, None);
+        assert!(
+            raw_ansi.contains("tail-anchor"),
+            "raw ANSI output must preserve source anchors: {raw_ansi:?}"
+        );
+    }
+
     /// Multiple HTML-like tags across different cells and rows must all
     /// render correctly without leaking.
     #[test]
