@@ -35,7 +35,7 @@ jobs:
 
     steps:
       - name: 检出 zh-dev
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: 选择预览版本
         id: preview
@@ -127,7 +127,7 @@ jobs:
 
       - name: 恢复 Cargo 依赖缓存
         id: cargo_home_cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ${{ runner.temp }}/grok-zh-cargo/registry
@@ -141,7 +141,7 @@ jobs:
 
       - name: 恢复 Cargo GNU release 缓存
         id: cargo_target_cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release
           key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
@@ -518,14 +518,14 @@ jobs:
 
       - name: 保存 Cargo GNU release 缓存
         if: ${{ success() && github.ref_name == 'zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release
           key: ${{ steps.cargo_target_cache.outputs.cache-primary-key }}
 
       - name: 保存 Cargo 依赖缓存
         if: ${{ success() && github.ref_name == 'zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
         with:
           path: |
             ${{ runner.temp }}/grok-zh-cargo/registry
