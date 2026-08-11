@@ -345,8 +345,19 @@ jobs:
             throw "创建 Draft Release 失败：$LASTEXITCODE"
           }
 
-          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" |
+          # GitHub's tag lookup endpoint does not expose draft releases. Enumerate
+          # the authenticated release list and require one exact draft instead.
+          $releasePages = gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" |
             ConvertFrom-Json
+          $releaseMatches = @(
+            $releasePages |
+              ForEach-Object { $_ } |
+              Where-Object { $_.tag_name -eq $env:RELEASE_TAG -and $_.draft }
+          )
+          if ($releaseMatches.Count -ne 1) {
+            throw "没有找到唯一的 Draft Release：$env:RELEASE_TAG"
+          }
+          $release = $releaseMatches[0]
           if (!$release.draft -or $release.tag_name -ne $env:RELEASE_TAG) {
             throw 'Draft Release 元数据与 Tag 不一致。'
           }
