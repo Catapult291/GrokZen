@@ -185,7 +185,11 @@ impl AgentView {
                     }
                     if !was_visible && !self.watching_cue_toast_shown {
                         self.watching_cue_toast_shown = true;
-                        self.show_toast("Tip: Ctrl+G toggles the tasks pane");
+                        let message = self.locale.named_static_text(
+                            "tasks.toast.toggle_hint",
+                            "Tip: Ctrl+G toggles the tasks pane",
+                        );
+                        self.show_toast(message);
                     }
                     return InputOutcome::Changed;
                 }

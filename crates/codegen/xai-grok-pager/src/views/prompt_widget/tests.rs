@@ -3782,6 +3782,25 @@
     }
 
     #[test]
+    fn default_placeholder_uses_the_chinese_ui_locale() {
+        let mut pw = PromptWidget::new();
+        let mut style = ghost_test_style();
+        style.focused = false;
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+
+        pw.draw_with_locale(&mut buf, area, None, &style, None, None, Some(&locale));
+
+        let rendered = buf_text_at(&buf, 0, area.width, 0);
+        assert!(rendered.contains("告诉我你想做些什么…"), "rendered={rendered:?}");
+        assert!(!rendered.contains("Build anything"));
+    }
+
+    #[test]
     fn set_and_has_ghost_text() {
         let mut pw = PromptWidget::new();
         assert!(!pw.has_ghost_text());

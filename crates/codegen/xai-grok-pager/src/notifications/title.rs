@@ -28,6 +28,8 @@ const ACTION_REQUIRED_BLINK_DIVISOR: u64 = 15;
 
 /// State passed into `TitleManager::update()` each tick.
 pub struct TitleState<'a> {
+    /// Locale for fixed terminal-title chrome. Session/model/tool payloads stay opaque.
+    pub locale: Option<&'a crate::locale::LocaleContext>,
     pub session_name: Option<&'a str>,
     pub model: Option<&'a str>,
     pub activity: Option<&'a TurnActivity>,
@@ -146,10 +148,14 @@ fn write_item(
         TitleItem::Activity => {
             if let Some(activity) = state.activity {
                 push_separator(buf, has_parts);
-                write_activity(buf, activity);
+                write_activity(buf, activity, state.locale);
             } else if state.is_busy {
                 push_separator(buf, has_parts);
-                buf.push_str("Waiting");
+                buf.push_str(title_text(
+                    state.locale,
+                    "notifications.title.waiting",
+                    "Waiting",
+                ));
             } else {
                 return false;
             }
@@ -203,7 +209,12 @@ fn write_item(
                 return false;
             }
             push_separator(buf, has_parts);
-            buf.push_str("\u{26A0} Action Required");
+            buf.push_str("\u{26A0} ");
+            buf.push_str(title_text(
+                state.locale,
+                "notifications.title.action_required",
+                "Action Required",
+            ));
         }
     }
     *has_parts = true;
@@ -216,33 +227,78 @@ fn push_separator(buf: &mut String, has_parts: &mut bool) {
     }
 }
 
-fn write_activity(buf: &mut String, activity: &TurnActivity) {
+fn title_text(
+    locale: Option<&crate::locale::LocaleContext>,
+    id: &str,
+    english: &'static str,
+) -> &'static str {
+    locale
+        .map(|locale| locale.named_static_text(id, english))
+        .unwrap_or(english)
+}
+
+fn write_activity(
+    buf: &mut String,
+    activity: &TurnActivity,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
     match activity {
-        TurnActivity::Thinking => buf.push_str("Thinking"),
-        TurnActivity::Responding => buf.push_str("Responding"),
+        TurnActivity::Thinking => buf.push_str(title_text(
+            locale,
+            "notifications.title.thinking",
+            "Thinking",
+        )),
+        TurnActivity::Responding => buf.push_str(title_text(
+            locale,
+            "notifications.title.responding",
+            "Responding",
+        )),
         TurnActivity::ToolRunning { title, description } => {
             if let Some(desc) = description
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                buf.push_str(&crate::acp::tracker::format_waiting_for_subject(desc));
+                buf.push_str(
+                    &crate::acp::tracker::format_waiting_for_subject_with_locale(desc, locale),
+                );
             } else if title.is_empty() {
-                buf.push_str("Running tool");
+                buf.push_str(title_text(
+                    locale,
+                    "notifications.title.running_tool",
+                    "Running tool",
+                ));
             } else {
-                buf.push_str("Running: ");
+                buf.push_str(title_text(
+                    locale,
+                    "notifications.title.running_prefix",
+                    "Running: ",
+                ));
                 write_truncated(buf, title, 30);
             }
         }
-        TurnActivity::AutoCompacting => buf.push_str("Compacting"),
+        TurnActivity::AutoCompacting => buf.push_str(title_text(
+            locale,
+            "notifications.title.compacting",
+            "Compacting",
+        )),
         TurnActivity::Retrying {
             attempt,
             max_retries,
             ..
         } => {
-            let _ = write!(buf, "Retrying ({}/{})", attempt, max_retries);
+            let template = title_text(
+                locale,
+                "notifications.title.retrying",
+                "Retrying ({attempt}/{max_retries})",
+            );
+            buf.push_str(
+                &template
+                    .replace("{attempt}", &attempt.to_string())
+                    .replace("{max_retries}", &max_retries.to_string()),
+            );
         }
-        TurnActivity::Waiting(reason) => buf.push_str(&reason.label()),
+        TurnActivity::Waiting(reason) => buf.push_str(&reason.label_with_locale(locale)),
     }
 }
 
@@ -293,6 +349,7 @@ mod tests {
 
     fn idle_state<'a>() -> TitleState<'a> {
         TitleState {
+            locale: None,
             session_name: None,
             model: None,
             activity: None,
@@ -518,6 +575,63 @@ mod tests {
         };
         mgr.update(&state);
         assert_eq!(mgr.last_title, "Retrying (2/5)");
+    }
+
+    #[test]
+    fn chinese_terminal_title_localizes_fixed_chrome_and_keeps_tool_detail() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let cfg = config_with_items(vec![TitleItem::Activity]);
+        let mut mgr = TitleManager::new(&cfg);
+
+        let thinking = TurnActivity::Thinking;
+        mgr.update(&TitleState {
+            locale: Some(&locale),
+            activity: Some(&thinking),
+            ..idle_state()
+        });
+        assert_eq!(mgr.last_title, "思考中");
+
+        let running = TurnActivity::ToolRunning {
+            title: "cargo build --frozen".to_owned(),
+            description: None,
+        };
+        mgr.update(&TitleState {
+            locale: Some(&locale),
+            activity: Some(&running),
+            ..idle_state()
+        });
+        assert_eq!(mgr.last_title, "运行：cargo build --frozen");
+
+        let retrying = TurnActivity::Retrying {
+            attempt: 2,
+            max_retries: 5,
+            reason: "timeout".to_owned(),
+        };
+        mgr.update(&TitleState {
+            locale: Some(&locale),
+            activity: Some(&retrying),
+            ..idle_state()
+        });
+        assert_eq!(mgr.last_title, "重试（2/5）");
+    }
+
+    #[test]
+    fn chinese_terminal_title_localizes_action_required() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let cfg = config_with_items(vec![TitleItem::ActionRequired]);
+        let mut mgr = TitleManager::new(&cfg);
+        mgr.update(&TitleState {
+            locale: Some(&locale),
+            has_pending_permissions: true,
+            ..idle_state()
+        });
+        assert_eq!(mgr.last_title, "⚠ 需要操作");
     }
 
     #[test]

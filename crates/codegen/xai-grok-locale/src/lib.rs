@@ -748,4 +748,24 @@ mod tests {
             "使用 grok.com 登录"
         );
     }
+
+    #[test]
+    fn chinese_composer_and_shortcut_labels_are_catalog_backed() {
+        let context = LocaleContext::new(ResolvedLocale {
+            locale: UiLocale::ZhCn,
+            source: LocaleSource::Cli,
+        });
+        assert_eq!(
+            context.named_text("prompt.placeholder.default", "Build anything"),
+            "告诉我你想做些什么…"
+        );
+        assert_eq!(
+            context.named_text("shortcut.clear_search", "clear search"),
+            "清除搜索"
+        );
+        assert_eq!(
+            context.named_text("shortcut.switch_tab", "switch tab"),
+            "切换标签页"
+        );
+    }
 }

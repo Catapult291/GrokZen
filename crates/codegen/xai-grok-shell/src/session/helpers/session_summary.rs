@@ -10,6 +10,17 @@ use crate::session::helpers::chat::floor_char_boundary;
 /// the opening, and this keeps the request well under the model prompt limit.
 const TITLE_SOURCE_MAX_BYTES: usize = 8_000;
 
+const SESSION_TITLE_SYSTEM_PROMPT: &str = r#"You are tasked with generating the session title. The user is asking almost always software engineering related questions on their codebase.
+We describe the session title below
+# Session Title
+A short and distinctive 5-10 word descriptive title for the session. Super info dense, no filler.
+
+You will be given the user query below encapsulated in <user_query></user_query>.
+
+Write the title in the same natural language as the user query. If the user query contains Chinese, the session_title MUST be concise Chinese and MUST NOT be translated into English. For mixed-language queries, follow the predominant natural language while preserving code identifiers, commands, and product names.
+
+Just generate the session_title and nothing else"#;
+
 #[derive(serde::Deserialize)]
 struct SessionTitle {
     session_title: String,
@@ -67,6 +78,29 @@ pub(crate) fn title_fallback_from_user_text(user_message: &str) -> String {
     }
 }
 
+fn contains_han(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(
+            character,
+            '\u{3400}'..='\u{4DBF}'
+                | '\u{4E00}'..='\u{9FFF}'
+                | '\u{F900}'..='\u{FAFF}'
+                | '\u{20000}'..='\u{2FA1F}'
+        )
+    })
+}
+
+/// Keep generated titles non-empty and enforce the Chinese-language contract.
+/// Other languages rely on the model instruction because this crate does not
+/// carry a general-purpose language detector.
+fn validated_generated_title(source: &str, generated: &str) -> Option<String> {
+    let generated = generated.trim();
+    if generated.is_empty() || (contains_han(source) && !contains_han(generated)) {
+        return None;
+    }
+    Some(generated.to_string())
+}
+
 /// Generates a title for the session by looking at the first user message
 /// We do not generate more of it on next user message unless its very important
 ///
@@ -78,16 +112,7 @@ pub async fn generate_session_summary(
 ) -> String {
     let clean_message = title_source_text(&user_message);
     let request = ConversationRequest::from_items(vec![
-        ConversationItem::system(
-            r#"You are tasked with generating the session title. The user is asking almost always software engineering related questions on their codebase.
-We describe the session title below
-# Session Title
-A short and distinctive 5-10 word descriptive title for the session. Super info dense, no filler.
-
-You will be given the user query below encapsulated in <user_query></user_query>.
-
-Just generate the session_title and nothing else"#,
-        ),
+        ConversationItem::system(SESSION_TITLE_SYSTEM_PROMPT),
         ConversationItem::user(format!(
             r#"<user_query>
 {}
@@ -98,14 +123,17 @@ Just generate the session_title and nothing else"#,
     .with_model(model)
     .with_tools(vec![ToolSpec {
         name: "session_title".to_owned(),
-        description: Some("Generate the session_title which we use for the user_message".to_owned()),
+        description: Some(
+            "Generate a concise session_title in the same natural language as the user query"
+                .to_owned(),
+        ),
         parameters: serde_json::json!({
             "type": "object",
             "required": ["session_title"],
             "properties": {
                 "session_title": {
                     "type": "string",
-                    "description": "Final session title, just 5-10 word descriptive title for the session. Super info dense, no filler."
+                    "description": "Final 5-10 word descriptive title in the same language as the user query. A Chinese query requires a concise Chinese title. Super info dense, no filler."
                 }
             },
             "additionalProperties": false
@@ -121,7 +149,15 @@ Just generate the session_title and nothing else"#,
                 && let Some(tool_call) = a.tool_calls.first()
                 && let Ok(result) = serde_json::from_str::<SessionTitle>(&tool_call.arguments)
             {
-                return result.session_title;
+                if let Some(title) =
+                    validated_generated_title(&clean_message, &result.session_title)
+                {
+                    return title;
+                }
+                tracing::warn!(
+                    model = %model,
+                    "session title generation returned an empty or wrong-language title; falling back to user text"
+                );
             }
             tracing::debug!(
                 model = %model,
@@ -142,8 +178,8 @@ Just generate the session_title and nothing else"#,
 #[cfg(test)]
 mod tests {
     use super::{
-        TITLE_SOURCE_MAX_BYTES, strip_system_reminder_blocks, title_fallback_from_user_text,
-        title_source_text,
+        SESSION_TITLE_SYSTEM_PROMPT, TITLE_SOURCE_MAX_BYTES, strip_system_reminder_blocks,
+        title_fallback_from_user_text, title_source_text, validated_generated_title,
     };
 
     #[test]
@@ -249,5 +285,33 @@ mod tests {
             title_fallback_from_user_text("fix the auth bug in login.rs"),
             "fix the auth bug in login.rs",
         );
+    }
+
+    #[test]
+    fn prompt_requires_titles_to_follow_the_user_language() {
+        assert!(SESSION_TITLE_SYSTEM_PROMPT.contains("same natural language as the user query"));
+        assert!(SESSION_TITLE_SYSTEM_PROMPT.contains("contains Chinese"));
+        assert!(SESSION_TITLE_SYSTEM_PROMPT.contains("MUST be concise Chinese"));
+    }
+
+    #[test]
+    fn chinese_source_rejects_english_generated_title() {
+        assert_eq!(
+            validated_generated_title("测试各种工具链是否正常", "Tool Chain Functionality Test"),
+            None
+        );
+        assert_eq!(
+            validated_generated_title("测试各种工具链是否正常", "测试工具链功能"),
+            Some("测试工具链功能".to_string())
+        );
+    }
+
+    #[test]
+    fn generated_title_is_trimmed_and_non_chinese_languages_remain_supported() {
+        assert_eq!(
+            validated_generated_title("fix the auth bug", "  Fix authentication bug  "),
+            Some("Fix authentication bug".to_string())
+        );
+        assert_eq!(validated_generated_title("fix the auth bug", "   "), None);
     }
 }

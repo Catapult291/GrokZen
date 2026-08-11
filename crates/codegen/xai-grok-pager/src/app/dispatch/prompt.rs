@@ -1447,6 +1447,7 @@ pub(super) fn handle_prompt_response(
                 let cwd_str = app.cwd.to_string_lossy();
                 let model = agent.session.models.current_model_name();
                 let idle_title = crate::notifications::TitleState {
+                    locale: Some(&app.locale),
                     session_name,
                     model: model.as_deref(),
                     activity: None,

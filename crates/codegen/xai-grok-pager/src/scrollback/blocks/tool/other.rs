@@ -89,6 +89,46 @@ impl OtherToolCallBlock {
         self.error.is_none()
     }
 
+    /// Localize only known, client-owned tool-title prefixes. The detail after
+    /// `: ` remains opaque because it can contain a prompt, path, command, or
+    /// server-provided text. The stored ACP title is never modified.
+    fn localized_name(&self, locale: &crate::locale::LocaleContext) -> String {
+        const PREFIXES: &[(&str, &str)] = &[
+            ("imagine-edit", "scrollback.tool.imagine_edit"),
+            ("image-edit", "scrollback.tool.imagine_edit"),
+            ("imagine", "scrollback.tool.imagine"),
+            ("image-gen", "scrollback.tool.imagine"),
+            ("image_gen", "scrollback.tool.imagine"),
+            ("image-to-video", "scrollback.tool.image_to_video"),
+            (
+                "reference-to-video",
+                "scrollback.tool.reference_to_video",
+            ),
+        ];
+
+        for &(english, key) in PREFIXES {
+            let detail = if self.name == english {
+                Some(None)
+            } else {
+                self.name
+                    .strip_prefix(english)
+                    .and_then(|rest| rest.strip_prefix(": "))
+                    .map(Some)
+            };
+            let Some(detail) = detail else {
+                continue;
+            };
+            let label = locale.named_static_text(key, english);
+            return match detail {
+                Some(detail) if label != english => format!("{label}：{detail}"),
+                Some(detail) => format!("{label}: {detail}"),
+                None => label.to_string(),
+            };
+        }
+
+        self.name.clone()
+    }
+
     /// Path of the first media reference (image or video) for the filepath
     /// line of an inline-media block, independent of inline-graphics support.
     pub(crate) fn media_ref_path(&self) -> Option<std::path::PathBuf> {
@@ -142,7 +182,13 @@ impl OtherToolCallBlock {
     ///
     /// When `muted` is true (collapsed state), all text uses dim styles to
     /// match other collapsed blocks. The label ("Ask") stays bold.
-    fn collapsed_line(&self, theme: &Theme, muted: bool, width: Option<usize>) -> Line<'static> {
+    fn collapsed_line(
+        &self,
+        theme: &Theme,
+        muted: bool,
+        width: Option<usize>,
+        locale: &crate::locale::LocaleContext,
+    ) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
         } else {
@@ -150,13 +196,17 @@ impl OtherToolCallBlock {
         };
         let bold_style = text_style.add_modifier(ratatui::style::Modifier::BOLD);
 
-        let mut spans = if let Some((label, content)) = self.name.split_once(": ") {
+        let display_name = self.localized_name(locale);
+        let mut spans = if let Some((label, content)) = display_name
+            .split_once(": ")
+            .or_else(|| display_name.split_once('：'))
+        {
             vec![
                 Span::styled(format!("{} ", label), bold_style),
                 Span::styled(content.to_string(), text_style),
             ]
         } else {
-            vec![Span::styled(self.name.clone(), bold_style)]
+            vec![Span::styled(display_name, bold_style)]
         };
 
         if !self.summary.is_empty() {
@@ -194,7 +244,12 @@ impl BlockContent for OtherToolCallBlock {
         // Inline media blocks (image_gen / video_gen): render the header and a
         // filepath line on every terminal.
         if let Some(media_path) = self.media_ref_path() {
-            let header = self.collapsed_line(&theme, muted_collapsed, Some(ctx.content_width()));
+            let header = self.collapsed_line(
+                &theme,
+                muted_collapsed,
+                Some(ctx.content_width()),
+                &ctx.locale,
+            );
             let max_w = ctx.content_width();
             // Percent-decode for display only (e.g. `%2F` → `/`); the stored
             // path is unchanged so Open / copy-path still target the file.
@@ -241,13 +296,20 @@ impl BlockContent for OtherToolCallBlock {
         match ctx.mode {
             DisplayMode::Collapsed => BlockOutput {
                 lines: vec![
-                    self.collapsed_line(&theme, muted_collapsed, Some(ctx.content_width()))
+                    self.collapsed_line(
+                        &theme,
+                        muted_collapsed,
+                        Some(ctx.content_width()),
+                        &ctx.locale,
+                    )
                         .into(),
                 ],
             },
             DisplayMode::Truncated | DisplayMode::Expanded => {
                 let mut lines: Vec<BlockLine> =
-                    vec![self.collapsed_line(&theme, false, None).into()];
+                    vec![self
+                        .collapsed_line(&theme, false, None, &ctx.locale)
+                        .into()];
 
                 if let Some(output) = &self.output {
                     // Try to render as structured Q&A (AskUserQuestion output).
@@ -579,4 +641,43 @@ fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
     }
 
     vec![]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn locale(locale: crate::locale::UiLocale) -> crate::locale::LocaleContext {
+        crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale,
+            source: crate::locale::LocaleSource::Cli,
+        })
+    }
+
+    #[test]
+    fn chinese_media_tool_prefix_is_localized_but_dynamic_prompt_is_opaque() {
+        let block = OtherToolCallBlock::new(
+            "image-to-video: Keep API_KEY and C:\\images\\1.jpg unchanged",
+            "",
+        );
+        assert_eq!(
+            block.localized_name(&locale(crate::locale::UiLocale::ZhCn)),
+            "图生视频：Keep API_KEY and C:\\images\\1.jpg unchanged"
+        );
+    }
+
+    #[test]
+    fn english_and_unknown_tool_titles_keep_their_original_identity() {
+        let media = OtherToolCallBlock::new("reference-to-video: a robot waves", "");
+        assert_eq!(
+            media.localized_name(&locale(crate::locale::UiLocale::EnUs)),
+            "reference-to-video: a robot waves"
+        );
+
+        let unknown = OtherToolCallBlock::new("custom-server-tool: opaque payload", "");
+        assert_eq!(
+            unknown.localized_name(&locale(crate::locale::UiLocale::ZhCn)),
+            "custom-server-tool: opaque payload"
+        );
+    }
 }

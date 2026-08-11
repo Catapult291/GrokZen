@@ -557,6 +557,7 @@ mod tests {
 
     fn make_title_state(is_busy: bool) -> title::TitleState<'static> {
         title::TitleState {
+            locale: None,
             session_name: None,
             model: None,
             activity: None,

@@ -5903,6 +5903,7 @@ impl AppView {
         }
         let cwd_str = self.cwd.to_string_lossy();
         let title_state = crate::notifications::TitleState {
+            locale: Some(&self.locale),
             session_name,
             model: model.as_deref(),
             activity: activity.as_ref(),
