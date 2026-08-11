@@ -395,13 +395,24 @@ jobs:
 
           # GitHub's tag lookup endpoint does not expose draft releases. Enumerate
           # the authenticated release list and require one exact draft instead.
-          $releasePages = gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" |
-            ConvertFrom-Json
-          $releaseMatches = @(
-            $releasePages |
-              ForEach-Object { $_ } |
-              Where-Object { $_.tag_name -eq $env:RELEASE_TAG -and $_.draft }
-          )
+          $releaseMatches = @()
+          for ($attempt = 0; $attempt -lt 15; $attempt++) {
+            $releasePages = @(
+              gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" |
+                ConvertFrom-Json
+            )
+            $releaseMatches = @(
+              foreach ($page in $releasePages) {
+                foreach ($candidate in @($page)) {
+                  if ($candidate.tag_name -eq $env:RELEASE_TAG -and $candidate.draft) {
+                    $candidate
+                  }
+                }
+              }
+            )
+            if ($releaseMatches.Count -eq 1) { break }
+            Start-Sleep -Seconds 2
+          }
           if ($releaseMatches.Count -ne 1) {
             throw "没有找到唯一的 Draft Release：$env:RELEASE_TAG"
           }
