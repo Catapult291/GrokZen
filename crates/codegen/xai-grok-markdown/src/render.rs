@@ -344,8 +344,14 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                 && mermaid_replace.is_none()
                 && ev.pos > last_pos
             {
-                let should_skip =
-                    pretty && all_hidden(hl_ids.iter().map(|&i| self.buffers.highlights[i].style));
+                let is_suppressed = self
+                    .buffers
+                    .suppressed_ranges
+                    .iter()
+                    .any(|range| range.start <= last_pos && ev.pos <= range.end);
+                let should_skip = pretty
+                    && (is_suppressed
+                        || all_hidden(hl_ids.iter().map(|&i| self.buffers.highlights[i].style)));
 
                 if should_skip {
                     push(
@@ -636,13 +642,19 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                         last_line_count_pos = range_start;
                     }
 
+                    let is_suppressed = self
+                        .buffers
+                        .suppressed_ranges
+                        .iter()
+                        .any(|range| range.start <= range_start && range_end <= range.end);
                     let is_hidden = pretty
-                        && all_hidden(
-                            self.buffers
-                                .active_highlights
-                                .iter()
-                                .map(|&i| self.buffers.highlights[i].style),
-                        );
+                        && (is_suppressed
+                            || all_hidden(
+                                self.buffers
+                                    .active_highlights
+                                    .iter()
+                                    .map(|&i| self.buffers.highlights[i].style),
+                            ));
 
                     if is_hidden {
                         let at_line_start = range_start == 0
@@ -669,7 +681,13 @@ impl<'a, 'b> ParsedMarkdown<'a, 'b> {
                                 }
                                 in_hidden_code_block = !in_hidden_code_block;
                             }
-                            skip_leading_newline = true;
+                            // A semantically suppressed range already owns the
+                            // complete source line, including its newline. The
+                            // generic marker path still needs to consume the
+                            // newline after a hidden marker, but doing that for
+                            // a standalone anchor would also erase a real blank
+                            // line that follows it.
+                            skip_leading_newline = !is_suppressed;
                         }
                     } else {
                         let mut text = &self.text[range_start..range_end];
@@ -2110,6 +2128,121 @@ mod tests {
             all_text.contains("Arc"),
             "Text before InlineHtml should appear in cell. Got: {text:#?}"
         );
+    }
+
+    #[test]
+    fn test_standalone_empty_id_anchor_is_hidden_only_in_pretty_output() {
+        let md = "<a id=\"available-themes\"></a>\n## 可用主题\n\n保留普通标签 <decl>。\n";
+
+        let (pretty, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
+        let pretty_text = lines_to_text(&pretty.lines).join("\n");
+        assert!(pretty_text.contains("可用主题"));
+        assert!(!pretty_text.starts_with('\n'));
+        assert!(pretty.lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("可用主题")
+                    && span
+                        .style
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::BOLD)
+            })
+        }));
+        assert!(pretty_text.contains("<decl>"));
+        assert!(!pretty_text.contains("<a"));
+        assert!(!pretty_text.contains("available-themes"));
+        assert!(!pretty_text.contains("</a>"));
+
+        let (pretty_ansi, _) = crate::render_markdown(md, test_style::STYLE, true, None);
+        assert!(!pretty_ansi.starts_with('\n'));
+        assert!(!pretty_ansi.contains("available-themes"));
+
+        let (raw, _) = render_markdown_ratatui_full(md, test_style::STYLE, false, None);
+        let raw_text = lines_to_text(&raw.lines).join("\n");
+        assert!(raw_text.contains("<a id=\"available-themes\"></a>"));
+    }
+
+    #[test]
+    fn test_standalone_empty_id_anchor_at_eof_is_hidden_in_pretty_output() {
+        let md = "<a id=\"tail-anchor\"></a>";
+
+        let (pretty, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
+        let pretty_text = lines_to_text(&pretty.lines).join("\n");
+        assert!(!pretty_text.contains("tail-anchor"));
+
+        let (pretty_ansi, _) = crate::render_markdown(md, test_style::STYLE, true, None);
+        assert!(!pretty_ansi.contains("tail-anchor"));
+
+        let (raw, _) = render_markdown_ratatui_full(md, test_style::STYLE, false, None);
+        let raw_text = lines_to_text(&raw.lines).join("\n");
+        assert!(raw_text.contains("tail-anchor"));
+
+        let (raw_ansi, _) = crate::render_markdown(md, test_style::STYLE, false, None);
+        assert!(raw_ansi.contains("tail-anchor"));
+    }
+
+    #[test]
+    fn test_standalone_anchor_preserves_a_following_blank_line() {
+        let md = "<a id=\"section\"></a>\n\n## 标题\n";
+
+        let (pretty, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
+        let pretty_text = lines_to_text(&pretty.lines).join("\n");
+        assert!(
+            pretty_text.starts_with('\n'),
+            "blank line vanished: {pretty_text:?}"
+        );
+        assert!(!pretty_text.starts_with("\n\n"));
+        assert!(!pretty_text.contains("section"));
+
+        let (pretty_ansi, _) = crate::render_markdown(md, test_style::STYLE, true, None);
+        assert!(
+            pretty_ansi.starts_with('\n'),
+            "blank line vanished: {pretty_ansi:?}"
+        );
+        assert!(!pretty_ansi.starts_with("\n\n"));
+        assert!(!pretty_ansi.contains("section"));
+    }
+
+    #[test]
+    fn test_anchor_filter_is_narrow_and_handles_adjacent_anchor_lines() {
+        let md = concat!(
+            "  <a id=\"first-anchor\"></a>  \n",
+            "<a id='second-anchor'></a>\n",
+            "## 标题\n\n",
+            "```html\n<a id=\"code-anchor\"></a>\n```\n\n",
+            "<a id=\"kept-anchor\" class=\"extra\"></a>\n",
+            "保留属性锚点。\n\n",
+            "<aid=\"not-an-anchor\"></a>\n\n",
+        );
+
+        let (pretty, _) = render_markdown_ratatui_full(md, test_style::STYLE, true, None);
+        let pretty_text = lines_to_text(&pretty.lines).join("\n");
+        assert!(!pretty_text.contains("first-anchor"));
+        assert!(!pretty_text.contains("second-anchor"));
+        assert!(
+            !pretty_text.starts_with([' ', '\n']),
+            "standalone anchor lines left leading whitespace: {pretty_text:?}"
+        );
+        assert!(pretty_text.contains("code-anchor"));
+        assert!(
+            pretty_text.contains("kept-anchor"),
+            "non-matching anchor was unexpectedly hidden: {pretty_text:?}"
+        );
+        assert!(pretty_text.contains("not-an-anchor"));
+        assert!(pretty.lines.iter().any(|line| {
+            line.spans.iter().any(|span| {
+                span.content.contains("标题")
+                    && span
+                        .style
+                        .add_modifier
+                        .contains(ratatui::style::Modifier::BOLD)
+            })
+        }));
+
+        let (pretty_ansi, _) = crate::render_markdown(md, test_style::STYLE, true, None);
+        let heading_pos = pretty_ansi.find("标题").expect("ANSI heading disappeared");
+        assert!(!pretty_ansi[..heading_pos].contains('\n'));
+        assert!(!pretty_ansi.contains("first-anchor"));
+        assert!(!pretty_ansi.contains("second-anchor"));
     }
 
     /// Multiple HTML-like tags across different cells and rows must all

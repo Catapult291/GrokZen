@@ -1451,7 +1451,7 @@ pub fn render_doc_viewer_overlay_with_shortcuts(
     theme: &Theme,
     shortcuts: &[super::modal_window::Shortcut<'_>],
 ) {
-    use ratatui::widgets::{Paragraph, Widget, Wrap};
+    use ratatui::widgets::{Paragraph, Widget};
     let modal_config = super::modal_window::ModalWindowConfig {
         title,
         tabs: None,
@@ -1494,14 +1494,22 @@ pub fn render_doc_viewer_overlay_with_shortcuts(
             .take(content_area.height as usize)
             .cloned()
             .collect();
-        let para = Paragraph::new(visible).wrap(Wrap { trim: false });
+        // MarkdownContent already wrapped these lines to the exact content
+        // width. Wrapping them again here can split CJK/table rows a second
+        // time and make the cached scroll rows disagree with painted rows.
+        let para = Paragraph::new(visible);
         para.render(content_area, buf);
     }
 }
 #[cfg(test)]
 mod doc_viewer_scroll_tests {
-    use super::{apply_doc_mouse_scroll, apply_doc_scroll, apply_doc_scroll_delta};
+    use super::{
+        apply_doc_mouse_scroll, apply_doc_scroll, apply_doc_scroll_delta, render_doc_viewer_overlay,
+    };
     use crossterm::event::{KeyCode, MouseEventKind};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use unicode_width::UnicodeWidthStr;
     #[test]
     fn apply_doc_scroll_moves_by_key() {
         let mut scroll = 10u16;
@@ -1536,6 +1544,58 @@ mod doc_viewer_scroll_tests {
         ));
         assert_eq!(scroll, 0);
         assert!(!apply_doc_mouse_scroll(MouseEventKind::Moved, &mut scroll));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn chinese_doc_cache_is_anchor_free_and_width_bounded_after_resize() {
+        crate::views::modal_window::set_embedded(false);
+        let doc = crate::docs::localized_doc(crate::docs::THEMING, crate::locale::UiLocale::ZhCn)
+            .expect("localized theming guide");
+        let theme = crate::theme::Theme::current();
+        let mut window = crate::views::modal_window::ModalWindowState::new();
+        let mut scroll = 0;
+        let mut cached = None;
+
+        for area in [Rect::new(0, 0, 100, 40), Rect::new(0, 0, 60, 24)] {
+            let mut buf = Buffer::empty(area);
+            render_doc_viewer_overlay(
+                &mut buf,
+                area,
+                &mut window,
+                &doc.title,
+                doc.content,
+                &mut scroll,
+                &mut cached,
+                false,
+                &theme,
+                None,
+            );
+
+            let (width, lines) = cached.as_ref().expect("rendered markdown cache");
+            let text = lines
+                .iter()
+                .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+                .collect::<String>();
+            assert!(text.contains("主题与外观"), "heading disappeared: {text:?}");
+            assert!(!text.contains("<a"), "raw anchor leaked: {text:?}");
+            assert!(
+                !text.contains("available-themes"),
+                "anchor id leaked: {text:?}"
+            );
+            assert!(
+                lines.iter().all(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref().width())
+                        .sum::<usize>()
+                        <= *width as usize
+                }),
+                "cached markdown exceeded its {width}-column content area"
+            );
+
+            scroll = scroll.saturating_add(9);
+        }
     }
 }
 #[cfg(test)]

@@ -8,7 +8,7 @@
 
 use std::ops::Range;
 
-use anstyle::Style;
+use anstyle::{Effects, Style};
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Tag, TagEnd, TextMergeWithOffset};
 use ratatui::style::Stylize as RatatuiStylize;
 use ratatui::text::{Line, Span};
@@ -245,6 +245,73 @@ fn is_br_tag(html: &str) -> bool {
     let tag = inner.trim();
     let tag = tag.strip_suffix('/').map_or(tag, str::trim);
     tag.eq_ignore_ascii_case("br")
+}
+
+/// Return the complete source line of a standalone, empty named anchor such as
+/// `<a id="available-themes"></a>` when `event_range` belongs to that line.
+///
+/// The localized user guide keeps these anchors for Markdown deep links. The
+/// terminal has no anchor surface, so pretty rendering must hide the markup
+/// without changing generic HTML-like text such as `<PathBuf>` or `<decl>`.
+fn standalone_empty_anchor_range(text: &str, event_range: &Range<usize>) -> Option<Range<usize>> {
+    if event_range.start > event_range.end || event_range.end > text.len() {
+        return None;
+    }
+
+    let line_start = text[..event_range.start]
+        .rfind('\n')
+        .map_or(0, |index| index + 1);
+    let line_end = text[line_start..]
+        .find('\n')
+        .map_or(text.len(), |offset| line_start + offset);
+    let line = &text[line_start..line_end];
+    let trimmed_start = line.trim_start();
+    let leading_bytes = line.len() - trimmed_start.len();
+    let trimmed = trimmed_start.trim_end();
+
+    let open_end = trimmed.find('>')?;
+    let open = trimmed[..open_end].trim();
+    let close = trimmed[open_end + 1..].trim();
+    if !open
+        .get(..2)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("<a"))
+        || !open.as_bytes().get(2).is_some_and(u8::is_ascii_whitespace)
+        || !close.eq_ignore_ascii_case("</a>")
+    {
+        return None;
+    }
+
+    let attributes = open[2..].trim();
+    let (name, value) = attributes.split_once('=')?;
+    if !name.trim().eq_ignore_ascii_case("id") {
+        return None;
+    }
+    let value = value.trim();
+    let quoted_id = value
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })?;
+    if quoted_id.is_empty()
+        || !quoted_id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+    {
+        return None;
+    }
+
+    let anchor_start = line_start + leading_bytes;
+    let anchor_end = anchor_start + trimmed.len();
+    let hidden_end = if line_end < text.len() {
+        line_end + 1
+    } else {
+        line_end
+    };
+    (event_range.start < anchor_end && event_range.end > anchor_start)
+        .then_some(line_start..hidden_end)
 }
 
 /// URLs (validated via `url::Url::parse`) are treated as unbreakable
@@ -509,6 +576,19 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
         });
     }
 
+    fn hide_standalone_anchor(&mut self, range: Range<usize>) {
+        if self.buffers.suppressed_ranges.contains(&range) {
+            return;
+        }
+
+        // Keep an explicit semantic range in addition to a HIDDEN highlight.
+        // Pulldown may emit indentation or trailing whitespace as overlapping
+        // Text/SoftBreak events; those visible styles must not defeat suppression
+        // of an otherwise empty anchor line.
+        self.buffers.suppressed_ranges.push(range.clone());
+        self.push_highlight(Some(Style::new().effects(Effects::HIDDEN)), &range);
+    }
+
     fn on_event(&mut self, event: Event<'a>, range: Range<usize>) {
         let mut parent_code_block = None;
 
@@ -740,13 +820,19 @@ impl<'a, 'b, 'syn, 'oc> MarkdownParser<'a, 'b, 'syn, 'oc> {
                 self.push_highlight(None, &range);
             }
             Event::Html(_) => {
-                // Render HTML block content as regular text (not code).
-                // pulldown-cmark treats XML-like tags (e.g. <example>) as HTML
-                // blocks, which previously got code-block styling via Replace.
-                self.push_highlight(Some(self.ms.text), &range);
+                if let Some(anchor_range) = standalone_empty_anchor_range(self.text, &range) {
+                    self.hide_standalone_anchor(anchor_range);
+                } else {
+                    // Render HTML block content as regular text (not code).
+                    // pulldown-cmark treats XML-like tags (e.g. <example>) as HTML
+                    // blocks, which previously got code-block styling via Replace.
+                    self.push_highlight(Some(self.ms.text), &range);
+                }
             }
             Event::InlineHtml(html) => {
-                if is_br_tag(&html) {
+                if let Some(anchor_range) = standalone_empty_anchor_range(self.text, &range) {
+                    self.hide_standalone_anchor(anchor_range);
+                } else if is_br_tag(&html) {
                     if let Some(ref mut state) = self.table_state {
                         state.push_text("\n");
                         self.push_highlight(Some(self.ms.text), &range);

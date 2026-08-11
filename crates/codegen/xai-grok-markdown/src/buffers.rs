@@ -308,6 +308,7 @@ pub struct RenderEvent {
 /// - `highlights`: Style ranges for inline formatting
 /// - `replaces`: Syntax-highlighted code blocks
 /// - `transforms`: Character substitutions (e.g., bullets)
+/// - `suppressed_ranges`: Source ranges hidden as complete semantic units in pretty mode
 /// - `untagged_code_ranges`: Code blocks without language tags
 /// - `table_replaces`: Formatted table replacements
 ///
@@ -320,6 +321,7 @@ pub struct MarkdownBuffers {
     pub highlights: Vec<Highlight>,
     pub replaces: Vec<Replace>,
     pub transforms: Vec<Transform>,
+    pub suppressed_ranges: Vec<Range<usize>>,
     pub untagged_code_ranges: Vec<Range<usize>>,
     pub table_replaces: Vec<TableReplace>,
     pub mermaid_replaces: Vec<MermaidReplace>,
@@ -339,6 +341,7 @@ impl MarkdownBuffers {
             highlights: Vec::new(),
             replaces: Vec::new(),
             transforms: Vec::new(),
+            suppressed_ranges: Vec::new(),
             untagged_code_ranges: Vec::new(),
             table_replaces: Vec::new(),
             mermaid_replaces: Vec::new(),
@@ -355,6 +358,7 @@ impl MarkdownBuffers {
         self.highlights.clear();
         self.replaces.clear();
         self.transforms.clear();
+        self.suppressed_ranges.clear();
         self.untagged_code_ranges.clear();
         self.table_replaces.clear();
         self.mermaid_replaces.clear();

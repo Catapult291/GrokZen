@@ -286,6 +286,24 @@ where
         &mut self.buffers[self.current]
     }
 
+    /// Restore Ratatui's wide-cell invariant before diffing the frame.
+    ///
+    /// Widgets can overlap at a rectangle boundary: a width-2 glyph may start
+    /// immediately outside the later widget while that widget overwrites only
+    /// its continuation cell. Ratatui's diff intentionally skips continuation
+    /// cells, so a malformed `[wide lead, non-blank continuation]` pair would
+    /// otherwise omit the later widget from the physical terminal forever.
+    fn normalize_current_buffer_wide_cells(&mut self) {
+        let current = self.current;
+        let reset_indices = normalize_overwritten_wide_cells(&mut self.buffers[current]);
+        let link_ids = &mut self.link_ids[current];
+        for index in reset_indices {
+            if let Some(id) = link_ids.get_mut(index) {
+                *id = 0;
+            }
+        }
+    }
+
     /// Gets the backend
     pub const fn backend(&self) -> &B {
         &self.backend
@@ -305,6 +323,7 @@ where
     /// `width * height > 65 535`.  On extra-large terminals (e.g. 420×160 = 67 200
     /// cells) this causes the entire UI to be rendered into a tiny corner.
     pub fn flush(&mut self) -> io::Result<bool> {
+        self.normalize_current_buffer_wide_cells();
         let previous_buffer = &self.buffers[1 - self.current];
         let current_buffer = &self.buffers[self.current];
         let updates = diff_large(previous_buffer, current_buffer);
@@ -382,6 +401,8 @@ where
         if self.link_tables[cur].is_empty() && self.link_tables[prev].is_empty() {
             return self.flush();
         }
+
+        self.normalize_current_buffer_wide_cells();
 
         let updates = diff_large_with_links(
             &self.buffers[prev],
@@ -1132,6 +1153,47 @@ where
     }
 }
 
+/// Reset wide glyph leads whose continuation cells were overwritten by a
+/// later widget, returning the row-major indices that were reset.
+///
+/// A valid Ratatui buffer stores blank cells after every wide lead. When a
+/// later widget writes into one of those cells, the two glyphs cannot coexist;
+/// clearing the earlier lead is the only representation that both matches the
+/// intended z-order and can be emitted safely by the diff.
+fn normalize_overwritten_wide_cells(buffer: &mut Buffer) -> Vec<usize> {
+    let row_width = buffer.area.width as usize;
+    if row_width == 0 {
+        return Vec::new();
+    }
+
+    let mut reset_indices = Vec::new();
+    for row_start in (0..buffer.content.len()).step_by(row_width) {
+        let row_end = (row_start + row_width).min(buffer.content.len());
+        let mut index = row_start;
+        while index < row_end {
+            let symbol_width = buffer.content[index].symbol().width();
+            if symbol_width <= 1 {
+                index += 1;
+                continue;
+            }
+
+            let continuation_end = index.saturating_add(symbol_width).min(row_end);
+            let is_clipped = index.saturating_add(symbol_width) > row_end;
+            let is_overwritten = buffer.content[index + 1..continuation_end]
+                .iter()
+                .any(|cell| cell.symbol() != " ");
+            if is_clipped || is_overwritten {
+                buffer.content[index].reset();
+                reset_indices.push(index);
+                index += 1;
+            } else {
+                index += symbol_width;
+            }
+        }
+    }
+    reset_indices
+}
+
 /// Like [`Buffer::diff`] but safe for buffers whose `width * height > u16::MAX`.
 ///
 /// Upstream ratatui (0.29) `Buffer::pos_of()` casts the flat index to `u16`
@@ -1327,6 +1389,71 @@ impl<B: Backend> Terminal<B> {
         self.link_tables[0].clear();
         self.link_tables[1].clear();
         self.viewport_area = area;
+    }
+}
+
+#[cfg(test)]
+mod wide_cell_diff_tests {
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::style::Style;
+    use ratatui::{TerminalOptions, Viewport};
+
+    use super::{Terminal, normalize_overwritten_wide_cells};
+
+    fn terminal(width: u16, height: u16) -> Terminal<TestBackend> {
+        Terminal::with_options(
+            TestBackend::new(width, height),
+            TerminalOptions {
+                viewport: Viewport::Fixed(Rect::new(0, 0, width, height)),
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn flush_repairs_a_wide_glyph_overwritten_at_its_continuation_cell() {
+        let mut terminal = terminal(4, 1);
+
+        terminal
+            .current_buffer_mut()
+            .set_string(0, 0, "中", Style::default());
+        terminal.flush().unwrap();
+        terminal.swap_buffers();
+
+        // A centered popup can leave the wide lead immediately outside its
+        // rectangle, then overwrite only the continuation cell with a border.
+        // Ratatui's normal diff assumes this malformed pair can never occur.
+        terminal
+            .current_buffer_mut()
+            .set_string(0, 0, "中", Style::default());
+        terminal.current_buffer_mut()[(1, 0)].set_symbol("│");
+        terminal.flush().unwrap();
+
+        let physical = terminal.backend().buffer();
+        assert_eq!(physical[(0, 0)].symbol(), " ");
+        assert_eq!(physical[(1, 0)].symbol(), "│");
+    }
+
+    #[test]
+    fn normalization_preserves_a_well_formed_wide_glyph() {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 4, 1));
+        buffer.set_string(0, 0, "中文", Style::default());
+
+        assert!(normalize_overwritten_wide_cells(&mut buffer).is_empty());
+        assert_eq!(buffer[(0, 0)].symbol(), "中");
+        assert_eq!(buffer[(1, 0)].symbol(), " ");
+        assert_eq!(buffer[(2, 0)].symbol(), "文");
+        assert_eq!(buffer[(3, 0)].symbol(), " ");
+    }
+
+    #[test]
+    fn normalization_removes_a_wide_glyph_clipped_by_the_row_edge() {
+        let mut buffer = ratatui::buffer::Buffer::empty(Rect::new(0, 0, 2, 1));
+        buffer[(1, 0)].set_symbol("中");
+
+        assert_eq!(normalize_overwritten_wide_cells(&mut buffer), vec![1]);
+        assert_eq!(buffer[(1, 0)].symbol(), " ");
     }
 }
 

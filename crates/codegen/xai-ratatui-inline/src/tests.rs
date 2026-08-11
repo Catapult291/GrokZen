@@ -108,6 +108,7 @@ mod links {
     #[derive(Default)]
     struct RecordingBackend {
         buf: Vec<u8>,
+        draws: Vec<(u16, u16, String)>,
         /// Total lines passed to `append_lines` (used by the
         /// `set_viewport_height` grow-path test).
         appended_lines: u16,
@@ -128,7 +129,8 @@ mod links {
         where
             I: Iterator<Item = (u16, u16, &'a Cell)>,
         {
-            for (_x, _y, cell) in content {
+            for (x, y, cell) in content {
+                self.draws.push((x, y, cell.symbol().to_owned()));
                 self.buf.extend_from_slice(cell.symbol().as_bytes());
             }
             Ok(())
@@ -380,6 +382,32 @@ mod links {
         assert!(
             out.contains("\x1b]8;;https://x.ai\x07世\x1b]8;;\x07"),
             "wide-char run: {out:?}"
+        );
+    }
+
+    #[test]
+    fn linked_flush_repairs_an_overwritten_wide_continuation() {
+        let mut t = term(4, 1);
+        {
+            let mut f = t.get_frame();
+            f.buffer_mut().set_string(0, 0, "中", Style::default());
+        }
+        t.set_frame_links(&[span(0, 2, "https://old", None)]);
+        t.flush_with_links().unwrap();
+        t.swap_buffers();
+
+        t.backend_mut().draws.clear();
+        {
+            let mut f = t.get_frame();
+            f.buffer_mut().set_string(0, 0, "中", Style::default());
+            f.buffer_mut()[(1, 0)].set_symbol("│");
+        }
+        t.set_frame_links(&[span(1, 2, "https://border", None)]);
+        t.flush_with_links().unwrap();
+
+        assert_eq!(
+            t.backend().draws,
+            vec![(0, 0, " ".to_owned()), (1, 0, "│".to_owned())]
         );
     }
 
