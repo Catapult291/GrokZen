@@ -81,7 +81,29 @@ Set-ExecutionPolicy -Scope Process Bypass
 不满足上述契约的旧预览 Release、可变 Release、含额外裸 EXE 的 Release 和官方 xAI 资产
 都不会被自动更新器接受。`v1.0.0-zh.preview.3` 使用旧的裸 EXE 更新契约，因此迁移到首个
 ZIP-only 版本需要手工下载完整 ZIP 安装一次。Immutable Release 与 SHA-256 提供发布对象和
-传输完整性校验，但不等同于 Windows Authenticode 签名。
+传输完整性校验。正式 Tag 工作流还会通过 GitHub Artifact Attestations 为 ZIP 和 `.sha256`
+生成与仓库、提交及构建工作流绑定的来源证明，不需要维护长期签名私钥。
+
+下载正式资产后，可用 GitHub CLI 同时验证不可变 Release、Release 资产以及 Actions 构建来源。
+把 `OWNER` 替换为仓库当前所属的 GitHub 用户名：
+
+```powershell
+$repo = 'OWNER/grok-build-Chinese'
+$tag = 'v1.0.0'
+$zip = '.\grok-zh-1.0.0-windows-x86_64-gnu.zip'
+$assets = @($zip, "$zip.sha256")
+
+gh release verify $tag --repo $repo
+foreach ($asset in $assets) {
+  gh release verify-asset $tag $asset --repo $repo
+  gh attestation verify $asset --repo $repo `
+    --signer-workflow "$repo/.github/workflows/zh-release-windows.yml" `
+    --source-ref "refs/tags/$tag"
+}
+```
+
+这些证明用于核对发布对象和云端构建来源，但不等同于 Windows Authenticode 签名，
+也不会让未签名 EXE 自动获得 SmartScreen 发布者信誉。
 
 ## 从源码构建
 

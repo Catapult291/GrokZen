@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: zh-release-${{ github.ref_name }}
@@ -283,6 +285,7 @@ jobs:
           PE: $pe
           Authenticode: $signature
           GitHub Immutable Release required: true
+          GitHub Actions artifact attestation required: true
           Executable smoke-tested by CI: true (--version only)
           Default commands after installation: grok-zh, agent-zh
           "@.Trim() | Set-Content (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
@@ -357,6 +360,13 @@ jobs:
           }
           "DIST_DIR=$dist" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "ZIP_NAME=$zipName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: 为 Release 资产生成构建来源证明
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ github.workspace }}/dist/${{ env.ZIP_NAME }}
+            ${{ github.workspace }}/dist/${{ env.ZIP_NAME }}.sha256
 
       - name: 创建 Draft、核验资产并发布
         shell: pwsh

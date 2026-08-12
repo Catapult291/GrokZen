@@ -23,7 +23,7 @@ fn zh_localization_release_notes_title_is_translated_without_touching_doc_titles
         Some(crate::views::modal::ActiveModal::DocViewer { title, .. }) => {
             assert_eq!(title, "更新日志");
         }
-        other => panic!("expected release-notes DocViewer, got {other:?}"),
+        _ => panic!("expected release-notes DocViewer"),
     }
 
     let _ = dispatch(
@@ -37,7 +37,7 @@ fn zh_localization_release_notes_title_is_translated_without_touching_doc_titles
         Some(crate::views::modal::ActiveModal::DocViewer { title, .. }) => {
             assert_eq!(title, "身份验证");
         }
-        other => panic!("expected documentation DocViewer, got {other:?}"),
+        _ => panic!("expected documentation DocViewer"),
     }
 }
 

@@ -25,6 +25,26 @@
 文件哈希。Release 只提供 ZIP 的 `.sha256` 旁车文件，GitHub API 也会记录 ZIP 资产 digest；
 不会再额外发布一份版本化裸 EXE。
 
+正式 Tag 工作流会为 ZIP 与 `.sha256` 自动生成 GitHub Actions 构建来源证明。下载后可用
+GitHub CLI 核对不可变 Release、资产和构建工作流；把 `OWNER` 替换为仓库当前所属的用户名：
+
+```powershell
+$repo = 'OWNER/grok-build-Chinese'
+$tag = 'v1.0.0'
+$zip = '.\grok-zh-1.0.0-windows-x86_64-gnu.zip'
+$assets = @($zip, "$zip.sha256")
+
+gh release verify $tag --repo $repo
+foreach ($asset in $assets) {
+  gh release verify-asset $tag $asset --repo $repo
+  gh attestation verify $asset --repo $repo `
+    --signer-workflow "$repo/.github/workflows/zh-release-windows.yml" `
+    --source-ref "refs/tags/$tag"
+}
+```
+
+Artifact Attestation 不是 Windows Authenticode；未签名 EXE 仍可能触发 SmartScreen 提示。
+
 ## 默认安装：与官方版共存
 
 在解压后的目录中打开 PowerShell，运行：
