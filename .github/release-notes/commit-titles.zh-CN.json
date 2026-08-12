@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "upstream_merges": [
+    {
+      "merge_sha": "b844df164f2e335f43b22226e9a12fc2a71873db",
+      "first_parent": "5a386576717b04e6e39e7d58d289151c014cce29",
+      "upstream_tip": "393430ee4934bc791b0d538f304a21691c517433",
+      "upstream_base": "e5478eff1e4050558e12e1328b85e6616632efb6"
+    },
+    {
+      "merge_sha": "983bc53f89efde6692faabf2f7ac90fde8fd3f4e",
+      "first_parent": "3f51e781fdd8f84c9177acc7a6d37c15777d3c53",
+      "upstream_tip": "8a14c91d88875a831a38b3a066b1683116bcb31c",
+      "upstream_base": "393430ee4934bc791b0d538f304a21691c517433"
+    }
+  ],
+  "local_merges": [],
+  "entries": [
+    {
+      "sha": "4072da692c799c4fa9eaa469b89af6aec9dcc56d",
+      "source_subject": "docs: complete Simplified Chinese documentation",
+      "title_zh": "完成简体中文文档"
+    },
+    {
+      "sha": "a13165f9a03faec5c815e1cbddbd7fdb57e29643",
+      "source_subject": "ci: localize Windows preview workflow",
+      "title_zh": "本地化 Windows 预览工作流"
+    },
+    {
+      "sha": "3f51e781fdd8f84c9177acc7a6d37c15777d3c53",
+      "source_subject": "ci: parallelize and cache Windows preview build",
+      "title_zh": "并行化并缓存 Windows 预览构建"
+    },
+    {
+      "sha": "983bc53f89efde6692faabf2f7ac90fde8fd3f4e",
+      "source_subject": "merge: sync upstream 1.0.0 and complete Chinese localization",
+      "title_zh": "同步上游 1.0.0 并完成中文本地化"
+    },
+    {
+      "sha": "ef61fb935f9c629b91311ef850e667cc5bfc6d3a",
+      "source_subject": "ci: adopt J3 build and reliable resource monitoring",
+      "title_zh": "采用 J3 构建并实现可靠的资源监控"
+    },
+    {
+      "sha": "4693d1a8b8d49e3daeef67c27d1d30cfad6afb66",
+      "source_subject": "feat: add community GitHub release updater",
+      "title_zh": "添加社区 GitHub 发布更新器"
+    },
+    {
+      "sha": "ca64bd8fc493d141ba12aeec87cc6a54838b598b",
+      "source_subject": "fix: avoid admin-only immutable release preflight",
+      "title_zh": "避免仅管理员可用的不可变发布预检"
+    },
+    {
+      "sha": "c71f199c5972dc68faa6fcf5ad03809aa238172b",
+      "source_subject": "fix: clear expected release lookup exit code",
+      "title_zh": "清理预期发布查询退出码"
+    },
+    {
+      "sha": "e4b838ebaddf6802483c87e249a9cd8bec7ab131",
+      "source_subject": "fix: inspect draft releases before publishing",
+      "title_zh": "发布前检查草稿发布"
+    },
+    {
+      "sha": "9f8a1850a56a35ae8983c3ee7bf6f60782abb016",
+      "source_subject": "feat(update): switch community releases to ZIP-only",
+      "title_zh": "将社区发布切换为仅 ZIP 资产"
+    },
+    {
+      "sha": "5a94ab98c50d6e000be7d89e80b29fed2b3cf5a8",
+      "source_subject": "fix(ci): wait for draft release visibility",
+      "title_zh": "等待草稿发布可见后再继续"
+    },
+    {
+      "sha": "b844df164f2e335f43b22226e9a12fc2a71873db",
+      "source_subject": "merge: sync upstream and share Grok user data",
+      "title_zh": "同步上游并与官方版共享 Grok 用户数据"
+    },
+    {
+      "sha": "ed6d543643628663873c5de28298e022ed634238",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "同步上游代码快照"
+    },
+    {
+      "sha": "a5589e958437d79e13db026eedcb1720bffd4063",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "同步上游代码快照"
+    },
+    {
+      "sha": "393430ee4934bc791b0d538f304a21691c517433",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "同步上游代码快照"
+    },
+    {
+      "sha": "afbc0fb710320c7add294c2106d447ecc3e3af2e",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "同步上游代码快照"
+    },
+    {
+      "sha": "8a14c91d88875a831a38b3a066b1683116bcb31c",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "同步上游代码快照"
+    }
+  ]
+}

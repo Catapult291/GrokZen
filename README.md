@@ -224,6 +224,11 @@ cargo fmt --all
 - 计划中的 `zh-stable`：只有在中文验证通过后才建立；稳定 Release 由指向已审核提交的纯
   SemVer Tag（`vX.Y.Z`）触发。
 - 上游 `main` 更新只能触发审查和测试，不能直接进入用户更新源。
+- GitHub 发布页正文统一使用中文；每条提交名称链接到对应的 GitHub 提交页面。若提交标题
+  不是中文，必须先在 `.github/release-notes/commit-titles.zh-CN.json` 中按完整 SHA 提供
+  可审查的中文标题，否则发布会在构建前失败。
+- 合并上游的提交必须在同一映射文件中登记已审核的父提交与合并基线；生成器核对 Git
+  提交图后，生成独立的“上游更新”区块，列出上游比较范围和实际同步的上游提交链接。
 - 正式更新日志、协议兼容检查、本 Fork 的 Windows 测试结果、Immutable Releases 开关和
   精确资产摘要共同构成发布门槛；官方 stable 指针不参与社区更新。
 

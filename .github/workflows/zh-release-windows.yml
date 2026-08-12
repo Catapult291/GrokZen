@@ -89,6 +89,23 @@ jobs:
           "IS_PRERELEASE=$($version.Contains('-').ToString().ToLowerInvariant())" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: 预生成并验证中文更新日志
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          & .\.github\scripts\write-release-notes.ps1 `
+            -CurrentTag $env:RELEASE_TAG `
+            -OutputPath $notes `
+            -Repository $env:GITHUB_REPOSITORY `
+            -GitHubToken $env:GH_TOKEN
+          if (!(Test-Path -LiteralPath $notes -PathType Leaf)) {
+            throw '未生成 Release 更新日志。'
+          }
+          "RELEASE_NOTES_PATH=$notes" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "## $env:GROK_VERSION 更新日志" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          Get-Content -LiteralPath $notes | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
       - name: 配置固定版本的 Rust、MinGW 和 protoc
         shell: pwsh
         run: |
@@ -158,6 +175,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          & .\.github\scripts\tests\Test-Write-ReleaseNotes.ps1
           cargo fmt --all -- --check
           if ($LASTEXITCODE -ne 0) { throw "cargo fmt 失败：$LASTEXITCODE" }
           cargo fetch --locked --target $env:TARGET
@@ -377,12 +395,10 @@ jobs:
             (Join-Path $dist $env:ZIP_NAME),
             (Join-Path $dist "$env:ZIP_NAME.sha256")
           )
-          $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
-          & .\.github\scripts\write-release-notes.ps1 `
-            -CurrentTag $env:RELEASE_TAG `
-            -OutputPath $notes `
-            -Repository $env:GITHUB_REPOSITORY `
-            -GitHubToken $env:GH_TOKEN
+          $notes = $env:RELEASE_NOTES_PATH
+          if (!(Test-Path -LiteralPath $notes -PathType Leaf)) {
+            throw "缺少预生成的 Release 更新日志：$notes"
+          }
 
           $createArgs = @(
             'release', 'create', $env:RELEASE_TAG

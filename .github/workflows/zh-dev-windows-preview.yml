@@ -36,6 +36,8 @@ jobs:
     steps:
       - name: 检出 zh-dev
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
 
       - name: 选择预览版本
         id: preview
@@ -154,6 +156,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          & .\.github\scripts\tests\Test-Write-ReleaseNotes.ps1
           cargo fmt --all -- --check
 
           $metadataPath = 'crates/codegen/xai-grok-locale/locales/zh-CN-metadata.json'
