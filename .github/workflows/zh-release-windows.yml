@@ -368,29 +368,18 @@ jobs:
             (Join-Path $dist "$env:ZIP_NAME.sha256")
           )
           $notes = Join-Path $env:RUNNER_TEMP 'release-notes.md'
-          $baseVersion = ($env:GROK_VERSION -split '-', 2)[0]
-          $changelog = "crates/codegen/xai-grok-shell/changelogs/$baseVersion.zh-CN.md"
-          if (Test-Path -LiteralPath $changelog) {
-            Get-Content -LiteralPath $changelog -Raw | Set-Content $notes -Encoding utf8
-          } else {
-            "# Grok Build 中文社区版 $env:GROK_VERSION" | Set-Content $notes -Encoding utf8
-          }
-          @"
-
-          ## Windows 资产说明
-
-          - 完整安装与自动更新包：``$env:ZIP_NAME``
-          - Release 仅发布 ZIP 与其 SHA-256 sidecar，不发布单独的裸 EXE。
-          - 此构建为未签名的 x86_64 GNU 版本；请结合 Immutable Release 和 SHA-256 核验来源。
-          - CI 仅执行 ``grok-zh.exe --version`` 冒烟；完整 TUI 仍由维护者在发布后人工验证。
-          "@ | Add-Content $notes -Encoding utf8
+          & .\.github\scripts\write-release-notes.ps1 `
+            -CurrentTag $env:RELEASE_TAG `
+            -OutputPath $notes `
+            -Repository $env:GITHUB_REPOSITORY `
+            -GitHubToken $env:GH_TOKEN
 
           $createArgs = @(
             'release', 'create', $env:RELEASE_TAG
           ) + $assets + @(
             '--repo', $env:GITHUB_REPOSITORY,
             '--verify-tag', '--draft',
-            '--title', "Grok Build 中文社区版 $env:GROK_VERSION",
+            '--title', $env:GROK_VERSION,
             '--notes-file', $notes
           )
           & gh @createArgs
@@ -424,6 +413,10 @@ jobs:
           $release = $releaseMatches[0]
           if (!$release.draft -or $release.tag_name -ne $env:RELEASE_TAG) {
             throw 'Draft Release 元数据与 Tag 不一致。'
+          }
+          $expectedNotes = (Get-Content -LiteralPath $notes -Raw).Trim()
+          if ($release.name -ne $env:GROK_VERSION -or $release.body.Trim() -ne $expectedNotes) {
+            throw 'Draft Release 的标题或正文与预生成更新日志不一致。'
           }
           $expectedNames = @(
             $env:ZIP_NAME,

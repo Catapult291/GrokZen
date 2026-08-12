@@ -2,6 +2,45 @@
 
 use super::*;
 
+#[test]
+fn zh_localization_release_notes_title_is_translated_without_touching_doc_titles() {
+    let mut app = test_app();
+    app.locale = Arc::new(crate::locale::LocaleContext::new(
+        crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        },
+    ));
+
+    let _ = dispatch(
+        Action::ShowReleaseNotes {
+            title: "Release Notes".to_string(),
+            content: "notes".to_string(),
+        },
+        &mut app,
+    );
+    match app.welcome_doc_viewer.as_ref() {
+        Some(crate::views::modal::ActiveModal::DocViewer { title, .. }) => {
+            assert_eq!(title, "更新日志");
+        }
+        other => panic!("expected release-notes DocViewer, got {other:?}"),
+    }
+
+    let _ = dispatch(
+        Action::ShowReleaseNotes {
+            title: "身份验证".to_string(),
+            content: "doc".to_string(),
+        },
+        &mut app,
+    );
+    match app.welcome_doc_viewer.as_ref() {
+        Some(crate::views::modal::ActiveModal::DocViewer { title, .. }) => {
+            assert_eq!(title, "身份验证");
+        }
+        other => panic!("expected documentation DocViewer, got {other:?}"),
+    }
+}
+
 /// Regression (leader-mode turn-end race): when this client is briefly Idle
 /// (`is_turn_running() == false`, `current_prompt_id` cleared) but the server
 /// still has queued prompts — visible as a non-empty `shared_queue` mirror —

@@ -768,9 +768,15 @@ pub(super) fn dispatch_open_tutorial(app: &mut AppView) -> Vec<Effect> {
 
 pub(super) fn dispatch_show_release_notes(
     app: &mut AppView,
-    title: String,
+    mut title: String,
     content: String,
 ) -> Vec<Effect> {
+    if title == "Release Notes" {
+        title = app
+            .locale
+            .named_text("docs.release_notes.title", "Release Notes")
+            .into_owned();
+    }
     match app.active_view {
         ActiveView::Agent(id) => {
             if let Some(agent) = app.agents.get_mut(&id) {

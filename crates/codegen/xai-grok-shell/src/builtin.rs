@@ -197,6 +197,7 @@ mod tests {
         assert!(BUILTIN_FILES[0].1.contains("简体中文社区版"));
         assert_eq!(BUILTIN_FILES[1].0, COMMUNITY_CHANGELOG_MD);
         assert!(BUILTIN_FILES[1].1.contains("## 新功能"));
+        assert!(!BUILTIN_FILES[1].1.contains("[English](1.0.0.md)"));
         assert_eq!(BUILTIN_FILES[2].0, COMMUNITY_CHANGELOG_JSON);
         let entries: serde_json::Value = serde_json::from_str(BUILTIN_FILES[2].1).unwrap();
         assert!(
