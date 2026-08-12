@@ -1,0 +1,2 @@
+# `include_str!` preserves checkout bytes; keep embedded docs platform-independent.
+crates/codegen/xai-grok-pager/docs/**/*.md text eol=lf

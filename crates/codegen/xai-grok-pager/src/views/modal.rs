@@ -1478,6 +1478,7 @@ pub fn render_doc_viewer_overlay_with_shortcuts(
             .as_ref()
             .is_none_or(|(cached_w, _)| *cached_w != w);
         if needs_reparse {
+            let content = normalize_doc_viewer_line_endings(content);
             let mc = crate::scrollback::blocks::markdown_content::MarkdownContent::new(content);
             let output = mc.output(w as usize);
             let lines: Vec<ratatui::text::Line<'static>> =
@@ -1501,10 +1502,26 @@ pub fn render_doc_viewer_overlay_with_shortcuts(
         para.render(content_area, buf);
     }
 }
+
+/// Normalize platform line endings before Markdown parsing.
+///
+/// Built-in documents are compiled with `include_str!`, so their bytes otherwise depend on the
+/// checkout's `core.autocrlf` setting. The Markdown renderer deliberately preserves source byte
+/// ranges and therefore treats a CRLF soft break as two display spaces. DocViewer content does not
+/// expose source offsets, so normalizing at this boundary keeps LF and Windows checkouts visually
+/// identical without changing the renderer's source-map contract.
+fn normalize_doc_viewer_line_endings(content: &str) -> std::borrow::Cow<'_, str> {
+    if !content.contains('\r') {
+        return std::borrow::Cow::Borrowed(content);
+    }
+
+    std::borrow::Cow::Owned(content.replace("\r\n", "\n").replace('\r', "\n"))
+}
 #[cfg(test)]
 mod doc_viewer_scroll_tests {
     use super::{
-        apply_doc_mouse_scroll, apply_doc_scroll, apply_doc_scroll_delta, render_doc_viewer_overlay,
+        apply_doc_mouse_scroll, apply_doc_scroll, apply_doc_scroll_delta,
+        normalize_doc_viewer_line_endings, render_doc_viewer_overlay,
     };
     use crossterm::event::{KeyCode, MouseEventKind};
     use ratatui::buffer::Buffer;
@@ -1544,6 +1561,55 @@ mod doc_viewer_scroll_tests {
         ));
         assert_eq!(scroll, 0);
         assert!(!apply_doc_mouse_scroll(MouseEventKind::Moved, &mut scroll));
+    }
+
+    #[test]
+    fn doc_viewer_normalizes_windows_and_legacy_line_endings() {
+        let lf = "# 身份验证\n\n正文\n";
+        let normalized = normalize_doc_viewer_line_endings(lf);
+        assert!(matches!(normalized, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(normalized, lf);
+
+        assert_eq!(
+            normalize_doc_viewer_line_endings("# 身份验证\r\n\r\n正文\r\n"),
+            lf
+        );
+        assert_eq!(
+            normalize_doc_viewer_line_endings("# 身份验证\r\r正文\r"),
+            "# 身份验证\n\n正文\n"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn zh_localization_doc_viewer_crlf_and_lf_render_the_same_cached_lines() {
+        crate::views::modal_window::set_embedded(false);
+        let theme = crate::theme::Theme::current();
+        let area = Rect::new(0, 0, 100, 28);
+
+        let render = |content: &str| {
+            let mut buf = Buffer::empty(area);
+            let mut window = crate::views::modal_window::ModalWindowState::new();
+            let mut scroll = 0;
+            let mut cached = None;
+            render_doc_viewer_overlay(
+                &mut buf,
+                area,
+                &mut window,
+                "身份验证",
+                content,
+                &mut scroll,
+                &mut cached,
+                false,
+                &theme,
+                None,
+            );
+            cached.expect("rendered markdown cache")
+        };
+
+        let lf = "# 身份验证\n\nGrok 支持浏览器登录、SSO 以及无头 CI/CD 运行器。\n\n## 浏览器登录\n\n首次启动时打开浏览器。\n";
+        let crlf = lf.replace('\n', "\r\n");
+        assert_eq!(render(lf), render(&crlf));
     }
 
     #[test]

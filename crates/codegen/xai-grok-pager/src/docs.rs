@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn chinese_catalog_has_a_localized_body_for_every_document() {
+    fn zh_localization_chinese_catalog_has_a_localized_body_for_every_document() {
         for translation in ZH_CN_DOCS {
             let content = translation
                 .content
@@ -647,6 +647,11 @@ mod tests {
                     .chars()
                     .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
                 "Chinese body for {} should contain Han characters",
+                translation.id.as_str()
+            );
+            assert!(
+                !content.contains('\r'),
+                "Chinese body for {} contains carriage returns; built-in docs must be LF-only",
                 translation.id.as_str()
             );
         }
