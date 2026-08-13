@@ -12,18 +12,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use futures::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::redirect::Policy;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
+use xai_grok_version::ReleaseVersion;
 
 pub(crate) const COMMUNITY_INSTALLER: &str = "community-github";
 
-const RELEASES_API: &str =
-    "https://api.github.com/repos/ljy6-6-6/grok-build-Chinese/releases?per_page=100";
-const RELEASE_BY_TAG_API: &str =
-    "https://api.github.com/repos/ljy6-6-6/grok-build-Chinese/releases/tags/";
 const API_VERSION: &str = "2026-03-10";
 const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_SIDECAR_BYTES: u64 = 4 * 1024;
@@ -31,6 +29,8 @@ const MAX_ARCHIVE_ENTRIES: usize = 128;
 const MAX_UNCOMPRESSED_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+const DOWNLOAD_PROGRESS_TEMPLATE: &str =
+    "  下载更新 {bar:30.cyan/dim} {bytes}/{total_bytes} {percent}% ({bytes_per_sec}，剩余 {eta})";
 const REQUIRED_PACKAGE_FILES: [&str; 5] = [
     "grok-zh.exe",
     "agent-zh.cmd",
@@ -41,6 +41,20 @@ const REQUIRED_PACKAGE_FILES: [&str; 5] = [
 
 fn release_repo() -> &'static str {
     xai_grok_product::COMMUNITY_RELEASE_REPO
+}
+
+fn releases_api(page: usize) -> String {
+    format!(
+        "https://api.github.com/repos/{}/releases?per_page=100&page={page}",
+        release_repo()
+    )
+}
+
+fn release_by_tag_api(version: &str) -> String {
+    format!(
+        "https://api.github.com/repos/{}/releases/tags/v{version}",
+        release_repo()
+    )
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -111,12 +125,12 @@ fn asset_client() -> Result<reqwest::Client> {
     github_client(Duration::from_secs(20 * 60))
 }
 
-fn parse_release_version(release: &ApiRelease) -> Option<semver::Version> {
+fn parse_release_version(release: &ApiRelease) -> Option<ReleaseVersion> {
     if release.draft || !release.immutable {
         return None;
     }
-    let version = semver::Version::parse(release.tag_name.strip_prefix('v')?).ok()?;
-    if !version.build.is_empty() || release.prerelease != !version.pre.is_empty() {
+    let version = ReleaseVersion::parse(release.tag_name.strip_prefix('v')?).ok()?;
+    if !version.as_semver().build.is_empty() || release.prerelease != version.is_prerelease() {
         return None;
     }
     Some(version)
@@ -125,7 +139,7 @@ fn parse_release_version(release: &ApiRelease) -> Option<semver::Version> {
 fn select_latest_release<'a>(
     releases: &'a [ApiRelease],
     channel: &str,
-) -> Result<(&'a ApiRelease, semver::Version)> {
+) -> Result<(&'a ApiRelease, ReleaseVersion)> {
     if !matches!(channel, "stable" | "alpha") {
         anyhow::bail!("unsupported community release channel: {channel}");
     }
@@ -133,7 +147,7 @@ fn select_latest_release<'a>(
         .iter()
         .filter_map(|release| {
             let version = parse_release_version(release)?;
-            if channel == "stable" && !version.pre.is_empty() {
+            if channel == "stable" && version.is_prerelease() {
                 return None;
             }
             Some((release, version))
@@ -165,14 +179,25 @@ async fn fetch_json<T: for<'de> Deserialize<'de>>(url: &str) -> Result<T> {
 
 pub(crate) async fn fetch_latest_version(channel: &str) -> Result<String> {
     crate::ensure_community_updates_enabled()?;
-    let releases: Vec<ApiRelease> = fetch_json(RELEASES_API).await?;
+    let mut releases = Vec::new();
+    for page in 1.. {
+        let page_releases: Vec<ApiRelease> = fetch_json(&releases_api(page)).await?;
+        let page_len = page_releases.len();
+        releases.extend(page_releases);
+        if page_len < 100 {
+            break;
+        }
+    }
     let (_, version) = select_latest_release(&releases, channel)?;
     Ok(version.to_string())
 }
 
 fn release_asset_name(version: &str) -> Result<String> {
-    semver::Version::parse(version)
+    let parsed = ReleaseVersion::parse(version)
         .with_context(|| format!("invalid community release version: {version}"))?;
+    if parsed.to_string() != version || !parsed.as_semver().build.is_empty() {
+        anyhow::bail!("community release version is not canonical: {version}");
+    }
     if !(cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") && cfg!(target_env = "gnu")) {
         anyhow::bail!("community self-update currently supports only x86_64-pc-windows-gnu");
     }
@@ -261,9 +286,15 @@ fn select_asset(release: &ApiRelease, version: &str) -> Result<VerifiedAsset> {
 
 pub(crate) async fn fetch_asset(version: &str) -> Result<VerifiedAsset> {
     crate::ensure_community_updates_enabled()?;
-    semver::Version::parse(version)
+    let parsed = ReleaseVersion::parse(version)
         .with_context(|| format!("invalid community release version: {version}"))?;
-    let url = format!("{RELEASE_BY_TAG_API}v{version}");
+    if !parsed.as_semver().build.is_empty() {
+        anyhow::bail!("community release version must not contain build metadata: {version}");
+    }
+    if parsed.to_string() != version {
+        anyhow::bail!("community release version is not canonical: {version}");
+    }
+    let url = release_by_tag_api(version);
     let release: ApiRelease = fetch_json(&url).await?;
     select_asset(&release, version)
 }
@@ -285,6 +316,14 @@ fn allowed_github_url(url: &reqwest::Url) -> bool {
 
 pub(crate) async fn download_verified(asset: &VerifiedAsset, destination: &Path) -> Result<()> {
     crate::ensure_community_updates_enabled()?;
+    let progress = ProgressBar::new(asset.size);
+    progress.set_style(
+        ProgressStyle::default_bar()
+            .template(DOWNLOAD_PROGRESS_TEMPLATE)
+            .expect("valid community download progress template"),
+    );
+    progress.set_position(0);
+    let mut created_destination = false;
     let result = async {
         let response = asset_client()?
             .get(&asset.download_url)
@@ -312,6 +351,7 @@ pub(crate) async fn download_verified(asset: &VerifiedAsset, destination: &Path)
             .open(destination)
             .await
             .with_context(|| format!("creating {}", destination.display()))?;
+        created_destination = true;
         let mut stream = response.bytes_stream();
         let mut hasher = Sha256::new();
         let mut written = 0u64;
@@ -325,6 +365,7 @@ pub(crate) async fn download_verified(asset: &VerifiedAsset, destination: &Path)
             }
             hasher.update(&chunk);
             file.write_all(&chunk).await?;
+            progress.set_position(written);
         }
         file.flush().await?;
         file.sync_all().await?;
@@ -344,7 +385,8 @@ pub(crate) async fn download_verified(asset: &VerifiedAsset, destination: &Path)
         Ok(())
     }
     .await;
-    if result.is_err() {
+    progress.finish_and_clear();
+    if result.is_err() && created_destination {
         let _ = tokio::fs::remove_file(destination).await;
     }
     result
@@ -381,10 +423,11 @@ fn validate_archive_layout(archive: &mut zip::ZipArchive<File>) -> Result<()> {
             anyhow::bail!("community release ZIP exceeds the uncompressed size limit");
         }
 
-        let normalized = enclosed
-            .to_string_lossy()
-            .replace('\\', "/")
-            .to_ascii_lowercase();
+        let enclosed_text = enclosed.to_string_lossy();
+        if !enclosed_text.is_ascii() {
+            anyhow::bail!("community release ZIP entry name must be ASCII: {raw_name}");
+        }
+        let normalized = enclosed_text.replace('\\', "/").to_ascii_lowercase();
         if !seen.insert(normalized) {
             anyhow::bail!("community release ZIP contains a duplicate path: {raw_name}");
         }
@@ -441,6 +484,7 @@ fn read_inner_manifest(archive: &mut zip::ZipArchive<File>) -> Result<HashMap<St
         }
         if name.is_empty()
             || name.trim() != name
+            || !name.is_ascii()
             || name.contains('/')
             || name.contains('\\')
             || matches!(name, "." | "..")
@@ -646,11 +690,13 @@ mod tests {
         let releases = vec![
             release("v1.1.0-alpha.2", true, true),
             release("v1.0.1", false, true),
+            release("v1.0.1.2", false, true),
+            release("v1.0.1.1", false, true),
             release("v1.2.0", false, false),
             release("v1.0.0", false, true),
         ];
         let (_, version) = select_latest_release(&releases, "stable").unwrap();
-        assert_eq!(version.to_string(), "1.0.1");
+        assert_eq!(version.to_string(), "1.0.1.2");
     }
 
     #[test]
@@ -703,22 +749,44 @@ mod tests {
     #[test]
     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "gnu"))]
     fn asset_selection_requires_the_exact_zip_only_asset_set() {
-        let mut candidate = release("v1.2.3", false, true);
-        candidate.assets = uploaded_package_assets("1.2.3");
-        let selected = select_asset(&candidate, "1.2.3").unwrap();
-        assert_eq!(selected.version, "1.2.3");
-        assert_eq!(selected.name, "grok-zh-1.2.3-windows-x86_64-gnu.zip");
+        let mut candidate = release("v1.2.3.1", false, true);
+        candidate.assets = uploaded_package_assets("1.2.3.1");
+        let selected = select_asset(&candidate, "1.2.3.1").unwrap();
+        assert_eq!(selected.version, "1.2.3.1");
+        assert_eq!(selected.name, "grok-zh-1.2.3.1-windows-x86_64-gnu.zip");
 
         candidate.assets.push(uploaded_asset(
-            "1.2.3",
-            "grok-zh-1.2.3-windows-x86_64-gnu.exe".to_string(),
+            "1.2.3.1",
+            "grok-zh-1.2.3.1-windows-x86_64-gnu.exe".to_string(),
             123,
         ));
-        assert!(select_asset(&candidate, "1.2.3").is_err());
+        assert!(select_asset(&candidate, "1.2.3.1").is_err());
 
         candidate.assets.pop();
         candidate.assets[0].browser_download_url = "https://example.com/grok-zh.zip".to_string();
-        assert!(select_asset(&candidate, "1.2.3").is_err());
+        assert!(select_asset(&candidate, "1.2.3.1").is_err());
+    }
+
+    #[test]
+    fn community_download_progress_template_is_valid() {
+        assert!(
+            ProgressStyle::default_bar()
+                .template(DOWNLOAD_PROGRESS_TEMPLATE)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn community_api_urls_follow_the_product_repository_identity() {
+        assert_eq!(release_repo(), "JoyElliot/grok-build-Chinese");
+        assert_eq!(
+            releases_api(2),
+            "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases?per_page=100&page=2"
+        );
+        assert_eq!(
+            release_by_tag_api("1.0.0.1"),
+            "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases/tags/v1.0.0.1"
+        );
     }
 
     #[test]
@@ -761,6 +829,26 @@ mod tests {
         entries.push(("../escape.txt".to_string(), b"escape".to_vec()));
         write_zip(&traversal, &entries);
         assert!(extract_verified_executable(&traversal, &candidate).is_err());
+        assert!(!candidate.exists());
+
+        let non_ascii_entry = temp.path().join("non-ascii-entry.zip");
+        let mut entries = package_entries();
+        entries.push(("É.txt".to_string(), b"ambiguous on Windows".to_vec()));
+        write_zip(&non_ascii_entry, &entries);
+        assert!(extract_verified_executable(&non_ascii_entry, &candidate).is_err());
+        assert!(!candidate.exists());
+
+        let non_ascii_manifest = temp.path().join("non-ascii-manifest.zip");
+        let mut entries = package_entries();
+        let manifest = entries
+            .iter_mut()
+            .find(|(name, _)| name == "SHA256SUMS.txt")
+            .unwrap();
+        manifest
+            .1
+            .extend_from_slice(format!("\n{}  É.txt", "00".repeat(32)).as_bytes());
+        write_zip(&non_ascii_manifest, &entries);
+        assert!(extract_verified_executable(&non_ascii_manifest, &candidate).is_err());
         assert!(!candidate.exists());
 
         let incomplete = temp.path().join("incomplete.zip");

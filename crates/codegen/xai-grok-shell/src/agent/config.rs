@@ -11816,7 +11816,7 @@ default = "grok-4.5"
 "#,
         )
         .unwrap();
-        let v = semver::Version::parse("1.8.0").unwrap();
+        let v = xai_grok_version::ReleaseVersion::parse("1.8.0").unwrap();
         xai_grok_config::apply_version_overrides(&mut value, &v).unwrap();
         let cfg = Config::new_from_toml_cfg(&value).unwrap();
         assert_eq!(cfg.models.default.as_deref(), Some("grok-4.5"));

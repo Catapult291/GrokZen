@@ -2655,9 +2655,9 @@ async fn async_main(
         Ok(true) => {
             let adopted = bg_update_wait.lock().await.take();
             if finish_update_on_exit(adopted).await {
-                eprintln!("Update installed. Run `grok-zh` to start.");
+                eprintln!("更新已安装。运行 `grok-zh` 启动。");
             } else {
-                eprintln!("Update did not complete. Run `grok-zh update` to retry.");
+                eprintln!("更新未完成。运行 `grok-zh update` 重试。");
             }
             Ok(())
         }
@@ -2686,26 +2686,17 @@ async fn finish_update_on_exit(
     };
     match adopted {
         Some(handle) => {
-            eprintln!("Waiting for the update download to finish...");
+            eprintln!("正在等待更新下载完成…");
             match handle.await {
                 Ok(Ok(status)) if status.success() => true,
                 Ok(Ok(status)) => {
-                    run_blocking(Some(format!(
-                        "Background update exited with {status}; retrying..."
-                    )))
-                    .await
+                    run_blocking(Some(format!("后台更新以 {status} 退出；正在重试…"))).await
                 }
                 Ok(Err(e)) => {
-                    run_blocking(Some(format!(
-                        "Could not wait for the background update ({e}); retrying..."
-                    )))
-                    .await
+                    run_blocking(Some(format!("无法等待后台更新（{e}）；正在重试…"))).await
                 }
                 Err(join_err) => {
-                    run_blocking(Some(format!(
-                        "Background update waiter failed ({join_err}); retrying..."
-                    )))
-                    .await
+                    run_blocking(Some(format!("后台更新等待失败（{join_err}）；正在重试…"))).await
                 }
             }
         }
@@ -2797,25 +2788,27 @@ async fn run_update_command(
     base_update_config: &UpdateConfig,
 ) -> Result<()> {
     if json && !check {
-        anyhow::bail!("--json requires --check");
+        anyhow::bail!("--json 只能与 --check 一起使用");
     }
     let mut update_config = base_update_config.clone();
     if check {
         if version.is_some() {
-            anyhow::bail!("--version cannot be used with --check");
+            anyhow::bail!("--version 不能与 --check 一起使用");
         }
         auto_update::apply_channel_switch(channel_switch, &mut update_config).await;
         let status = auto_update::check_update_status(&update_config).await;
         auto_update::print_update_status(&status, json)?;
         return Ok(());
     }
-    if let Some(ref v) = version
-        && semver::Version::parse(v).is_err()
-    {
-        anyhow::bail!(
-            "'{}' is not a valid version. Expected semver like 0.1.150",
-            v
-        );
+    if let Some(ref v) = version {
+        let valid = xai_grok_version::ReleaseVersion::parse(v)
+            .is_ok_and(|parsed| parsed.as_semver().build.is_empty());
+        if !valid {
+            anyhow::bail!(
+                "“{}”不是有效版本；应为 1.0.0、1.0.0.1 或 1.0.0-alpha.1 这类格式，且不得含 build metadata",
+                v
+            );
+        }
     }
     let installed = auto_update::run_update(
         force_reinstall,

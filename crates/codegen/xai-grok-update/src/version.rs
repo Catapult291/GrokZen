@@ -8,6 +8,7 @@ use tokio::process::Command;
 
 use xai_grok_shell::env::GrokBuildEnvironment;
 use xai_grok_shell::util::grok_home::grok_home;
+use xai_grok_version::parse_distribution_version;
 
 const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
 const NPM_PACKAGE: &str = "@xai-official/grok";
@@ -98,8 +99,8 @@ impl GrokVersion {
 
 /// Return the semver-greater of two version strings.
 fn semver_max(a: &str, b: &str) -> Result<String> {
-    let va = semver::Version::parse(a)?;
-    let vb = semver::Version::parse(b)?;
+    let va = parse_distribution_version(a, cfg!(feature = "community-build"))?;
+    let vb = parse_distribution_version(b, cfg!(feature = "community-build"))?;
     Ok(std::cmp::max(va, vb).to_string())
 }
 
@@ -320,7 +321,8 @@ async fn fetch_gcs_channel_pointer(channel: &str, base_url: &str) -> Result<Stri
                     ));
                     continue;
                 }
-                if semver::Version::parse(&version).is_err() {
+                if parse_distribution_version(&version, cfg!(feature = "community-build")).is_err()
+                {
                     anyhow::bail!(
                         "invalid semver in {} channel pointer: '{}'",
                         channel,
@@ -500,7 +502,7 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
         .position(|p| PLATFORM_OS.contains(p))
         .unwrap_or(parts.len());
     let ver_str = parts[..platform_start].join("-");
-    semver::Version::parse(&ver_str).ok()?;
+    parse_distribution_version(&ver_str, cfg!(feature = "community-build")).ok()?;
     Some(ver_str)
 }
 
@@ -564,8 +566,8 @@ pub fn cached_stable_version() -> Option<String> {
 /// Returns `Some("alpha")` when `current > stable`, `Some("stable")` when
 /// `current <= stable`, or `None` when either version fails to parse.
 fn derive_channel<'a>(current: &str, stable: &str) -> Option<&'a str> {
-    let current_v = semver::Version::parse(current).ok()?;
-    let stable_v = semver::Version::parse(stable).ok()?;
+    let current_v = parse_distribution_version(current, cfg!(feature = "community-build")).ok()?;
+    let stable_v = parse_distribution_version(stable, cfg!(feature = "community-build")).ok()?;
     if current_v > stable_v {
         Some("alpha")
     } else {
@@ -640,6 +642,7 @@ mod tests {
             ("grok-0.2.46-darwin-arm64", Some("0.2.46")),
             ("grok-0.1.220-linux-x86_64", Some("0.1.220")),
             ("grok-0.2.5-windows-x86_64.exe", Some("0.2.5")),
+            ("grok-1.0.0.1-windows-x86_64.exe", Some("1.0.0.1")),
             // Pre-releases must round-trip whole — truncating to "0.1.220"
             // would make an alpha install masquerade as the release and
             // mask alpha → stable updates.
@@ -691,6 +694,8 @@ mod tests {
             ("0.2.5", "0.2.3", Some("alpha")), // alpha ahead of stable
             ("0.2.5", "0.2.5", Some("stable")), // promoted to stable
             ("0.2.3", "0.2.5", Some("stable")), // behind stable
+            ("1.0.0.1", "1.0.0", Some("alpha")), // community revision ahead
+            ("1.0.0.1", "1.0.0.1", Some("stable")),
             ("0.2.0", "0.2.0", Some("stable")), // first release, both 0.2.0
             // ── Cross-regime upgrade ──
             ("0.2.0", "0.1.219", Some("alpha")), // new regime ahead of old stable
@@ -729,6 +734,8 @@ mod tests {
             ("0.1.149-alpha.1", "0.1.148", "0.1.149-alpha.1"),         // higher base wins
             ("0.0.0", "0.0.1", "0.0.1"),                               // zero versions
             ("0.99.99", "1.0.0", "1.0.0"),                             // major jump
+            ("1.0.0", "1.0.0.1", "1.0.0.1"),                           // community revision
+            ("1.0.0.2", "1.0.1", "1.0.1"),                             // upstream patch wins
         ];
 
         for (a, b, expected) in cases {

@@ -28,7 +28,8 @@ use matcher::FuzzyMatcher;
 use registry::{CommandRegistry, CommandSource, CommandTrigger};
 
 pub use command::{
-    AppCtx, ArgItem, CommandExecCtx, CommandProvenance, CommandResult, SlashCommand,
+    AppCtx, ArgItem, ArgPresentation, CommandExecCtx, CommandProvenance, CommandResult,
+    SlashCommand,
 };
 pub use mode_support::{ModeSupport, Remedy};
 
@@ -151,6 +152,8 @@ pub struct SuggestionRow {
     /// Render-only localized badge text. Provenance remains canonical for
     /// collision handling and command identity.
     pub provenance_badge: Option<String>,
+    /// Stable argument presentation metadata copied from [`ArgItem`].
+    pub presentation: Option<ArgPresentation>,
 }
 
 impl SuggestionRow {
@@ -245,6 +248,7 @@ impl SuggestionRow {
             tag: None,
             provenance: collides_with_builtin_or_skill.then(|| trigger.provenance.clone()),
             provenance_badge: None,
+            presentation: None,
         }
     }
 
@@ -259,6 +263,7 @@ impl SuggestionRow {
             tag: None,
             provenance: None,
             provenance_badge: None,
+            presentation: item.presentation,
         }
     }
 
@@ -2609,6 +2614,7 @@ mod tests {
             tag: None,
             provenance: None,
             provenance_badge: None,
+            presentation: None,
         };
         // Without smart-case, starts_with("p") fails on "Privacy" and ghost disappears
         // while the dropdown still highlights the row via CaseMatching::Smart.
@@ -3454,6 +3460,7 @@ mod tests {
                 match_text: match_text.into(),
                 insert_text: insert.into(),
                 description: String::new(),
+                presentation: None,
             };
             if let Some(rest) = args_query.strip_prefix("first")
                 && rest.starts_with(char::is_whitespace)

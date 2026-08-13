@@ -201,7 +201,7 @@ fn validate_requirements_value(
         return Ok(());
     }
     let fail_closed = resolve_fail_closed_mode(&v);
-    let Ok(version) = xai_grok_version::installed_semver() else {
+    let Ok(version) = xai_grok_version::installed_release_version() else {
         return Ok(());
     };
     if let Err(e) = apply_version_overrides(&mut v, &version)

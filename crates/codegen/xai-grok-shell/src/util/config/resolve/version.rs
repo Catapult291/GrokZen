@@ -1,10 +1,10 @@
-use semver::Version;
 use toml::Value as TomlValue;
+use xai_grok_version::ReleaseVersion;
 
 /// Machine-readable channel name derived from the GCS stable pointer cache.
 ///
-/// Reads `stable_version` from `~/.grok/version.json` (written by the
-/// auto-updater) and compares the compiled-in version against it:
+/// Reads `stable_version` from the community updater cache, falling back to
+/// the official cache for installations that predate distribution isolation:
 /// - `Some("alpha")` when the current version is ahead of stable,
 /// - `Some("stable")` when at or behind stable,
 /// - `None` when no cached pointer is available (first launch, old cache).
@@ -15,12 +15,14 @@ pub(crate) fn channel_name_from_cache() -> Option<&'static str> {
     use std::sync::OnceLock;
     static NAME: OnceLock<Option<&'static str>> = OnceLock::new();
     *NAME.get_or_init(|| {
-        let version_path = crate::util::grok_home::grok_home().join("version.json");
-        let content = std::fs::read_to_string(&version_path).ok()?;
+        let home = crate::util::grok_home::grok_home();
+        let content = ["version.grok-build-zh.json", "version.json"]
+            .into_iter()
+            .find_map(|name| std::fs::read_to_string(home.join(name)).ok())?;
         let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
         let stable = parsed.get("stable_version")?.as_str()?;
-        let current = semver::Version::parse(xai_grok_version::VERSION).ok()?;
-        let stable_v = semver::Version::parse(stable).ok()?;
+        let current = ReleaseVersion::parse(xai_grok_version::VERSION).ok()?;
+        let stable_v = ReleaseVersion::parse(stable).ok()?;
         if current > stable_v {
             Some("alpha")
         } else {
@@ -109,14 +111,14 @@ fn version_candidates(
     .collect()
 }
 
-fn fold_bound(raws: Vec<String>, knob: VersionKnob) -> Option<Version> {
-    let mut best: Option<Version> = None;
+fn fold_bound(raws: Vec<String>, knob: VersionKnob) -> Option<ReleaseVersion> {
+    let mut best: Option<ReleaseVersion> = None;
     for raw in raws {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             continue;
         }
-        match Version::parse(trimmed) {
+        match ReleaseVersion::parse(trimmed) {
             Ok(v) => {
                 best = Some(match (best, knob.bound()) {
                     (None, _) => v,
@@ -140,7 +142,7 @@ fn resolve_version_bound<E: Fn(&str) -> Option<String>>(
     layers: &crate::config::ConfigLayers,
     env: &E,
     knob: VersionKnob,
-) -> Option<Version> {
+) -> Option<ReleaseVersion> {
     let mut raws = version_candidates(layers, knob.toml_key(), false);
     raws.extend(env(knob.env_var()));
     fold_bound(raws, knob)
@@ -150,7 +152,7 @@ fn resolve_version_bound<E: Fn(&str) -> Option<String>>(
 fn resolve_version_bound_managed(
     layers: &crate::config::ConfigLayers,
     knob: VersionKnob,
-) -> Option<Version> {
+) -> Option<ReleaseVersion> {
     fold_bound(version_candidates(layers, knob.toml_key(), true), knob)
 }
 
@@ -158,10 +160,10 @@ fn resolve_version_bound_managed(
 /// hard `required_*` gate startup.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VersionPolicy {
-    pub minimum: Option<Version>,
-    pub maximum: Option<Version>,
-    pub required_minimum: Option<Version>,
-    pub required_maximum: Option<Version>,
+    pub minimum: Option<ReleaseVersion>,
+    pub maximum: Option<ReleaseVersion>,
+    pub required_minimum: Option<ReleaseVersion>,
+    pub required_maximum: Option<ReleaseVersion>,
 }
 
 impl VersionPolicy {
@@ -217,13 +219,13 @@ impl VersionPolicy {
     }
 
     /// `None` on a contradictory range, so the fail-open guard lives in one place.
-    fn effective_required_minimum(&self) -> Option<&Version> {
+    fn effective_required_minimum(&self) -> Option<&ReleaseVersion> {
         (!self.has_contradictory_required_range())
             .then_some(self.required_minimum.as_ref())
             .flatten()
     }
 
-    fn effective_required_maximum(&self) -> Option<&Version> {
+    fn effective_required_maximum(&self) -> Option<&ReleaseVersion> {
         (!self.has_contradictory_required_range())
             .then_some(self.required_maximum.as_ref())
             .flatten()
@@ -231,7 +233,7 @@ impl VersionPolicy {
 
     /// Shared clamp core: cap at the ceilings, then the hard `required_minimum`
     /// last so it wins over a lower ceiling.
-    fn clamp_version(&self, mut v: Version) -> Version {
+    fn clamp_version(&self, mut v: ReleaseVersion) -> ReleaseVersion {
         if let Some(c) = &self.maximum
             && v > *c
         {
@@ -260,11 +262,13 @@ impl VersionPolicy {
     /// Clamp `target` into range. An unparseable target resolves to the lowest
     /// in-range version when a hard floor applies, else passes through unchanged.
     fn clamp(&self, target: &str) -> String {
-        match Version::parse(target) {
+        match ReleaseVersion::parse(target) {
             Ok(v) => self.clamp_version(v).to_string(),
-            Err(_) if self.effective_required_minimum().is_some() => {
-                self.clamp_version(Version::new(0, 0, 0)).to_string()
-            }
+            Err(_) if self.effective_required_minimum().is_some() => self
+                .clamp_version(
+                    ReleaseVersion::parse("0.0.0").expect("0.0.0 is a valid release version"),
+                )
+                .to_string(),
             Err(_) => target.to_string(),
         }
     }
@@ -272,16 +276,18 @@ impl VersionPolicy {
     /// Anti-downgrade: skip a target below the soft `minimum`. Never clamps up.
     fn skips_update_target(&self, target: &str) -> bool {
         matches!(
-            (&self.minimum, Version::parse(target)),
+            (&self.minimum, ReleaseVersion::parse(target)),
             (Some(min), Ok(t)) if t < *min
         )
     }
 
     /// Lowest version an explicit `--version` pin may install, always agreeing
     /// with [`clamp`](Self::clamp). Only the hard `required_minimum` blocks a pin.
-    pub fn installable_floor(&self) -> Option<Version> {
+    pub fn installable_floor(&self) -> Option<ReleaseVersion> {
         self.effective_required_minimum()?;
-        Some(self.clamp_version(Version::new(0, 0, 0)))
+        Some(self.clamp_version(
+            ReleaseVersion::parse("0.0.0").expect("0.0.0 is a valid release version"),
+        ))
     }
 }
 
@@ -316,8 +322,8 @@ mod tests {
         }
     }
 
-    fn v(s: &str) -> Version {
-        Version::parse(s).unwrap()
+    fn v(s: &str) -> ReleaseVersion {
+        ReleaseVersion::parse(s).unwrap()
     }
 
     #[test]
@@ -486,6 +492,15 @@ mod tests {
         // value. This is the ordering every updater path depends on.
         assert_eq!(
             pol(Some("0.2.100"), Some("0.2.50"), None, None).resolve_target("0.2.200"),
+            None
+        );
+
+        assert_eq!(
+            pol(Some("1.0.0.1"), None, None, None).resolve_target("1.0.0.2"),
+            Some("1.0.0.2".into())
+        );
+        assert_eq!(
+            pol(Some("1.0.0.2"), None, None, None).resolve_target("1.0.0.1"),
             None
         );
     }

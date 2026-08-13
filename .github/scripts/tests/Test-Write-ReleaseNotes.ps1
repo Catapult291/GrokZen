@@ -129,6 +129,46 @@ try {
         Pop-Location
     }
 
+    [IO.File]::WriteAllText((Join-Path $fixtureRepo 'fixture.txt'), 'fixture-3', (New-Object Text.UTF8Encoding($false)))
+    & git -C $fixtureRepo add fixture.txt
+    & git -C $fixtureRepo commit --quiet -m '增加社区修订版本测试'
+    & git -C $fixtureRepo tag 'v1.0.1.1'
+    Push-Location $fixtureRepo
+    try {
+        $revisionPath = Join-Path $tempRoot 'community-revision.md'
+        & $generator `
+            -CurrentTag 'v1.0.1.1' `
+            -OutputPath $revisionPath `
+            -Repository $repository `
+            -TranslationMapPath $emptyMap `
+            -PublishedReleaseTags @('v1.0.1')
+        $revisionNotes = Get-Content -LiteralPath $revisionPath -Raw
+        $revisionSha = (& git rev-parse HEAD).Trim()
+        Assert-Contains $revisionNotes "[增加社区修订版本测试](https://github.com/$repository/commit/$revisionSha)" '四段社区修订 Tag 必须生成正常提交链接'
+    } finally {
+        Pop-Location
+    }
+
+    foreach ($invalidTag in @(
+        'V1.0.0.1',
+        'v1.0.0.0',
+        'v1.0.0.01',
+        'v1.0.0.1.2',
+        'v1.0.0.1-alpha.1',
+        'v1.0.0.1١',
+        'v1.0.0.18446744073709551616',
+        'v1.0.0-alpha.18446744073709551616'
+    )) {
+        Assert-Throws {
+            & $generator `
+                -CurrentTag $invalidTag `
+                -OutputPath (Join-Path $tempRoot 'invalid-tag.md') `
+                -Repository $repository `
+                -TranslationMapPath $emptyMap `
+                -PublishedReleaseTags @()
+        } 'CurrentTag 必须' "无效社区修订 Tag 必须被拒绝：$invalidTag"
+    }
+
     $invalidSchemaMap = Join-Path $tempRoot 'invalid-schema-map.json'
     [IO.File]::WriteAllText($invalidSchemaMap, '{"schema":true,"entries":[]}', (New-Object Text.UTF8Encoding($false)))
     Assert-Throws {

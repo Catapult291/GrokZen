@@ -23,13 +23,23 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
 function Test-ReleaseTag([string] $Tag) {
-    if ($Tag -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$') {
+    if ($Tag -cnotmatch '^v(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:\.(?<revision>[1-9][0-9]*)|-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$') {
         return $false
+    }
+    foreach ($number in @($matches['major'], $matches['minor'], $matches['patch'], $matches['revision'])) {
+        [uint64]$parsedNumber = 0
+        if ($number -and ![uint64]::TryParse([string]$number, [ref]$parsedNumber)) {
+            return $false
+        }
     }
     if ($matches.ContainsKey('prerelease') -and $matches.prerelease) {
         foreach ($identifier in ($matches.prerelease -split '\.')) {
-            if ($identifier -match '^\d+$' -and $identifier.Length -gt 1 -and $identifier.StartsWith('0')) {
-                return $false
+            if ($identifier -cmatch '^[0-9]+$') {
+                [uint64]$parsedIdentifier = 0
+                if (($identifier.Length -gt 1 -and $identifier.StartsWith('0')) -or
+                    ![uint64]::TryParse($identifier, [ref]$parsedIdentifier)) {
+                    return $false
+                }
             }
         }
     }
@@ -50,7 +60,7 @@ function ConvertTo-MarkdownLinkText([string] $Text) {
 }
 
 if (!(Test-ReleaseTag $CurrentTag)) {
-    throw "CurrentTag 必须是无 build metadata、无数字前导零的 SemVer Tag：$CurrentTag"
+    throw "CurrentTag 必须是 vA.B.C、vA.B.C.N（N > 0）或三段预发布格式，且不得含 build metadata、数字前导零：$CurrentTag"
 }
 if (!(Test-RepositoryName $Repository)) {
     throw "Repository 必须是 owner/name：$Repository"
@@ -184,7 +194,11 @@ function Get-PublishedReleaseTags {
         $pageResult = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers
         $releases = @($pageResult)
         foreach ($release in $releases) {
-            if (!$release.draft -and $release.immutable -and (Test-ReleaseTag ([string]$release.tag_name))) {
+            $tagName = [string]$release.tag_name
+            $tagPrerelease = $tagName.Contains('-')
+            if (!$release.draft -and $release.immutable -and
+                ([bool]$release.prerelease -eq $tagPrerelease) -and
+                (Test-ReleaseTag $tagName)) {
                 $tags.Add([string]$release.tag_name)
             }
         }

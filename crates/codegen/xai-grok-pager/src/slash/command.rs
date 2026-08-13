@@ -14,6 +14,7 @@ use crate::app::actions::Action;
 use crate::app::bundle::BundleState;
 use crate::slash::mode_support::ModeSupport;
 use agent_client_protocol as acp;
+use xai_grok_shell::sampling::types::ReasoningEffort;
 
 /// Provisional scheduled task info for immediate display in the tasks pane.
 ///
@@ -87,6 +88,14 @@ pub enum CommandResult {
 }
 
 /// A suggestion item for command argument completion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgPresentation {
+    /// Stable reasoning value used only to localize the visible label and
+    /// description. The option id in `insert_text` remains untouched.
+    ReasoningEffort(ReasoningEffort),
+}
+
+/// A suggestion item for command argument completion.
 #[derive(Debug, Clone)]
 pub struct ArgItem {
     /// Display text shown in the dropdown.
@@ -97,6 +106,9 @@ pub struct ArgItem {
     pub insert_text: String,
     /// Description shown alongside the item.
     pub description: String,
+    /// Optional stable presentation metadata. This must never change the text
+    /// inserted into the prompt or the value sent to the model API.
+    pub presentation: Option<ArgPresentation>,
 }
 
 /// Read-only context for generating suggestions.

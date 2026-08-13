@@ -17,7 +17,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::render::SafeBuf;
 use crate::render::line_utils::truncate_str;
 use crate::render::scrollbar::render_scrollbar_styled;
-use crate::slash::{MAX_VISIBLE_SUGGESTIONS, SlashSnapshot, SuggestionRow};
+use crate::slash::{
+    ArgItem, ArgPresentation, MAX_VISIBLE_SUGGESTIONS, SlashSnapshot, SuggestionRow,
+};
 use crate::theme::Theme;
 
 /// Apply locale metadata to a render-only snapshot. Command identity, aliases,
@@ -51,8 +53,17 @@ pub fn localized_snapshot(
             // phrase such as "Heavy reasoning".
             Some(_) => {}
             None => {
-                row.display = localized_argument_display(locale, &row.display, &row.description);
-                row.description = localized_argument_description(locale, &row.description);
+                row.display = localized_argument_display_with_presentation(
+                    locale,
+                    &row.display,
+                    &row.description,
+                    row.presentation,
+                );
+                row.description = localized_argument_description_with_presentation(
+                    locale,
+                    &row.description,
+                    row.presentation,
+                );
             }
         }
 
@@ -86,6 +97,27 @@ pub(crate) fn localized_argument_display(
     text: &str,
     description: &str,
 ) -> String {
+    localized_argument_display_with_presentation(locale, text, description, None)
+}
+
+pub(crate) fn localized_arg_item_display(
+    locale: &crate::locale::LocaleContext,
+    item: &ArgItem,
+) -> String {
+    localized_argument_display_with_presentation(
+        locale,
+        &item.display,
+        &item.description,
+        item.presentation,
+    )
+}
+
+fn localized_argument_display_with_presentation(
+    locale: &crate::locale::LocaleContext,
+    text: &str,
+    description: &str,
+    presentation: Option<ArgPresentation>,
+) -> String {
     let (base, marker_id, marker_english) = if let Some(base) = text.strip_suffix(" (active)") {
         (base, Some("slash.marker.active"), "active")
     } else if let Some(base) = text.strip_suffix(" (current)") {
@@ -97,24 +129,55 @@ pub(crate) fn localized_argument_display(
     // Picker labels are presentation only. Match the client-owned built-in
     // label together with its built-in description so a dynamic ACP option
     // that merely reuses a word such as `high` remains opaque.
-    let label_id = match (base, description) {
-        ("how-to", "Browse in-TUI How-to Guides") => Some("slash.command.docs.arg.how-to.label"),
-        ("web", "Open docs.x.ai/build in the browser") => Some("slash.command.docs.arg.web.label"),
-        ("High Effort", "Highest implementation quality with extensive reasoning") => {
-            Some("slash.arg.model_effort.high.label")
-        }
-        ("Medium Effort", "Balanced effort with standard implementation and testing") => {
-            Some("slash.arg.model_effort.medium.label")
-        }
-        ("Low Effort", "Quick, fast implementations") => Some("slash.arg.model_effort.low.label"),
-        ("none", "No reasoning") => Some("reasoning_effort.none.label"),
-        ("minimal", "Minimal reasoning") => Some("reasoning_effort.minimal.label"),
-        ("low", "Faster, lighter reasoning") => Some("reasoning_effort.low.label"),
-        ("medium", "Balanced reasoning") => Some("reasoning_effort.medium.label"),
-        ("high", "Heavy reasoning") => Some("reasoning_effort.high.label"),
-        ("xhigh", "Extended reasoning") => Some("reasoning_effort.xhigh.label"),
-        ("max", "Maximum reasoning") => Some("reasoning_effort.max.label"),
-        _ => None,
+    let label_id = match presentation {
+        Some(ArgPresentation::ReasoningEffort(level)) => Some(match level {
+            xai_grok_shell::sampling::types::ReasoningEffort::None => {
+                "slash.arg.model_effort.none.label"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Minimal => {
+                "slash.arg.model_effort.minimal.label"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Low => {
+                "slash.arg.model_effort.low.label"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Medium => {
+                "slash.arg.model_effort.medium.label"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::High => {
+                "slash.arg.model_effort.high.label"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Xhigh => {
+                "slash.arg.model_effort.xhigh.label"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Max => {
+                "slash.arg.model_effort.max.label"
+            }
+        }),
+        None => match (base, description) {
+            ("how-to", "Browse in-TUI How-to Guides") => {
+                Some("slash.command.docs.arg.how-to.label")
+            }
+            ("web", "Open docs.x.ai/build in the browser") => {
+                Some("slash.command.docs.arg.web.label")
+            }
+            ("High Effort", "Highest implementation quality with extensive reasoning") => {
+                Some("slash.arg.model_effort.high.label")
+            }
+            ("Medium Effort", "Balanced effort with standard implementation and testing") => {
+                Some("slash.arg.model_effort.medium.label")
+            }
+            ("Low Effort", "Quick, fast implementations") => {
+                Some("slash.arg.model_effort.low.label")
+            }
+            ("none", "No reasoning") => Some("reasoning_effort.none.label"),
+            ("minimal", "Minimal reasoning") => Some("reasoning_effort.minimal.label"),
+            ("low", "Faster, lighter reasoning") => Some("reasoning_effort.low.label"),
+            ("medium", "Balanced reasoning") => Some("reasoning_effort.medium.label"),
+            ("high", "Heavy reasoning") => Some("reasoning_effort.high.label"),
+            ("xhigh", "Extended reasoning") => Some("reasoning_effort.xhigh.label"),
+            ("max", "Maximum reasoning") => Some("reasoning_effort.max.label"),
+            _ => None,
+        },
     };
     let localized_doc_title = description
         .strip_prefix("Open \"")
@@ -137,6 +200,48 @@ pub(crate) fn localized_argument_description(
     locale: &crate::locale::LocaleContext,
     english: &str,
 ) -> String {
+    localized_argument_description_with_presentation(locale, english, None)
+}
+
+pub(crate) fn localized_arg_item_description(
+    locale: &crate::locale::LocaleContext,
+    item: &ArgItem,
+) -> String {
+    localized_argument_description_with_presentation(locale, &item.description, item.presentation)
+}
+
+fn localized_argument_description_with_presentation(
+    locale: &crate::locale::LocaleContext,
+    english: &str,
+    presentation: Option<ArgPresentation>,
+) -> String {
+    if let Some(ArgPresentation::ReasoningEffort(level)) = presentation {
+        let id = match level {
+            xai_grok_shell::sampling::types::ReasoningEffort::None => {
+                "slash.arg.model_effort.none.description"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Minimal => {
+                "slash.arg.model_effort.minimal.description"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Low => {
+                "slash.arg.model_effort.low.description"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Medium => {
+                "slash.arg.model_effort.medium.description"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::High => {
+                "slash.arg.model_effort.high.description"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Xhigh => {
+                "slash.arg.model_effort.xhigh.description"
+            }
+            xai_grok_shell::sampling::types::ReasoningEffort::Max => {
+                "slash.arg.model_effort.max.description"
+            }
+        };
+        return locale.named_text(id, english).into_owned();
+    }
+
     let catalog_id = match english {
         "Hide the announcement banner" => Some("slash.command.announcements.arg.hide.description"),
         "Show the announcement banner" => Some("slash.command.announcements.arg.show.description"),
@@ -715,6 +820,7 @@ mod tests {
                 tag: None,
                 provenance: None,
                 provenance_badge: None,
+                presentation: None,
             })
             .collect();
         assert_eq!(desired_item_rows(&matches, 80), MAX_DROPDOWN_ROWS);
@@ -740,6 +846,7 @@ mod tests {
                 tag: None,
                 provenance: None,
                 provenance_badge: None,
+                presentation: None,
             })
             .collect();
         let snap = SlashSnapshot {
@@ -785,6 +892,7 @@ mod tests {
                 tag: None,
                 provenance: Some(CommandProvenance::Builtin),
                 provenance_badge: None,
+                presentation: None,
             },
             SuggestionRow {
                 command_canonical: Some("login".into()),
@@ -798,6 +906,7 @@ mod tests {
                     source: "acme".to_string(),
                 }),
                 provenance_badge: None,
+                presentation: None,
             },
         ];
         let snap = SlashSnapshot {
@@ -834,7 +943,144 @@ mod tests {
             tag: None,
             provenance: None,
             provenance_badge: None,
+            presentation: None,
         }
+    }
+
+    fn effort_row(
+        display: &str,
+        description: &str,
+        value: xai_grok_shell::sampling::types::ReasoningEffort,
+        insert_text: &str,
+    ) -> SuggestionRow {
+        let mut row = row(display, description);
+        row.insert_text = insert_text.to_string();
+        row.presentation = Some(ArgPresentation::ReasoningEffort(value));
+        row
+    }
+
+    #[test]
+    fn chinese_effort_rows_use_typed_values_for_all_tiers_and_keep_option_ids() {
+        use xai_grok_shell::sampling::types::ReasoningEffort;
+
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let raw = SlashSnapshot {
+            open: true,
+            matches: vec![
+                effort_row("No Effort", "Provider text", ReasoningEffort::None, "off"),
+                effort_row("Minimal", "Provider text", ReasoningEffort::Minimal, "tiny"),
+                effort_row("Low Effort", "Provider text", ReasoningEffort::Low, "low"),
+                effort_row(
+                    "Medium Effort",
+                    "Provider text",
+                    ReasoningEffort::Medium,
+                    "medium",
+                ),
+                effort_row(
+                    "High Effort",
+                    "Higher implementation quality with extensive reasoning",
+                    ReasoningEffort::High,
+                    "high",
+                ),
+                effort_row(
+                    "Extra High Effort (active)",
+                    "Highest effort and reasoning level",
+                    ReasoningEffort::Xhigh,
+                    "deep",
+                ),
+                effort_row("Maximum", "Provider text", ReasoningEffort::Max, "maximum"),
+            ],
+            ..Default::default()
+        };
+
+        let localized = localized_snapshot(raw.clone(), Some(&locale));
+        let displays: Vec<_> = localized
+            .matches
+            .iter()
+            .map(|row| row.display.as_str())
+            .collect();
+        assert_eq!(
+            displays,
+            [
+                "无推理",
+                "最低强度",
+                "低强度",
+                "中等强度",
+                "高强度",
+                "极高强度（当前）",
+                "最高强度"
+            ]
+        );
+        let descriptions: Vec<_> = localized
+            .matches
+            .iter()
+            .map(|row| row.description.as_str())
+            .collect();
+        assert_eq!(
+            descriptions,
+            [
+                "不进行推理",
+                "使用最少推理，优先响应速度",
+                "快速、轻量的实现",
+                "均衡投入，采用标准实现与测试",
+                "更高的实现质量，并进行充分推理",
+                "最高投入与推理强度",
+                "使用模型支持的最大推理强度",
+            ]
+        );
+        assert_eq!(
+            localized.matches[5].insert_text, "deep",
+            "third-party option id must remain the accepted input token"
+        );
+        assert_eq!(
+            localized
+                .matches
+                .iter()
+                .map(|row| &row.insert_text)
+                .collect::<Vec<_>>(),
+            raw.matches
+                .iter()
+                .map(|row| &row.insert_text)
+                .collect::<Vec<_>>(),
+            "localization must not alter any option id or wire selection"
+        );
+
+        let mut screenshot_rows = localized.clone();
+        screenshot_rows.matches = vec![localized.matches[4].clone(), localized.matches[5].clone()];
+        screenshot_rows.selected = 1;
+        let area = Rect::new(0, 0, 90, 4);
+        let mut buffer = Buffer::empty(area);
+        render_dropdown(&mut buffer, area, &screenshot_rows, None, &Theme::current());
+        let rendered: String = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // Wide glyph continuation cells are represented as spaces in a raw
+        // ratatui Buffer snapshot. Compact them before checking Chinese text.
+        let compact_rendered = rendered.replace(' ', "");
+        assert!(
+            compact_rendered.contains("极高强度（当前）"),
+            "rendered buffer omitted the selected xhigh row: {rendered:?}"
+        );
+        assert!(
+            compact_rendered.contains("高强度"),
+            "rendered buffer omitted the high row: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("Extra High Effort"),
+            "rendered buffer unexpectedly retained the provider label: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("Highest effort and reasoning level"),
+            "rendered buffer unexpectedly retained the provider description: {rendered:?}"
+        );
     }
 
     #[test]
@@ -907,7 +1153,7 @@ mod tests {
         assert_eq!(localized.matches[3].display, "高强度（当前）");
         assert_eq!(
             localized.matches[3].description,
-            "最高实现质量，并进行充分推理"
+            "更高的实现质量，并进行充分推理"
         );
         assert_eq!(
             localized.matches[4].display, "Deep（当前）",

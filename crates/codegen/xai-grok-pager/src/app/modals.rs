@@ -1905,10 +1905,8 @@ impl AgentView {
                     .map(|item| {
                         locale
                             .map(|locale| {
-                                crate::views::slash_dropdown::localized_argument_display(
-                                    locale,
-                                    &item.display,
-                                    &item.description,
+                                crate::views::slash_dropdown::localized_arg_item_display(
+                                    locale, item,
                                 )
                             })
                             .unwrap_or_else(|| item.display.clone())
@@ -1919,9 +1917,8 @@ impl AgentView {
                     .map(|item| {
                         locale
                             .map(|locale| {
-                                crate::views::slash_dropdown::localized_argument_description(
-                                    locale,
-                                    &item.description,
+                                crate::views::slash_dropdown::localized_arg_item_description(
+                                    locale, item,
                                 )
                             })
                             .unwrap_or_else(|| item.description.clone())

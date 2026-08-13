@@ -9,11 +9,11 @@ const BUILTIN_FILES: &[(&str, &str)] = &[
     (COMMUNITY_README, include_str!("../README.zh-CN.md")),
     (
         COMMUNITY_CHANGELOG_MD,
-        include_str!("../changelogs/1.0.0.zh-CN.md"),
+        include_str!("../changelogs/1.0.0.1.zh-CN.md"),
     ),
     (
         COMMUNITY_CHANGELOG_JSON,
-        include_str!("../changelogs/1.0.0.zh-CN.json"),
+        include_str!("../changelogs/1.0.0.1.zh-CN.json"),
     ),
 ];
 
@@ -196,7 +196,12 @@ mod tests {
         assert!(BUILTIN_FILES[0].1.contains("grok-zh"));
         assert!(BUILTIN_FILES[0].1.contains("简体中文社区版"));
         assert_eq!(BUILTIN_FILES[1].0, COMMUNITY_CHANGELOG_MD);
+        assert!(BUILTIN_FILES[1].1.starts_with("# 1.0.0.1"));
         assert!(BUILTIN_FILES[1].1.contains("## 新功能"));
+        assert_eq!(
+            BUILTIN_FILES[1].1.matches("补全 Grok 4.6 更新汉化").count(),
+            1
+        );
         assert!(!BUILTIN_FILES[1].1.contains("[English](1.0.0.md)"));
         assert_eq!(BUILTIN_FILES[2].0, COMMUNITY_CHANGELOG_JSON);
         let entries: serde_json::Value = serde_json::from_str(BUILTIN_FILES[2].1).unwrap();
@@ -204,6 +209,14 @@ mod tests {
             entries
                 .as_array()
                 .is_some_and(|entries| !entries.is_empty())
+        );
+        let entries = entries.as_array().unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .filter(|entry| entry["description"] == "补全 Grok 4.6 更新汉化")
+                .count(),
+            1
         );
     }
 

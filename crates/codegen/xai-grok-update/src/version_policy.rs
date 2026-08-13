@@ -2,9 +2,9 @@
 //! startup; `minimum`/`maximum` are updater-only. Every knob fails open.
 
 use crate::version::get_installed_grok_version;
-use semver::Version;
 use tracing::warn;
 use xai_grok_shell::util::config::VersionPolicy;
+use xai_grok_version::ReleaseVersion;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RequiredRangeDecision {
@@ -15,9 +15,18 @@ enum RequiredRangeDecision {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum VersionPolicyError {
-    #[error(
-        "Cannot install Grok {target}: the minimum allowed version is {minimum}. \
-         Run `grok update` to install the latest allowed version."
+    #[cfg_attr(
+        feature = "community-build",
+        error(
+            "无法安装 grok-zh {target}：允许安装的最低版本为 {minimum}。请运行 `grok-zh update` 安装最新的允许版本。"
+        )
+    )]
+    #[cfg_attr(
+        not(feature = "community-build"),
+        error(
+            "Cannot install Grok {target}: the minimum allowed version is {minimum}. \
+             Run `grok update` to install the latest allowed version."
+        )
     )]
     TargetBelowFloor { target: String, minimum: String },
 }
@@ -34,7 +43,7 @@ fn evaluate_required_range(current_version: &str, policy: &VersionPolicy) -> Req
         return RequiredRangeDecision::InRange;
     }
 
-    let Ok(cur) = Version::parse(current_version) else {
+    let Ok(cur) = ReleaseVersion::parse(current_version) else {
         return RequiredRangeDecision::InRange;
     };
 
@@ -66,7 +75,7 @@ pub(crate) fn check_install_target(
     let Some(min) = policy.installable_floor() else {
         return Ok(());
     };
-    if !matches!(Version::parse(target), Ok(t) if t >= min) {
+    if !matches!(ReleaseVersion::parse(target), Ok(t) if t >= min) {
         return Err(VersionPolicyError::TargetBelowFloor {
             target: target.to_string(),
             minimum: min.to_string(),
@@ -78,18 +87,36 @@ pub(crate) fn check_install_target(
 fn required_range_message(decision: &RequiredRangeDecision) -> Option<String> {
     match decision {
         RequiredRangeDecision::InRange => None,
-        RequiredRangeDecision::Below { current, minimum } => Some(format!(
-            "This version of Grok ({current}) is older than the minimum required \
-             by your organization ({minimum}).\n\n\
-             Update to an approved version through your organization's approved \
-             method (for example, run `grok update`)."
-        )),
-        RequiredRangeDecision::Above { current, maximum } => Some(format!(
-            "This version of Grok ({current}) is newer than the maximum allowed \
-             by your organization ({maximum}).\n\n\
-             Install an approved version through your organization's approved \
-             method (for example, run `grok update --version {maximum}`)."
-        )),
+        RequiredRangeDecision::Below { current, minimum } => {
+            if cfg!(feature = "community-build") {
+                Some(format!(
+                    "当前 grok-zh 版本（{current}）低于组织要求的最低版本（{minimum}）。\n\n\
+                     请通过组织批准的方式更新到允许的版本，例如运行 `grok-zh update`。"
+                ))
+            } else {
+                Some(format!(
+                    "This version of Grok ({current}) is older than the minimum required \
+                     by your organization ({minimum}).\n\n\
+                     Update to an approved version through your organization's approved \
+                     method (for example, run `grok update`)."
+                ))
+            }
+        }
+        RequiredRangeDecision::Above { current, maximum } => {
+            if cfg!(feature = "community-build") {
+                Some(format!(
+                    "当前 grok-zh 版本（{current}）高于组织允许的最高版本（{maximum}）。\n\n\
+                     请通过组织批准的方式安装允许的版本，例如运行 `grok-zh update --version {maximum}`。"
+                ))
+            } else {
+                Some(format!(
+                    "This version of Grok ({current}) is newer than the maximum allowed \
+                     by your organization ({maximum}).\n\n\
+                     Install an approved version through your organization's approved \
+                     method (for example, run `grok update --version {maximum}`)."
+                ))
+            }
+        }
     }
 }
 
@@ -110,8 +137,8 @@ pub fn enforce_version_policy_or_exit() {
 mod tests {
     use super::*;
 
-    fn v(s: &str) -> Version {
-        Version::parse(s).unwrap()
+    fn v(s: &str) -> ReleaseVersion {
+        ReleaseVersion::parse(s).unwrap()
     }
 
     fn pol(
@@ -152,6 +179,7 @@ mod tests {
             )
             .is_ok()
         );
+        assert!(check_install_target(&hard, "0.1.150.1").is_ok());
     }
 
     #[test]

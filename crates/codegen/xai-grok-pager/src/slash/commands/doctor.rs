@@ -85,6 +85,7 @@ impl SlashCommand for DoctorCommand {
                     match_text: format!("fix {handle} {id}"),
                     insert_text: format!("fix {handle}"),
                     description: label.into(),
+                    presentation: None,
                 })
                 .collect::<Vec<_>>();
             return (!items.is_empty()).then_some(items);
@@ -94,6 +95,7 @@ impl SlashCommand for DoctorCommand {
             match_text: "fix".into(),
             insert_text: "fix".into(),
             description: "Show automatic fixes available here".into(),
+            presentation: None,
         }])
     }
 

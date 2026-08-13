@@ -177,6 +177,7 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             match_text: info.name.clone(),
             insert_text,
             description: info.description.clone().unwrap_or_default(),
+            presentation: None,
         });
     }
     items

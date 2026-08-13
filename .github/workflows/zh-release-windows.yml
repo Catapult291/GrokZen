@@ -40,20 +40,30 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           $tag = $env:GITHUB_REF_NAME.Trim()
-          if ($tag -notmatch '^v(?<version>(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?)$') {
-            throw "Release Tag 必须是无 build metadata 的 SemVer：$tag"
+          if ($tag -cnotmatch '^v(?<version>(?<base>(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*))(?:\.(?<revision>[1-9][0-9]*)|-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?)$') {
+            throw "Release Tag 必须是 vA.B.C、vA.B.C.N（N > 0）或三段预发布格式，且不得含 build metadata：$tag"
           }
           $version = $matches.version
+          $baseVersion = $matches.base
+          $revisionText = $matches['revision']
+          foreach ($number in @($matches['major'], $matches['minor'], $matches['patch'], $revisionText)) {
+            [uint64]$parsedNumber = 0
+            if ($number -and ![uint64]::TryParse([string]$number, [ref]$parsedNumber)) {
+              throw "Release Tag 数值超出 u64 范围：$tag"
+            }
+          }
           if ($version.Contains('-')) {
             $prerelease = ($version -split '-', 2)[1]
             foreach ($identifier in ($prerelease -split '\.')) {
-              if ($identifier -match '^\d+$' -and $identifier.Length -gt 1 -and $identifier.StartsWith('0')) {
-                throw "SemVer 数字预发布标识不得包含前导零：$identifier"
+              if ($identifier -cmatch '^[0-9]+$') {
+                [uint64]$parsedIdentifier = 0
+                if (($identifier.Length -gt 1 -and $identifier.StartsWith('0')) -or
+                    ![uint64]::TryParse($identifier, [ref]$parsedIdentifier)) {
+                  throw "SemVer 数字预发布标识必须无前导零且不超过 u64：$identifier"
+                }
               }
             }
           }
-          $baseVersion = ($version -split '-', 2)[0]
-
           function Read-PackageVersion([string]$path) {
             $line = Get-Content -LiteralPath $path |
               Where-Object { $_ -match '^version\s*=\s*"([^"]+)"\s*$' } |
@@ -66,20 +76,47 @@ jobs:
 
           $pagerVersion = Read-PackageVersion 'crates/codegen/xai-grok-pager-bin/Cargo.toml'
           $coreVersion = Read-PackageVersion 'crates/codegen/xai-grok-version/Cargo.toml'
-          if ($pagerVersion -ne $coreVersion -or $baseVersion -ne $pagerVersion) {
+          if ($pagerVersion -cne $coreVersion -or $baseVersion -cne $pagerVersion) {
             throw "Tag 基线、pager-bin 与 xai-grok-version 必须一致：tag=$baseVersion pager=$pagerVersion core=$coreVersion"
           }
 
           $tagCommit = (& git rev-list -n 1 $tag).Trim()
-          if ($LASTEXITCODE -ne 0 -or $tagCommit -ne $env:GITHUB_SHA) {
+          if ($LASTEXITCODE -ne 0 -or $tagCommit -cne $env:GITHUB_SHA) {
             throw "Tag 必须直接构建其所指提交：tag=$tagCommit workflow=$env:GITHUB_SHA"
           }
 
-          & gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
-          $releaseExists = $LASTEXITCODE -eq 0
-          $global:LASTEXITCODE = 0
-          if ($releaseExists) {
+          $releasePages = @(
+            gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" |
+              ConvertFrom-Json
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw "无法读取现有 Release 列表：$LASTEXITCODE"
+          }
+          $allReleases = @(
+            foreach ($page in $releasePages) {
+              foreach ($candidate in @($page)) { $candidate }
+            }
+          )
+          if (@($allReleases | Where-Object { $_.tag_name -ceq $tag }).Count -ne 0) {
             throw "Release $tag 已存在；不可变发布不得覆盖。"
+          }
+          if ($revisionText) {
+            [uint64]$revision = 0
+            [void][uint64]::TryParse($revisionText, [ref]$revision)
+            $previousVersion = if ($revision -eq 1) { $baseVersion } else { "$baseVersion.$($revision - 1)" }
+            $previousTag = "v$previousVersion"
+            $previous = @(
+              $allReleases | Where-Object {
+                $_.tag_name -ceq $previousTag -and ![bool]$_.draft -and [bool]$_.immutable -and ![bool]$_.prerelease
+              }
+            )
+            if ($previous.Count -ne 1) {
+              throw "社区修订必须连续发布；缺少唯一的上一版 immutable Release：$previousTag"
+            }
+            & git merge-base --is-ancestor $previousTag $tag
+            if ($LASTEXITCODE -ne 0) {
+              throw "上一社区版本必须是当前 Tag 的祖先：previous=$previousTag current=$tag"
+            }
           }
 
           $packageName = "grok-zh-$version-windows-x86_64-gnu"
@@ -182,14 +219,28 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cargo fetch 失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-product
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-product 测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-version
+          if ($LASTEXITCODE -ne 0) { throw "xai-grok-version 测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-update --features community-build --lib
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-update 测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-locale
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-locale 测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-config --lib version_match_boundaries
+          if ($LASTEXITCODE -ne 0) { throw "四段版本配置覆盖测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib session_summary
           if ($LASTEXITCODE -ne 0) { throw "中文会话标题测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
           if ($LASTEXITCODE -ne 0) { throw "中文界面定向测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib chinese_effort_rows_use_typed_values_for_all_tiers_and_keep_option_ids
+          if ($LASTEXITCODE -ne 0) { throw "推理强度汉化测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib localization_regression_grok_announcements_cover_4_5_and_4_6
+          if ($LASTEXITCODE -ne 0) { throw "Grok 4.6 公告汉化测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib localization_regression_slash_snapshot_uses_canonical_metadata_only
+          if ($LASTEXITCODE -ne 0) { throw "斜杠菜单汉化回归失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib 'builtin::tests::'
+          if ($LASTEXITCODE -ne 0) { throw "内置中文更新日志测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib leader_is_older_than_directional
+          if ($LASTEXITCODE -ne 0) { throw "四段版本 leader 比较测试失败：$LASTEXITCODE" }
           & .\packaging\windows\tests\Test-Install-GrokZh.ps1
           & powershell.exe -NoProfile -NonInteractive `
             -File .\packaging\windows\tests\Test-Install-GrokZh.ps1
@@ -400,6 +451,27 @@ jobs:
             throw "缺少预生成的 Release 更新日志：$notes"
           }
 
+          function Resolve-RemoteTagCommit {
+            $ref = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:RELEASE_TAG" |
+              ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw '无法读取远端 Tag 引用。' }
+            $object = $ref.object
+            for ($depth = 0; $object.type -ceq 'tag' -and $depth -lt 8; $depth++) {
+              $tagObject = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$($object.sha)" |
+                ConvertFrom-Json
+              if ($LASTEXITCODE -ne 0) { throw '无法解引用 annotated Tag。' }
+              $object = $tagObject.object
+            }
+            if ($object.type -cne 'commit') {
+              throw "远端 Tag 未指向 commit：type=$($object.type)"
+            }
+            return [string]$object.sha
+          }
+          $remoteTagCommit = Resolve-RemoteTagCommit
+          if ($remoteTagCommit -cne $env:GITHUB_SHA) {
+            throw "发布前远端 Tag 必须仍指向工作流提交：tag=$remoteTagCommit workflow=$env:GITHUB_SHA"
+          }
+
           $createArgs = @(
             'release', 'create', $env:RELEASE_TAG
           ) + $assets + @(
@@ -424,7 +496,7 @@ jobs:
             $releaseMatches = @(
               foreach ($page in $releasePages) {
                 foreach ($candidate in @($page)) {
-                  if ($candidate.tag_name -eq $env:RELEASE_TAG -and $candidate.draft) {
+                  if ($candidate.tag_name -ceq $env:RELEASE_TAG -and $candidate.draft) {
                     $candidate
                   }
                 }
@@ -436,29 +508,57 @@ jobs:
           if ($releaseMatches.Count -ne 1) {
             throw "没有找到唯一的 Draft Release：$env:RELEASE_TAG"
           }
-          $release = $releaseMatches[0]
-          if (!$release.draft -or $release.tag_name -ne $env:RELEASE_TAG) {
+          $releaseId = $releaseMatches[0].id
+          $release = $null
+          for ($attempt = 0; $attempt -lt 15; $attempt++) {
+            $releaseJson = (& gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" 2>$null) -join "`n"
+            if ($LASTEXITCODE -eq 0 -and $releaseJson) {
+              try {
+                $candidate = $releaseJson | ConvertFrom-Json
+                $candidateAssets = @($candidate.assets)
+                $assetsReady = $candidateAssets.Count -eq $assets.Count -and
+                  @(
+                    $candidateAssets | Where-Object {
+                      $_.state -cne 'uploaded' -or $_.digest -cnotmatch '^sha256:[0-9a-f]{64}$'
+                    }
+                  ).Count -eq 0
+                if ($assetsReady) {
+                  $release = $candidate
+                  break
+                }
+              } catch {
+                $release = $null
+              }
+            }
+            Start-Sleep -Seconds 2
+          }
+          if ($null -eq $release) {
+            throw "Draft Release 的资产未在等待期内进入 uploaded 状态并生成 SHA-256 digest。"
+          }
+          if (!$release.draft -or $release.tag_name -cne $env:RELEASE_TAG) {
             throw 'Draft Release 元数据与 Tag 不一致。'
           }
           $expectedNotes = (Get-Content -LiteralPath $notes -Raw).Trim()
-          if ($release.name -ne $env:GROK_VERSION -or $release.body.Trim() -ne $expectedNotes) {
+          if ($release.name -cne $env:GROK_VERSION -or $release.body.Trim() -cne $expectedNotes) {
             throw 'Draft Release 的标题或正文与预生成更新日志不一致。'
           }
           $expectedNames = @(
             $env:ZIP_NAME,
             "$env:ZIP_NAME.sha256"
-          ) | Sort-Object
-          $actualNames = @($release.assets | ForEach-Object name | Sort-Object)
-          if (($expectedNames -join "`n") -ne ($actualNames -join "`n")) {
+          )
+          [Array]::Sort($expectedNames, [StringComparer]::Ordinal)
+          $actualNames = @($release.assets | ForEach-Object name)
+          [Array]::Sort($actualNames, [StringComparer]::Ordinal)
+          if (($expectedNames -join "`n") -cne ($actualNames -join "`n")) {
             throw "Release 资产集合不匹配：$($actualNames -join ', ')"
           }
           foreach ($asset in $release.assets) {
-            if ($asset.digest -notmatch '^sha256:[0-9a-f]{64}$') {
-              throw "GitHub 未记录 $($asset.name) 的 SHA-256。"
+            if ($asset.state -cne 'uploaded' -or $asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+              throw "GitHub 未完成 $($asset.name) 的上传或 SHA-256 记录。"
             }
             $remoteHash = $asset.digest.Substring('sha256:'.Length)
             $localHash = (Get-FileHash (Join-Path $dist $asset.name) -Algorithm SHA256).Hash
-            if ($remoteHash -ne $localHash.ToLowerInvariant()) {
+            if ($remoteHash -cne $localHash.ToLowerInvariant()) {
               throw "$($asset.name) 的本地哈希与 GitHub digest 不一致。"
             }
           }
@@ -475,15 +575,47 @@ jobs:
           }
 
           $published = $null
-          for ($attempt = 0; $attempt -lt 10; $attempt++) {
-            $published = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" |
-              ConvertFrom-Json
-            if ($published.immutable) { break }
+          for ($attempt = 0; $attempt -lt 30; $attempt++) {
+            $publishedJson = (& gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG" 2>$null) -join "`n"
+            if ($LASTEXITCODE -eq 0 -and $publishedJson) {
+              try {
+                $candidate = $publishedJson | ConvertFrom-Json
+                if ($null -ne $candidate) {
+                  $published = $candidate
+                  if ([bool]$published.immutable) { break }
+                }
+              } catch {
+                $published = $null
+              }
+            }
             Start-Sleep -Seconds 2
           }
-          if ($published.draft -or !$published.immutable) {
+          if ($null -eq $published -or [bool]$published.draft -or ![bool]$published.immutable) {
             throw 'Release 发布后未进入 immutable 状态。'
           }
           if ([bool]$published.prerelease -ne [bool]($env:IS_PRERELEASE -eq 'true')) {
             throw 'Release prerelease 状态与 SemVer 不一致。'
+          }
+          if ($published.tag_name -cne $env:RELEASE_TAG -or
+              $published.name -cne $env:GROK_VERSION -or
+              $published.body.Trim() -cne $expectedNotes) {
+            throw 'Release 发布后的 Tag、标题或正文与已核验 Draft 不一致。'
+          }
+          $publishedNames = @($published.assets | ForEach-Object name)
+          [Array]::Sort($publishedNames, [StringComparer]::Ordinal)
+          if (($expectedNames -join "`n") -cne ($publishedNames -join "`n")) {
+            throw 'Release 发布后的资产集合与已核验 Draft 不一致。'
+          }
+          foreach ($asset in $published.assets) {
+            if ($asset.state -cne 'uploaded' -or $asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+              throw "Release 发布后 $($asset.name) 未保持 uploaded 状态或缺少规范 SHA-256 digest。"
+            }
+            $localHash = (Get-FileHash (Join-Path $dist $asset.name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($asset.digest.Substring('sha256:'.Length) -cne $localHash) {
+              throw "Release 发布后 $($asset.name) 的 digest 与本地资产不一致。"
+            }
+          }
+          $remoteTagCommit = Resolve-RemoteTagCommit
+          if ($remoteTagCommit -cne $env:GITHUB_SHA) {
+            throw "Release 发布后远端 Tag 指向发生变化：tag=$remoteTagCommit workflow=$env:GITHUB_SHA"
           }

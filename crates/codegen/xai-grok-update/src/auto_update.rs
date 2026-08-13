@@ -16,6 +16,7 @@ use crate::version::{
 };
 use xai_grok_shell::util::config;
 use xai_grok_shell::util::grok_home::{grok_application, grok_home};
+use xai_grok_version::{ReleaseVersion, parse_distribution_version};
 
 #[derive(Clone, Copy, Debug)]
 pub enum UpdateRunMode {
@@ -23,16 +24,63 @@ pub enum UpdateRunMode {
     NonBlocking,
 }
 
+#[cfg(feature = "community-build")]
+const PROMPT_UPDATE_NOW: &str = "现在更新？[Y/n/d]";
+#[cfg(not(feature = "community-build"))]
 const PROMPT_UPDATE_NOW: &str = "Update now? [Y/n/d]";
+#[cfg(feature = "community-build")]
+const MSG_AUTO_UPDATE_BACKGROUND: &str = "正在后台自动更新。";
+#[cfg(not(feature = "community-build"))]
 const MSG_AUTO_UPDATE_BACKGROUND: &str = "Auto-update running in background.";
 #[cfg(feature = "community-build")]
-const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok-zh update` to get the latest version.";
+const MSG_RUN_UPDATE_MANUAL: &str = "运行 `grok-zh update` 获取最新版本。";
 #[cfg(not(feature = "community-build"))]
 const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version.";
+
+fn human_channel_label(channel: &str) -> String {
+    if cfg!(feature = "community-build") {
+        let translated = match channel {
+            "stable" => "稳定",
+            "alpha" => "预览",
+            "enterprise" => "企业",
+            other => other,
+        };
+        format!(" [{translated}]")
+    } else {
+        format!(" [{channel}]")
+    }
+}
+
+fn announce_update_available(current: &str, latest: &str, channel: &str) {
+    if cfg!(feature = "community-build") {
+        eprintln!(
+            "发现 {} 新版本：{} → {}{}",
+            xai_grok_product::DISPLAY_NAME,
+            current,
+            latest,
+            human_channel_label(channel)
+        );
+    } else {
+        eprintln!(
+            "A new version of Grok Build is available: {} -> {}{}",
+            current,
+            latest,
+            human_channel_label(channel)
+        );
+    }
+}
+
+fn announce_update_failed(error: &dyn std::fmt::Display) {
+    if cfg!(feature = "community-build") {
+        eprintln!("更新失败：{error}");
+    } else {
+        eprintln!("Update failed: {error}");
+    }
+}
 /// Manual-install command or distribution-owned download page.
 fn manual_install_cmd() -> &'static str {
     if cfg!(feature = "community-build") {
-        return "https://github.com/ljy6-6-6/grok-build-Chinese/releases";
+        return xai_grok_product::COMMUNITY_RELEASES_URL;
     }
     if cfg!(windows) {
         "irm https://x.ai/cli/install.ps1 | iex"
@@ -45,7 +93,7 @@ fn manual_install_cmd() -> &'static str {
 fn reinstall_hint(installer: &str) -> String {
     if cfg!(feature = "community-build") {
         return format!(
-            "Please download the latest grok-zh package from this project's Releases page:\n  {}",
+            "请从本项目 Releases 页面下载最新 grok-zh 安装包：\n  {}",
             manual_install_cmd()
         );
     }
@@ -84,32 +132,56 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
 
     if let Some(error) = status.error.as_deref() {
         println!(
-            "{} - v{} [{}]",
-            product_name, status.current_version, status.channel
+            "{} - v{}{}",
+            product_name,
+            status.current_version,
+            human_channel_label(&status.channel)
         );
-        println!("Update check failed: {error}");
+        if cfg!(feature = "community-build") {
+            println!("检查更新失败：{error}");
+        } else {
+            println!("Update check failed: {error}");
+        }
         return Ok(());
     }
 
-    let channel_label = format!(" [{}]", status.channel);
+    let channel_label = human_channel_label(&status.channel);
 
     if status.update_available {
         if let Some(latest_version) = status.latest_version.as_deref() {
-            println!(
-                "A new version of {} is available: {} -> {}{}",
-                product_name, status.current_version, latest_version, channel_label
-            );
+            if cfg!(feature = "community-build") {
+                println!(
+                    "发现 {} 新版本：{} → {}{}",
+                    product_name, status.current_version, latest_version, channel_label
+                );
+            } else {
+                println!(
+                    "A new version of {} is available: {} -> {}{}",
+                    product_name, status.current_version, latest_version, channel_label
+                );
+            }
         } else {
-            println!("A new version of {product_name} is available.");
+            if cfg!(feature = "community-build") {
+                println!("发现 {product_name} 新版本。");
+            } else {
+                println!("A new version of {product_name} is available.");
+            }
         }
         return Ok(());
     }
 
     if let Some(latest_version) = status.latest_version.as_deref() {
-        println!(
-            "{} - v{} (latest: {}){}",
-            product_name, status.current_version, latest_version, channel_label
-        );
+        if cfg!(feature = "community-build") {
+            println!(
+                "{} - v{}（最新：{}）{}",
+                product_name, status.current_version, latest_version, channel_label
+            );
+        } else {
+            println!(
+                "{} - v{} (latest: {}){}",
+                product_name, status.current_version, latest_version, channel_label
+            );
+        }
         return Ok(());
     }
 
@@ -168,9 +240,25 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
                     Some(value) => value,
                     None => {
                         // Distinguish parse failure from unsupported channel.
-                        let parse_ok = semver::Version::parse(&current_version).is_ok()
-                            && semver::Version::parse(&target).is_ok();
-                        error = Some(if parse_ok {
+                        let parse_ok = parse_distribution_version(
+                            &current_version,
+                            cfg!(feature = "community-build"),
+                        )
+                        .is_ok()
+                            && parse_distribution_version(
+                                &target,
+                                cfg!(feature = "community-build"),
+                            )
+                            .is_ok();
+                        error = Some(if cfg!(feature = "community-build") {
+                            if parse_ok {
+                                format!(
+                                    "不支持发布通道“{channel}”（当前={current_version}，最新={target}）。支持的通道：stable、alpha、enterprise。"
+                                )
+                            } else {
+                                format!("版本解析失败（当前={current_version}，最新={target}）")
+                            }
+                        } else if parse_ok {
                             format!(
                                 "Unsupported release channel '{channel}' (current={current_version}, latest={target}). \
                                      Supported channels: stable, alpha, enterprise."
@@ -241,7 +329,10 @@ fn plan_for(policy: &config::VersionPolicy, latest: String) -> UpdatePlan {
     // A hard `required_minimum` can clamp above the latest release; that version
     // doesn't exist.
     if matches!(
-        (semver::Version::parse(&target), semver::Version::parse(&latest)),
+        (
+            parse_distribution_version(&target, cfg!(feature = "community-build")),
+            parse_distribution_version(&latest, cfg!(feature = "community-build")),
+        ),
         (Ok(t), Ok(l)) if t > l
     ) {
         UpdatePlan::Unavailable { latest, target }
@@ -416,14 +507,14 @@ pub async fn get_installer() -> Option<&'static str> {
 }
 
 fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: bool) -> Option<bool> {
-    let current = semver::Version::parse(current).ok()?;
-    let target = semver::Version::parse(target).ok()?;
+    let current = parse_distribution_version(current, cfg!(feature = "community-build")).ok()?;
+    let target = parse_distribution_version(target, cfg!(feature = "community-build")).ok()?;
     match channel {
         // NOTE: With the 0.2.X versioning scheme, all versions are plain
         // semver (no pre-release suffix). The pre-release checks in this
         // match are dead code but kept as a safety net.
         "stable" | "enterprise" => {
-            if !target.pre.is_empty() {
+            if target.is_prerelease() {
                 tracing::warn!(
                     %current, %target,
                     channel = %channel,
@@ -431,7 +522,7 @@ fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: boo
                 );
                 return Some(false);
             }
-            if !current.pre.is_empty() {
+            if current.is_prerelease() {
                 return Some(true);
             }
         }
@@ -650,15 +741,11 @@ pub async fn run_update_if_available(
         return Ok(false);
     }
 
-    let channel_label = format!(" [{}]", update_config.channel);
     if auto_update {
-        eprintln!(
-            "A new version of Grok Build is available: {} -> {}{}",
-            current_version, latest_version, channel_label
-        );
+        announce_update_available(&current_version, &latest_version, &update_config.channel);
         if interactive {
             if let Err(e) = run_update_subcommand(run_mode).await {
-                eprintln!("Update failed: {}", e);
+                announce_update_failed(&e);
             } else if matches!(run_mode, UpdateRunMode::Blocking) {
                 return Ok(true);
             } else {
@@ -666,7 +753,7 @@ pub async fn run_update_if_available(
                 return Ok(false);
             }
         } else if let Err(e) = run_update_subcommand(run_mode).await {
-            eprintln!("Update failed: {}", e);
+            announce_update_failed(&e);
         } else if matches!(run_mode, UpdateRunMode::Blocking) {
             return Ok(true);
         }
@@ -680,10 +767,7 @@ pub async fn run_update_if_available(
         {
             return Ok(false);
         }
-        eprintln!(
-            "A new version of Grok Build is available: {} -> {}{}",
-            current_version, latest_version, channel_label
-        );
+        announce_update_available(&current_version, &latest_version, &update_config.channel);
         if interactive {
             eprintln!("{}", PROMPT_UPDATE_NOW);
             let mut line = String::new();
@@ -691,7 +775,7 @@ pub async fn run_update_if_available(
                 let ans = line.trim().to_ascii_lowercase();
                 if ans.is_empty() || ans == "y" || ans == "yes" {
                     if let Err(e) = run_update_subcommand(run_mode).await {
-                        eprintln!("Update failed: {}", e);
+                        announce_update_failed(&e);
                     } else if matches!(run_mode, UpdateRunMode::Blocking) {
                         return Ok(true);
                     } else {
@@ -747,6 +831,9 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
             // No detach: the child must stay in the foreground process group so Ctrl+C cancels it with the parent; the atomic install protocol makes mid-download kills safe.
             let status = cmd.status().await?;
             if !status.success() {
+                if cfg!(feature = "community-build") {
+                    anyhow::bail!("grok-zh update 执行失败：{}", status);
+                }
                 anyhow::bail!("grok update failed with {}", status);
             }
             Ok(None)
@@ -796,7 +883,11 @@ pub fn restart_grok() -> Result<()> {
     }
     cmd.env_clear();
     cmd.envs(std::env::vars_os().filter(|(k, _)| k != "GROK_AUTO_UPDATE"));
-    eprintln!("Restarting Grok...");
+    if cfg!(feature = "community-build") {
+        eprintln!("正在重新启动 grok-zh…");
+    } else {
+        eprintln!("Restarting Grok...");
+    }
 
     // Use exec on Unix to replace the current process, avoiding stdio issues
     // when the parent exits. On Windows, fall back to spawn + exit.
@@ -853,11 +944,15 @@ pub async fn run_install_script(
         remove_stale_models_cache().await;
     }
     result.map_err(|e| {
-        anyhow::anyhow!(
-            "Auto-update failed: {:#}\n\n{}",
-            e,
-            reinstall_hint(installer)
-        )
+        if cfg!(feature = "community-build") {
+            anyhow::anyhow!("自动更新失败：{:#}\n\n{}", e, reinstall_hint(installer))
+        } else {
+            anyhow::anyhow!(
+                "Auto-update failed: {:#}\n\n{}",
+                e,
+                reinstall_hint(installer)
+            )
+        }
     })
 }
 
@@ -885,7 +980,7 @@ async fn install_community_release(
             Some(version) => version.to_string(),
             None => crate::community_release::fetch_latest_version(&update_config.channel).await?,
         };
-        semver::Version::parse(&version)
+        ReleaseVersion::parse(&version)
             .with_context(|| format!("invalid community release version: {version}"))?;
 
         let destination = std::env::current_exe().context("locating the running grok-zh.exe")?;
@@ -950,10 +1045,10 @@ async fn install_community_release(
         let _ = tokio::fs::remove_file(&candidate).await;
         replace_result?;
         eprintln!(
-            "  Installed {} v{} from {}/releases.",
+            "  已从 {}/releases 安装 {} v{}。",
+            xai_grok_product::COMMUNITY_RELEASE_REPO,
             xai_grok_product::CLI_NAME,
-            version,
-            xai_grok_product::COMMUNITY_RELEASE_REPO
+            version
         );
         Ok(())
     }
@@ -1532,7 +1627,7 @@ async fn download_verified_from_base(
 
     let version = match target {
         Some(v) => {
-            semver::Version::parse(v)
+            parse_distribution_version(v, false)
                 .map_err(|_| anyhow::anyhow!("invalid version format: '{}'", v))?;
             v.to_string()
         }
@@ -2102,7 +2197,7 @@ async fn sweep_old_exe_backups(old: &std::path::Path) {
 /// would make its atomic rename fail.
 async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_version: &str) {
     let prefix = format!("{}-", bin_prefix);
-    let current_semver = match semver::Version::parse(current_version) {
+    let current_semver = match ReleaseVersion::parse(current_version) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
@@ -2126,7 +2221,7 @@ async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_
         }
     };
 
-    let mut versioned: Vec<(semver::Version, String)> = Vec::new();
+    let mut versioned: Vec<(ReleaseVersion, String)> = Vec::new();
 
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -2170,7 +2265,7 @@ async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_
         else {
             continue;
         };
-        if let Ok(v) = semver::Version::parse(&ver_str) {
+        if let Ok(v) = ReleaseVersion::parse(&ver_str) {
             // Skip the current version — never delete it.
             if v == current_semver {
                 continue;
@@ -2596,7 +2691,11 @@ pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &
         })
         .await;
         update_config.channel = ch.to_string();
-        eprintln!("Switched to {} channel.", ch);
+        if cfg!(feature = "community-build") {
+            eprintln!("已切换到 {ch} 通道。");
+        } else {
+            eprintln!("Switched to {} channel.", ch);
+        }
     }
 }
 
@@ -2619,7 +2718,11 @@ pub async fn run_update(
     let installer = match get_installer().await {
         Some(i) => i,
         None => {
-            eprintln!("Auto-update is not available for manual installations.");
+            if cfg!(feature = "community-build") {
+                eprintln!("当前安装方式无法使用自动更新。");
+            } else {
+                eprintln!("Auto-update is not available for manual installations.");
+            }
             return Ok(None);
         }
     };
@@ -2646,10 +2749,14 @@ pub async fn run_update(
         if let Err(e) = crate::version_policy::check_install_target(&policy, version) {
             anyhow::bail!("{e}");
         }
-        eprintln!(
-            "Installing Grok {} (current: {})...",
-            version, current_version
-        );
+        if cfg!(feature = "community-build") {
+            eprintln!("正在安装 grok-zh {version}（当前：{current_version}）…");
+        } else {
+            eprintln!(
+                "Installing Grok {} (current: {})...",
+                version, current_version
+            );
+        }
         eprintln!();
         run_install_script(installer, Some(version), update_config).await?;
         refresh_deployment_config().await;
@@ -2660,15 +2767,24 @@ pub async fn run_update(
         {
             tracing::warn!("Failed to persist auto_update=false for pinned install: {e}");
         }
-        eprintln!("  ✓ grok v{} installed successfully!", version);
-        eprintln!("  Please restart Grok.");
+        if cfg!(feature = "community-build") {
+            eprintln!("  ✓ grok-zh v{version} 安装成功！");
+            eprintln!("  请重新启动 grok-zh。");
+        } else {
+            eprintln!("  ✓ grok v{} installed successfully!", version);
+            eprintln!("  Please restart Grok.");
+        }
         return Ok(Some(version.to_string()));
     }
 
     let pb = ProgressBar::new_spinner();
     pb.set_style(
         ProgressStyle::default_spinner()
-            .template("  {spinner:.cyan} Checking for updates...")
+            .template(if cfg!(feature = "community-build") {
+                "  {spinner:.cyan} 正在检查更新…"
+            } else {
+                "  {spinner:.cyan} Checking for updates..."
+            })
             .unwrap(),
     );
     pb.enable_steady_tick(Duration::from_millis(100));
@@ -2680,14 +2796,25 @@ pub async fn run_update(
             // Cache so an explicit `grok update` doesn't re-prompt every run.
             let stable_ptr = try_fetch_stable_pointer().await;
             write_version_cache(&latest, stable_ptr.as_deref()).await;
-            eprintln!(
-                "The latest release ({latest}) is not an allowed update; \
-                 keeping the current version ({current_version})."
-            );
+            if cfg!(feature = "community-build") {
+                eprintln!(
+                    "最新发布版本（{latest}）不在允许的更新范围内；保持当前版本（{current_version}）。"
+                );
+            } else {
+                eprintln!(
+                    "The latest release ({latest}) is not an allowed update; \
+                     keeping the current version ({current_version})."
+                );
+            }
             refresh_deployment_config().await;
             return Ok(None);
         }
         UpdatePlan::Unavailable { latest, target } => {
+            if cfg!(feature = "community-build") {
+                anyhow::bail!(
+                    "要求的最低版本（{target}）高于最新可用版本（{latest}）。请联系管理员。"
+                );
+            }
             anyhow::bail!(
                 "The required minimum version ({target}) is newer than the latest \
                  available release ({latest}). Contact your administrator."
@@ -2696,10 +2823,16 @@ pub async fn run_update(
         UpdatePlan::Install { latest, target } => (latest, target),
     };
     if install_target != latest_version {
-        eprintln!(
-            "Latest available is {latest_version}, but your configured version range \
-             allows {install_target}; installing that instead."
-        );
+        if cfg!(feature = "community-build") {
+            eprintln!(
+                "最新可用版本为 {latest_version}，但配置的版本范围允许安装 {install_target}；将安装该版本。"
+            );
+        } else {
+            eprintln!(
+                "Latest available is {latest_version}, but your configured version range \
+                 allows {install_target}; installing that instead."
+            );
+        }
     }
 
     // What's on disk wins over this process's compiled-in version: a
@@ -2729,7 +2862,11 @@ pub async fn run_update(
                 } else {
                     let stable_ptr = try_fetch_stable_pointer().await;
                     write_version_cache(&install_target, stable_ptr.as_deref()).await;
-                    eprintln!("Already up to date ({}).", effective_current);
+                    if cfg!(feature = "community-build") {
+                        eprintln!("已是最新版本（{effective_current}）。");
+                    } else {
+                        eprintln!("Already up to date ({}).", effective_current);
+                    }
                     // Retry if a prior sync failed.
                     refresh_deployment_config().await;
                     // The target is on disk even though this call installed
@@ -2741,9 +2878,25 @@ pub async fn run_update(
             }
             None => {
                 // Distinguish parse failure from unsupported channel.
-                let parse_ok = semver::Version::parse(&effective_current).is_ok()
-                    && semver::Version::parse(&install_target).is_ok();
+                let parse_ok = parse_distribution_version(
+                    &effective_current,
+                    cfg!(feature = "community-build"),
+                )
+                .is_ok()
+                    && parse_distribution_version(
+                        &install_target,
+                        cfg!(feature = "community-build"),
+                    )
+                    .is_ok();
                 if parse_ok {
+                    if cfg!(feature = "community-build") {
+                        anyhow::bail!(
+                            "不支持发布通道“{}”（当前={}，目标={}）。支持的通道：stable、alpha、enterprise。可使用 --stable 或 --alpha 覆盖，或在 config.toml 的 [cli] 中设置通道。",
+                            update_config.channel,
+                            effective_current,
+                            install_target
+                        );
+                    }
                     anyhow::bail!(
                         "Unsupported release channel '{}' (current={}, target={}). \
                          Supported channels: stable, alpha, enterprise. \
@@ -2753,6 +2906,13 @@ pub async fn run_update(
                         install_target
                     );
                 } else {
+                    if cfg!(feature = "community-build") {
+                        anyhow::bail!(
+                            "版本解析失败（当前={}，目标={}）",
+                            effective_current,
+                            install_target
+                        );
+                    }
                     anyhow::bail!(
                         "Failed to parse versions (current={}, target={})",
                         effective_current,
@@ -2772,13 +2932,21 @@ pub async fn run_update(
         )
         .unwrap_or(true)
     {
-        eprintln!(
-            "Forcing reinstall of Grok {} (already up to date)",
-            effective_current
-        );
+        if cfg!(feature = "community-build") {
+            eprintln!("正在强制重新安装 grok-zh {effective_current}（当前已是最新版本）");
+        } else {
+            eprintln!(
+                "Forcing reinstall of Grok {} (already up to date)",
+                effective_current
+            );
+        }
         &effective_current
     } else {
-        eprintln!("Updating Grok {} → {}", effective_current, install_target);
+        if cfg!(feature = "community-build") {
+            eprintln!("正在更新 grok-zh {effective_current} → {install_target}");
+        } else {
+            eprintln!("Updating Grok {} → {}", effective_current, install_target);
+        }
         &install_target
     };
 
@@ -2790,10 +2958,18 @@ pub async fn run_update(
     let stable_ptr = try_fetch_stable_pointer().await;
     write_version_cache(target_version, stable_ptr.as_deref()).await;
     refresh_deployment_config().await;
-    eprintln!("  ✓ grok v{} installed successfully!", target_version);
+    if cfg!(feature = "community-build") {
+        eprintln!("  ✓ grok-zh v{target_version} 安装成功！");
+    } else {
+        eprintln!("  ✓ grok v{} installed successfully!", target_version);
+    }
 
     if !force && std::env::var_os("GROK_AUTO_UPDATE").is_none() {
-        eprintln!("  Please restart Grok.");
+        if cfg!(feature = "community-build") {
+            eprintln!("  请重新启动 grok-zh。");
+        } else {
+            eprintln!("  Please restart Grok.");
+        }
     }
     Ok(Some(target_version.to_string()))
 }
@@ -2815,15 +2991,31 @@ async fn refresh_deployment_config() {
         return;
     }
     match xai_grok_shell::managed_config::sync().await {
-        Ok(true) => eprintln!("  Applied managed configuration."),
+        Ok(true) => {
+            if cfg!(feature = "community-build") {
+                eprintln!("  已应用托管配置。");
+            } else {
+                eprintln!("  Applied managed configuration.");
+            }
+        }
         Ok(false) => tracing::debug!("no managed configuration to apply"),
         // Auth issues aren't actionable mid-update: quiet here, loud on `grok setup`.
         Err(e) if e.is_auth_rejection() => tracing::debug!("managed config not applied: {e}"),
         Err(e) if e.is_retryable() => {
             tracing::debug!("managed config refresh failed: {e}");
-            eprintln!("  Couldn't apply managed configuration. Run `grok setup` to retry.");
+            if cfg!(feature = "community-build") {
+                eprintln!("  无法应用托管配置。运行 `grok-zh setup` 重试。");
+            } else {
+                eprintln!("  Couldn't apply managed configuration. Run `grok setup` to retry.");
+            }
         }
-        Err(e) => eprintln!("  Couldn't apply managed configuration. {e}"),
+        Err(e) => {
+            if cfg!(feature = "community-build") {
+                eprintln!("  无法应用托管配置：{e}");
+            } else {
+                eprintln!("  Couldn't apply managed configuration. {e}");
+            }
+        }
     }
 }
 
@@ -3454,6 +3646,22 @@ mod tests {
             needs_update("0.1.148-alpha.3", "0.1.148-alpha.2", "alpha", false),
             Some(false)
         );
+        assert_eq!(
+            needs_update("1.0.0", "1.0.0.1", "stable", false),
+            Some(true)
+        );
+        assert_eq!(
+            needs_update("1.0.0.1", "1.0.0.2", "stable", false),
+            Some(true)
+        );
+        assert_eq!(
+            needs_update("1.0.0.2", "1.0.0.1", "stable", false),
+            Some(false)
+        );
+        assert_eq!(
+            needs_update("1.0.0.999", "1.0.1", "stable", false),
+            Some(true)
+        );
     }
 
     #[test]
@@ -3913,16 +4121,16 @@ mod tests {
     #[test]
     fn test_community_version_output_must_match_release_version() {
         assert!(community_version_output_matches(
-            "grok-zh 1.2.3 (abcdef0) [stable]\n",
-            "1.2.3"
+            "grok-zh 1.2.3.1 (abcdef0) [stable]\n",
+            "1.2.3.1"
         ));
         assert!(!community_version_output_matches(
             "grok-zh 1.2.2 (abcdef0)\n",
-            "1.2.3"
+            "1.2.3.1"
         ));
         assert!(!community_version_output_matches(
-            "grok 1.2.3 (abcdef0)\n",
-            "1.2.3"
+            "grok 1.2.3.1 (abcdef0)\n",
+            "1.2.3.1"
         ));
     }
 
@@ -4651,15 +4859,26 @@ mod tests {
 
     #[test]
     fn test_user_facing_constants_are_stable() {
-        assert_eq!(PROMPT_UPDATE_NOW, "Update now? [Y/n/d]");
+        assert_eq!(
+            PROMPT_UPDATE_NOW,
+            if cfg!(feature = "community-build") {
+                "现在更新？[Y/n/d]"
+            } else {
+                "Update now? [Y/n/d]"
+            }
+        );
         assert_eq!(
             MSG_AUTO_UPDATE_BACKGROUND,
-            "Auto-update running in background."
+            if cfg!(feature = "community-build") {
+                "正在后台自动更新。"
+            } else {
+                "Auto-update running in background."
+            }
         );
         assert_eq!(
             MSG_RUN_UPDATE_MANUAL,
             if cfg!(feature = "community-build") {
-                "Run `grok-zh update` to get the latest version."
+                "运行 `grok-zh update` 获取最新版本。"
             } else {
                 "Run `grok update` to get the latest version."
             }

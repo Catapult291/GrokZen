@@ -633,7 +633,7 @@ pub fn load_dismissed_ids_from_home() -> std::collections::HashSet<String> {
 /// can't be parsed (broken `GROK_TEST_VERSION` in dev), silently strips
 /// without applying — keeps the CLI usable on a bad dev override.
 pub fn apply_version_overrides_with_registered(value: &mut toml::Value) -> std::io::Result<()> {
-    match xai_grok_version::installed_semver() {
+    match xai_grok_version::installed_release_version() {
         Ok(version) => apply_version_overrides(value, &version)
             .map_err(|e| std::io::Error::other(e.to_string())),
         Err(_) => {
@@ -789,7 +789,7 @@ mod tests {
 
     #[test]
     fn full_precedence_holds_when_values_come_from_version_overrides() {
-        let cli_version = semver::Version::parse("1.8.0").unwrap();
+        let cli_version = xai_grok_version::ReleaseVersion::parse("1.8.0").unwrap();
 
         let mut managed: toml::Value = toml::from_str(
             r#"
@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn user_version_overrides_dont_escape_their_layer() {
-        let cli_version = semver::Version::parse("1.8.0").unwrap();
+        let cli_version = xai_grok_version::ReleaseVersion::parse("1.8.0").unwrap();
         let mut user: toml::Value = toml::from_str(
             r#"
             [[version_overrides]]

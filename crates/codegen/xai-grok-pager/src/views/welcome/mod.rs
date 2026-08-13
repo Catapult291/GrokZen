@@ -742,6 +742,7 @@ pub(crate) fn localized_announcement_for_display<'a>(
         let id = match title {
             "Workflows are here!" => "welcome.announcement.workflows.title",
             "Grok 4.5 is here!" => "welcome.announcement.grok_4_5.title",
+            "Grok 4.6 is here!" => "welcome.announcement.grok_4_6.title",
             _ => return None,
         };
         Some(locale.named_text(id, title).into_owned())
@@ -750,6 +751,7 @@ pub(crate) fn localized_announcement_for_display<'a>(
         let id = match message {
             "Try them out using /workflows." => "welcome.announcement.workflows.message",
             "Select 'Grok 4.5' under /model." => "welcome.announcement.grok_4_5.message",
+            "Select 'Grok 4.6' under /model." => "welcome.announcement.grok_4_6.message",
             _ => return None,
         };
         Some(locale.named_text(id, message).into_owned())
@@ -3397,27 +3399,39 @@ mod tests {
     }
 
     #[test]
-    fn localization_regression_grok_4_5_announcement_near_misses_are_opaque() {
-        let announcement = xai_grok_announcements::RemoteAnnouncement {
-            title: Some("Grok 4.5 is here!".to_string()),
-            message: Some("Select 'Grok 4.5' under /model.".to_string()),
-            ..Default::default()
-        };
-        let localized = localized_announcement_for_display(&ZH_TEST_LOCALE, &announcement);
-        assert_eq!(localized.title.as_deref(), Some("Grok 4.5 现已上线！"));
-        assert_eq!(
-            localized.message.as_deref(),
-            Some("请在 /model 中选择“Grok 4.5”。")
-        );
+    fn localization_regression_grok_announcements_cover_4_5_and_4_6() {
+        for (version, expected_title, expected_message) in [
+            (
+                "4.5",
+                "Grok 4.5 现已上线！",
+                "请在 /model 中选择“Grok 4.5”。",
+            ),
+            (
+                "4.6",
+                "Grok 4.6 现已上线！",
+                "请在 /model 中选择“Grok 4.6”。",
+            ),
+        ] {
+            let announcement = xai_grok_announcements::RemoteAnnouncement {
+                title: Some(format!("Grok {version} is here!")),
+                message: Some(format!("Select 'Grok {version}' under /model.")),
+                ..Default::default()
+            };
+            let localized = localized_announcement_for_display(&ZH_TEST_LOCALE, &announcement);
+            assert_eq!(localized.title.as_deref(), Some(expected_title));
+            assert_eq!(localized.message.as_deref(), Some(expected_message));
+        }
 
-        let near_miss = xai_grok_announcements::RemoteAnnouncement {
-            title: Some("Grok 4.5 is here.".to_string()),
-            message: Some("Select Grok 4.5 under /model.".to_string()),
-            ..Default::default()
-        };
-        let untouched = localized_announcement_for_display(&ZH_TEST_LOCALE, &near_miss);
-        assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
-        assert_eq!(untouched.as_ref(), &near_miss);
+        for version in ["4.5", "4.6"] {
+            let near_miss = xai_grok_announcements::RemoteAnnouncement {
+                title: Some(format!("Grok {version} is here.")),
+                message: Some(format!("Select Grok {version} under /model.")),
+                ..Default::default()
+            };
+            let untouched = localized_announcement_for_display(&ZH_TEST_LOCALE, &near_miss);
+            assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(untouched.as_ref(), &near_miss);
+        }
     }
 
     #[test]

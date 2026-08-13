@@ -92,12 +92,12 @@ const EVICT_WAIT_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long the SAME live grok flock-holder may stay unconnectable before
 /// `connect_or_spawn` treats it as a "zombie leader" and evicts it.
 const ZOMBIE_EVICT_DEADLINE: Duration = Duration::from_secs(30);
-/// Whether `leader_version` is a strictly-older parseable semver than `baseline`.
+/// Whether `leader_version` is a strictly older parseable release than `baseline`.
 /// Unparseable versions (e.g. dev `"unknown"`) return `false` — leave them alone.
 pub fn leader_is_older_than(leader_version: &str, baseline: &str) -> bool {
     match (
-        semver::Version::parse(leader_version),
-        semver::Version::parse(baseline),
+        xai_grok_version::ReleaseVersion::parse(leader_version),
+        xai_grok_version::ReleaseVersion::parse(baseline),
     ) {
         (Ok(leader), Ok(baseline)) => leader < baseline,
         _ => false,
@@ -2002,6 +2002,9 @@ mod tests {
         assert!(!leader_is_older_than("0.2.0", "0.2.0"));
         assert!(!leader_is_older_than("unknown", "0.2.0"));
         assert!(!leader_is_older_than("0.1.0", "not-a-version"));
+        assert!(leader_is_older_than("1.0.0", "1.0.0.1"));
+        assert!(leader_is_older_than("1.0.0.1", "1.0.0.2"));
+        assert!(!leader_is_older_than("1.0.0.2", "1.0.0.1"));
     }
     /// Evicted only when strictly older than the client (anti-thrash).
     #[test]
@@ -2125,25 +2128,34 @@ mod tests {
     /// the comparison under test.
     #[tokio::test]
     async fn should_evict_conn_decides_from_live_fake_registrations() {
-        let client: semver::Version = CLIENT_LEADER_VERSION
-            .parse()
-            .expect("CLIENT_LEADER_VERSION parses as semver");
-        let newer = format!("{}.{}.{}", client.major, client.minor, client.patch + 1);
-        let older = if client.patch > 0 {
+        let client = xai_grok_version::ReleaseVersion::parse(CLIENT_LEADER_VERSION)
+            .expect("CLIENT_LEADER_VERSION parses as a release version");
+        let client_semver = client.as_semver();
+        let newer = format!(
+            "{}.{}.{}",
+            client_semver.major,
+            client_semver.minor,
+            client_semver.patch + 1
+        );
+        let older = if client_semver.patch > 0 {
             Some(format!(
                 "{}.{}.{}",
-                client.major,
-                client.minor,
-                client.patch - 1
+                client_semver.major,
+                client_semver.minor,
+                client_semver.patch - 1
             ))
-        } else if client.minor > 0 {
-            Some(format!("{}.{}.0", client.major, client.minor - 1))
-        } else if client.major > 0 {
-            Some(format!("{}.0.0", client.major - 1))
-        } else if client.pre.is_empty() {
+        } else if client_semver.minor > 0 {
+            Some(format!(
+                "{}.{}.0",
+                client_semver.major,
+                client_semver.minor - 1
+            ))
+        } else if client_semver.major > 0 {
+            Some(format!("{}.0.0", client_semver.major - 1))
+        } else if client_semver.pre.is_empty() {
             Some(format!(
                 "{}.{}.{}-0",
-                client.major, client.minor, client.patch
+                client_semver.major, client_semver.minor, client_semver.patch
             ))
         } else {
             None

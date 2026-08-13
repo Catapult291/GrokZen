@@ -5,7 +5,7 @@
 
 ## 下载与解压
 
-1. 推荐从本仓库 [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases)
+1. 推荐从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
    下载 `grok-zh-<version>-windows-x86_64-gnu.zip`。开发测试也可从
    **Actions → CI** 下载短期 Artifact。
 2. 解压一次；Release ZIP 内直接是安装包内容。
@@ -26,12 +26,14 @@
 不会再额外发布一份版本化裸 EXE。
 
 正式 Tag 工作流会为 ZIP 与 `.sha256` 自动生成 GitHub Actions 构建来源证明。下载后可用
-GitHub CLI 核对不可变 Release、资产和构建工作流；把 `OWNER` 替换为仓库当前所属的用户名：
+GitHub CLI 核对不可变 Release、资产和构建工作流；以下命令已使用当前仓库
+`JoyElliot/grok-build-Chinese`：
 
 ```powershell
-$repo = 'OWNER/grok-build-Chinese'
-$tag = 'v1.0.0'
-$zip = '.\grok-zh-1.0.0-windows-x86_64-gnu.zip'
+$repo = 'JoyElliot/grok-build-Chinese'
+$version = '1.0.0.1'
+$tag = "v$version"
+$zip = ".\grok-zh-$version-windows-x86_64-gnu.zip"
 $assets = @($zip, "$zip.sha256")
 
 gh release verify $tag --repo $repo
@@ -175,19 +177,23 @@ npm uninstall -g @xai-official/grok
 ## 通过 GitHub Releases 自动更新
 
 安装带社区更新器的版本后，程序启动时会查询固定仓库
-`ljy6-6-6/grok-build-Chinese`：
+`JoyElliot/grok-build-Chinese`：
 
-- 默认 `stable` 只接受 immutable、非 Draft、非 prerelease 的 `vX.Y.Z` Release；
+- 默认 `stable` 只接受 immutable、非 Draft、非 prerelease 的 `vA.B.C` 或 `vA.B.C.N`
+  Release。前三段对应官方版本；首个社区发布不加第四段，后续修订使用 `.1`、`.2`，
+  官方版本升级后重新从无第四段的版本开始；
 - `grok-zh update --alpha` 可选择预发布通道，`grok-zh update --stable` 可切回稳定通道；
 - Release 只接受精确命名的完整
   `grok-zh-<version>-windows-x86_64-gnu.zip` 及其 `.sha256` sidecar；更新器验证固定 URL、
   大小、GitHub SHA-256、安全 ZIP 布局和包内 `SHA256SUMS.txt`；
 - 社区版的“自动更新”设置默认关闭。此时启动只查询版本并显示提示，不下载；欢迎页按
-  `Ctrl+U` 后才退出旧 TUI、下载 ZIP 并执行更新。显式开启该设置后才允许后台预下载；
+  `Ctrl+U` 后才退出旧 TUI、下载 ZIP 并执行更新。交互式下载会显示大小、百分比、速度和
+  预计剩余时间；输出重定向或后台更新时进度条自动隐藏。显式开启该设置后才允许后台预下载；
 - ZIP 中的候选 EXE 必须通过 `--version`，之后才使用 Windows 的重命名旁置和失败回滚逻辑
   替换当前 `grok-zh.exe`；不会强制结束其他会话；完成后重新运行 `grok-zh`；
-- `v1.0.0-zh.preview.3` 的旧更新器只认识裸 EXE，因此迁移到首个 ZIP-only 版本时需要手工
-  下载完整 ZIP 并运行安装器一次。
+- `v1.0.0-zh.preview.3` 的旧更新器只认识裸 EXE；已经发布的 `v1.0.0` 又仍使用三段 SemVer
+  解析器，无法识别 `v1.0.0.1`。从这两个版本迁移到 `v1.0.0.1` 时，都需要手工下载完整
+  ZIP 并运行安装器一次；安装 `v1.0.0.1` 后，后续 `.2`、`.3` 等修订即可自动识别。
 
 自动激活仍沿用原版的单 EXE 替换语义，但传输与验证只使用完整 ZIP；不会在运行中的安装
 目录内逐个改写 `agent-zh.cmd`、`rg.exe`、安装文档、Path 或官方 `grok`/`agent`。若某个版本

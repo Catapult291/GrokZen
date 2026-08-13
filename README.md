@@ -14,7 +14,7 @@
 
 本项目在尽量保持原有功能、命令行参数、配置格式和协议兼容性的前提下，为 Grok Build 的 CLI、TUI、设置、提示信息和用户文档提供简体中文支持。它以独立程序名 `grok-zh` 与官方版并行使用，但有意共用 `~/.grok` 数据目录：会话、登录状态、配置、第三方 API、插件与本地状态在两个入口之间保持一致。
 
-[项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [开发](#开发) · [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
+[项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [开发](#开发) · [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
 
 ![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
 
@@ -46,7 +46,7 @@
 
 ## Windows 安装
 
-正式 Tag 工作流会在 [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases)
+正式 Tag 工作流会在 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
 中发布完整 Windows ZIP；`CI` 工作流仍会上传短期 Actions Artifact。
 解压完整包后，在包内运行社区安装器：
 
@@ -61,36 +61,42 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 ### 自动更新
 
-- 默认使用 `stable` 通道，只接受 `vX.Y.Z`、非 Draft、非 prerelease 且已经进入
-  GitHub immutable 状态的本仓库 Release。
+- 默认使用 `stable` 通道，只接受非 Draft、非 prerelease 且已经进入 GitHub immutable
+  状态的本仓库 Release。前三段 `A.B.C` 始终对应官方版本：该官方版本的首个社区发布使用
+  `vA.B.C`，后续社区修订依次使用 `vA.B.C.1`、`vA.B.C.2`；官方版本升级后修订号重新从
+  无第四段的 `vA.B.C` 开始。
 - `alpha` 通道可通过 `grok-zh update --alpha` 显式选择；它也只接受 immutable
-  Release，并按 SemVer 选择稳定版与预发布版中的较新版本。
+  Release，并兼容历史 `-zh.ci.N`、`-zh.preview.N` 预发布版本。
 - Release 资产必须精确包含完整
   `grok-zh-<version>-windows-x86_64-gnu.zip` 及其 `.sha256` sidecar，不再发布单独的
   版本化裸 EXE。更新器核对固定 URL、大小、GitHub SHA-256、ZIP 安全布局和包内
   `SHA256SUMS.txt`，再运行候选 `grok-zh.exe --version`。
 - 社区版默认关闭后台自动更新：启动时只检查 Release 元数据并显示欢迎页提示，不下载文件。
   按 `Ctrl+U` 是对本次下载和安装的明确授权；随后重新运行 `grok-zh`。只有在设置中显式
-  开启“自动更新”后，启动流程才可在后台预下载和安装。
+  开启“自动更新”后，启动流程才可在后台预下载和安装。交互式下载会显示已下载大小、
+  百分比、速度和预计剩余时间；重定向输出或后台更新时进度条自动隐藏。
 - 自动激活只替换已验证的 `grok-zh.exe`，不会在仍有进程运行时冒险逐个覆盖
   `agent-zh.cmd`、`rg.exe`、安装器或文档；需要同步旁载文件的版本应重新运行 ZIP 内安装器。
   下载、解压、校验、冒烟或替换失败时保留当前版本。
-- 旧版社区程序没有这套更新器，第一次升级到带更新器的版本仍需手工下载完整 ZIP 安装；
-  之后才会跟随 Releases。
+- 已发布的 `v1.0.0` 仍使用三段 SemVer 解析器，无法识别四段版本 `v1.0.0.1`；从
+  `v1.0.0` 升级到 `v1.0.0.1` 时需手工下载完整 ZIP 并运行安装器一次。安装
+  `v1.0.0.1` 后，后续 `.2`、`.3` 等同一官方基线的社区修订即可由新更新器识别。
+- 更早的旧版社区程序同样需要先手工安装一次带新更新器的完整 ZIP，之后才会跟随 Releases。
 
 不满足上述契约的旧预览 Release、可变 Release、含额外裸 EXE 的 Release 和官方 xAI 资产
-都不会被自动更新器接受。`v1.0.0-zh.preview.3` 使用旧的裸 EXE 更新契约，因此迁移到首个
-ZIP-only 版本需要手工下载完整 ZIP 安装一次。Immutable Release 与 SHA-256 提供发布对象和
+都不会被自动更新器接受。`v1.0.0-zh.preview.3` 使用旧的裸 EXE 更新契约，`v1.0.0` 又不认识
+四段社区修订号，因此这两条迁移路径都需要手工下载完整 ZIP 安装一次。Immutable Release 与 SHA-256 提供发布对象和
 传输完整性校验。正式 Tag 工作流还会通过 GitHub Artifact Attestations 为 ZIP 和 `.sha256`
 生成与仓库、提交及构建工作流绑定的来源证明，不需要维护长期签名私钥。
 
 下载正式资产后，可用 GitHub CLI 同时验证不可变 Release、Release 资产以及 Actions 构建来源。
-把 `OWNER` 替换为仓库当前所属的 GitHub 用户名：
+以下命令已使用当前仓库 `JoyElliot/grok-build-Chinese`：
 
 ```powershell
-$repo = 'OWNER/grok-build-Chinese'
-$tag = 'v1.0.0'
-$zip = '.\grok-zh-1.0.0-windows-x86_64-gnu.zip'
+$repo = 'JoyElliot/grok-build-Chinese'
+$version = '1.0.0.1'
+$tag = "v$version"
+$zip = ".\grok-zh-$version-windows-x86_64-gnu.zip"
 $assets = @($zip, "$zip.sha256")
 
 gh release verify $tag --repo $repo
@@ -180,8 +186,8 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 - 英文上游用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/README.md)
 - 贡献说明：[`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)
 - 安全策略：[`SECURITY.zh-CN.md`](SECURITY.zh-CN.md)
-- 1.0.0 简体中文发行说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.0.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.0.zh-CN.md)
-- 版本发布：[`Releases`](https://github.com/ljy6-6-6/grok-build-Chinese/releases)
+- 1.0.0.1 简体中文发行说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.0.1.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.0.1.zh-CN.md)
+- 版本发布：[`Releases`](https://github.com/JoyElliot/grok-build-Chinese/releases)
 - 官方在线文档：[docs.x.ai/build/overview](https://docs.x.ai/build/overview)
 
 中文文档将使用稳定文档 ID 和 `zh-CN` 平行目录，不直接改变英文标题所承担的查找身份，以降低合并上游更新时的冲突。
@@ -221,8 +227,9 @@ cargo fmt --all
 
 - `main`：尽量保持官方上游镜像，只用于同步和审查。
 - `zh-dev`：汉化开发、上游合并、构建和测试。
-- 计划中的 `zh-stable`：只有在中文验证通过后才建立；稳定 Release 由指向已审核提交的纯
-  SemVer Tag（`vX.Y.Z`）触发。
+- 计划中的 `zh-stable`：只有在中文验证通过后才建立；稳定 Release 由指向已审核提交的
+  `vA.B.C` 或社区修订 Tag `vA.B.C.N`（`N > 0`）触发。前三段与官方版本一致，第四段只
+  表示本社区在同一官方版本上的后续修订。
 - 上游 `main` 更新只能触发审查和测试，不能直接进入用户更新源。
 - GitHub 发布页正文统一使用中文；每条提交名称链接到对应的 GitHub 提交页面。若提交标题
   不是中文，必须先在 `.github/release-notes/commit-titles.zh-CN.json` 中按完整 SHA 提供

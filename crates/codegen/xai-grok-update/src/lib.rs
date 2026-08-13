@@ -10,6 +10,9 @@ pub use version_policy::enforce_version_policy_or_exit;
 
 /// User-facing reason returned when the selected distribution source is not
 /// enabled. Community builds never use the official xAI update sources.
+#[cfg(feature = "community-build")]
+pub const UPDATE_DISABLED_REASON: &str = "此版本未启用所选的更新来源。";
+#[cfg(not(feature = "community-build"))]
 pub const UPDATE_DISABLED_REASON: &str =
     "The selected update source is disabled for this distribution.";
 

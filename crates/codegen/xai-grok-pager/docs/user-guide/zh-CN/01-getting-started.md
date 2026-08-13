@@ -18,7 +18,7 @@ Agent Client Protocol（ACP）集成到编辑器中。
 Release ZIP 下载后只需解压一次；包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
 `grok-zh`、`agent-zh`，并支持由用户显式接管 `grok`、`agent`。完整说明也会
 作为包内的 `INSTALL-WINDOWS.md` 提供，并可在
-[仓库中在线查看](https://github.com/ljy6-6-6/grok-build-Chinese/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
+[仓库中在线查看](https://github.com/JoyElliot/grok-build-Chinese/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
 
 上游的 `install.sh`、`install.ps1` 和 `@xai-official/grok` 包不能用于安装此
 发行版。
@@ -35,6 +35,8 @@ grok-zh --version
 
 社区版默认关闭后台自动更新：程序启动时只检查版本并显示提示，不下载文件。欢迎页按
 `Ctrl+U` 才会退出旧 TUI、下载并安装；显式开启设置中的“自动更新”后才允许后台预下载。
+交互式下载会显示已下载大小、百分比、速度和预计剩余时间；后台更新或输出重定向时进度条
+自动隐藏。版本前三段对应官方版本，同一官方版本的后续社区修订使用第四段 `.1`、`.2`。
 随后重新运行 `grok-zh`。默认通道为稳定版；`grok-zh update --alpha` 可显式选择预发布版，
 `grok-zh update --stable` 可切回稳定版。
 

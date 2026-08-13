@@ -2,7 +2,7 @@
 
 use xai_grok_shell::sampling::types::{ReasoningEffort, ReasoningEffortOption};
 
-use crate::slash::command::ArgItem;
+use crate::slash::command::{ArgItem, ArgPresentation};
 
 /// Effort levels in the built-in fallback menu (strongest first). `none`/`minimal`
 /// are still accepted by `ReasoningEffort::from_str` for power users.
@@ -72,6 +72,7 @@ pub(crate) fn build_effort_arg_items(
                 match_text: format!("{sort_prefix} {insert_text}"),
                 insert_text,
                 description: option.description.clone().unwrap_or_default(),
+                presentation: Some(ArgPresentation::ReasoningEffort(option.value)),
             }
         })
         .collect()

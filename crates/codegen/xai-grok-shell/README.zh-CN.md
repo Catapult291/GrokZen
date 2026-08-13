@@ -4,13 +4,13 @@
 
 > 这是社区构建，不代表 xAI 官方发布。登录、模型、计费、云端会话、共享链接和服务可用性仍由官方服务端决定。
 
-> 完整中文用户指南见 [GitHub 在线文档](https://github.com/ljy6-6-6/grok-build-Chinese/blob/zh-dev/crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/README.md)；可下载版本见 [Releases](https://github.com/ljy6-6-6/grok-build-Chinese/releases)。
+> 完整中文用户指南见 [GitHub 在线文档](https://github.com/JoyElliot/grok-build-Chinese/blob/zh-dev/crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/README.md)；可下载版本见 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)。
 
 ## 快速开始
 
 Windows 云构建包下载后只需解压一次。要自动安装并把 `grok-zh`、`agent-zh`
 加入当前用户 `Path`，请参阅包内的 `INSTALL-WINDOWS.md`，或在
-[仓库中在线查看](https://github.com/ljy6-6-6/grok-build-Chinese/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
+[仓库中在线查看](https://github.com/JoyElliot/grok-build-Chinese/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
 
 ```powershell
 # 交互式 TUI
