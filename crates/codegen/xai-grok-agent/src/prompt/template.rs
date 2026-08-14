@@ -66,6 +66,25 @@ mod tests {
     /// If this fails, run: `python3 scripts/encrypt_templates.py`
     #[test]
     fn test_encrypted_templates_not_stale() {
+        fn normalize_newlines(data: &[u8]) -> Vec<u8> {
+            let mut normalized = Vec::with_capacity(data.len());
+            let mut index = 0;
+            while index < data.len() {
+                if data[index] == b'\r' {
+                    normalized.push(b'\n');
+                    index += if data.get(index + 1) == Some(&b'\n') {
+                        2
+                    } else {
+                        1
+                    };
+                } else {
+                    normalized.push(data[index]);
+                    index += 1;
+                }
+            }
+            normalized
+        }
+
         fn xor_encrypt(data: &[u8], seed: u8) -> Vec<u8> {
             data.iter()
                 .enumerate()
@@ -78,17 +97,17 @@ mod tests {
 
         assert_eq!(
             BASE_PROMPT_ENC,
-            &xor_encrypt(base_raw, PROMPT_SEEDS[0]),
+            &xor_encrypt(&normalize_newlines(base_raw), PROMPT_SEEDS[0]),
             "prompt.md encrypted bytes are stale — run scripts/encrypt_templates.py"
         );
         assert_eq!(
             CODEX_PROMPT_ENC,
-            &xor_encrypt(apply_patch_raw, PROMPT_SEEDS[1]),
+            &xor_encrypt(&normalize_newlines(apply_patch_raw), PROMPT_SEEDS[1]),
             "apply_patch_prompt.md encrypted bytes are stale — run scripts/encrypt_templates.py"
         );
         assert_eq!(
             SUBAGENT_PROMPT_ENC,
-            &xor_encrypt(subagent_raw, PROMPT_SEEDS[2]),
+            &xor_encrypt(&normalize_newlines(subagent_raw), PROMPT_SEEDS[2]),
             "subagent_prompt.md encrypted bytes are stale — run scripts/encrypt_templates.py"
         );
     }
@@ -536,6 +555,16 @@ mod tests {
             prompt.contains("## Planning"),
             "Planning section should be present when plan tool exists"
         );
+        assert!(
+            prompt.contains("If the user's request contains Chinese"),
+            "Planning section should ask for Chinese plan content on Chinese requests"
+        );
+        for status in ["`pending`", "`in_progress`", "`completed`", "`cancelled`"] {
+            assert!(
+                prompt.contains(status),
+                "Canonical plan status {status} must remain verbatim"
+            );
+        }
     }
 
     #[test]

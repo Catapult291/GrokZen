@@ -28,6 +28,11 @@ def xor_encrypt(data: bytes, seed: int) -> bytes:
     return bytes(b ^ ((seed + i) & 0xFF) for i, b in enumerate(data))
 
 
+def normalize_newlines(data: bytes) -> bytes:
+    """Keep generated prompt bytes identical on LF and CRLF checkouts."""
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def main():
     lines = [
         "// Auto-generated -- do not edit.",
@@ -37,7 +42,7 @@ def main():
     ]
     for const_name, filename in TEMPLATES.items():
         path = TEMPLATE_DIR / filename
-        data = path.read_bytes()
+        data = normalize_newlines(path.read_bytes())
         enc = xor_encrypt(data, SEEDS[const_name])
         arr = ", ".join(str(b) for b in enc)
         # `#[rustfmt::skip]` keeps the multi-KB byte array on a single line so
