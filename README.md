@@ -48,16 +48,17 @@
 
 正式 Tag 工作流会在 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
 中发布完整 Windows ZIP；`CI` 工作流仍会上传短期 Actions Artifact。
-解压完整包后，在包内运行社区安装器：
+解压完整包后，直接双击包根目录中的：
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-& .\Install-GrokZh.ps1
+```text
+一键安装.cmd
 ```
 
-默认安装会把 `grok-zh`、`agent-zh` 加入当前用户 `Path`，与官方命令共存；可选
-接管 `grok`、`agent`，也可将官方命令备份后移走。完整参数、回滚方式和共享数据
-边界见 [Windows 自动安装说明](packaging/windows/INSTALL-WINDOWS.md)。
+安装窗口会显示完整性校验和文件复制进度，完成后提示在新终端中输入
+`grok-zh` 或 `agent-zh`。默认安装与官方命令共存；如需直接使用 `grok`、`agent`
+启动中文版，再双击 `[可选]替换原始启动方式.cmd`，并在菜单中选择是否保留官方
+程序入口。该可选操作不会删除共享的聊天记录、登录状态或配置。高级参数、恢复方式
+和共享数据边界见 [Windows 自动安装说明](packaging/windows/INSTALL-WINDOWS.md)。
 
 ### 自动更新
 

@@ -395,6 +395,10 @@ jobs:
 
           Copy-Item -LiteralPath 'packaging\windows\agent-zh.cmd' `
             -Destination (Join-Path $package 'agent-zh.cmd')
+          Copy-Item -LiteralPath 'packaging\windows\一键安装.cmd' `
+            -Destination (Join-Path $package '一键安装.cmd')
+          Copy-Item -LiteralPath 'packaging\windows\[可选]替换原始启动方式.cmd' `
+            -Destination (Join-Path $package '[可选]替换原始启动方式.cmd')
           Copy-Item -LiteralPath 'packaging\windows\Install-GrokZh.ps1' `
             -Destination (Join-Path $package 'Install-GrokZh.ps1')
           Copy-Item -LiteralPath 'packaging\windows\INSTALL-WINDOWS.md' `
@@ -432,6 +436,8 @@ jobs:
             'grok-zh.exe',
             'agent-zh.cmd',
             'rg.exe',
+            '一键安装.cmd',
+            '[可选]替换原始启动方式.cmd',
             'Install-GrokZh.ps1',
             'INSTALL-WINDOWS.md'
           )

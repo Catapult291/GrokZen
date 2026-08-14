@@ -15,6 +15,8 @@
    grok-zh.exe
    agent-zh.cmd
    rg.exe
+   一键安装.cmd
+   [可选]替换原始启动方式.cmd
    Install-GrokZh.ps1
    INSTALL-WINDOWS.md
    SHA256SUMS.txt
@@ -24,6 +26,9 @@
 `Install-GrokZh.ps1` 会在写入任何安装目录前，自动核对 `SHA256SUMS.txt` 中的
 文件哈希。Release 只提供 ZIP 的 `.sha256` 旁车文件，GitHub API 也会记录 ZIP 资产 digest；
 不会再额外发布一份版本化裸 EXE。
+
+两个双击入口、安装脚本和本说明只在解压包根目录中使用，不会复制到程序运行目录；
+需要升级或调整安装方式时，请使用新下载并解压后的完整包。
 
 正式 Tag 工作流会为 ZIP 与 `.sha256` 自动生成 GitHub Actions 构建来源证明。下载后可用
 GitHub CLI 核对不可变 Release、资产和构建工作流；以下命令已使用当前仓库
@@ -47,14 +52,17 @@ foreach ($asset in $assets) {
 
 Artifact Attestation 不是 Windows Authenticode；未签名 EXE 仍可能触发 SmartScreen 提示。
 
-## 默认安装：与官方版共存
+## 一键安装：与官方版共存
 
-在解压后的目录中打开 PowerShell，运行：
+在解压后的目录中，直接双击：
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-& .\Install-GrokZh.ps1
+```text
+一键安装.cmd
 ```
+
+它会从脚本所在目录启动 Windows PowerShell，只对这一次子进程使用
+`ExecutionPolicy Bypass`，不会修改用户或计算机的永久执行策略。安装窗口会显示
+SHA-256 完整性校验和程序复制百分比；成功或失败后都会等待按键再关闭，避免一闪而过。
 
 默认安装位置是：
 
@@ -78,19 +86,38 @@ agent-zh --help
   `agent-zh stdio`、`agent-zh headless`。
 - `rg.exe` 与 `grok-zh.exe` 保持在同一目录，供内置搜索使用。
 
-这里修改的是用户 `Path`，不是创建名为 `grok-zh` 或 `agent-zh` 的环境变量。
-
-## 可选：接管 `grok` 和 `agent` 命令名
-
-如果希望在终端中直接输入 `grok` 和 `agent` 时使用中文版，运行：
+安装完成后，按任意键关闭安装窗口。完全关闭已有的 PowerShell / Windows Terminal，
+再打开一个新终端并输入：
 
 ```powershell
-& .\Install-GrokZh.ps1 -OverrideOfficialCommands
+grok-zh
+# 或
+agent-zh
 ```
 
-该选项不会覆盖官方 `grok.exe` 或 `agent.exe`。它会在中文版安装目录中创建
-`grok.cmd` 与 `agent.cmd`，并利用该目录位于用户 `Path` 最前方来接管命令解析。
-删除这两个 shim 或重新执行不带该开关的安装，即可恢复默认共存模式。
+这里修改的是用户 `Path`，不是创建名为 `grok-zh` 或 `agent-zh` 的环境变量。
+
+## 可选：替换原始启动方式
+
+如果希望在终端中直接输入 `grok` 和 `agent` 时使用中文版，请回到解压包根目录，再双击：
+
+```text
+[可选]替换原始启动方式.cmd
+```
+
+菜单提供以下选择：
+
+1. **保留官方版（推荐）**：只在中文版安装目录创建 `grok.cmd`、`agent.cmd`，
+   并把该目录置于当前用户 `Path` 首位；官方程序文件保持原样。
+2. **备份并停用官方程序入口**：只处理 `%GROK_HOME%\bin` 中通过
+   X.AI LLC Authenticode 签名验证的 `grok.exe`、`agent.exe`，先备份再移动，
+   然后创建中文版兼容命令。来源无法验证的文件会被拒绝自动移动。
+3. **取消**：不修改程序、Path 或用户数据。
+
+两个安装方案都不会覆盖官方 `grok.exe` 或 `agent.exe`。如果使用方案 1，删除中文版
+安装目录中的两个 shim，或重新运行不带接管选项的高级安装命令，即可停止命令接管。
+如果使用方案 2，官方程序入口已经移入可恢复备份；停止命令接管后，还需按下方
+“恢复官方命令”步骤手工移回，安装器不会擅自覆盖后来安装的官方版本。
 
 这里只调整用户级 `Path`。如果同名程序来自更靠前的 Machine 级 `Path`，Windows
 仍可能优先解析该程序；安装后必须用下面的命令核对实际结果。此时可卸载对应的
@@ -103,7 +130,19 @@ Machine 级环境变量。
 Get-Command grok-zh, agent-zh, grok, agent -All
 ```
 
-## 可选：备份并移走官方命令
+## 高级命令行选项
+
+双击入口已经覆盖常用安装方式。需要自动化或自定义目录时，仍可在 PowerShell 中运行：
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+& .\Install-GrokZh.ps1
+
+# 创建 grok、agent 兼容命令，但保留官方程序
+& .\Install-GrokZh.ps1 -OverrideOfficialCommands
+```
+
+### 高级：备份并移走官方命令
 
 如果除接管命令名外，还希望移除官方安装器放在共享目录中的两个入口，运行：
 
@@ -128,6 +167,10 @@ Get-Command grok-zh, agent-zh, grok, agent -All
 这项操作不会删除或修改共享的 `auth.json`、`config.toml`、会话、第三方 API、
 MCP、插件、缓存或其他 `~/.grok` 数据。若文件正被占用，安装器会保留原文件并
 提示关闭相关进程后重试，不会强行结束进程。
+
+> `-UninstallOfficial` 是供高级用户使用的低级兼容参数：它按指定路径备份并移动
+> 两个命令文件，不等同于 Windows“应用和功能”中的完整卸载。双击可选入口会额外
+> 验证 X.AI LLC 签名，安全性更高，普通用户应优先使用菜单。
 
 如果官方版由 npm 或其他包管理器安装，它们在其他目录中的 shim/包记录不会被
 这个开关猜测性删除。可先检查：
@@ -169,8 +212,9 @@ npm uninstall -g @xai-official/grok
 该目录并确认可以整体替换时，才使用 `-Force`。升级已有社区安装时，旧目录会被
 重命名为同级的 `bin.previous.<timestamp>-<id>`，便于回滚。
 
-`-GrokHome`（以及环境变量 `GROK_HOME`）必须是已经展开的绝对路径；不要把
-`%USERPROFILE%` 这样的未展开占位符作为其字面值。
+`-GrokHome`（以及环境变量 `GROK_HOME`）必须解析为绝对路径。安装器会展开已经
+定义的 `%USERPROFILE%` 这类 Windows 环境变量；无法展开的 `%VAR%` 或字面的
+`$env:VAR` 会被拒绝，请先在 PowerShell 中解析后再传入。
 安装器只用该参数定位可选的官方 `grok.exe`、`agent.exe`，不会替你持久化
 `GROK_HOME`；若程序运行时也要使用自定义数据根，请另行设置同值的环境变量。
 

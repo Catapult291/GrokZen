@@ -269,9 +269,11 @@ jobs:
             throw "strip 失败：$LASTEXITCODE"
           }
 
-          Copy-Item 'packaging\windows\agent-zh.cmd' $package
-          Copy-Item 'packaging\windows\Install-GrokZh.ps1' $package
-          Copy-Item 'packaging\windows\INSTALL-WINDOWS.md' $package
+          Copy-Item -LiteralPath 'packaging\windows\agent-zh.cmd' -Destination $package
+          Copy-Item -LiteralPath 'packaging\windows\一键安装.cmd' -Destination $package
+          Copy-Item -LiteralPath 'packaging\windows\[可选]替换原始启动方式.cmd' -Destination $package
+          Copy-Item -LiteralPath 'packaging\windows\Install-GrokZh.ps1' -Destination $package
+          Copy-Item -LiteralPath 'packaging\windows\INSTALL-WINDOWS.md' -Destination $package
 
           $rgVersion = '15.1.0'
           $rgArchive = Join-Path $env:RUNNER_TEMP 'ripgrep.zip'
@@ -311,11 +313,13 @@ jobs:
             'grok-zh.exe',
             'agent-zh.cmd',
             'rg.exe',
+            '一键安装.cmd',
+            '[可选]替换原始启动方式.cmd',
             'Install-GrokZh.ps1',
             'INSTALL-WINDOWS.md'
           )
           $manifest = foreach ($name in $manifestNames) {
-            $hash = (Get-FileHash (Join-Path $package $name) -Algorithm SHA256).Hash
+            $hash = (Get-FileHash -LiteralPath (Join-Path $package $name) -Algorithm SHA256).Hash
             "$hash  $name"
           }
           $manifest | Set-Content (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
@@ -361,6 +365,8 @@ jobs:
             'grok-zh.exe',
             'agent-zh.cmd',
             'rg.exe',
+            '一键安装.cmd',
+            '[可选]替换原始启动方式.cmd',
             'Install-GrokZh.ps1',
             'INSTALL-WINDOWS.md'
           )
@@ -368,9 +374,15 @@ jobs:
           if (!(Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
             throw 'Release ZIP 根目录缺少 SHA256SUMS.txt。'
           }
-          $manifestHashes = @{}
+          $manifestHashes = [Collections.Generic.Dictionary[string, string]]::new(
+            [StringComparer]::Ordinal
+          )
+          $normalizedNames = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::Ordinal
+          )
+          $allowedUnicodeNames = @('一键安装.cmd', '[可选]替换原始启动方式.cmd')
           $lineNumber = 0
-          foreach ($rawLine in (Get-Content -LiteralPath $manifestPath)) {
+          foreach ($rawLine in (Get-Content -LiteralPath $manifestPath -Encoding UTF8)) {
             $lineNumber++
             $line = $rawLine.TrimStart([char]0xFEFF)
             $match = [regex]::Match($line, '^(?<hash>[0-9A-Fa-f]{64})  (?<name>[^\\/]+)$')
@@ -378,8 +390,20 @@ jobs:
               throw "SHA256SUMS.txt 第 $lineNumber 行格式无效。"
             }
             $name = $match.Groups['name'].Value
-            $key = $name.ToLowerInvariant()
-            if ($manifestHashes.ContainsKey($key)) {
+            $isAscii = $name -cmatch '^[\x00-\x7F]+$'
+            if ($name.Trim() -ne $name -or
+                $name.Contains(':') -or
+                $name -in @('.', '..') -or
+                $required -cnotcontains $name -or
+                (!$isAscii -and $allowedUnicodeNames -cnotcontains $name)) {
+              throw "SHA256SUMS.txt 包含不安全或未批准的文件名：$name"
+            }
+            $normalizedName = if ($isAscii) {
+              $name.ToLowerInvariant()
+            } else {
+              $name
+            }
+            if (!$normalizedNames.Add($normalizedName)) {
               throw "SHA256SUMS.txt 包含重复文件名：$name"
             }
             $file = Join-Path $verifyRoot $name
@@ -390,10 +414,10 @@ jobs:
             if ($actualHash -ne $match.Groups['hash'].Value) {
               throw "Release ZIP 内层 SHA-256 不匹配：$name"
             }
-            $manifestHashes[$key] = $actualHash
+            $manifestHashes.Add($name, $actualHash)
           }
           foreach ($name in $required) {
-            if (!$manifestHashes.ContainsKey($name.ToLowerInvariant())) {
+            if (!$manifestHashes.ContainsKey($name)) {
               throw "Release ZIP 清单缺少必需文件：$name"
             }
           }

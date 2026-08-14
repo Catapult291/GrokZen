@@ -31,13 +31,21 @@ const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const DOWNLOAD_PROGRESS_TEMPLATE: &str =
     "  下载更新 {bar:30.cyan/dim} {bytes}/{total_bytes} {percent}% ({bytes_per_sec}，剩余 {eta})";
-const REQUIRED_PACKAGE_FILES: [&str; 5] = [
+const ONE_CLICK_INSTALLER: &str = "一键安装.cmd";
+const COMMAND_SETUP_INSTALLER: &str = "[可选]替换原始启动方式.cmd";
+const REQUIRED_PACKAGE_FILES: [&str; 7] = [
     "grok-zh.exe",
     "agent-zh.cmd",
     "rg.exe",
+    ONE_CLICK_INSTALLER,
+    COMMAND_SETUP_INSTALLER,
     "Install-GrokZh.ps1",
     "INSTALL-WINDOWS.md",
 ];
+
+fn is_allowed_unicode_package_name(name: &str) -> bool {
+    name == ONE_CLICK_INSTALLER || name == COMMAND_SETUP_INSTALLER
+}
 
 fn release_repo() -> &'static str {
     xai_grok_product::COMMUNITY_RELEASE_REPO
@@ -404,8 +412,16 @@ fn validate_archive_layout(archive: &mut zip::ZipArchive<File>) -> Result<()> {
             .by_index(index)
             .with_context(|| format!("reading ZIP entry {index}"))?;
         let raw_name = entry.name().to_string();
-        if raw_name.contains('\\') {
-            anyhow::bail!("community release ZIP contains a backslash path: {raw_name}");
+        let raw_without_directory_suffix = raw_name.strip_suffix('/').unwrap_or(&raw_name);
+        if raw_name.contains('\\')
+            || raw_name.contains(':')
+            || raw_without_directory_suffix.is_empty()
+            || raw_without_directory_suffix.starts_with('/')
+            || raw_without_directory_suffix
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | ".."))
+        {
+            anyhow::bail!("community release ZIP contains an unsafe raw path: {raw_name}");
         }
         let enclosed = entry
             .enclosed_name()
@@ -424,10 +440,16 @@ fn validate_archive_layout(archive: &mut zip::ZipArchive<File>) -> Result<()> {
         }
 
         let enclosed_text = enclosed.to_string_lossy();
-        if !enclosed_text.is_ascii() {
-            anyhow::bail!("community release ZIP entry name must be ASCII: {raw_name}");
+        if !enclosed_text.is_ascii() && !is_allowed_unicode_package_name(&enclosed_text) {
+            anyhow::bail!(
+                "community release ZIP entry name contains unapproved Unicode: {raw_name}"
+            );
         }
-        let normalized = enclosed_text.replace('\\', "/").to_ascii_lowercase();
+        let normalized = if enclosed_text.is_ascii() {
+            enclosed_text.replace('\\', "/").to_ascii_lowercase()
+        } else {
+            enclosed_text.to_string()
+        };
         if !seen.insert(normalized) {
             anyhow::bail!("community release ZIP contains a duplicate path: {raw_name}");
         }
@@ -484,7 +506,9 @@ fn read_inner_manifest(archive: &mut zip::ZipArchive<File>) -> Result<HashMap<St
         }
         if name.is_empty()
             || name.trim() != name
-            || !name.is_ascii()
+            || (!name.is_ascii() && !is_allowed_unicode_package_name(name))
+            || !REQUIRED_PACKAGE_FILES.contains(&name)
+            || name.contains(':')
             || name.contains('/')
             || name.contains('\\')
             || matches!(name, "." | "..")
@@ -494,7 +518,11 @@ fn read_inner_manifest(archive: &mut zip::ZipArchive<File>) -> Result<HashMap<St
                 line_index + 1
             );
         }
-        let normalized = name.to_ascii_lowercase();
+        let normalized = if name.is_ascii() {
+            name.to_ascii_lowercase()
+        } else {
+            name.to_string()
+        };
         if !normalized_names.insert(normalized) {
             anyhow::bail!("community release SHA256SUMS.txt contains a duplicate filename");
         }
@@ -658,6 +686,14 @@ mod tests {
             ("grok-zh.exe".to_string(), b"verified executable".to_vec()),
             ("agent-zh.cmd".to_string(), b"agent wrapper".to_vec()),
             ("rg.exe".to_string(), b"ripgrep".to_vec()),
+            (
+                ONE_CLICK_INSTALLER.to_string(),
+                b"one-click installer".to_vec(),
+            ),
+            (
+                COMMAND_SETUP_INSTALLER.to_string(),
+                b"optional command setup".to_vec(),
+            ),
             ("Install-GrokZh.ps1".to_string(), b"installer".to_vec()),
             (
                 "INSTALL-WINDOWS.md".to_string(),
@@ -831,6 +867,30 @@ mod tests {
         assert!(extract_verified_executable(&traversal, &candidate).is_err());
         assert!(!candidate.exists());
 
+        let internal_parent = temp.path().join("internal-parent.zip");
+        let mut entries = package_entries();
+        entries.push(("nested/../escape.txt".to_string(), b"escape".to_vec()));
+        write_zip(&internal_parent, &entries);
+        assert!(extract_verified_executable(&internal_parent, &candidate).is_err());
+        assert!(!candidate.exists());
+
+        let current_segment = temp.path().join("current-segment.zip");
+        let mut entries = package_entries();
+        entries.push(("./escape.txt".to_string(), b"escape".to_vec()));
+        write_zip(&current_segment, &entries);
+        assert!(extract_verified_executable(&current_segment, &candidate).is_err());
+        assert!(!candidate.exists());
+
+        let duplicate_unicode_entry = temp.path().join("duplicate-unicode-entry.zip");
+        let mut entries = package_entries();
+        entries.push((
+            ONE_CLICK_INSTALLER.to_string(),
+            b"duplicate installer".to_vec(),
+        ));
+        write_zip(&duplicate_unicode_entry, &entries);
+        assert!(extract_verified_executable(&duplicate_unicode_entry, &candidate).is_err());
+        assert!(!candidate.exists());
+
         let non_ascii_entry = temp.path().join("non-ascii-entry.zip");
         let mut entries = package_entries();
         entries.push(("É.txt".to_string(), b"ambiguous on Windows".to_vec()));
@@ -851,21 +911,40 @@ mod tests {
         assert!(extract_verified_executable(&non_ascii_manifest, &candidate).is_err());
         assert!(!candidate.exists());
 
-        let incomplete = temp.path().join("incomplete.zip");
+        let duplicate_unicode_manifest = temp.path().join("duplicate-unicode-manifest.zip");
         let mut entries = package_entries();
         let manifest = entries
             .iter_mut()
             .find(|(name, _)| name == "SHA256SUMS.txt")
             .unwrap();
-        manifest.1 = String::from_utf8(manifest.1.clone())
-            .unwrap()
-            .lines()
-            .filter(|line| !line.ends_with("  rg.exe"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .into_bytes();
-        write_zip(&incomplete, &entries);
-        assert!(extract_verified_executable(&incomplete, &candidate).is_err());
+        manifest
+            .1
+            .extend_from_slice(format!("\n{}  {ONE_CLICK_INSTALLER}", "00".repeat(32)).as_bytes());
+        write_zip(&duplicate_unicode_manifest, &entries);
+        assert!(extract_verified_executable(&duplicate_unicode_manifest, &candidate).is_err());
         assert!(!candidate.exists());
+
+        for (suffix, missing_required) in [
+            ("rg", "rg.exe"),
+            ("one-click", ONE_CLICK_INSTALLER),
+            ("command-setup", COMMAND_SETUP_INSTALLER),
+        ] {
+            let incomplete = temp.path().join(format!("incomplete-{suffix}.zip"));
+            let mut entries = package_entries();
+            let manifest = entries
+                .iter_mut()
+                .find(|(name, _)| name == "SHA256SUMS.txt")
+                .unwrap();
+            manifest.1 = String::from_utf8(manifest.1.clone())
+                .unwrap()
+                .lines()
+                .filter(|line| !line.ends_with(&format!("  {missing_required}")))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes();
+            write_zip(&incomplete, &entries);
+            assert!(extract_verified_executable(&incomplete, &candidate).is_err());
+            assert!(!candidate.exists());
+        }
     }
 }
