@@ -1411,7 +1411,6 @@ async fn run_agent_command(
     }
     let early_prefetch = xai_grok_shell::agent::models::start_early_prefetch(None);
     xai_grok_shell::agent::mvp_agent::warm_async_http_client();
-    tokio::task::spawn_blocking(|| {});
     let is_stdio = matches!(agent_args.mode, Some(AgentCmd::Stdio));
     let is_leader = matches!(agent_args.mode, Some(AgentCmd::Leader(_)));
     if !is_stdio && !is_leader {
@@ -1427,6 +1426,7 @@ async fn run_agent_command(
             auto_update::run_update_if_available(
                 auto_update::UpdateRunMode::NonBlocking,
                 false,
+                auto_update::CliUpdateTrigger::AutoBackground,
                 update_config,
             )
             .await
@@ -1527,6 +1527,7 @@ async fn run_agent_command(
             auto_update::run_update_if_available(
                 auto_update::UpdateRunMode::NonBlocking,
                 false,
+                auto_update::CliUpdateTrigger::AutoBackground,
                 &update_config,
             )
             .await
@@ -2258,7 +2259,7 @@ fn main() {
             );
         }
     }
-    let crashed = xai_grok_shell::active_sessions::collect_crashed().unwrap_or_default();
+    let crashed = xai_grok_active_sessions::collect_crashed().unwrap_or_default();
     if !crashed.is_empty() {
         tracing::info!(
             count = crashed.len(),
@@ -2282,7 +2283,10 @@ fn main() {
     xai_grok_telemetry::debug_log::flush();
     if let Err(e) = result {
         xai_tty_utils::restore_native_stderr();
-        eprintln!("Error: {e:#}");
+        match e.downcast_ref::<xai_grok_pager::app::StartupFailure>() {
+            Some(startup) => eprintln!("{}", startup.user_report()),
+            None => eprintln!("Error: {e:#}"),
+        }
         drop(_sentry_guard);
         std::process::exit(1);
     }
@@ -2510,16 +2514,20 @@ async fn async_main(
                 alpha,
                 stable,
                 enterprise,
+                trigger,
+                auto,
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
                 let channel_switch = get_channel_switch(alpha, stable, enterprise);
+                let trigger = resolve_update_trigger(trigger.as_deref(), auto);
                 return run_update_command(
                     check,
                     json,
                     force_reinstall,
                     version,
                     channel_switch,
+                    trigger,
                     &update_config,
                 )
                 .await;
@@ -2532,9 +2540,7 @@ async fn async_main(
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let config = AgentConfig::new_from_toml_cfg(&config)
+                let config = xai_grok_shell::config::load_agent_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
                 xai_grok_shell::auth::run_cli_login(&config, oauth, device_auth, devbox).await?;
                 println!();
@@ -2542,9 +2548,7 @@ async fn async_main(
             }
             Command::Logout => {
                 init_tracing_simple("cli");
-                let config = xai_grok_shell::config::load_effective_config_disk_only()
-                    .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
-                let config = AgentConfig::new_from_toml_cfg(&config)
+                let config = xai_grok_shell::config::load_agent_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to create agent config: {e}"))?;
                 xai_grok_shell::auth::run_cli_logout(&config)?;
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
@@ -2779,12 +2783,29 @@ fn get_channel_switch(alpha: bool, stable: bool, enterprise: bool) -> Option<&'s
     }
 }
 /// Handle `grok-pager update [--check] [--json] [--force-reinstall] [--version X] [--alpha|--stable|--enterprise]`.
+/// --trigger is the one representation; --auto is the compat alias from
+/// older parents. Unknown values fall back to user_command (a human is the
+/// only caller that can produce them).
+fn resolve_update_trigger(flag: Option<&str>, auto: bool) -> auto_update::CliUpdateTrigger {
+    if let Some(flag) = flag {
+        match flag.parse() {
+            Ok(t) => return t,
+            Err(e) => tracing::warn!("{e}; recording user_command"),
+        }
+    }
+    if auto {
+        auto_update::CliUpdateTrigger::AutoBackground
+    } else {
+        auto_update::CliUpdateTrigger::UserCommand
+    }
+}
 async fn run_update_command(
     check: bool,
     json: bool,
     force_reinstall: bool,
     version: Option<String>,
     channel_switch: Option<&str>,
+    trigger: auto_update::CliUpdateTrigger,
     base_update_config: &UpdateConfig,
 ) -> Result<()> {
     if json && !check {
@@ -2801,25 +2822,38 @@ async fn run_update_command(
         return Ok(());
     }
     if let Some(ref v) = version {
-        let valid = xai_grok_version::ReleaseVersion::parse(v)
-            .is_ok_and(|parsed| parsed.as_semver().build.is_empty());
+        let valid = semver::Version::parse(v).is_ok_and(|parsed| parsed.build.is_empty());
         if !valid {
             anyhow::bail!(
-                "“{}”不是有效版本；应为 1.0.0、1.0.0.1 或 1.0.0-alpha.1 这类格式，且不得含 build metadata",
+                "“{}”不是有效版本；应为 1.0.3 或 1.0.3-alpha.1 这类三段 SemVer，且不得含 build metadata",
                 v
             );
         }
     }
-    let installed = auto_update::run_update(
+    let telemetry_cfg = xai_grok_shell::config::load_agent_config_disk_only()
+        .map_err(|e| tracing::warn!("grok update: telemetry init skipped (agent config: {e})"))
+        .ok();
+    if let Some(agent_cfg) = telemetry_cfg {
+        let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
+            &xai_grok_shell::util::grok_home::grok_home(),
+            agent_cfg.grok_com_config.clone(),
+        ));
+        xai_grok_shell::agent::init::update_telemetry_config(&agent_cfg, &auth_manager);
+    }
+    let result = auto_update::run_update(
         force_reinstall,
         version.as_deref(),
         channel_switch,
         &mut update_config,
+        trigger,
     )
-    .await?;
-    if let Some(installed_version) = installed {
-        signal_leaders_to_relaunch(&installed_version).await;
+    .await;
+    if let Ok(Some(installed_version)) = &result {
+        signal_leaders_to_relaunch(installed_version).await;
     }
+    xai_grok_telemetry::session_ctx::drain_pending(xai_grok_telemetry::session_ctx::CLI_DRAIN)
+        .await;
+    result?;
     Ok(())
 }
 /// After a successful `grok update`, ask any running leader on this machine that

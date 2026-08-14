@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -14,9 +14,13 @@ use crate::version::{
     UpdateConfig, fetch_latest_version, get_installed_grok_version, get_latest_version,
     is_version_cache_fresh, try_fetch_stable_pointer, write_version_cache,
 };
+use semver::Version;
 use xai_grok_shell::util::config;
 use xai_grok_shell::util::grok_home::{grok_application, grok_home};
-use xai_grok_version::{ReleaseVersion, parse_distribution_version};
+pub use xai_grok_telemetry::events::CliUpdateTrigger;
+use xai_grok_telemetry::events::{
+    CliUpdate, CliUpdateChannel, CliUpdateErrorKind, CliUpdateInstaller, CliUpdateOutcome,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum UpdateRunMode {
@@ -78,29 +82,144 @@ fn announce_update_failed(error: &dyn std::fmt::Display) {
     }
 }
 /// Manual-install command or distribution-owned download page.
-fn manual_install_cmd() -> &'static str {
+fn manual_install_cmd(channel: &str) -> String {
     if cfg!(feature = "community-build") {
-        return xai_grok_product::COMMUNITY_RELEASES_URL;
+        return xai_grok_product::COMMUNITY_RELEASES_URL.to_string();
+    }
+    let channel = channel.trim();
+    let safe = !channel.is_empty()
+        && channel
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if channel == "enterprise" {
+        return if cfg!(windows) {
+            "irm https://x.ai/cli/enterprise-install.ps1 | iex".to_string()
+        } else {
+            "curl -fsSL https://x.ai/cli/enterprise-install.sh | bash".to_string()
+        };
+    }
+    if channel.is_empty() || channel == "stable" || !safe {
+        return if cfg!(windows) {
+            "irm https://x.ai/cli/install.ps1 | iex".to_string()
+        } else {
+            "curl -fsSL https://x.ai/cli/install.sh | bash".to_string()
+        };
     }
     if cfg!(windows) {
-        "irm https://x.ai/cli/install.ps1 | iex"
+        format!("$env:GROK_CHANNEL='{channel}'; irm https://x.ai/cli/install.ps1 | iex")
     } else {
-        "curl -fsSL https://x.ai/cli/install.sh | bash"
+        format!("curl -fsSL https://x.ai/cli/install.sh | GROK_CHANNEL='{channel}' bash")
     }
 }
 
 /// Build a reinstall hint for a known installer type.
-fn reinstall_hint(installer: &str) -> String {
+fn reinstall_hint(installer: &str, channel: &str) -> String {
     if cfg!(feature = "community-build") {
         return format!(
             "请从本项目 Releases 页面下载最新 grok-zh 安装包：\n  {}",
-            manual_install_cmd()
+            manual_install_cmd(channel)
         );
     }
     match installer {
         "npm" => "Please reinstall via npm:\n  npm i -g @xai-official/grok".to_string(),
         "gh-release" => "Please reinstall via GitHub Releases:\n  gh release download --repo xai-org-shared/grok-build --pattern 'grok-*' --output grok && chmod +x grok".to_string(),
-        _ => format!("Please reinstall via:\n  {}", manual_install_cmd()),
+        _ => format!("Please reinstall via:\n  {}", manual_install_cmd(channel)),
+    }
+}
+
+/// True when this process is an x86_64 build translated by Rosetta on an
+/// Apple Silicon host. `hw.optional.arm64` is 1 on Apple Silicon — including
+/// from a translated process, where the compile-time arch says x86_64.
+///
+/// Read in-process via `sysctlbyname`: no spawn, no stdout parse, and no
+/// dependence on the `sysctl` binary being on PATH. A missing key (genuine
+/// Intel Mac) or any error means not Apple Silicon — the probe fails open
+/// to the compile-time arch. Cached: fixed host property, read from async
+/// paths via [`detect_platform`].
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn running_under_rosetta_on_apple_silicon() -> bool {
+    static ROSETTA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ROSETTA.get_or_init(|| {
+        let mut val: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>();
+        // SAFETY: the name is a valid NUL-terminated C string; `val`/`len`
+        // describe a properly sized c_int; sysctlbyname writes at most
+        // `len` bytes into `val`.
+        let rc = unsafe {
+            libc::sysctlbyname(
+                c"hw.optional.arm64".as_ptr(),
+                (&raw mut val).cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        rc == 0 && val == 1
+    })
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "x86_64")))]
+fn running_under_rosetta_on_apple_silicon() -> bool {
+    false
+}
+
+/// Arch to download artifacts for, given the compile-time arch and whether
+/// the host is Apple Silicon running this build under Rosetta. Separated
+/// from [`detect_platform`] so the decision is unit-testable.
+fn corrected_arch(
+    os: &'static str,
+    arch: &'static str,
+    rosetta_on_apple_silicon: bool,
+) -> &'static str {
+    if os == "macos" && arch == "x86_64" && rosetta_on_apple_silicon {
+        "aarch64"
+    } else {
+        arch
+    }
+}
+
+/// Artifact platform from [`detect_platform`]; compile-time values for
+/// combos the updater does not support.
+fn platform_label() -> String {
+    detect_platform()
+        .map(|(os, arch)| format!("{os}-{arch}"))
+        .unwrap_or_else(|_| format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH))
+}
+
+/// Typed phase marker for telemetry classification. Deliberately no
+/// `source()`, so anyhow's `{:#}` does not print the chain twice.
+#[derive(Debug, thiserror::Error)]
+enum InstallPhaseError {
+    #[error("{0:#}")]
+    Download(anyhow::Error),
+    #[error("{0:#}")]
+    Activate(anyhow::Error),
+}
+
+/// Smoke failures stay unwrapped — already typed, and the base-retry abort
+/// in [`install_internal_from_bases`] must still downcast them.
+fn wrap_download_err(e: anyhow::Error) -> anyhow::Error {
+    if e.is::<SmokeTestFailure>() {
+        e
+    } else {
+        InstallPhaseError::Download(e).into()
+    }
+}
+
+#[doc(hidden)]
+pub fn classify_install_error(err: &anyhow::Error) -> CliUpdateErrorKind {
+    if let Some(smoke) = err.downcast_ref::<SmokeTestFailure>() {
+        return match smoke {
+            SmokeTestFailure::Timeout => CliUpdateErrorKind::SmokeTimeout,
+            SmokeTestFailure::Spawn(_) => CliUpdateErrorKind::SmokeSpawn,
+            SmokeTestFailure::NonZero { .. } => CliUpdateErrorKind::SmokeNonzero,
+        };
+    }
+    match err.downcast_ref::<InstallPhaseError>() {
+        Some(InstallPhaseError::Download(_)) => CliUpdateErrorKind::Download,
+        Some(InstallPhaseError::Activate(_)) => CliUpdateErrorKind::Activate,
+        // npm / gh-release failures carry no phase marker.
+        None => CliUpdateErrorKind::Other,
     }
 }
 
@@ -240,16 +359,8 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
                     Some(value) => value,
                     None => {
                         // Distinguish parse failure from unsupported channel.
-                        let parse_ok = parse_distribution_version(
-                            &current_version,
-                            cfg!(feature = "community-build"),
-                        )
-                        .is_ok()
-                            && parse_distribution_version(
-                                &target,
-                                cfg!(feature = "community-build"),
-                            )
-                            .is_ok();
+                        let parse_ok = Version::parse(&current_version).is_ok()
+                            && Version::parse(&target).is_ok();
                         error = Some(if cfg!(feature = "community-build") {
                             if parse_ok {
                                 format!(
@@ -330,8 +441,8 @@ fn plan_for(policy: &config::VersionPolicy, latest: String) -> UpdatePlan {
     // doesn't exist.
     if matches!(
         (
-            parse_distribution_version(&target, cfg!(feature = "community-build")),
-            parse_distribution_version(&latest, cfg!(feature = "community-build")),
+            Version::parse(&target),
+            Version::parse(&latest),
         ),
         (Ok(t), Ok(l)) if t > l
     ) {
@@ -429,7 +540,18 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
     )
     .unwrap_or(false)
     {
-        run_install_script(installer, Some(&target), update_config).await?;
+        run_install_script(
+            installer,
+            Some(&target),
+            update_config,
+            CliUpdateTrigger::LeaderConverge,
+        )
+        .await?;
+        // The leader relaunches right after a successful converge and would
+        // die with the event still in flight (failures keep it alive, so
+        // successes would under-report). The install is already done.
+        xai_grok_telemetry::session_ctx::drain_pending(xai_grok_telemetry::session_ctx::CLI_DRAIN)
+            .await;
         outcome.installed = Some(target.clone());
     }
 
@@ -507,14 +629,14 @@ pub async fn get_installer() -> Option<&'static str> {
 }
 
 fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: bool) -> Option<bool> {
-    let current = parse_distribution_version(current, cfg!(feature = "community-build")).ok()?;
-    let target = parse_distribution_version(target, cfg!(feature = "community-build")).ok()?;
+    let current = Version::parse(current).ok()?;
+    let target = Version::parse(target).ok()?;
     match channel {
         // NOTE: With the 0.2.X versioning scheme, all versions are plain
         // semver (no pre-release suffix). The pre-release checks in this
         // match are dead code but kept as a safety net.
         "stable" | "enterprise" => {
-            if target.is_prerelease() {
+            if !target.pre.is_empty() {
                 tracing::warn!(
                     %current, %target,
                     channel = %channel,
@@ -522,7 +644,7 @@ fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: boo
                 );
                 return Some(false);
             }
-            if current.is_prerelease() {
+            if !current.pre.is_empty() {
                 return Some(true);
             }
         }
@@ -666,7 +788,9 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
     // only after the user explicitly enables auto-update; otherwise Ctrl+U
     // starts the same update subprocess after the TUI exits.
     let download = if should_start_background_download(auto_update, disk_needs_download) {
-        match run_update_subcommand(UpdateRunMode::NonBlocking).await {
+        match run_update_subcommand(UpdateRunMode::NonBlocking, CliUpdateTrigger::AutoBackground)
+            .await
+        {
             Ok(child) => child,
             Err(e) => {
                 tracing::warn!("Background update download failed to start: {e}");
@@ -699,6 +823,7 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
 pub async fn run_update_if_available(
     run_mode: UpdateRunMode,
     interactive: bool,
+    trigger: CliUpdateTrigger,
     update_config: &UpdateConfig,
 ) -> Result<bool> {
     let Some(inst) = get_installer().await else {
@@ -744,7 +869,7 @@ pub async fn run_update_if_available(
     if auto_update {
         announce_update_available(&current_version, &latest_version, &update_config.channel);
         if interactive {
-            if let Err(e) = run_update_subcommand(run_mode).await {
+            if let Err(e) = run_update_subcommand(run_mode, trigger).await {
                 announce_update_failed(&e);
             } else if matches!(run_mode, UpdateRunMode::Blocking) {
                 return Ok(true);
@@ -752,7 +877,7 @@ pub async fn run_update_if_available(
                 eprintln!("{}", MSG_AUTO_UPDATE_BACKGROUND);
                 return Ok(false);
             }
-        } else if let Err(e) = run_update_subcommand(run_mode).await {
+        } else if let Err(e) = run_update_subcommand(run_mode, trigger).await {
             announce_update_failed(&e);
         } else if matches!(run_mode, UpdateRunMode::Blocking) {
             return Ok(true);
@@ -774,7 +899,9 @@ pub async fn run_update_if_available(
             if io::stdin().read_line(&mut line).is_ok() {
                 let ans = line.trim().to_ascii_lowercase();
                 if ans.is_empty() || ans == "y" || ans == "yes" {
-                    if let Err(e) = run_update_subcommand(run_mode).await {
+                    if let Err(e) =
+                        run_update_subcommand(run_mode, CliUpdateTrigger::UserCommand).await
+                    {
                         announce_update_failed(&e);
                     } else if matches!(run_mode, UpdateRunMode::Blocking) {
                         return Ok(true);
@@ -807,10 +934,24 @@ pub async fn run_update_if_available(
 /// quit-for-update path) instead of blind-spawning a second downloader.
 /// Dropping the handle does not kill the child (`kill_on_drop` is off), so
 /// callers that don't care can ignore it. `Blocking` mode returns `None`.
-async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::process::Child>> {
+async fn run_update_subcommand(
+    run_mode: UpdateRunMode,
+    trigger: CliUpdateTrigger,
+) -> Result<Option<tokio::process::Child>> {
     let exe = std::env::current_exe()?;
     let mut cmd = tokio::process::Command::new(exe);
+    // One trigger representation end to end: the enum crosses the process
+    // boundary as --trigger=<value> (FromStr on the other side).
     cmd.arg("update");
+    cmd.arg(format!("--trigger={}", trigger.as_str()));
+    // Hand the resolved telemetry mode to the child, which cannot see the
+    // remote-settings layer (requirement pins still beat env). None at the
+    // startup spawns — they run before the settings prefetch, when this
+    // process knows no more than the child; waiting would let telemetry
+    // delay an update.
+    if let Some(mode) = xai_grok_telemetry::client::current_mode() {
+        cmd.env("GROK_TELEMETRY_ENABLED", mode.to_string());
+    }
     match run_mode {
         UpdateRunMode::Blocking => {
             // stderr must be null, not piped: `.status()` does not drain
@@ -857,7 +998,7 @@ async fn run_update_subcommand(run_mode: UpdateRunMode) -> Result<Option<tokio::
 /// persisted `auto_update` preference: Ctrl+U is the user's authorization for
 /// this one download and install.
 pub async fn run_user_approved_update() -> Result<()> {
-    run_update_subcommand(UpdateRunMode::Blocking).await?;
+    run_update_subcommand(UpdateRunMode::Blocking, CliUpdateTrigger::UserCommand).await?;
     Ok(())
 }
 
@@ -919,38 +1060,75 @@ pub async fn run_install_script(
     installer: &str,
     target: Option<&str>,
     update_config: &UpdateConfig,
+    trigger: CliUpdateTrigger,
 ) -> Result<()> {
     crate::ensure_selected_updates_enabled()?;
+    let from_version =
+        disk_version_for_installer(installer).unwrap_or_else(get_installed_grok_version);
+    let started = Instant::now();
     #[cfg(feature = "community-build")]
-    let result = if installer == crate::community_release::COMMUNITY_INSTALLER {
-        install_community_release(target, update_config).await
-    } else {
-        Err(anyhow::anyhow!(
-            "unsupported installer for the community distribution: {installer}"
-        ))
-    };
+    let result: Result<Option<String>> =
+        if installer == crate::community_release::COMMUNITY_INSTALLER {
+            install_community_release(target, update_config)
+                .await
+                .map(Some)
+        } else {
+            Err(anyhow::anyhow!(
+                "unsupported installer for the community distribution: {installer}"
+            ))
+        };
     #[cfg(not(feature = "community-build"))]
-    let result = match installer {
+    let result: Result<Option<String>> = match installer {
         "npm" => install_npm(
             target,
             &update_config.channel,
             update_config.npm_registry.as_deref(),
-        ),
-        "gh-release" => install_gh_release(target).await,
-        "internal" => install_internal(target, update_config).await,
+        )
+        .map(|()| None),
+        "gh-release" => install_gh_release(target).await.map(|()| None),
+        "internal" => install_internal(target, update_config).await.map(Some),
         _ => Err(anyhow::anyhow!("unsupported installer: {installer}")),
     };
+    // Before the success-only cache sweep, so it cannot inflate successes.
+    let duration_ms = started.elapsed().as_millis() as u64;
     if result.is_ok() {
         remove_stale_models_cache().await;
     }
-    result.map_err(|e| {
+    let (outcome, error_kind) = match &result {
+        Ok(_) => (CliUpdateOutcome::Success, None),
+        Err(error) => (
+            CliUpdateOutcome::Failed,
+            Some(classify_install_error(error)),
+        ),
+    };
+    let to_version = match &result {
+        Ok(Some(installed)) => Some(installed.clone()),
+        _ => target.map(str::to_string),
+    };
+    xai_grok_telemetry::session_ctx::log_event(CliUpdate {
+        outcome,
+        trigger,
+        from_version,
+        to_version,
+        channel: CliUpdateChannel::from_channel_str(&update_config.channel),
+        installer: CliUpdateInstaller::from_installer_str(installer),
+        platform: platform_label(),
+        rosetta: running_under_rosetta_on_apple_silicon(),
+        duration_ms,
+        error_kind,
+    });
+    result.map(|_| ()).map_err(|e| {
         if cfg!(feature = "community-build") {
-            anyhow::anyhow!("自动更新失败：{:#}\n\n{}", e, reinstall_hint(installer))
+            anyhow::anyhow!(
+                "自动更新失败：{:#}\n\n{}",
+                e,
+                reinstall_hint(installer, &update_config.channel)
+            )
         } else {
             anyhow::anyhow!(
                 "Auto-update failed: {:#}\n\n{}",
                 e,
-                reinstall_hint(installer)
+                reinstall_hint(installer, &update_config.channel)
             )
         }
     })
@@ -965,7 +1143,7 @@ pub async fn run_install_script(
 async fn install_community_release(
     target: Option<&str>,
     update_config: &UpdateConfig,
-) -> Result<()> {
+) -> Result<String> {
     crate::ensure_community_updates_enabled()?;
 
     #[cfg(not(windows))]
@@ -980,7 +1158,7 @@ async fn install_community_release(
             Some(version) => version.to_string(),
             None => crate::community_release::fetch_latest_version(&update_config.channel).await?,
         };
-        ReleaseVersion::parse(&version)
+        Version::parse(&version)
             .with_context(|| format!("invalid community release version: {version}"))?;
 
         let destination = std::env::current_exe().context("locating the running grok-zh.exe")?;
@@ -1050,7 +1228,7 @@ async fn install_community_release(
             xai_grok_product::CLI_NAME,
             version
         );
-        Ok(())
+        Ok(version)
     }
 }
 
@@ -1072,7 +1250,10 @@ pub(crate) fn detect_platform() -> Result<(&'static str, &'static str)> {
     } else {
         anyhow::bail!("Unsupported architecture");
     };
-    Ok((os, arch))
+    Ok((
+        os,
+        corrected_arch(os, arch, running_under_rosetta_on_apple_silicon()),
+    ))
 }
 
 /// Age past which a leftover `.tmp` download file (or a freshly-renamed
@@ -1434,8 +1615,11 @@ async fn download_cli_artifact_from_gcs(
     }
 }
 
-async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) -> Result<()> {
-    install_internal_from_bases(target, update_config, crate::version::CLI_BASE_URLS).await
+/// Returns the version that was actually activated.
+async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) -> Result<String> {
+    let bases = crate::version::cli_base_urls();
+    let base_refs: Vec<&str> = bases.iter().map(String::as_str).collect();
+    install_internal_from_bases(target, update_config, &base_refs).await
 }
 
 /// Try the base-dependent install phase ([`download_verified_from_base`]:
@@ -1457,18 +1641,25 @@ pub async fn install_internal_from_bases(
     target: Option<&str>,
     update_config: &UpdateConfig,
     bases: &[&str],
-) -> Result<()> {
+) -> Result<String> {
     crate::ensure_updates_enabled()?;
     let mut last_err: Option<anyhow::Error> = None;
     for (i, base) in bases.iter().enumerate() {
         match download_verified_from_base(target, update_config, base).await {
-            Ok(download) => return activate_verified_download(&download).await,
+            Ok(download) => {
+                return activate_verified_download(&download)
+                    .await
+                    .map(|()| download.version)
+                    .map_err(|e| InstallPhaseError::Activate(e).into());
+            }
             Err(e) if e.is::<SmokeTestFailure>() => {
                 // Same published artifact on every base — retrying will not
-                // change a --version timeout or crash.
+                // change a --version timeout or crash. Left unwrapped so
+                // telemetry classification sees the typed failure.
                 return Err(e);
             }
             Err(e) => {
+                let e = wrap_download_err(e);
                 if i + 1 < bases.len() {
                     tracing::warn!(
                         "install via {} failed ({:#}); trying next base URL",
@@ -1600,10 +1791,12 @@ pub async fn install_internal_from_base(
     target: Option<&str>,
     update_config: &UpdateConfig,
     gcs_base_url: &str,
-) -> Result<()> {
+) -> Result<String> {
     crate::ensure_updates_enabled()?;
     let download = download_verified_from_base(target, update_config, gcs_base_url).await?;
-    activate_verified_download(&download).await
+    activate_verified_download(&download)
+        .await
+        .map(|()| download.version)
 }
 
 /// A downloaded and smoke-tested binary in `~/.grok/downloads/`, not yet
@@ -1627,8 +1820,7 @@ async fn download_verified_from_base(
 
     let version = match target {
         Some(v) => {
-            parse_distribution_version(v, false)
-                .map_err(|_| anyhow::anyhow!("invalid version format: '{}'", v))?;
+            Version::parse(v).map_err(|_| anyhow::anyhow!("invalid version format: '{}'", v))?;
             v.to_string()
         }
         None => {
@@ -2197,7 +2389,7 @@ async fn sweep_old_exe_backups(old: &std::path::Path) {
 /// would make its atomic rename fail.
 async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_version: &str) {
     let prefix = format!("{}-", bin_prefix);
-    let current_semver = match ReleaseVersion::parse(current_version) {
+    let current_semver = match Version::parse(current_version) {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(
@@ -2221,7 +2413,7 @@ async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_
         }
     };
 
-    let mut versioned: Vec<(ReleaseVersion, String)> = Vec::new();
+    let mut versioned: Vec<(Version, String)> = Vec::new();
 
     while let Ok(Some(entry)) = entries.next_entry().await {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -2265,7 +2457,7 @@ async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_
         else {
             continue;
         };
-        if let Ok(v) = ReleaseVersion::parse(&ver_str) {
+        if let Ok(v) = Version::parse(&ver_str) {
             // Skip the current version — never delete it.
             if v == current_semver {
                 continue;
@@ -2712,6 +2904,7 @@ pub async fn run_update(
     pinned_version: Option<&str>,
     channel_switch: Option<&str>,
     update_config: &mut UpdateConfig,
+    trigger: CliUpdateTrigger,
 ) -> Result<Option<String>> {
     crate::ensure_selected_updates_enabled()?;
     apply_channel_switch(channel_switch, update_config).await;
@@ -2726,7 +2919,6 @@ pub async fn run_update(
             return Ok(None);
         }
     };
-
     // Persist installer if not already saved
     #[cfg(not(feature = "community-build"))]
     {
@@ -2758,7 +2950,7 @@ pub async fn run_update(
             );
         }
         eprintln!();
-        run_install_script(installer, Some(version), update_config).await?;
+        run_install_script(installer, Some(version), update_config, trigger).await?;
         refresh_deployment_config().await;
         if let Err(e) = config::update_config(|st| {
             st.cli.auto_update = Some(false);
@@ -2878,16 +3070,8 @@ pub async fn run_update(
             }
             None => {
                 // Distinguish parse failure from unsupported channel.
-                let parse_ok = parse_distribution_version(
-                    &effective_current,
-                    cfg!(feature = "community-build"),
-                )
-                .is_ok()
-                    && parse_distribution_version(
-                        &install_target,
-                        cfg!(feature = "community-build"),
-                    )
-                    .is_ok();
+                let parse_ok = Version::parse(&effective_current).is_ok()
+                    && Version::parse(&install_target).is_ok();
                 if parse_ok {
                     if cfg!(feature = "community-build") {
                         anyhow::bail!(
@@ -2951,7 +3135,7 @@ pub async fn run_update(
     };
 
     eprintln!();
-    run_install_script(installer, Some(target_version), update_config).await?;
+    run_install_script(installer, Some(target_version), update_config, trigger).await?;
     // Fetch the stable pointer now so the new binary has it immediately
     // for channel_label() display, rather than waiting for the next
     // TTL-gated update check (~30 min).
@@ -3646,22 +3830,9 @@ mod tests {
             needs_update("0.1.148-alpha.3", "0.1.148-alpha.2", "alpha", false),
             Some(false)
         );
-        assert_eq!(
-            needs_update("1.0.0", "1.0.0.1", "stable", false),
-            Some(true)
-        );
-        assert_eq!(
-            needs_update("1.0.0.1", "1.0.0.2", "stable", false),
-            Some(true)
-        );
-        assert_eq!(
-            needs_update("1.0.0.2", "1.0.0.1", "stable", false),
-            Some(false)
-        );
-        assert_eq!(
-            needs_update("1.0.0.999", "1.0.1", "stable", false),
-            Some(true)
-        );
+        assert_eq!(needs_update("1.0.0", "1.0.3", "stable", false), Some(true));
+        assert_eq!(needs_update("1.0.3", "1.0.4", "stable", false), Some(true));
+        assert_eq!(needs_update("1.0.4", "1.0.3", "stable", false), Some(false));
     }
 
     #[test]
@@ -4026,7 +4197,7 @@ mod tests {
     #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_npm_mentions_npm_command() {
-        let hint = reinstall_hint("npm");
+        let hint = reinstall_hint("npm", "stable");
         assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
         assert!(
             hint.contains("@xai-official/grok"),
@@ -4037,7 +4208,7 @@ mod tests {
     #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_gh_release_mentions_gh_command() {
-        let hint = reinstall_hint("gh-release");
+        let hint = reinstall_hint("gh-release", "stable");
         assert!(
             hint.contains("gh release download"),
             "should suggest gh release download: {hint}"
@@ -4051,7 +4222,7 @@ mod tests {
     #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_internal_mentions_platform_installer() {
-        let hint = reinstall_hint("internal");
+        let hint = reinstall_hint("internal", "stable");
         if cfg!(windows) {
             assert!(hint.contains("irm"), "should suggest irm install: {hint}");
             assert!(
@@ -4071,22 +4242,22 @@ mod tests {
     #[test]
     fn test_reinstall_hint_unknown_falls_back_to_internal() {
         // Unknown installer falls back to the same hint as "internal".
-        let unknown = reinstall_hint("homebrew");
-        let internal = reinstall_hint("internal");
+        let unknown = reinstall_hint("homebrew", "stable");
+        let internal = reinstall_hint("internal", "stable");
         assert_eq!(unknown, internal);
     }
 
     #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_empty_falls_back_to_internal() {
-        let hint = reinstall_hint("");
-        assert_eq!(hint, reinstall_hint("internal"));
+        let hint = reinstall_hint("", "stable");
+        assert_eq!(hint, reinstall_hint("internal", "stable"));
     }
 
     #[cfg(feature = "community-build")]
     #[test]
     fn test_reinstall_hint_community_never_names_official_sources() {
-        let hint = reinstall_hint(crate::community_release::COMMUNITY_INSTALLER);
+        let hint = reinstall_hint(crate::community_release::COMMUNITY_INSTALLER, "stable");
         assert!(hint.contains(xai_grok_product::COMMUNITY_RELEASE_REPO));
         for forbidden in ["x.ai", "@xai-official", "xai-org-shared"] {
             assert!(
@@ -4121,16 +4292,16 @@ mod tests {
     #[test]
     fn test_community_version_output_must_match_release_version() {
         assert!(community_version_output_matches(
-            "grok-zh 1.2.3.1 (abcdef0) [stable]\n",
-            "1.2.3.1"
+            "grok-zh 1.2.3 (abcdef0) [stable]\n",
+            "1.2.3"
         ));
         assert!(!community_version_output_matches(
             "grok-zh 1.2.2 (abcdef0)\n",
-            "1.2.3.1"
+            "1.2.3"
         ));
         assert!(!community_version_output_matches(
-            "grok 1.2.3.1 (abcdef0)\n",
-            "1.2.3.1"
+            "grok 1.2.3 (abcdef0)\n",
+            "1.2.3"
         ));
     }
 

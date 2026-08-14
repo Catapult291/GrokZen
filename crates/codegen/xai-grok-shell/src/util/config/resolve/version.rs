@@ -1,5 +1,5 @@
+use semver::Version;
 use toml::Value as TomlValue;
-use xai_grok_version::ReleaseVersion;
 
 /// Machine-readable channel name derived from the GCS stable pointer cache.
 ///
@@ -21,8 +21,8 @@ pub(crate) fn channel_name_from_cache() -> Option<&'static str> {
             .find_map(|name| std::fs::read_to_string(home.join(name)).ok())?;
         let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
         let stable = parsed.get("stable_version")?.as_str()?;
-        let current = ReleaseVersion::parse(xai_grok_version::VERSION).ok()?;
-        let stable_v = ReleaseVersion::parse(stable).ok()?;
+        let current = Version::parse(xai_grok_version::VERSION).ok()?;
+        let stable_v = Version::parse(stable).ok()?;
         if current > stable_v {
             Some("alpha")
         } else {
@@ -111,14 +111,14 @@ fn version_candidates(
     .collect()
 }
 
-fn fold_bound(raws: Vec<String>, knob: VersionKnob) -> Option<ReleaseVersion> {
-    let mut best: Option<ReleaseVersion> = None;
+fn fold_bound(raws: Vec<String>, knob: VersionKnob) -> Option<Version> {
+    let mut best: Option<Version> = None;
     for raw in raws {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             continue;
         }
-        match ReleaseVersion::parse(trimmed) {
+        match Version::parse(trimmed) {
             Ok(v) => {
                 best = Some(match (best, knob.bound()) {
                     (None, _) => v,
@@ -142,7 +142,7 @@ fn resolve_version_bound<E: Fn(&str) -> Option<String>>(
     layers: &crate::config::ConfigLayers,
     env: &E,
     knob: VersionKnob,
-) -> Option<ReleaseVersion> {
+) -> Option<Version> {
     let mut raws = version_candidates(layers, knob.toml_key(), false);
     raws.extend(env(knob.env_var()));
     fold_bound(raws, knob)
@@ -152,7 +152,7 @@ fn resolve_version_bound<E: Fn(&str) -> Option<String>>(
 fn resolve_version_bound_managed(
     layers: &crate::config::ConfigLayers,
     knob: VersionKnob,
-) -> Option<ReleaseVersion> {
+) -> Option<Version> {
     fold_bound(version_candidates(layers, knob.toml_key(), true), knob)
 }
 
@@ -160,10 +160,10 @@ fn resolve_version_bound_managed(
 /// hard `required_*` gate startup.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VersionPolicy {
-    pub minimum: Option<ReleaseVersion>,
-    pub maximum: Option<ReleaseVersion>,
-    pub required_minimum: Option<ReleaseVersion>,
-    pub required_maximum: Option<ReleaseVersion>,
+    pub minimum: Option<Version>,
+    pub maximum: Option<Version>,
+    pub required_minimum: Option<Version>,
+    pub required_maximum: Option<Version>,
 }
 
 impl VersionPolicy {
@@ -219,13 +219,13 @@ impl VersionPolicy {
     }
 
     /// `None` on a contradictory range, so the fail-open guard lives in one place.
-    fn effective_required_minimum(&self) -> Option<&ReleaseVersion> {
+    fn effective_required_minimum(&self) -> Option<&Version> {
         (!self.has_contradictory_required_range())
             .then_some(self.required_minimum.as_ref())
             .flatten()
     }
 
-    fn effective_required_maximum(&self) -> Option<&ReleaseVersion> {
+    fn effective_required_maximum(&self) -> Option<&Version> {
         (!self.has_contradictory_required_range())
             .then_some(self.required_maximum.as_ref())
             .flatten()
@@ -233,7 +233,7 @@ impl VersionPolicy {
 
     /// Shared clamp core: cap at the ceilings, then the hard `required_minimum`
     /// last so it wins over a lower ceiling.
-    fn clamp_version(&self, mut v: ReleaseVersion) -> ReleaseVersion {
+    fn clamp_version(&self, mut v: Version) -> Version {
         if let Some(c) = &self.maximum
             && v > *c
         {
@@ -262,13 +262,11 @@ impl VersionPolicy {
     /// Clamp `target` into range. An unparseable target resolves to the lowest
     /// in-range version when a hard floor applies, else passes through unchanged.
     fn clamp(&self, target: &str) -> String {
-        match ReleaseVersion::parse(target) {
+        match Version::parse(target) {
             Ok(v) => self.clamp_version(v).to_string(),
-            Err(_) if self.effective_required_minimum().is_some() => self
-                .clamp_version(
-                    ReleaseVersion::parse("0.0.0").expect("0.0.0 is a valid release version"),
-                )
-                .to_string(),
+            Err(_) if self.effective_required_minimum().is_some() => {
+                self.clamp_version(Version::new(0, 0, 0)).to_string()
+            }
             Err(_) => target.to_string(),
         }
     }
@@ -276,18 +274,16 @@ impl VersionPolicy {
     /// Anti-downgrade: skip a target below the soft `minimum`. Never clamps up.
     fn skips_update_target(&self, target: &str) -> bool {
         matches!(
-            (&self.minimum, ReleaseVersion::parse(target)),
+            (&self.minimum, Version::parse(target)),
             (Some(min), Ok(t)) if t < *min
         )
     }
 
     /// Lowest version an explicit `--version` pin may install, always agreeing
     /// with [`clamp`](Self::clamp). Only the hard `required_minimum` blocks a pin.
-    pub fn installable_floor(&self) -> Option<ReleaseVersion> {
+    pub fn installable_floor(&self) -> Option<Version> {
         self.effective_required_minimum()?;
-        Some(self.clamp_version(
-            ReleaseVersion::parse("0.0.0").expect("0.0.0 is a valid release version"),
-        ))
+        Some(self.clamp_version(Version::new(0, 0, 0)))
     }
 }
 
@@ -322,8 +318,8 @@ mod tests {
         }
     }
 
-    fn v(s: &str) -> ReleaseVersion {
-        ReleaseVersion::parse(s).unwrap()
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
     }
 
     #[test]
@@ -496,11 +492,11 @@ mod tests {
         );
 
         assert_eq!(
-            pol(Some("1.0.0.1"), None, None, None).resolve_target("1.0.0.2"),
-            Some("1.0.0.2".into())
+            pol(Some("1.0.1"), None, None, None).resolve_target("1.0.2"),
+            Some("1.0.2".into())
         );
         assert_eq!(
-            pol(Some("1.0.0.2"), None, None, None).resolve_target("1.0.0.1"),
+            pol(Some("1.0.2"), None, None, None).resolve_target("1.0.1"),
             None
         );
     }

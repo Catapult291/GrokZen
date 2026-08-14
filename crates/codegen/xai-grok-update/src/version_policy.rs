@@ -2,9 +2,9 @@
 //! startup; `minimum`/`maximum` are updater-only. Every knob fails open.
 
 use crate::version::get_installed_grok_version;
+use semver::Version;
 use tracing::warn;
 use xai_grok_shell::util::config::VersionPolicy;
-use xai_grok_version::ReleaseVersion;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RequiredRangeDecision {
@@ -43,7 +43,7 @@ fn evaluate_required_range(current_version: &str, policy: &VersionPolicy) -> Req
         return RequiredRangeDecision::InRange;
     }
 
-    let Ok(cur) = ReleaseVersion::parse(current_version) else {
+    let Ok(cur) = Version::parse(current_version) else {
         return RequiredRangeDecision::InRange;
     };
 
@@ -75,7 +75,7 @@ pub(crate) fn check_install_target(
     let Some(min) = policy.installable_floor() else {
         return Ok(());
     };
-    if !matches!(ReleaseVersion::parse(target), Ok(t) if t >= min) {
+    if !matches!(Version::parse(target), Ok(t) if t >= min) {
         return Err(VersionPolicyError::TargetBelowFloor {
             target: target.to_string(),
             minimum: min.to_string(),
@@ -137,8 +137,8 @@ pub fn enforce_version_policy_or_exit() {
 mod tests {
     use super::*;
 
-    fn v(s: &str) -> ReleaseVersion {
-        ReleaseVersion::parse(s).unwrap()
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
     }
 
     fn pol(
@@ -179,7 +179,6 @@ mod tests {
             )
             .is_ok()
         );
-        assert!(check_install_target(&hard, "0.1.150.1").is_ok());
     }
 
     #[test]

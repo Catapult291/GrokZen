@@ -122,6 +122,11 @@ pub async fn run(
             });
 
             let resp = local_resp?;
+            if let Some(by) = xai_grok_shell::config::session_search_turned_off_by() {
+                eprintln!(
+                    "warning: local session search is off ({by}); local sessions were not searched."
+                );
+            }
             let local_ids: HashSet<&str> =
                 resp.results.iter().map(|r| r.session_id.as_str()).collect();
 

@@ -15,10 +15,10 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::header::{ACCEPT, HeaderMap, HeaderValue, USER_AGENT};
 use reqwest::redirect::Policy;
+use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
-use xai_grok_version::ReleaseVersion;
 
 pub(crate) const COMMUNITY_INSTALLER: &str = "community-github";
 
@@ -125,12 +125,12 @@ fn asset_client() -> Result<reqwest::Client> {
     github_client(Duration::from_secs(20 * 60))
 }
 
-fn parse_release_version(release: &ApiRelease) -> Option<ReleaseVersion> {
+fn parse_release_version(release: &ApiRelease) -> Option<Version> {
     if release.draft || !release.immutable {
         return None;
     }
-    let version = ReleaseVersion::parse(release.tag_name.strip_prefix('v')?).ok()?;
-    if !version.as_semver().build.is_empty() || release.prerelease != version.is_prerelease() {
+    let version = Version::parse(release.tag_name.strip_prefix('v')?).ok()?;
+    if !version.build.is_empty() || release.prerelease != !version.pre.is_empty() {
         return None;
     }
     Some(version)
@@ -139,7 +139,7 @@ fn parse_release_version(release: &ApiRelease) -> Option<ReleaseVersion> {
 fn select_latest_release<'a>(
     releases: &'a [ApiRelease],
     channel: &str,
-) -> Result<(&'a ApiRelease, ReleaseVersion)> {
+) -> Result<(&'a ApiRelease, Version)> {
     if !matches!(channel, "stable" | "alpha") {
         anyhow::bail!("unsupported community release channel: {channel}");
     }
@@ -147,7 +147,7 @@ fn select_latest_release<'a>(
         .iter()
         .filter_map(|release| {
             let version = parse_release_version(release)?;
-            if channel == "stable" && version.is_prerelease() {
+            if channel == "stable" && !version.pre.is_empty() {
                 return None;
             }
             Some((release, version))
@@ -193,9 +193,9 @@ pub(crate) async fn fetch_latest_version(channel: &str) -> Result<String> {
 }
 
 fn release_asset_name(version: &str) -> Result<String> {
-    let parsed = ReleaseVersion::parse(version)
+    let parsed = Version::parse(version)
         .with_context(|| format!("invalid community release version: {version}"))?;
-    if parsed.to_string() != version || !parsed.as_semver().build.is_empty() {
+    if parsed.to_string() != version || !parsed.build.is_empty() {
         anyhow::bail!("community release version is not canonical: {version}");
     }
     if !(cfg!(target_os = "windows") && cfg!(target_arch = "x86_64") && cfg!(target_env = "gnu")) {
@@ -286,9 +286,9 @@ fn select_asset(release: &ApiRelease, version: &str) -> Result<VerifiedAsset> {
 
 pub(crate) async fn fetch_asset(version: &str) -> Result<VerifiedAsset> {
     crate::ensure_community_updates_enabled()?;
-    let parsed = ReleaseVersion::parse(version)
+    let parsed = Version::parse(version)
         .with_context(|| format!("invalid community release version: {version}"))?;
-    if !parsed.as_semver().build.is_empty() {
+    if !parsed.build.is_empty() {
         anyhow::bail!("community release version must not contain build metadata: {version}");
     }
     if parsed.to_string() != version {
@@ -690,13 +690,13 @@ mod tests {
         let releases = vec![
             release("v1.1.0-alpha.2", true, true),
             release("v1.0.1", false, true),
-            release("v1.0.1.2", false, true),
-            release("v1.0.1.1", false, true),
+            release("v1.0.3", false, true),
+            release("v1.0.2", false, true),
             release("v1.2.0", false, false),
             release("v1.0.0", false, true),
         ];
         let (_, version) = select_latest_release(&releases, "stable").unwrap();
-        assert_eq!(version.to_string(), "1.0.1.2");
+        assert_eq!(version.to_string(), "1.0.3");
     }
 
     #[test]
@@ -749,22 +749,22 @@ mod tests {
     #[test]
     #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "gnu"))]
     fn asset_selection_requires_the_exact_zip_only_asset_set() {
-        let mut candidate = release("v1.2.3.1", false, true);
-        candidate.assets = uploaded_package_assets("1.2.3.1");
-        let selected = select_asset(&candidate, "1.2.3.1").unwrap();
-        assert_eq!(selected.version, "1.2.3.1");
-        assert_eq!(selected.name, "grok-zh-1.2.3.1-windows-x86_64-gnu.zip");
+        let mut candidate = release("v1.2.3", false, true);
+        candidate.assets = uploaded_package_assets("1.2.3");
+        let selected = select_asset(&candidate, "1.2.3").unwrap();
+        assert_eq!(selected.version, "1.2.3");
+        assert_eq!(selected.name, "grok-zh-1.2.3-windows-x86_64-gnu.zip");
 
         candidate.assets.push(uploaded_asset(
-            "1.2.3.1",
-            "grok-zh-1.2.3.1-windows-x86_64-gnu.exe".to_string(),
+            "1.2.3",
+            "grok-zh-1.2.3-windows-x86_64-gnu.exe".to_string(),
             123,
         ));
-        assert!(select_asset(&candidate, "1.2.3.1").is_err());
+        assert!(select_asset(&candidate, "1.2.3").is_err());
 
         candidate.assets.pop();
         candidate.assets[0].browser_download_url = "https://example.com/grok-zh.zip".to_string();
-        assert!(select_asset(&candidate, "1.2.3.1").is_err());
+        assert!(select_asset(&candidate, "1.2.3").is_err());
     }
 
     #[test]
@@ -784,8 +784,8 @@ mod tests {
             "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases?per_page=100&page=2"
         );
         assert_eq!(
-            release_by_tag_api("1.0.0.1"),
-            "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases/tags/v1.0.0.1"
+            release_by_tag_api("1.0.3"),
+            "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases/tags/v1.0.3"
         );
     }
 

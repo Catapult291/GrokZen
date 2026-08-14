@@ -47,7 +47,9 @@ use super::prompt::{dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_
 use super::session::fork::build_child_fork_marker;
 use super::session::lifecycle::{dispatch_new_session_inner, drain_startup_actions, finish_trust};
 use super::session::load::{dispatch_load_session_with_restore, reanchor_grouped_selection};
-use super::session::modal::{dispatch_rename_session, dispatch_sessions_confirm_close};
+use super::session::modal::{
+    dispatch_rename_session, dispatch_reset_session_title, dispatch_sessions_confirm_close,
+};
 use super::settings::setters::set_default_model_inner;
 use super::settings::ui::{action_for_reset, apply_setting_rollback};
 use super::status::scrub_error_for_toast;
@@ -223,7 +225,7 @@ fn test_app() -> AppView {
         welcome_on_privacy_banner: false,
         welcome_on_upgrade_cta: false,
         auth_show_raw_url: false,
-        auth_mouse_disabled: false,
+        native_select_hold: false,
         session_picker_entries: None,
         session_picker_loading: false,
         session_picker_state: crate::views::picker::PickerState::with_mode(
@@ -864,6 +866,7 @@ fn enqueue_permission_with_enable_always_approve(
         active_idx: 0,
         bash_highlights: None,
         bash_selection_count: 0,
+        bash_deny_selection_count: 0,
         bash_command_raw: None,
         mcp_scope: None,
         title: "test-enable-always-approve".to_string(),
@@ -994,6 +997,7 @@ fn push_synthetic_permission(
         active_idx: 0,
         bash_highlights: None,
         bash_selection_count: 0,
+        bash_deny_selection_count: 0,
         bash_command_raw: None,
         mcp_scope: None,
         title: "Test permission".to_string(),

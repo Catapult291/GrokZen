@@ -1,5 +1,6 @@
 //! Fork dispatchers and fork placeholder builders.
 use super::lifecycle::{dispatch_new_session_inner_with_id, refuse_chat_mode_build_agent};
+use super::load::session_opens_as_chat;
 use crate::acp::tracker::AcpUpdateTracker;
 use crate::app::actions::Effect;
 use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
@@ -277,6 +278,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             .into_owned(),
     };
     let parent_chat_kind = parent.chat_kind || app.chat_mode;
+    let parent_conversation_entry = parent.conversation_entry;
     app.agents.insert(new_id, new_agent);
     {
         let agent = app
@@ -301,6 +303,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             &app.tier_restricted_commands,
         );
         agent.chat_kind = parent_chat_kind;
+        agent.conversation_entry = parent_conversation_entry;
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
         agent
             .prompt
@@ -532,7 +535,10 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
     let session_id_str = session_id.0.to_string();
     let locale = app.locale.clone();
     let pending_entry = std::mem::take(&mut app.deferred_startup.pending_chat);
-    let agent_entry = app.agents.get(&agent_id).is_some_and(|a| a.chat_kind);
+    let agent_entry = app
+        .agents
+        .get(&agent_id)
+        .is_some_and(|a| a.conversation_entry);
     let conversation_entry = pending_entry || agent_entry;
     if crate::app::session_startup::chat_mode_refuses_local_build_load(
         app.chat_mode,
@@ -543,6 +549,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         refuse_chat_mode_build_agent(app, agent_id);
         return vec![];
     }
+    let rename_entry = session_opens_as_chat(app, conversation_entry);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "WorktreeForked");
         agent.session.finish_command();
@@ -590,6 +597,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
         }
         let effective_chat = conversation_entry || app.chat_mode;
         agent.chat_kind = effective_chat;
+        agent.conversation_entry = rename_entry;
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
     } else {
         return vec![];
@@ -617,7 +625,10 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
 ) -> Vec<Effect> {
     let session_id_str = new_session_id.0.to_string();
     let pending_entry = std::mem::take(&mut app.deferred_startup.pending_chat);
-    let agent_entry = app.agents.get(&agent_id).is_some_and(|a| a.chat_kind);
+    let agent_entry = app
+        .agents
+        .get(&agent_id)
+        .is_some_and(|a| a.conversation_entry);
     let conversation_entry = pending_entry || agent_entry;
     if crate::app::session_startup::chat_mode_refuses_local_build_load(
         app.chat_mode,
@@ -628,6 +639,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         refuse_chat_mode_build_agent(app, agent_id);
         return vec![];
     }
+    let rename_entry = session_opens_as_chat(app, conversation_entry);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "ForkSessionReady");
         agent.session.finish_command();
@@ -638,6 +650,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
         agent.session.cwd = cwd.clone();
         let effective_chat = conversation_entry || app.chat_mode;
         agent.chat_kind = effective_chat;
+        agent.conversation_entry = rename_entry;
     } else {
         return vec![];
     }

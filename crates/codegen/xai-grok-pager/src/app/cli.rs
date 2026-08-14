@@ -107,6 +107,14 @@ Terminal）时，这会让复制功能正常工作。包装命令的终端也会
         /// Switch to the enterprise release channel.
         #[arg(long, conflicts_with_all = ["alpha", "stable"], hide = true)]
         enterprise: bool,
+        /// Internal: what spawned this `grok update` (`user_command`,
+        /// `auto_background`, `leader_converge`). Hidden.
+        #[arg(long, hide = true)]
+        trigger: Option<String>,
+        /// Internal compat alias for `--trigger=auto_background` (older
+        /// parents still spawn children with it).
+        #[arg(long, hide = true)]
+        auto: bool,
     },
     /// 打印版本信息
     #[command(visible_alias = "v")]

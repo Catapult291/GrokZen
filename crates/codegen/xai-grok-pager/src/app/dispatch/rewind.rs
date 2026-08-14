@@ -1,5 +1,6 @@
 //! Conversation rewind dispatchers and prompt-entry lookup helpers.
 
+use super::ctx::NO_SESSION_NOTICE;
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};

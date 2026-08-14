@@ -1,6 +1,6 @@
 # Changelog
 
-[1.0.0.1 简体中文更新说明](changelogs/1.0.0.1.zh-CN.md)
+[1.0.3 简体中文更新说明](changelogs/1.0.3.zh-CN.md)
 
 [1.0.0 简体中文更新说明](changelogs/1.0.0.zh-CN.md)
 

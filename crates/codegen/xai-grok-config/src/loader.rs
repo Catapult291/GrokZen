@@ -447,6 +447,25 @@ impl ConfigLayers {
             requirements_campaigns.extend(take_campaign_entries(req, "requirements"));
         }
 
+        // Normalize each layer before it is ever merged, so `[toolset.web_search]`'s
+        // mutually-exclusive `allowed_domains` / `excluded_domains` travel together:
+        // a layer that sets one clears the other to `[]`. That makes the existing
+        // `deep_merge_toml` replace the whole policy from the winning layer instead
+        // of mixing keys across layers.
+        normalize_config_layer(&mut system_managed);
+        normalize_config_layer(&mut managed);
+        normalize_config_layer(&mut user);
+        for req in [
+            &mut user_requirements,
+            &mut system_requirements,
+            &mut mdm_requirements,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            normalize_config_layer(req);
+        }
+
         Ok(Self {
             system_managed,
             managed,
@@ -633,7 +652,7 @@ pub fn load_dismissed_ids_from_home() -> std::collections::HashSet<String> {
 /// can't be parsed (broken `GROK_TEST_VERSION` in dev), silently strips
 /// without applying — keeps the CLI usable on a bad dev override.
 pub fn apply_version_overrides_with_registered(value: &mut toml::Value) -> std::io::Result<()> {
-    match xai_grok_version::installed_release_version() {
+    match xai_grok_version::installed_semver() {
         Ok(version) => apply_version_overrides(value, &version)
             .map_err(|e| std::io::Error::other(e.to_string())),
         Err(_) => {
@@ -642,6 +661,48 @@ pub fn apply_version_overrides_with_registered(value: &mut toml::Value) -> std::
             }
             Ok(())
         }
+    }
+}
+
+/// Normalize a single config layer in place, before it is merged with the others. Per-layer
+/// fix-ups that must run pre-merge live here.
+///
+/// Currently: couple `[toolset.web_search]`'s mutually-exclusive `allowed_domains` and
+/// `excluded_domains`. If exactly one is set (non-empty), clear the other to `[]`, so the two keys
+/// travel together and `deep_merge_toml` replaces the whole policy from the winning layer instead
+/// of mixing keys across layers. Both-set (a user error) and both-unset are left alone; the
+/// both-set case is handled downstream where the section is read.
+///
+/// This runs on every input of the merge, not only the disk layers. Campaign and version-override
+/// patches overlay *after* the layer merge, so they are normalized too, in `apply_patches`.
+pub(crate) fn normalize_config_layer(layer: &mut toml::Value) {
+    let Some(web_search) = layer
+        .as_table_mut()
+        .and_then(|t| t.get_mut("toolset"))
+        .and_then(|t| t.as_table_mut())
+        .and_then(|t| t.get_mut("web_search"))
+        .and_then(|v| v.as_table_mut())
+    else {
+        return;
+    };
+    let non_empty = |table: &toml::value::Table, key: &str| {
+        table
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .is_some_and(|a| !a.is_empty())
+    };
+    let allowed = non_empty(web_search, "allowed_domains");
+    let excluded = non_empty(web_search, "excluded_domains");
+    if allowed && !excluded {
+        web_search.insert(
+            "excluded_domains".to_string(),
+            toml::Value::Array(Vec::new()),
+        );
+    } else if excluded && !allowed {
+        web_search.insert(
+            "allowed_domains".to_string(),
+            toml::Value::Array(Vec::new()),
+        );
     }
 }
 
@@ -789,7 +850,7 @@ mod tests {
 
     #[test]
     fn full_precedence_holds_when_values_come_from_version_overrides() {
-        let cli_version = xai_grok_version::ReleaseVersion::parse("1.8.0").unwrap();
+        let cli_version = semver::Version::parse("1.8.0").unwrap();
 
         let mut managed: toml::Value = toml::from_str(
             r#"
@@ -882,9 +943,114 @@ mod tests {
         assert_eq!(base["brand_new"]["x"].as_integer(), Some(1));
     }
 
+    fn ws_layer(body: &str) -> toml::Value {
+        toml::from_str(&format!("[toolset.web_search]\n{body}\n")).unwrap()
+    }
+
+    fn ws_array(v: &toml::Value, key: &str) -> Option<Vec<String>> {
+        v.get("toolset")?
+            .get("web_search")?
+            .get(key)?
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|d| d.as_str().map(str::to_owned))
+                    .collect()
+            })
+    }
+
+    #[test]
+    fn normalize_sets_the_absent_sibling_to_empty() {
+        let mut allow = ws_layer(r#"allowed_domains = ["a.com"]"#);
+        normalize_config_layer(&mut allow);
+        assert_eq!(
+            ws_array(&allow, "allowed_domains"),
+            Some(vec!["a.com".into()])
+        );
+        assert_eq!(ws_array(&allow, "excluded_domains"), Some(vec![]));
+
+        let mut block = ws_layer(r#"excluded_domains = ["b.com"]"#);
+        normalize_config_layer(&mut block);
+        assert_eq!(
+            ws_array(&block, "excluded_domains"),
+            Some(vec!["b.com".into()])
+        );
+        assert_eq!(ws_array(&block, "allowed_domains"), Some(vec![]));
+    }
+
+    #[test]
+    fn normalize_leaves_both_set_and_both_unset_untouched() {
+        let mut both = ws_layer("allowed_domains = [\"a.com\"]\nexcluded_domains = [\"b.com\"]");
+        normalize_config_layer(&mut both);
+        assert_eq!(
+            ws_array(&both, "allowed_domains"),
+            Some(vec!["a.com".into()])
+        );
+        assert_eq!(
+            ws_array(&both, "excluded_domains"),
+            Some(vec!["b.com".into()])
+        );
+
+        let mut none: toml::Value = toml::from_str("[toolset.web_search]\n").unwrap();
+        normalize_config_layer(&mut none);
+        assert_eq!(ws_array(&none, "allowed_domains"), None);
+        assert_eq!(ws_array(&none, "excluded_domains"), None);
+    }
+
+    /// The regression: after per-layer normalization, a plain `deep_merge_toml`
+    /// lets a higher layer's blocklist beat a lower layer's allowlist atomically.
+    #[test]
+    fn normalized_layers_deep_merge_atomically() {
+        let mut lower = ws_layer(r#"allowed_domains = ["github.com"]"#);
+        let mut higher = ws_layer(r#"excluded_domains = ["evil.com"]"#);
+        normalize_config_layer(&mut lower);
+        normalize_config_layer(&mut higher);
+
+        // higher wins in a deep merge
+        let mut merged = lower;
+        deep_merge_toml(&mut merged, &higher);
+
+        assert_eq!(
+            ws_array(&merged, "excluded_domains"),
+            Some(vec!["evil.com".into()])
+        );
+        assert_eq!(
+            ws_array(&merged, "allowed_domains"),
+            Some(vec![]),
+            "lower layer's allowlist must be cleared, not merged in"
+        );
+    }
+
+    /// Campaign and version-override patches overlay after the layer merge, so
+    /// they need the same normalization: a campaign that flips an allowlist to a
+    /// blocklist must replace the policy, not leave both keys set.
+    #[test]
+    fn overlay_patches_are_normalized_before_merge() {
+        let mut merged = ws_layer(r#"allowed_domains = ["github.com"]"#);
+        normalize_config_layer(&mut merged);
+
+        let patch: toml::Table =
+            toml::from_str("[toolset.web_search]\nexcluded_domains = [\"evil.com\"]\n").unwrap();
+        crate::config_override::apply_patches(
+            &mut merged,
+            std::iter::once(patch),
+            crate::config_override::PATCH_STRIP_KEYS,
+        );
+
+        assert_eq!(
+            ws_array(&merged, "excluded_domains"),
+            Some(vec!["evil.com".into()])
+        );
+        assert_eq!(
+            ws_array(&merged, "allowed_domains"),
+            Some(vec![]),
+            "the campaign's blocklist must replace the underlying allowlist"
+        );
+    }
+
     #[test]
     fn user_version_overrides_dont_escape_their_layer() {
-        let cli_version = xai_grok_version::ReleaseVersion::parse("1.8.0").unwrap();
+        let cli_version = semver::Version::parse("1.8.0").unwrap();
         let mut user: toml::Value = toml::from_str(
             r#"
             [[version_overrides]]

@@ -6,13 +6,14 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookRegistryReq {}
 
 impl WorkspaceRpc for HookRegistryReq {
     const METHOD: &'static str = "workspace.hook_registry";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = HookRegistryWire;
 }
 
@@ -53,6 +54,7 @@ pub enum HookEventNameWire {
     SessionEnd,
     Stop,
     StopFailure,
+    StopCancelled,
     PreToolUse,
     PostToolUse,
     PostToolUseFailure,
@@ -74,6 +76,7 @@ impl HookEventNameWire {
             Self::SessionEnd => "session_end",
             Self::Stop => "stop",
             Self::StopFailure => "stop_failure",
+            Self::StopCancelled => "stop_cancelled",
             Self::PreToolUse => "pre_tool_use",
             Self::PostToolUse => "post_tool_use",
             Self::PostToolUseFailure => "post_tool_use_failure",
@@ -107,6 +110,7 @@ impl<'de> Deserialize<'de> for HookEventNameWire {
             "session_end" => Self::SessionEnd,
             "stop" => Self::Stop,
             "stop_failure" => Self::StopFailure,
+            "stop_cancelled" => Self::StopCancelled,
             "pre_tool_use" => Self::PreToolUse,
             "post_tool_use" => Self::PostToolUse,
             "post_tool_use_failure" => Self::PostToolUseFailure,
@@ -132,14 +136,15 @@ mod tests {
         assert_eq!(HookRegistryReq::METHOD, "workspace.hook_registry");
     }
 
+    /// Mirrors `event_name_deser_all_variants` in xai-grok-hooks; the two lists move together.
     #[test]
     fn hook_event_name_wire_snake_case_round_trip() {
-        // All 15 variants (mirrors upstream `event_name_deser_all_variants`).
         for (variant, wire) in [
             (HookEventNameWire::SessionStart, "session_start"),
             (HookEventNameWire::SessionEnd, "session_end"),
             (HookEventNameWire::Stop, "stop"),
             (HookEventNameWire::StopFailure, "stop_failure"),
+            (HookEventNameWire::StopCancelled, "stop_cancelled"),
             (HookEventNameWire::PreToolUse, "pre_tool_use"),
             (HookEventNameWire::PostToolUse, "post_tool_use"),
             (

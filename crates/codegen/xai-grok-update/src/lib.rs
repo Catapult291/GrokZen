@@ -111,9 +111,8 @@ mod community_build_tests {
                 .expect_err("community download must be disabled");
         assert_eq!(error.to_string(), UPDATE_DISABLED_REASON);
         assert!(!destination.exists());
-        assert_eq!(
-            auto_update::get_installer().await,
-            Some(community_release::COMMUNITY_INSTALLER)
-        );
+        let expected_installer =
+            community_updates_enabled().then_some(community_release::COMMUNITY_INSTALLER);
+        assert_eq!(auto_update::get_installer().await, expected_installer);
     }
 }

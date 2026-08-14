@@ -1971,8 +1971,10 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
         "repeat call must keep the populated snapshot"
     );
 }
+mod list_running_heal_tests;
 #[cfg(unix)]
 mod process_scope_reclaim;
+mod session_rename_tests;
 mod session_resume_close_tests;
 mod subagent_spawn_context_tests;
 /// No load in flight and no session → the wait returns immediately
@@ -2767,7 +2769,10 @@ async fn prepare_video_gen_config_disabled_when_zdr_flag_set() {
     agent.cfg.borrow_mut().disable_zdr_incompatible_tools = true;
     assert!(matches!(
         agent.prepare_video_gen_config(),
-        VideoGenConfig::Disabled
+        VideoGenConfig::Enabled {
+            zdr_restricted: true,
+            ..
+        }
     ));
     agent.cfg.borrow_mut().zdr_video_output_s3 = Some(zdr_s3());
     agent.cfg.borrow_mut().disable_zdr_incompatible_tools = false;
@@ -2785,12 +2790,14 @@ async fn prepare_video_gen_config_disabled_when_zdr_flag_set() {
     agent.cfg.borrow_mut().disable_zdr_incompatible_tools = true;
     let VideoGenConfig::Enabled {
         zdr_video_output_s3,
+        zdr_restricted,
         ..
     } = agent.prepare_video_gen_config()
     else {
         panic!("expected Enabled");
     };
     assert!(zdr_video_output_s3.as_ref().is_some_and(|c| c.is_valid()));
+    assert!(!zdr_restricted);
 }
 #[tokio::test(flavor = "current_thread")]
 async fn prepare_video_gen_config_respects_feature_flag() {
@@ -3109,6 +3116,28 @@ async fn diagnostic_upload_skipped_after_mid_session_trace_upload_kill_switch() 
         0,
         "an already-wired diagnostics uploader must honor a mid-session \
          trace-upload kill switch"
+    );
+}
+#[tokio::test]
+#[serial_test::serial]
+async fn session_search_stops_on_a_mid_session_kill_switch() {
+    use crate::session::storage::search_gate;
+    let _env = xai_grok_test_support::EnvGuard::unset("GROK_SESSION_SEARCH");
+    let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
+    let _gate = search_gate::IndexGateGuard::open();
+    agent.apply_session_search_gate();
+    assert!(
+        search_gate::is_index_enabled(),
+        "precondition: nothing has turned the index off"
+    );
+    agent.cfg.borrow_mut().remote_settings = Some(crate::util::config::RemoteSettings {
+        session_search: Some(false),
+        ..Default::default()
+    });
+    agent.apply_session_search_gate();
+    assert!(
+        !search_gate::is_index_enabled(),
+        "a remote kill switch must reach the indexer without a new session"
     );
 }
 /// The live collection gate reads a `Send` mirror of the config-level
@@ -3609,7 +3638,14 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
     agent
         .session_registry
         .set_permission_receiver(&sid, permission_rx);
+    let _ = agent.session_registry.live_orphan_heal_lock(&sid);
+    assert_eq!(agent.session_registry.counts().live_orphan_heal_locks, 1);
     agent.remove_session(&sid);
+    assert_eq!(
+        agent.session_registry.counts().live_orphan_heal_locks,
+        0,
+        "remove_session must evict the live-orphan heal mutex"
+    );
     assert!(
         toolset_weak.upgrade().is_none(),
         "the workspace binding must release the toolset"
@@ -3926,10 +3962,10 @@ async fn ext_notification_forwards_each_queue_method_to_session_actor() {
                 assert_eq!(owner.as_deref(), Some("grok-tui"));
                 assert_eq!(new_text.as_deref(), Some("now"));
             }
-            ("x.ai/queue/hold_edit", SessionCommand::HoldCombineEdit { id }) => {
+            ("x.ai/queue/hold_edit", SessionCommand::HoldEdit { id }) => {
                 assert_eq!(id, "p-hold");
             }
-            ("x.ai/queue/release_edit", SessionCommand::ReleaseCombineEdit { id }) => {
+            ("x.ai/queue/release_edit", SessionCommand::ReleaseEdit { id }) => {
                 assert_eq!(id, "p-release");
             }
             (method, _) => {

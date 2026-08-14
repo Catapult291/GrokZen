@@ -62,9 +62,8 @@ Set-ExecutionPolicy -Scope Process Bypass
 ### 自动更新
 
 - 默认使用 `stable` 通道，只接受非 Draft、非 prerelease 且已经进入 GitHub immutable
-  状态的本仓库 Release。前三段 `A.B.C` 始终对应官方版本：该官方版本的首个社区发布使用
-  `vA.B.C`，后续社区修订依次使用 `vA.B.C.1`、`vA.B.C.2`；官方版本升级后修订号重新从
-  无第四段的 `vA.B.C` 开始。
+  状态的本仓库 Release。版本严格使用与上游一致的三段 SemVer `vA.B.C`；不再定义或接受
+  第四段社区修订号。
 - `alpha` 通道可通过 `grok-zh update --alpha` 显式选择；它也只接受 immutable
   Release，并兼容历史 `-zh.ci.N`、`-zh.preview.N` 预发布版本。
 - Release 资产必须精确包含完整
@@ -78,23 +77,22 @@ Set-ExecutionPolicy -Scope Process Bypass
 - 自动激活只替换已验证的 `grok-zh.exe`，不会在仍有进程运行时冒险逐个覆盖
   `agent-zh.cmd`、`rg.exe`、安装器或文档；需要同步旁载文件的版本应重新运行 ZIP 内安装器。
   下载、解压、校验、冒烟或替换失败时保留当前版本。
-- 已发布的 `v1.0.0` 仍使用三段 SemVer 解析器，无法识别四段版本 `v1.0.0.1`；从
-  `v1.0.0` 升级到 `v1.0.0.1` 时需手工下载完整 ZIP 并运行安装器一次。安装
-  `v1.0.0.1` 后，后续 `.2`、`.3` 等同一官方基线的社区修订即可由新更新器识别。
+- 已撤回的 `v1.0.0.1` 使用了不兼容代理版本门禁的四段版本号，不应继续安装或分发。
+  已下载该版本的用户应安装下一份经过验证的三段版本完整 ZIP。
 - 更早的旧版社区程序同样需要先手工安装一次带新更新器的完整 ZIP，之后才会跟随 Releases。
 
 不满足上述契约的旧预览 Release、可变 Release、含额外裸 EXE 的 Release 和官方 xAI 资产
-都不会被自动更新器接受。`v1.0.0-zh.preview.3` 使用旧的裸 EXE 更新契约，`v1.0.0` 又不认识
-四段社区修订号，因此这两条迁移路径都需要手工下载完整 ZIP 安装一次。Immutable Release 与 SHA-256 提供发布对象和
+都不会被自动更新器接受。`v1.0.0-zh.preview.3` 使用旧的裸 EXE 更新契约，因此该迁移路径
+需要手工下载完整 ZIP 安装一次。Immutable Release 与 SHA-256 提供发布对象和
 传输完整性校验。正式 Tag 工作流还会通过 GitHub Artifact Attestations 为 ZIP 和 `.sha256`
 生成与仓库、提交及构建工作流绑定的来源证明，不需要维护长期签名私钥。
 
 下载正式资产后，可用 GitHub CLI 同时验证不可变 Release、Release 资产以及 Actions 构建来源。
-以下命令已使用当前仓库 `JoyElliot/grok-build-Chinese`：
+以下命令以待发布的三段版本 `1.0.3` 为例，发布后执行：
 
 ```powershell
 $repo = 'JoyElliot/grok-build-Chinese'
-$version = '1.0.0.1'
+$version = '1.0.3'
 $tag = "v$version"
 $zip = ".\grok-zh-$version-windows-x86_64-gnu.zip"
 $assets = @($zip, "$zip.sha256")
@@ -149,7 +147,7 @@ $localRoot = Join-Path $PWD '.codex-local'
 $env:CARGO_HOME = Join-Path $localRoot 'cargo-home'
 $env:CARGO_TARGET_DIR = Join-Path $localRoot 'target'
 $env:GROK_HOME = Join-Path $localRoot 'test-home'
-$env:GROK_VERSION = "1.0.0-zh.preview.1"
+$env:GROK_VERSION = "1.0.3-zh.preview.1"
 cargo build --frozen --target x86_64-pc-windows-gnu `
   -p xai-grok-pager-bin --profile release-dist --features release-dist
 ```
@@ -186,7 +184,7 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 - 英文上游用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/README.md)
 - 贡献说明：[`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)
 - 安全策略：[`SECURITY.zh-CN.md`](SECURITY.zh-CN.md)
-- 1.0.0.1 简体中文发行说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.0.1.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.0.1.zh-CN.md)
+- 1.0.3 简体中文发行说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.3.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.3.zh-CN.md)
 - 版本发布：[`Releases`](https://github.com/JoyElliot/grok-build-Chinese/releases)
 - 官方在线文档：[docs.x.ai/build/overview](https://docs.x.ai/build/overview)
 
@@ -227,9 +225,8 @@ cargo fmt --all
 
 - `main`：尽量保持官方上游镜像，只用于同步和审查。
 - `zh-dev`：汉化开发、上游合并、构建和测试。
-- 计划中的 `zh-stable`：只有在中文验证通过后才建立；稳定 Release 由指向已审核提交的
-  `vA.B.C` 或社区修订 Tag `vA.B.C.N`（`N > 0`）触发。前三段与官方版本一致，第四段只
-  表示本社区在同一官方版本上的后续修订。
+- 计划中的 `zh-stable`：只有在中文验证通过后才建立；稳定 Release 只由指向已审核提交的
+  严格三段 Tag `vA.B.C` 触发，并与上游包版本保持一致。
 - 上游 `main` 更新只能触发审查和测试，不能直接进入用户更新源。
 - GitHub 发布页正文统一使用中文；每条提交名称链接到对应的 GitHub 提交页面。若提交标题
   不是中文，必须先在 `.github/release-notes/commit-titles.zh-CN.json` 中按完整 SHA 提供

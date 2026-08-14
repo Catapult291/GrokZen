@@ -14,8 +14,8 @@
 //! enabled = true
 //! ```
 
+use semver::Version;
 use serde::Deserialize;
-use xai_grok_version::{ReleaseVersion, ReleaseVersionParseError};
 
 use crate::config_override::{PATCH_STRIP_KEYS, apply_patches, take_patch_array};
 
@@ -40,7 +40,7 @@ pub enum VersionOverrideError {
         index: usize,
         value: String,
         #[source]
-        source: ReleaseVersionParseError,
+        source: semver::Error,
     },
     #[error(
         "version_overrides[{index}].maximum_version = {value:?} is not a valid release version: {source}"
@@ -49,7 +49,7 @@ pub enum VersionOverrideError {
         index: usize,
         value: String,
         #[source]
-        source: ReleaseVersionParseError,
+        source: semver::Error,
     },
 }
 
@@ -57,27 +57,27 @@ pub enum VersionOverrideError {
 /// patch in ascending `minimum_version` order.
 pub fn apply_version_overrides(
     config: &mut toml::Value,
-    version: &ReleaseVersion,
+    version: &Version,
 ) -> Result<(), VersionOverrideError> {
     let entries = take_patch_array::<VersionOverrideMeta>(config, VERSION_OVERRIDES_KEY)?;
 
     // Parse all bounds upfront so an invalid entry fails before any merge.
     // Missing minimum_version => 0.0.0 (no lower bound).
-    let mut parsed: Vec<(ReleaseVersion, Option<ReleaseVersion>, toml::Table)> =
+    let mut parsed: Vec<(Version, Option<Version>, toml::Table)> =
         Vec::with_capacity(entries.len());
     for (index, entry) in entries.into_iter().enumerate() {
         let min_v = match &entry.meta.minimum_version {
-            Some(s) => ReleaseVersion::parse(s.trim()).map_err(|source| {
+            Some(s) => Version::parse(s.trim()).map_err(|source| {
                 VersionOverrideError::InvalidMinimumVersion {
                     index,
                     value: s.clone(),
                     source,
                 }
             })?,
-            None => ReleaseVersion::parse("0.0.0").expect("0.0.0 is a valid release version"),
+            None => Version::new(0, 0, 0),
         };
         let max_v = match &entry.meta.maximum_version {
-            Some(max_str) => Some(ReleaseVersion::parse(max_str.trim()).map_err(|source| {
+            Some(max_str) => Some(Version::parse(max_str.trim()).map_err(|source| {
                 VersionOverrideError::InvalidMaximumVersion {
                     index,
                     value: max_str.clone(),
@@ -117,8 +117,8 @@ mod tests {
         toml::from_str(s).expect("valid toml")
     }
 
-    fn v(s: &str) -> ReleaseVersion {
-        ReleaseVersion::parse(s).unwrap()
+    fn v(s: &str) -> Version {
+        Version::parse(s).unwrap()
     }
 
     /// Helper asserts the section is stripped on every call, so the
@@ -155,8 +155,6 @@ mod tests {
         assert!(applies(None, Some("2.0.0"), "1.5.0")); // max-only, within
         assert!(!applies(None, Some("2.0.0"), "2.0.1")); // max-only, above
         assert!(applies(None, None, "1.0.0")); // unbounded both = always
-        assert!(applies(Some("1.0.0.1"), None, "1.0.0.2"));
-        assert!(!applies(Some("1.0.0.2"), None, "1.0.0.1"));
     }
 
     #[test]

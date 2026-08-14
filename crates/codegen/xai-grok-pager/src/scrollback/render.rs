@@ -524,8 +524,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
         // sits above member 0's own content, which stays mapped (selectable
         // like every other member row) one row below.
         let is_group_header = entry_layout_info.is_group_header();
-        let verb_expanded_slot =
-            entry_layout_info.verb_group_header && entry_layout_info.group_collapse_header;
+        let verb_expanded_slot = entry_layout_info.is_expanded_verb_header();
 
         let mapped_lines = if is_group_header && !verb_expanded_slot {
             &[][..]
@@ -650,6 +649,7 @@ pub(crate) fn render_scrolled_entries_with_selection_boundaries(
                         entry_row_layout.content.x,
                         content_line_offset,
                         media_paths,
+                        cwd,
                         &mut result.link_overlay,
                     );
                 }
@@ -947,6 +947,7 @@ pub(crate) fn map_hyperlinks_to_overlay(
     content_x: u16,
     content_line_offset: usize,
     media_paths: &[std::path::PathBuf],
+    cwd: Option<&std::path::Path>,
     overlay: &mut LinkOverlay,
 ) {
     // Build mapping: pre-wrap line index → vec of (wrapped_idx, col_start_in_prewrap, col_end_in_prewrap).
@@ -978,13 +979,14 @@ pub(crate) fn map_hyperlinks_to_overlay(
     // Map each hyperlink to screen-space OverlayLinks. Unsafe schemes
     // (javascript:, data:, …) are dropped since OSC 8 URLs reach the terminal
     // without the link_opener scheme filter. Local-file destinations such as
-    // `[videos/1.mp4](videos/1.mp4)` resolve against generated media.
+    // `[videos/1.mp4](videos/1.mp4)` resolve against generated media, then
+    // against existing files under the session `cwd`.
     let scheme_filter = crate::terminal::hyperlinks::SchemeFilter::Standard;
     for h in hyperlinks {
         let target = if crate::app::link_opener::is_safe_to_open(&h.url, scheme_filter) {
             crate::render::osc8::LinkTarget::Url(Arc::from(h.url.as_str()))
         } else if let Some(file_target) =
-            crate::render::osc8::local_link_to_file_target(&h.url, media_paths)
+            crate::render::osc8::local_link_to_file_target(&h.url, media_paths, cwd)
         {
             file_target
         } else {
@@ -2387,7 +2389,7 @@ mod tests {
         let output = make_block_output(&[("hello world", None)]);
         let links = [make_hyperlink(0, 0..5, "https://a.com", 1)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 10, 20, 4, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 10, 20, 4, 0, &[], None, &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         let link = &overlay.links()[0];
@@ -2471,7 +2473,7 @@ mod tests {
         // Link spans the full pre-wrap line: cols 0..11
         let links = [make_hyperlink(0, 0..11, "https://b.com", 2)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 0, &[], None, &mut overlay);
 
         assert_eq!(overlay.links().len(), 2);
         // First segment: cols 0..5 on screen row 0
@@ -2502,7 +2504,7 @@ mod tests {
         ];
         let mut overlay = LinkOverlay::new();
         // content_skip=2 means first 2 wrapped lines are above viewport
-        map_hyperlinks_to_overlay(&links, &output, 2, 0, 10, 0, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 2, 0, 10, 0, 0, &[], None, &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
@@ -2523,7 +2525,7 @@ mod tests {
         ];
         let mut overlay = LinkOverlay::new();
         // max_screen_y=2 → only rows 0..2 are visible (screen_y 0 and 1)
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 2, 0, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 0, 2, 0, 0, &[], None, &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(
@@ -2546,7 +2548,7 @@ mod tests {
         let links = [make_hyperlink(0, 0..4, "https://body.com", 1)];
         let mut overlay = LinkOverlay::new();
         // content_line_offset=2 shifts line_index by 2
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 2, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 2, &[], None, &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         assert_eq!(overlay.links()[0].screen_row, 2);
@@ -2560,7 +2562,7 @@ mod tests {
         // line_index=0, but offset=5 pushes adjusted_line=5 past pre_wrap_segments
         let links = [make_hyperlink(0, 0..4, "https://x.com", 1)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 5, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 0, 10, 0, 5, &[], None, &mut overlay);
 
         assert!(overlay.is_empty());
     }
@@ -2571,7 +2573,7 @@ mod tests {
         let output = make_block_output(&[("abcdef", None)]);
         let links = [make_hyperlink(0, 3..8, "https://partial.com", 1)];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(&links, &output, 0, 5, 10, 2, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(&links, &output, 0, 5, 10, 2, 0, &[], None, &mut overlay);
 
         assert_eq!(overlay.links().len(), 1);
         let link = &overlay.links()[0];
@@ -2585,7 +2587,7 @@ mod tests {
         let output = make_block_output(&[("text", None)]);
         let links: &[xai_grok_markdown::HyperlinkTarget] = &[];
         let mut overlay = LinkOverlay::new();
-        map_hyperlinks_to_overlay(links, &output, 0, 0, 10, 0, 0, &[], &mut overlay);
+        map_hyperlinks_to_overlay(links, &output, 0, 0, 10, 0, 0, &[], None, &mut overlay);
 
         assert!(overlay.is_empty());
     }

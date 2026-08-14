@@ -1,6 +1,6 @@
 //! Plan, yolo, auto, and permission mode transitions and toasts.
 
-use super::ctx::with_active_agent;
+use super::ctx::{NO_SESSION_NOTICE, with_active_agent};
 use super::queue::{maybe_drain_queue, note_peek_page_flip};
 use super::settings::ui::{
     refresh_open_settings_modals, save_success_toast, save_success_toast_with_locale,

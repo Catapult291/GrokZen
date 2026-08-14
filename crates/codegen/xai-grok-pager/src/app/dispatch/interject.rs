@@ -2,6 +2,7 @@
 //! `x.ai/interject` effect, and prompt-history recording. Split out of
 //! `dispatch.rs` verbatim (pure code motion).
 
+use super::ctx::NO_SESSION_NOTICE;
 use super::voice::voice_stop_on_submit;
 use crate::app::actions::Effect;
 use crate::app::agent_view::AgentView;

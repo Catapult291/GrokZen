@@ -333,6 +333,7 @@ pub fn draw_live(app: &mut AppView, terminal: &mut PagerTerminal) {
                 &mut agent.last_btw_selection_model,
                 None,
                 &[],
+                agent.scrollback.cwd(),
                 Some(&locale),
             );
             agent.last_btw_area = btw_area;

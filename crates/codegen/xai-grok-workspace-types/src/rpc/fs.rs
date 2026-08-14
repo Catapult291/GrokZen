@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use super::WorkspaceRpc;
+use super::{RpcActivityClass, WorkspaceRpc};
 
 // =========================================================================
 // Service-level file I/O
@@ -15,8 +15,8 @@ use super::WorkspaceRpc;
 /// A single file entry to write.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutFileEntry {
-    /// Path relative to the workspace root, or an absolute path within it.
-    /// Paths that escape the root are rejected.
+    /// Path relative to the client-fs base (the bound session's cwd when it
+    /// extends the workspace root, else the root); escapes are rejected.
     pub path: String,
     /// UTF-8 file content (one chunk).
     pub content: String,
@@ -52,13 +52,14 @@ pub struct PutFilesReq {
 
 impl WorkspaceRpc for PutFilesReq {
     const METHOD: &'static str = "workspace.put_files";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = PutFilesRes;
 }
 
 /// Per-file result from a put_files operation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PutFileResult {
-    /// The resolved path (relative to workspace root).
+    /// The request path, echoed back.
     pub path: String,
     /// Whether this file was successfully written.
     pub ok: bool,
@@ -88,7 +89,7 @@ pub struct PutFilesRes {
 /// chunking should align offsets to codepoint boundaries.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetFileEntry {
-    /// Path relative to the workspace root, or an absolute path within it.
+    /// Path relative to the client-fs base (see [`PutFileEntry::path`]).
     pub path: String,
     /// If set, the server compares this hash against the full-file content
     /// hash. If they match, the content field in the response is `None`
@@ -111,6 +112,7 @@ pub struct GetFilesReq {
 
 impl WorkspaceRpc for GetFilesReq {
     const METHOD: &'static str = "workspace.get_files";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = GetFilesRes;
 }
 
@@ -229,6 +231,7 @@ pub struct FsListReq {
 
 impl WorkspaceRpc for FsListReq {
     const METHOD: &'static str = "workspace.fs_list";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = FsListData;
 }
 
@@ -241,6 +244,7 @@ pub struct FsExistsReq {
 
 impl WorkspaceRpc for FsExistsReq {
     const METHOD: &'static str = "workspace.fs_exists";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = FsExistsData;
 }
 
@@ -273,6 +277,7 @@ pub struct FsReadFileReq {
 
 impl WorkspaceRpc for FsReadFileReq {
     const METHOD: &'static str = "workspace.fs_read_file";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = FsReadFileData;
 }
 
@@ -288,6 +293,7 @@ pub struct FsWriteFileReq {
 
 impl WorkspaceRpc for FsWriteFileReq {
     const METHOD: &'static str = "workspace.fs_write_file";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ();
 }
 
@@ -300,6 +306,7 @@ pub struct FsDeleteFileReq {
 
 impl WorkspaceRpc for FsDeleteFileReq {
     const METHOD: &'static str = "workspace.fs_delete_file";
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Mutation;
     type Response = ();
 }
 
@@ -374,9 +381,9 @@ fn default_max_bytes() -> u64 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFsListReq {
-    /// Path relative to the workspace root (`""` or `"."` = root), or an
-    /// absolute path within the root. Paths that escape the root are
-    /// rejected by the server.
+    /// Path relative to the client-fs base (`""` or `"."` = the base: the
+    /// bound session's cwd when it extends the workspace root, else the
+    /// root); escapes are rejected.
     pub path: String,
     /// Walk depth below `path` (1 = immediate children).
     #[serde(default = "default_client_depth")]
@@ -407,17 +414,18 @@ pub struct ClientFsListReq {
 
 impl WorkspaceRpc for ClientFsListReq {
     const METHOD: &'static str = CLIENT_FS_LIST_METHOD;
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ClientFsListRes;
 }
 
-/// One listed node. Shell-aligned except `path` (workspace-root-relative)
+/// One listed node. Shell-aligned except `path` (client-fs-base-relative)
 /// and `mtimeMs` (epoch millis).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFsListNode {
     /// File name (final path component).
     pub name: String,
-    /// Path relative to the workspace root (divergent: shell is absolute).
+    /// Path relative to the client-fs base (divergent: shell is absolute).
     pub path: String,
     /// Node kind.
     #[serde(rename = "type")]
@@ -449,12 +457,13 @@ pub struct ClientFsListRes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFsStatReq {
-    /// Path relative to the workspace root, or an absolute path within it.
+    /// Path relative to the client-fs base (see [`ClientFsListReq::path`]).
     pub path: String,
 }
 
 impl WorkspaceRpc for ClientFsStatReq {
     const METHOD: &'static str = CLIENT_FS_STAT_METHOD;
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ClientFsStatRes;
 }
 
@@ -486,7 +495,7 @@ pub struct ClientFsStatRes {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientFsReadFileReq {
-    /// Path relative to the workspace root, or an absolute path within it.
+    /// Path relative to the client-fs base (see [`ClientFsListReq::path`]).
     pub path: String,
     /// Byte offset to start reading from (default 0).
     #[serde(default)]
@@ -510,6 +519,7 @@ pub struct ClientFsReadFileReq {
 
 impl WorkspaceRpc for ClientFsReadFileReq {
     const METHOD: &'static str = CLIENT_FS_READ_FILE_METHOD;
+    const ACTIVITY: RpcActivityClass = RpcActivityClass::Read;
     type Response = ClientFsReadFileRes;
 }
 

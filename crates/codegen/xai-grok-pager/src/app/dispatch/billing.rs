@@ -326,6 +326,7 @@ fn open_supergrok_upsell(
         auth_method,
     });
 
+    // /supergrok lists all plans; every upgrade option lands there.
     let options = vec![
         QuestionOption {
             label: locale
@@ -354,8 +355,6 @@ fn open_supergrok_upsell(
                 )
                 .into(),
             preview: None,
-            // No Heavy-specific URL exists; the /supergrok page lists
-            // both plans, so both upgrade options land there.
             id: Some(UPSELL_URL_UPGRADE.into()),
         },
     ];

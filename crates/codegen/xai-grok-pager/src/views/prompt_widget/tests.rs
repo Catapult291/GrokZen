@@ -65,6 +65,22 @@
     }
 
     #[test]
+    fn clone_for_live_prefill_restores_without_stealing_session_images() {
+        let mut pw = PromptWidget::new();
+        pw.textarea.insert_str("inspect ");
+        pw.insert_image(test_image()).unwrap();
+        let session = pw.stash();
+        assert!(pw.images.is_empty());
+
+        pw.restore(session.clone_for_live_prefill());
+        assert!(pw.text().contains("[Image #1]"));
+        assert_eq!(pw.images.len(), 1);
+        assert_eq!(session.images.len(), 1);
+        drop(pw);
+        assert_eq!(session.images.len(), 1);
+    }
+
+    #[test]
     fn stash_clear_restore_preserves_image_for_send() {
         let mut pw = PromptWidget::new();
         pw.textarea.insert_str("inspect ");
@@ -527,12 +543,12 @@
             chrome: false,
             ..Default::default()
         };
-        pw.history_search.activate_browse(
+        assert!(pw.history_search.activate_browse(
             &[crate::views::history_search::HistoryEntry {
                 text: "line1\nline2\nline3".into(),
             }],
             "",
-        );
+        ));
         pw.set_text("line1\nline2\nline3"); // populated multi-line entry
         assert_eq!(
             pw.desired_height(80, &style, true, 20),

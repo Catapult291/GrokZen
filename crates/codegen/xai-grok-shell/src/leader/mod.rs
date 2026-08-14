@@ -96,8 +96,8 @@ const ZOMBIE_EVICT_DEADLINE: Duration = Duration::from_secs(30);
 /// Unparseable versions (e.g. dev `"unknown"`) return `false` — leave them alone.
 pub fn leader_is_older_than(leader_version: &str, baseline: &str) -> bool {
     match (
-        xai_grok_version::ReleaseVersion::parse(leader_version),
-        xai_grok_version::ReleaseVersion::parse(baseline),
+        semver::Version::parse(leader_version),
+        semver::Version::parse(baseline),
     ) {
         (Ok(leader), Ok(baseline)) => leader < baseline,
         _ => false,
@@ -2002,9 +2002,9 @@ mod tests {
         assert!(!leader_is_older_than("0.2.0", "0.2.0"));
         assert!(!leader_is_older_than("unknown", "0.2.0"));
         assert!(!leader_is_older_than("0.1.0", "not-a-version"));
-        assert!(leader_is_older_than("1.0.0", "1.0.0.1"));
-        assert!(leader_is_older_than("1.0.0.1", "1.0.0.2"));
-        assert!(!leader_is_older_than("1.0.0.2", "1.0.0.1"));
+        assert!(leader_is_older_than("1.0.0", "1.0.1"));
+        assert!(leader_is_older_than("1.0.1", "1.0.2"));
+        assert!(!leader_is_older_than("1.0.2", "1.0.1"));
     }
     /// Evicted only when strictly older than the client (anti-thrash).
     #[test]
@@ -2128,9 +2128,9 @@ mod tests {
     /// the comparison under test.
     #[tokio::test]
     async fn should_evict_conn_decides_from_live_fake_registrations() {
-        let client = xai_grok_version::ReleaseVersion::parse(CLIENT_LEADER_VERSION)
+        let client = semver::Version::parse(CLIENT_LEADER_VERSION)
             .expect("CLIENT_LEADER_VERSION parses as a release version");
-        let client_semver = client.as_semver();
+        let client_semver = &client;
         let newer = format!(
             "{}.{}.{}",
             client_semver.major,

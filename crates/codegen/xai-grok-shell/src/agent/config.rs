@@ -49,6 +49,7 @@ pub(crate) fn default_agent_type() -> String {
 pub const CLI_CHAT_PROXY_BASE_URL_DEFAULT: &str = "https://cli-chat-proxy.grok.com/v1";
 /// Default base URL for the public xAI API.
 pub const XAI_API_BASE_URL_DEFAULT: &str = "https://api.x.ai/v1";
+const NO_INLINE_CITATIONS_RESPONSE_INCLUDE: &str = "no_inline_citations";
 /// One or more environment variable names that may hold a model API key.
 ///
 /// Serde `untagged`: accepts a string or an array in TOML/JSON.
@@ -611,6 +612,8 @@ pub struct Requirements {
     pub write_file: Constrained<bool>,
     /// Voice dictation (STT). Pin via requirements/managed `[features] voice_mode`.
     pub voice_mode: Constrained<bool>,
+    /// The session search index. Pin via requirements/managed `[features] session_search`.
+    pub session_search: Constrained<bool>,
     pub sandbox_auto_allow_bash: Constrained<bool>,
     pub sandbox_profile: Constrained<String>,
     pub respect_gitignore: Constrained<bool>,
@@ -1214,61 +1217,6 @@ pub struct MarketplaceSourceEntry {
     #[serde(default)]
     pub branch: Option<String>,
 }
-/// `[suggestions]` section from config.toml.
-///
-/// Controls the shell command suggestion pipeline (history, path, AI).
-///
-/// ```toml
-/// [suggestions]
-/// enabled = true
-/// ai_enabled = true
-/// ai_model = "grok-build"
-/// debounce_ms = 50
-/// ```
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SuggestionsConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ai_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ai_model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub debounce_ms: Option<u64>,
-}
-impl SuggestionsConfig {
-    pub fn resolve_enabled(
-        &self,
-        remote: Option<&crate::util::config::RemoteSettings>,
-    ) -> Resolved<bool> {
-        BoolFlag::env("GROK_SUGGESTIONS")
-            .config(self.enabled)
-            .feature_flag(remote.and_then(|r| r.suggestions_enabled))
-            .default(false)
-            .resolve()
-    }
-    pub fn resolve_ai_enabled(
-        &self,
-        remote: Option<&crate::util::config::RemoteSettings>,
-    ) -> Resolved<bool> {
-        BoolFlag::env("GROK_SUGGESTIONS_AI")
-            .config(self.ai_enabled)
-            .feature_flag(remote.and_then(|r| r.suggestions_ai_enabled))
-            .default(false)
-            .resolve()
-    }
-    pub fn resolve_ai_model(&self) -> String {
-        resolve_string_flag(
-            None,
-            "GROK_SUGGESTIONS_AI_MODEL",
-            self.ai_model.as_deref(),
-            None,
-        )
-        .map(|r| r.value)
-        .unwrap_or_else(|| "grok-build".to_owned())
-    }
-}
 /// `[storage]` section from config.toml.
 ///
 /// Controls session persistence settings like cleanup TTL.
@@ -1449,9 +1397,6 @@ pub struct Config {
     /// `[storage]` — also read by `resolve_cleanup_ttl_days()`.
     #[serde(default, skip_serializing)]
     pub storage: StorageConfig,
-    /// `[suggestions]` — shell command suggestion pipeline settings.
-    #[serde(default, skip_serializing)]
-    pub suggestions: SuggestionsConfig,
     /// `[marketplace]` — also read by `xai_grok_plugin_marketplace::load_sources()`.
     #[serde(default, skip_serializing)]
     pub marketplace: MarketplaceConfig,
@@ -1576,10 +1521,10 @@ pub struct Config {
     /// Resolved by [`crate::config::ToolsConfig::resolve`].
     #[serde(skip)]
     pub respect_gitignore: bool,
-    /// When `true`, `MvpAgent::prepare_video_gen_config` returns
-    /// `VideoGenConfig::Disabled`, dropping `video_gen` (and any
-    /// future ZDR-incompatible tools) from the model's tool set.
-    /// Resolved by [`crate::config::ToolsConfig::resolve`].
+    /// When `true` (and no valid `zdr_video_output_s3` bucket is set),
+    /// `MvpAgent::prepare_video_gen_config` marks the video tools
+    /// zdr-restricted: they stay advertised but short-circuit at call time
+    /// with setup guidance. Resolved by [`crate::config::ToolsConfig::resolve`].
     #[serde(skip)]
     pub disable_zdr_incompatible_tools: bool,
     /// S3 config for ZDR video output (presigned upload to team bucket).
@@ -1834,7 +1779,6 @@ impl Default for Config {
             permission: PermissionKnownKeys::default(),
             tools: crate::config::ToolsConfig::default(),
             storage: StorageConfig::default(),
-            suggestions: SuggestionsConfig::default(),
             marketplace: MarketplaceConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             storage_mode: StorageMode::resolve(None, None),
@@ -1892,6 +1836,11 @@ const NON_SERDE_CONFIG_PATHS: &[&str] = &[
     crate::util::config::REMOTE_FETCH_CONFIG_PATH,
     crate::util::config::SLASH_COMMAND_TAGS_CONFIG_PATH,
 ];
+/// [`NON_SERDE_CONFIG_PATHS`] plus the multi-path groups.
+fn is_non_serde_config_path(path: &str) -> bool {
+    NON_SERDE_CONFIG_PATHS.contains(&path)
+        || crate::util::config::WEB_SEARCH_DOMAIN_CONFIG_PATHS.contains(&path)
+}
 /// Parse `[auth_provider.<name>]` tables leniently: a malformed entry warns
 /// (surfaced by `grok inspect`) and is skipped, so it fails closed for the
 /// models referencing it instead of failing the whole config.
@@ -2004,7 +1953,7 @@ impl Config {
                     let top_level = path.split('.').next().unwrap_or(path);
                     user_table.contains_key(top_level)
                 })
-                .filter(|path| !NON_SERDE_CONFIG_PATHS.contains(&path.as_str()))
+                .filter(|path| !is_non_serde_config_path(path))
                 .collect(),
             None => Vec::new(),
         };
@@ -2537,6 +2486,14 @@ impl Config {
                 .max_retries
                 .or(remote.and_then(|s| s.max_retries))
                 .map_or(Policy::DEFAULT_MAX_RETRIES, Policy::clamp_max_retries),
+            window_tokens: self
+                .doom_loop_recovery
+                .window_tokens
+                .or(remote.and_then(|s| s.window_tokens))
+                .map_or(
+                    Policy::DEFAULT_RECOVERY_WINDOW_TOKENS,
+                    Policy::clamp_window_tokens,
+                ),
         })
     }
     /// Automatic worktree GC policy. Precedence: env kill/dry-run >
@@ -2610,6 +2567,18 @@ impl Config {
         let ff = self.remote_settings.as_ref().and_then(|s| s.session_recap);
         BoolFlag::env("GROK_SESSION_RECAP")
             .config(self.features.session_recap)
+            .feature_flag(ff)
+            .default(true)
+            .resolve()
+    }
+    /// Session search index. Default ON. Turn off with a `requirements.toml` or MDM pin, the
+    /// `GROK_SESSION_SEARCH` env var, the `[features] session_search` config key, or remote
+    /// settings, in that order. Only a pin outranks the environment.
+    pub(crate) fn resolve_session_search(&self) -> Resolved<bool> {
+        let ff = self.remote_settings.as_ref().and_then(|s| s.session_search);
+        BoolFlag::env("GROK_SESSION_SEARCH")
+            .requirement(self.requirements.session_search.pinned())
+            .config(self.features.session_search)
             .feature_flag(ff)
             .default(true)
             .resolve()
@@ -4638,6 +4607,10 @@ pub struct Features {
     /// `None` = defer to remote settings / env / default (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_recap: Option<bool>,
+    /// Full-text index of past sessions, behind `/load` deep search. `None` = defer to remote
+    /// settings / env / default (`true`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_search: Option<bool>,
     /// Per-turn dashboard summary generated at turn end.
     /// `None` = defer to remote settings / env / default (`true`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -5166,6 +5139,23 @@ pub(crate) fn resolve_chat_state_auth_type(
         .map(|r| r.auth_type)
         .unwrap_or(fallback)
 }
+/// Selects xAI-only Responses extensions for trusted backend-search routes.
+///
+/// Third-party Responses providers reject `no_inline_citations`, so it must stay
+/// on a trusted first-party route and apply only to models with backend search.
+pub(crate) fn response_include_extensions(
+    supports_backend_search: bool,
+    api_backend: &ApiBackend,
+    base_url: &str,
+) -> Vec<String> {
+    let is_trusted_route = crate::util::is_trusted_cli_chat_proxy_url(base_url)
+        || crate::util::is_trusted_xai_https_url(base_url);
+    if supports_backend_search && api_backend == &ApiBackend::Responses && is_trusted_route {
+        vec![NO_INLINE_CITATIONS_RESPONSE_INCLUDE.to_owned()]
+    } else {
+        Vec::new()
+    }
+}
 pub(crate) fn sampling_config_for_model(
     model: &ModelEntry,
     credentials: ResolvedCredentials,
@@ -5186,6 +5176,11 @@ pub(crate) fn sampling_config_for_model(
         &credentials.base_url,
     );
     let api_backend = info.api_backend.clone();
+    let extra_response_includes = response_include_extensions(
+        info.supports_backend_search,
+        &api_backend,
+        &credentials.base_url,
+    );
     SamplerConfig {
         api_key: credentials.api_key,
         model: model_name,
@@ -5196,6 +5191,7 @@ pub(crate) fn sampling_config_for_model(
         api_backend,
         auth_scheme: credentials.auth_scheme,
         extra_headers,
+        extra_response_includes,
         query_params: info.query_params.clone(),
         env_http_headers: info.env_http_headers.clone(),
         context_window: info.context_window.get(),
@@ -11816,7 +11812,7 @@ default = "grok-4.5"
 "#,
         )
         .unwrap();
-        let v = xai_grok_version::ReleaseVersion::parse("1.8.0").unwrap();
+        let v = semver::Version::parse("1.8.0").unwrap();
         xai_grok_config::apply_version_overrides(&mut value, &v).unwrap();
         let cfg = Config::new_from_toml_cfg(&value).unwrap();
         assert_eq!(cfg.models.default.as_deref(), Some("grok-4.5"));

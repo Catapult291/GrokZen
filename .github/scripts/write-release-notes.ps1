@@ -23,10 +23,10 @@ $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
 function Test-ReleaseTag([string] $Tag) {
-    if ($Tag -cnotmatch '^v(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:\.(?<revision>[1-9][0-9]*)|-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$') {
+    if ($Tag -cnotmatch '^v(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$') {
         return $false
     }
-    foreach ($number in @($matches['major'], $matches['minor'], $matches['patch'], $matches['revision'])) {
+    foreach ($number in @($matches['major'], $matches['minor'], $matches['patch'])) {
         [uint64]$parsedNumber = 0
         if ($number -and ![uint64]::TryParse([string]$number, [ref]$parsedNumber)) {
             return $false
@@ -60,7 +60,7 @@ function ConvertTo-MarkdownLinkText([string] $Text) {
 }
 
 if (!(Test-ReleaseTag $CurrentTag)) {
-    throw "CurrentTag 必须是 vA.B.C、vA.B.C.N（N > 0）或三段预发布格式，且不得含 build metadata、数字前导零：$CurrentTag"
+    throw "CurrentTag 必须是严格三段 vA.B.C 或三段预发布格式，且不得含 build metadata、数字前导零：$CurrentTag"
 }
 if (!(Test-RepositoryName $Repository)) {
     throw "Repository 必须是 owner/name：$Repository"

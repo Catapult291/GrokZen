@@ -632,8 +632,8 @@ impl ScrollbackEntry {
                         Some(&ctx.locale),
                     );
                     let has_any = !pre.is_empty() || !post.is_empty() || !hd.lifecycle.is_empty();
-                    // Lifecycle blocks already show the event name as the block header,
-                    // so skip the separator (no tool output above) and the section header.
+                    // Lifecycle blocks already use the event name as their
+                    // header, so a separator before their detail is redundant.
                     if has_any && !is_lifecycle {
                         output.lines.push(render_hook_separator());
                     }

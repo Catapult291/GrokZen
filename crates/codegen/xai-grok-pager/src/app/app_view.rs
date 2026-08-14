@@ -898,8 +898,8 @@ pub struct AppView {
     pub welcome_changelog_cta_rect: Option<ratatui::layout::Rect>,
     /// Show the raw auth URL with mouse capture disabled for manual copy.
     pub auth_show_raw_url: bool,
-    /// Whether mouse capture is currently disabled for raw URL mode.
-    pub auth_mouse_disabled: bool,
+    /// We turned capture off for native select and owe a restore on leave.
+    pub native_select_hold: bool,
     /// Fetched session list for the session picker (None = not yet fetched).
     pub session_picker_entries: Option<Vec<SessionPickerEntry>>,
     /// Whether the session list is currently being fetched.
@@ -926,8 +926,7 @@ pub struct AppView {
     /// last-write-wins behavior.
     pub session_picker_list_seq: u64,
     /// Resolved compat-session cells used before checking resume-skill paths.
-    pub(crate) foreign_session_compat:
-        xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources,
+    pub(crate) foreign_session_compat: xai_grok_foreign_sessions::EnabledForeignSessionSources,
     /// Monotonic picker scan sequence, bumped on every open and close.
     pub(crate) foreign_session_scan_seq: u64,
     /// Coalesces obsolete foreign scans across welcome and modal pickers.
@@ -1112,7 +1111,7 @@ pub struct AppView {
     pub privacy_banner_reshow_days: Option<u64>,
     /// Local `[privacy].privacy_banner_acked` (RFC 3339 UTC).
     pub privacy_banner_acked: Option<String>,
-    /// Accept awaits ACP success before ack.
+    /// In-flight opt-in write whose ack waits on ACP success.
     pub privacy_banner_opt_in_inflight: bool,
     /// Newest `SetCodingDataSharing` write. Bumped per dispatch and echoed
     /// on the `TaskResult`, so an older write's late reply — whose
@@ -1324,6 +1323,19 @@ impl AppView {
     pub fn session_startup_allowed(&self) -> bool {
         matches!(self.auth_state, AuthState::Done) && matches!(self.trust_state, TrustState::Done)
     }
+    /// Whether startup type-ahead captured while the app was loading may be
+    /// replayed into the input channel: every startup screen that consumes raw
+    /// keystrokes must be resolved so the composer is the active consumer.
+    /// Mirrors the folder-trust interceptor's gate (auth Done, has access, not
+    /// ZDR-blocked) plus trust Done. When this is false at launch the captured
+    /// prompt is dropped rather than replayed (see `event_loop::run`), so e.g. a
+    /// prompt starting with "n" cannot answer the folder-trust question and quit.
+    pub fn ready_for_startup_typeahead(&self) -> bool {
+        matches!(self.auth_state, AuthState::Done)
+            && self.has_access()
+            && !self.is_zdr_blocked()
+            && matches!(self.trust_state, TrustState::Done)
+    }
     /// Extract `GateInfo` from `RemoteSettings`.
     pub fn gate_from_settings(
         rs: &xai_grok_shell::util::config::RemoteSettings,
@@ -1524,7 +1536,7 @@ impl AppView {
             welcome_on_upgrade_cta: false,
             welcome_changelog_cta_rect: None,
             auth_show_raw_url: false,
-            auth_mouse_disabled: false,
+            native_select_hold: false,
             session_picker_entries: None,
             session_picker_loading: false,
             session_picker_state: crate::views::picker::PickerState::with_mode(
@@ -4403,6 +4415,36 @@ impl AppView {
         }
         Some(InputOutcome::Changed)
     }
+    /// Release capture while a native-select surface is on screen so the terminal owns
+    /// drag-select. Restore only if we took the hold: a user who already had
+    /// `/toggle-mouse-reporting` off must stay off.
+    fn sync_native_selection_mouse(&mut self) {
+        if self.screen_mode.is_minimal() {
+            return;
+        }
+        let want_off = self.auth_show_raw_url
+            && matches!(self.active_view, ActiveView::Welcome)
+            && matches!(self.auth_state, AuthState::Authenticating { .. });
+        let capture_on = super::MOUSE_CAPTURE_ENABLED.load(std::sync::atomic::Ordering::Acquire);
+        if want_off && capture_on {
+            self.native_select_hold = true;
+            xai_grok_shell::util::with_locked_stderr(|stderr| {
+                let _ = crossterm::execute!(stderr, crossterm::event::DisableMouseCapture);
+            });
+            #[cfg(windows)]
+            super::win_native_selection::enable_native_selection();
+            super::MOUSE_CAPTURE_ENABLED.store(false, std::sync::atomic::Ordering::Release);
+        } else if !want_off && self.native_select_hold {
+            self.native_select_hold = false;
+            xai_grok_shell::util::with_locked_stderr(|stderr| {
+                let _ = crossterm::execute!(stderr, crossterm::event::EnableMouseCapture);
+            });
+            super::MOUSE_CAPTURE_ENABLED.store(true, std::sync::atomic::Ordering::Release);
+            for agent in self.agents.values_mut() {
+                agent.set_sticky_toast_recursive(None);
+            }
+        }
+    }
     /// Render the current view to the terminal.
     ///
     /// Delegates to [`crate::render::draw::draw_frame`] which handles the
@@ -4443,28 +4485,7 @@ impl AppView {
                 });
             }
         }
-        let want_mouse_off = self.auth_show_raw_url
-            && !self.screen_mode.is_minimal()
-            && matches!(self.active_view, ActiveView::Welcome)
-            && matches!(self.auth_state, AuthState::Authenticating { .. });
-        if want_mouse_off && !self.auth_mouse_disabled {
-            self.auth_mouse_disabled = true;
-            xai_grok_shell::util::with_locked_stderr(|stderr| {
-                let _ = crossterm::execute!(stderr, crossterm::event::DisableMouseCapture);
-            });
-            #[cfg(windows)]
-            super::win_native_selection::enable_native_selection();
-            super::MOUSE_CAPTURE_ENABLED.store(false, std::sync::atomic::Ordering::Release);
-        } else if !want_mouse_off && self.auth_mouse_disabled {
-            self.auth_mouse_disabled = false;
-            xai_grok_shell::util::with_locked_stderr(|stderr| {
-                let _ = crossterm::execute!(stderr, crossterm::event::EnableMouseCapture);
-            });
-            super::MOUSE_CAPTURE_ENABLED.store(true, std::sync::atomic::Ordering::Release);
-            for agent in self.agents.values_mut() {
-                agent.set_sticky_toast_recursive(None);
-            }
-        }
+        self.sync_native_selection_mouse();
         self.maybe_trigger_small_screen_tip();
         self.maybe_trigger_ssh_wrap_tip();
         let compact = self.appearance.prompt.compact;
@@ -5741,11 +5762,12 @@ impl AppView {
         {
             return TickDemand::Fast;
         }
-        if self
-            .agents
-            .values()
-            .any(|a| a.pending_cancel_resend.is_some())
-        {
+        if self.agents.values().any(|a| {
+            a.pending_cancel_resend.is_some()
+                || a.subagent_views
+                    .values()
+                    .any(|c| c.pending_cancel_resend.is_some())
+        }) {
             return TickDemand::Fast;
         }
         if self.deferred_notification.is_some() {
@@ -5834,6 +5856,7 @@ impl AppView {
                             || child.selection_created_at.is_some()
                             || (agent.active_subagent.as_deref() == Some(sid.as_str())
                                 && child.scrollback.needs_animation())
+                            || child.any_cancel_pending()
                             || child.scrollback_search.is_some()
                             || child.block_viewer.is_some()
                             || child.image_viewer.as_ref().is_some_and(|v| v.loading)
@@ -6198,7 +6221,7 @@ pub(crate) mod tests {
             welcome_on_upgrade_cta: false,
             welcome_changelog_cta_rect: None,
             auth_show_raw_url: false,
-            auth_mouse_disabled: false,
+            native_select_hold: false,
             session_picker_entries: None,
             session_picker_loading: false,
             session_picker_state: crate::views::picker::PickerState::with_mode(
@@ -7753,11 +7776,10 @@ pub(crate) mod tests {
     #[test]
     fn welcome_ctrl_u_update_keeps_priority_over_foreign_resume() {
         let mut app = test_app();
-        app.foreign_session_compat =
-            xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources {
-                cursor: true,
-                ..Default::default()
-            };
+        app.foreign_session_compat = xai_grok_foreign_sessions::EnabledForeignSessionSources {
+            cursor: true,
+            ..Default::default()
+        };
         let crate::app::actions::Effect::CanonicalizeForeignResumeCwd {
             requested_cwd,
             launch_token,
@@ -7774,8 +7796,8 @@ pub(crate) mod tests {
         app.apply_foreign_resume_detection(
             launch_token,
             &canonical_cwd,
-            Some(xai_grok_workspace::foreign_sessions::RecentForeignSession {
-                tool: xai_grok_workspace::foreign_sessions::ForeignSessionTool::Cursor,
+            Some(xai_grok_foreign_sessions::RecentForeignSession {
+                tool: xai_grok_foreign_sessions::ForeignSessionTool::Cursor,
                 native_id: "cursor-session".into(),
                 age: std::time::Duration::from_secs(30),
             }),

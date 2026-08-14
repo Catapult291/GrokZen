@@ -10,6 +10,7 @@ use super::agent::AgentId;
 use crate::scrollback::entry::EntryId;
 use agent_client_protocol as acp;
 use xai_grok_shell::sampling::types::ReasoningEffort;
+use xai_grok_shell::session::unified_list::SessionKind;
 /// Typed error for model switch failures. Replaces the raw `String` in
 /// `TaskResult::SwitchModelComplete` so dispatch can match on the variant
 /// instead of parsing strings.
@@ -253,6 +254,20 @@ pub enum Action {
         /// the original server-side text, not the edit. Atomicity semantics
         /// live on [`Effect::QueueInterject`].
         new_text: Option<String>,
+    },
+    /// A queued-row edit whose saved text is a complete pager builtin invocation: drop the row,
+    /// then run the command through the normal slash dispatch. The view only classifies; dispatch
+    /// stays the sole execution owner, and it removes the row only after its own guards pass, so a
+    /// failed run leaves the row queued.
+    RunEditedQueuedCommand {
+        /// `PromptMode::EditingQueued.id`: the local `pending_prompts` id, or the synthesized
+        /// selection id for a server row (unused there).
+        local_id: u64,
+        /// `Some` for a server-authoritative row. `None` covers both a local row and a server row
+        /// that vanished from the mirror before Enter: with nothing to remove, no versioned
+        /// `x.ai/queue/remove` request is sent.
+        server: Option<SharedQueueTarget>,
+        text: String,
     },
     /// Focus the prompt pane.
     FocusPrompt,
@@ -547,6 +562,9 @@ pub enum Action {
     /// drain site) and persists to `[ui].combine_queued_prompts` via
     /// `Effect::PersistSetting`.
     SetCombineQueuedPrompts(bool),
+    /// Mid-turn follow-up routing (`queue` | `steer`).
+    /// SHARED-owned: `[ui].follow_up_behavior`.
+    SetFollowUpBehavior(crate::appearance::FollowUpBehavior),
     /// Set simple mode (ASCII / minimal glyphs). Persists via `Effect::PersistSetting`.
     SetSimpleMode(bool),
     /// Set the per-tip contextual-hint user config (`[ui.contextual_hints]`).
@@ -686,6 +704,8 @@ pub enum Action {
     RenameSession {
         title: String,
     },
+    /// Unpin the current session title (`/rename --auto`).
+    ResetSessionTitleToAuto,
     /// Show detailed context usage (progress bar, token breakdown, stats).
     ShowContextInfo,
     /// `/usage` — session token/cost, plus consumer credits when visible.
@@ -1009,6 +1029,12 @@ pub enum Action {
     JumpPickerSelect(EntryId),
     /// Close the picker and restore the stashed viewport.
     JumpDismiss,
+}
+/// A server-authoritative queue row plus the version its removal is checked against.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SharedQueueTarget {
+    pub id: String,
+    pub expected_version: u64,
 }
 /// Persist-and-notify semantics for [`Effect::PersistPermissionMode`].
 ///
@@ -1450,7 +1476,7 @@ pub enum Effect {
     /// Scan enabled foreign session stores without delaying the native list.
     ScanForeignSessions {
         cwd: std::path::PathBuf,
-        compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources,
+        compat: xai_grok_foreign_sessions::EnabledForeignSessionSources,
         grok_home: std::path::PathBuf,
         coordinator: crate::app::ForeignScanCoordinator,
         seq: u64,
@@ -1463,7 +1489,7 @@ pub enum Effect {
     /// Detect the newest resumable foreign session without delaying first paint.
     DetectForeignResumeHint {
         canonical_cwd: std::path::PathBuf,
-        compat: xai_grok_workspace::foreign_sessions::EnabledForeignSessionSources,
+        compat: xai_grok_foreign_sessions::EnabledForeignSessionSources,
         grok_home: std::path::PathBuf,
         launch_token: u64,
     },
@@ -1560,6 +1586,7 @@ pub enum Effect {
     KillBgTask {
         session_id: acp::SessionId,
         task_id: String,
+        source: xai_grok_shell::extensions::task::TaskKillSource,
     },
     /// Cancel a subagent via `x.ai/subagent/cancel`.
     KillSubagent {
@@ -2031,6 +2058,17 @@ pub enum Effect {
         session_id: acp::SessionId,
         title: String,
         cwd: std::path::PathBuf,
+        kind: SessionKind,
+    },
+    /// Unpin the current session title (`/rename --auto`).
+    ResetSessionTitle {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        cwd: std::path::PathBuf,
+        kind: SessionKind,
+        /// Pre-clear caches so `ResetSessionTitleFailed` can restore the pin.
+        previous_display_name: Option<String>,
+        previous_generated_title: Option<String>,
     },
     /// Delete a session's stored data (local + remote) via
     /// `x.ai/session/delete`.
@@ -2161,6 +2199,45 @@ pub enum Effect {
         target: DoctorFixTarget,
         plan: Box<crate::diagnostics::FixPlan>,
     },
+}
+/// Wire params for `x.ai/session/rename`. Shared with the effect executor
+/// so dispatch tests can pin the exact camelCase payload.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RenameSessionRequest {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: String,
+    pub kind: SessionKind,
+    /// Empty-title + `true` is the unpin convention. Omitted when false so
+    /// ordinary rename payloads stay byte-identical for old shells.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reset_to_auto: bool,
+}
+impl RenameSessionRequest {
+    pub(crate) fn for_rename(
+        session_id: String,
+        title: String,
+        cwd: String,
+        kind: SessionKind,
+    ) -> Self {
+        Self {
+            session_id,
+            title,
+            cwd,
+            kind,
+            reset_to_auto: false,
+        }
+    }
+    pub(crate) fn for_reset(session_id: String, cwd: String, kind: SessionKind) -> Self {
+        Self {
+            session_id,
+            title: String::new(),
+            cwd,
+            kind,
+            reset_to_auto: true,
+        }
+    }
 }
 /// Outcome of an `x.ai/subagent/cancel` request, telling dispatch whether the
 /// pager must finalize the subagent row itself.
@@ -2325,7 +2402,7 @@ pub enum TaskResult {
     ForeignResumeHintDetected {
         canonical_cwd: std::path::PathBuf,
         launch_token: u64,
-        hint: Option<xai_grok_workspace::foreign_sessions::RecentForeignSession>,
+        hint: Option<xai_grok_foreign_sessions::RecentForeignSession>,
     },
     /// Session list fetch failed.
     SessionListFailed {
@@ -2608,7 +2685,10 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         info: Box<xai_grok_shell::session::SessionInfoResponse>,
+        /// Plain-text block for minimal-mode scrollback.
         text: String,
+        /// Structured rows for the modal (built upstream from typed data).
+        fields: Vec<crate::views::usage_modal::SessionInfoField>,
         nonce: u64,
     },
     /// Session info fetch failed.
@@ -2640,6 +2720,17 @@ pub enum TaskResult {
     RenameSessionFailed {
         agent_id: AgentId,
         error: String,
+    },
+    /// `/rename --auto` completed successfully.
+    ResetSessionTitleComplete {
+        agent_id: AgentId,
+    },
+    /// `/rename --auto` failed.
+    ResetSessionTitleFailed {
+        agent_id: AgentId,
+        error: String,
+        previous_display_name: Option<String>,
+        previous_generated_title: Option<String>,
     },
     /// Session delete completed successfully.
     DeleteSessionComplete {

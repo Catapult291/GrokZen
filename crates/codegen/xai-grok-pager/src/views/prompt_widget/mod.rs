@@ -436,6 +436,32 @@ impl StashedPrompt {
         }
     }
 
+    /// Clone for freeform prefill while this stash remains the session draft.
+    /// Omits `staged_temp_path` so freeform Drop cannot delete session temps;
+    /// display/send still use `encoded_bytes` / `session_image_path`.
+    pub(crate) fn clone_for_live_prefill(&self) -> Self {
+        let strip_temp = |img: &PastedImage| {
+            let mut c = img.clone();
+            c.staged_temp_path = None;
+            c
+        };
+        Self {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            images: self.images.iter().map(strip_temp).collect(),
+            chip_elements: self.chip_elements.clone(),
+            image_counter: self.image_counter,
+            image_undo_stash: self.image_undo_stash.iter().map(strip_temp).collect(),
+        }
+    }
+
+    pub(crate) fn is_effectively_empty(&self) -> bool {
+        self.text.trim().is_empty()
+            && self.images.is_empty()
+            && self.chip_elements.is_empty()
+            && self.image_undo_stash.is_empty()
+    }
+
     pub(crate) fn into_submission(
         mut self,
     ) -> (
@@ -1053,9 +1079,19 @@ impl PromptWidget {
 
     // -- Slash command state sync -------------------------------------------
 
+    pub fn set_slash_current_title(&mut self, title: Option<String>) {
+        self.slash_controller.set_current_title(title);
+    }
+
+    pub fn slash_current_title(&self) -> Option<&str> {
+        self.slash_controller.current_title()
+    }
+
     /// Refresh the slash snapshot from current text + cursor.
     ///
-    /// Called by `AgentView` after every `PromptEvent::Edited`.
+    /// Called by `AgentView` after every `PromptEvent::Edited`, and when
+    /// `current_title` changes while the dropdown is already open (so the
+    /// `/rename` ghost is not left stale until the next keystroke).
     /// This is the only way to update the slash snapshot -- `AgentView`
     /// never touches `slash_controller` or `slash_state` directly.
     ///

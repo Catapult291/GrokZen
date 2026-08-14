@@ -1341,8 +1341,8 @@ Each feature section below documents its own config. This section covers the gen
 auto_update = false                    # community default: notify only; Ctrl+U downloads
 
 [models]
-default = "grok-4.5"                   # model used for new sessions
-web_search = "grok-4.5"                # model used by the web_search tool
+default = "grok-4.6"                   # model used for new sessions
+web_search = "grok-4.6"                # model used by the web_search tool
 
 [ui]
 max_thoughts_width = 120               # max column width for reasoning display
@@ -2250,7 +2250,8 @@ restrict_network = true
 # Paths the agent can read but NOT write/delete
 read_only = ["/data"]
 
-# Additional writable paths
+# Additional writable paths (literal directory grants — no globs;
+# trailing /** is treated as the parent directory)
 read_write = ["/tmp/scratch"]
 
 # Paths denied entirely

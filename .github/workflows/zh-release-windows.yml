@@ -40,13 +40,12 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           $tag = $env:GITHUB_REF_NAME.Trim()
-          if ($tag -cnotmatch '^v(?<version>(?<base>(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*))(?:\.(?<revision>[1-9][0-9]*)|-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?)$') {
-            throw "Release Tag 必须是 vA.B.C、vA.B.C.N（N > 0）或三段预发布格式，且不得含 build metadata：$tag"
+          if ($tag -cnotmatch '^v(?<version>(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?)$') {
+            throw "Release Tag 必须是严格三段 vA.B.C 或三段预发布格式，且不得含 build metadata：$tag"
           }
           $version = $matches.version
-          $baseVersion = $matches.base
-          $revisionText = $matches['revision']
-          foreach ($number in @($matches['major'], $matches['minor'], $matches['patch'], $revisionText)) {
+          $tagBaseVersion = ($version -split '-', 2)[0]
+          foreach ($number in @($matches['major'], $matches['minor'], $matches['patch'])) {
             [uint64]$parsedNumber = 0
             if ($number -and ![uint64]::TryParse([string]$number, [ref]$parsedNumber)) {
               throw "Release Tag 数值超出 u64 范围：$tag"
@@ -75,9 +74,12 @@ jobs:
           }
 
           $pagerVersion = Read-PackageVersion 'crates/codegen/xai-grok-pager-bin/Cargo.toml'
+          $pagerCoreVersion = Read-PackageVersion 'crates/codegen/xai-grok-pager/Cargo.toml'
+          $shellVersion = Read-PackageVersion 'crates/codegen/xai-grok-shell/Cargo.toml'
           $coreVersion = Read-PackageVersion 'crates/codegen/xai-grok-version/Cargo.toml'
-          if ($pagerVersion -cne $coreVersion -or $baseVersion -cne $pagerVersion) {
-            throw "Tag 基线、pager-bin 与 xai-grok-version 必须一致：tag=$baseVersion pager=$pagerVersion core=$coreVersion"
+          if ($pagerVersion -cne $coreVersion -or $pagerCoreVersion -cne $coreVersion -or
+              $shellVersion -cne $coreVersion -or $tagBaseVersion -cne $coreVersion) {
+            throw "Tag 基线与四个发布包版本必须一致：tag=$tagBaseVersion pager-bin=$pagerVersion pager=$pagerCoreVersion shell=$shellVersion core=$coreVersion"
           }
 
           $tagCommit = (& git rev-list -n 1 $tag).Trim()
@@ -100,25 +102,6 @@ jobs:
           if (@($allReleases | Where-Object { $_.tag_name -ceq $tag }).Count -ne 0) {
             throw "Release $tag 已存在；不可变发布不得覆盖。"
           }
-          if ($revisionText) {
-            [uint64]$revision = 0
-            [void][uint64]::TryParse($revisionText, [ref]$revision)
-            $previousVersion = if ($revision -eq 1) { $baseVersion } else { "$baseVersion.$($revision - 1)" }
-            $previousTag = "v$previousVersion"
-            $previous = @(
-              $allReleases | Where-Object {
-                $_.tag_name -ceq $previousTag -and ![bool]$_.draft -and [bool]$_.immutable -and ![bool]$_.prerelease
-              }
-            )
-            if ($previous.Count -ne 1) {
-              throw "社区修订必须连续发布；缺少唯一的上一版 immutable Release：$previousTag"
-            }
-            & git merge-base --is-ancestor $previousTag $tag
-            if ($LASTEXITCODE -ne 0) {
-              throw "上一社区版本必须是当前 Tag 的祖先：previous=$previousTag current=$tag"
-            }
-          }
-
           $packageName = "grok-zh-$version-windows-x86_64-gnu"
           "RELEASE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "GROK_VERSION=$version" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
@@ -226,7 +209,7 @@ jobs:
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-locale
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-locale 测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-config --lib version_match_boundaries
-          if ($LASTEXITCODE -ne 0) { throw "四段版本配置覆盖测试失败：$LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "三段版本配置覆盖测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib session_summary
           if ($LASTEXITCODE -ne 0) { throw "中文会话标题测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
@@ -240,7 +223,7 @@ jobs:
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib 'builtin::tests::'
           if ($LASTEXITCODE -ne 0) { throw "内置中文更新日志测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib leader_is_older_than_directional
-          if ($LASTEXITCODE -ne 0) { throw "四段版本 leader 比较测试失败：$LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "版本 leader 比较测试失败：$LASTEXITCODE" }
           & .\packaging\windows\tests\Test-Install-GrokZh.ps1
           & powershell.exe -NoProfile -NonInteractive `
             -File .\packaging\windows\tests\Test-Install-GrokZh.ps1

@@ -62,14 +62,7 @@ impl ToolCallHookData {
     }
 
     pub fn has_content(&self) -> bool {
-        self.pre_hooks
-            .iter()
-            .chain(self.post_hooks.iter())
-            .any(|r| !matches!(r.status, HookRunStatus::Skipped))
-            || self.lifecycle.iter().any(|(_, runs)| {
-                runs.iter()
-                    .any(|r| !matches!(r.status, HookRunStatus::Skipped))
-            })
+        HookRunCounts::from_data(self).total() > 0
     }
 }
 
@@ -77,20 +70,130 @@ impl ToolCallHookData {
 
 const INDENT: &str = "    ";
 
-/// Count successes and failures across all hook entries.
-fn count_hooks(entries: &[&[HookRunEntry]]) -> (usize, usize) {
-    let mut success = 0usize;
-    let mut failed = 0usize;
-    for runs in entries {
-        for r in *runs {
-            match r.status {
-                HookRunStatus::Success { .. } | HookRunStatus::Blocked { .. } => success += 1,
-                HookRunStatus::Failed { .. } => failed += 1,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct HookRunCounts {
+    pub(crate) success: usize,
+    pub(crate) blocked: usize,
+    pub(crate) failed: usize,
+}
+
+impl HookRunCounts {
+    pub(crate) fn from_data(data: &ToolCallHookData) -> Self {
+        let mut counts = Self::default();
+        counts.add_data(data);
+        counts
+    }
+
+    fn from_runs(runs: &[HookRunEntry]) -> Self {
+        let mut counts = Self::default();
+        counts.add_runs(runs);
+        counts
+    }
+
+    pub(crate) fn add_data(&mut self, data: &ToolCallHookData) {
+        self.add_runs(&data.pre_hooks);
+        self.add_runs(&data.post_hooks);
+        for (_, runs) in &data.lifecycle {
+            self.add_runs(runs);
+        }
+    }
+
+    pub(crate) fn has_failures(self) -> bool {
+        self.failed > 0
+    }
+
+    fn compact_completed(self) -> usize {
+        self.success + self.blocked
+    }
+
+    fn add_runs(&mut self, runs: &[HookRunEntry]) {
+        for run in runs {
+            match run.status {
+                HookRunStatus::Success { .. } => self.success += 1,
+                HookRunStatus::Blocked { .. } => self.blocked += 1,
+                HookRunStatus::Failed { .. } => self.failed += 1,
                 HookRunStatus::Skipped => {}
             }
         }
     }
-    (success, failed)
+
+    fn total(self) -> usize {
+        self.success + self.blocked + self.failed
+    }
+}
+
+fn count_hooks(groups: &[&[HookRunEntry]]) -> (usize, usize) {
+    let mut counts = HookRunCounts::default();
+    for runs in groups {
+        counts.add_runs(runs);
+    }
+    (counts.compact_completed(), counts.failed)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum HookCountShape {
+    Compact,
+    Labeled,
+}
+
+fn render_hook_counts_inline_suffix(
+    counts: HookRunCounts,
+    shape: HookCountShape,
+    theme: &Theme,
+) -> Option<Vec<Span<'static>>> {
+    if counts.total() == 0 {
+        return None;
+    }
+    let dimmed = ratatui::style::Modifier::DIM;
+    let mut spans = vec![Span::styled("  [hooks: ", theme.muted())];
+    match shape {
+        HookCountShape::Compact => {
+            let completed = counts.compact_completed();
+            if completed > 0 {
+                spans.push(Span::styled(
+                    completed.to_string(),
+                    theme.fg(theme.accent_success).add_modifier(dimmed),
+                ));
+            }
+            if completed > 0 && counts.failed > 0 {
+                spans.push(Span::styled("/", theme.muted()));
+            }
+            if counts.failed > 0 {
+                spans.push(Span::styled(
+                    counts.failed.to_string(),
+                    theme.fg(theme.accent_error).add_modifier(dimmed),
+                ));
+            }
+        }
+        HookCountShape::Labeled if counts.blocked == 0 && counts.failed == 0 => {
+            spans.push(Span::styled(
+                counts.success.to_string(),
+                theme.fg(theme.accent_success).add_modifier(dimmed),
+            ));
+        }
+        HookCountShape::Labeled => {
+            let mut is_first = true;
+            for (count, label, color) in [
+                (counts.success, "ok", theme.accent_success),
+                (counts.blocked, "blocked", theme.accent_running),
+                (counts.failed, "failed", theme.accent_error),
+            ] {
+                if count == 0 {
+                    continue;
+                }
+                if !is_first {
+                    spans.push(Span::styled(", ", theme.muted()));
+                }
+                is_first = false;
+                spans.push(Span::styled(
+                    format!("{count} {label}"),
+                    theme.fg(color).add_modifier(dimmed),
+                ));
+            }
+        }
+    }
+    spans.push(Span::styled("]", theme.muted()));
+    Some(spans)
 }
 
 /// `[hooks: N/M]` spans (green successes, red failures) with a leading
@@ -135,12 +238,13 @@ fn hooks_count_spans_with_locale(
     Some(spans)
 }
 
-/// Render an inline `[hooks: N/M]` suffix to append to the tool header line.
-///
-/// - Green number for successes, red for failures
-/// - If no errors, only show success count
-/// - If no successes, only show error count
-/// - Returns None if no hooks ran
+pub(crate) fn render_group_hook_counts_inline_suffix(
+    counts: HookRunCounts,
+    theme: &Theme,
+) -> Option<Vec<Span<'static>>> {
+    render_hook_counts_inline_suffix(counts, HookCountShape::Labeled, theme)
+}
+
 pub fn render_hooks_inline_suffix(data: &ToolCallHookData) -> Option<Vec<Span<'static>>> {
     render_hooks_inline_suffix_with_locale(data, None)
 }
@@ -411,3 +515,7 @@ pub fn render_hooks_detail_with_locale(
 pub fn render_hook_separator() -> BlockLine {
     render_separator()
 }
+
+#[cfg(test)]
+#[path = "hook_tests.rs"]
+mod tests;

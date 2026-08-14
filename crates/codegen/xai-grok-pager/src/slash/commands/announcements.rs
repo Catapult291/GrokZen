@@ -128,6 +128,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         };
         let items = AnnouncementsCommand
             .suggest_args(&ctx, "")
@@ -150,6 +151,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         }));
         assert!(cmd.visible(&AppCtx {
             models: &models,
@@ -159,6 +161,7 @@ mod tests {
             usage_command_visible: true,
             workflows_available: true,
             screen_mode: crate::app::ScreenMode::Fullscreen,
+            current_title: None,
         }));
     }
 

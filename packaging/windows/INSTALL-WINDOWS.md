@@ -27,11 +27,11 @@
 
 正式 Tag 工作流会为 ZIP 与 `.sha256` 自动生成 GitHub Actions 构建来源证明。下载后可用
 GitHub CLI 核对不可变 Release、资产和构建工作流；以下命令已使用当前仓库
-`JoyElliot/grok-build-Chinese`：
+`JoyElliot/grok-build-Chinese`；以下命令以待发布的 `1.0.3` 为例，发布后执行：
 
 ```powershell
 $repo = 'JoyElliot/grok-build-Chinese'
-$version = '1.0.0.1'
+$version = '1.0.3'
 $tag = "v$version"
 $zip = ".\grok-zh-$version-windows-x86_64-gnu.zip"
 $assets = @($zip, "$zip.sha256")
@@ -179,9 +179,8 @@ npm uninstall -g @xai-official/grok
 安装带社区更新器的版本后，程序启动时会查询固定仓库
 `JoyElliot/grok-build-Chinese`：
 
-- 默认 `stable` 只接受 immutable、非 Draft、非 prerelease 的 `vA.B.C` 或 `vA.B.C.N`
-  Release。前三段对应官方版本；首个社区发布不加第四段，后续修订使用 `.1`、`.2`，
-  官方版本升级后重新从无第四段的版本开始；
+- 默认 `stable` 只接受 immutable、非 Draft、非 prerelease 的严格三段 `vA.B.C`
+  Release，并与上游包版本保持一致；第四段社区修订号不再受支持；
 - `grok-zh update --alpha` 可选择预发布通道，`grok-zh update --stable` 可切回稳定通道；
 - Release 只接受精确命名的完整
   `grok-zh-<version>-windows-x86_64-gnu.zip` 及其 `.sha256` sidecar；更新器验证固定 URL、
@@ -191,9 +190,8 @@ npm uninstall -g @xai-official/grok
   预计剩余时间；输出重定向或后台更新时进度条自动隐藏。显式开启该设置后才允许后台预下载；
 - ZIP 中的候选 EXE 必须通过 `--version`，之后才使用 Windows 的重命名旁置和失败回滚逻辑
   替换当前 `grok-zh.exe`；不会强制结束其他会话；完成后重新运行 `grok-zh`；
-- `v1.0.0-zh.preview.3` 的旧更新器只认识裸 EXE；已经发布的 `v1.0.0` 又仍使用三段 SemVer
-  解析器，无法识别 `v1.0.0.1`。从这两个版本迁移到 `v1.0.0.1` 时，都需要手工下载完整
-  ZIP 并运行安装器一次；安装 `v1.0.0.1` 后，后续 `.2`、`.3` 等修订即可自动识别。
+- `v1.0.0-zh.preview.3` 的旧更新器只认识裸 EXE，需要手工下载完整 ZIP 迁移；已撤回的
+  `v1.0.0.1` 使用了不兼容代理版本门禁的四段版本号，不应继续安装或分发。
 
 自动激活仍沿用原版的单 EXE 替换语义，但传输与验证只使用完整 ZIP；不会在运行中的安装
 目录内逐个改写 `agent-zh.cmd`、`rg.exe`、安装文档、Path 或官方 `grok`/`agent`。若某个版本

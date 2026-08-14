@@ -221,6 +221,8 @@ pub fn render_btw_panel(
     link_overlay: Option<&mut LinkOverlay>,
     // Generated-media paths for resolving relative file-path link targets.
     media_paths: &[std::path::PathBuf],
+    // Session cwd for resolving relative markdown link targets to on-disk files.
+    cwd: Option<&std::path::Path>,
 ) {
     render_btw_panel_with_locale(
         buf,
@@ -232,6 +234,7 @@ pub fn render_btw_panel(
         selection_model,
         link_overlay,
         media_paths,
+        cwd,
         None,
     )
 }
@@ -247,6 +250,7 @@ pub fn render_btw_panel_with_locale(
     selection_model: &mut ResolvedSelectionModel,
     link_overlay: Option<&mut LinkOverlay>,
     media_paths: &[std::path::PathBuf],
+    cwd: Option<&std::path::Path>,
     locale: Option<&crate::locale::LocaleContext>,
 ) {
     if area.width < 12 || area.height < 3 {
@@ -482,6 +486,7 @@ pub fn render_btw_panel_with_locale(
                         content_x,
                         /* content_line_offset */ 0,
                         media_paths,
+                        cwd,
                         overlay,
                     );
                 });
@@ -530,7 +535,18 @@ mod tests {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let mut model = ResolvedSelectionModel::default();
-        render_btw_panel(&mut buf, state, area, 0, false, None, &mut model, None, &[]);
+        render_btw_panel(
+            &mut buf,
+            state,
+            area,
+            0,
+            false,
+            None,
+            &mut model,
+            None,
+            &[],
+            None,
+        );
         model
     }
 
@@ -539,7 +555,18 @@ mod tests {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let mut model = ResolvedSelectionModel::default();
-        render_btw_panel(&mut buf, state, area, 0, false, None, &mut model, None, &[]);
+        render_btw_panel(
+            &mut buf,
+            state,
+            area,
+            0,
+            false,
+            None,
+            &mut model,
+            None,
+            &[],
+            None,
+        );
         buf
     }
 
@@ -569,6 +596,7 @@ mod tests {
             &mut model,
             Some(&mut links),
             &[],
+            None,
         );
         (model, links)
     }
@@ -1044,6 +1072,7 @@ mod tests {
             &mut model,
             None,
             &[],
+            None,
         );
         let rect = hit
             .rect

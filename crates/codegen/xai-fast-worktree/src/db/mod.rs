@@ -6,6 +6,7 @@
 mod queries;
 mod schema;
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -466,6 +467,7 @@ pub fn now_epoch_secs() -> i64 {
         .as_secs() as i64
 }
 
+/// Resolve the grok home: `$GROK_HOME`, else `<home>/.grok`.
 pub fn resolve_grok_home() -> Result<PathBuf> {
     if let Some(value) =
         std::env::var_os(xai_grok_product::HOME_ENV).filter(|value| !value.is_empty())
