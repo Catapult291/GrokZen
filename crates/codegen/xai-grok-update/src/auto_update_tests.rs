@@ -559,17 +559,34 @@ async fn test_atomic_symlink_swap_broken_symlink_target() {
 }
 
 #[test]
-fn test_needs_update_prerelease_to_stable_forces_install() {
-    // Inadmissible current (pre-release on stable channel) → install even
-    // if the candidate is semver-lower.
+fn test_needs_update_prerelease_to_stable_respects_version_order() {
     assert_eq!(
         needs_update("0.1.149-alpha.1", "0.1.148", "stable", false),
-        Some(true)
+        Some(false)
     );
     assert_eq!(
         needs_update("0.1.148-alpha.3", "0.1.148", "stable", false),
         Some(true)
     );
+}
+
+#[test]
+fn test_needs_update_ci_prerelease_respects_rollback_policy() {
+    let current = "1.0.3-zh.ci.21";
+    for (target, allow_downgrade, expected) in [
+        ("1.0.0", false, false),
+        ("1.0.0", true, true),
+        ("1.0.3", false, true),
+        ("1.0.3", true, true),
+        ("1.0.4", false, true),
+        ("1.0.4", true, true),
+    ] {
+        assert_eq!(
+            needs_update(current, target, "stable", allow_downgrade),
+            Some(expected),
+            "current={current}, target={target}, allow_downgrade={allow_downgrade}"
+        );
+    }
 }
 
 #[test]
@@ -1550,16 +1567,16 @@ fn test_needs_update_downgrade_prerelease_still_rejected_on_stable() {
 }
 
 #[test]
-fn test_needs_update_prerelease_current_forces_install_regardless_of_allow_downgrade() {
-    // Pre-release current on stable channel → force-install, independent
-    // of allow_downgrade.
+fn test_needs_update_prerelease_current_respects_allow_downgrade() {
+    // A lower stable target is only an update for authoritative installers
+    // whose pointer is allowed to roll back.
     assert_eq!(
         needs_update("0.1.149-alpha.1", "0.1.148", "stable", true),
         Some(true)
     );
     assert_eq!(
         needs_update("0.1.149-alpha.1", "0.1.148", "stable", false),
-        Some(true)
+        Some(false)
     );
 }
 

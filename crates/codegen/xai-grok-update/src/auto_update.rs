@@ -632,9 +632,10 @@ fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: boo
     let current = Version::parse(current).ok()?;
     let target = Version::parse(target).ok()?;
     match channel {
-        // NOTE: With the 0.2.X versioning scheme, all versions are plain
-        // semver (no pre-release suffix). The pre-release checks in this
-        // match are dead code but kept as a safety net.
+        // Stable channels never accept pre-release candidates. A pre-release
+        // current version still follows normal SemVer ordering, so a same-base
+        // stable release is newer while a lower stable release is only accepted
+        // when the installer explicitly allows rollback.
         "stable" | "enterprise" => {
             if !target.pre.is_empty() {
                 tracing::warn!(
@@ -643,9 +644,6 @@ fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: boo
                     "stable/enterprise channel received pre-release candidate, rejecting"
                 );
                 return Some(false);
-            }
-            if !current.pre.is_empty() {
-                return Some(true);
             }
         }
         "alpha" => {}
@@ -3766,17 +3764,34 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_update_prerelease_to_stable_forces_install() {
-        // Inadmissible current (pre-release on stable channel) → install even
-        // if the candidate is semver-lower.
+    fn test_needs_update_prerelease_to_stable_respects_version_order() {
         assert_eq!(
             needs_update("0.1.149-alpha.1", "0.1.148", "stable", false),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             needs_update("0.1.148-alpha.3", "0.1.148", "stable", false),
             Some(true)
         );
+    }
+
+    #[test]
+    fn test_needs_update_ci_prerelease_respects_rollback_policy() {
+        let current = "1.0.3-zh.ci.21";
+        for (target, allow_downgrade, expected) in [
+            ("1.0.0", false, false),
+            ("1.0.0", true, true),
+            ("1.0.3", false, true),
+            ("1.0.3", true, true),
+            ("1.0.4", false, true),
+            ("1.0.4", true, true),
+        ] {
+            assert_eq!(
+                needs_update(current, target, "stable", allow_downgrade),
+                Some(expected),
+                "current={current}, target={target}, allow_downgrade={allow_downgrade}"
+            );
+        }
     }
 
     #[test]
@@ -4728,16 +4743,16 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_update_prerelease_current_forces_install_regardless_of_allow_downgrade() {
-        // Pre-release current on stable channel → force-install, independent
-        // of allow_downgrade.
+    fn test_needs_update_prerelease_current_respects_allow_downgrade() {
+        // A lower stable target is only an update for authoritative installers
+        // whose pointer is allowed to roll back.
         assert_eq!(
             needs_update("0.1.149-alpha.1", "0.1.148", "stable", true),
             Some(true)
         );
         assert_eq!(
             needs_update("0.1.149-alpha.1", "0.1.148", "stable", false),
-            Some(true)
+            Some(false)
         );
     }
 
