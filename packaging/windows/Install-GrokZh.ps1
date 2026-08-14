@@ -320,6 +320,23 @@ function Test-XaiSignedExecutable {
     }
 }
 
+function Read-InstallerInput {
+    param([Parameter(Mandatory = $true)][string]$Prompt)
+
+    if ([Console]::IsInputRedirected) {
+        Write-Host -NoNewline "$Prompt`: "
+        $value = [Console]::In.ReadLine()
+        Write-Host ''
+    } else {
+        $value = Read-Host $Prompt
+    }
+
+    if ($null -eq $value) {
+        return $null
+    }
+    return $value.Trim()
+}
+
 function Read-InteractiveCommandSetup {
     param([Parameter(Mandatory = $true)][string]$OfficialBin)
 
@@ -333,7 +350,15 @@ function Read-InteractiveCommandSetup {
     Write-Host '[3] 取消'
 
     while ($true) {
-        $choice = (Read-Host '请输入 1、2 或 3').Trim()
+        $choice = Read-InstallerInput '请输入 1、2 或 3'
+        if ($null -eq $choice) {
+            Write-Warning '没有收到输入，已安全取消可选命令设置。'
+            return [pscustomobject]@{
+                Cancelled = $true
+                OverrideOfficial = $false
+                MoveOfficial = $false
+            }
+        }
         switch ($choice) {
             '1' {
                 return [pscustomobject]@{
@@ -371,7 +396,15 @@ function Read-InteractiveCommandSetup {
                     Write-Host "  $path"
                 }
                 Write-Host '不会运行官方卸载器，也不会删除 GROK_HOME 内的任何用户数据。'
-                $confirm = (Read-Host '如确认继续，请再次输入 2；输入其他内容返回菜单').Trim()
+                $confirm = Read-InstallerInput '如确认继续，请再次输入 2；输入其他内容返回菜单'
+                if ($null -eq $confirm) {
+                    Write-Warning '没有收到二次确认，已安全取消可选命令设置。'
+                    return [pscustomobject]@{
+                        Cancelled = $true
+                        OverrideOfficial = $false
+                        MoveOfficial = $false
+                    }
+                }
                 if ($confirm -ne '2') {
                     Write-Host '未执行停用操作。'
                     continue

@@ -31,7 +31,7 @@ function Invoke-InteractiveInstaller {
         [Parameter(Mandatory = $true)][string]$PackagePath,
         [Parameter(Mandatory = $true)][string]$InstallPath,
         [Parameter(Mandatory = $true)][string]$SharedHome,
-        [Parameter(Mandatory = $true)][string[]]$InputLines
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$InputLines
     )
 
     $powerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -175,6 +175,16 @@ try {
     Assert-True ($interactiveKeep.ExitCode -eq 0) "交互方案 1 执行失败：$($interactiveKeep.Stderr)"
     Assert-True (Test-Path -LiteralPath (Join-Path $interactiveKeepInstall 'grok.cmd')) '交互方案 1 未创建 grok.cmd'
     Assert-True (Test-Path -LiteralPath (Join-Path $interactiveKeepInstall 'agent.cmd')) '交互方案 1 未创建 agent.cmd'
+
+    $interactiveEofInstall = Join-Path $testRoot 'interactive-eof-install'
+    $interactiveEof = Invoke-InteractiveInstaller `
+        -InstallerPath $packageInstaller `
+        -PackagePath $package `
+        -InstallPath $interactiveEofInstall `
+        -SharedHome (Join-Path $testRoot 'interactive-eof-home') `
+        -InputLines @()
+    Assert-True ($interactiveEof.ExitCode -eq 0) "交互输入结束时未能安全取消：$($interactiveEof.Stderr)"
+    Assert-True (!(Test-Path -LiteralPath $interactiveEofInstall)) '交互输入结束后仍创建了安装目录'
 
     $interactiveNoOfficialInstall = Join-Path $testRoot 'interactive-no-official-install'
     $interactiveNoOfficial = Invoke-InteractiveInstaller `
