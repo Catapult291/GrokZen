@@ -353,6 +353,25 @@ mod tests {
         assert!(!off.contains("<browser_verification>"));
     }
     #[test]
+    fn standard_primary_template_with_plan_tool_includes_language_guidance() {
+        use xai_grok_tools::types::tool::ToolKind;
+
+        let renderer = TemplateRenderer::new(
+            [(ToolKind::Plan, "todo_write".to_string())].into(),
+            Default::default(),
+        );
+        let prompt = test_context()
+            .render_with_renderer(&renderer)
+            .expect("standard primary template should render");
+        assert!(prompt.contains("<planning_language>"));
+        assert!(prompt.contains("When using `todo_write`"));
+        assert!(prompt.contains("If the user's request contains Chinese"));
+        assert!(prompt.contains("tool names"));
+        for status in ["`pending`", "`in_progress`", "`completed`", "`cancelled`"] {
+            assert!(prompt.contains(status));
+        }
+    }
+    #[test]
     fn full_mode_flag_does_not_append_browser_verification() {
         let renderer = TemplateRenderer::new(Default::default(), Default::default());
         let ctx = PromptContext {

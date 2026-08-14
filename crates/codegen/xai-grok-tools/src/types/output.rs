@@ -936,6 +936,9 @@ impl ToolOutput {
                 format!(
                     "{message}\n\n\
                      {plan_status}\n\n\
+                     Write all natural-language plan and task-list content in the same natural language as the user's request. \
+                     If the user's request contains Chinese, or active instructions ask for Chinese, use concise Simplified Chinese and do not translate it into English. \
+                     Preserve code identifiers, tool names, commands, paths, URLs, configuration keys, protocol fields and status values, symbols, product and proper names, and task IDs; keep canonical values such as pending, in_progress, completed, and cancelled verbatim.\n\n\
                      In plan mode, you should:\n\
                      1. Thoroughly explore the codebase to understand existing patterns{task_hint}\n\
                      2. Identify similar features, codebase architecture, and understand trade-offs\n\
@@ -2250,6 +2253,8 @@ mod tests {
         assert!(prompt.contains("/tmp/plan.md"));
         assert!(prompt.contains("ask_user_question"));
         assert!(prompt.contains("exit_plan_mode"));
+        assert!(prompt.contains("If the user's request contains Chinese"));
+        assert!(prompt.contains("pending, in_progress, completed, and cancelled"));
         assert!(prompt.contains("5. Write your plan to the plan file above"));
         assert!(prompt.contains("present your plan to the user"));
         assert!(

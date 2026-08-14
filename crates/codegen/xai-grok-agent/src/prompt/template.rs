@@ -53,7 +53,8 @@ pub(crate) fn subagent_template() -> Zeroizing<String> {
 
 /// The compact system prompt used after conversation compaction.
 pub const COMPACT_SYSTEM_PROMPT: &str = "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-     Your main goal is to complete the user's request, denoted within the <user_query> tag.";
+     Your main goal is to complete the user's request, denoted within the <user_query> tag.\n\n\
+     Write natural-language plan and task-list content in the same language as the user's request. For Chinese requests, use concise Simplified Chinese. Preserve code identifiers, tool names, commands, paths, URLs, configuration keys, protocol fields and status values, symbols, proper names, and task IDs; keep canonical values such as pending, in_progress, completed, and cancelled verbatim.";
 
 #[cfg(test)]
 mod tests {
@@ -313,6 +314,25 @@ mod tests {
             !prompt.contains("Task Management"),
             "Task Management section should be omitted"
         );
+        assert!(
+            !prompt.contains("<planning_language>"),
+            "Planning language guidance should be omitted when plan tool is absent"
+        );
+    }
+
+    #[test]
+    fn test_base_template_plan_present_includes_language_guidance() {
+        let prompt = render_base(&default_renderer(), &default_placeholders());
+        assert!(prompt.contains("<planning_language>"));
+        assert!(prompt.contains("plan and task-list content"));
+        assert!(prompt.contains("When using `todo_write`"));
+        assert!(prompt.contains("If the user's request contains Chinese"));
+        for status in ["`pending`", "`in_progress`", "`completed`", "`cancelled`"] {
+            assert!(
+                prompt.contains(status),
+                "Canonical plan status {status} must remain verbatim"
+            );
+        }
     }
 
     #[test]
@@ -348,7 +368,8 @@ mod tests {
         assert_eq!(
             COMPACT_SYSTEM_PROMPT,
             "You are an AI coding agent. You operate in a workspace with a provided codebase.\n\n\
-             Your main goal is to complete the user's request, denoted within the <user_query> tag.",
+             Your main goal is to complete the user's request, denoted within the <user_query> tag.\n\n\
+             Write natural-language plan and task-list content in the same language as the user's request. For Chinese requests, use concise Simplified Chinese. Preserve code identifiers, tool names, commands, paths, URLs, configuration keys, protocol fields and status values, symbols, proper names, and task IDs; keep canonical values such as pending, in_progress, completed, and cancelled verbatim.",
         );
     }
 
@@ -357,6 +378,10 @@ mod tests {
     #[test]
     fn test_mid_session_switch_concise_to_full() {
         let compact = COMPACT_SYSTEM_PROMPT;
+        assert!(compact.contains("For Chinese requests, use concise Simplified Chinese"));
+        for status in ["pending", "in_progress", "completed", "cancelled"] {
+            assert!(compact.contains(status));
+        }
         assert!(!compact.contains("read_file"), "Compact has no tool names");
         assert!(
             !compact.contains("<tool_calling>"),
