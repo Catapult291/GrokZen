@@ -37,8 +37,9 @@ function Invoke-InteractiveInstaller {
     $powerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
     $startInfo = New-Object Diagnostics.ProcessStartInfo
     $startInfo.FileName = $powerShellExe
-    $startInfo.Arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -PackageDir "{1}" -InstallDir "{2}" -GrokHome "{3}" -NoPathUpdate -InteractiveCommandSetup -ShowProgress' -f `
-        $InstallerPath, $PackagePath, $InstallPath, $SharedHome
+    $scriptedAnswers = $InputLines -join ';'
+    $startInfo.Arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}" -PackageDir "{1}" -InstallDir "{2}" -GrokHome "{3}" -NoPathUpdate -InteractiveCommandSetup -ScriptedCommandSetupAnswers "{4}" -ShowProgress' -f `
+        $InstallerPath, $PackagePath, $InstallPath, $SharedHome, $scriptedAnswers
     $startInfo.UseShellExecute = $false
     $startInfo.CreateNoWindow = $true
     $startInfo.RedirectStandardInput = $true

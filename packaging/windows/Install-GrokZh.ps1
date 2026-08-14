@@ -23,6 +23,9 @@
 .PARAMETER InteractiveCommandSetup
 显示适合双击入口的数字菜单，让用户选择保留官方版，或备份并停用已验证的官方命令入口。
 
+.PARAMETER ScriptedCommandSetupAnswers
+仅供安装器自动化验证使用。以分号分隔菜单答案；正常安装和双击入口不要设置。
+
 .PARAMETER ShowProgress
 显示安装包校验和程序复制的百分比进度。用于双击入口；自动化调用可不启用。
 
@@ -50,6 +53,7 @@ param(
     [switch]$OverrideOfficialCommands,
     [switch]$UninstallOfficial,
     [switch]$InteractiveCommandSetup,
+    [string]$ScriptedCommandSetupAnswers,
     [switch]$ShowProgress,
     [switch]$NoPathUpdate,
     [switch]$Force
@@ -321,9 +325,20 @@ function Test-XaiSignedExecutable {
 }
 
 function Read-InstallerInput {
-    param([Parameter(Mandatory = $true)][string]$Prompt)
+    param(
+        [Parameter(Mandatory = $true)][string]$Prompt,
+        [AllowNull()][Collections.Generic.Queue[string]]$ScriptedAnswers
+    )
 
-    if ([Console]::IsInputRedirected) {
+    if ($null -ne $ScriptedAnswers) {
+        Write-Host -NoNewline "$Prompt`: "
+        if ($ScriptedAnswers.Count -eq 0) {
+            Write-Host ''
+            return $null
+        }
+        $value = $ScriptedAnswers.Dequeue()
+        Write-Host $value
+    } elseif ([Console]::IsInputRedirected) {
         Write-Host -NoNewline "$Prompt`: "
         $value = [Console]::In.ReadLine()
         Write-Host ''
@@ -338,7 +353,10 @@ function Read-InstallerInput {
 }
 
 function Read-InteractiveCommandSetup {
-    param([Parameter(Mandatory = $true)][string]$OfficialBin)
+    param(
+        [Parameter(Mandatory = $true)][string]$OfficialBin,
+        [AllowNull()][Collections.Generic.Queue[string]]$ScriptedAnswers
+    )
 
     Write-Host ''
     Write-Host '=== 可选：替换原始启动方式 ===' -ForegroundColor Cyan
@@ -350,7 +368,7 @@ function Read-InteractiveCommandSetup {
     Write-Host '[3] 取消'
 
     while ($true) {
-        $choice = Read-InstallerInput '请输入 1、2 或 3'
+        $choice = Read-InstallerInput '请输入 1、2 或 3' -ScriptedAnswers $ScriptedAnswers
         if ($null -eq $choice) {
             Write-Warning '没有收到输入，已安全取消可选命令设置。'
             return [pscustomobject]@{
@@ -396,7 +414,9 @@ function Read-InteractiveCommandSetup {
                     Write-Host "  $path"
                 }
                 Write-Host '不会运行官方卸载器，也不会删除 GROK_HOME 内的任何用户数据。'
-                $confirm = Read-InstallerInput '如确认继续，请再次输入 2；输入其他内容返回菜单'
+                $confirm = Read-InstallerInput `
+                    '如确认继续，请再次输入 2；输入其他内容返回菜单' `
+                    -ScriptedAnswers $ScriptedAnswers
                 if ($null -eq $confirm) {
                     Write-Warning '没有收到二次确认，已安全取消可选命令设置。'
                     return [pscustomobject]@{
@@ -727,7 +747,18 @@ Assert-NoReparsePointInPath -Path $officialBin -Label 'GrokHome\bin'
 $requestedOverrideOfficialCommands = $OverrideOfficialCommands.IsPresent
 $requestedUninstallOfficial = $UninstallOfficial.IsPresent
 if ($InteractiveCommandSetup.IsPresent) {
-    $interactiveChoice = Read-InteractiveCommandSetup -OfficialBin $officialBin
+    $scriptedAnswers = $null
+    if ($PSBoundParameters.ContainsKey('ScriptedCommandSetupAnswers')) {
+        $scriptedAnswers = [Collections.Generic.Queue[string]]::new()
+        if (![string]::IsNullOrEmpty($ScriptedCommandSetupAnswers)) {
+            foreach ($answer in $ScriptedCommandSetupAnswers.Split(';')) {
+                $scriptedAnswers.Enqueue($answer)
+            }
+        }
+    }
+    $interactiveChoice = Read-InteractiveCommandSetup `
+        -OfficialBin $officialBin `
+        -ScriptedAnswers $scriptedAnswers
     if ($interactiveChoice.Cancelled) {
         Write-Host '已取消，没有修改程序、Path 或共享用户数据。'
         return

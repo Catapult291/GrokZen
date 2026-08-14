@@ -152,6 +152,17 @@ jobs:
             grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
             grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-
 
+      - name: 验证 Windows 安装程序
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\packaging\windows\tests\Test-Install-GrokZh.ps1
+          & powershell.exe -NoProfile -NonInteractive `
+            -File .\packaging\windows\tests\Test-Install-GrokZh.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell 5.1 安装程序测试失败：$LASTEXITCODE"
+          }
+
       - name: 验证本地化元数据
         shell: pwsh
         run: |
@@ -178,17 +189,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "中文会话标题测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
           if ($LASTEXITCODE -ne 0) { throw "中文界面定向测试失败：$LASTEXITCODE" }
-
-      - name: 验证 Windows 安装程序
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          & .\packaging\windows\tests\Test-Install-GrokZh.ps1
-          & powershell.exe -NoProfile -NonInteractive `
-            -File .\packaging\windows\tests\Test-Install-GrokZh.ps1
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows PowerShell 5.1 安装程序测试失败：$LASTEXITCODE"
-          }
 
       - name: 构建并监控 Windows 预览版（J${{ env.CARGO_BUILD_JOBS }}）
         id: windows_build
