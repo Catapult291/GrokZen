@@ -9079,8 +9079,9 @@ reasoning_effort = "low"
         let p = default_cfg
             .resolve_doom_loop_recovery()
             .expect("default is ON");
-        assert_eq!(p.max_threshold, 8, "default tunables unchanged");
+        assert_eq!(p.max_threshold, 32, "default tunables unchanged");
         assert_eq!(p.max_retries, 2, "default tunables unchanged");
+        assert_eq!(p.window_tokens, 1024, "default tunables unchanged");
         let toml_off = Config {
             doom_loop_recovery: DoomLoopRecoverySettings {
                 enabled: Some(false),
@@ -9118,6 +9119,7 @@ reasoning_effort = "low"
                     enabled: Some(true),
                     max_threshold: Some(16),
                     max_retries: Some(1),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -9126,6 +9128,7 @@ reasoning_effort = "low"
         let p = remote_on.resolve_doom_loop_recovery().expect("remote on");
         assert_eq!(p.max_threshold, 16);
         assert_eq!(p.max_retries, 1);
+        assert_eq!(p.window_tokens, 1024);
         let partial_remote = Config {
             remote_settings: Some(crate::util::config::RemoteSettings {
                 doom_loop_recovery: Some(DoomLoopRecoverySettings {
@@ -9141,17 +9144,20 @@ reasoning_effort = "low"
             .expect("default-on gate despite remote object omitting enabled");
         assert_eq!(p.max_threshold, 16, "remote tunable applies");
         assert_eq!(p.max_retries, 2, "unset field falls to the default");
+        assert_eq!(p.window_tokens, 1024, "unset field falls to the default");
         let config_over_remote = Config {
             doom_loop_recovery: DoomLoopRecoverySettings {
                 enabled: Some(true),
                 max_threshold: Some(4),
                 max_retries: Some(3),
+                ..Default::default()
             },
             remote_settings: Some(crate::util::config::RemoteSettings {
                 doom_loop_recovery: Some(DoomLoopRecoverySettings {
                     enabled: Some(false),
                     max_threshold: Some(16),
                     max_retries: Some(1),
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
@@ -9242,6 +9248,7 @@ reasoning_effort = "low"
                 enabled: Some(true),
                 max_threshold: Some(1_000),
                 max_retries: Some(99),
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -9253,12 +9260,33 @@ reasoning_effort = "low"
                 enabled: Some(true),
                 max_threshold: Some(0),
                 max_retries: Some(0),
+                ..Default::default()
             },
             ..Default::default()
         };
         let p = cfg.resolve_doom_loop_recovery().expect("enabled");
         assert_eq!(p.max_threshold, 2);
         assert_eq!(p.max_retries, 0, "0 retries is valid (observe-only)");
+        for (raw, expected) in [
+            (0, 4096),
+            (100, 4096),
+            (256, 4096),
+            (512, 512),
+            (1024, 1024),
+            (4096, 4096),
+            (99999, 4096),
+        ] {
+            let cfg = Config {
+                doom_loop_recovery: DoomLoopRecoverySettings {
+                    enabled: Some(true),
+                    window_tokens: Some(raw),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let p = cfg.resolve_doom_loop_recovery().expect("enabled");
+            assert_eq!(p.window_tokens, expected, "window_tokens={raw}");
+        }
     }
     #[test]
     #[serial]
