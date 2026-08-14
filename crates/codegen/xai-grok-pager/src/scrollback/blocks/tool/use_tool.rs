@@ -88,6 +88,31 @@ impl UseToolCallBlock {
         out
     }
 
+    /// Localize only known, product-owned display aliases. The stored MCP
+    /// qualified name remains untouched for routing, permissions, and copy.
+    fn localized_name(&self, locale: &crate::locale::LocaleContext) -> Option<&'static str> {
+        let (key, english) = match self.tool_name.as_str() {
+            "tasks__list" => ("scrollback.tool.mcp.tasks.list", "Tasks List"),
+            "tasks__create" => ("scrollback.tool.mcp.tasks.create", "Tasks Create"),
+            "tasks__update" => ("scrollback.tool.mcp.tasks.update", "Tasks Update"),
+            "tasks__get_results" => ("scrollback.tool.mcp.tasks.get_results", "Tasks Get Results"),
+            "tasks__pause" => ("scrollback.tool.mcp.tasks.pause", "Tasks Pause"),
+            "tasks__delete" => ("scrollback.tool.mcp.tasks.delete", "Tasks Delete"),
+            "tasks__list_trigger_catalog" => (
+                "scrollback.tool.mcp.tasks.list_trigger_catalog",
+                "Tasks List Trigger Catalog",
+            ),
+            "tasks__list_trigger_resources" => (
+                "scrollback.tool.mcp.tasks.list_trigger_resources",
+                "Tasks List Trigger Resources",
+            ),
+            "voice__list_voices" => ("scrollback.tool.mcp.voice.list_voices", "Voice List Voices"),
+            _ => return None,
+        };
+        let localized = locale.named_static_text(key, english);
+        (localized != english).then_some(localized)
+    }
+
     /// Split `tool_name` on the (validated-unambiguous)
     /// `MCP_TOOL_NAME_DELIMITER` and title-case each segment. Returns
     /// `(server_title, action_title)` for qualified names, or
@@ -101,7 +126,13 @@ impl UseToolCallBlock {
     }
 
     /// Render the header line: **Server** `Action`
-    fn header_line(&self, theme: &Theme, muted: bool, max_width: Option<usize>) -> Line<'static> {
+    fn header_line(
+        &self,
+        theme: &Theme,
+        locale: &crate::locale::LocaleContext,
+        muted: bool,
+        max_width: Option<usize>,
+    ) -> Line<'static> {
         let text_style = if muted {
             theme.muted()
         } else {
@@ -113,6 +144,14 @@ impl UseToolCallBlock {
         } else {
             theme.fg(theme.command)
         };
+
+        if let Some(localized) = self.localized_name(locale) {
+            let display = match max_width {
+                Some(w) => truncate_str(localized, w),
+                None => localized.to_string(),
+            };
+            return Line::from(vec![Span::styled(display, bold_style)]);
+        }
 
         let (server, action) = self.split_name();
 
@@ -152,12 +191,17 @@ impl BlockContent for UseToolCallBlock {
         match ctx.mode {
             DisplayMode::Collapsed => BlockOutput {
                 lines: vec![
-                    self.header_line(&theme, muted_collapsed, Some(ctx.content_width()))
-                        .into(),
+                    self.header_line(
+                        &theme,
+                        &ctx.locale,
+                        muted_collapsed,
+                        Some(ctx.content_width()),
+                    )
+                    .into(),
                 ],
             },
             DisplayMode::Truncated | DisplayMode::Expanded => {
-                let header = self.header_line(&theme, false, None);
+                let header = self.header_line(&theme, &ctx.locale, false, None);
                 let wrapped = crate::render::wrapping::wrap_header_flush(
                     header,
                     ctx.width as usize,
@@ -285,18 +329,24 @@ impl BlockContent for UseToolCallBlock {
         }
     }
 
-    fn preamble(&self, _ctx: &BlockContext) -> Option<Text<'static>> {
+    fn preamble(&self, ctx: &BlockContext) -> Option<Text<'static>> {
         let theme = Theme::current();
-        Some(Text::from(vec![self.header_line(&theme, false, None)]))
+        Some(Text::from(vec![self.header_line(
+            &theme,
+            &ctx.locale,
+            false,
+            None,
+        )]))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::{LocaleContext, LocaleSource, ResolvedLocale, UiLocale};
     use crate::scrollback::types::BlockContext;
 
-    fn ctx(mode: DisplayMode) -> BlockContext {
+    fn ctx_with_locale(mode: DisplayMode, locale: LocaleContext) -> BlockContext {
         BlockContext {
             width: 80,
             mode,
@@ -306,13 +356,28 @@ mod tests {
             appearance: Default::default(),
             is_selected: false,
             cwd: None,
-            locale: Default::default(),
+            locale,
         }
     }
 
+    fn zh_locale() -> LocaleContext {
+        LocaleContext::new(ResolvedLocale {
+            locale: UiLocale::ZhCn,
+            source: LocaleSource::Cli,
+        })
+    }
+
     fn rendered_text(block: &UseToolCallBlock, mode: DisplayMode) -> String {
+        rendered_text_with_locale(block, mode, LocaleContext::default())
+    }
+
+    fn rendered_text_with_locale(
+        block: &UseToolCallBlock,
+        mode: DisplayMode,
+        locale: LocaleContext,
+    ) -> String {
         block
-            .output(&ctx(mode))
+            .output(&ctx_with_locale(mode, locale))
             .lines
             .iter()
             .map(|l| {
@@ -324,6 +389,64 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn zh_localization_translates_known_tasks_and_voice_titles() {
+        let cases = [
+            ("tasks__list", "列出任务"),
+            ("tasks__create", "创建任务"),
+            ("tasks__update", "更新任务"),
+            ("tasks__get_results", "获取任务结果"),
+            ("tasks__pause", "暂停任务"),
+            ("tasks__delete", "删除任务"),
+            ("tasks__list_trigger_catalog", "列出触发器目录"),
+            ("tasks__list_trigger_resources", "列出触发器资源"),
+            ("voice__list_voices", "列出可用语音"),
+        ];
+
+        for (tool_name, expected) in cases {
+            let block = UseToolCallBlock::new(tool_name);
+            assert_eq!(
+                rendered_text_with_locale(&block, DisplayMode::Collapsed, zh_locale()),
+                expected,
+                "tool_name={tool_name}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_title_localization_preserves_english_unknown_and_raw_identity() {
+        let mut tasks = UseToolCallBlock::new("tasks__list");
+        tasks
+            .input_args
+            .push(("workspace".to_string(), r"C:\repo\API_KEY".to_string()));
+        tasks.output = Some("opaque server result".to_string());
+        assert_eq!(rendered_text(&tasks, DisplayMode::Collapsed), "Tasks List");
+        assert_eq!(
+            tasks.copy_text(),
+            "tool: tasks__list\nworkspace: C:\\repo\\API_KEY\n\nopaque server result"
+        );
+
+        let unknown = UseToolCallBlock::new("linear__list_issues");
+        assert_eq!(
+            rendered_text_with_locale(&unknown, DisplayMode::Collapsed, zh_locale()),
+            "Linear List Issues"
+        );
+    }
+
+    #[test]
+    fn zh_localization_applies_to_fullscreen_preamble() {
+        let block = UseToolCallBlock::new("voice__list_voices");
+        let text = block
+            .preamble(&ctx_with_locale(DisplayMode::Expanded, zh_locale()))
+            .expect("preamble")
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, "列出可用语音");
     }
 
     #[test]
