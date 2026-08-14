@@ -12,6 +12,12 @@
       "first_parent": "3f51e781fdd8f84c9177acc7a6d37c15777d3c53",
       "upstream_tip": "8a14c91d88875a831a38b3a066b1683116bcb31c",
       "upstream_base": "393430ee4934bc791b0d538f304a21691c517433"
+    },
+    {
+      "merge_sha": "3d93de4eded1273d8d87186fab5c025320380bd0",
+      "first_parent": "d40ac9c591b3a131613baea04e001315e59a2df1",
+      "upstream_tip": "eb267feff13129e568df38fb6fdf0ceb65f735d6",
+      "upstream_base": "8a14c91d88875a831a38b3a066b1683116bcb31c"
     }
   ],
   "local_merges": [],
@@ -100,6 +106,31 @@
       "sha": "8a14c91d88875a831a38b3a066b1683116bcb31c",
       "source_subject": "Synced from monorepo",
       "title_zh": "同步上游代码快照"
+    },
+    {
+      "sha": "75e73f3d6ac0350d211f12ae7d57c2c0aad72576",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "改进工作区差异统计、折行输入、沙箱与分页器"
+    },
+    {
+      "sha": "b13fa526f5112c0b20dad5f1f2300d3d3b127895",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "完善中途发送与会话重命名并稳定阻塞任务池"
+    },
+    {
+      "sha": "be713136d2a69080743a3f6b3c72077057e5948f",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "完善在线状态、工作树、分页器与工具生命周期"
+    },
+    {
+      "sha": "e5fd4816d43260c15ba785f103990c1ed6cea230",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "增强会话、图像、权限与工具调用流程"
+    },
+    {
+      "sha": "eb267feff13129e568df38fb6fdf0ceb65f735d6",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "更新 Grok 4.6 默认模型并完善会话、钩子与搜索"
     }
   ]
 }
