@@ -733,7 +733,8 @@ pub(super) fn dispatch_copy_session_id(app: &mut AppView, index: usize) -> Vec<E
         });
     if let Some(id) = id {
         let delivery = crate::clipboard::copy_text_or_file(&id);
-        app.show_toast(delivery.toast_message().as_ref());
+        let message = crate::clipboard_toast::localized_copy_toast(&app.locale, &delivery);
+        app.show_toast(&message);
     }
     vec![]
 }

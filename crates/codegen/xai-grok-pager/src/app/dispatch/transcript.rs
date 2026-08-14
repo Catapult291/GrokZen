@@ -209,7 +209,8 @@ pub(super) fn dispatch_copy_assistant_message(
                 agent.scrollback.push_block(RenderBlock::system(message));
             }
         }
-        agent.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
+        let message = crate::clipboard_toast::localized_copy_toast(&locale, &delivery);
+        agent.show_toast_ticks(&message, delivery.toast_ticks());
     });
 }
 

@@ -295,7 +295,9 @@ impl AgentView {
     /// the copy actually landed (clipboard, backup file, or nowhere).
     pub fn copy_to_clipboard(&mut self, text: &str) -> crate::clipboard::CopyDelivery {
         let delivery = crate::clipboard::copy_text_or_file(text);
-        self.show_toast_ticks(delivery.toast_message().as_ref(), delivery.toast_ticks());
+        let message =
+            crate::clipboard_toast::localized_copy_toast(self.scrollback.locale(), &delivery);
+        self.show_toast_ticks(&message, delivery.toast_ticks());
         delivery
     }
 

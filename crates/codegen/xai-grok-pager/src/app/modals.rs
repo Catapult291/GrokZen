@@ -1790,14 +1790,18 @@ impl AgentView {
             return;
         };
         let delivery = crate::clipboard::copy_text_or_file(&id);
-        self.show_toast(delivery.toast_message().as_ref());
+        let message =
+            crate::clipboard_toast::localized_copy_toast(self.scrollback.locale(), &delivery);
+        self.show_toast(&message);
     }
 
     /// Copy Session-info text (`y` / footer "copy all") and toast the
     /// delivery outcome. Mirrors [`Self::copy_usage_modal_session_id`].
     fn copy_usage_modal_text(&mut self, text: &str) {
         let delivery = crate::clipboard::copy_text_or_file(text);
-        self.show_toast(delivery.toast_message().as_ref());
+        let message =
+            crate::clipboard_toast::localized_copy_toast(self.scrollback.locale(), &delivery);
+        self.show_toast(&message);
     }
 
     /// Draw the active modal overlay: the per-`ActiveModal`-variant render
