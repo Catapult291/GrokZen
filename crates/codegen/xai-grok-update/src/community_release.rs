@@ -881,14 +881,13 @@ mod tests {
         assert!(extract_verified_executable(&current_segment, &candidate).is_err());
         assert!(!candidate.exists());
 
-        let duplicate_unicode_entry = temp.path().join("duplicate-unicode-entry.zip");
+        let duplicate_normalized_entry = temp.path().join("duplicate-normalized-entry.zip");
         let mut entries = package_entries();
-        entries.push((
-            ONE_CLICK_INSTALLER.to_string(),
-            b"duplicate installer".to_vec(),
-        ));
-        write_zip(&duplicate_unicode_entry, &entries);
-        assert!(extract_verified_executable(&duplicate_unicode_entry, &candidate).is_err());
+        entries.push(("RG.EXE".to_string(), b"duplicate ripgrep".to_vec()));
+        write_zip(&duplicate_normalized_entry, &entries);
+        let error =
+            extract_verified_executable(&duplicate_normalized_entry, &candidate).unwrap_err();
+        assert!(error.to_string().contains("duplicate path"), "{error:#}");
         assert!(!candidate.exists());
 
         let non_ascii_entry = temp.path().join("non-ascii-entry.zip");
