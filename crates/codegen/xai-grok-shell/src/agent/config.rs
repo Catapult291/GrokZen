@@ -22,9 +22,12 @@ use xai_grok_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
 };
 
-/// ACP model metadata marker for entries sourced from the bundled catalog.
-/// Pager consumers use this display-only provenance to avoid translating
-/// user-configured or server-provided models that reuse a built-in id/text.
+/// ACP model metadata marker for client-owned catalog presentation.
+///
+/// This covers untouched bundled defaults and exact matches returned by the
+/// public first-party model catalog. Pager consumers use this display-only
+/// provenance to avoid translating user-configured or custom-server models
+/// that reuse a built-in id/text. Routing never reads this marker.
 pub const BUNDLED_MODEL_META_KEY: &str = "x.ai/bundledModel";
 
 /// The mode in which the agent is running.
@@ -3506,6 +3509,9 @@ pub(crate) fn resolve_model_list(
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
     let mut resolved: IndexMap<String, ModelEntry> = IndexMap::new();
+    let public_catalog_endpoints = !cfg.endpoints.has_custom_endpoint()
+        && base_url_matches(&cfg.endpoints.proxy_url(), CLI_CHAT_PROXY_BASE_URL_DEFAULT)
+        && base_url_matches(&cfg.endpoints.xai_api_base_url, XAI_API_BASE_URL_DEFAULT);
     if cfg.endpoints.has_custom_endpoint() {
         tracing::info!(
             models_base_url = ?cfg.endpoints.models_base_url,
@@ -3513,7 +3519,12 @@ pub(crate) fn resolve_model_list(
             "custom models endpoint active, skipping built-in defaults",
         );
     } else {
-        let defaults = default_model_entries(&cfg.endpoints);
+        let mut defaults = default_model_entries(&cfg.endpoints);
+        if !public_catalog_endpoints {
+            for entry in defaults.values_mut() {
+                entry.bundled_catalog_entry = false;
+            }
+        }
         tracing::debug!(count = defaults.len(), "loaded default models");
         resolved.extend(defaults);
     }
@@ -3521,6 +3532,12 @@ pub(crate) fn resolve_model_list(
         tracing::debug!(count = prefetched.len(), "loaded prefetched models");
         let default_cw = DEFAULT_CONTEXT_WINDOW;
         for (key, entry) in prefetched.iter_mut() {
+            // Cached and remote values are not trusted to carry display
+            // provenance. Recompute it from the current local endpoint config
+            // and an exact bundled-catalog identity match every time. This
+            // upgrades legacy first-party caches while clearing stale/spoofed
+            // markers after switching to a custom endpoint.
+            entry.bundled_catalog_entry = false;
             let donor = resolved.get(key);
             if let Some(donor) = donor {
                 if entry.info.context_window.get() == default_cw
@@ -3542,6 +3559,20 @@ pub(crate) fn resolve_model_list(
                 if entry.info.api_backend == ApiBackend::default() {
                     entry.info.api_backend.clone_from(&donor.info.api_backend);
                 }
+
+                let entry_route_is_public =
+                    base_url_matches(&entry.info.base_url, CLI_CHAT_PROXY_BASE_URL_DEFAULT)
+                        && entry.api_base_url.as_deref().is_none_or(|api_base_url| {
+                            base_url_matches(api_base_url, XAI_API_BASE_URL_DEFAULT)
+                        });
+                let presentation_matches = entry.info.id == donor.info.id
+                    && entry.info.model == donor.info.model
+                    && entry.info.name == donor.info.name
+                    && entry.info.description == donor.info.description;
+                entry.bundled_catalog_entry = public_catalog_endpoints
+                    && donor.bundled_catalog_entry
+                    && entry_route_is_public
+                    && presentation_matches;
             }
             if resolved.contains_key(key) {
                 tracing::debug!(model_key = %key, "prefetched model overriding default");
@@ -3661,6 +3692,12 @@ pub(crate) fn resolve_model_list(
         entry.info.derive_reasoning_effort_fields();
     }
     resolved
+}
+
+/// Compare canonical API base URLs while tolerating only redundant trailing
+/// slashes. Host/path changes remain distinct and therefore fail closed.
+fn base_url_matches(actual: &str, expected: &str) -> bool {
+    actual.trim_end_matches('/') == expected.trim_end_matches('/')
 }
 /// Layer 6 of [`resolve_model_list`]: fold the global `[models].extra_headers`
 /// into every model as a base. The presence check is case-insensitive because
@@ -4343,8 +4380,9 @@ impl ModelInfo {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelEntry {
     pub info: ModelInfo,
-    /// True only for untouched entries loaded from embedded
-    /// `default_models.json`. Routing never reads this display provenance.
+    /// Client-owned picker presentation provenance. True only for untouched
+    /// embedded defaults or exact display matches from the configured public
+    /// first-party catalog. Routing never reads this field.
     #[serde(default, skip_serializing_if = "is_false")]
     pub bundled_catalog_entry: bool,
     pub api_key: Option<String>,
@@ -7754,8 +7792,13 @@ reasoning_effort = "low"
 
     #[test]
     fn bundled_model_provenance_survives_acp_but_config_override_clears_it() {
-        let endpoints = EndpointsConfig::default();
-        let defaults = default_model_entries(&endpoints);
+        let mut cfg = Config::default();
+        cfg.endpoints.cli_chat_proxy_base_url = None;
+        cfg.endpoints.xai_api_base_url = XAI_API_BASE_URL_DEFAULT.to_string();
+        cfg.endpoints.models_base_url = None;
+        cfg.endpoints.models_list_url = None;
+
+        let defaults = default_model_entries(&cfg.endpoints);
         let bundled = defaults.get("grok-4.6").expect("bundled grok-4.6");
         assert!(bundled.bundled_catalog_entry);
         let bundled_acp = to_acp_model_info(&defaults);
@@ -7772,8 +7815,9 @@ reasoning_effort = "low"
             "#,
         )
         .unwrap();
-        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
-        let overridden = resolve_model_list(&cfg, None);
+        let mut override_cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        override_cfg.endpoints = cfg.endpoints.clone();
+        let overridden = resolve_model_list(&override_cfg, None);
         assert!(
             !overridden["grok-4.6"].bundled_catalog_entry,
             "a user-owned override must not inherit bundled presentation provenance"
@@ -7785,14 +7829,112 @@ reasoning_effort = "low"
             .expect("standard model meta");
         assert!(overridden_meta.get(BUNDLED_MODEL_META_KEY).is_none());
 
-        let mut prefetched = IndexMap::new();
-        let mut remote = test_model_entry("grok-4.6", "https://test.api/v1", None, None, None);
-        remote.info.description = Some("SpaceXAI's latest frontier model".to_string());
-        prefetched.insert("grok-4.6".to_string(), remote);
-        let remote_resolved = resolve_model_list(&Config::default(), Some(prefetched));
+        let mut official_cached = bundled.clone();
+        official_cached.bundled_catalog_entry = false;
+        official_cached.info.base_url = CLI_CHAT_PROXY_BASE_URL_DEFAULT.to_string();
+        official_cached.api_base_url = None;
+        let official_resolved = resolve_model_list(
+            &cfg,
+            Some(IndexMap::from([(
+                "grok-4.6".to_string(),
+                official_cached.clone(),
+            )])),
+        );
+        assert!(
+            official_resolved["grok-4.6"].bundled_catalog_entry,
+            "an exact first-party remote/cache match should regain client-owned presentation provenance"
+        );
+        let official_acp = to_acp_model_info(&official_resolved);
+        let official_meta = official_acp[&acp::ModelId::new(Arc::from("grok-4.6"))]
+            .meta
+            .as_ref()
+            .expect("official model meta");
+        assert_eq!(official_meta[BUNDLED_MODEL_META_KEY], true);
+
+        let mut official_api_cached = official_cached.clone();
+        official_api_cached.api_base_url = Some(XAI_API_BASE_URL_DEFAULT.to_string());
+        let official_api_resolved = resolve_model_list(
+            &cfg,
+            Some(IndexMap::from([(
+                "grok-4.6".to_string(),
+                official_api_cached,
+            )])),
+        );
+        assert!(
+            official_api_resolved["grok-4.6"].bundled_catalog_entry,
+            "the public API-key catalog route should also retain client-owned presentation provenance"
+        );
+
+        let mut custom_cfg = cfg.clone();
+        custom_cfg.endpoints.models_list_url = Some("https://custom.example/v1/models".to_string());
+        let mut spoofed_custom = official_cached.clone();
+        spoofed_custom.bundled_catalog_entry = true;
+        let custom_resolved = resolve_model_list(
+            &custom_cfg,
+            Some(IndexMap::from([("grok-4.6".to_string(), spoofed_custom)])),
+        );
+        assert!(
+            !custom_resolved["grok-4.6"].bundled_catalog_entry,
+            "a custom endpoint must clear even a cached/spoofed provenance marker"
+        );
+
+        let mut custom_proxy_cfg = cfg.clone();
+        custom_proxy_cfg.endpoints.cli_chat_proxy_base_url =
+            Some("https://proxy.example/v1".to_string());
+        let mut custom_proxy_remote = official_cached.clone();
+        custom_proxy_remote.bundled_catalog_entry = true;
+        custom_proxy_remote.info.base_url = "https://proxy.example/v1".to_string();
+        custom_proxy_remote.api_base_url = Some(XAI_API_BASE_URL_DEFAULT.to_string());
+        let custom_proxy_resolved = resolve_model_list(
+            &custom_proxy_cfg,
+            Some(IndexMap::from([(
+                "grok-4.6".to_string(),
+                custom_proxy_remote,
+            )])),
+        );
+        assert!(
+            !custom_proxy_resolved["grok-4.6"].bundled_catalog_entry,
+            "a custom session proxy must keep model presentation dynamic"
+        );
+        assert!(
+            !resolve_model_list(&custom_proxy_cfg, None)["grok-4.6"].bundled_catalog_entry,
+            "a custom session proxy must also clear bundled fallback presentation"
+        );
+
+        let mut custom_api_cfg = cfg.clone();
+        custom_api_cfg.endpoints.xai_api_base_url = "https://api.example/v1".to_string();
+        let mut custom_api_remote = official_cached.clone();
+        custom_api_remote.bundled_catalog_entry = true;
+        custom_api_remote.api_base_url = Some("https://api.example/v1".to_string());
+        let custom_api_resolved = resolve_model_list(
+            &custom_api_cfg,
+            Some(IndexMap::from([(
+                "grok-4.6".to_string(),
+                custom_api_remote,
+            )])),
+        );
+        assert!(
+            !custom_api_resolved["grok-4.6"].bundled_catalog_entry,
+            "a custom public-API base must keep model presentation dynamic"
+        );
+        assert!(
+            !resolve_model_list(&custom_api_cfg, None)["grok-4.6"].bundled_catalog_entry,
+            "a custom public-API base must also clear bundled fallback presentation"
+        );
+
+        let mut mismatched_remote = official_cached;
+        mismatched_remote.bundled_catalog_entry = true;
+        mismatched_remote.info.description = Some("Custom description".to_string());
+        let remote_resolved = resolve_model_list(
+            &cfg,
+            Some(IndexMap::from([(
+                "grok-4.6".to_string(),
+                mismatched_remote,
+            )])),
+        );
         assert!(
             !remote_resolved["grok-4.6"].bundled_catalog_entry,
-            "a remotely supplied same-id model must remain dynamic"
+            "a remote same-id model with custom presentation must remain dynamic"
         );
         let remote_acp = to_acp_model_info(&remote_resolved);
         let remote_meta = remote_acp[&acp::ModelId::new(Arc::from("grok-4.6"))]
