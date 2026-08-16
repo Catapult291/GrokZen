@@ -402,7 +402,19 @@ impl AgentView {
         mut child_view: Box<AgentView>,
     ) {
         child_view.mark_as_subagent_view();
+        let locale = self.scrollback.locale().clone();
+        child_view.set_locale_recursive(&locale);
         self.subagent_views.insert(child_sid, child_view);
+    }
+
+    /// Keep fixed scrollback chrome in this view and every nested subagent on
+    /// the app locale. Dynamic prompts, paths, commands, and tool payloads are
+    /// deliberately unaffected by `ScrollbackState::set_locale`.
+    pub(crate) fn set_locale_recursive(&mut self, locale: &crate::locale::LocaleContext) {
+        self.scrollback.set_locale(locale);
+        for child in self.subagent_views.values_mut() {
+            child.set_locale_recursive(locale);
+        }
     }
     /// Clear the turn-timing fields and stamp `last_active_at` to "now".
     ///
@@ -2369,6 +2381,67 @@ mod reconnect_workflow_maps_tests {
                 .find(|r| r.run_id == "wf-keep")
                 .map(|r| r.status.as_str()),
             Some("complete")
+        );
+    }
+}
+
+#[cfg(test)]
+mod recursive_locale_tests {
+    use super::super::test_fixtures::make_agent;
+    use crate::locale::{LocaleContext, LocaleSource, ResolvedLocale, UiLocale};
+    use crate::scrollback::RenderBlock;
+
+    fn zh_locale() -> LocaleContext {
+        LocaleContext::new(ResolvedLocale {
+            locale: UiLocale::ZhCn,
+            source: LocaleSource::Cli,
+        })
+    }
+
+    #[test]
+    fn zh_localization_locale_propagates_to_existing_nested_subagent_views() {
+        let mut parent = make_agent();
+        let mut child = make_agent();
+        child
+            .scrollback
+            .push_block(RenderBlock::agent_message("child entry"));
+        let mut grandchild = make_agent();
+        grandchild
+            .scrollback
+            .push_block(RenderBlock::agent_message("grandchild entry"));
+        child
+            .subagent_views
+            .insert("grandchild".into(), Box::new(grandchild));
+        parent
+            .subagent_views
+            .insert("child".into(), Box::new(child));
+
+        parent.set_locale_recursive(&zh_locale());
+
+        let child = &parent.subagent_views["child"];
+        let grandchild = &child.subagent_views["grandchild"];
+        assert_eq!(parent.scrollback.locale().locale(), UiLocale::ZhCn);
+        assert_eq!(child.scrollback.locale().locale(), UiLocale::ZhCn);
+        assert_eq!(grandchild.scrollback.locale().locale(), UiLocale::ZhCn);
+        assert_eq!(
+            child.scrollback.entry(0).unwrap().locale().locale(),
+            UiLocale::ZhCn
+        );
+        assert_eq!(
+            grandchild.scrollback.entry(0).unwrap().locale().locale(),
+            UiLocale::ZhCn
+        );
+    }
+
+    #[test]
+    fn zh_localization_inserted_subagent_inherits_parent_locale_immediately() {
+        let mut parent = make_agent();
+        parent.set_locale_recursive(&zh_locale());
+        parent.insert_subagent_view("child".into(), Box::new(make_agent()));
+
+        assert_eq!(
+            parent.subagent_views["child"].scrollback.locale().locale(),
+            UiLocale::ZhCn
         );
     }
 }

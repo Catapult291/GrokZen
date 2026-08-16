@@ -4461,7 +4461,7 @@ impl AppView {
         // locale across full, dashboard, and minimal render surfaces.
         let locale = self.locale.as_ref().clone();
         for agent in self.agents.values_mut() {
-            agent.scrollback.set_locale(&locale);
+            agent.set_locale_recursive(&locale);
         }
         if self.screen_mode.is_minimal() {
             if let Some(hooks) = crate::minimal_hook::hooks() {
@@ -5709,7 +5709,15 @@ impl AppView {
                     | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         agent.image_viewer = None;
                         agent.image_load_rx = None;
-                        agent.toast = Some(("Couldn't load image preview".into(), 6));
+                        let message = agent
+                            .scrollback
+                            .locale()
+                            .named_static_text(
+                                "prompt.image.preview_unavailable",
+                                "Preview unavailable",
+                            )
+                            .to_string();
+                        agent.toast = Some((message, 6));
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
                 }

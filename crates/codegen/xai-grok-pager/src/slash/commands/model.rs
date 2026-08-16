@@ -177,7 +177,23 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             match_text: info.name.clone(),
             insert_text,
             description: info.description.clone().unwrap_or_default(),
-            presentation: None,
+            presentation: Some(
+                info.meta
+                    .as_ref()
+                    .and_then(|meta| {
+                        meta.get(xai_grok_shell::agent::config::BUNDLED_MODEL_META_KEY)
+                    })
+                    .and_then(serde_json::Value::as_bool)
+                    .filter(|is_bundled| *is_bundled)
+                    .and_then(|_| match id.0.as_ref() {
+                        "grok-4.6" => Some(crate::slash::command::ArgPresentation::BundledModel {
+                            model_id: "grok-4.6",
+                            is_current,
+                        }),
+                        _ => None,
+                    })
+                    .unwrap_or(crate::slash::command::ArgPresentation::DynamicModel { is_current }),
+            ),
         });
     }
     items
@@ -222,6 +238,21 @@ mod tests {
     fn plain_model(id: &str, name: &str) -> (acp::ModelId, acp::ModelInfo) {
         let id = acp::ModelId::new(Arc::from(id));
         let info = acp::ModelInfo::new(id.clone(), name.to_string());
+        (id, info)
+    }
+
+    fn grok_46_model(bundled: bool) -> (acp::ModelId, acp::ModelInfo) {
+        let id = acp::ModelId::new(Arc::from("grok-4.6"));
+        let mut meta = serde_json::Map::new();
+        if bundled {
+            meta.insert(
+                xai_grok_shell::agent::config::BUNDLED_MODEL_META_KEY.into(),
+                serde_json::Value::Bool(true),
+            );
+        }
+        let info = acp::ModelInfo::new(id.clone(), "Grok 4.6".to_string())
+            .description(Some("SpaceXAI's latest frontier model".to_string()))
+            .meta((!meta.is_empty()).then_some(meta));
         (id, info)
     }
 
@@ -300,6 +331,36 @@ mod tests {
         // Plain model has no trailing space -- Enter commits immediately.
         let plain = items.iter().find(|i| i.match_text == "Grok 4.5").unwrap();
         assert_eq!(plain.insert_text, "Grok 4.5");
+    }
+
+    #[test]
+    fn zh_localization_bundled_marker_types_only_builtin_grok_46() {
+        let mut state = ModelState::default();
+        let (id, info) = grok_46_model(true);
+        state.available.insert(id, info);
+        let items = build_model_items(&state);
+        assert_eq!(items[0].display, "Grok 4.6");
+        assert_eq!(items[0].insert_text, "Grok 4.6");
+        assert_eq!(
+            items[0].presentation,
+            Some(crate::slash::command::ArgPresentation::BundledModel {
+                model_id: "grok-4.6",
+                is_current: false,
+            })
+        );
+
+        let mut custom_same_id = ModelState::default();
+        let (id, info) = grok_46_model(false);
+        custom_same_id.available.insert(id, info);
+        let custom_items = build_model_items(&custom_same_id);
+        assert_eq!(
+            custom_items[0].presentation,
+            Some(crate::slash::command::ArgPresentation::DynamicModel { is_current: false })
+        );
+        assert_eq!(
+            custom_items[0].description,
+            "SpaceXAI's latest frontier model"
+        );
     }
 
     #[test]

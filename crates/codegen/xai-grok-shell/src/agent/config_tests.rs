@@ -1013,6 +1013,7 @@ fn test_model_entry(
     api_base_url: Option<&str>,
 ) -> ModelEntry {
     ModelEntry {
+        bundled_catalog_entry: false,
         info: ModelInfo {
             user_selectable: true,
             id: None,
@@ -6634,6 +6635,7 @@ fn slug_propagation_noop_when_no_donor() {
 /// Build a minimal `ModelEntry` for testing resolve_model_list.
 fn prefetch_model_entry(slug: &str, context_window: u64, api_backend: ApiBackend) -> ModelEntry {
     ModelEntry {
+        bundled_catalog_entry: false,
         info: ModelInfo {
             user_selectable: true,
             id: None,

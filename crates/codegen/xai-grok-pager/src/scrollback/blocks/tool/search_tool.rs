@@ -238,18 +238,28 @@ impl BlockContent for SearchToolCallBlock {
                     for (i, tool) in self.results.iter().enumerate() {
                         let idx_span = Span::styled(format!("  {}. ", i + 1), theme.muted());
 
-                        // Strip the trusted server prefix from tool_name and
-                        // title-case both halves; show the action bold and
-                        // the server name ghosted on the right.
-                        let action = mcp_titleize_segment(discovered_tool_action(tool));
-                        let server_label = mcp_titleize_segment(&tool.server);
-
-                        let name_span =
-                            Span::styled(action, theme.primary().add_modifier(Modifier::BOLD));
-
-                        let mut spans = vec![idx_span, name_span];
-                        if !server_label.is_empty() {
-                            spans.push(Span::styled(format!("  {server_label}"), theme.dim()));
+                        let mut spans = vec![idx_span];
+                        if let Some(localized) = super::localized_known_search_mcp_tool_name(
+                            &tool.name,
+                            &tool.server,
+                            &ctx.locale,
+                        ) {
+                            spans.push(Span::styled(
+                                localized,
+                                theme.primary().add_modifier(Modifier::BOLD),
+                            ));
+                        } else {
+                            // Dynamic MCP names remain opaque apart from the
+                            // existing title-casing presentation.
+                            let action = mcp_titleize_segment(discovered_tool_action(tool));
+                            let server_label = mcp_titleize_segment(&tool.server);
+                            spans.push(Span::styled(
+                                action,
+                                theme.primary().add_modifier(Modifier::BOLD),
+                            ));
+                            if !server_label.is_empty() {
+                                spans.push(Span::styled(format!("  {server_label}"), theme.dim()));
+                            }
                         }
                         lines.push(BlockLine::styled(Line::from(spans)));
                     }
@@ -351,6 +361,44 @@ impl BlockContent for SearchToolCallBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::locale::{LocaleContext, LocaleSource, ResolvedLocale, UiLocale};
+
+    fn ctx(locale: LocaleContext) -> BlockContext {
+        BlockContext {
+            width: 100,
+            mode: DisplayMode::Expanded,
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: Default::default(),
+            is_selected: false,
+            cwd: None,
+            locale,
+        }
+    }
+
+    fn zh_locale() -> LocaleContext {
+        LocaleContext::new(ResolvedLocale {
+            locale: UiLocale::ZhCn,
+            source: LocaleSource::Cli,
+        })
+    }
+
+    fn rendered_text(block: &SearchToolCallBlock, locale: LocaleContext) -> String {
+        block
+            .output(&ctx(locale))
+            .lines
+            .iter()
+            .map(|line| {
+                line.content
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 
     #[test]
     fn discovered_tool_action_strips_local_mcp_prefix() {
@@ -383,5 +431,64 @@ mod tests {
             score: 1.0,
         };
         assert_eq!(discovered_tool_action(&tool), "search");
+    }
+
+    #[test]
+    fn zh_localization_search_results_only_alias_known_product_tools() {
+        let mut block = SearchToolCallBlock::new("tasks list");
+        block.result_count = 4;
+        block.results = vec![
+            DiscoveredTool {
+                name: "tasks__list".into(),
+                server: "tasks".into(),
+                description: "server-owned description".into(),
+                score: 1.0,
+            },
+            DiscoveredTool {
+                name: "voice__list_voices".into(),
+                server: "voice".into(),
+                description: String::new(),
+                score: 0.9,
+            },
+            DiscoveredTool {
+                name: "linear__list_issues".into(),
+                server: "linear".into(),
+                description: String::new(),
+                score: 0.8,
+            },
+            DiscoveredTool {
+                name: "tasks__list".into(),
+                server: "custom".into(),
+                description: String::new(),
+                score: 0.7,
+            },
+        ];
+
+        let rendered = rendered_text(&block, zh_locale());
+        assert!(rendered.contains("搜索工具 tasks list"), "{rendered}");
+        assert!(rendered.contains("1. 列出任务"), "{rendered}");
+        assert!(rendered.contains("2. 列出可用语音"), "{rendered}");
+        assert!(rendered.contains("3. List Issues  Linear"), "{rendered}");
+        assert!(rendered.contains("4. Tasks  List  Custom"), "{rendered}");
+        assert!(!rendered.contains("server-owned description"));
+    }
+
+    #[test]
+    fn zh_localization_search_tool_copy_and_english_render_keep_canonical_dynamic_values() {
+        let mut block = SearchToolCallBlock::new("tasks list");
+        block.result_count = 1;
+        block.results.push(DiscoveredTool {
+            name: "tasks__list".into(),
+            server: "tasks".into(),
+            description: r"Keep C:\repo\API_KEY unchanged".into(),
+            score: 1.0,
+        });
+
+        let rendered = rendered_text(&block, LocaleContext::default());
+        assert!(rendered.contains("1. List  Tasks"), "{rendered}");
+        assert_eq!(
+            block.copy_text(),
+            "query: tasks list\n1 result\n\n1. List  Tasks\n   Keep C:\\repo\\API_KEY unchanged\n"
+        );
     }
 }

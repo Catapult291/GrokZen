@@ -636,7 +636,9 @@ impl AgentView {
         Option<(u16, u16)>,
         Option<crate::terminal::overlay::PostFlush>,
     ) {
-        use crate::app::subagent::{format_context_badge, format_subagent_label};
+        use crate::app::subagent::{
+            format_context_badge_with_locale, format_subagent_label_with_locale,
+        };
         use ratatui::style::Modifier;
         use unicode_width::UnicodeWidthStr;
         let appearance = self.scrollback.appearance().clone();
@@ -679,7 +681,7 @@ impl AgentView {
             .map(|s| crate::util::format_duration(s.display_elapsed()))
             .unwrap_or_default();
         let (type_label, description): (String, String) = match info {
-            Some(s) => format_subagent_label(s),
+            Some(s) => format_subagent_label_with_locale(s, locale),
             None => (String::new(), raw_description.to_string()),
         };
         let icon = if is_running {
@@ -714,7 +716,9 @@ impl AgentView {
             .filter(|s| !s.is_empty())
             .unwrap_or("")
             .to_string();
-        let badge = info.map(format_context_badge).unwrap_or("");
+        let badge = info
+            .map(|info| format_context_badge_with_locale(info, locale))
+            .unwrap_or_default();
         let activity_label: Option<String> = if is_running {
             self.subagent_views.get(child_sid).and_then(|cv| {
                 cv.resolve_turn_activity()
@@ -839,12 +843,13 @@ impl AgentView {
             );
         }
         if !badge.is_empty() {
-            rx = rx.saturating_sub(badge.width() as u16 + 1);
+            let badge_width = badge.width() as u16;
+            rx = rx.saturating_sub(badge_width + 1);
             buf.set_span_safe(
                 rx,
                 title_y,
                 &Span::styled(badge, Style::default().fg(theme.gray_dim)),
-                badge.width() as u16,
+                badge_width,
             );
         }
         let mut child_post_flush = None;
@@ -2163,9 +2168,9 @@ impl AgentView {
             "▲",
             &mut self.hit_response_top_indicator,
         );
-        if let Some(msg) = self.active_toast_message() {
+        if let Some(msg) = self.active_toast_message_with_locale(locale) {
             let sb = layout.scrollback;
-            if let Some(toast_text) = fit_toast_text(msg, sb.width) {
+            if let Some(toast_text) = fit_toast_text(&msg, sb.width) {
                 let w = unicode_width::UnicodeWidthStr::width(toast_text.as_str()) as u16;
                 if sb.height > 0 {
                     let x = sb.right().saturating_sub(w + 1);
@@ -2543,9 +2548,14 @@ impl AgentView {
             }
             if !announcement_banner_owns_slot
                 && tip_row_visible
-                && let Some(line) = self.ephemeral_tip.line()
+                && let Some(tip) = self.ephemeral_tip.active_tip()
             {
-                crate::tips::render::render_ephemeral_tip(layout.banner, buf, line);
+                crate::tips::render::render_ephemeral_tip_with_locale(
+                    layout.banner,
+                    buf,
+                    tip,
+                    locale,
+                );
             }
         }
         self.draw_plugin_cta(buf, layout.plugin_cta, &theme);
@@ -2918,13 +2928,14 @@ impl AgentView {
                 } else {
                     feedback_input::flat_style_with_locale(&theme, locale)
                 };
-                let result = self.prompt.draw(
+                let result = self.prompt.draw_with_locale(
                     buf,
                     input_area,
                     Some(layout.scrollback),
                     &style,
                     outlined.then_some(&PromptInfo::default()),
                     None,
+                    locale,
                 );
                 prompt_cursor_pos = result.cursor_pos;
                 self.inline_prompt_area = Some(input_area);
@@ -3657,7 +3668,7 @@ impl AgentView {
                     .render(layout.shortcuts, buf);
             }
         }
-        let line_viewer_toast = self.active_toast_message().map(|s| s.to_string());
+        let line_viewer_toast = self.active_toast_message_with_locale(locale);
         let is_plan_viewer = self.is_plan_viewer();
         let has_plan_comments = !self.plan_comments.is_empty();
         let casual_commenting = self.is_casual_commenting();
@@ -4137,7 +4148,7 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, prompt_post_flush);
         }
-        let block_viewer_toast = self.active_toast_message().map(|s| s.to_string());
+        let block_viewer_toast = self.active_toast_message_with_locale(locale);
         if let Some(ref mut viewer) = self.block_viewer {
             use ratatui::style::Modifier;
             use ratatui::widgets::{Block as RBlock, BorderType, Borders, Clear, Widget};

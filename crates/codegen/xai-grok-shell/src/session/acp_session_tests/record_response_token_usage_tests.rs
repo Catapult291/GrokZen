@@ -184,6 +184,7 @@ async fn build_session_info_sources_show_model_fingerprint_from_catalog() {
             // Catalog KEY ("custom-catalog-id") differs from the session's routing
             // SLUG ("test", the harness sampling model). Flag OFF → false.
             let mut entry = ModelEntry {
+                bundled_catalog_entry: false,
                 info: ModelInfo::fallback("test"),
                 api_key: None,
                 env_key: None,

@@ -38,6 +38,8 @@ pub struct ContentLine {
     content: Line<'static>,
     /// Plain text for search matching.
     plain_text: String,
+    /// Optional pre-localization text for copy/drag operations.
+    copy_text_override: Option<String>,
     /// Stable identity (pre-wrap line index).
     id: u64,
     /// Optional full-width background color (e.g., code block bg).
@@ -55,11 +57,19 @@ impl ContentLine {
                 Self {
                     content: line.clone(),
                     plain_text: plain,
+                    copy_text_override: None,
                     id: i as u64,
                     bg: line.style.bg,
                 }
             })
             .collect()
+    }
+
+    /// Plain text actually painted for this item. Character-level hit testing
+    /// and drag selection must use this coordinate space even when whole-row
+    /// `y` copy has a pre-localization override.
+    fn display_text(&self) -> &str {
+        &self.plain_text
     }
 }
 
@@ -74,6 +84,16 @@ impl ListItem for ContentLine {
 
     fn search_text(&self) -> &str {
         &self.plain_text
+    }
+
+    fn copy_text(&self) -> String {
+        self.copy_text_override.clone().unwrap_or_else(|| {
+            self.content
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
     }
 
     fn background(&self) -> Option<Color> {
@@ -357,6 +377,7 @@ impl BlockViewerPane {
                 ContentLine {
                     content: line,
                     plain_text: plain,
+                    copy_text_override: None,
                     id: i as u64,
                     bg: None,
                 }
@@ -574,6 +595,7 @@ impl BlockViewerPane {
         let dim = Style::default().fg(theme.gray);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut copy_overrides: Vec<Option<String>> = Vec::new();
 
         // Metadata
         if let Some(limit) = st.limit {
@@ -586,6 +608,7 @@ impl BlockViewerPane {
                 ),
                 Span::styled(limit.to_string(), value),
             ]));
+            copy_overrides.push(None);
         }
         let english = if st.result_count == 1 {
             "{count} result"
@@ -599,31 +622,57 @@ impl BlockViewerPane {
                 .replace("{count}", &st.result_count.to_string()),
             label,
         )));
+        copy_overrides.push(None);
 
         // Tool list
         for (i, tool) in st.results.iter().enumerate() {
             lines.push(Line::from(""));
+            copy_overrides.push(None);
+            let mut spans = vec![Span::styled(format!("{}. ", i + 1), dim)];
             let action =
                 mcp_titleize_segment(crate::scrollback::blocks::discovered_tool_action(tool));
             let server = mcp_titleize_segment(&tool.server);
-            lines.push(Line::from(vec![
-                Span::styled(format!("{}. ", i + 1), dim),
-                Span::styled(action, Style::default().fg(theme.text_primary)),
-                Span::styled(format!("  {}", server), dim),
-            ]));
+            let copy_text = if server.is_empty() {
+                format!("{}. {action}", i + 1)
+            } else {
+                format!("{}. {action}  {server}", i + 1)
+            };
+            if let Some(localized) =
+                crate::scrollback::blocks::tool::localized_known_search_mcp_tool_name(
+                    &tool.name,
+                    &tool.server,
+                    entry.locale(),
+                )
+            {
+                spans.push(Span::styled(
+                    localized,
+                    Style::default().fg(theme.text_primary),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    action,
+                    Style::default().fg(theme.text_primary),
+                ));
+                if !server.is_empty() {
+                    spans.push(Span::styled(format!("  {server}"), dim));
+                }
+            }
+            lines.push(Line::from(spans));
+            copy_overrides.push(Some(copy_text));
             if !tool.description.is_empty() {
                 lines.push(Line::from(Span::styled(
                     format!("   {}", tool.description),
                     dim,
                 )));
+                copy_overrides.push(None);
             }
         }
 
-        Some(Self::for_static_content(
-            entry_id,
-            ViewerKind::IntegrationSearch,
-            lines,
-        ))
+        let mut pane = Self::for_static_content(entry_id, ViewerKind::IntegrationSearch, lines);
+        for (item, copy_text_override) in pane.items.iter_mut().zip(copy_overrides) {
+            item.copy_text_override = copy_text_override;
+        }
+        Some(pane)
     }
 
     /// Create a viewer for a use_tool block.
@@ -749,12 +798,14 @@ impl BlockViewerPane {
             ContentLine {
                 content: Line::from(Span::styled(title.to_owned(), title_style)),
                 plain_text: title.to_owned(),
+                copy_text_override: None,
                 id: u64::MAX,
                 bg: None,
             },
             ContentLine {
                 content: Line::default(),
                 plain_text: String::new(),
+                copy_text_override: None,
                 id: u64::MAX - 1,
                 bg: None,
             },
@@ -762,6 +813,7 @@ impl BlockViewerPane {
         items.extend(text.lines().enumerate().map(|(i, line)| ContentLine {
             content: Line::from(Span::styled(line.to_owned(), style)),
             plain_text: line.to_owned(),
+            copy_text_override: None,
             id: i as u64,
             bg: None,
         }));
@@ -834,6 +886,7 @@ impl BlockViewerPane {
             .map(|(i, rl)| ContentLine {
                 content: rl.line,
                 plain_text: rl.plain,
+                copy_text_override: None,
                 id: i as u64,
                 bg: Some(theme.bg_dark),
             })
@@ -932,6 +985,7 @@ impl BlockViewerPane {
             items.push(ContentLine {
                 content: dl.line,
                 plain_text: plain,
+                copy_text_override: None,
                 id: i as u64,
                 bg: dl.background,
             });
@@ -1477,8 +1531,7 @@ impl BlockViewerPane {
                 if col_in_sub >= line_w && i + 1 < wrapped.len() {
                     // Cursor at/past the right edge of a non-last sub-row:
                     // snap to end of logical line.
-                    let text = item.copy_text();
-                    let total = unicode_width::UnicodeWidthStr::width(text.as_str()) as u16;
+                    let total = unicode_width::UnicodeWidthStr::width(item.display_text()) as u16;
                     return Some(TextEndpoint {
                         item_idx,
                         col: total,
@@ -1554,23 +1607,23 @@ impl BlockViewerPane {
             let Some(item) = items.get(idx) else {
                 break;
             };
-            let text = item.copy_text();
+            let text = item.display_text();
             let slice = if start.item_idx == end.item_idx {
                 // Single-item: slice [start .. end_inclusive]
-                let lo = Self::col_at_char_start(&text, start.col);
-                let hi = crate::scrollback::types::col_past_grapheme(&text, end.col);
-                crate::scrollback::types::slice_display_cols(&text, lo, hi)
+                let lo = Self::col_at_char_start(text, start.col);
+                let hi = crate::scrollback::types::col_past_grapheme(text, end.col);
+                crate::scrollback::types::slice_display_cols(text, lo, hi)
             } else if idx == start.item_idx {
                 // First item: from start to end of line
-                let lo = Self::col_at_char_start(&text, start.col);
-                crate::scrollback::types::slice_display_cols(&text, lo, u16::MAX)
+                let lo = Self::col_at_char_start(text, start.col);
+                crate::scrollback::types::slice_display_cols(text, lo, u16::MAX)
             } else if idx == end.item_idx {
                 // Last item: from beginning to end_inclusive
-                let hi = crate::scrollback::types::col_past_grapheme(&text, end.col);
-                crate::scrollback::types::slice_display_cols(&text, 0, hi)
+                let hi = crate::scrollback::types::col_past_grapheme(text, end.col);
+                crate::scrollback::types::slice_display_cols(text, 0, hi)
             } else {
                 // Middle items: full line
-                text
+                text.to_string()
             };
             if wrote_any {
                 out.push('\n');
@@ -1606,7 +1659,7 @@ impl BlockViewerPane {
         let end_col_hi = self
             .cached_unified
             .get(end.item_idx)
-            .map(|item| crate::scrollback::types::col_past_grapheme(&item.copy_text(), end.col))
+            .map(|item| crate::scrollback::types::col_past_grapheme(item.display_text(), end.col))
             .unwrap_or(end.col);
         let end = TextEndpoint {
             item_idx: end.item_idx,
@@ -1617,7 +1670,7 @@ impl BlockViewerPane {
         let start_col_lo = self
             .cached_unified
             .get(start.item_idx)
-            .map(|item| Self::col_at_char_start(&item.copy_text(), start.col))
+            .map(|item| Self::col_at_char_start(item.display_text(), start.col))
             .unwrap_or(start.col);
         let start = TextEndpoint {
             item_idx: start.item_idx,
@@ -1699,6 +1752,69 @@ impl BlockViewerPane {
     }
 }
 
+#[cfg(test)]
+mod localization_tests {
+    use super::*;
+    use crate::locale::{LocaleContext, LocaleSource, ResolvedLocale, UiLocale};
+    use crate::scrollback::blocks::tool::{DiscoveredTool, IntegrationSearchToolCallBlock};
+
+    #[test]
+    fn zh_localization_integration_search_display_preserves_copy_geometry() {
+        let mut search = IntegrationSearchToolCallBlock::new("tasks list");
+        search.result_count = 2;
+        search.results = vec![
+            DiscoveredTool {
+                name: "tasks__list".to_string(),
+                server: "tasks".to_string(),
+                description: r"Keep API_KEY and C:\repo unchanged".to_string(),
+                score: 1.0,
+            },
+            DiscoveredTool {
+                name: "tasks__list_custom".to_string(),
+                server: "tasks".to_string(),
+                description: String::new(),
+                score: 0.5,
+            },
+        ];
+        assert_eq!(search.results[0].name, "tasks__list");
+
+        let mut entry = ScrollbackEntry::new(RenderBlock::ToolCall(
+            ToolCallBlock::IntegrationSearch(search),
+        ));
+        entry.set_locale(LocaleContext::new(ResolvedLocale {
+            locale: UiLocale::ZhCn,
+            source: LocaleSource::Cli,
+        }));
+        let pane = BlockViewerPane::for_integration_search(EntryId::new(1), &entry)
+            .expect("integration search viewer");
+
+        assert_eq!(pane.items[2].plain_text, "1. 列出任务");
+        assert_eq!(pane.items[2].copy_text(), "1. List  Tasks");
+        let display_width = unicode_width::UnicodeWidthStr::width("1. 列出任务") as u16;
+        let dragged = pane.text_for_drag(
+            TextDrag {
+                anchor: TextEndpoint {
+                    item_idx: 2,
+                    col: 0,
+                },
+                head: TextEndpoint {
+                    item_idx: 2,
+                    col: display_width.saturating_sub(1),
+                },
+                active: false,
+            },
+            &pane.items,
+        );
+        assert_eq!(dragged.as_deref(), Some("1. 列出任务"));
+        assert_eq!(
+            pane.items[3].copy_text(),
+            r"   Keep API_KEY and C:\repo unchanged"
+        );
+        assert_eq!(pane.items[5].plain_text, "2. List Custom  Tasks");
+        assert_eq!(pane.items[5].copy_text(), "2. List Custom  Tasks");
+    }
+}
+
 /// Display width of a `Line` in terminal columns, clamped to `u16::MAX`.
 fn line_display_width_u16(line: &Line<'_>) -> u16 {
     use unicode_width::UnicodeWidthStr;
@@ -1776,6 +1892,7 @@ impl BlockViewerPane {
                 ContentLine {
                     content: line.clone(),
                     plain_text: plain,
+                    copy_text_override: None,
                     id: u64::MAX - i as u64,
                     bg: line.style.bg,
                 }

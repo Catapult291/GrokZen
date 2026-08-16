@@ -415,12 +415,40 @@ pub(crate) fn format_type_label(subagent_type: &str) -> &str {
         other => other,
     }
 }
+
+fn localized_builtin_subagent_type<'a>(
+    subagent_type: &str,
+    locale: Option<&'a crate::locale::LocaleContext>,
+) -> Option<&'a str> {
+    let locale = locale?;
+    let (key, english) = match subagent_type {
+        "general-purpose" => ("subagent.label.general", "general"),
+        "explore" => ("subagent.label.explore", "explore"),
+        "plan" => ("subagent.label.plan", "plan"),
+        _ => return None,
+    };
+    Some(locale.named_static_text(key, english))
+}
 pub(crate) fn format_context_badge(info: &SubagentInfo) -> &str {
     match info.context_source.as_deref() {
         Some("resumed") => "resumed",
         Some("forked") => "forked",
         _ => "",
     }
+}
+pub(crate) fn format_context_badge_with_locale(
+    info: &SubagentInfo,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
+    let english = format_context_badge(info);
+    let key = match english {
+        "resumed" => "tasks.context.resumed",
+        "forked" => "tasks.context.forked",
+        _ => return english.to_string(),
+    };
+    locale
+        .map(|locale| locale.named_text(key, english).into_owned())
+        .unwrap_or_else(|| english.to_string())
 }
 /// Parse a leading `[tag]` prefix from a description.
 ///
@@ -479,14 +507,21 @@ pub(crate) fn format_subagent_label_with_locale(
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        r.to_string()
+        if r.eq_ignore_ascii_case(info.subagent_type.as_ref()) {
+            localized_builtin_subagent_type(&info.subagent_type, locale)
+                .unwrap_or(r)
+                .to_string()
+        } else {
+            r.to_string()
+        }
     } else if info.subagent_type.as_ref() != "general-purpose" {
-        format_type_label(&info.subagent_type).to_string()
+        localized_builtin_subagent_type(&info.subagent_type, locale)
+            .unwrap_or_else(|| format_type_label(&info.subagent_type))
+            .to_string()
     } else if let Some(tag) = tag {
         tag.to_string()
     } else {
-        locale
-            .map(|locale| locale.named_static_text("subagent.label.general", "general"))
+        localized_builtin_subagent_type("general-purpose", locale)
             .unwrap_or("general")
             .to_string()
     };
@@ -613,6 +648,13 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Instant;
+
+    fn zh_locale() -> crate::locale::LocaleContext {
+        crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        })
+    }
     fn make_info() -> SubagentInfo {
         SubagentInfo {
             subagent_id: "sa-1".into(),
@@ -1036,6 +1078,23 @@ mod tests {
         assert_eq!(format_context_badge(&make_info()), "");
     }
     #[test]
+    fn zh_localization_context_badge_localizes_only_fixed_sources() {
+        let locale = zh_locale();
+        let mut resumed = make_info();
+        resumed.context_source = Some("resumed".into());
+        assert_eq!(
+            format_context_badge_with_locale(&resumed, Some(&locale)),
+            "已恢复"
+        );
+
+        let mut dynamic = make_info();
+        dynamic.context_source = Some("custom-source".into());
+        assert_eq!(
+            format_context_badge_with_locale(&dynamic, Some(&locale)),
+            ""
+        );
+    }
+    #[test]
     fn subagent_meta_collapses_duplicate_persona_role() {
         assert_eq!(
             format_subagent_meta(Some("reviewer"), Some("reviewer"), Some("grok-3")),
@@ -1158,6 +1217,51 @@ mod tests {
         info.subagent_type = "custom-agent".into();
         let (label, _) = format_subagent_label(&info);
         assert_eq!(label, "Custom-agent");
+    }
+
+    #[test]
+    fn zh_localization_subagent_label_localizes_only_builtin_types() {
+        let locale = zh_locale();
+
+        let mut explore = make_info();
+        explore.subagent_type = "explore".into();
+        explore.role = Some("explore".into());
+        explore.description = "Workspace smoke-test probe".into();
+        let (label, description) = format_subagent_label_with_locale(&explore, Some(&locale));
+        assert_eq!(label, "探索");
+        assert_eq!(description, "Workspace smoke-test probe");
+
+        let mut plan = make_info();
+        plan.subagent_type = "plan".into();
+        plan.role = None;
+        assert_eq!(
+            format_subagent_label_with_locale(&plan, Some(&locale)).0,
+            "计划"
+        );
+
+        let mut custom = make_info();
+        custom.subagent_type = "custom-agent".into();
+        custom.role = Some("custom-role".into());
+        assert_eq!(
+            format_subagent_label_with_locale(&custom, Some(&locale)).0,
+            "Custom-role"
+        );
+
+        let mut dynamic_collision = make_info();
+        dynamic_collision.subagent_type = "custom-agent".into();
+        dynamic_collision.role = Some("explore".into());
+        assert_eq!(
+            format_subagent_label_with_locale(&dynamic_collision, Some(&locale)).0,
+            "Explore"
+        );
+
+        let mut general = make_info();
+        general.subagent_type = "general-purpose".into();
+        general.role = None;
+        assert_eq!(
+            format_subagent_label_with_locale(&general, Some(&locale)).0,
+            "通用"
+        );
     }
     #[test]
     fn label_preserves_already_capitalized_persona() {

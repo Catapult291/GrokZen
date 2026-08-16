@@ -93,6 +93,15 @@ pub enum ArgPresentation {
     /// Stable reasoning value used only to localize the visible label and
     /// description. The option id in `insert_text` remains untouched.
     ReasoningEffort(ReasoningEffort),
+    /// Bundled model identity used only to localize client-owned picker
+    /// description chrome. Model names, ids, and inserted text stay opaque.
+    BundledModel {
+        model_id: &'static str,
+        is_current: bool,
+    },
+    /// A model row without trusted bundled provenance. Its description is
+    /// server/user-owned and must bypass generic exact-phrase localization.
+    DynamicModel { is_current: bool },
 }
 
 /// A suggestion item for command argument completion.

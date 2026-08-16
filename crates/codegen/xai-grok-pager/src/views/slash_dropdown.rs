@@ -118,12 +118,26 @@ fn localized_argument_display_with_presentation(
     description: &str,
     presentation: Option<ArgPresentation>,
 ) -> String {
-    let (base, marker_id, marker_english) = if let Some(base) = text.strip_suffix(" (active)") {
-        (base, Some("slash.marker.active"), "active")
-    } else if let Some(base) = text.strip_suffix(" (current)") {
-        (base, Some("slash.marker.current"), "current")
-    } else {
-        (text, None, "")
+    let (base, marker_id, marker_english) = match presentation {
+        Some(ArgPresentation::BundledModel { is_current, .. })
+        | Some(ArgPresentation::DynamicModel { is_current }) => {
+            if is_current {
+                text.strip_suffix(" (current)")
+                    .map(|base| (base, Some("slash.marker.current"), "current"))
+                    .unwrap_or((text, None, ""))
+            } else {
+                (text, None, "")
+            }
+        }
+        _ => {
+            if let Some(base) = text.strip_suffix(" (active)") {
+                (base, Some("slash.marker.active"), "active")
+            } else if let Some(base) = text.strip_suffix(" (current)") {
+                (base, Some("slash.marker.current"), "current")
+            } else {
+                (text, None, "")
+            }
+        }
     };
 
     // Picker labels are presentation only. Match the client-owned built-in
@@ -153,6 +167,9 @@ fn localized_argument_display_with_presentation(
                 "slash.arg.model_effort.max.label"
             }
         }),
+        Some(ArgPresentation::BundledModel { .. }) | Some(ArgPresentation::DynamicModel { .. }) => {
+            None
+        }
         None => match (base, description) {
             ("how-to", "Browse in-TUI How-to Guides") => {
                 Some("slash.command.docs.arg.how-to.label")
@@ -179,13 +196,18 @@ fn localized_argument_display_with_presentation(
             _ => None,
         },
     };
-    let localized_doc_title = description
-        .strip_prefix("Open \"")
-        .and_then(|rest| rest.strip_suffix('"'))
-        .filter(|title| *title == base)
-        .and_then(crate::docs::find_doc)
-        .and_then(|doc| crate::docs::localized_doc(doc.id, locale.locale()))
-        .map(|doc| doc.title);
+    let localized_doc_title = match presentation {
+        Some(ArgPresentation::BundledModel { .. }) | Some(ArgPresentation::DynamicModel { .. }) => {
+            None
+        }
+        _ => description
+            .strip_prefix("Open \"")
+            .and_then(|rest| rest.strip_suffix('"'))
+            .filter(|title| *title == base)
+            .and_then(crate::docs::find_doc)
+            .and_then(|doc| crate::docs::localized_doc(doc.id, locale.locale()))
+            .map(|doc| doc.title),
+    };
     let base = label_id
         .map(|id| locale.named_text(id, base).into_owned())
         .or(localized_doc_title)
@@ -241,6 +263,16 @@ fn localized_argument_description_with_presentation(
         };
         return locale.named_text(id, english).into_owned();
     }
+    if let Some(ArgPresentation::BundledModel { model_id, .. }) = presentation {
+        let id = match model_id {
+            "grok-4.6" => "slash.arg.model.grok_4_6.description",
+            _ => return english.to_string(),
+        };
+        return locale.named_text(id, english).into_owned();
+    }
+    if matches!(presentation, Some(ArgPresentation::DynamicModel { .. })) {
+        return english.to_string();
+    }
 
     let catalog_id = match english {
         "Hide the announcement banner" => Some("slash.command.announcements.arg.hide.description"),
@@ -262,7 +294,6 @@ fn localized_argument_description_with_presentation(
         "Heavy reasoning" => Some("slash.arg.reasoning_effort.high.description"),
         "Extended reasoning" => Some("slash.arg.reasoning_effort.xhigh.description"),
         "Maximum reasoning" => Some("slash.arg.reasoning_effort.max.description"),
-        "SpaceXAI's new frontier model" => Some("slash.arg.model.grok_4_5.description"),
         "Highest implementation quality with extensive reasoning" => {
             Some("slash.arg.model_effort.high.description")
         }
@@ -957,6 +988,87 @@ mod tests {
         row.insert_text = insert_text.to_string();
         row.presentation = Some(ArgPresentation::ReasoningEffort(value));
         row
+    }
+
+    #[test]
+    fn zh_localization_bundled_model_description_keeps_dynamic_collision_opaque() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let english = "SpaceXAI's latest frontier model";
+
+        assert_eq!(
+            localized_argument_description_with_presentation(
+                &locale,
+                english,
+                Some(ArgPresentation::BundledModel {
+                    model_id: "grok-4.6",
+                    is_current: false,
+                }),
+            ),
+            "SpaceXAI 推出的最新一代前沿模型"
+        );
+        assert_eq!(
+            localized_argument_description_with_presentation(
+                &locale,
+                english,
+                Some(ArgPresentation::DynamicModel { is_current: false }),
+            ),
+            english,
+            "an unmarked custom/server model must remain opaque"
+        );
+        assert_eq!(
+            localized_argument_description_with_presentation(
+                &locale,
+                "Heavy reasoning",
+                Some(ArgPresentation::DynamicModel { is_current: false }),
+            ),
+            "Heavy reasoning",
+            "dynamic model descriptions must bypass generic phrase localization"
+        );
+        assert_eq!(
+            localized_argument_display_with_presentation(
+                &locale,
+                "Custom Grok 4.6",
+                english,
+                Some(ArgPresentation::BundledModel {
+                    model_id: "grok-4.6",
+                    is_current: false,
+                }),
+            ),
+            "Custom Grok 4.6"
+        );
+        assert_eq!(
+            localized_argument_display_with_presentation(
+                &locale,
+                "Getting Started",
+                "Open \"Getting Started\"",
+                Some(ArgPresentation::DynamicModel { is_current: false }),
+            ),
+            "Getting Started",
+            "a dynamic model name must not collide with a bundled docs title"
+        );
+        assert_eq!(
+            localized_argument_display_with_presentation(
+                &locale,
+                "Provider Model (current)",
+                "Server-owned description",
+                Some(ArgPresentation::DynamicModel { is_current: false }),
+            ),
+            "Provider Model (current)",
+            "a non-current dynamic model may legitimately end with the marker text"
+        );
+        assert_eq!(
+            localized_argument_display_with_presentation(
+                &locale,
+                "Provider Model (current) (current)",
+                "Server-owned description",
+                Some(ArgPresentation::DynamicModel { is_current: true }),
+            ),
+            "Provider Model (current)（当前）",
+            "only the client-owned current marker is localized"
+        );
     }
 
     #[test]

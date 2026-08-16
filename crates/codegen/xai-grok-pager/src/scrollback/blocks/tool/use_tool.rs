@@ -88,31 +88,6 @@ impl UseToolCallBlock {
         out
     }
 
-    /// Localize only known, product-owned display aliases. The stored MCP
-    /// qualified name remains untouched for routing, permissions, and copy.
-    fn localized_name(&self, locale: &crate::locale::LocaleContext) -> Option<&'static str> {
-        let (key, english) = match self.tool_name.as_str() {
-            "tasks__list" => ("scrollback.tool.mcp.tasks.list", "Tasks List"),
-            "tasks__create" => ("scrollback.tool.mcp.tasks.create", "Tasks Create"),
-            "tasks__update" => ("scrollback.tool.mcp.tasks.update", "Tasks Update"),
-            "tasks__get_results" => ("scrollback.tool.mcp.tasks.get_results", "Tasks Get Results"),
-            "tasks__pause" => ("scrollback.tool.mcp.tasks.pause", "Tasks Pause"),
-            "tasks__delete" => ("scrollback.tool.mcp.tasks.delete", "Tasks Delete"),
-            "tasks__list_trigger_catalog" => (
-                "scrollback.tool.mcp.tasks.list_trigger_catalog",
-                "Tasks List Trigger Catalog",
-            ),
-            "tasks__list_trigger_resources" => (
-                "scrollback.tool.mcp.tasks.list_trigger_resources",
-                "Tasks List Trigger Resources",
-            ),
-            "voice__list_voices" => ("scrollback.tool.mcp.voice.list_voices", "Voice List Voices"),
-            _ => return None,
-        };
-        let localized = locale.named_static_text(key, english);
-        (localized != english).then_some(localized)
-    }
-
     /// Split `tool_name` on the (validated-unambiguous)
     /// `MCP_TOOL_NAME_DELIMITER` and title-case each segment. Returns
     /// `(server_title, action_title)` for qualified names, or
@@ -145,7 +120,7 @@ impl UseToolCallBlock {
             theme.fg(theme.command)
         };
 
-        if let Some(localized) = self.localized_name(locale) {
+        if let Some(localized) = super::localized_known_mcp_tool_name(&self.tool_name, locale) {
             let display = match max_width {
                 Some(w) => truncate_str(localized, w),
                 None => localized.to_string(),

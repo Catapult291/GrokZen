@@ -49,6 +49,53 @@ use std::fmt;
 /// using one id across tool kinds keeps multi-line drag/copy grouping simple.
 pub(crate) const TOOL_HEADER_RANGE: u16 = 0;
 
+/// Return a translated display alias for product-owned MCP tools.
+///
+/// The qualified name remains the canonical routing, permission, search, and
+/// copy contract. Unknown and server-provided names deliberately fall back to
+/// their existing dynamic presentation.
+pub(crate) fn localized_known_mcp_tool_name(
+    tool_name: &str,
+    locale: &crate::locale::LocaleContext,
+) -> Option<&'static str> {
+    let (key, english) = match tool_name {
+        "tasks__list" => ("scrollback.tool.mcp.tasks.list", "Tasks List"),
+        "tasks__create" => ("scrollback.tool.mcp.tasks.create", "Tasks Create"),
+        "tasks__update" => ("scrollback.tool.mcp.tasks.update", "Tasks Update"),
+        "tasks__get_results" => ("scrollback.tool.mcp.tasks.get_results", "Tasks Get Results"),
+        "tasks__pause" => ("scrollback.tool.mcp.tasks.pause", "Tasks Pause"),
+        "tasks__delete" => ("scrollback.tool.mcp.tasks.delete", "Tasks Delete"),
+        "tasks__list_trigger_catalog" => (
+            "scrollback.tool.mcp.tasks.list_trigger_catalog",
+            "Tasks List Trigger Catalog",
+        ),
+        "tasks__list_trigger_resources" => (
+            "scrollback.tool.mcp.tasks.list_trigger_resources",
+            "Tasks List Trigger Resources",
+        ),
+        "voice__list_voices" => ("scrollback.tool.mcp.voice.list_voices", "Voice List Voices"),
+        _ => return None,
+    };
+    let localized = locale.named_static_text(key, english);
+    (localized != english).then_some(localized)
+}
+
+/// Search results carry the server separately from the qualified tool name.
+/// Require both halves of the product-owned identity before replacing the
+/// dynamic presentation; a custom server must not inherit a Tasks/Voice alias
+/// merely by returning the same tool-name string.
+pub(crate) fn localized_known_search_mcp_tool_name(
+    tool_name: &str,
+    server: &str,
+    locale: &crate::locale::LocaleContext,
+) -> Option<&'static str> {
+    let expected_server = tool_name.split_once("__")?.0;
+    if server != expected_server {
+        return None;
+    }
+    localized_known_mcp_tool_name(tool_name, locale)
+}
+
 /// 1-based inclusive line range for display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LineRange {

@@ -154,6 +154,15 @@ impl EphemeralTipState {
         self.slot.as_ref().map(|t| &t.line)
     }
 
+    /// The active tip, including its stable key and pre-styled line.
+    ///
+    /// Renderers use the key to translate only client-owned hint chrome while
+    /// preserving shortcut and command spans exactly as the builder produced
+    /// them.
+    pub fn active_tip(&self) -> Option<&EphemeralTip> {
+        self.slot.as_ref()
+    }
+
     /// The active tip's dedup key, if any (drives accept-site attribution).
     pub fn current_key(&self) -> Option<&'static str> {
         self.slot.as_ref().map(|t| t.key)

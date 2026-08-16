@@ -6,7 +6,7 @@
 
 use crate::app::agent::BgTaskStatus;
 use crate::app::agent_view::AgentView;
-use crate::app::subagent::format_subagent_label;
+use crate::app::subagent::format_subagent_label_with_locale;
 use crate::util::{format_duration, group_thousands};
 
 fn status_text<'a>(
@@ -146,7 +146,7 @@ pub(crate) fn tasks_block_text_with_locale(
             .then(a.child_session_id.cmp(&b.child_session_id))
     });
     for info in subs {
-        let (type_label, desc) = format_subagent_label(info);
+        let (type_label, desc) = format_subagent_label_with_locale(info, locale);
         let status = if info.pending_kill {
             "stopping"
         } else if info.is_running() {
@@ -424,6 +424,9 @@ fn join_header_rows(header: String, rows: Vec<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::subagent::SubagentInfo;
+    use std::sync::Arc;
+    use std::time::Instant;
     use xai_grok_shell::extensions::notification::{PromptUsage, PromptUsageModel};
 
     fn zh_locale() -> crate::locale::LocaleContext {
@@ -431,6 +434,49 @@ mod tests {
             locale: crate::locale::UiLocale::ZhCn,
             source: crate::locale::LocaleSource::Cli,
         })
+    }
+
+    fn explore_subagent() -> SubagentInfo {
+        let now = Instant::now();
+        SubagentInfo {
+            subagent_id: Arc::from("sa-1"),
+            child_session_id: Arc::from("child-1"),
+            description: Arc::from("Workspace smoke-test probe"),
+            subagent_type: Arc::from("explore"),
+            persona: None,
+            role: Some(Arc::from("explore")),
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            started_at: now,
+            last_progress_at: now,
+            finished: false,
+            status: None,
+            error: None,
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            context_window_tokens: None,
+            context_usage_pct: None,
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: None,
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            prompt: None,
+            child_cwd: None,
+            worktree_path: None,
+            child_updates_replayed: false,
+        }
     }
 
     fn model_row(input: u64, output: u64, ticks: Option<i64>) -> PromptUsageModel {
@@ -463,6 +509,18 @@ mod tests {
             ..Default::default()
         };
         assert!(session_usage_block_text(&incomplete).contains("incomplete"));
+    }
+
+    #[test]
+    fn zh_localization_tasks_block_localizes_builtin_type_but_not_description() {
+        let mut agent = crate::app::agent_view::test_fixtures::make_agent();
+        agent
+            .subagent_sessions
+            .insert("child-1".to_string(), explore_subagent());
+        let locale = zh_locale();
+        let text = tasks_block_text_with_locale(&agent, Some(&locale));
+        assert!(text.contains("探索 · Workspace smoke-test probe"), "{text}");
+        assert!(!text.contains("Explore"), "{text}");
     }
 
     #[test]

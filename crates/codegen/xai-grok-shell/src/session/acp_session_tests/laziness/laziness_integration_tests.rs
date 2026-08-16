@@ -35,6 +35,7 @@ fn detector_entry(
         include_reasoning: None,
     };
     crate::agent::config::ModelEntry {
+        bundled_catalog_entry: false,
         info,
         api_key: None,
         env_key: None,

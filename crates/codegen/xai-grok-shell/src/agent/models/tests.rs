@@ -549,6 +549,7 @@ fn model_show_model_fingerprint_reads_catalog_flag() {
     let mgr = test_manager();
 
     let mut flagged = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("fp-model"),
         api_key: None,
         env_key: None,
@@ -561,6 +562,7 @@ fn model_show_model_fingerprint_reads_catalog_flag() {
     mgr.insert_test_entry(
         "plain-model",
         ModelEntry {
+            bundled_catalog_entry: false,
             info: config::ModelInfo::fallback("plain-model"),
             api_key: None,
             env_key: None,
@@ -570,6 +572,7 @@ fn model_show_model_fingerprint_reads_catalog_flag() {
     );
 
     let mut custom = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("enterprise-slug"),
         api_key: None,
         env_key: None,
@@ -749,6 +752,7 @@ fn rebuild_updates_models_and_available() {
     prefetched.insert(
         "test-model".to_string(),
         ModelEntry {
+            bundled_catalog_entry: false,
             info: config::ModelInfo::fallback("test-model"),
             api_key: None,
             env_key: None,
@@ -803,6 +807,7 @@ fn default_reasoning_effort_only_stamps_supporting_model() {
 
     let mut prefetched = IndexMap::new();
     let mut reasoning_entry = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("reasoning-model"),
         api_key: None,
         env_key: None,
@@ -825,6 +830,7 @@ fn default_reasoning_effort_only_stamps_supporting_model() {
 
     let mut prefetched = IndexMap::new();
     let plain_entry = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("plain-model"),
         api_key: None,
         env_key: None,
@@ -852,6 +858,7 @@ fn reasoning_effort_override_skips_models_that_do_not_offer_level() {
 
     let mut prefetched = IndexMap::new();
     let mut no_none = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("grok-4.5"),
         api_key: None,
         env_key: None,
@@ -870,6 +877,7 @@ fn reasoning_effort_override_skips_models_that_do_not_offer_level() {
     prefetched.insert("grok-4.5".to_string(), no_none);
 
     let mut with_none = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("legacy-none"),
         api_key: None,
         env_key: None,
@@ -971,6 +979,7 @@ fn cli_reasoning_effort_override_only_stamps_supporting_models() {
 
     let mut prefetched = IndexMap::new();
     let mut reasoning_entry = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("reasoning-model"),
         api_key: None,
         env_key: None,
@@ -981,6 +990,7 @@ fn cli_reasoning_effort_override_only_stamps_supporting_models() {
     prefetched.insert("reasoning-model".to_string(), reasoning_entry);
 
     let plain_entry = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("plain-model"),
         api_key: None,
         env_key: None,
@@ -1024,6 +1034,7 @@ fn apply_refresh_result_only_updates_etag_on_success() {
 
 fn make_model_entry(model_id: &str) -> ModelEntry {
     ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback(model_id),
         api_key: None,
         env_key: None,
@@ -1893,6 +1904,7 @@ async fn fetch_and_apply_degrades_offline_when_remote_fetch_disabled() {
     mgr.insert_test_entry(
         "static-one",
         ModelEntry {
+            bundled_catalog_entry: false,
             info: config::ModelInfo::fallback("static-one"),
             api_key: None,
             env_key: None,
@@ -1921,6 +1933,7 @@ fn default_model_skips_oauth_only_for_api_key_users() {
     let mut catalog = IndexMap::new();
 
     let mut oauth_only = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("oauth-only"),
         api_key: None,
         env_key: None,
@@ -1931,6 +1944,7 @@ fn default_model_skips_oauth_only_for_api_key_users() {
     catalog.insert("oauth-only".to_string(), oauth_only);
 
     let public = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("public-model"),
         api_key: None,
         env_key: None,

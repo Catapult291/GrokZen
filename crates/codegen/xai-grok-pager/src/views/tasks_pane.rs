@@ -18,7 +18,9 @@ use std::time::{Instant, SystemTime};
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::agent::{BgTaskState, BgTaskStatus, ScheduledTaskInfo};
-use crate::app::subagent::{SubagentInfo, format_context_badge, format_subagent_label};
+use crate::app::subagent::{
+    SubagentInfo, format_context_badge_with_locale, format_subagent_label_with_locale,
+};
 use crate::appearance::LayoutConfig;
 use crate::scrollback::layout::HorizontalLayout;
 use crate::syntax::get_syntect;
@@ -409,12 +411,7 @@ impl TaskEntry {
 
         // Single consolidated label (persona > role > subagent_type > tag >
         // "general") plus description with any `[tag]` prefix stripped.
-        let (type_label, description) = format_subagent_label(info);
-        let type_label = if type_label == "general" {
-            tasks_static(locale, "tasks.kind.general", "general").to_string()
-        } else {
-            type_label
-        };
+        let (type_label, description) = format_subagent_label_with_locale(info, locale);
         let model_suffix = info
             .model
             .as_deref()
@@ -1914,11 +1911,7 @@ impl TasksPane {
         buf.set_span(area.x, y, &Span::styled(icon, icon_style), 2);
 
         // Clear overlay area to prevent label text bleeding through.
-        let badge = match format_context_badge(info) {
-            "resumed" => tasks_static(locale, "tasks.context.resumed", "resumed"),
-            "forked" => tasks_static(locale, "tasks.context.forked", "forked"),
-            other => other,
-        };
+        let badge = format_context_badge_with_locale(info, locale);
         let model_text = info
             .model
             .as_deref()
@@ -3248,6 +3241,21 @@ mod tests {
             _ => panic!("expected Agent variant"),
         };
         assert_eq!(label, "Explore Find API endpoints");
+    }
+
+    #[test]
+    fn zh_localization_task_entry_preserves_dynamic_description() {
+        let info = make_info();
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let entry = TaskEntry::from_subagent_with_locale(&info, Some(&locale));
+        let label = match &entry {
+            TaskEntry::Agent { label, .. } => label.as_str(),
+            _ => panic!("expected Agent variant"),
+        };
+        assert_eq!(label, "探索 Find API endpoints");
     }
 
     #[test]

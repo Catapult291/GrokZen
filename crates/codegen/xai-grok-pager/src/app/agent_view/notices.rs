@@ -252,6 +252,34 @@ impl AgentView {
         Some(sticky)
     }
 
+    /// Locale-aware display text for the active toast. Stored toast content
+    /// remains canonical; only the two client-owned mouse-reporting hints are
+    /// translated, while dynamic errors and provider messages stay opaque.
+    pub(super) fn active_toast_message_with_locale(
+        &self,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> Option<String> {
+        if let Some((message, _)) = &self.toast {
+            return Some(message.clone());
+        }
+        let message = self.active_toast_message()?;
+        let Some(locale) = locale else {
+            return Some(message.to_string());
+        };
+        let catalog_id = match message {
+            crate::app::MOUSE_OFF_HINT_SCROLLBACK => {
+                Some("settings.toast.mouse_reporting_off_scrollback")
+            }
+            crate::app::MOUSE_OFF_HINT_PROMPT => Some("settings.toast.mouse_reporting_off_prompt"),
+            _ => None,
+        };
+        Some(
+            catalog_id
+                .map(|id| locale.named_text(id, message).into_owned())
+                .unwrap_or_else(|| message.to_string()),
+        )
+    }
+
     /// Show a transient "Switched to mode: ..." banner above the prompt.
     ///
     /// Triggered on Shift+Tab mode cycles.
@@ -421,6 +449,41 @@ mod mouse_off_banner_tests {
         // A transient toast still wins over the sticky banner, regardless of pane.
         view.show_toast("Copied!");
         assert_eq!(view.active_toast_message(), Some("Copied!"));
+    }
+
+    #[test]
+    fn zh_localization_mouse_off_banner_preserves_commands_and_dynamic_toasts() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let mut view = make_running_agent();
+        view.set_sticky_toast(Some(crate::app::MOUSE_OFF_HINT_SCROLLBACK));
+
+        view.active_pane = AgentPane::Scrollback;
+        assert_eq!(
+            view.active_toast_message_with_locale(Some(&locale)),
+            Some("按 Ctrl+r 开启鼠标报告并恢复 TUI 功能".to_string())
+        );
+
+        view.active_pane = AgentPane::Prompt;
+        assert_eq!(
+            view.active_toast_message_with_locale(Some(&locale)),
+            Some("使用 /toggle-mouse-reporting 开启鼠标报告并恢复 TUI 功能".to_string())
+        );
+
+        view.show_toast("Provider retrying");
+        assert_eq!(
+            view.active_toast_message_with_locale(Some(&locale)),
+            Some("Provider retrying".to_string())
+        );
+
+        view.show_toast(crate::app::MOUSE_OFF_HINT_SCROLLBACK);
+        assert_eq!(
+            view.active_toast_message_with_locale(Some(&locale)),
+            Some(crate::app::MOUSE_OFF_HINT_SCROLLBACK.to_string()),
+            "a transient provider message that collides with the client hint stays opaque"
+        );
     }
 
     #[test]

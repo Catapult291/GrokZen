@@ -416,7 +416,10 @@ pub fn compute_peek_fields(
             let parent_agent = agents.get(parent)?;
             let info = parent_agent.subagent_sessions.get(child_session_id)?;
             let label = {
-                let (l, _) = crate::app::subagent::format_subagent_label(info);
+                let (l, _) = crate::app::subagent::format_subagent_label_with_locale(
+                    info,
+                    Some(parent_agent.scrollback.locale()),
+                );
                 sanitize_display_text(&l).into_owned()
             };
             // `subagent_views` holds `Box<AgentView>`; the closures let

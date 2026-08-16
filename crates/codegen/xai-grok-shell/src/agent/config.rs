@@ -21,6 +21,12 @@ use xai_grok_sampling_types::{
 use xai_grok_tools::types::compat::{
     COMPAT_CELLS, CompatConfig, CompatConfigToml, CompatRemoteKey, CompatSurface, CompatVendor,
 };
+
+/// ACP model metadata marker for entries sourced from the bundled catalog.
+/// Pager consumers use this display-only provenance to avoid translating
+/// user-configured or server-provided models that reuse a built-in id/text.
+pub const BUNDLED_MODEL_META_KEY: &str = "x.ai/bundledModel";
+
 /// The mode in which the agent is running.
 /// Determines behavior like relay sync enablement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -3717,7 +3723,11 @@ fn apply_global_scalar_defaults(
 pub(crate) fn default_model_entries(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntry> {
     default_models(endpoints)
         .into_iter()
-        .map(|(key, entry)| (key, ModelEntry::from_config_entry(&entry)))
+        .map(|(key, entry)| {
+            let mut model = ModelEntry::from_config_entry(&entry);
+            model.bundled_catalog_entry = true;
+            (key, model)
+        })
         .collect()
 }
 /// Resolve a model against the available model map.
@@ -4039,6 +4049,9 @@ impl ConfigModelOverride {
         endpoints: &EndpointsConfig,
     ) -> ModelEntry {
         let mut entry = base.unwrap_or_else(|| ModelEntry::fallback(key, endpoints));
+        // Any explicit `[model.<id>]` entry is user-owned presentation, even
+        // when it overrides a bundled id with identical text.
+        entry.bundled_catalog_entry = false;
         if let Some(ref v) = self.model {
             entry.info.model = v.clone();
         }
@@ -4330,6 +4343,10 @@ impl ModelInfo {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelEntry {
     pub info: ModelInfo,
+    /// True only for untouched entries loaded from embedded
+    /// `default_models.json`. Routing never reads this display provenance.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub bundled_catalog_entry: bool,
     pub api_key: Option<String>,
     pub env_key: Option<EnvKeys>,
     /// Named credential helper (`[model.<id>] auth_provider = "<name>"`),
@@ -4347,6 +4364,7 @@ impl ModelEntry {
         info.base_url = endpoints.resolve_inference_base_url();
         Self {
             info,
+            bundled_catalog_entry: false,
             api_key: None,
             env_key: None,
             auth_provider: None,
@@ -4359,6 +4377,7 @@ impl ModelEntry {
     pub(crate) fn from_config_entry(entry: &ModelEntryConfig) -> Self {
         Self {
             info: ModelInfo::from_config(entry),
+            bundled_catalog_entry: false,
             api_key: entry.api_key.clone(),
             env_key: entry.env_key.clone(),
             auth_provider: None,
@@ -5017,6 +5036,7 @@ pub(crate) fn resolve_aux_model_sampling_config(
         .or_else(|| endpoints.deployment_key.clone());
     if let Some(bearer) = xai_bearer {
         let entry = ModelEntry {
+            bundled_catalog_entry: false,
             info: ModelInfo {
                 user_selectable: true,
                 id: None,
@@ -5255,6 +5275,7 @@ fn resolve_hidden_default_web_search_sampling_config(
     endpoints: &EndpointsConfig,
 ) -> SamplerConfig {
     let entry = ModelEntry {
+        bundled_catalog_entry: false,
         info: ModelInfo {
             id: None,
             model: model_id.to_owned(),
@@ -5385,6 +5406,12 @@ pub(crate) fn to_acp_model_info(
                     map.insert(
                         REASONING_EFFORTS_META_KEY.to_string(),
                         reasoning_efforts_meta_value(&info.reasoning_efforts),
+                    );
+                }
+                if model.bundled_catalog_entry {
+                    map.insert(
+                        BUNDLED_MODEL_META_KEY.to_string(),
+                        serde_json::Value::Bool(true),
                     );
                 }
                 if map.is_empty() { None } else { Some(map) }
@@ -6472,6 +6499,7 @@ reasoning_effort = "low"
         api_base_url: Option<&str>,
     ) -> ModelEntry {
         ModelEntry {
+            bundled_catalog_entry: false,
             info: ModelInfo {
                 user_selectable: true,
                 id: None,
@@ -7722,6 +7750,56 @@ reasoning_effort = "low"
             meta["agentType"], DEFAULT_AGENT_TYPE,
             "agentType should always be in meta, defaulting to DEFAULT_AGENT_TYPE"
         );
+    }
+
+    #[test]
+    fn bundled_model_provenance_survives_acp_but_config_override_clears_it() {
+        let endpoints = EndpointsConfig::default();
+        let defaults = default_model_entries(&endpoints);
+        let bundled = defaults.get("grok-4.6").expect("bundled grok-4.6");
+        assert!(bundled.bundled_catalog_entry);
+        let bundled_acp = to_acp_model_info(&defaults);
+        let bundled_meta = bundled_acp[&acp::ModelId::new(Arc::from("grok-4.6"))]
+            .meta
+            .as_ref()
+            .expect("bundled model meta");
+        assert_eq!(bundled_meta[BUNDLED_MODEL_META_KEY], true);
+
+        let raw_config: toml::Value = toml::from_str(
+            r#"
+            [model."grok-4.6"]
+            description = "SpaceXAI's latest frontier model"
+            "#,
+        )
+        .unwrap();
+        let cfg = Config::new_from_toml_cfg(&raw_config).expect("config should parse");
+        let overridden = resolve_model_list(&cfg, None);
+        assert!(
+            !overridden["grok-4.6"].bundled_catalog_entry,
+            "a user-owned override must not inherit bundled presentation provenance"
+        );
+        let overridden_acp = to_acp_model_info(&overridden);
+        let overridden_meta = overridden_acp[&acp::ModelId::new(Arc::from("grok-4.6"))]
+            .meta
+            .as_ref()
+            .expect("standard model meta");
+        assert!(overridden_meta.get(BUNDLED_MODEL_META_KEY).is_none());
+
+        let mut prefetched = IndexMap::new();
+        let mut remote = test_model_entry("grok-4.6", "https://test.api/v1", None, None, None);
+        remote.info.description = Some("SpaceXAI's latest frontier model".to_string());
+        prefetched.insert("grok-4.6".to_string(), remote);
+        let remote_resolved = resolve_model_list(&Config::default(), Some(prefetched));
+        assert!(
+            !remote_resolved["grok-4.6"].bundled_catalog_entry,
+            "a remotely supplied same-id model must remain dynamic"
+        );
+        let remote_acp = to_acp_model_info(&remote_resolved);
+        let remote_meta = remote_acp[&acp::ModelId::new(Arc::from("grok-4.6"))]
+            .meta
+            .as_ref()
+            .expect("standard remote model meta");
+        assert!(remote_meta.get(BUNDLED_MODEL_META_KEY).is_none());
     }
     #[test]
     fn acp_model_meta_emits_reasoning_effort_when_supported() {
@@ -11986,6 +12064,7 @@ default = "grok-4.5"
         api_backend: ApiBackend,
     ) -> ModelEntry {
         ModelEntry {
+            bundled_catalog_entry: false,
             info: ModelInfo {
                 user_selectable: true,
                 id: None,

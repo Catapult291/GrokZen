@@ -11,6 +11,8 @@ use ratatui::{
 use crate::render::SafeBuf;
 use crate::theme::Theme;
 
+use super::EphemeralTip;
+
 /// Compute the number of rows a tip needs when rendered at the given `width`.
 pub fn tip_height(width: u16, tip: &str) -> u16 {
     tip_height_with_locale(width, tip, None)
@@ -65,6 +67,7 @@ fn localized_tip_body<'a>(
         "Run /dashboard (or Ctrl+\\) to see and manage all your agents in one place." => {
             Some("tips.dashboard")
         }
+        "Try out workflows using /workflows." => Some("tips.workflows"),
         _ => None,
     };
     if let Some(catalog_id) = catalog_id {
@@ -141,6 +144,149 @@ pub fn render_ephemeral_tip(area: Rect, buf: &mut Buffer, line: &Line<'static>) 
     let theme = Theme::current();
     clear_rect(buf, area, theme.bg_base);
     buf.set_line_safe(area.x, area.y, line, area.width);
+}
+
+struct TemplateToken<'a> {
+    name: &'static str,
+    span: &'a Span<'static>,
+}
+
+/// Rebuild a localized tip template while retaining the original shortcut or
+/// command spans (content and style). A malformed catalog placeholder falls
+/// back to the canonical pre-styled English line instead of dropping text.
+fn localized_ephemeral_line(
+    tip: &EphemeralTip,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Line<'static> {
+    let Some(locale) = locale else {
+        return tip.line.clone();
+    };
+    let Some(default_style) = tip.line.spans.first().map(|span| span.style) else {
+        return tip.line.clone();
+    };
+
+    let token = |name, index| {
+        tip.line
+            .spans
+            .get(index)
+            .map(|span| TemplateToken { name, span })
+    };
+    let (catalog_id, english, tokens): (&str, &str, Vec<TemplateToken<'_>>) = match tip.key {
+        super::clear_detector::UNDO_TIP_KEY => {
+            let Some(chord) = token("chord", 1) else {
+                return tip.line.clone();
+            };
+            (
+                "tips.ephemeral.undo",
+                "Input cleared · {chord} to undo",
+                vec![chord],
+            )
+        }
+        super::clipboard_focus::CLIPBOARD_IMAGE_TIP_KEY => {
+            let Some(chord) = token("chord", 1) else {
+                return tip.line.clone();
+            };
+            (
+                "tips.ephemeral.clipboard_image",
+                "Image in clipboard · {chord} to paste",
+                vec![chord],
+            )
+        }
+        super::plan_nudge::PLAN_NUDGE_KEY => {
+            let Some(chord) = token("chord", 1) else {
+                return tip.line.clone();
+            };
+            (
+                "tips.ephemeral.plan_mode",
+                "Planning? Check out plan mode via {chord}",
+                vec![chord],
+            )
+        }
+        super::send_now::SEND_NOW_TIP_KEY => {
+            let Some(key) = token("key", 1) else {
+                return tip.line.clone();
+            };
+            (
+                "tips.ephemeral.send_now",
+                "Queued · {key} to send now",
+                vec![key],
+            )
+        }
+        super::small_screen::SMALL_SCREEN_TIP_KEY => {
+            let Some(command) = token("command", 1) else {
+                return tip.line.clone();
+            };
+            (
+                "tips.ephemeral.small_screen",
+                "Tight on space? Try {command}",
+                vec![command],
+            )
+        }
+        super::ssh_wrap::SSH_WRAP_TIP_KEY => {
+            let Some(command) = token("command", 1) else {
+                return tip.line.clone();
+            };
+            (
+                "tips.ephemeral.ssh_wrap",
+                "Run {command} for details and fixes.",
+                vec![command],
+            )
+        }
+        super::word_select::WORD_SELECT_TIP_KEY => {
+            let (Some(settings), Some(chord)) = (token("settings", 1), token("chord", 3)) else {
+                return tip.line.clone();
+            };
+            (
+                "tips.ephemeral.word_select",
+                "Want double-click to select? {settings} → Text selection · {chord}: enable now",
+                vec![settings, chord],
+            )
+        }
+        _ => return tip.line.clone(),
+    };
+
+    let template = locale.named_text(catalog_id, english);
+    let mut rest = template.as_ref();
+    let mut spans = Vec::new();
+    let mut used_tokens = Vec::with_capacity(tokens.len());
+    while let Some(open) = rest.find('{') {
+        let Some(close_rel) = rest[open + 1..].find('}') else {
+            return tip.line.clone();
+        };
+        let close = open + 1 + close_rel;
+        if open > 0 {
+            spans.push(Span::styled(rest[..open].to_string(), default_style));
+        }
+        let name = &rest[open + 1..close];
+        let Some(token) = tokens.iter().find(|token| token.name == name) else {
+            return tip.line.clone();
+        };
+        if used_tokens.contains(&name) {
+            return tip.line.clone();
+        }
+        used_tokens.push(name);
+        spans.push(token.span.clone());
+        rest = &rest[close + 1..];
+    }
+    if used_tokens.len() != tokens.len() {
+        return tip.line.clone();
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest.to_string(), default_style));
+    }
+    Line::from(spans)
+}
+
+/// Render a client-owned contextual hint in the selected locale. Dynamic
+/// shortcut and command tokens are preserved from the original styled line.
+pub fn render_ephemeral_tip_with_locale(
+    area: Rect,
+    buf: &mut Buffer,
+    tip: &EphemeralTip,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
+    let line = localized_ephemeral_line(tip, locale);
+    render_ephemeral_tip(area, buf, &line);
 }
 
 #[cfg(test)]
@@ -221,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn current_remote_tip_catalog_is_localized_without_rewriting_shortcuts() {
+    fn zh_localization_remote_tip_catalog_preserves_shortcuts() {
         let locale = zh_cn_locale();
         let cases = [
             (
@@ -252,6 +398,10 @@ mod tests {
                 "Run /dashboard (or Ctrl+\\) to see and manage all your agents in one place.",
                 "提示：运行 /dashboard（或按 Ctrl+\\）即可集中查看和管理所有智能体。",
             ),
+            (
+                "Try out workflows using /workflows.",
+                "提示：输入 /workflows 即可体验工作流。",
+            ),
         ];
         for (english, expected) in cases {
             let text = tip_line(english, Some(&locale))
@@ -260,6 +410,93 @@ mod tests {
                 .map(|span| span.content.as_ref())
                 .collect::<String>();
             assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn zh_localization_ephemeral_tip_catalog_preserves_action_tokens() {
+        let locale = zh_cn_locale();
+        let cases = [
+            (
+                super::super::clear_detector::undo_tip(),
+                "输入已清空 · ctrl+z 可撤销",
+                "ctrl+z",
+            ),
+            (
+                super::super::clipboard_focus::clipboard_image_tip(),
+                "剪贴板中有图像 · ctrl+v 可粘贴",
+                "ctrl+v",
+            ),
+            (
+                super::super::plan_nudge::plan_nudge_tip(),
+                "正在规划？可按 shift+tab 进入计划模式",
+                "shift+tab",
+            ),
+            (
+                super::super::send_now::send_now_tip(),
+                "已排队 · 按 Enter 立即发送",
+                "Enter",
+            ),
+            (
+                super::super::small_screen::small_screen_tip(),
+                "空间有限？试试 /compact-mode",
+                "/compact-mode",
+            ),
+            (
+                super::super::ssh_wrap::ssh_wrap_tip(),
+                "运行 /doctor 查看详情和修复建议。",
+                "/doctor",
+            ),
+            (
+                super::super::word_select::word_select_tip(),
+                "想通过双击选择文本？/settings → 文本选择 · Ctrl+Y：立即启用",
+                "Ctrl+Y",
+            ),
+        ];
+
+        for (tip, expected, token) in cases {
+            let line = localized_ephemeral_line(&tip, Some(&locale));
+            let text = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert_eq!(text, expected);
+            let token_span = line
+                .spans
+                .iter()
+                .find(|span| span.content.as_ref() == token)
+                .expect("shortcut or command token remains a distinct span");
+            assert!(token_span.style.add_modifier.contains(Modifier::BOLD));
+        }
+
+        let english = super::super::send_now::send_now_tip();
+        let english_line =
+            localized_ephemeral_line(&english, Some(&crate::locale::LocaleContext::default()));
+        let english_text = english_line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(english_text, "Queued · Enter to send now");
+    }
+
+    #[test]
+    fn zh_localization_malformed_ephemeral_tip_falls_back_without_panicking() {
+        let locale = zh_cn_locale();
+        for key in [
+            super::super::clear_detector::UNDO_TIP_KEY,
+            super::super::word_select::WORD_SELECT_TIP_KEY,
+        ] {
+            let tip = EphemeralTip::new(key, Line::from("Keep original"));
+            let line = localized_ephemeral_line(&tip, Some(&locale));
+            assert_eq!(
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>(),
+                "Keep original"
+            );
         }
     }
 

@@ -104,7 +104,15 @@ impl AgentView {
                     AgentPane::Catalog => self.catalog.overlay.focused = false,
                     _ => {}
                 }
-                self.show_toast("Editing a queued prompt: press Enter to save, Esc to discard");
+                let message = self
+                    .scrollback
+                    .locale()
+                    .named_static_text(
+                        "prompt.queue.editing_switch_hint",
+                        "Editing a queued prompt: press Enter to save, Esc to discard",
+                    )
+                    .to_string();
+                self.show_toast(&message);
                 return Some(false); // blocked, no modal armed
             }
             // Clean edit — silently exit editing mode.
@@ -464,11 +472,27 @@ impl AgentView {
         // Non-prompt rows stay queued (see `queue_row_prompt_like`): save the edit.
         let row_prompt_like = self.queue_row_prompt_like(id);
         if row_prompt_like == Some(false) {
-            self.show_toast("Can't send this mid-turn — it runs when the current turn ends");
+            let message = self
+                .scrollback
+                .locale()
+                .named_static_text(
+                    "prompt.queue.mid_turn_deferred",
+                    "Can't send this mid-turn — it runs when the current turn ends",
+                )
+                .to_string();
+            self.show_toast(&message);
             return self.save_edited_queued_row(id, server_id, true);
         }
         if row_prompt_like.is_none() && kind != crate::app::agent::QueueEntryKind::Prompt {
-            self.show_toast("Queued prompt is no longer in the queue");
+            let message = self
+                .scrollback
+                .locale()
+                .named_static_text(
+                    "prompt.queue.row_missing",
+                    "Queued prompt is no longer in the queue",
+                )
+                .to_string();
+            self.show_toast(&message);
             return self.save_edited_queued_row(id, server_id, true);
         }
         match server_id {
@@ -569,7 +593,15 @@ impl AgentView {
         // Restore the pre-edit draft; keeping the orphaned edit text would look
         // "duplicated" (the row is now the running turn). A concurrent-removal edit is lost.
         self.exit_editing_mode();
-        self.show_toast("Queued prompt is no longer in the queue");
+        let message = self
+            .scrollback
+            .locale()
+            .named_static_text(
+                "prompt.queue.row_missing",
+                "Queued prompt is no longer in the queue",
+            )
+            .to_string();
+        self.show_toast(&message);
     }
 
     /// Exit editing mode: restore stashed text, clear mode, focus queue pane.

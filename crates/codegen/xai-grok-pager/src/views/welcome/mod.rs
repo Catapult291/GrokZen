@@ -3359,6 +3359,28 @@ mod tests {
     }
 
     #[test]
+    fn zh_localization_welcome_tip_translates_known_body_and_keeps_command() {
+        let auth = AuthState::Done;
+        let trust = TrustState::Done;
+
+        let mut params = render_params(&auth, &trust, None);
+        params.locale = &ZH_TEST_LOCALE;
+        params.tip = Some("Try out workflows using /workflows.");
+        let localized = render_done_text(&params);
+        assert!(
+            localized.contains("提示：输入 /workflows 即可体验工作流。"),
+            "{localized}"
+        );
+
+        params.locale = &TEST_LOCALE;
+        let english = render_done_text(&params);
+        assert!(
+            english.contains("Tip: Try out workflows using /workflows."),
+            "{english}"
+        );
+    }
+
+    #[test]
     fn simplified_chinese_update_prompt_describes_download() {
         let auth = AuthState::Done;
         let trust = TrustState::Done;

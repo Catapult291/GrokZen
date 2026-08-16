@@ -1797,17 +1797,55 @@ pub(super) fn int_step_sizes(min: i64, max: i64) -> (i64, i64) {
 }
 
 /// Footer labels for the Int stepper (must be `'static` for `Shortcut`).
-fn int_step_footer_labels(min: i64, max: i64) -> (&'static str, &'static str) {
+fn int_step_footer_labels(
+    min: i64,
+    max: i64,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> (&'static str, &'static str) {
     let (small, large) = int_step_sizes(min, max);
-    match (small, large) {
-        (1, 1) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} +/-1"),
-        (1, 5) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} +/-5"),
-        (5, 10) => ("\u{2191}/\u{2193} +/-5", "\u{2190}/\u{2192} +/-10"),
+    let (small_id, small_english, large_id, large_english) = match (small, large) {
+        (1, 1) => (
+            "settings.shortcut.int_step.vertical_1",
+            "\u{2191}/\u{2193} +/-1",
+            "settings.shortcut.int_step.horizontal_1",
+            "\u{2190}/\u{2192} +/-1",
+        ),
+        (1, 5) => (
+            "settings.shortcut.int_step.vertical_1",
+            "\u{2191}/\u{2193} +/-1",
+            "settings.shortcut.int_step.horizontal_5",
+            "\u{2190}/\u{2192} +/-5",
+        ),
+        (5, 10) => (
+            "settings.shortcut.int_step.vertical_5",
+            "\u{2191}/\u{2193} +/-5",
+            "settings.shortcut.int_step.horizontal_10",
+            "\u{2190}/\u{2192} +/-10",
+        ),
         // Defensive fallback if thresholds change without new static pairs.
-        (1, _) => ("\u{2191}/\u{2193} +/-1", "\u{2190}/\u{2192} step"),
-        (5, _) => ("\u{2191}/\u{2193} +/-5", "\u{2190}/\u{2192} step"),
-        _ => ("\u{2191}/\u{2193} step", "\u{2190}/\u{2192} step"),
-    }
+        (1, _) => (
+            "settings.shortcut.int_step.vertical_1",
+            "\u{2191}/\u{2193} +/-1",
+            "settings.shortcut.int_step.horizontal_step",
+            "\u{2190}/\u{2192} step",
+        ),
+        (5, _) => (
+            "settings.shortcut.int_step.vertical_5",
+            "\u{2191}/\u{2193} +/-5",
+            "settings.shortcut.int_step.horizontal_step",
+            "\u{2190}/\u{2192} step",
+        ),
+        _ => (
+            "settings.shortcut.int_step.vertical_step",
+            "\u{2191}/\u{2193} step",
+            "settings.shortcut.int_step.horizontal_step",
+            "\u{2190}/\u{2192} step",
+        ),
+    };
+    (
+        localized_named_static(locale, small_id, small_english),
+        localized_named_static(locale, large_id, large_english),
+    )
 }
 
 // ‹ / › (U+2039 / U+203A) — fall back to ASCII `<` / `>` on legacy ConHost.
@@ -3329,7 +3367,7 @@ fn build_shortcuts_with_locale(
         }
 
         SettingsMode::EditingInt { min, max, .. } => {
-            let (small_label, large_label) = int_step_footer_labels(*min, *max);
+            let (small_label, large_label) = int_step_footer_labels(*min, *max, locale);
             vec![
                 Shortcut {
                     label: small_label,
@@ -3425,5 +3463,26 @@ fn build_shortcuts_with_locale(
                 id: 0,
             },
         ],
+    }
+}
+
+#[cfg(test)]
+mod localization_tests {
+    use super::int_step_footer_labels;
+
+    #[test]
+    fn zh_localization_settings_int_step_footer_uses_locale() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        assert_eq!(
+            int_step_footer_labels(1, 100, Some(&locale)),
+            ("↑/↓ ±1", "←/→ ±5")
+        );
+        assert_eq!(
+            int_step_footer_labels(1, 100, None),
+            ("↑/↓ +/-1", "←/→ +/-5")
+        );
     }
 }
