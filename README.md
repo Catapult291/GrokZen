@@ -16,7 +16,7 @@
 
 [项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [开发](#开发) · [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
 
-![Grok Build TUI](https://media.x.ai/v1/website/universe-tui-screenshot-6f7a0837.png)
+![grok-zh 中文 TUI 工具链体检](docs/screenshots/grok-zh-toolchain-check.png)
 
 </div>
 
@@ -31,7 +31,7 @@
 
 ## 当前状态
 
-本仓库正在进行第一阶段汉化、Windows 绿色构建和社区 Release 更新链验证。当前 Windows 产物仍未经过 Authenticode 签名，不应把预发布包视为正式签名安装包。
+当前稳定版为 `v1.0.3`，提供 Windows x86_64 GNU 完整 ZIP。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) 下载。
 
 已建立的产品与数据边界：
 
@@ -41,8 +41,14 @@
 - 默认界面语言：`zh-CN`，可用 `--locale en-US` 切换英文
 - 内置更新器只读取本仓库的 Immutable GitHub Releases；官方 npm、GitHub、x.ai 和 GCS 更新源始终禁用
 
+### 中文标题与计划
+
+官方原版的相关提示没有中文语言约束，中文对话中的会话标题和计划容易被生成为英文。社区版没有重写整套上游提示词，只在会话标题和主要计划入口加入少量、按条件生效的语言规则：中文请求优先生成简洁的中文标题，并以简体中文创建计划和任务步骤；命令、路径、工具名、配置键、协议字段、任务 ID 以及 `pending`、`in_progress`、`completed`、`cancelled` 等规范状态仍保持原样。标题为空或中文请求生成纯英文标题时，会回退到用户输入。
+
+![grok-zh 中文计划与工具链测试摘要](docs/screenshots/grok-zh-chinese-plan.png)
+
 > [!WARNING]
-> `crates/codegen/xai-grok-pager/scripts/` 下的安装脚本及同模块内的 npm 包装仍来自官方上游，可能安装或覆盖官方 `grok`。社区版发布流程完成前，请勿使用这些脚本安装本 Fork。测试时只使用独立绿色测试包中的 `grok-zh.exe`。
+> `crates/codegen/xai-grok-pager/scripts/` 下的安装脚本及同模块内的 npm 包装仍来自官方上游，可能安装或覆盖官方 `grok`。安装社区版时只使用本仓库 Releases 中的完整 ZIP。
 
 ## Windows 安装
 
@@ -62,53 +68,12 @@
 
 ### 自动更新
 
-- 默认使用 `stable` 通道，只接受非 Draft、非 prerelease 且已经进入 GitHub immutable
-  状态的本仓库 Release。版本严格使用与上游一致的三段 SemVer `vA.B.C`；不再定义或接受
-  第四段社区修订号。
-- `alpha` 通道可通过 `grok-zh update --alpha` 显式选择；它也只接受 immutable
-  Release，并兼容历史 `-zh.ci.N`、`-zh.preview.N` 预发布版本。
-- Release 资产必须精确包含完整
-  `grok-zh-<version>-windows-x86_64-gnu.zip` 及其 `.sha256` sidecar，不再发布单独的
-  版本化裸 EXE。更新器核对固定 URL、大小、GitHub SHA-256、ZIP 安全布局和包内
-  `SHA256SUMS.txt`，再运行候选 `grok-zh.exe --version`。
-- 社区版默认关闭后台自动更新：启动时只检查 Release 元数据并显示欢迎页提示，不下载文件。
-  按 `Ctrl+U` 是对本次下载和安装的明确授权；随后重新运行 `grok-zh`。只有在设置中显式
-  开启“自动更新”后，启动流程才可在后台预下载和安装。交互式下载会显示已下载大小、
-  百分比、速度和预计剩余时间；重定向输出或后台更新时进度条自动隐藏。
-- 自动激活只替换已验证的 `grok-zh.exe`，不会在仍有进程运行时冒险逐个覆盖
-  `agent-zh.cmd`、`rg.exe`、安装器或文档；需要同步旁载文件的版本应重新运行 ZIP 内安装器。
-  下载、解压、校验、冒烟或替换失败时保留当前版本。
-- 已撤回的 `v1.0.0.1` 使用了不兼容代理版本门禁的四段版本号，不应继续安装或分发。
-  已下载该版本的用户应安装下一份经过验证的三段版本完整 ZIP。
-- 更早的旧版社区程序同样需要先手工安装一次带新更新器的完整 ZIP，之后才会跟随 Releases。
+- 默认使用 `stable` 通道，只接受本仓库非 Draft、非 prerelease 的 Immutable Release；如需预览版，可显式运行 `grok-zh update --alpha`。
+- 更新器只接受完整 ZIP 及其 `.sha256`，并校验下载地址、大小、SHA-256、ZIP 布局、包内 `SHA256SUMS.txt` 和候选程序版本。
+- 后台自动更新默认关闭。按 `Ctrl+U` 才会下载并安装本次更新；也可以在设置中显式开启后台更新。
+- 激活失败时保留当前版本；需要同步 `agent-zh.cmd`、`rg.exe`、安装器或文档时，重新运行新 ZIP 中的安装器。
 
-不满足上述契约的旧预览 Release、可变 Release、含额外裸 EXE 的 Release 和官方 xAI 资产
-都不会被自动更新器接受。`v1.0.0-zh.preview.3` 使用旧的裸 EXE 更新契约，因此该迁移路径
-需要手工下载完整 ZIP 安装一次。Immutable Release 与 SHA-256 提供发布对象和
-传输完整性校验。正式 Tag 工作流还会通过 GitHub Artifact Attestations 为 ZIP 和 `.sha256`
-生成与仓库、提交及构建工作流绑定的来源证明，不需要维护长期签名私钥。
-
-下载正式资产后，可用 GitHub CLI 同时验证不可变 Release、Release 资产以及 Actions 构建来源。
-以下命令以待发布的三段版本 `1.0.3` 为例，发布后执行：
-
-```powershell
-$repo = 'JoyElliot/grok-build-Chinese'
-$version = '1.0.3'
-$tag = "v$version"
-$zip = ".\grok-zh-$version-windows-x86_64-gnu.zip"
-$assets = @($zip, "$zip.sha256")
-
-gh release verify $tag --repo $repo
-foreach ($asset in $assets) {
-  gh release verify-asset $tag $asset --repo $repo
-  gh attestation verify $asset --repo $repo `
-    --signer-workflow "$repo/.github/workflows/zh-release-windows.yml" `
-    --source-ref "refs/tags/$tag"
-}
-```
-
-这些证明用于核对发布对象和云端构建来源，但不等同于 Windows Authenticode 签名，
-也不会让未签名 EXE 自动获得 SmartScreen 发布者信誉。
+旧版迁移、高级参数和恢复方式见 [Windows 自动安装说明](packaging/windows/INSTALL-WINDOWS.md)。正式 Release 同时提供 SHA-256 与 GitHub Artifact Attestation，用于核对文件完整性和云端构建来源；它们不等同于 Windows Authenticode 签名。
 
 ## 从源码构建
 
