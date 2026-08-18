@@ -75,6 +75,11 @@
 
 旧版迁移、高级参数和恢复方式见 [Windows 自动安装说明](packaging/windows/INSTALL-WINDOWS.md)。正式 Release 同时提供 SHA-256 与 GitHub Artifact Attestation，用于核对文件完整性和云端构建来源；它们不等同于 Windows Authenticode 签名。
 
+### 反馈
+
+- 当遇到汉化不全等任何问题时，欢迎提出 [issue](https://github.com/JoyElliot/grok-build-Chinese/issues)
+- Linux Do 社区讨论地址：稍后更新
+
 ## 从源码构建
 
 ### 通用要求
