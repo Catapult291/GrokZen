@@ -78,7 +78,7 @@
 ### 反馈
 
 - 当遇到汉化不全等任何问题时，欢迎提出 [issue](https://github.com/JoyElliot/grok-build-Chinese/issues)
-- Linux Do 社区讨论地址：稍后更新
+- Linux Do 社区讨论地址：[点此进入](https://linux.do/t/topic/2770188)
 
 ## 从源码构建
 
