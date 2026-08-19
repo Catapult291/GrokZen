@@ -1,0 +1,117 @@
+# 在 GitHub 托管的 Apple Silicon runner 上编译 grok-zh（仅 aarch64-apple-darwin）。
+# 每次成功构建都上传 Artifact；推送 v* tag 时额外创建 GitHub Release。
+name: Build macOS ARM
+
+on:
+  push:
+    branches:
+      - main
+      - zh-dev
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Artifact 上传只需 contents:read；创建 Release 需要 contents:write。
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-arm-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-macos-arm:
+    name: macOS aarch64
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      TARGET: aarch64-apple-darwin
+      ARCHIVE_NAME: grok-zh-aarch64-apple-darwin.tar.gz
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 确认 runner 为 Apple Silicon
+        run: |
+          set -euo pipefail
+          arch="$(uname -m)"
+          echo "uname -m = ${arch}"
+          if [[ "${arch}" != "arm64" ]]; then
+            echo "::error::期望 Apple Silicon runner（arm64），实际为 ${arch}。请把 runs-on 改成 macos-14 / macos-15。"
+            exit 1
+          fi
+
+      - name: 安装 Rust 目标三元组
+        run: |
+          set -euo pipefail
+          # rust-toolchain.toml 会固定 1.94.0；host target 会自动加入。
+          rustup show
+          rustup target add "${TARGET}"
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: 安装 dotslash 与 protoc
+        run: |
+          set -euo pipefail
+          # 构建脚本优先通过 DotSlash 解析仓库内 bin/protoc；
+          # brew protobuf 作为 PROTOC / PATH 回退。
+          cargo install dotslash
+          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          brew install protobuf
+          echo "PROTOC=$(command -v protoc)" >> "${GITHUB_ENV}"
+          dotslash --version
+          protoc --version
+          ./bin/protoc --version
+
+      - name: 编译 grok-zh（aarch64-apple-darwin）
+        run: |
+          set -euo pipefail
+          cargo build --locked -p xai-grok-pager-bin --release --target "${TARGET}"
+
+      - name: 打包 tar.gz
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          bin="target/${TARGET}/release/grok-zh"
+          if [[ ! -f "${bin}" ]]; then
+            echo "::error::找不到编译产物：${bin}"
+            exit 1
+          fi
+          file "${bin}"
+          if ! file "${bin}" | grep -q 'arm64'; then
+            echo "::error::产物不是 arm64：$(file "${bin}")"
+            exit 1
+          fi
+          cp "${bin}" dist/grok-zh
+          chmod +x dist/grok-zh
+          tar -C dist -czf "dist/${ARCHIVE_NAME}" grok-zh
+          shasum -a 256 "dist/${ARCHIVE_NAME}" | tee "dist/${ARCHIVE_NAME}.sha256"
+          ls -lh dist
+
+      - name: 上传 Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grok-zh-aarch64-apple-darwin
+          path: |
+            dist/${{ env.ARCHIVE_NAME }}
+            dist/${{ env.ARCHIVE_NAME }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 创建 GitHub Release（仅 tag）
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            "dist/${ARCHIVE_NAME}" \
+            "dist/${ARCHIVE_NAME}.sha256" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "grok-zh ${GITHUB_REF_NAME} (macOS ARM)" \
+            --generate-notes \
+            --verify-tag
