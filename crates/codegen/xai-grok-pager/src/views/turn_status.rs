@@ -864,7 +864,7 @@ fn compute_activity(
         ),
         (AgentState::TurnRunning, Some(TurnActivity::WritingToolCall(writing))) => (
             Style::default().fg(theme.text_secondary),
-            writing.label(),
+            writing.label_with_locale(locale),
             false,
         ),
         (AgentState::TurnRunning, Some(TurnActivity::Waiting(reason))) => (

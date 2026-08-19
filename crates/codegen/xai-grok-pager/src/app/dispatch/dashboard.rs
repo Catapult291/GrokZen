@@ -156,6 +156,21 @@ pub(super) fn dispatch_open_dashboard(app: &mut AppView) -> Vec<Effect> {
         app.show_toast(message);
         return vec![];
     }
+    // Same for the terms notice: opening the dashboard would dismiss it unanswered.
+    if matches!(
+        app.consent_state,
+        crate::app::consent::ConsentState::Pending { .. }
+    ) {
+        let message = app
+            .locale
+            .named_static_text(
+                "dashboard.toast.terms",
+                "Answer the terms notice to open the dashboard",
+            )
+            .to_string();
+        app.show_toast(&message);
+        return vec![];
+    }
     // Same rationale for folder trust: opening the dashboard would visually
     // dismiss the trust question with the folder still unanswered. Toast and
     // stay put (mirrors the auth gate above) so the question is resolved first.
@@ -331,7 +346,7 @@ fn rearm_session_overlay(app: &mut AppView, id: AgentId) {
         },
         None => {
             if let Some(agent) = app.agents.get_mut(&id) {
-                agent.active_subagent = None;
+                agent.close_subagent_fullscreen();
             }
             DashboardRowId::TopLevel(id)
         }
@@ -382,7 +397,7 @@ pub(super) fn dispatch_dashboard_attach(
                 // Drop any prior subagent takeover so the agent
                 // view paints the parent, not whatever subagent
                 // the user last opened fullscreen.
-                agent.active_subagent = None;
+                agent.close_subagent_fullscreen();
             }
             if let Some(d) = app.dashboard.as_mut() {
                 // `focus_row` (not a bare `selected` assignment) so the
@@ -1154,7 +1169,7 @@ pub(super) fn dispatch_dashboard_overlay_cycle(app: &mut AppView, delta: i32) ->
     // Drop any prior subagent takeover on the next agent so the
     // overlay paints the parent view, mirroring the attach path.
     if let Some(agent) = app.agents.get_mut(&next_id) {
-        agent.active_subagent = None;
+        agent.close_subagent_fullscreen();
     }
     // A stop-confirm armed on the CURRENT agent must not carry over to
     // the next one — a mouse click on `[‹]` / `[›]` lands here without
@@ -2189,7 +2204,7 @@ fn stop_top_level_activity(agent: &mut crate::app::agent_view::AgentView) -> Opt
                 agent,
                 session_id.clone(),
                 /* cancel_subagents */ true,
-                /* rewind_if_no_output */ false,
+                /* rewind_prompt_id */ None,
             ));
         }
         let running: Vec<String> = agent

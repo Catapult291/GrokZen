@@ -2,69 +2,14 @@
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
-static GROK_HOME: OnceLock<PathBuf> = OnceLock::new();
+pub use xai_grok_home::{default_grok_home, grok_home, user_grok_home};
 
 #[cfg(target_os = "macos")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str =
     "/Library/Application Support/ClaudeCode/managed-settings.json";
 #[cfg(target_os = "linux")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str = "/etc/claude-code/managed-settings.json";
-
-/// The shared Grok data directory (`~/.grok`, canonicalized) used when
-/// `GROK_HOME` is unset. Exposed so
-/// callers (e.g. display helpers) can detect
-/// whether [`grok_home()`] is the default without duplicating the computation.
-///
-/// Uses [`dunce::canonicalize`] instead of [`std::fs::canonicalize`]: on
-/// Windows, std returns a verbatim path (`\\?\C:\Users\...`) which external
-/// tools choke on — e.g. `git clone` rejects `\\?\` destinations with
-/// "Invalid argument", breaking marketplace cache clones under
-/// `~/.grok/marketplace-cache`. `dunce` strips the prefix whenever the path
-/// is safely representable in legacy form; on non-Windows it is identical to
-/// `std::fs::canonicalize`.
-///
-/// Keep the dunce canonicalization in sync with the hand-rolled duplicate in
-/// `xai_fast_worktree::db::resolve_grok_home` (deliberately standalone crate).
-pub fn default_grok_home() -> PathBuf {
-    #[allow(deprecated)]
-    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    dunce::canonicalize(&home)
-        .unwrap_or(home)
-        .join(xai_grok_product::DATA_DIR_NAME)
-}
-
-fn configured_grok_home() -> Option<PathBuf> {
-    configured_grok_home_from(std::env::var_os(xai_grok_product::HOME_ENV))
-}
-
-fn configured_grok_home_from(value: Option<std::ffi::OsString>) -> Option<PathBuf> {
-    value.filter(|value| !value.is_empty()).map(PathBuf::from)
-}
-
-/// Shared per-user data directory: `$GROK_HOME` or `~/.grok`.
-pub fn grok_home() -> PathBuf {
-    GROK_HOME
-        .get_or_init(|| {
-            let grok_home = configured_grok_home().unwrap_or_else(default_grok_home);
-            let _ = std::fs::create_dir_all(&grok_home);
-            grok_home
-        })
-        .clone()
-}
-
-/// The user-global grok home, but only when one genuinely resolves: `Some` when
-/// a supported home override is set or a home directory is found, `None`
-/// otherwise. Unlike
-/// [`grok_home()`], this never falls back to a cwd-relative `.grok`, so callers
-/// that *scan* user-global grok resources (hooks, marketplace sources, ...) don't
-/// mistake a project's `.grok` tree for the user-global one when no home resolves.
-pub fn user_grok_home() -> Option<PathBuf> {
-    #[allow(deprecated)]
-    let resolvable = configured_grok_home().is_some() || std::env::home_dir().is_some();
-    resolvable.then(grok_home)
-}
 
 /// Canonical Chinese application path: `<grok-home>/bin/grok-zh` (Unix) or
 /// `grok-zh.exe` (Windows).
@@ -402,19 +347,6 @@ mod tests {
         assert!(!home.to_string_lossy().starts_with(r"\\?\"));
         assert!(home.ends_with(xai_grok_product::DATA_DIR_NAME));
     }
-
-    #[test]
-    fn grok_home_override_is_used_and_empty_values_fall_through() {
-        use std::ffi::OsString;
-
-        assert_eq!(
-            configured_grok_home_from(Some(OsString::from("shared"))),
-            Some(PathBuf::from("shared"))
-        );
-        assert_eq!(configured_grok_home_from(Some(OsString::new())), None);
-        assert_eq!(configured_grok_home_from(None), None);
-    }
-
     #[cfg(unix)]
     fn unix_mode(path: &std::path::Path) -> u32 {
         use std::os::unix::fs::PermissionsExt;

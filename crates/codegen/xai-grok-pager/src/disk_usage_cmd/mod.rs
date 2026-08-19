@@ -29,7 +29,7 @@ const SCHEMA_VERSION: u32 = 1;
     after_help = "按大小降序列出 Grok 主目录中的所有顶层目录，以及 `worktrees/` 和 \
 `worktree_pool/` 下每个工作树的大小、年龄和标签。要回收空间，可先运行 \
 `grok-zh worktree gc --max-age 7d --dry-run` 预览；未指定 `--max-age` 时，gc 不会使任何项过期，
-且只处理注册表跟踪的工作树。"
+且只处理注册表跟踪的工作树；如果无法确认工作内容在其他位置仍有副本，gc 会保留该工作树。"
 )]
 pub struct DiskUsageArgs {
     /// 输出机器可读的 JSON。

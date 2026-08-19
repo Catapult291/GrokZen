@@ -190,6 +190,33 @@ fn picker_keeps_untitled_conversation_as_untitled() {
     assert_eq!(entries[0].summary, "Untitled");
     assert_eq!(entries[0].source, "conversation");
 }
+/// The recap and last-turn summary ride the session-list wire and land on
+/// the picker entry so the expanded card can show them.
+#[test]
+fn picker_parses_last_recap_and_last_turn_summary() {
+    let recent = chrono::Utc::now().to_rfc3339();
+    let payload = serde_json::json!({
+            "sessions": [{
+                "sessionId": "s_recap",
+                "cwd": "/Users/me/xai",
+                "summary": "Auth refactor",
+                "source": "local",
+                "updatedAt": recent,
+                "lastTurnSummary": "Wired retries into billing",
+                "lastRecap": "Where we left off: auth refactor across the API"
+            }]
+        });
+    let entries = parse_session_picker_entries(&payload);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+            entries[0].last_turn_summary.as_deref(),
+            Some("Wired retries into billing")
+        );
+    assert_eq!(
+            entries[0].last_recap.as_deref(),
+            Some("Where we left off: auth refactor across the API")
+        );
+}
 /// Canary: the empty-summary drop still applies to Build rows.
 #[test]
 fn picker_still_drops_build_row_with_empty_summary() {
@@ -2426,6 +2453,35 @@ fn format_session_info_hides_resolved_when_disabled() {
     assert!(text.contains("Model: grok-4.5"));
     assert!(!text.contains("grok-4.3"));
 }
+/// The (cwd, id)-derived summary path resolves and `generated_title` wins.
+#[tokio::test]
+async fn lookup_session_title_loads_single_summary_by_cwd() {
+    let root = tempfile::tempdir().unwrap();
+    let cwd = "/workspace";
+    let dir = root
+        .path()
+        .join("sessions")
+        .join(xai_grok_shell::util::grok_home::encode_cwd_dirname(cwd))
+        .join("sess-1");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+            dir.join("summary.json"),
+            serde_json::json!({
+                "info": { "id": "sess-1", "cwd": cwd },
+                "session_summary": "raw summary",
+                "created_at": "2026-01-01T00:00:00Z",
+                "updated_at": "2026-01-01T00:00:00Z",
+                "num_messages": 1,
+                "current_model_id": "m",
+                "generated_title": "Renamed title"
+            })
+                .to_string(),
+        )
+        .unwrap();
+    let id = acp::SessionId::new("sess-1");
+    let title = lookup_session_title_in(root.path().to_path_buf(), &id, cwd).await;
+    assert_eq!(title.as_deref(), Some("Renamed title"));
+}
 #[test]
 fn format_session_info_no_parens_when_resolved_matches_requested() {
     let info = make_session_info("grok-4.5", Some("grok-4.5"), 1000, 10000);
@@ -2558,6 +2614,7 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
         repo_name: "repo-app".to_string(),
         worktree_label: Some("wt".to_string()),
         last_turn_summary: Some("Fixed the parser".to_string()),
+        last_recap: None,
         card_detail: None,
     };
     let roster = session_picker_entry_to_roster(&entry);

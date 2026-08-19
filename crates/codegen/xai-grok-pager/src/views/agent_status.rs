@@ -9,7 +9,7 @@
 //! ```ignore
 //! let mut status = AgentStatusBar::new(&theme);
 //! status.push("context", context_line);
-//! status.push("badge", badge_line);
+//! status.push("queue", queue_line);
 //! let areas = status.render(buf, status_bar_rect);
 //! let context_area = areas.get("context");
 //! ```
@@ -72,7 +72,7 @@ pub(crate) fn localized_goal_pause_label(
 
 /// A named status bar item.
 struct StatusEntry {
-    /// Identifier for hit-test lookup (e.g., "context", "badge").
+    /// Identifier for hit-test lookup (e.g., "context", "queue").
     id: &'static str,
     /// Pre-built styled content.
     line: Line<'static>,

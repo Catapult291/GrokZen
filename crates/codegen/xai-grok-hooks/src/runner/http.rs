@@ -134,7 +134,7 @@ fn build_hook_client(timeout_ms: u64) -> reqwest::Client {
 pub async fn run_http_hook(
     spec: &HookSpec,
     envelope: &HookEventEnvelope,
-    _ctx: &RunContext<'_>,
+    ctx: &RunContext<'_>,
     mode: GateKind,
 ) -> HookRunOutput {
     let start = Instant::now();
@@ -151,7 +151,17 @@ pub async fn run_http_hook(
     // vars (e.g. `${CLAUDE_PLUGIN_ROOT}/check`) only land in `extra_env` after
     // the plugin adapter runs. Unset refs are preserved so `validate_hook_url`
     // rejects them rather than smuggling a literal `${VAR}` past validation.
-    let expanded_url = crate::env_expand::expand_env_vars_with_extra(raw_url, &spec.extra_env);
+    let mut url_env = spec.extra_env.clone();
+    for (k, v) in [
+        ("GROK_HOOK_EVENT", envelope.hook_event_name.to_string()),
+        ("GROK_HOOK_NAME", spec.name.clone()),
+        ("GROK_SESSION_ID", ctx.session_id.to_string()),
+        ("GROK_WORKSPACE_ROOT", ctx.workspace_root.to_string()),
+        ("CLAUDE_PROJECT_DIR", ctx.workspace_root.to_string()),
+    ] {
+        url_env.insert(k.to_string(), v);
+    }
+    let expanded_url = crate::env_expand::expand_env_vars_with_extra(raw_url, &url_env);
     let url: &str = &expanded_url;
     // Prefer the pre-expansion source for logs so resolved `env` secrets don't
     // reach `~/.grok/logs`; threaded into the reqwest error format below so

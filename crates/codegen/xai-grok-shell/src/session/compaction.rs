@@ -512,7 +512,7 @@ impl SessionActor {
             .memory
             .last_flush_compaction
             .load(std::sync::atomic::Ordering::Relaxed);
-        if crate::session::helpers::memory_flush::should_flush(
+        if xai_grok_memory::flush::should_flush(
             total_tokens,
             context_window,
             self.compaction.threshold_percent.get(),
@@ -1466,7 +1466,8 @@ impl SessionActor {
                     crate::session::memory::MemoryBackendImpl::from_session_params(
                         storage.clone(),
                         &crate::session::memory::MemoryBackendParams {
-                            search_source: "compaction_recovery",
+                            search_source:
+                                crate::session::memory::MemorySearchSource::CompactionRecovery,
                             ..params.clone()
                         },
                     )

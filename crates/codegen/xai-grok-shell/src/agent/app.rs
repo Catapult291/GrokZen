@@ -1160,7 +1160,7 @@ pub async fn run_leader(
                         }
                     });
                 }
-                let initial_config = crate::config::load_effective_config()
+                let initial_config = crate::config::load_from_disk()
                     .unwrap_or_else(|_| toml::Value::Table(toml::map::Map::new()));
                 let reloader = crate::config::reloader::ConfigReloader::new(
                     grok_home::grok_home(),
@@ -1169,8 +1169,7 @@ pub async fn run_leader(
                     auth_scope,
                     None,
                     config_update_tx,
-                    agent_config.cli_experimental_memory,
-                    agent_config.cli_no_memory,
+                    agent_config.memory_enabled_override,
                 );
                 tokio::spawn(reloader.run(events_rx, cancel_clone.clone()));
                 Some(watcher)
@@ -1724,8 +1723,7 @@ mod tests {
             scope,
             None,
             tx,
-            false,
-            false,
+            None,
         );
         reloader.reload_auth().unwrap();
         let ConfigUpdate::Auth(minted) = rx
