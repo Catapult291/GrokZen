@@ -4903,6 +4903,7 @@ fn welcome_doc_viewer_is_scroll_blocking_and_wheel_scrolls_content() {
     app.welcome_doc_viewer = Some(crate::views::modal::ActiveModal::DocViewer {
         title: "Release Notes".into(),
         content: "line\n".repeat(80),
+        locale: crate::locale::UiLocale::EnUs,
         scroll: 0,
         window: crate::views::modal_window::ModalWindowState::new(),
         cached_lines: None,
