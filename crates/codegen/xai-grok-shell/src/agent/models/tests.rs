@@ -597,6 +597,7 @@ fn reasoning_effort_helpers_resolve_wire_name_to_catalog_key() {
     let mgr = test_manager();
 
     let mut custom = ModelEntry {
+        bundled_catalog_entry: false,
         info: config::ModelInfo::fallback("enterprise-slug"),
         api_key: None,
         env_key: None,
