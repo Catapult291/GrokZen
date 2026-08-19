@@ -97,6 +97,7 @@ pub fn render_consent(
             layout.version,
             buf,
             theme,
+            locale,
             None,
             h_margin,
             false,
