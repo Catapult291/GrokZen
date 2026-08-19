@@ -1,30 +1,12 @@
-//! Pre-compaction memory flush logic.
-//!
-//! Before compacting the conversation, the session actor can optionally run
-//! a "flush turn" that asks the model to summarize important information
-//! for storage in memory files.
-//!
-//! This module provides:
-//! - `should_flush()` — threshold check for when to trigger the flush
-//! - `FLUSH_SYSTEM_PROMPT` — the prompt sent to the model during flush
-//! - `process_flush_response()` — quality controls on the model's output
-//! - `is_semantically_duplicate()` — embedding-based dedup gate before writing
-//!
-//! The session actor orchestrates the flush by:
-//! 1. Setting `is_flushing = true` (suppresses auto-compact)
-//! 2. Sending `FLUSH_SYSTEM_PROMPT` to the model (no tools offered)
-//! 3. Calling `process_flush_response()` on the result
-//! 4. Calling `is_semantically_duplicate()` to skip near-duplicate content
-//! 5. Writing to `MemoryStorage::write_daily_log()` if accepted and not duplicate
-//! 6. Setting `is_flushing = false`
+//! Pure pre-compaction memory flush policy and response processing.
 
-use crate::config::MemoryFlushConfig;
-use crate::sampling::{ChatRequestMessage, Role};
-// Pure text helpers moved into the memory subsystem (breaks the
-// dream <-> memory_flush module cycle).
-use crate::session::memory::text_utils::{has_markdown_headers, is_no_reply};
+use crate::{
+    MemoryIndex,
+    embedding::EmbeddingProvider,
+    text_utils::{has_markdown_headers, is_no_reply},
+};
+use xai_grok_config_types::MemoryFlushConfig;
 
-/// Memory log target — matches `xai_grok_telemetry::memory_log::TARGET`.
 const LOG: &str = "xai_memory";
 
 /// Check whether a memory flush should run before the next compaction.
@@ -201,7 +183,7 @@ pub fn process_flush_response(response: &str, config: &MemoryFlushConfig) -> Flu
 /// content that adds meaningful new information to pass through.
 ///
 /// Used as the fallback when no config override is set.
-pub(crate) const SEMANTIC_DEDUP_SIMILARITY_THRESHOLD: f64 = 0.92;
+pub const SEMANTIC_DEDUP_SIMILARITY_THRESHOLD: f64 = 0.92;
 
 /// Maximum L2 distance between two unit-norm embedding vectors (used to
 /// convert sqlite-vec L2 distances to cosine similarity).
@@ -228,8 +210,8 @@ const SEMANTIC_DEDUP_KNN_LIMIT: usize = 3;
 /// matching the pattern used in `search.rs` and `backend.rs`.
 pub async fn is_semantically_duplicate(
     content: &str,
-    index: &crate::session::memory::MemoryIndex,
-    embedding_provider: Option<&dyn crate::session::memory::embedding::EmbeddingProvider>,
+    index: &MemoryIndex,
+    embedding_provider: Option<&dyn EmbeddingProvider>,
     threshold: f64,
 ) -> bool {
     // Phase 1 (sync): check prerequisites — borrows index, no .await
@@ -292,29 +274,6 @@ pub async fn is_semantically_duplicate(
          threshold={threshold})",
         neighbors.len());
     false
-}
-
-/// Select a recent window from simplified chat messages for the flush model.
-///
-/// Starts with the last `recent_message_count` messages, then expands backward
-/// to the nearest `User` message so the window always starts on a user
-/// boundary. The returned window may be larger than `recent_message_count`.
-/// System messages are excluded since the flush adds its own system prompt.
-pub fn select_flush_window(
-    messages: Vec<ChatRequestMessage>,
-    recent_message_count: usize,
-) -> Vec<ChatRequestMessage> {
-    let messages: Vec<_> = messages
-        .into_iter()
-        .filter(|m| m.role != Role::System)
-        .collect();
-
-    let total = messages.len();
-    let mut start = total.saturating_sub(recent_message_count);
-    while start > 0 && messages[start].role != Role::User {
-        start -= 1;
-    }
-    messages.into_iter().skip(start).collect()
 }
 
 #[cfg(test)]
@@ -527,57 +486,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_select_flush_window_expands_to_user_boundary() {
-        let mut messages = vec![ChatRequestMessage::user("early question")];
-        for i in 0..20 {
-            messages.push(ChatRequestMessage::assistant(
-                format!("response {i}"),
-                "",
-                None,
-            ));
-        }
-
-        let window = select_flush_window(messages, 20);
-
-        assert_eq!(window.len(), 21);
-        assert_eq!(window[0].role, Role::User);
-    }
-
-    #[test]
-    fn test_select_flush_window_filters_system_messages() {
-        let messages = vec![
-            ChatRequestMessage::system("you are helpful"),
-            ChatRequestMessage::user("hi"),
-            ChatRequestMessage::assistant("hello", "", None),
-        ];
-
-        let window = select_flush_window(messages, 20);
-
-        assert!(window.iter().all(|m| m.role != Role::System));
-        assert_eq!(window.len(), 2);
-    }
-
-    #[test]
-    fn test_select_flush_window_short_conversation() {
-        let messages = vec![
-            ChatRequestMessage::user("hi"),
-            ChatRequestMessage::assistant("hello", "", None),
-        ];
-
-        let window = select_flush_window(messages, 20);
-
-        assert_eq!(window.len(), 2);
-        assert_eq!(window[0].role, Role::User);
-    }
-
     // -----------------------------------------------------------------------
     // is_semantically_duplicate tests
     // -----------------------------------------------------------------------
 
     #[tokio::test]
     async fn test_semantic_dedup_no_provider_allows_write() {
-        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use crate::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
         init_sqlite_vec();
@@ -600,8 +515,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_no_similar_content() {
-        use crate::session::memory::embedding::MockEmbeddingProvider;
-        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use crate::embedding::MockEmbeddingProvider;
+        use crate::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
         init_sqlite_vec();
@@ -626,8 +541,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_detects_identical_content() {
-        use crate::session::memory::embedding::{EmbeddingProvider, MockEmbeddingProvider};
-        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use crate::embedding::{EmbeddingProvider, MockEmbeddingProvider};
+        use crate::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
         init_sqlite_vec();
@@ -666,8 +581,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_semantic_dedup_allows_different_content() {
-        use crate::session::memory::embedding::{EmbeddingProvider, MockEmbeddingProvider};
-        use crate::session::memory::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
+        use crate::embedding::{EmbeddingProvider, MockEmbeddingProvider};
+        use crate::{MemoryIndex, MemoryStorage, index::init_sqlite_vec};
         use tempfile::TempDir;
 
         init_sqlite_vec();

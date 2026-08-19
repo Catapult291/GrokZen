@@ -8,6 +8,7 @@ use crate::app::actions::{Action, Effect, SwitchModelError};
 use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState, DeferredModelSwitch};
 use crate::app::agent_view::{ActivePane, AgentView, McpInitProgress};
 use crate::app::app_view::{ActiveView, AppView, TrustState};
+use crate::app::consent::ConsentState;
 use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, reseed_tip_for_new_session, show_welcome, switch_to_agent,
 };
@@ -727,7 +728,7 @@ pub(in crate::app::dispatch) fn dispatch_delete_current_session_answered(
         session_id: session_id.clone(),
         cancel_subagents: true,
         trigger: None,
-        rewind_if_no_output: false,
+        rewind_prompt_id: None,
     }];
     effects.extend(
         running_bg_tasks
@@ -767,6 +768,42 @@ pub(in crate::app::dispatch) fn dispatch_trust_folder(app: &mut AppView) -> Vec<
 /// `AuthComplete` uses, so whichever gate resolves last drains exactly once.
 pub(in crate::app::dispatch) fn finish_trust(app: &mut AppView) -> Vec<Effect> {
     app.trust_state = TrustState::Done;
+    app.welcome_prompt_focused = !app.is_access_blocked();
+    if app.session_startup_allowed() {
+        drain_startup_actions(app)
+    } else {
+        vec![]
+    }
+}
+/// Resolves `consent_state` before the marker write, so a failed write cannot trap the user.
+pub(in crate::app::dispatch) fn dispatch_accept_consent(app: &mut AppView) -> Vec<Effect> {
+    let ConsentState::Pending {
+        notice, legibility, ..
+    } = &app.consent_state
+    else {
+        return vec![];
+    };
+    if !legibility.can_accept() {
+        return vec![];
+    }
+    let notice_id = notice.id.clone();
+    let version = notice.version;
+    app.consent_answered = Some((notice_id.clone(), version));
+    let mut effects = Vec::new();
+    if let Some(account) = app.account_email.clone() {
+        effects.push(Effect::PersistConsentAnswer {
+            account: Some(account),
+            notice_id: notice_id.clone(),
+            version,
+            acked: false,
+        });
+    }
+    effects.push(Effect::RecordConsentUpstream { notice_id, version });
+    effects.extend(finish_consent(app));
+    effects
+}
+fn finish_consent(app: &mut AppView) -> Vec<Effect> {
+    app.consent_state = ConsentState::Done;
     app.welcome_prompt_focused = !app.is_access_blocked();
     if app.session_startup_allowed() {
         drain_startup_actions(app)

@@ -200,19 +200,81 @@ pub struct WritingToolCall {
 impl WritingToolCall {
     /// User-facing spinner label.
     pub fn label(&self) -> String {
+        self.label_with_locale(None)
+    }
+
+    /// User-facing spinner label in the selected UI locale.
+    pub fn label_with_locale(&self, locale: Option<&crate::locale::LocaleContext>) -> String {
         let ordinal = match self.ordinal.get() {
             1 => String::new(),
             n => format!(" ({n})"),
         };
+        let text = |id: &str, english: &'static str| {
+            locale
+                .map(|locale| locale.named_static_text(id, english))
+                .unwrap_or(english)
+        };
+        let format_ordinal =
+            |id: &str, english: &'static str| text(id, english).replace("{ordinal}", &ordinal);
         match self.tool_name.as_deref() {
-            Some(name) if xai_grok_tools::is_task_tool_id(name) => {
-                format!("Writing subagent prompt{ordinal}…")
+            Some(name) if xai_grok_tools::is_task_tool_id(name) => format_ordinal(
+                "turn.writing.subagent_prompt",
+                "Writing subagent prompt{ordinal}…",
+            ),
+            Some(xai_grok_tools::USE_TOOL_NAME) => {
+                format_ordinal("turn.writing.mcp_tool", "Preparing MCP tool{ordinal}…")
             }
+            Some(xai_grok_tools::SEARCH_TOOL_NAME) => format_ordinal(
+                "turn.writing.search_mcp_tools",
+                "Searching MCP tools{ordinal}…",
+            ),
             Some(name) => {
-                let name = xai_grok_workspace::permission::mcp_pretty_name_if_qualified(name);
-                format!("Preparing {}{ordinal}…", clamp_activity_subject(&name))
+                use xai_grok_tools::types::tool::ToolKind;
+                let copy =
+                    xai_grok_tools::tool_taxonomy::writing_tool_kind(name).and_then(|kind| {
+                        match kind {
+                            ToolKind::Write => {
+                                Some(("turn.writing.file", "Writing file{ordinal}…"))
+                            }
+                            ToolKind::Edit => Some(("turn.writing.edit", "Writing edit{ordinal}…")),
+                            ToolKind::Execute => {
+                                Some(("turn.writing.command", "Writing command{ordinal}…"))
+                            }
+                            ToolKind::Plan => {
+                                Some(("turn.writing.todo", "Updating todo list{ordinal}…"))
+                            }
+                            ToolKind::Workflow => {
+                                Some(("turn.writing.workflow", "Writing workflow{ordinal}…"))
+                            }
+                            ToolKind::ImageGen => Some((
+                                "turn.writing.image_prompt",
+                                "Writing image prompt{ordinal}…",
+                            )),
+                            ToolKind::ImageToVideo | ToolKind::ReferenceToVideo => Some((
+                                "turn.writing.video_prompt",
+                                "Writing video prompt{ordinal}…",
+                            )),
+                            ToolKind::AskUser => {
+                                Some(("turn.writing.question", "Preparing question{ordinal}…"))
+                            }
+                            _ => None,
+                        }
+                    });
+                match copy {
+                    Some((id, copy)) => format_ordinal(id, copy),
+                    None => {
+                        let name =
+                            xai_grok_workspace::permission::mcp_pretty_name_if_qualified(name);
+                        text(
+                            "turn.writing.preparing_subject",
+                            "Preparing {subject}{ordinal}…",
+                        )
+                        .replace("{subject}", &clamp_activity_subject(&name))
+                        .replace("{ordinal}", &ordinal)
+                    }
+                }
             }
-            None => format!("Preparing tool call{ordinal}…"),
+            None => format_ordinal("turn.writing.tool_call", "Preparing tool call{ordinal}…"),
         }
     }
 }
@@ -1454,7 +1516,11 @@ impl AcpUpdateTracker {
                 .and_then(|m| m.get(user_message_chunk_meta::PROMPT_INDEX))
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
-            if let Some(pi) = prompt_index {
+            let replay_ts = meta
+                .is_replay
+                .then(|| meta.turn_start_ms.or(meta.agent_timestamp_ms))
+                .flatten();
+            if prompt_index.is_some() || replay_ts.is_some() {
                 for idx in (0..scrollback.len()).rev() {
                     if let Some(entry) = scrollback.get_mut(idx)
                         && let RenderBlock::UserPrompt(ref mut block) = entry.block
@@ -1462,8 +1528,13 @@ impl AcpUpdateTracker {
                         if block.is_interjection {
                             continue;
                         }
-                        if block.prompt_index.is_none() {
+                        if let Some(pi) = prompt_index
+                            && block.prompt_index.is_none()
+                        {
                             block.prompt_index = Some(pi);
+                        }
+                        if let Some(ms) = replay_ts {
+                            entry.created_at = Some(utc_ms_to_local(ms));
                         }
                         break;
                     }

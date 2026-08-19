@@ -269,7 +269,7 @@ pub fn print_report_with_locale(
                 text(
                     locale,
                     "du.hint.reclaim_tracked",
-                    "To reclaim space, run `grok worktree gc --max-age 7d --dry-run`, then the same command without `--dry-run`. Without `--max-age`, gc expires nothing."
+                    "To reclaim space, run `grok-zh worktree gc --max-age 7d --dry-run`, then the same command without `--dry-run`. Without `--max-age`, gc expires nothing, and it keeps a worktree whose work it cannot find elsewhere, naming each one."
                 )
             )?;
         }

@@ -298,7 +298,7 @@ fn write_activity(
                     .replace("{max_retries}", &max_retries.to_string()),
             );
         }
-        TurnActivity::WritingToolCall(writing) => buf.push_str(&writing.label()),
+        TurnActivity::WritingToolCall(writing) => buf.push_str(&writing.label_with_locale(locale)),
         TurnActivity::Waiting(reason) => buf.push_str(&reason.label_with_locale(locale)),
     }
 }

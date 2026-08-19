@@ -2,6 +2,153 @@
 
 [1.0.3 简体中文更新说明](changelogs/1.0.3.zh-CN.md)
 
+# 1.0.5 — 2026-08-15
+
+## Features
+
+- **GROK_CONFIG** and **GROK_CONFIG_PATH** environment variables now let launchers override selected config settings without editing config.toml.
+- **Worktrees** under ~/.grok/worktrees are now automatically reclaimed when safe, with strong safeguards that never delete a user's last copy.
+- **Hook policy blocks** now correctly report "Turn blocked by a hook" instead of "Turn cancelled by user."
+- **Image and video generation** now limits how many calls the model can request in one step to avoid overload.
+- **Arabic and Persian text** can now be reordered correctly in the terminal UI. Turn on in /settings.
+- **Reasoning effort** can now be supplied when an ACP client opens or resumes a session.
+- **Session titles** now refresh early in the conversation and stay stable; /resume shows a recap and last-turn summary when available.
+- **GROK_FORCE_LOGIN_TEAM_ID** environment variable now lets launchers restrict interactive login to one or more teams.
+- **Preparing spinner** now shows readable labels such as "Writing file…" and "Writing edit…" for common tools.
+
+## Bug Fixes
+
+- **Tool calls** (shell, grep, list_dir) no longer fail for the rest of a session if /dev/null is removed.
+- **Agent skill discovery** now resolves the user's home directory correctly on Windows.
+- **MCP tool calls** now show clearer spinner text instead of the raw wire name while arguments are still arriving.
+- **grok inspect** no longer crashes when its output is piped into a command that closes the pipe early.
+- **Minimal mode** no longer truncates a still-streaming assistant reply when thinking blocks are interleaved.
+
+
+# 1.0.4 — 2026-08-13
+
+## Features
+
+- **New StopCancelled hook event** now reports when a turn ends without completing (interrupt, permission reject, max turns, etc.).
+- **Recurring /loop tasks** now show a one-line expiry notice in the transcript when they auto-expire after 7 days.
+- **Web search** can now be restricted to allowed or excluded domains via [toolset.web_search] in config.toml.
+- **Session search index** can now be disabled via GROK_SESSION_SEARCH or [features] session_search for hosts sharing $GROK_HOME.
+- **Drag to select and copy** values on the /session-info tab; c and y shortcuts also work.
+- **Double-click now selects a word** by default and triple-click selects the whole paragraph.
+- **New follow-up behavior setting** lets queued messages send immediately as interjections instead of waiting for the turn to finish.
+- Tool commands and MCP servers now receive a GROK_SESSION_ID environment variable matching the current session.
+- Relative markdown links can now open existing files in your current working directory when no matching generated media is found.
+- PreToolUse hooks can now rewrite a tool's input before it runs instead of only allowing or denying the call.
+
+## Bug Fixes
+
+- **Queued messages** no longer auto-submit while you are still editing them in the composer.
+- **Sessions poisoned by rejected images** are now healed permanently so future turns succeed without retrying the bad image.
+- **Auto permission mode** now correctly honors your explicit "always allow" grants and narrow allow rules from settings.
+- **Subagent lifecycle events** are now preserved even when delivered out of order, ensuring all subagents appear correctly in the UI.
+- **Keystrokes typed while Grok is starting** are now preserved in the composer instead of being lost.
+- **Background tasks killed from the UI** now correctly wake the model when needed instead of staying parked after a single-task stop.
+- **[stop]** / Ctrl+C inside a fullscreen subagent overlay now cancels the visible child session.
+- **Hook failures** now show the first line of stderr output instead of only the exit code.
+- **Pasting text or dragging images** while the scrollback pane is focused now focuses the composer and pastes there.
+- **[stop]** / Ctrl+C inside a subagent drill-in view now stops the focused subagent instead of the root session.
+- The dashboard shortcut now works with Ctrl+4 in terminals that do not support the Kitty keyboard protocol.
+- Pasting image-only screenshots from tools like Flameshot now works on Linux without a clipboard error.
+- Editing a queued prompt to a slash command like /btw now runs the command instead of sending the text to the model.
+- Text typed while a plan is being generated is now preserved when the approval screen appears.
+- **`grok du`** and worktree commands now work on Windows when only USERPROFILE is set.
+- Permission-mode changes made on the welcome screen now correctly apply to the newly created session.
+
+## Performance
+
+- **Finished subagent transcripts** are now evicted from memory to reduce RAM usage and rebuilt from disk when reopened.
+
+
+# 1.0.3 — 2026-08-12
+
+## Features
+
+- **/session-info** now lets you click any row to copy its value, with hover highlights and a copy-all shortcut.
+
+## Performance
+
+- **Subagent spawning** is dramatically faster when you have many sessions in ~/.grok.
+- **TUI rendering** now automatically matches high-refresh displays (120 Hz+) for smoother scrolling and painting.
+
+
+# 1.0.2 — 2026-08-11
+
+## Features
+
+- **Tool-call argument streaming** now shows a distinct spinner label instead of a generic "Waiting for response…" message.
+- **Harness** now includes UI-verification instructions and project/user rules higher in prefix.
+- **Large sessions** with images no longer exceed limits during compaction
+
+## Bug Fixes
+
+- **Fixed recovery** from server-rejected images so poisoned sessions no longer become permanently unusable.
+- **Improved startup timeout messages** to show which step took longest, elapsed times, and actionable advice instead of a generic error.
+- **Worktree copies** of large repos no longer inherit dangerous fetch specs or stale shallow grafts.
+- **Privacy banner** can now be dismissed from Settings even when you are already opted out.
+- **Status bar** now keeps showing your current model after a catalog refresh even if that model is no longer listed.
+- **Grouped tool calls** now stay grouped even when hooks attach metadata, and show hook results in the header.
+- **Cmd+click** on autolinks in Apple Terminal now opens the correct URL when multiple messages are visible.
+
+# 1.0.1 — 2026-08-10
+
+## Breaking Changes
+
+- /rewind now only truncates conversation history instead of files as well and asks for confirmation by default.
+- **Managed MCP servers** are now only available through the gateway catalog.
+
+## Features
+
+- **Subagent spawning** is now bounded; wide fan-outs queue instead of exhausting file descriptors.
+- New `grok du` command shows disk usage of ~/.grok including worktrees and sessions.
+- **Tools** now report whether they only read data, enabling safer restricted agents and subagents.
+- **Sandbox workspace** sessions can now limit which bundled skills are advertised via caller config.
+- **Renaming a session** from the dashboard now starts with the current title prefilled for easy editing.
+- **/usage**, **/session-info**, and **/context** now open in a tabbed modal instead of adding text to the conversation.
+- **grok trace** exports now bundle memory trace files for easier debugging.
+- Session rename now enforces a 100-character limit, ghost-prefills the current title, and preserves manual titles across machines.
+- New `/rename --auto` command unpins a manual session title so automatic titling resumes.
+- Video generation from references now supports preset voices, single-image input, 1–15 s durations, and 4:3 / 3:4 aspect ratios.
+
+## Bug Fixes
+
+- **Sandbox config** entries ending in /** now correctly grant the parent directory instead of creating a literal ** subdirectory.
+- **Failed alpha/enterprise updates** now suggest the matching GROK_CHANNEL reinstall command.
+- **On Apple Silicon**, grok now installs the native arm64 build even from a Rosetta shell or x86_64 updater.
+- **Skills** that share names with built-in commands now appear alongside them in the slash menu with qualified names.
+- **Notebook** permission rules imported from Claude configs are now ignored with a warning instead of applying broadly.
+- **Goal evaluation** at round end no longer fails due to timeouts.
+- **Tool timeouts** no longer cause the agent to hang when child processes are stuck in D-state or hold pipes open.
+- **Home** and **End** keys now move to the start or end of the current logical line even when the prompt is wrapped.
+- **Worktree** sessions now correctly show their branch in the status bar.
+- **Worktree** sessions now keep their status correctly when switching directories or resuming.
+- **Worktree** status is no longer lost when opening the dashboard.
+- **Recaps** are now written in the same language as your conversation.
+- **Plugin suggestions** no longer flash incorrectly while typing.
+- **Send Now** now works during active goals without cancelling the goal.
+- **Headless sessions** now correctly wait for MCP servers when using delivery tools.
+- **Non-interactive sessions** (`grok -p`) no longer fail when the agent asks for user input or plan approval.
+- **read_file errors** for missing skills now suggest the correct registered path instead of a generic hint.
+- **Session load and creation** can no longer freeze forever when `.envrc` evaluation blocks.
+- **Upgraded installs** no longer silently run outdated platform skill instructions.
+- **Deleting a session** now properly stops and waits for any running subagents before wiping history.
+- **Permission and plan-approval notification hooks** no longer fire on auto-allowed tools.
+- **Mid-turn steering** sent with double-Enter or Ctrl+Enter now correctly tells the model it arrived while work was in progress.
+- **Scrollback drag selection** no longer gets stuck after the mouse button is released outside VS Code or Cursor terminals.
+- **Video generation tools** now show a clear error explaining ZDR storage requirements instead of silently disappearing.
+- **Esc on the cancel-turn panel** now closes the panel and keeps the current turn running as the shortcuts bar indicates.
+
+## Performance
+
+- **Git status** and diff operations no longer cause high CPU or memory use on large repositories.
+- **Large git histories** no longer cause excessive memory use or unresponsiveness.
+- **History search** no longer leaks background threads in long sessions with many subagents.
+- **Resuming large sessions** is now significantly faster and the UI no longer shows an incomplete transcript while replay is still applying.
+
 [1.0.0 简体中文更新说明](changelogs/1.0.0.zh-CN.md)
 
 # 1.0.0 — 2026-08-07

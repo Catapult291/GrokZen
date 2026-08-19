@@ -337,11 +337,7 @@ impl VideoGenClient {
             // 500 chars so the unknown-voice 400 keeps its full voice roster.
             let truncated: String = body.chars().take(500).collect();
             tracing::warn!(http_status = %status, "Video generation API error: {truncated}");
-            return Err(xai_tool_runtime::ToolError::new(
-                xai_tool_runtime::ToolErrorKind::Custom,
-                format!("Video generation failed with HTTP {status}: {truncated}"),
-            )
-            .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()})));
+            return Err(video_http_error(status, &body));
         }
 
         let body = response.text().await.map_err(|e| {
@@ -408,6 +404,9 @@ impl VideoGenClient {
             }
             if !poll_status.is_success() && poll_status.as_u16() != 202 {
                 let body = poll_response.text().await.unwrap_or_default();
+                if is_zdr_upload_url_error(&body) {
+                    return Err(zdr_restricted_error());
+                }
                 let truncated: String = body.chars().take(200).collect();
                 return Err(xai_tool_runtime::ToolError::new(
                     xai_tool_runtime::ToolErrorKind::Custom,
@@ -738,16 +737,31 @@ pub(crate) const TIER_RESTRICTED_UPSELL: &str = "Video generation is a SuperGrok
 /// Error for video tool calls in a ZDR session with no output bucket.
 /// A verbatim tool *error* (unlike the [`TIER_RESTRICTED_UPSELL`] prose):
 /// paraphrasing a privacy-adjacent message risks distortion.
-pub(crate) const ZDR_RESTRICTED_MESSAGE: &str = "Video generation tools are unavailable under zero data retention (ZDR). To re-enable, either supply a user-hosted storage bucket (see https://docs.x.ai/build/settings/zdr-video-storage) or turn off /privacy mode to disable ZDR for all Grok Build requests (including code). Restart Grok after changing the config for it to take effect. Relay this message to the user verbatim; do not retry this tool.";
+pub(crate) const ZDR_RESTRICTED_MESSAGE: &str = "Video generation tools are unavailable under zero data retention (ZDR). To enable, either turn off /privacy mode to disable ZDR or supply a user-hosted storage bucket (see https://docs.x.ai/build/settings/zdr-video-storage).";
 
-/// The [`ZDR_RESTRICTED_MESSAGE`] as a structured tool error, with a stable
-/// details code for log/trace filtering.
 fn zdr_restricted_error() -> xai_tool_runtime::ToolError {
     xai_tool_runtime::ToolError::new(
         xai_tool_runtime::ToolErrorKind::Custom,
         ZDR_RESTRICTED_MESSAGE,
     )
     .with_details(serde_json::json!({"code": "zdr_output_storage_required"}))
+}
+
+fn is_zdr_upload_url_error(body: &str) -> bool {
+    body.to_ascii_lowercase()
+        .contains("must provide output.upload_url")
+}
+
+fn video_http_error(status: reqwest::StatusCode, body: &str) -> xai_tool_runtime::ToolError {
+    if is_zdr_upload_url_error(body) {
+        return zdr_restricted_error();
+    }
+    let truncated: String = body.chars().take(500).collect();
+    xai_tool_runtime::ToolError::new(
+        xai_tool_runtime::ToolErrorKind::Custom,
+        format!("Video generation failed with HTTP {status}: {truncated}"),
+    )
+    .with_details(serde_json::json!({"code": "http_failure", "status": status.as_u16()}))
 }
 
 fn default_resolution_name() -> String {
@@ -1512,6 +1526,21 @@ mod tests {
         let a = zdr_video_object_key("v/");
         let b = zdr_video_object_key("v/");
         assert_ne!(a, b, "object keys must be unique across calls");
+    }
+
+    #[test]
+    fn video_http_error_rewrites_zdr_storage_400() {
+        let zdr = video_http_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"code":"invalid-argument","error":"Zero Data Retention teams must provide output.upload_url for video generation."}"#,
+        );
+        assert_eq!(zdr.to_string(), ZDR_RESTRICTED_MESSAGE);
+
+        let invalid_url = video_http_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"code":"invalid-argument","error":"The output.upload_url field is invalid."}"#,
+        );
+        assert_ne!(invalid_url.to_string(), ZDR_RESTRICTED_MESSAGE);
     }
 
     #[test]

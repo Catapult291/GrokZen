@@ -12,6 +12,7 @@ use crate::util::{format_bytes, pad_to_width, truncate_to_width, unix_now};
 const REPO_WIDTH: usize = 6;
 const BRANCH_WIDTH: usize = 20;
 const AGE_WIDTH: usize = 10;
+const GC_LABEL_WIDTH: usize = 26;
 
 /// Truncate-then-pad to exactly `width` display columns; headers and data
 /// share it so the two stay aligned.
@@ -368,6 +369,17 @@ pub fn print_gc(report: &GcReport, out: &mut impl Write) -> std::io::Result<()> 
     print_gc_with_locale(report, out, &LocaleContext::default())
 }
 
+fn write_gc_field(
+    out: &mut impl Write,
+    locale: &LocaleContext,
+    id: &str,
+    english: &str,
+    value: impl std::fmt::Display,
+) -> std::io::Result<()> {
+    let label = format!("{}:", locale.named_text(id, english));
+    writeln!(out, "  {} {value}", pad_to_width(&label, GC_LABEL_WIDTH))
+}
+
 pub fn print_gc_with_locale(
     report: &GcReport,
     out: &mut impl Write,
@@ -378,29 +390,128 @@ pub fn print_gc_with_locale(
         "{}",
         locale.named_text("worktree.gc.title", "GC report:")
     )?;
-    write_show_field(
+    write_gc_field(
         out,
         locale,
         "worktree.gc.dead_removed",
         "Dead records removed",
         report.dead_removed,
     )?;
-    write_show_field(
+    write_gc_field(
         out,
         locale,
         "worktree.gc.expired_removed",
         "Expired worktrees removed",
         report.expired_removed,
     )?;
-    write_show_field(
+    if report.no_repo_paths > 0 {
+        write_gc_field(
+            out,
+            locale,
+            "worktree.gc.no_repo_paths",
+            "Non-repository paths",
+            report.no_repo_paths,
+        )?;
+    }
+    write_gc_field(
         out,
         locale,
         "worktree.gc.skipped_alive",
-        "Skipped (alive process)",
+        "Skipped (guarded)",
         report.skipped_alive,
     )?;
+    if report.never_expiring > 0 {
+        write_gc_field(
+            out,
+            locale,
+            "worktree.gc.never_expiring",
+            "Kept (never expires)",
+            report.never_expiring,
+        )?;
+    }
+    if report.kept_unsafe > 0 {
+        write_gc_field(
+            out,
+            locale,
+            "worktree.gc.kept_unsafe",
+            "Kept (not reclaimable)",
+            report.kept_unsafe,
+        )?;
+        for (reason, count) in &report.kept_reasons {
+            let count = count.to_string();
+            writeln!(
+                out,
+                "{}",
+                localized_named(
+                    locale,
+                    "worktree.gc.kept_reason",
+                    "    {reason}: {count}",
+                    &[("reason", reason), ("count", &count)],
+                )
+            )?;
+        }
+        // The report carries only the first hundred entries; every retained
+        // worktree is also named in the log for explicit follow-up.
+        const MAX_KEPT_PRINTED: usize = 20;
+        let printed = report.kept.len().min(MAX_KEPT_PRINTED);
+        for kept in report.kept.iter().take(MAX_KEPT_PRINTED) {
+            writeln!(
+                out,
+                "{}",
+                localized_named(
+                    locale,
+                    "worktree.gc.kept_path",
+                    "      {path}  ({reason})",
+                    &[("path", &kept.path), ("reason", &kept.reason)],
+                )
+            )?;
+        }
+        let rest = usize::try_from(report.kept_unsafe)
+            .unwrap_or(usize::MAX)
+            .saturating_sub(printed);
+        if rest > 0 {
+            let rest = rest.to_string();
+            writeln!(
+                out,
+                "{}",
+                localized_named(
+                    locale,
+                    "worktree.gc.kept_more",
+                    "      and {count} more, named in the log",
+                    &[("count", &rest)],
+                )
+            )?;
+        }
+    }
+    if report.names_collected > 0 {
+        write_gc_field(
+            out,
+            locale,
+            "worktree.gc.names_collected",
+            "Reclaimed names dropped",
+            report.names_collected,
+        )?;
+    }
+    if report.not_judged > 0 {
+        write_gc_field(
+            out,
+            locale,
+            "worktree.gc.not_judged",
+            "Not judged this pass",
+            report.not_judged,
+        )?;
+    }
+    if report.unnamed > 0 {
+        write_gc_field(
+            out,
+            locale,
+            "worktree.gc.unnamed",
+            "Naming failed (kept)",
+            report.unnamed,
+        )?;
+    }
     if report.remove_failed > 0 {
-        write_show_field(
+        write_gc_field(
             out,
             locale,
             "worktree.gc.remove_failed",

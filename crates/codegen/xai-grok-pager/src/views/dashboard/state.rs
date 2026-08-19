@@ -16,7 +16,7 @@ use crate::app::agent::AgentId;
 use crate::app::app_view::InputOutcome;
 use crate::input::line_editor::{LineEditOutcome, LineEditor};
 use crate::key;
-use crate::views::prompt_widget::PromptWidget;
+use crate::views::prompt_widget::{PromptEvent, PromptWidget};
 use xai_grok_shell::session::persistence::MAX_TITLE_SCALARS as MAX_RENAME_SCALARS;
 
 const PROMPT_MULTI_CLICK_MS: u128 = 300;
@@ -2062,10 +2062,7 @@ impl DashboardState {
     /// rooted at the peeked agent's cwd. All reply-composing paths route
     /// through here so the lazy retarget lands before a freshly typed
     /// `@` kicks off the directory walk on a stale root.
-    fn peek_reply_handle_key(
-        &mut self,
-        key: &KeyEvent,
-    ) -> crate::views::prompt_widget::PromptEvent {
+    fn peek_reply_handle_key(&mut self, key: &KeyEvent) -> PromptEvent {
         self.ensure_peek_reply_cwd();
         self.peek_reply.handle_key(key)
     }
@@ -2335,12 +2332,12 @@ impl DashboardState {
         } else {
             self.dispatch.handle_paste(text)
         };
-        if !peek && matches!(event, crate::views::prompt_widget::PromptEvent::Edited) {
+        if !peek && matches!(event, PromptEvent::Edited) {
             self.dispatch.refresh_slash(&self.models);
         }
         let completion = match event {
-            crate::views::prompt_widget::PromptEvent::Edited => ClipboardTextInsertion::Inserted,
-            crate::views::prompt_widget::PromptEvent::Ignored => ClipboardTextInsertion::Failed,
+            PromptEvent::Edited => ClipboardTextInsertion::Inserted,
+            PromptEvent::Ignored => ClipboardTextInsertion::Failed,
         };
         (InputOutcome::Changed, completion)
     }
@@ -2722,10 +2719,10 @@ impl DashboardState {
         // below (so e.g. Ctrl+X stop still fires with the dropdown up).
         if self.peek_reply.file_search_visible() {
             match self.peek_reply_handle_key(key) {
-                crate::views::prompt_widget::PromptEvent::Edited => {
+                PromptEvent::Edited => {
                     return Some(InputOutcome::Changed);
                 }
-                crate::views::prompt_widget::PromptEvent::Ignored => {}
+                PromptEvent::Ignored => {}
             }
         }
 
@@ -2959,12 +2956,7 @@ impl DashboardState {
             // the selected one. Delegated to the reply widget so the
             // feedback field gets the same editing surface (selection,
             // word ops, chips) as the main reply line.
-            if on_reject
-                && matches!(
-                    self.peek_reply_handle_key(key),
-                    crate::views::prompt_widget::PromptEvent::Edited
-                )
-            {
+            if on_reject && matches!(self.peek_reply_handle_key(key), PromptEvent::Edited) {
                 return Some(InputOutcome::Changed);
             }
             // Modal while the question picker is up: consume any other key so
@@ -3067,8 +3059,8 @@ impl DashboardState {
             // dispatch input below; app-global shortcuts still fire off
             // the `Unchanged` bubble-up.
             return Some(match self.peek_reply_handle_key(key) {
-                crate::views::prompt_widget::PromptEvent::Edited => InputOutcome::Changed,
-                crate::views::prompt_widget::PromptEvent::Ignored => InputOutcome::Unchanged,
+                PromptEvent::Edited => InputOutcome::Changed,
+                PromptEvent::Ignored => InputOutcome::Unchanged,
             });
         }
 
@@ -3277,11 +3269,11 @@ impl DashboardState {
         // handlers, mirroring `agent_view::handle_prompt_key`.
         if self.dispatch.file_search_visible() {
             match self.dispatch.handle_key(key) {
-                crate::views::prompt_widget::PromptEvent::Edited => {
+                PromptEvent::Edited => {
                     self.dispatch.refresh_slash(&self.models);
                     return InputOutcome::Changed;
                 }
-                crate::views::prompt_widget::PromptEvent::Ignored => {
+                PromptEvent::Ignored => {
                     // Not a picker key — fall through to normal handling.
                 }
             }
@@ -3686,7 +3678,9 @@ impl DashboardState {
 
         // Forward to the prompt widget (single-line).
         let old = self.dispatch.text().to_string();
+        let had_highlight = self.dispatch.textarea.selection_range().is_some();
         let event = self.dispatch.handle_key(key);
+        let dropped_highlight = had_highlight && self.dispatch.textarea.selection_range().is_none();
         let new = self.dispatch.text().to_string();
         if old != new {
             // Live-update the filter as the user types ONLY in search
@@ -3719,7 +3713,7 @@ impl DashboardState {
                 self.manual_scroll_active = false;
             }
             InputOutcome::Changed
-        } else if event == crate::views::prompt_widget::PromptEvent::Edited {
+        } else if event == PromptEvent::Edited || dropped_highlight {
             InputOutcome::Changed
         } else {
             InputOutcome::Unchanged

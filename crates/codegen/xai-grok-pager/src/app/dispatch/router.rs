@@ -59,7 +59,7 @@ use super::session::fork::{
     dispatch_startup_fork_session,
 };
 use super::session::lifecycle::{
-    clear_startup_actions, dispatch_agent_type_mismatch_answered,
+    clear_startup_actions, dispatch_accept_consent, dispatch_agent_type_mismatch_answered,
     dispatch_delete_current_session_answered, dispatch_exit_session, dispatch_new_session,
     dispatch_new_session_inner, dispatch_new_session_with_id, dispatch_new_worktree_session,
     dispatch_trust_folder, open_delete_current_session_question, open_new_session_question,
@@ -116,6 +116,7 @@ use super::voice::{dispatch_enable_voice_mode, dispatch_voice_stop, dispatch_voi
 use crate::app::actions::{Action, Effect};
 use crate::app::agent_view::ActivePane;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
+use crate::app::consent::ConsentState;
 use crate::scrollback::types::DisplayMode;
 use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
 use xai_grok_telemetry::session_ctx::log_event;
@@ -1190,6 +1191,17 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             vec![]
         }
         Action::TrustFolder => dispatch_trust_folder(app),
+        Action::AcceptConsent => dispatch_accept_consent(app),
+        Action::OpenConsentLink(index) => {
+            let url = match &app.consent_state {
+                ConsentState::Pending { notice, .. } => notice.links.get(index).cloned(),
+                ConsentState::Done => None,
+            };
+            if let Some(url) = url {
+                open_url_or_show(app, &url);
+            }
+            vec![]
+        }
         Action::TriggerDeepSearch => dispatch_trigger_deep_search(app, false),
         Action::ForceDeepSearch => dispatch_trigger_deep_search(app, true),
         Action::PickContentSession { session_id, cwd } => {

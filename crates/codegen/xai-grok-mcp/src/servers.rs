@@ -97,6 +97,106 @@ pub fn validate_tool_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Max protocol icons kept per server/tool at ingest.
+pub const MAX_MCP_ICONS_PER_ENTITY: usize = 8;
+
+/// Max bytes for a single icon `src` (including data URIs) at ingest.
+pub const MAX_MCP_ICON_SRC_BYTES: usize = 64 * 1024;
+
+/// Max bytes for a single icon `mime_type` string at ingest.
+pub const MAX_MCP_ICON_MIME_TYPE_BYTES: usize = 128;
+
+/// Max size tokens kept per icon (`48x48`, `any`, …) at ingest.
+pub const MAX_MCP_ICON_SIZES: usize = 8;
+
+/// Max bytes for a single size token at ingest.
+pub const MAX_MCP_ICON_SIZE_TOKEN_BYTES: usize = 32;
+
+/// Wire theme for MCP protocol icons.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpIconTheme {
+    Light,
+    Dark,
+    #[serde(other)]
+    Unknown,
+}
+
+/// ACP-facing MCP protocol icon (SEP-973), mirrored from rmcp so clients
+/// never depend on the quarantined SDK types.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct McpIcon {
+    pub src: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sizes: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<McpIconTheme>,
+}
+
+impl McpIcon {
+    /// Convert an rmcp icon with ingest rules: trim `src`, allow only
+    /// `https://` and `data:image/…`, drop empty/oversized values.
+    pub fn from_rmcp(icon: rmcp::model::Icon) -> Option<Self> {
+        let src = icon.src.trim();
+        if src.is_empty() || src.len() > MAX_MCP_ICON_SRC_BYTES {
+            return None;
+        }
+        if !is_allowed_mcp_icon_src(src) {
+            return None;
+        }
+        let theme = match icon.theme {
+            Some(rmcp::model::IconTheme::Light) => Some(McpIconTheme::Light),
+            Some(rmcp::model::IconTheme::Dark) => Some(McpIconTheme::Dark),
+            _ => None,
+        };
+        let mime_type = icon.mime_type.and_then(|mime| {
+            let mime = mime.trim();
+            if mime.is_empty() || mime.len() > MAX_MCP_ICON_MIME_TYPE_BYTES {
+                None
+            } else {
+                Some(mime.to_owned())
+            }
+        });
+        let sizes = icon.sizes.map(|sizes| {
+            sizes
+                .into_iter()
+                .filter_map(|size| {
+                    let size = size.trim();
+                    if size.is_empty() || size.len() > MAX_MCP_ICON_SIZE_TOKEN_BYTES {
+                        None
+                    } else {
+                        Some(size.to_owned())
+                    }
+                })
+                .take(MAX_MCP_ICON_SIZES)
+                .collect::<Vec<_>>()
+        });
+        let sizes = sizes.filter(|sizes| !sizes.is_empty());
+        Some(Self {
+            src: src.to_owned(),
+            mime_type,
+            sizes,
+            theme,
+        })
+    }
+
+    pub fn from_rmcp_list(icons: Option<Vec<rmcp::model::Icon>>) -> Vec<Self> {
+        icons
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(Self::from_rmcp)
+            .take(MAX_MCP_ICONS_PER_ENTITY)
+            .collect()
+    }
+}
+
+fn is_allowed_mcp_icon_src(src: &str) -> bool {
+    src.starts_with("data:image/") || src.starts_with("https://")
+}
+
 /// Sanitize an MCP server or tool name into a single safe path segment
 /// (e.g. `"user-Hugging Face"` becomes `user-Hugging_Face`). Shared so the
 /// per-server folder advertised in the prompt matches the tool files on disk.
@@ -374,6 +474,8 @@ pub struct McpState {
     pub generation: u64,
     /// Qualified tool name → `_meta` from MCP tools/list. Populated during init.
     pub mcp_tool_meta: HashMap<String, serde_json::Value>,
+    /// Qualified tool name → protocol `icons` from MCP tools/list.
+    pub mcp_tool_icons: HashMap<String, Vec<McpIcon>>,
     /// HTTP servers that support OAuth but haven't been authenticated yet.
     pub auth_required: std::collections::HashSet<McpServerName>,
     /// Servers whose background init failed (handshake error, `tools/list`
@@ -433,6 +535,7 @@ impl McpState {
             init_progress: InitProgress::default(),
             generation: 0,
             mcp_tool_meta: HashMap::new(),
+            mcp_tool_icons: HashMap::new(),
             auth_required: std::collections::HashSet::new(),
             init_failed: HashMap::new(),
             disabled_tools: HashMap::new(),
@@ -487,6 +590,16 @@ impl McpState {
 
     pub fn event_writer(&self) -> &xai_grok_session_events::EventWriter {
         &self.event_writer
+    }
+
+    /// Snapshot tool icons for `mcp/list`. Empty clears any prior entry so
+    /// a tools/list refresh without icons does not keep a stale set.
+    pub fn record_tool_icons(&mut self, qualified_name: String, icons: Vec<McpIcon>) {
+        if icons.is_empty() {
+            self.mcp_tool_icons.remove(&qualified_name);
+        } else {
+            self.mcp_tool_icons.insert(qualified_name, icons);
+        }
     }
 
     /// Register the session's in-process SDK MCP servers (`name -> serverId`) plus the
@@ -572,6 +685,7 @@ impl McpState {
         // Clear owned clients only — shared (inherited) clients are untouched.
         self.owned_clients.clear();
         self.mcp_tool_meta.clear();
+        self.mcp_tool_icons.clear();
         self.disabled_tool_registrations.clear();
         self.configs = new_configs;
         self.init_progress.cancel();
@@ -647,6 +761,7 @@ impl McpState {
             self.init_progress.mark_handshake_complete(name);
             let prefix = format!("{}{}", name, MCP_TOOL_NAME_DELIMITER);
             self.mcp_tool_meta.retain(|k, _| !k.starts_with(&prefix));
+            self.mcp_tool_icons.retain(|k, _| !k.starts_with(&prefix));
             self.disabled_tool_registrations
                 .retain(|k, _| !k.starts_with(&prefix));
         }
@@ -1259,6 +1374,7 @@ pub struct McpToolRegistration {
     pub input_schema: serde_json::Value,
     pub tool: McpErasedTool,
     pub meta: Option<serde_json::Value>,
+    pub icons: Vec<McpIcon>,
     pub model_visible: bool,
 }
 
@@ -1331,6 +1447,7 @@ impl McpTool {
             input_schema,
             tool: McpErasedTool { tool: self },
             meta,
+            icons: Vec::new(),
             model_visible,
         })
     }
@@ -3870,6 +3987,20 @@ impl McpClient {
         }
     }
 
+    // Server icons stay on peer_info (handshake) and are re-read here; tool
+    // icons are snapshotted into McpState at registration because tools/list
+    // is not re-fetched for every status build.
+    pub async fn server_icons(&self) -> Vec<McpIcon> {
+        let guard = self.state.lock().await;
+        match &*guard {
+            ClientState::Ready(service) => service
+                .peer_info()
+                .map(|info| McpIcon::from_rmcp_list(info.server_info.icons.clone()))
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
     pub async fn get_tool_registrations(
         &self,
         mcp_state: Arc<Mutex<McpState>>,
@@ -3921,6 +4052,7 @@ impl McpClient {
                         .or_insert_with(|| serde_json::json!({}));
                 }
 
+                let icons = McpIcon::from_rmcp_list(tool.icons);
                 let mcp_tool = McpTool {
                     name,
                     description,
@@ -3930,7 +4062,10 @@ impl McpClient {
                     meta,
                 };
                 // Invalid tools (bad names) return None and are skipped
-                mcp_tool.into_registration()
+                mcp_tool.into_registration().map(|mut reg| {
+                    reg.icons = icons;
+                    reg
+                })
             })
             .collect();
 

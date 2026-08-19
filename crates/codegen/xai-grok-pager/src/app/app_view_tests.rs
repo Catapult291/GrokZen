@@ -8,6 +8,28 @@ use crate::scrollback::state::ScrollbackState;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
+
+#[test]
+fn welcome_model_name_localizes_effort_without_changing_model_name() {
+    let zh = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let display = localized_welcome_model_name(
+        &zh,
+        "Grok 4.5".to_string(),
+        Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+    );
+    assert_eq!(display, "Grok 4.5 (高)");
+
+    let english = localized_welcome_model_name(
+        &crate::locale::LocaleContext::default(),
+        "Grok 4.5".to_string(),
+        Some(xai_grok_shell::sampling::types::ReasoningEffort::High),
+    );
+    assert_eq!(english, "Grok 4.5 (high)");
+}
+
 #[test]
 fn welcome_show_toast_scrubs_control_chars() {
     let mut app = test_app();
@@ -109,6 +131,7 @@ pub(crate) fn test_app() -> AppView {
         scroll_state: MouseScrollState::default(),
         scroll_config: ScrollConfig::default(),
         appearance: AppearanceConfig::default(),
+        locale: std::sync::Arc::new(crate::locale::LocaleContext::default()),
         notification_service: NotificationService::new(Default::default()),
         pending_notification_escapes: None,
         deferred_notification: None,
@@ -163,6 +186,11 @@ pub(crate) fn test_app() -> AppView {
         auth_methods: Vec::new(),
         auth_state: AuthState::Done,
         trust_state: TrustState::Done,
+        consent_state: crate::app::consent::ConsentState::Done,
+        account_email: None,
+        welcome_consent_link_rects: Vec::new(),
+        welcome_consent_hover_link: None,
+        consent_answered: None,
         login_label: None,
         login_method_id: None,
         auth_start_mode: AuthMode::Pending,
@@ -765,6 +793,7 @@ fn tick_demand_fast_while_modal_session_picker_loads() {
         repo_name: "r".into(),
         worktree_label: None,
         last_turn_summary: None,
+        last_recap: None,
         card_detail: None,
     };
     if let Some(crate::views::modal::ActiveModal::SessionPicker { entries, .. }) =
@@ -1239,44 +1268,6 @@ fn needs_animation_gates_btw_loading_spinner() {
     assert!(!app.needs_animation());
 }
 #[test]
-fn needs_animation_gates_todo_badge_flash() {
-    let mut app = test_app_with_agent();
-    let id = super::super::agent::AgentId(0);
-    assert!(!app.needs_animation(), "idle agent must not request ticks");
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .todo
-        .update_todos(vec![xai_grok_shell::tools::TodoItem {
-            content: "do the thing".into(),
-            priority: Default::default(),
-            status: xai_grok_shell::tools::TodoStatus::InProgress,
-            meta: None,
-        }]);
-    assert!(
-        app.agents[&id].todo.badge_needs_tick(),
-        "fixture: a counts change must arm the badge flash"
-    );
-    assert!(
-        app.needs_animation(),
-        "an active todo badge flash must request animation ticks"
-    );
-    app.agents
-        .get_mut(&id)
-        .unwrap()
-        .todo
-        .expire_badge_flash_for_test();
-    let _ = app.tick();
-    assert!(
-        !app.agents[&id].todo.badge_needs_tick(),
-        "tick() must clear the expired badge flash (badge_tick)"
-    );
-    assert!(
-        !app.needs_animation(),
-        "a cleared badge flash must stop requesting ticks"
-    );
-}
-#[test]
 fn needs_animation_gates_pending_acp_command_sync() {
     let mut app = test_app_with_agent();
     let id = super::super::agent::AgentId(0);
@@ -1326,6 +1317,7 @@ fn needs_animation_gates_pending_turn_end_reconcile() {
             stop_reason: Some("end_turn".into()),
             agent_result: None,
             cancel_trigger: None,
+            cancellation_category: None,
             received_at: std::time::Instant::now()
                 - (TURN_END_RECONCILE_GRACE + std::time::Duration::from_secs(1)),
         });
@@ -2137,6 +2129,7 @@ fn welcome_session_entry(id: &str) -> SessionPickerEntry {
         repo_name: "tmp-repo".into(),
         worktree_label: None,
         last_turn_summary: None,
+        last_recap: None,
         card_detail: None,
     }
 }
@@ -2229,6 +2222,273 @@ fn welcome_trust_decline_keys_quit() {
     };
     let outcome = app.handle_input(&key_event(KeyCode::Char('y'), KeyModifiers::NONE));
     assert!(matches!(outcome, InputOutcome::Action(Action::TrustFolder)));
+}
+/// A notice already on screen, with both menu rows and both of its links painted.
+fn consent_pending_app() -> AppView {
+    use crate::app::consent::{ConsentLegibility, ConsentNotice, ConsentSegment};
+    use ratatui::layout::Rect;
+    let mut app = test_app();
+    app.trust_state = TrustState::Pending {
+        workspace: std::path::PathBuf::from("/tmp/x"),
+    };
+    app.consent_state = crate::app::consent::ConsentState::Pending {
+        notice: ConsentNotice {
+            id: "notice".to_string(),
+            version: 1,
+            title: "Title".to_string(),
+            segments: vec![
+                ConsentSegment::Link {
+                    index: 0,
+                    label: "Terms".to_string(),
+                },
+                ConsentSegment::Link {
+                    index: 1,
+                    label: "AUP".to_string(),
+                },
+            ],
+            links: vec![
+                "https://x.ai/legal/tos".to_string(),
+                "https://x.ai/legal/aup".to_string(),
+            ],
+            accept_label: "Accept".to_string(),
+        },
+        legibility: ConsentLegibility::Painted,
+        painted_at: Some(std::time::Instant::now()),
+    };
+    app.welcome_menu_rects = vec![Rect::new(10, 20, 30, 1), Rect::new(10, 21, 30, 1)];
+    app.welcome_consent_link_rects =
+        vec![(0, Rect::new(5, 12, 5, 1)), (1, Rect::new(20, 12, 6, 1))];
+    app
+}
+/// Accept is `a` alone. `y` belongs to the trust question one screen later, Enter may be buffered,
+/// and the rest have no meaning here.
+#[test]
+fn welcome_consent_answers_only_to_its_own_keys() {
+    for code in [
+        KeyCode::Char('y'),
+        KeyCode::Char('n'),
+        KeyCode::Esc,
+        KeyCode::Enter,
+        KeyCode::Char(' '),
+        KeyCode::Tab,
+    ] {
+        let mut app = consent_pending_app();
+        let outcome = app.handle_input(&key_event(code, KeyModifiers::NONE));
+        assert!(
+            matches!(outcome, InputOutcome::Unchanged),
+            "{code:?} must not answer the notice, got {outcome:?}",
+        );
+    }
+    let mut app = consent_pending_app();
+    assert!(matches!(
+        app.handle_input(&key_event(KeyCode::Char('a'), KeyModifiers::NONE)),
+        InputOutcome::Action(Action::AcceptConsent)
+    ));
+    let mut app = consent_pending_app();
+    assert!(matches!(app.handle_input(&ctrl_c()), InputOutcome::Changed));
+    assert!(
+        app.pending_action.is_some(),
+        "the first Ctrl+C must arm the confirmation"
+    );
+    let mut app = consent_pending_app();
+    assert!(
+        matches!(
+            app.handle_input(&key_event(KeyCode::Char('q'), KeyModifiers::NONE)),
+            InputOutcome::Action(Action::Quit)
+        ),
+        "the screen offers Quit, so the key has to work",
+    );
+}
+/// Every event from before the notice painted was aimed at the screen it replaced, and acting on
+/// one would quit and take the composer's text with it. Ctrl+C is the exception, because nothing
+/// else on this screen handles it.
+#[test]
+fn welcome_consent_ignores_everything_from_before_the_paint() {
+    use crate::app::consent::ConsentState;
+    let unpainted = || {
+        let mut app = consent_pending_app();
+        if let ConsentState::Pending { painted_at, .. } = &mut app.consent_state {
+            *painted_at = None;
+        }
+        app
+    };
+    let mut app = consent_pending_app();
+    let painted = match &app.consent_state {
+        ConsentState::Pending { painted_at, .. } => painted_at.expect("painted"),
+        ConsentState::Done => unreachable!(),
+    };
+    let outcome = app.handle_input_at_with_paste_provenance(
+        &key_event(KeyCode::Char('a'), KeyModifiers::NONE),
+        painted - std::time::Duration::from_millis(1),
+        crate::app::app_view::PasteProvenance::Terminal,
+    );
+    assert!(
+        matches!(outcome, InputOutcome::Unchanged),
+        "a key that predates the notice was aimed at the composer, got {outcome:?}",
+    );
+    for ev in [
+        left_mouse(MouseEventKind::Down(MouseButton::Left), 12, 20),
+        key_event(KeyCode::Char('q'), KeyModifiers::NONE),
+    ] {
+        assert!(matches!(
+            unpainted().handle_input(&ev),
+            InputOutcome::Unchanged
+        ));
+    }
+    let mut app = unpainted();
+    assert!(matches!(app.handle_input(&ctrl_c()), InputOutcome::Changed));
+    assert!(
+        app.pending_action.is_some(),
+        "a notice that never painted must still be escapable",
+    );
+}
+#[test]
+fn welcome_consent_answers_and_links_are_reachable_by_key_and_click() {
+    let click = |col, row| left_mouse(MouseEventKind::Down(MouseButton::Left), col, row);
+    let mut app = consent_pending_app();
+    assert!(matches!(
+        app.handle_input(&click(12, 20)),
+        InputOutcome::Action(Action::AcceptConsent)
+    ));
+    let mut app = consent_pending_app();
+    assert!(matches!(
+        app.handle_input(&click(12, 21)),
+        InputOutcome::Action(Action::Quit)
+    ));
+    let mut app = consent_pending_app();
+    assert!(matches!(
+        app.handle_input(&click(21, 12)),
+        InputOutcome::Action(Action::OpenConsentLink(1))
+    ));
+    let mut app = consent_pending_app();
+    assert!(matches!(
+        app.handle_input(&key_event(KeyCode::Char('2'), KeyModifiers::NONE)),
+        InputOutcome::Action(Action::OpenConsentLink(1))
+    ));
+    for code in [KeyCode::Char('0'), KeyCode::Char('3')] {
+        let mut app = consent_pending_app();
+        assert!(
+            matches!(
+                app.handle_input(&key_event(code, KeyModifiers::NONE)),
+                InputOutcome::Unchanged
+            ),
+            "{code:?} addresses no link",
+        );
+    }
+}
+/// What the renderer reports is the only thing standing between a click and an acceptance, so the
+/// three answers it can give have to land in the state exactly.
+#[test]
+fn consent_paint_records_what_the_renderer_reported() {
+    use crate::app::consent::{ConsentLegibility, ConsentNotice, ConsentState};
+    let pending = || ConsentState::Pending {
+        notice: ConsentNotice {
+            id: "notice".to_string(),
+            version: 1,
+            title: "Title".to_string(),
+            segments: Vec::new(),
+            links: Vec::new(),
+            accept_label: "Accept".to_string(),
+        },
+        legibility: ConsentLegibility::Illegible,
+        painted_at: None,
+    };
+    let mut state = pending();
+    record_consent_paint(&mut state, Some(ConsentLegibility::Illegible));
+    let ConsentState::Pending {
+        painted_at,
+        legibility,
+        ..
+    } = &state
+    else {
+        panic!("expected pending");
+    };
+    assert!(painted_at.is_some(), "an illegible paint is still a paint");
+    assert_eq!(*legibility, ConsentLegibility::Illegible);
+    let mut state = pending();
+    record_consent_paint(&mut state, Some(ConsentLegibility::Painted));
+    record_consent_paint(&mut state, None);
+    let ConsentState::Pending {
+        painted_at,
+        legibility,
+        ..
+    } = &state
+    else {
+        panic!("expected pending");
+    };
+    assert_eq!(
+        *legibility,
+        ConsentLegibility::Illegible,
+        "a frame that did not paint the notice cannot leave it acceptable",
+    );
+    assert!(painted_at.is_some(), "the first paint still happened");
+}
+/// An unreadable notice still has to take `q`, so the paint stamp cannot wait for legibility.
+#[test]
+fn welcome_consent_quit_works_while_the_body_is_unreadable() {
+    use crate::app::consent::{ConsentLegibility, ConsentState};
+    let mut app = consent_pending_app();
+    if let ConsentState::Pending { legibility, .. } = &mut app.consent_state {
+        *legibility = ConsentLegibility::Illegible;
+    }
+    app.welcome_menu_rects.truncate(1);
+    assert!(matches!(
+        app.handle_input(&key_event(KeyCode::Char('q'), KeyModifiers::NONE)),
+        InputOutcome::Action(Action::Quit)
+    ));
+    let mut app = consent_pending_app();
+    if let ConsentState::Pending { legibility, .. } = &mut app.consent_state {
+        *legibility = ConsentLegibility::Illegible;
+    }
+    for ev in [
+        key_event(KeyCode::Char('1'), KeyModifiers::NONE),
+        left_mouse(MouseEventKind::Down(MouseButton::Left), 6, 12),
+    ] {
+        assert!(matches!(app.handle_input(&ev), InputOutcome::Unchanged));
+    }
+    let mut app = consent_pending_app();
+    if let ConsentState::Pending { legibility, .. } = &mut app.consent_state {
+        *legibility = ConsentLegibility::Illegible;
+    }
+    assert!(matches!(
+        app.handle_input(&left_mouse(MouseEventKind::Down(MouseButton::Left), 12, 20)),
+        InputOutcome::Action(Action::Quit)
+    ));
+}
+#[test]
+fn welcome_consent_hover_tracks_the_menu_row_and_the_link() {
+    let mut app = consent_pending_app();
+    app.welcome_menu_rects.truncate(1);
+    let moved = |col, row| left_mouse(MouseEventKind::Moved, col, row);
+    assert!(matches!(
+        app.handle_input(&moved(12, 20)),
+        InputOutcome::Changed
+    ));
+    assert_eq!(app.welcome_menu_index, Some(0));
+    assert!(matches!(
+        app.handle_input(&moved(30, 20)),
+        InputOutcome::Unchanged
+    ));
+    assert!(matches!(
+        app.handle_input(&moved(6, 12)),
+        InputOutcome::Changed
+    ));
+    assert_eq!(app.welcome_consent_hover_link, Some(0));
+    assert_eq!(app.welcome_menu_index, None);
+    assert!(matches!(
+        app.handle_input(&moved(21, 12)),
+        InputOutcome::Changed
+    ));
+    assert_eq!(app.welcome_consent_hover_link, Some(1));
+    assert!(matches!(
+        app.handle_input(&moved(0, 0)),
+        InputOutcome::Changed
+    ));
+    assert_eq!(app.welcome_consent_hover_link, None);
+    assert!(matches!(
+        app.handle_input(&moved(1, 0)),
+        InputOutcome::Unchanged
+    ));
 }
 #[test]
 fn welcome_ctrl_c_requires_confirmation() {
@@ -6238,7 +6498,7 @@ fn handle_input_exit_session_action_closes_popup() {
         d.close_popup();
     }
     if let Some(agent) = app.agents.get_mut(&id) {
-        agent.active_subagent = None;
+        agent.close_subagent_fullscreen();
     }
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, None);
     assert!(
@@ -6265,6 +6525,7 @@ fn welcome_picker_f_cycle_disabled_under_chat_mode() {
         repo_name: "r".into(),
         worktree_label: None,
         last_turn_summary: None,
+        last_recap: None,
         card_detail: None,
     };
     let f_key = Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::NONE));

@@ -126,6 +126,14 @@ impl AgentView {
             return self.handle_history_search_key(key);
         }
 
+        // Tab-family chords drop the prompt highlight no matter which layer
+        // consumes them (dropdown accepts, registry actions, widget decline).
+        let mut dropped_highlight = false;
+        if matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            dropped_highlight = self.prompt.textarea.selection_range().is_some();
+            self.prompt.textarea.clear_selection();
+        }
+
         // ── File search intercept ───────────────────────────────────────
         // When the @-completion dropdown is visible, the widget handles
         // Tab (accept), Enter (accept), Esc (dismiss), and arrow keys
@@ -560,7 +568,7 @@ impl AgentView {
                         && !slash_accepted_send
                         && crate::input::is_apple_terminal_newline_modifier_held()
                     {
-                        self.prompt.textarea.insert_str("\n");
+                        self.prompt.insert_replacing_selection("\n");
                         return InputOutcome::Changed;
                     }
 
@@ -583,7 +591,7 @@ impl AgentView {
                         {
                             return outcome;
                         }
-                        self.prompt.textarea.insert_str("\n");
+                        self.prompt.insert_replacing_selection("\n");
                         return InputOutcome::Changed;
                     }
                     if let Some(text) = self.prompt.try_send() {
@@ -783,6 +791,8 @@ impl AgentView {
             KeyCode::Tab if registry.find(ActionId::FocusScrollback).is_some() => {
                 InputOutcome::Action(Action::FocusScrollback)
             }
+            // A dropped highlight must repaint even when nothing claims the key.
+            _ if dropped_highlight => InputOutcome::Changed,
             _ => InputOutcome::Unchanged,
         }
     }
@@ -1772,6 +1782,33 @@ mod prompt_suggestion_key_tests {
             matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
             "Tab keeps its focus-cycling behavior when no ghost is visible: {outcome:?}"
         );
+    }
+
+    /// Tab drops the highlight even though the registry consumes the chord.
+    #[test]
+    fn tab_with_selection_clears_highlight_and_focuses_scrollback() {
+        let mut agent = super::test_fixtures::make_agent();
+        agent.prompt.textarea.insert_str("alpha beta");
+        agent.prompt.textarea.set_selection(0, 5);
+
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::FocusScrollback)
+        ));
+        assert_eq!(agent.prompt.textarea.selection_range(), None);
+    }
+
+    /// Shift+Tab (CycleMode) drops the highlight on the same press too.
+    #[test]
+    fn shift_tab_with_selection_clears_highlight_and_cycles_mode() {
+        let mut agent = super::test_fixtures::make_agent();
+        agent.prompt.textarea.insert_str("alpha beta");
+        agent.prompt.textarea.set_selection(0, 5);
+
+        let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::BackTab));
+        assert!(!matches!(outcome, InputOutcome::Unchanged));
+        assert_eq!(agent.prompt.textarea.selection_range(), None);
     }
 
     #[test]

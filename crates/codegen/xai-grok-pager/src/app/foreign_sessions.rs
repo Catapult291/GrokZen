@@ -448,6 +448,7 @@ pub(crate) fn map_summary(summary: ForeignSessionSummary) -> SessionPickerEntry 
         repo_name: crate::views::session_picker::repo_name_from_cwd(&cwd),
         worktree_label: None,
         last_turn_summary: None,
+        last_recap: None,
         card_detail: None,
     }
 }
@@ -558,6 +559,7 @@ mod tests {
             repo_name: "repo".into(),
             worktree_label: None,
             last_turn_summary: None,
+            last_recap: None,
             card_detail: None,
         }
     }

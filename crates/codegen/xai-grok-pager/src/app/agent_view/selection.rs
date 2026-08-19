@@ -1487,6 +1487,7 @@ mod tests {
                 screen_x: 0,
                 selectable_cols: 0..20,
                 text: (*text).to_string(),
+                painted_region: None,
                 joiner_to_previous: None,
             });
         }
@@ -1537,6 +1538,7 @@ mod tests {
                 screen_x: 0,
                 selectable_cols: 0..text.len() as u16,
                 text: (*text).to_string(),
+                painted_region: None,
                 joiner_to_previous: joiner.map(str::to_string),
             });
         }
@@ -1669,6 +1671,7 @@ mod tests {
                 screen_x: 0,
                 selectable_cols: 0..text.len() as u16,
                 text: text.to_string(),
+                painted_region: None,
                 joiner_to_previous: None,
             };
             boundaries.push(
@@ -1713,6 +1716,7 @@ mod tests {
                 screen_x: 0,
                 selectable_cols: 0..text.len() as u16,
                 text: text.to_string(),
+                painted_region: None,
                 joiner_to_previous: joiner.map(str::to_string),
             });
         }
@@ -2144,6 +2148,7 @@ mod tests {
                 screen_x: 0,
                 selectable_cols: 0..40,
                 text: format!("stacked line {}", first_bl + i),
+                painted_region: None,
                 joiner_to_previous: (first_bl + i > 0).then(|| "\n".to_string()),
             });
         }
@@ -2298,6 +2303,7 @@ mod tests {
             screen_x: 0,
             selectable_cols: 0..40,
             text: "btw line".to_string(),
+            painted_region: None,
             joiner_to_previous: None,
         });
         agent.last_btw_selection_model = btw_model;
@@ -2591,6 +2597,7 @@ mod tests {
                 screen_x: 0,
                 selectable_cols: 0..20,
                 text: format!("entry zero line {bl}"),
+                painted_region: None,
                 joiner_to_previous: (bl > 0).then(|| "\n".to_string()),
             });
         }
@@ -2602,6 +2609,7 @@ mod tests {
             screen_x: 0,
             selectable_cols: 0..20,
             text: "entry one line".to_string(),
+            painted_region: None,
             joiner_to_previous: None,
         });
         let block = |entry_idx: usize, area: Rect, content_width: u16| VisibleBlockGeometry {
