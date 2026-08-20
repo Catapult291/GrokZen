@@ -1,6 +1,6 @@
 # Changelog
 
-[1.0.3 简体中文更新说明](changelogs/1.0.3.zh-CN.md)
+[1.0.5 简体中文更新说明](changelogs/1.0.5.zh-CN.md) · [1.0.3 简体中文更新说明](changelogs/1.0.3.zh-CN.md)
 
 # 1.0.5 — 2026-08-15
 

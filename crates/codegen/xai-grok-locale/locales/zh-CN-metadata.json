@@ -2466,6 +2466,7 @@
   "usage.modal.footer.tabs": "Tab 切换",
   "usage.modal.footer.scroll": "↑/↓ 滚动",
   "usage.modal.footer.copy_session_id": "c 复制会话 ID",
+  "usage.modal.footer.copy_all": "y 全部复制",
   "usage.modal.footer.close": "Esc 关闭",
   "usage.modal.context.load_failed": "无法加载上下文用量：{error}",
   "usage.modal.context.loading": "正在加载上下文用量…",

@@ -1,0 +1,72 @@
+[
+  {
+    "category": "features",
+    "description": "**GROK_CONFIG** 和 **GROK_CONFIG_PATH** 环境变量现在允许启动器覆盖部分配置设置，无需编辑 config.toml。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "现在会在安全的情况下自动回收 ~/.grok/worktrees 下的**工作树**，并通过严格防护确保绝不删除用户的最后一份副本。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "回合被**钩子策略阻止**时，现在会正确报告“回合被钩子阻止”，而不是“回合被用户取消”。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "如果 /dev/null 被移除，**工具调用**（shell、grep、list_dir）在该会话的后续过程中不再持续失败。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**图像和视频生成**现在会限制模型在单个步骤中可请求的调用次数，以避免过载。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**智能体技能发现**现在可在 Windows 上正确解析用户主目录。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**阿拉伯语和波斯语文本**现在可在终端 UI 中正确重排；可在 /settings 中开启。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**MCP 工具调用**在参数仍在传入时会显示更清晰的准备提示，不再显示原始传输名称。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "ACP 客户端打开或恢复会话时，现在可以提供**推理强度**。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**`grok-zh inspect`** 的输出通过管道传给提前关闭管道的命令时不再崩溃。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**会话标题**现在会在对话早期刷新并保持稳定；有可用内容时，/resume 会显示回顾和上一回合摘要。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**GROK_FORCE_LOGIN_TEAM_ID** 环境变量现在允许启动器将交互式登录限制到一个或多个团队。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**准备中指示器**现在会为常用工具显示“正在编写文件…”和“正在编写编辑内容…”等易读标签。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**最小模式**在思考块交错出现时，不再截断仍在流式输出的助手回复。",
+    "breaking_change": false
+  }
+]

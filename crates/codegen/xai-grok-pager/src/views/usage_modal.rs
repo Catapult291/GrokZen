@@ -523,7 +523,7 @@ pub fn render_usage_modal(
         && state.session_fields.as_ref().is_some_and(|f| !f.is_empty())
     {
         shortcuts.push(Shortcut {
-            label: "y copy all",
+            label: locale.named_static_text("usage.modal.footer.copy_all", "y copy all"),
             clickable: true,
             id: COPY_ALL_SESSION_INFO_SHORTCUT,
         });
@@ -1739,6 +1739,7 @@ mod tests {
             "会话ID",
             "工作目录",
             "模型",
+            "全部复制",
         ] {
             assert!(
                 compact_text.contains(needle),
