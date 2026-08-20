@@ -1,7 +1,22 @@
 [
   {
+    "category": "performance",
+    "description": "当 ~/.grok 中存在大量会话时，**子智能体启动**速度大幅提升。",
+    "breaking_change": false
+  },
+  {
     "category": "features",
-    "description": "补全 Grok 4.6 更新汉化",
+    "description": "**/session-info** 现在可点击任意行复制其值，并支持悬停高亮和全部复制快捷键。",
+    "breaking_change": false
+  },
+  {
+    "category": "performance",
+    "description": "**TUI 渲染**现在会自动匹配高刷新率显示器（120 Hz 及以上），使滚动和绘制更加流畅。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**中文社区版（2026-08-14）** 补全 Grok 4.6 更新汉化。",
     "breaking_change": false
   }
 ]
