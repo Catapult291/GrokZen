@@ -287,6 +287,14 @@ pub fn compute_peek_fields(
     row: &DashboardRowId,
     agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
 ) -> Option<PeekFields> {
+    compute_peek_fields_with_locale(row, agents, None)
+}
+
+pub fn compute_peek_fields_with_locale(
+    row: &DashboardRowId,
+    agents: &indexmap::IndexMap<crate::app::agent::AgentId, AgentView>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> Option<PeekFields> {
     use crate::views::session_title::{entry_title, sanitize_display_text};
     match row {
         DashboardRowId::TopLevel(id) => {
@@ -306,7 +314,9 @@ pub fn compute_peek_fields(
             // an ask question (`None`).
             let (question, options, request_id, reject_option) =
                 if let Some(p) = agent.permission_queue.front() {
-                    let q = sanitize_display_text(&p.title).into_owned();
+                    let title =
+                        crate::views::permission_view::localized_permission_title(locale, &p.title);
+                    let q = sanitize_display_text(&title).into_owned();
                     // Live scope-aware labels: the peek's answer path attaches
                     // the same selection meta, so each row's label must match
                     // its own count (allow and deny scopes are independent).
@@ -333,10 +343,12 @@ pub fn compute_peek_fields(
                             } else {
                                 selected_words.as_deref()
                             };
-                            let name = crate::views::permission_view::option_label_for_selection(
+                            let name =
+                            crate::views::permission_view::option_label_for_selection_with_locale(
                                 opt,
                                 row_words,
                                 p.mcp_scope.as_ref(),
+                                locale,
                             );
                             (
                                 opt.option_id.0.to_string(),
