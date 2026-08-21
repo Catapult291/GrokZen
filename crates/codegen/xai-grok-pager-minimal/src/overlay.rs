@@ -651,7 +651,7 @@ fn render_permission(
     // Clone so the immutable borrow of `agent.prompt` ends before the mutable
     // `agent.prompt.draw` below.
     let followup = agent.prompt.text().to_string();
-    let result = xai_grok_pager::views::permission_view::render_permission_view_with_placeholder(
+    let result = xai_grok_pager::views::permission_view::render_permission_view_with_locale(
         buf,
         area,
         perm,
@@ -661,6 +661,7 @@ fn render_permission(
         theme,
         true,
         locale.text(xai_grok_pager::locale::TextKey::PermissionRejectFeedback),
+        Some(locale),
     );
     // Follow-up (reject-with-text) hosts an inline editor; draw it plainly
     // (minimal skips the full TUI's accent-bar/scrollbar chrome).

@@ -274,7 +274,7 @@ pub fn render_dashboard_with_locale(
     let reply_text_w = layout.dispatch.width.saturating_sub(6);
 
     match state.selected.clone() {
-        Some(sel) => match super::peek::compute_peek_fields(&sel, agents) {
+        Some(sel) => match super::peek::compute_peek_fields_with_locale(&sel, agents, locale) {
             Some(fields) => {
                 let question = fields.question.is_some();
                 let peek_min = if question {

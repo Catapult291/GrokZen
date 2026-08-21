@@ -25,8 +25,8 @@ use xai_grok_workspace::permission::bash_command_splitting::{
     soft_break_offsets_after_operators,
 };
 use xai_grok_workspace::permission::{
-    ALLOW_EDITS_SESSION_OPTION_ID, BashCommandPermission, McpToolPermission, mcp_titleize_segment,
-    mcp_tool_action, mcp_tool_display_name,
+    ALLOW_EDITS_SESSION_OPTION_ID, BashCommandPermission, ENABLE_ALWAYS_APPROVE_OPTION_ID,
+    McpToolPermission, mcp_titleize_segment, mcp_tool_action, mcp_tool_display_name,
 };
 
 use unicode_width::UnicodeWidthStr;
@@ -680,16 +680,22 @@ fn localized_permission_static(
         .unwrap_or(english)
 }
 
-fn localized_permission_title(
+pub(crate) fn localized_permission_title(
     locale: Option<&crate::locale::LocaleContext>,
     english: &str,
 ) -> String {
     if locale.is_none() {
         return english.to_owned();
     }
-    let (base, on_machine) = english
-        .strip_suffix(" (on your machine)")
-        .map_or((english, false), |base| (base, true));
+    let (base, on_machine, on_machine_before_question): (std::borrow::Cow<'_, str>, bool, bool) =
+        if let Some(base) = english.strip_suffix(" (on your machine)?") {
+            (std::borrow::Cow::Owned(format!("{base}?")), true, true)
+        } else if let Some(base) = english.strip_suffix(" (on your machine)") {
+            (std::borrow::Cow::Borrowed(base), true, false)
+        } else {
+            (std::borrow::Cow::Borrowed(english), false, false)
+        };
+    let base = base.as_ref();
     let localized = match base {
         "Allow Execute?" => {
             localized_permission_static(locale, "permission.title.execute", "Allow Execute?")
@@ -727,16 +733,137 @@ fn localized_permission_title(
         _ => base.to_owned(),
     };
     if on_machine {
-        format!(
-            "{localized}{}",
-            localized_permission_static(
-                locale,
-                "permission.title.on_machine",
-                " (on your machine)",
-            )
-        )
+        let qualifier = localized_permission_static(
+            locale,
+            "permission.title.on_machine",
+            " (on your machine)",
+        );
+        if on_machine_before_question {
+            if let Some(stem) = localized.strip_suffix('?') {
+                format!("{stem}{qualifier}?")
+            } else if let Some(stem) = localized.strip_suffix('？') {
+                format!("{stem}{qualifier}？")
+            } else {
+                format!("{localized}{qualifier}")
+            }
+        } else {
+            format!("{localized}{qualifier}")
+        }
     } else {
         localized
+    }
+}
+
+fn localized_permission_text(
+    locale: Option<&crate::locale::LocaleContext>,
+    id: &str,
+    english: &str,
+) -> String {
+    locale
+        .map(|locale| locale.named_text(id, english).into_owned())
+        .unwrap_or_else(|| english.to_owned())
+}
+
+/// Localize the stable permission choices emitted by our workspace server.
+/// Unknown ACP options keep their server-provided label verbatim so third-party
+/// agents do not lose option-specific meaning.
+fn localized_permission_option_name(
+    locale: Option<&crate::locale::LocaleContext>,
+    option: &acp::PermissionOption,
+) -> String {
+    let Some(locale) = locale else {
+        return option.name.clone();
+    };
+    let id = option.option_id.0.as_ref();
+    let text = |key: &str, english: &str| locale.named_text(key, english).into_owned();
+
+    match id {
+        ENABLE_ALWAYS_APPROVE_OPTION_ID
+            if option.name == "Yes, and don't ask again for anything (always-approve mode)" =>
+        {
+            text("permission.option.enable_always_approve", &option.name)
+        }
+        ALLOW_EDITS_SESSION_OPTION_ID
+            if option.name == "Yes, allow all edits during this session" =>
+        {
+            text("permission.option.allow_edits_session", &option.name)
+        }
+        "allow-once" => match option.name.as_str() {
+            "Yes" => text("permission.option.yes", &option.name),
+            "Yes, proceed" => text("permission.option.yes_proceed", &option.name),
+            "Yes, allow once" | "allow once" => text("permission.option.allow_once", &option.name),
+            _ => option.name.clone(),
+        },
+        "always-allow" if option.name == "Yes, and don't ask again for bash commands" => {
+            text("permission.option.always_allow_bash", &option.name)
+        }
+        "always-allow" if option.name == "always allow" => {
+            text("permission.option.always_allow", &option.name)
+        }
+        "reject-always" if option.name == "No, and don't ask again for this command" => {
+            text("permission.option.reject_always_command", &option.name)
+        }
+        "allow-always-domain" => option
+            .name
+            .strip_prefix("Yes, always allow ")
+            .and_then(|rest| rest.strip_suffix(" for this project"))
+            .map(|domain| {
+                text(
+                    "permission.option.always_allow_domain",
+                    "Yes, always allow {domain} for this project",
+                )
+                .replace("{domain}", domain)
+            })
+            .unwrap_or_else(|| option.name.clone()),
+        "reject-always-domain" => option
+            .name
+            .strip_prefix("No, never allow ")
+            .and_then(|rest| rest.strip_suffix(" for this project"))
+            .map(|domain| {
+                text(
+                    "permission.option.never_allow_domain",
+                    "No, never allow {domain} for this project",
+                )
+                .replace("{domain}", domain)
+            })
+            .unwrap_or_else(|| option.name.clone()),
+        ALLOW_ALWAYS_COMMAND_OPTION_ID | ALLOW_ALWAYS_MCP_OPTION_ID => option
+            .name
+            .strip_prefix("Always allow: ")
+            .map(|scope| {
+                format!(
+                    "{} {scope}",
+                    text("permission.option.always_allow_prefix", "Always allow:")
+                )
+            })
+            .unwrap_or_else(|| option.name.clone()),
+        REJECT_ALWAYS_COMMAND_OPTION_ID | "reject-always-mcp" => option
+            .name
+            .strip_prefix("Never allow: ")
+            .map(|scope| {
+                format!(
+                    "{} {scope}",
+                    text("permission.option.never_allow_prefix", "Never allow:")
+                )
+            })
+            .unwrap_or_else(|| option.name.clone()),
+        _ => option.name.clone(),
+    }
+}
+
+fn localized_permission_option_prefix(
+    locale: Option<&crate::locale::LocaleContext>,
+    option_id: &str,
+    english: &str,
+) -> String {
+    match option_id {
+        ALLOW_ALWAYS_COMMAND_OPTION_ID | ALLOW_ALWAYS_MCP_OPTION_ID => {
+            localized_permission_text(locale, "permission.option.always_allow_prefix", english)
+        }
+        REJECT_ALWAYS_COMMAND_OPTION_ID | "reject-always-mcp" => {
+            localized_permission_text(locale, "permission.option.never_allow_prefix", english)
+        }
+        _ => english.to_owned(),
     }
 }
 
@@ -1121,6 +1248,7 @@ pub fn render_permission_view_with_locale(
             content_width,
             theme,
             reject_feedback_placeholder,
+            locale,
         );
 
         let row_rect = Rect {
@@ -2017,6 +2145,7 @@ fn build_permission_option_line<'a>(
     row_width: u16,
     theme: &Theme,
     reject_feedback_placeholder: &str,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> Line<'a> {
     let num_style = Style::default().fg(theme.accent_user).bg(row_bg);
 
@@ -2036,7 +2165,8 @@ fn build_permission_option_line<'a>(
     // Dynamic label: AllowAlways/RejectAlways with BashCommandPermission or
     // McpToolPermission meta gets its scope text rebuilt from current
     // selection state.
-    let (label_prefix, scope_words) = dynamic_option_label(option, selected_words, mcp_scope);
+    let (label_prefix, scope_words) =
+        dynamic_option_label_with_locale(option, selected_words, mcp_scope, locale);
     // MCP scope text is a plain identifier, not a bash script — skip
     // syntax highlighting in that case so we don't accidentally tokenize
     // tool names.
@@ -2168,6 +2298,15 @@ fn dynamic_option_label(
     selected_words: Option<&str>,
     mcp_scope: Option<&McpScopeState>,
 ) -> (String, Option<String>) {
+    dynamic_option_label_with_locale(option, selected_words, mcp_scope, None)
+}
+
+fn dynamic_option_label_with_locale(
+    option: &acp::PermissionOption,
+    selected_words: Option<&str>,
+    mcp_scope: Option<&McpScopeState>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> (String, Option<String>) {
     if matches!(
         option.kind,
         acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::RejectAlways
@@ -2180,11 +2319,21 @@ fn dynamic_option_label(
             let scope_text = match scope.selected {
                 McpScope::Tool => perm.display_name(),
                 McpScope::Server => match scope.server_prefix.as_deref() {
-                    Some(s) => format!("all tools from {}", mcp_titleize_segment(s)),
+                    Some(s) => localized_permission_text(
+                        locale,
+                        "permission.option.mcp_all_tools_from",
+                        "all tools from {server}",
+                    )
+                    .replace("{server}", &mcp_titleize_segment(s)),
                     None => perm.display_name(),
                 },
             };
-            return (format!("{} ", perm.prompt_prefix), Some(scope_text));
+            let prefix = localized_permission_option_prefix(
+                locale,
+                option.option_id.0.as_ref(),
+                &perm.prompt_prefix,
+            );
+            return (format!("{prefix} "), Some(scope_text));
         }
 
         if let Some(words) = selected_words
@@ -2192,13 +2341,15 @@ fn dynamic_option_label(
                 serde_json::Value::Object(meta.clone()),
             )
         {
-            return (
-                format!("{} ", bash_perm.prompt_prefix),
-                Some(words.to_owned()),
+            let prefix = localized_permission_option_prefix(
+                locale,
+                option.option_id.0.as_ref(),
+                &bash_perm.prompt_prefix,
             );
+            return (format!("{prefix} "), Some(words.to_owned()));
         }
     }
-    (option.name.clone(), None)
+    (localized_permission_option_name(locale, option), None)
 }
 
 /// The allow row's label for scope `count`: the dequoted word join, except a
@@ -2242,6 +2393,20 @@ pub(crate) fn option_label_for_selection(
     }
 }
 
+pub(crate) fn option_label_for_selection_with_locale(
+    option: &acp::PermissionOption,
+    selected_words: Option<&str>,
+    mcp_scope: Option<&McpScopeState>,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
+    let (prefix, scope_text) =
+        dynamic_option_label_with_locale(option, selected_words, mcp_scope, locale);
+    match scope_text {
+        Some(scope) => format!("{prefix}{scope}"),
+        None => prefix,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2255,7 +2420,7 @@ mod tests {
     }
 
     #[test]
-    fn localized_permission_titles_preserve_dynamic_targets() {
+    fn zh_localization_permission_titles_preserve_dynamic_targets() {
         let locale = zh_cn_locale();
         assert_eq!(
             localized_permission_title(Some(&locale), "Allow Execute?"),
@@ -2274,8 +2439,152 @@ mod tests {
             "是否允许删除？（在你的计算机上）"
         );
         assert_eq!(
+            localized_permission_title(Some(&locale), "Allow Edit (on your machine)?"),
+            "是否允许编辑（在你的计算机上）？"
+        );
+        assert_eq!(
+            localized_permission_title(
+                Some(&crate::locale::LocaleContext::default()),
+                "Allow Edit (on your machine)?",
+            ),
+            "Allow Edit (on your machine)?"
+        );
+        assert_eq!(
             localized_permission_title(None, "Allow Execute?"),
             "Allow Execute?"
+        );
+    }
+
+    #[test]
+    fn zh_localization_permission_options_cover_fixed_and_dynamic_rows() {
+        let locale = zh_cn_locale();
+        let option = |id: &'static str, name: &str, kind: acp::PermissionOptionKind| {
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::<str>::from(id)),
+                name.to_owned(),
+                kind,
+            )
+        };
+
+        let global = option(
+            ENABLE_ALWAYS_APPROVE_OPTION_ID,
+            "Yes, and don't ask again for anything (always-approve mode)",
+            acp::PermissionOptionKind::AllowOnce,
+        );
+        assert_eq!(
+            localized_permission_option_name(Some(&locale), &global),
+            "是，不再询问任何操作（始终批准模式）"
+        );
+
+        let proceed = option(
+            "allow-once",
+            "Yes, proceed",
+            acp::PermissionOptionKind::AllowOnce,
+        );
+        assert_eq!(
+            localized_permission_option_name(Some(&locale), &proceed),
+            "是，继续"
+        );
+
+        for (id, name, kind, expected) in [
+            (
+                ALLOW_EDITS_SESSION_OPTION_ID,
+                "Yes, allow all edits during this session",
+                acp::PermissionOptionKind::AllowAlways,
+                "是，本会话内允许所有编辑",
+            ),
+            (
+                "allow-once",
+                "Yes",
+                acp::PermissionOptionKind::AllowOnce,
+                "是",
+            ),
+            (
+                "allow-once",
+                "Yes, allow once",
+                acp::PermissionOptionKind::AllowOnce,
+                "是，仅允许一次",
+            ),
+            (
+                "always-allow",
+                "Yes, and don't ask again for bash commands",
+                acp::PermissionOptionKind::AllowAlways,
+                "是，不再询问 Bash 命令",
+            ),
+            (
+                "always-allow",
+                "always allow",
+                acp::PermissionOptionKind::AllowAlways,
+                "始终允许",
+            ),
+            (
+                "reject-always",
+                "No, and don't ask again for this command",
+                acp::PermissionOptionKind::RejectAlways,
+                "否，不再询问此命令",
+            ),
+            (
+                "allow-always-domain",
+                "Yes, always allow example.com for this project",
+                acp::PermissionOptionKind::AllowAlways,
+                "是，本项目始终允许 example.com",
+            ),
+            (
+                "reject-always-mcp",
+                "Never allow: (Linear) Delete Issue",
+                acp::PermissionOptionKind::RejectAlways,
+                "始终拒绝： (Linear) Delete Issue",
+            ),
+        ] {
+            assert_eq!(
+                localized_permission_option_name(Some(&locale), &option(id, name, kind)),
+                expected,
+                "permission option {id}"
+            );
+        }
+
+        let third_party = option(
+            "allow-once",
+            "Approve after reviewing the generated policy",
+            acp::PermissionOptionKind::AllowOnce,
+        );
+        assert_eq!(
+            localized_permission_option_name(Some(&locale), &third_party),
+            "Approve after reviewing the generated policy"
+        );
+
+        let domain_deny = option(
+            "reject-always-domain",
+            "No, never allow www.example.com for this project",
+            acp::PermissionOptionKind::RejectAlways,
+        );
+        assert_eq!(
+            localized_permission_option_name(Some(&locale), &domain_deny),
+            "否，本项目始终拒绝 www.example.com"
+        );
+
+        let bash = option(
+            ALLOW_ALWAYS_COMMAND_OPTION_ID,
+            "Always allow: cargo test",
+            acp::PermissionOptionKind::AllowAlways,
+        )
+        .meta(
+            serde_json::to_value(BashCommandPermission {
+                prompt_prefix: "Always allow:".to_owned(),
+            })
+            .ok()
+            .and_then(|value| value.as_object().cloned()),
+        );
+        assert_eq!(
+            option_label_for_selection_with_locale(&bash, Some("cargo test"), None, Some(&locale),),
+            "始终允许： cargo test"
+        );
+
+        let mcp = allow_always_mcp_option("linear__list", Some("linear"));
+        let server_scope = mcp_state("linear__list", Some("linear"), McpScope::Server);
+        assert_eq!(
+            option_label_for_selection_with_locale(&mcp, None, Some(&server_scope), Some(&locale),),
+            "始终允许： 来自 Linear 的所有工具"
         );
     }
 
@@ -2753,9 +3062,32 @@ mod tests {
     }
 
     fn render_to_text(state: &PermissionViewState, area: Rect) -> String {
+        render_to_text_with_locale(state, area, None)
+    }
+
+    fn render_to_text_with_locale(
+        state: &PermissionViewState,
+        area: Rect,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> String {
         let theme = Theme::current();
         let mut buf = Buffer::empty(area);
-        let _ = render_permission_view(&mut buf, area, state, "", None, None, &theme, true);
+        let reject_feedback_placeholder = locale
+            .map_or("No, reject (type to add feedback)", |locale| {
+                locale.text(crate::locale::TextKey::PermissionRejectFeedback)
+            });
+        let _ = render_permission_view_with_locale(
+            &mut buf,
+            area,
+            state,
+            "",
+            None,
+            None,
+            &theme,
+            true,
+            reject_feedback_placeholder,
+            locale,
+        );
         (0..area.height)
             .map(|row| {
                 (area.x..area.x + area.width)
@@ -2764,6 +3096,45 @@ mod tests {
                     + "\n"
             })
             .collect()
+    }
+
+    #[test]
+    fn zh_localization_permission_renders_standard_choice_rows() {
+        let mut state = empty_view_state(None);
+        state.title = "Allow Execute?".to_owned();
+        state.options = vec![
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::from(ENABLE_ALWAYS_APPROVE_OPTION_ID)),
+                "Yes, and don't ask again for anything (always-approve mode)".to_owned(),
+                acp::PermissionOptionKind::AllowOnce,
+            ),
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::from("allow-once")),
+                "Yes, proceed".to_owned(),
+                acp::PermissionOptionKind::AllowOnce,
+            ),
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::from("reject-once")),
+                "No, and tell Grok what to do differently".to_owned(),
+                acp::PermissionOptionKind::RejectOnce,
+            ),
+        ];
+
+        let locale = zh_cn_locale();
+        let text = render_to_text_with_locale(&state, Rect::new(0, 0, 100, 12), Some(&locale));
+        assert!(
+            text.contains("是，不再询问任何操作（始终批准模式）"),
+            "global approval row missing:\n{text}"
+        );
+        assert!(text.contains("是，继续"), "allow-once row missing:\n{text}");
+        assert!(
+            text.contains("否，拒绝（可输入反馈）"),
+            "reject row missing:\n{text}"
+        );
+        assert!(
+            !text.contains("Yes, proceed") && !text.contains("always-approve mode"),
+            "English option text leaked into the zh-CN renderer:\n{text}"
+        );
     }
 
     #[test]

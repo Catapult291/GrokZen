@@ -837,9 +837,11 @@ fn top_level_secondary_line(
             if let Some(perm) = agent.permission_queue.front() {
                 let title = perm.title.trim();
                 if !title.is_empty() {
+                    let title =
+                        crate::views::permission_view::localized_permission_title(locale, title);
                     return Some(
                         row_text(locale, "dashboard.row.pending", "Pending: {detail}")
-                            .replace("{detail}", &sanitize(title)),
+                            .replace("{detail}", &sanitize(&title)),
                     );
                 }
             }
