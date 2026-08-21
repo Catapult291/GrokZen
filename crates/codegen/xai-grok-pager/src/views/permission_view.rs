@@ -3122,13 +3122,20 @@ mod tests {
 
         let locale = zh_cn_locale();
         let text = render_to_text_with_locale(&state, Rect::new(0, 0, 100, 12), Some(&locale));
+        // Ratatui stores the trailing cell of each double-width CJK glyph as
+        // a blank symbol. Remove only that cell padding before checking the
+        // localized rows; keep the original text for the English leak check.
+        let text_without_cell_padding = text.replace(' ', "");
         assert!(
-            text.contains("是，不再询问任何操作（始终批准模式）"),
+            text_without_cell_padding.contains("是，不再询问任何操作（始终批准模式）"),
             "global approval row missing:\n{text}"
         );
-        assert!(text.contains("是，继续"), "allow-once row missing:\n{text}");
         assert!(
-            text.contains("否，拒绝（可输入反馈）"),
+            text_without_cell_padding.contains("是，继续"),
+            "allow-once row missing:\n{text}"
+        );
+        assert!(
+            text_without_cell_padding.contains("否，拒绝（可输入反馈）"),
             "reject row missing:\n{text}"
         );
         assert!(
