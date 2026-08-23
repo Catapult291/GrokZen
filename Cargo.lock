@@ -14577,6 +14577,7 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+ "xai-grok-home",
  "xai-grok-product",
  "xai-grok-shell",
  "xai-grok-telemetry",

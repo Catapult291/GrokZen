@@ -1430,7 +1430,7 @@ async fn install_community_macos_release(
     version: &str,
     asset: &crate::community_release::VerifiedAsset,
 ) -> Result<String> {
-    let home = xai_grok_shell::util::grok_home::resolve_grok_home()
+    let home = xai_grok_home::resolve_grok_home()
         .ok_or_else(|| anyhow::anyhow!("unable to resolve a user GROK_HOME"))?;
     validate_community_home_path(&home)?;
     let bin_dir = home.join("bin");
@@ -2957,7 +2957,7 @@ async fn heal_managed_install(installer: &str) {
         if installer == crate::community_release::COMMUNITY_INSTALLER {
             #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
             let bin_dir = {
-                let Some(home) = xai_grok_shell::util::grok_home::resolve_grok_home() else {
+                let Some(home) = xai_grok_home::resolve_grok_home() else {
                     return;
                 };
                 if let Err(error) = validate_community_home_path(&home) {
