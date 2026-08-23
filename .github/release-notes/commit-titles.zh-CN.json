@@ -24,6 +24,12 @@
       "first_parent": "7f39734463fe29b09ebfd9b1c81866acfad71087",
       "upstream_tip": "d92c5b0b8582fda358de1f97446aa74af44a464f",
       "upstream_base": "eb267feff13129e568df38fb6fdf0ceb65f735d6"
+    },
+    {
+      "merge_sha": "033170737d391b7fd43ca6352512ac1ef55ea7c3",
+      "first_parent": "f97161ecaf6de761bf10e000cb49be22db621352",
+      "upstream_tip": "19d42e35c07a9c9244f03f6df0c4c353f970d4f9",
+      "upstream_base": "d92c5b0b8582fda358de1f97446aa74af44a464f"
     }
   ],
   "local_merges": [],
@@ -172,6 +178,11 @@
       "sha": "d92c5b0b8582fda358de1f97446aa74af44a464f",
       "source_subject": "Synced from monorepo",
       "title_zh": "完善尝试记录编解码与输入交互并补齐同意回执"
+    },
+    {
+      "sha": "19d42e35c07a9c9244f03f6df0c4c353f970d4f9",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "新增状态栏并强化目标验证、权限与会话稳定性"
     }
   ]
 }
