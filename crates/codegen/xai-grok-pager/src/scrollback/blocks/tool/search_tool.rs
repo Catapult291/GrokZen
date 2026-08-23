@@ -436,13 +436,19 @@ mod tests {
     #[test]
     fn zh_localization_search_results_only_alias_known_product_tools() {
         let mut block = SearchToolCallBlock::new("tasks list");
-        block.result_count = 4;
+        block.result_count = 5;
         block.results = vec![
             DiscoveredTool {
                 name: "tasks__list".into(),
                 server: "tasks".into(),
                 description: "server-owned description".into(),
                 score: 1.0,
+            },
+            DiscoveredTool {
+                name: "tasks__run_now".into(),
+                server: "tasks".into(),
+                description: String::new(),
+                score: 0.95,
             },
             DiscoveredTool {
                 name: "voice__list_voices".into(),
@@ -467,9 +473,10 @@ mod tests {
         let rendered = rendered_text(&block, zh_locale());
         assert!(rendered.contains("搜索工具 tasks list"), "{rendered}");
         assert!(rendered.contains("1. 列出任务"), "{rendered}");
-        assert!(rendered.contains("2. 列出可用语音"), "{rendered}");
-        assert!(rendered.contains("3. List Issues  Linear"), "{rendered}");
-        assert!(rendered.contains("4. Tasks  List  Custom"), "{rendered}");
+        assert!(rendered.contains("2. 立即运行任务"), "{rendered}");
+        assert!(rendered.contains("3. 列出可用语音"), "{rendered}");
+        assert!(rendered.contains("4. List Issues  Linear"), "{rendered}");
+        assert!(rendered.contains("5. Tasks  List  Custom"), "{rendered}");
         assert!(!rendered.contains("server-owned description"));
     }
 
@@ -478,17 +485,18 @@ mod tests {
         let mut block = SearchToolCallBlock::new("tasks list");
         block.result_count = 1;
         block.results.push(DiscoveredTool {
-            name: "tasks__list".into(),
+            name: "tasks__run_now".into(),
             server: "tasks".into(),
             description: r"Keep C:\repo\API_KEY unchanged".into(),
             score: 1.0,
         });
 
         let rendered = rendered_text(&block, LocaleContext::default());
-        assert!(rendered.contains("1. List  Tasks"), "{rendered}");
+        assert!(rendered.contains("1. Run Now  Tasks"), "{rendered}");
+        assert_eq!(block.results[0].name, "tasks__run_now");
         assert_eq!(
             block.copy_text(),
-            "query: tasks list\n1 result\n\n1. List  Tasks\n   Keep C:\\repo\\API_KEY unchanged\n"
+            "query: tasks list\n1 result\n\n1. Run Now  Tasks\n   Keep C:\\repo\\API_KEY unchanged\n"
         );
     }
 }

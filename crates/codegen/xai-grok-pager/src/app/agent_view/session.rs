@@ -1078,6 +1078,7 @@ impl AgentView {
     /// child has a description.
     fn subagent_wait_subject(&self) -> Option<String> {
         use crate::acp::tracker::{MAX_ACTIVITY_SUBJECT_CHARS, clamp_activity_subject};
+        let locale = self.scrollback.locale();
         let mut running: Vec<_> = self.running_foreground_subagents().collect();
         running.sort_by_key(|info| info.started_at);
         let description = running.iter().find_map(|info| {
@@ -1087,8 +1088,10 @@ impl AgentView {
         })?;
         if running.len() > 1 {
             let n = running.len();
+            let subagents =
+                locale.named_static_text("turn.waiting.subagent.subject_multiple", "subagents: ");
             return Some(budgeted_subject(
-                &format!("{n} subagents: "),
+                &format!("{n} {subagents}"),
                 &description,
                 &format!(" +{}", n - 1),
             ));
@@ -1100,25 +1103,36 @@ impl AgentView {
             .filter(|label| !label.is_empty());
         match activity {
             Some(activity) => {
-                const PREFIX: &str = "Subagent (";
-                const SUFFIX_HEAD: &str = "): ";
-                const SUBAGENT_AFFIX_CHARS: usize = PREFIX.len() + SUFFIX_HEAD.len();
+                let prefix = locale.named_static_text(
+                    "turn.waiting.subagent.subject_activity_prefix",
+                    "Subagent (",
+                );
+                let suffix_head = locale
+                    .named_static_text("turn.waiting.subagent.subject_activity_separator", "): ");
+                let subagent_affix_chars = prefix.chars().count() + suffix_head.chars().count();
                 const ACTIVITY_FLOOR: usize = 8;
-                let desc_claim = description
-                    .chars()
-                    .count()
-                    .min(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - ACTIVITY_FLOOR);
+                let desc_claim = description.chars().count().min(
+                    MAX_ACTIVITY_SUBJECT_CHARS
+                        .saturating_sub(subagent_affix_chars + ACTIVITY_FLOOR),
+                );
                 let activity: String = activity
                     .chars()
-                    .take(MAX_ACTIVITY_SUBJECT_CHARS - SUBAGENT_AFFIX_CHARS - desc_claim)
+                    .take(
+                        MAX_ACTIVITY_SUBJECT_CHARS
+                            .saturating_sub(subagent_affix_chars + desc_claim),
+                    )
                     .collect();
                 Some(budgeted_subject(
-                    PREFIX,
+                    prefix,
                     &description,
-                    &format!("{SUFFIX_HEAD}{activity}"),
+                    &format!("{suffix_head}{activity}"),
                 ))
             }
-            None => Some(budgeted_subject("Subagent: ", &description, "")),
+            None => Some(budgeted_subject(
+                locale.named_static_text("turn.waiting.subagent.subject_prefix", "Subagent: "),
+                &description,
+                "",
+            )),
         }
     }
     /// Update context state with a full snapshot from live callers.
@@ -1526,6 +1540,15 @@ mod resolve_turn_activity_tests {
     use super::*;
     use crate::acp::tracker::{TurnActivity, WaitingReason};
     use crate::app::agent::AgentState;
+    use crate::locale::{LocaleContext, LocaleSource, ResolvedLocale, UiLocale};
+
+    fn zh_locale() -> LocaleContext {
+        LocaleContext::new(ResolvedLocale {
+            locale: UiLocale::ZhCn,
+            source: LocaleSource::Cli,
+        })
+    }
+
     fn running_view() -> AgentView {
         let mut view = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
         view.session.state = AgentState::TurnRunning;
@@ -1604,6 +1627,38 @@ mod resolve_turn_activity_tests {
             panic!("expected waiting activity");
         };
         assert_eq!(reason.label(), "Subagent (fix flaky test): Writing subag…");
+    }
+
+    #[test]
+    fn zh_localization_subagent_wait_translates_only_fixed_affixes() {
+        let mut view = running_view();
+        view.set_locale_recursive(&zh_locale());
+        let mut info = running_child("Test subagent toolchain");
+        info.activity_label = Some("思考中…".into());
+        view.subagent_sessions.insert("child-1".into(), info);
+        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
+            panic!("expected waiting activity");
+        };
+        assert_eq!(
+            reason.label(),
+            "子智能体（Test subagent toolchain）：思考中…"
+        );
+
+        view.subagent_sessions.clear();
+        view.subagent_sessions
+            .insert("child-1".into(), running_child("scan src/"));
+        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
+            panic!("expected waiting activity");
+        };
+        assert_eq!(reason.label(), "子智能体：scan src/…");
+
+        let mut earlier = running_child("audit dashboard");
+        earlier.started_at = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        view.subagent_sessions.insert("child-0".into(), earlier);
+        let Some(TurnActivity::Waiting(reason)) = view.resolve_turn_activity() else {
+            panic!("expected waiting activity");
+        };
+        assert_eq!(reason.label(), "2 个子智能体：audit dashboard +1…");
     }
     #[test]
     fn subagent_wait_long_description_keeps_activity_visible() {
