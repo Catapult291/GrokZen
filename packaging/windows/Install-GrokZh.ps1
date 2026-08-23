@@ -452,6 +452,7 @@ function Read-InteractiveCommandSetup {
 function Read-AndVerifyManifest {
     param([Parameter(Mandatory = $true)][string]$Root)
 
+    Assert-NoReparsePointTree -Path $Root -Label '安装包'
     $manifestPath = Join-Path $Root 'SHA256SUMS.txt'
     if (!(Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "安装包缺少校验清单：$manifestPath"
@@ -474,7 +475,15 @@ function Read-AndVerifyManifest {
         '一键安装.cmd',
         '[可选]替换原始启动方式.cmd',
         'Install-GrokZh.ps1',
-        'INSTALL-WINDOWS.md'
+        'INSTALL-WINDOWS.md',
+        'LICENSE-grok-build.txt',
+        'BUILD-INFO.txt',
+        'licenses/ripgrep/COPYING',
+        'licenses/ripgrep/LICENSE-MIT',
+        'licenses/ripgrep/UNLICENSE',
+        'licenses/project/THIRD-PARTY-NOTICES',
+        'licenses/project/THIRD_PARTY_NOTICES.md',
+        'licenses/project/NOTICE'
     )
     $allowedUnicodeNames = @('一键安装.cmd', '[可选]替换原始启动方式.cmd')
     foreach ($line in Get-Content -LiteralPath $manifestPath -Encoding UTF8) {
@@ -486,11 +495,14 @@ function Read-AndVerifyManifest {
         }
         $expected = $matches[1].ToUpperInvariant()
         $name = $matches[2]
+        $pathParts = $name.Split('/')
         if ($name.Trim() -ne $name -or
-            $name -ne [IO.Path]::GetFileName($name) -or
+            $name.StartsWith('/') -or
+            $name.Contains('\') -or
             $name.Contains(':') -or
-            $name -in @('.', '..')) {
-            throw "安装包校验清单包含非根目录路径：$name"
+            $pathParts.Count -eq 0 -or
+            @($pathParts | Where-Object { $_ -in @('', '.', '..') }).Count -ne 0) {
+            throw "安装包校验清单包含不安全路径：$name"
         }
         if ($name -ieq 'SHA256SUMS.txt') {
             throw 'SHA256SUMS.txt 不能包含自身哈希条目。'
@@ -825,6 +837,10 @@ try {
     foreach ($name in $installNames) {
         $source = Join-Path $PackageDir $name
         $destination = Join-Path $stage $name
+        $destinationParent = Split-Path -Parent $destination
+        if (!(Test-Path -LiteralPath $destinationParent -PathType Container)) {
+            New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+        }
         $length = (Get-Item -LiteralPath $source).Length
         $copiedHash = Copy-PackageFile -Source $source -Destination $destination `
             -DisplayName $name -BytesBefore $copiedBytes -TotalBytes $copyTotalBytes `
@@ -845,22 +861,6 @@ try {
         [string[]]$installedManifestLines,
         (New-Object Text.UTF8Encoding($false))
     )
-    foreach ($name in @('BUILD-INFO.txt', 'LICENSE-grok-build.txt')) {
-        $source = Join-Path $PackageDir $name
-        if (Test-Path -LiteralPath $source -PathType Leaf) {
-            $sourceItem = Get-Item -LiteralPath $source -Force
-            if (($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-                throw "可选安装包文件不能是符号链接或重解析点：$source"
-            }
-            Copy-Item -LiteralPath $source -Destination (Join-Path $stage $name)
-        }
-    }
-    $licenseSource = Join-Path $PackageDir 'licenses'
-    if (Test-Path -LiteralPath $licenseSource -PathType Container) {
-        Assert-NoReparsePointTree -Path $licenseSource -Label '许可证目录'
-        Copy-Item -LiteralPath $licenseSource -Destination (Join-Path $stage 'licenses') -Recurse
-    }
-
     if ($provideOfficialNames) {
         Write-CommandShim -Path (Join-Path $stage 'grok.cmd') -AgentMode:$false
         Write-CommandShim -Path (Join-Path $stage 'agent.cmd') -AgentMode:$true

@@ -844,16 +844,45 @@ impl PagerArgs {
     }
     /// Parse CLI arguments without applying side effects.
     pub fn parse_cli() -> Self {
-        let bin_name = std::env::args()
+        Self::parse_cli_from(std::env::args_os())
+    }
+
+    fn parse_cli_from<I, T>(args: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString>,
+    {
+        let mut args = args.into_iter().map(Into::into);
+        let argv0 = args
             .next()
-            .as_deref()
-            .map(std::path::Path::new)
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .filter(|n| *n == xai_grok_product::CLI_NAME || *n == "grok" || *n == "agent")
-            .unwrap_or(xai_grok_product::CLI_NAME)
-            .to_owned();
-        Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)))
+            .unwrap_or_else(|| std::ffi::OsString::from(xai_grok_product::CLI_NAME));
+        let invoked_name = std::path::Path::new(&argv0)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(xai_grok_product::CLI_NAME);
+        let invoked_stem = invoked_name
+            .get(..invoked_name.len().saturating_sub(4))
+            .filter(|_| {
+                invoked_name
+                    .get(invoked_name.len().saturating_sub(4)..)
+                    .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".exe"))
+            })
+            .unwrap_or(invoked_name);
+        let normalized_stem = invoked_stem.to_ascii_lowercase();
+        let is_agent_entrypoint = matches!(normalized_stem.as_str(), "agent" | "agent-zh");
+        let recognized_entrypoint = matches!(
+            normalized_stem.as_str(),
+            "grok" | "grok-zh" | "agent" | "agent-zh"
+        );
+        let bin_name = if recognized_entrypoint {
+            argv0
+        } else {
+            std::ffi::OsString::from(xai_grok_product::CLI_NAME)
+        };
+        let normalized = std::iter::once(bin_name)
+            .chain(is_agent_entrypoint.then(|| std::ffi::OsString::from("agent")))
+            .chain(args);
+        Self::parse_from(normalized)
     }
     /// Apply launch-directory path anchoring and `--cwd` after early commands
     /// have been dispatched without filesystem or process initialization.
@@ -1055,6 +1084,38 @@ impl PagerArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_entrypoint_names_inject_the_agent_subcommand() {
+        for entrypoint in [
+            "agent",
+            "agent-zh",
+            "agent.exe",
+            "agent-zh.exe",
+            "AGENT-ZH.ExE",
+        ] {
+            let args = PagerArgs::parse_cli_from([entrypoint, "stdio"]);
+            let Some(Command::Agent(agent)) = args.command else {
+                panic!("{entrypoint} must dispatch the agent subcommand");
+            };
+            assert!(
+                matches!(agent.mode, Some(AgentCmd::Stdio)),
+                "{entrypoint} must preserve the agent mode arguments"
+            );
+        }
+    }
+
+    #[test]
+    fn grok_entrypoint_names_keep_normal_top_level_parsing() {
+        for entrypoint in ["grok", "grok-zh", "grok.exe", "grok-zh.exe", "GROK-ZH.ExE"] {
+            let args = PagerArgs::parse_cli_from([entrypoint, "version"]);
+            assert!(
+                matches!(args.command, Some(Command::Version { json: false })),
+                "{entrypoint} must not inject the agent subcommand"
+            );
+        }
+    }
+
     #[test]
     fn version_flags_parse_as_early_intent_without_exiting() {
         for flag in ["--version", "-v", "-V"] {
