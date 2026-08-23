@@ -18,6 +18,12 @@
       "first_parent": "d40ac9c591b3a131613baea04e001315e59a2df1",
       "upstream_tip": "eb267feff13129e568df38fb6fdf0ceb65f735d6",
       "upstream_base": "8a14c91d88875a831a38b3a066b1683116bcb31c"
+    },
+    {
+      "merge_sha": "46764afd4796f28dc39234e5479d80aa1f32795e",
+      "first_parent": "7f39734463fe29b09ebfd9b1c81866acfad71087",
+      "upstream_tip": "d92c5b0b8582fda358de1f97446aa74af44a464f",
+      "upstream_base": "eb267feff13129e568df38fb6fdf0ceb65f735d6"
     }
   ],
   "local_merges": [],
@@ -31,6 +37,16 @@
       "sha": "a13165f9a03faec5c815e1cbddbd7fdb57e29643",
       "source_subject": "ci: localize Windows preview workflow",
       "title_zh": "本地化 Windows 预览工作流"
+    },
+    {
+      "sha": "29b222694acc3de8ed99cffd8c2ff71bce0d2066",
+      "source_subject": "Add feedback section to README",
+      "title_zh": "新增反馈区与社区入口"
+    },
+    {
+      "sha": "7f39734463fe29b09ebfd9b1c81866acfad71087",
+      "source_subject": "Update README.md",
+      "title_zh": "补全 Linux Do 社区讨论链接"
     },
     {
       "sha": "3f51e781fdd8f84c9177acc7a6d37c15777d3c53",
@@ -131,6 +147,31 @@
       "sha": "eb267feff13129e568df38fb6fdf0ceb65f735d6",
       "source_subject": "Synced from monorepo",
       "title_zh": "更新 Grok 4.6 默认模型并完善会话、钩子与搜索"
+    },
+    {
+      "sha": "d6a22a1aed70b58d30a0f82a1a2a76ce1301631e",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "新增配置覆盖与阿拉伯语排版并强化权限与遥测"
+    },
+    {
+      "sha": "5163763e703c319e4554c2f455535c5adb6e51e8",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "新增会话同意门禁、工作树安全回收与媒体并发上限"
+    },
+    {
+      "sha": "9fabadea800fa6e2ed8ec91c4f45f02b7e2504f4",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "修复分页器折叠与回退并规范化目标与尝试记录"
+    },
+    {
+      "sha": "d71f6e0c1f5acc5469e503e192fe14824e6f8c90",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "仅从 Git 引用解析会话 HEAD 元数据"
+    },
+    {
+      "sha": "d92c5b0b8582fda358de1f97446aa74af44a464f",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "完善尝试记录编解码与输入交互并补齐同意回执"
     }
   ]
 }
