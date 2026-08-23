@@ -467,6 +467,82 @@
         assert_eq!(parsed["outcome"], "approved");
     }
 
+    /// Delivers a status snapshot the way the agent does, and reports whether
+    /// the client repainted.
+    fn notify_status(app: &mut crate::app::app_view::AppView, cwd: &str) -> bool {
+        let notif = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: XaiSessionUpdate::SessionStatus(Box::new(
+                crate::app::status_line::test_context(cwd),
+            )),
+            meta: None,
+        };
+        let raw = serde_json::value::to_raw_value(&notif).unwrap();
+        let ext = acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw));
+        handle_session_notification(&ext, app)
+    }
+
+    /// Storing the snapshot paints nothing when no row is configured, and the
+    /// agent pushes one at every turn end: reporting a change here would
+    /// repaint the whole fleet once per turn for a row nobody draws.
+    #[test]
+    fn a_status_snapshot_does_not_repaint_a_client_with_no_status_line() {
+        let mut app = make_app_with_agent("sess-1");
+        assert!(
+            !app.current_ui.status_line.reserves_a_row(),
+            "disabled is the default"
+        );
+
+        assert!(!notify_status(&mut app, "/tmp"), "no row, no repaint");
+        assert!(
+            app.agents[&AgentId(0)].status_context.is_some(),
+            "the payload is still stored for whenever a row is enabled"
+        );
+        assert!(app.status_line.display().is_none(), "and nothing is drawn");
+    }
+
+    /// The other half. An enabled row settles once it has drawn, and an idle
+    /// session asks for no ticks, so the snapshot's own repaint is the only
+    /// thing that moves the row until the next turn.
+    #[test]
+    fn a_status_snapshot_repaints_a_row_that_had_already_settled() {
+        let mut app = make_app_with_agent("sess-1");
+        app.current_ui.status_line =
+            xai_grok_status_line::test_support::StatusLineConfigFixture::from_kind(
+                xai_grok_status_line::StatusLineType::Builtin,
+            )
+            .with_items(vec![xai_grok_status_line::StatusLineItem::Cwd])
+            .into_config();
+
+        assert!(
+            notify_status(&mut app, "/tmp/first"),
+            "the first snapshot draws"
+        );
+        assert!(app.status_line.is_settled(), "a drawn row settles");
+        assert_eq!(
+            app.status_line_tick_demand(),
+            crate::app::app_view::TickDemand::None,
+            "an idle settled row asks for no ticks, so only the snapshot can move it"
+        );
+
+        // Inside the refresh floor the snapshot defers rather than repaints, so
+        // what it must leave behind is a row still asking to be recomputed.
+        notify_status(&mut app, "/tmp/second");
+        assert_ne!(
+            app.status_line_tick_demand(),
+            crate::app::app_view::TickDemand::None,
+            "the snapshot left the row settled and idle, so it will never redraw"
+        );
+
+        app.update_status_line_at(
+            std::time::Instant::now() + crate::app::status_line::MIN_REFRESH_INTERVAL_MS,
+        );
+        assert!(
+            app.status_line.take_changed(),
+            "the deferred recompute never happened"
+        );
+    }
+
     #[test]
     fn exit_plan_mode_prefills_mid_thinking_draft_as_freeform() {
         let mut app = make_app_with_agent("sess-B");

@@ -254,6 +254,9 @@ pub struct SessionContext {
     /// The toolset loads existing state on construction and auto-saves
     /// after every tool execution. The file stores serialized `State<T>`
     /// values (e.g., `TodoState`).
+    ///
+    /// Empty means this registry gives the session a handle that reads and writes nothing. `xai-grok-agent` reads
+    /// the same empty value as "use the temp directory" for `session_folder`; unifying the two is a follow-up.
     pub state_path: PathBuf,
     /// Optional memory backend for cross-session knowledge retrieval.
     /// When `Some`, injected into `Resources` so `memory_search` / `memory_get`
@@ -1110,12 +1113,12 @@ impl ToolRegistryBuilder {
         for entry in self.tools.values() {
             (entry.register_params)(&mut resources);
         }
-        let resources_state_path = ctx
-            .state_path
-            .parent()
-            .unwrap_or(&ctx.state_path)
-            .join("resources_state.json");
-        let persistence = Arc::new(ResourcesPersistence::new(resources_state_path));
+        let persistence = Arc::new(if ctx.state_path.as_os_str().is_empty() {
+            ResourcesPersistence::noop()
+        } else {
+            let dir = ctx.state_path.parent().unwrap_or(&ctx.state_path);
+            ResourcesPersistence::new(dir.join("resources_state.json"))
+        });
         persistence.load(&mut resources);
         let preset_name = config.behavior_preset.as_deref().unwrap_or("current");
         let local_registry = self.shared_local_registry.take().unwrap_or_default();
@@ -1898,13 +1901,11 @@ impl FinalizedToolset {
     pub async fn flush_persistence(&self) {
         self.resources_persistence.flush().await;
     }
-    /// Serialize current in-memory state, write it to disk, and wait for
-    /// the write to complete. Returns the path to the persisted file.
+    /// Serialize current in-memory state, write it to disk, and wait for the write to complete.
+    /// Returns where it landed, or `None` for a session that persists nothing.
     ///
-    /// Unlike `flush_persistence()` (which only flushes previously queued
-    /// snapshots), this method captures a **fresh** snapshot of the current
-    /// `Resources` and ensures it hits disk before returning.
-    pub async fn save_and_flush_persistence(&self) -> &std::path::Path {
+    /// Unlike `flush_persistence()`, which only flushes previously queued snapshots, this takes a fresh snapshot first.
+    pub async fn save_and_flush_persistence(&self) -> Option<&std::path::Path> {
         {
             let res = self.resources.lock().await;
             self.resources_persistence.save(&res);

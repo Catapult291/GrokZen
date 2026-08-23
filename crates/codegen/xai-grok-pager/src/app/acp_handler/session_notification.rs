@@ -226,6 +226,7 @@ pub(super) fn handle_session_notification_with_origin(
         return false;
     }
     let mut plugins_changed_needs_skills_refetch = false;
+    let mut status_snapshot_applied = false;
     let mut terminal_outcome: Option<super::super::turn_completion::TerminalApply> = None;
     let mut deferred_subagent_finish: Option<SessionNotification> = None;
     let root_session_id: &str = session_notif.session_id.0.as_ref();
@@ -1268,6 +1269,11 @@ pub(super) fn handle_session_notification_with_origin(
         XaiSessionUpdate::InteractionResolved { tool_call_id } => {
             agent.dismiss_resolved_interaction(&tool_call_id)
         }
+        XaiSessionUpdate::SessionStatus(status) => {
+            agent.status_context = Some(*status);
+            status_snapshot_applied = true;
+            false
+        }
         _ => {
             tracing::trace!(
                 "Ignoring {}: {:?}",
@@ -1277,6 +1283,11 @@ pub(super) fn handle_session_notification_with_origin(
             return false;
         }
     };
+    let mut changed = changed;
+    if status_snapshot_applied && is_active {
+        app.refresh_status_line_now();
+        changed |= app.status_line.take_changed();
+    }
     if plugins_changed_needs_skills_refetch {
         if let Some(agent) = app.agents.get(&parent_id)
             && let Some(session_id) = agent.session.session_id.clone()

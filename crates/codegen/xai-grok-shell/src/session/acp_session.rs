@@ -195,6 +195,8 @@ mod run_loop;
 mod session_setup;
 #[path = "acp_session_impl/side_call.rs"]
 mod side_call;
+#[path = "acp_session_impl/status_line.rs"]
+pub(crate) mod status_line;
 #[path = "acp_session_impl/title_refresh.rs"]
 mod title_refresh;
 #[path = "acp_session_impl/turn_end.rs"]
@@ -730,6 +732,9 @@ pub(crate) struct SessionActor {
     pub(crate) rewind_pending_prompt: std::sync::Mutex<Option<String>>,
     /// Startup hints for the session: currently responsible for customizing the user message prefix and the git status mode (fast no untracked for non-interactive mode)
     pub(crate) startup_hints: StartupHints,
+    /// Wakes the status-line emitter task, and on drop ends it. See
+    /// [`status_line::run_status_emitter`] and the `Drop` beside it.
+    pub(crate) status_wake: status_line::StatusWake,
     /// Delivery-tool names for the CURRENT attachment, seeded from the spawn
     /// `startupHints.deliveryTools` and re-applied when a resident
     /// `session/load` carries explicit hints (`UpdateAttachPolicy`). Kept
@@ -803,6 +808,15 @@ pub(crate) struct SessionActor {
     /// Client opted into `x.ai/gitHeadChanged`. When false (headless/SDK),
     /// `maybe_notify_git_branch` no-ops — no git subprocess.
     git_head_enabled: bool,
+    /// A client that will draw a status row has attached (`x.ai/statusLine`).
+    /// While false, the emitter wakes and returns without building anything: no
+    /// git discovery, no chat-state round trips.
+    ///
+    /// Live rather than fixed at spawn, because a resident session outlives the
+    /// client that created it and a later attach may be the one that draws a
+    /// row. Assigned from the attaching client's capability; see
+    /// [`crate::session::handle::SessionHandle::set_status_line_wanted`].
+    pub(crate) status_line_enabled: Arc<std::sync::atomic::AtomicBool>,
     /// Shared models manager for etag-triggered refresh from response headers.
     pub(crate) models_manager: crate::agent::models::ModelsManager,
     /// Stable display path for forked sessions (original project path).
@@ -2007,6 +2021,9 @@ mod prompt_context_persistence_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/session_thread_tests.rs"]
 mod session_thread_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/status_line_payload_tests.rs"]
+mod status_line_payload_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/tool_layer_images_bridge_tests.rs"]
 mod tool_layer_images_bridge_tests;

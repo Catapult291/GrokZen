@@ -108,8 +108,8 @@ impl acp::Agent for MvpAgent {
                 );
             }
         }
-        if !self.tier_allowed.get() && let Some(auth) = self.auth_manager.current() {
-            self.enforce_grok_code_access(&auth).await;
+        if !self.tier_allowed.get() {
+            self.spawn_tier_recheck();
         }
         self.maybe_sync_bundle_in_background(false);
         let mut client_type = arguments

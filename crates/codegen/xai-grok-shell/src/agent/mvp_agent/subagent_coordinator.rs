@@ -50,7 +50,8 @@ impl coordinator::ChildRunner for ShellChildRunner {
             if let Some(handle) = parent_handle {
                 ctx.parent_mcp_pool = handle.snapshot_mcp_pool().await;
                 ctx.client_hooks = handle.snapshot_client_hooks().await;
-                let definitions = handle.snapshot_tool_definitions().await;
+                let mut definitions = handle.snapshot_tool_definitions().await;
+                crate::agent::subagent::strip_ask_user_question_tool(&mut definitions);
                 ctx.parent_tool_definitions = (!definitions.is_empty()).then_some(definitions);
             }
             crate::agent::subagent::run_shell_child(run, ctx, &this.gateway).await
@@ -356,14 +357,6 @@ impl MvpAgent {
         let parent_model_agent_type =
             config::find_model_by_id(&available_models, parent_model_id.0.as_ref())
                 .map(|e| e.info.agent_type.clone());
-        let ask_user_question_enabled = parent_handle
-            .as_ref()
-            .map(|h| h.ask_user_question_enabled)
-            .unwrap_or_else(|| {
-                self.cfg
-                    .borrow()
-                    .is_feature_enabled(crate::agent::config::Feature::AskUserQuestion)
-            });
         let parent_non_interactive = parent_handle
             .as_ref()
             .map(|h| h.non_interactive)
@@ -452,7 +445,7 @@ impl MvpAgent {
                 .is_feature_enabled(crate::agent::config::Feature::WriteFile),
             goal_enabled: self.cfg.borrow().resolve_goal().value,
             background_workflows_enabled: self.cfg.borrow().resolve_workflows().value,
-            ask_user_question_enabled,
+            ask_user_question_enabled: false,
             parent_non_interactive,
             parent_cmd_tx: parent_cmd_tx.clone(),
             parent_session_info: parent_handle.as_ref().map(|h| crate::session::info::Info {

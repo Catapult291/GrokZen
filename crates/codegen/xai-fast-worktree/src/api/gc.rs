@@ -22,19 +22,13 @@ pub struct GcOptions {
     pub max_age_secs: Option<i64>,
     pub force: bool,
     pub dry_run: bool,
-    /// Locations currently in use — a worktree is kept when one of these paths
-    /// lies **at or inside** it. Pass the in-use location (e.g. a live cwd) or
-    /// the worktree root itself; an **ancestor** of the worktree does NOT
-    /// protect it. Ignored when `force`. Serialized as `protect_paths` for wire
-    /// compat.
     #[serde(default, rename = "protect_paths")]
     pub keep_worktrees_containing: Vec<PathBuf>,
     #[serde(default)]
     pub max_age_by_kind: BTreeMap<WorktreeKind, Option<i64>>,
 }
 
-/// Time limits for one age pass. Constructed via `Pass::default()`; tests
-/// override a single field with struct-update syntax.
+/// Time limits for one age pass.
 #[derive(Clone, Copy)]
 struct Pass {
     /// Wall-clock budget for the whole pass.
@@ -284,7 +278,7 @@ fn worktree_holds_in_use_path(wt_path: &Path, in_use: &[PathBuf]) -> bool {
 
 /// Single verdict on whether an age pass may reclaim a worktree. Every other
 /// eligibility check (the main loop, the post-gate recheck) routes through here
-/// so the rules — and the `force` override — live in exactly one place.
+/// so the rules (and the `force` override) live in exactly one place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Eligibility {
     /// Kind never age-expires (e.g. `Manual` with a `never` TTL).
@@ -293,7 +287,7 @@ enum Eligibility {
     NotYetExpired,
     /// Expired but held by a live pid, a live cwd, or an in-use path.
     Guarded,
-    /// Expired and unheld — a candidate for the safety gate.
+    /// Expired and unheld: a candidate for the safety gate.
     Reclaimable,
 }
 
@@ -415,9 +409,7 @@ fn dispose_of(
     report: &mut GcReport,
 ) {
     let path = Path::new(&rec.path);
-    // `exists()` follows symlinks, so a dangling symlink is not "gone" — we
-    // still want to unlink it. Treat the path as absent only when the link
-    // itself is missing.
+    // `exists()` follows symlinks; a dangling link reads as absent but must still be unlinked.
     if !path.exists() && std::fs::symlink_metadata(path).is_err() {
         if unregister_logged(db, &rec.id) {
             report.expired_removed += 1;

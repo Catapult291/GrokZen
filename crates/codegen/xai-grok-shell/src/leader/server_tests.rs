@@ -1382,6 +1382,32 @@ fn inject_capabilities_skips_when_yolo_mode_false() {
 }
 
 #[test]
+fn inject_capabilities_adds_status_line_when_it_is_the_only_capability() {
+    let payload = format!(
+        r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp"}}}}"#,
+        AGENT_METHOD_NAMES.session_new
+    );
+    let caps = ClientCapabilities {
+        status_line: true,
+        ..Default::default()
+    };
+
+    let mut json = pv(&payload);
+    assert!(inject_session_request_context(
+        &mut json,
+        &caps,
+        "",
+        ClientId(1)
+    ));
+    assert_eq!(
+        json["params"]["_meta"][xai_grok_status_line::CLIENT_STATUS_LINE_META],
+        true,
+        "a status-line client that states nothing else must still get its own capability, \
+         not the process-wide initialize one"
+    );
+}
+
+#[test]
 fn inject_capabilities_preserves_existing_meta() {
     let payload = format!(
         r#"{{"jsonrpc":"2.0","method":"{}","id":1,"params":{{"cwd":"/tmp","_meta":{{"foo":"bar"}}}}}}"#,

@@ -304,7 +304,7 @@ Grok 会读取 ~/.claude/settings.json 和 ~/.claude/settings.local.json，以�
 
 permissions.allow、permissions.deny 和 permissions.ask 条目会转换为原生规则，然后按[规则匹配参考](#rule-matching-reference)中的语义匹配。转换说明：
 
-- MCP 工具规则必须使用 MCPTool(server__tool) 形式；mcp__server__tool 形式永远不会匹配（见[MCP 规则](#mcp-rules)）。
+- MCP 工具规则既可以使用 `.claude/settings.json` 中常见的 `mcp__server__tool` 形式，也可以使用原生 `MCPTool(server__tool)` 形式（见[MCP 规则](#mcp-rules)）。
 - 命名未知工具的规则，以及 Agent(model:opus) 等参数规则，会带警告跳过，而不会导致加载失败。
 - permissions.additionalDirectories 会被解析，但不受支持。
 
@@ -319,23 +319,32 @@ permissions.allow、permissions.deny 和 permissions.ask 条目会转换为原�
 
 ### Bash 规则
 
-Bash(...) 模式以两种方式之一匹配命令：
+`Bash(...)` 模式以两种方式之一匹配命令（对于 `allow` 规则，是匹配链式命令中的每个分段；见下方“链式命令”）：
 
 - **前缀：**命令逐字符比较，必须以模式文本开头。不要求单词边界，因此 Bash(git) 会匹配 gitleaks 和 git status。添加尾随空格和通配符（Bash(git *)）可要求前缀为完整单词。
-- **Glob：**模式作为 glob 匹配整个命令。* 可以出现在任意位置并匹配任意字符（包括空格和斜杠），因此 Bash(git * main) 会匹配 git checkout main。同时支持 ? 和 [...]。
+- **Glob：**模式作为 glob 匹配整个命令（或整个分段）。`*` 可以出现在任意位置并匹配任意字符（包括空格和斜杠），因此 `Bash(git * main)` 会匹配 `git checkout main`。同时支持 `?` 和 `[...]`。
 
-匹配区分大小写。匹配前会去掉命令开头的空白；其他内容不做规范化。
+匹配区分大小写。匹配前会去掉命令开头的空白。对于 `deny` 和 `ask` 规则，除此以外不会规范化原始命令字符串；分段级检查还会匹配规范化后的形式（见下文）。
 
 Bash 规则末尾的 :* 后缀会被去掉，转为普通前缀：Bash(git commit:*) 变成前缀 git commit。由于前缀没有单词边界，写成 Bash(sed:*) 的 deny 也会阻止 sed-custom 等命令。
 
 **链式命令。**Grok 像 shell 一样解析每条命令，并按 &&、||、;、| 和换行拆分。规则操作对分段的处理不同：
 
 - deny 和 ask 规则会针对每个分段以及整个字符串检查。任何被拒绝的分段都会拒绝整个命令。
-- allow 规则只针对完整命令字符串检查。因此 Bash(git *) 会自动批准 git status && rm -rf /，因为完整字符串以 git 开头。应将窄范围的 allow 规则与要阻止的模式的 deny 规则配对。
+- `allow` 规则采用合取语义：只有**每个**分段都分别匹配某条 allow 规则时，规则才会自动批准整条命令。`Bash(git *)` 会批准 `git status && git diff`，但不会批准 `git status && rm -rf /`——`rm` 分段没有匹配 allow 规则，因此命令会回落到当前模式的正常处理方式（`default` 模式中提示；`auto` 模式中交给分类器，分类器仍可能批准或阻止；`dontAsk` 模式中拒绝）。因此，单条 allow 规则无法批准夹带无关命令的命令链。
+
+> **Allow 规则不是封闭的允许列表。**命令没有匹配任何 allow 规则并不等于拒绝，而是会回落到当前模式。在 `auto` 模式中，分类器仍可能批准规则从未提到的命令。若要实现默认拒绝策略，请使用 `dontAsk`（或使用 always-approve，并通过 `deny` 规则设置硬性阻止），详见[配置权限](#configuring-permissions)。
 
 无法拆分成简单分段的命令（子 shell、命令替换 $(...)、反引号、后台 &、控制流）在配置了 Bash 限制时会作为单个单元提示。
 
-分段级检查（deny 和 ask 规则、已记住的授权以及只读命令列表）会去除 RUST_LOG=debug 等环境变量前缀，并剥离一组固定的进程包装器（timeout、nice、ionice、chrt、stdbuf、env），使 deny 和 ask 规则能够匹配包装后的命令或内部命令。传给 bash -c 的内联脚本内部也会检查 deny 和 ask 规则。包括 sudo、xargs 和 nohup 在内的其他包装器不会被剥离；请把它们显式写入规则。allow 规则不做此处理：它们匹配原样的命令字符串，因此前导环境赋值或包装器会使 allow 规则无法匹配，命令转而提示。
+匹配规则前会规范化每个分段。系统会去掉 `RUST_LOG=debug` 等前导环境变量赋值，并剥离一组固定的包装器（`timeout`、`nice`、`ionice`、`chrt`、`stdbuf`、`env`），让规则匹配内部命令：`Bash(npm test *)` 可以批准 `RUST_LOG=debug timeout 30 npm test --workers=4`。该处理适用于 `deny`、`ask` 和 `allow` 规则、已记住的授权以及只读命令列表。
+
+其他匹配细节：
+
+- 规则也会应用到传给 `bash -c` 的字面脚本中。对于 `allow`，脚本内部的每条命令都必须分别获得允许。
+- 列表之外的包装器（`sudo`、`xargs`、`nohup` 等）不会被剥离；请显式编写包含这些包装器的规则。
+- 当解析器无法安全剥离某种形式（例如 `env -S`）时，命令会转而提示，而不会匹配 allow 规则。
+- 匹配器看到的是去掉 shell 引号后、以单个空格连接的解析词。请按不含引号的命令编写模式。
 
 <a id="dangerous-commands"></a>
 ### 危险命令
@@ -357,7 +366,9 @@ Read 和 Edit 的 deny 规则还会应用于 shell 命令操作的文件路径�
 <a id="mcp-rules"></a>
 ### MCP 规则
 
-MCPTool(...) 模式以 server__tool 形式匹配完整的 Grok 工具名称，并支持 glob：MCPTool(linear__*) 匹配 linear 服务器的每个工具。Grok 工具名称没有 mcp__ 前缀，因此写成 mcp__server__tool 的规则永远不会匹配 MCP 调用；应写为 MCPTool(server__tool)。
+`MCPTool(...)` 模式以 `server__tool` 形式匹配完整的 Grok 工具名称，并支持 glob：`MCPTool(linear__*)` 匹配 `linear` 服务器的每个工具。Grok 工具名称本身不带 `mcp__` 前缀。
+
+`.claude/settings.json` 中使用的 `mcp__` 规则写法也会被接受并改写到同一匹配器：`mcp__linear`（`linear` 服务器的所有工具）、`mcp__linear__get_issue`（一个工具）、`mcp__linear__*`（该服务器的所有工具）以及 `mcp__*`（所有 MCP 工具）。
 
 ### WebFetch 规则
 
@@ -389,25 +400,27 @@ MCPTool(...) 模式以 server__tool 形式匹配完整的 Grok 工具名称，�
 
 ### 按命令的“始终允许”
 
-更窄的一组选项只记住当前提示的特定命令、MCP 工具或 web-fetch 域名，例如“Always allow cargo test”。这些行默认关闭。使用以下配置启用：
+更窄的一组选项只记住当前提示的特定命令、MCP 工具或 web-fetch 域名，例如“Always allow cargo test”。这些行默认启用。可使用以下配置关闭：
 
 ```toml
 # ~/.grok/config.toml
 [ui]
-remember_tool_approvals = true
+remember_tool_approvals = false
 ```
 
-启用该开关后，提示会增加：
+组织也可以在 `requirements.toml` 或托管配置中通过同一个键禁用它们。启用该开关时（默认），提示会增加：
 
 - **Always allow: <command>**，为该命令前缀持久化 allow。
 - 对应的“never allow”行，以相同方式持久化 deny。
-- MCP 工具和 web-fetch 域名也有等效的“always allow”行。
+- MCP 工具和 web-fetch 域名也有等效的“always allow”和“never allow”行。“never allow”始终记住当前提示的精确工具（绝不会扩大到整个服务器）或精确域名；已记住的拒绝优先于任何授权，被拒绝的域名也覆盖其子域名。
 
-记住的前缀被限制为命令的短形式：只读命令只保存其列出的前缀（例如 git status，而不是完整参数列表），其他命令保存简短的开头前缀。确认前提示会准确显示将记住的内容。[危险列表](#dangerous-commands)中的命令会再次提示，而不使用已记住的前缀。
+记住的前缀被限制为命令的短形式：只读命令只保存其列出的前缀（例如 `git status`，而不是完整参数列表），其他命令保存简短的开头前缀。确认前提示会准确显示将记住的内容。
+
+[危险列表](#dangerous-commands)中的命令（例如 `git push` 和 `rm`）绝不会采用已记住的命令*前缀*：只有整条命令的精确授权才有效，因此它们的“Always allow”行默认会显示完整命令。批准后只会停止该次精确调用的提示；参数有任何变化都会再次提示。如果保存授权仍无法避免脚本再次提示——例如危险命令位于 `env` 前缀后，或命令链中其他步骤仍需审批——系统不会显示“Always allow”行，以免保存一条实际上无效的规则。
 
 ### 按项目持久化
 
-交互式授权保存在主目录下 Grok 自己的状态目录中，作用域是启动 Grok 的目录。在一个项目中创建的授权不会应用于另一个项目，授权不会写入仓库，也不建议手动编辑。
+交互式授权保存在主目录下 Grok 自己的状态目录中，并以启动 Grok 的 Git 仓库（仓库根目录）为作用域，因此在仓库根目录接受的授权也适用于从同一仓库子目录启动的会话。仓库之外的授权以启动目录为作用域，每个 Git 工作树分别保存自己的授权。一个项目中的授权绝不会应用到另一个项目；授权不会写入仓库，也不建议手动编辑。
 
 交互式授权是个人、按机器保存的状态。若要使用可在代码审查中查看并与队友共享的允许列表，请改用项目 .grok/config.toml 中的声明式规则。
 
@@ -537,7 +550,7 @@ rules = [
 
 - 权限决策会显示在记录中。
 - /always-approve 命令切换 always-approve 模式；其他模式通过 defaultMode 设置（见[如何设置模式](#how-to-set-the-mode)）。
-- 使用 [ui] remember_tool_approvals = true 时，权限提示会包含仅对当前项目持久化的按命令“Always allow”选项。见[交互式批准及其保存位置](#interactive-approvals-and-where-they-persist)。
+- 权限提示会包含仅对当前项目持久化的按命令“Always allow”选项（默认启用；设 `[ui] remember_tool_approvals = false` 可关闭）。见[交互式批准及其保存位置](#interactive-approvals-and-where-they-persist)。
 - 要管理钩子和插件，请运行 /hooks 或 /plugins（在大多数终端中，**Ctrl+L** 也会打开扩展模态框；在 VS Code、Cursor、Windsurf 和 Zed 中，Ctrl+L 是回合中插话操作）。参见 [10-hooks.md](10-hooks.md)。
 
 ---

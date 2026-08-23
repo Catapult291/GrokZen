@@ -236,6 +236,9 @@ pub(super) async fn run_session(
         let s = session.clone();
         tokio::task::spawn_local(async move { s.maybe_notify_git_branch().await });
     }
+    tokio::task::spawn_local(super::status_line::run_status_emitter(Arc::downgrade(
+        &session,
+    )));
     let liveness_watchers_enabled = {
         let user_cfg = crate::config::load_effective_config().ok();
         let requirements = crate::agent::config::read_requirements_toml();
@@ -490,6 +493,9 @@ pub(super) async fn run_session(
                         SessionCommand::ReplaceSystemPrompt { system_prompt } => {
                             session.handle_replace_system_prompt(system_prompt).await;
                         }
+                        SessionCommand::EmitStatusSnapshot => {
+                            session.emit_status_snapshot_detached();
+                        }
                         SessionCommand::RestorePlanApproval => {
                             // Resume re-park: spawn the approval
                             // round-trip so the command loop is not blocked on
@@ -617,8 +623,8 @@ pub(super) async fn run_session(
                             session.handle_session_mode(session_mode).await;
                             let _ = responds_to.send(());
                         }
-                        SessionCommand::SetSessionModel { sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
-                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
+                        SessionCommand::SetSessionModel { sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent, responds_to } => {
+                            let updated_model_id = session.handle_set_session_model(sampling_config, use_concise, is_family_switch, apply_prompt_override, skip_prompt_rewrite, auto_compact_threshold_percent).await;
                             let _ = responds_to.send(updated_model_id);
                         }
                         SessionCommand::RebuildAgentForDefinition { definition, responds_to } => {

@@ -17,6 +17,7 @@ use crate::scrollback::text_selection::{
     render_block_drag_overlay, render_persistent_selection_overlay,
 };
 use crate::theme::Theme;
+use crate::views::agent::AgentViewLayoutParams;
 use crate::views::btw_overlay::BTW_OVERLAY_ENTRY_IDX;
 use crate::views::modal;
 use crate::views::plan_approval_view::PlanApprovalFocus;
@@ -31,8 +32,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::HashSet;
 use std::time::Instant;
-/// AppView-owned per-frame inputs to [`AgentView::draw`] — state the agent
-/// view cannot see itself (the voice pipeline and app-level Esc ownership).
+/// AppView-owned per-frame inputs to [`AgentView::draw`]: state the agent
+/// view cannot see itself (the voice pipeline, app-level Esc ownership, the
+/// status row).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
 /// fact extends this struct instead of every `draw` call site; tests take
 /// `Default` and override only what they exercise.
@@ -54,6 +56,8 @@ pub struct AppRenderParams<'a> {
     /// attached-agent popup). Feeds the hint path so the bar never
     /// advertises `Esc cancel` while an app-level owner would consume it.
     pub esc_owned_before_agent: bool,
+    /// The status row this frame paints, or `Off` when this frame has none.
+    pub status_line: crate::views::status_line::StatusLineFrame,
 }
 fn localized_ui_label(
     locale: Option<&crate::locale::LocaleContext>,
@@ -1008,6 +1012,7 @@ impl AgentView {
             voice_listening,
             voice_interim,
             esc_owned_before_agent,
+            status_line,
         } = app_params;
         self.scrollback.begin_frame();
         self.in_dashboard_overlay = in_dashboard_overlay;
@@ -1371,12 +1376,6 @@ impl AgentView {
         } else {
             prompt_height
         };
-        let prompt_height = if question_view_h > 0 {
-            let reserved = 1 + 5 + 1 + 3;
-            prompt_height.min(area.height.saturating_sub(reserved))
-        } else {
-            prompt_height
-        };
         {
             use crate::app::agent::PENDING_KILL_TIMEOUT_SECS;
             let now = Instant::now();
@@ -1487,10 +1486,10 @@ impl AgentView {
             area.width,
             self.scrollback.turn_count(),
         );
-        let mut layout = AgentViewLayout::compute(
+        let mut layout_params = AgentViewLayoutParams {
             area,
-            layout_cfg,
-            scrollbar_cfg,
+            layout_cfg: *layout_cfg,
+            scrollbar_cfg: *scrollbar_cfg,
             timeline_width,
             prompt_height,
             tasks_height,
@@ -1502,12 +1501,17 @@ impl AgentView {
             banner_height,
             cta_height,
             follow_ups_height,
-            0,
             prompt_gap,
             voice_recording_height,
-            1,
+            shortcuts_height: 1,
+            status_line_height: status_line.height(),
             compact,
-        );
+        };
+        if question_view_h > 0 {
+            layout_params.prompt_height =
+                prompt_height.min(AgentViewLayout::rows_available_for_prompt(layout_params));
+        }
+        let mut layout = AgentViewLayout::compute(layout_params);
         let search_active =
             self.scrollback_search.is_some() && self.active_pane == AgentPane::Scrollback;
         let search_reserved_rows =
@@ -1563,27 +1567,10 @@ impl AgentView {
                     self.timeline_rail = None;
                     self.timeline_hover = None;
                     self.timeline_hover_preview = None;
-                    layout = AgentViewLayout::compute(
-                        area,
-                        layout_cfg,
-                        scrollbar_cfg,
-                        0,
-                        prompt_height,
-                        tasks_height,
-                        catalog_height,
-                        todo_height,
-                        queue_height,
-                        btw_height,
-                        turn_status_height,
-                        banner_height,
-                        cta_height,
-                        follow_ups_height,
-                        0,
-                        prompt_gap,
-                        voice_recording_height,
-                        1,
-                        compact,
-                    );
+                    layout = AgentViewLayout::compute(AgentViewLayoutParams {
+                        timeline_width: 0,
+                        ..layout_params
+                    });
                     if search_reserved_rows > 0 {
                         layout.scrollback.height -= search_reserved_rows;
                         layout.scrollback_content.height = layout
@@ -1603,6 +1590,28 @@ impl AgentView {
             self.timeline_hover_preview = None;
         }
         agent::fill_background(buf, area, layout_cfg, compact, &theme);
+        let mut status_line_link_spans: Vec<xai_ratatui_inline::LinkSpan> = Vec::new();
+        if let Some(padding) = status_line.padding()
+            && layout.status_line.height > 0
+        {
+            if let Some(width) =
+                crate::views::status_line::inner_width(layout.status_line.width, padding)
+            {
+                self.last_status_line_size = Some(crate::views::status_line::RowSize {
+                    cols: width,
+                    lines: layout.status_line.height,
+                });
+            }
+            if let Some(display) = status_line.display() {
+                status_line_link_spans = crate::views::status_line::render_status_line(
+                    buf,
+                    layout.status_line,
+                    display,
+                    padding,
+                    &theme,
+                );
+            }
+        }
         use crate::views::agent_status::AgentStatusBar;
         use crate::views::context_bar;
         let mut status = AgentStatusBar::new(&theme);
@@ -1617,25 +1626,20 @@ impl AgentView {
             let link_style = Style::default().fg(theme.link_fg).bg(theme.bg_base);
             status.push("link_url", Line::from(Span::styled(display, link_style)));
         }
-        let running_count = self.tasks.running_count(
+        let task_counts = self.tasks.status_counts(
             &self.session.bg_tasks,
             &self.subagent_sessions,
             &self.session.scheduled_tasks,
             &self.workflow_runs,
         );
-        if running_count > 0 {
-            let spinner_frames = crate::glyphs::dot_spinner_frames();
-            let frame_idx = (self.tasks.tick_count() / 4) as usize % spinner_frames.len();
-            let frame = spinner_frames[frame_idx];
-            let indicator = format!("{frame} {running_count}");
-            let mut indicator_style = Style::default().fg(theme.accent_running).bg(theme.bg_base);
-            if self.hit_bg_status.hovered {
-                indicator_style = indicator_style.add_modifier(ratatui::style::Modifier::BOLD);
-            }
-            status.push(
-                "bg_tasks",
-                Line::from(Span::styled(indicator, indicator_style)),
-            );
+        if let Some(line) = crate::views::agent_status::task_status_line(
+            task_counts,
+            &theme,
+            self.hit_bg_status.hovered,
+            self.tasks.tick_count(),
+            locale,
+        ) {
+            status.push("bg_tasks", line);
         }
         if self.should_show_plan_chip(&appearance) {
             let mut plan_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
@@ -4755,6 +4759,10 @@ impl AgentView {
                     banner_announcements,
                     hidden_announcement_ids,
                 );
+                self.push_status_line_link_spans(
+                    link_spans_out,
+                    std::mem::take(&mut status_line_link_spans),
+                );
             }
         }
         let on_link = self.hovered_link_idx.is_some();
@@ -5318,5 +5326,181 @@ mod feedback_input_tests {
                 "box must leave room below the panel (height {height})\n{screen}"
             );
         }
+    }
+}
+#[cfg(test)]
+mod status_line_draw_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::AgentView;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
+    use crate::views::status_line::{SanitizedText, StatusLineDisplay, StatusLineFrame};
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+    use ratatui::style::Color;
+    use xai_grok_tools::implementations::grok_build::ask_user_question::Question;
+    fn draw_script(output: &str, rows: u16) -> Buffer {
+        draw_script_for(&mut make_agent(), output, rows)
+    }
+    fn draw_script_for(agent: &mut AgentView, output: &str, rows: u16) -> Buffer {
+        let area = Rect::new(0, 0, 80, rows);
+        let mut buf = Buffer::empty(area);
+        let mut scratch = ScratchBuffer::new();
+        let _ = agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut scratch,
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams {
+                status_line: StatusLineFrame::On {
+                    display: std::sync::Arc::new(StatusLineDisplay::Text(SanitizedText::new(
+                        output,
+                    ))),
+                    padding: 0,
+                },
+                ..Default::default()
+            },
+        );
+        buf
+    }
+    fn find(buf: &Buffer, text: &str) -> Option<(u16, u16)> {
+        let area = *buf.area();
+        let want: Vec<String> = text.chars().map(String::from).collect();
+        (area.y..area.bottom()).find_map(|y| {
+            (area.x..area.right().saturating_sub(want.len() as u16 - 1))
+                .find(|x| {
+                    want.iter()
+                        .enumerate()
+                        .all(|(i, c)| buf[(x + i as u16, y)].symbol() == c.as_str())
+                })
+                .map(|x| (x, y))
+        })
+    }
+    #[test]
+    fn script_background_survives_the_pane_fill() {
+        let buf = draw_script("\x1b[41mRED\x1b[0m", 30);
+        let (x, y) = find(&buf, "RED").expect("the script row is on screen");
+        assert_eq!(buf[(x, y)].bg, Color::Red);
+    }
+    /// Agent with the bare `/feedback` pane open and focused, which asks for
+    /// most of the screen.
+    fn question_agent() -> AgentView {
+        let mut agent = make_agent();
+        let stashed = agent.prompt.stash();
+        let mut state = QuestionViewState::new(
+            "status_line-test".into(),
+            vec![Question {
+                question: crate::app::dispatch::FEEDBACK_QUESTION_LABEL.into(),
+                options: vec![],
+                multi_select: Some(false),
+                id: None,
+            }],
+            stashed,
+        )
+        .with_local_kind(LocalQuestionKind::Feedback);
+        let freeform = state.activate_freeform_input();
+        agent.prompt.set_text_preserving(&freeform);
+        agent.question_view = Some(state);
+        agent
+    }
+    fn dump(buf: &Buffer) -> String {
+        let area = *buf.area();
+        (area.y..area.bottom())
+            .map(|y| {
+                (area.x..area.right())
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
+    }
+    const FIVE_ROW_SCRIPT: &str = "row-1\nrow-2\nrow-3\nrow-4\nrow-5";
+    #[test]
+    fn short_terminal_leaves_the_row_four_of_its_five_rows() {
+        let buf = draw_script(FIVE_ROW_SCRIPT, 16);
+        let screen = dump(&buf);
+        assert!(
+            find(&buf, "row-4").is_some(),
+            "four rows are left over at height 16\n{screen}"
+        );
+        assert!(
+            find(&buf, "row-5").is_none(),
+            "a fifth row could only come out of the prompt\n{screen}"
+        );
+        assert!(
+            find(&buf, "\u{2570}").is_some(),
+            "the prompt keeps its bottom rule\n{screen}"
+        );
+        assert!(
+            // The label, not the binding: a terminal that cannot send `Ctrl+.`
+            // draws `Ctrl+x` for the same cheatsheet.
+            find(&buf, ":shortcuts").is_some(),
+            "the shortcuts bar keeps its row\n{screen}"
+        );
+    }
+    const ONE_ROW_SCRIPT: &str = "solo-row";
+    #[test]
+    fn fullscreen_question_panel_leaves_the_row_its_rows() {
+        let buf = draw_script_for(&mut question_agent(), FIVE_ROW_SCRIPT, 24);
+        let screen = dump(&buf);
+        let present: Vec<u16> = (1..=5)
+            .filter_map(|i| find(&buf, &format!("row-{i}")).map(|(_, y)| y))
+            .collect();
+        assert_eq!(
+            present.len(),
+            5,
+            "the panel shrinks by the rows the script asks for, got rows at {present:?}\n{screen}"
+        );
+        assert!(
+            find(&buf, "Esc:dismiss").is_some(),
+            "the shortcuts bar keeps its row\n{screen}"
+        );
+    }
+    #[test]
+    fn fullscreen_question_panel_leaves_a_one_row_script_its_row() {
+        let buf = draw_script_for(&mut question_agent(), ONE_ROW_SCRIPT, 24);
+        let screen = dump(&buf);
+        let row_y = find(&buf, ONE_ROW_SCRIPT)
+            .map(|(_, y)| y)
+            .unwrap_or_else(|| panic!("the panel must leave the single row on screen\n{screen}"));
+        let bar_y = find(&buf, "Esc:dismiss")
+            .map(|(_, y)| y)
+            .unwrap_or_else(|| panic!("the shortcuts bar keeps its row\n{screen}"));
+        assert_eq!(
+            bar_y,
+            row_y + 1,
+            "the shortcuts bar sits directly under the row\n{screen}"
+        );
+    }
+    #[test]
+    fn row_clamped_away_by_the_prompt_keeps_the_exported_size() {
+        let mut agent = make_agent();
+        draw_script_for(&mut agent, ONE_ROW_SCRIPT, 20);
+        let painted = agent.last_status_line_size;
+        assert_eq!(
+            painted,
+            Some(crate::views::status_line::RowSize { cols: 76, lines: 1 }),
+            "the row fills the inner width of an 80-column area"
+        );
+        agent.prompt.set_text_preserving(&"line\n".repeat(20));
+        let buf = draw_script_for(&mut agent, ONE_ROW_SCRIPT, 20);
+        assert!(
+            find(&buf, ONE_ROW_SCRIPT).is_none(),
+            "a prompt at its cap leaves no row to paint\n{}",
+            dump(&buf)
+        );
+        assert_eq!(
+            agent.last_status_line_size, painted,
+            "a frame with no row must not export a width the script would read as the 80-column fallback"
+        );
     }
 }

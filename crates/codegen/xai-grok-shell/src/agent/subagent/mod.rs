@@ -194,12 +194,12 @@ pub(crate) struct SubagentSpawnContext {
     /// Whether goal mode (`/goal`) is enabled.
     pub goal_enabled: bool,
     pub background_workflows_enabled: bool,
-    /// Whether the `ask_user_question` tool is exposed to this subagent,
-    /// inherited from the parent session (see `build_subagent_spawn_context`).
+    /// Child policy for exposing `ask_user_question`. Always false; the
+    /// parent session's setting must not cross the subagent boundary.
     pub ask_user_question_enabled: bool,
     /// Whether the parent session is non-interactive (headless `-p` / SDK),
-    /// copied onto the child's `StartupHints` so its ask_user_question also
-    /// returns no-operator text instead of pretending a user declined.
+    /// copied onto the child's `StartupHints` so its prompt omits interactive
+    /// guidance.
     pub parent_non_interactive: bool,
     /// Parent session command channel. Carries lifecycle notifications the
     /// parent persists (`SubagentSpawned` / `SubagentFinished`) and — when
@@ -325,6 +325,9 @@ pub(crate) struct SubagentSpawnContext {
     /// doesn't derail the parent mid-`/goal`; surfaces 2/3 still drain it.
     pub goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
 }
+pub(crate) fn strip_ask_user_question_tool(tools: &mut Vec<xai_grok_sampling_types::ToolSpec>) {
+    tools.retain(|tool| tool.name != "ask_user_question");
+}
 impl SubagentSpawnContext {
     /// Would installing a live bearer resolver strip this subagent's only
     /// credential? A wired resolver is the sampler's sole auth source, so
@@ -400,25 +403,6 @@ impl SubagentSpawnContext {
     /// git ref and its directory deleted.
     pub(crate) fn resolve_subagent_worktree_snapshot_enabled(&self) -> bool {
         self.resolve_feature(crate::agent::config::Feature::SubagentWorktreeSnapshot)
-    }
-    /// Per-tool params for the child's spawn. The ask_user_question timeout is
-    /// session-level config, so it is resolved from the same tiers as the
-    /// parent (requirements/env/user/managed from disk; remote from the
-    /// parent's snapshot) and follows the session into subagents. Bash stays
-    /// on tool defaults, as before that knob existed.
-    pub(crate) fn resolve_tool_params_json(
-        &self,
-    ) -> crate::session::agent_rebuild::ResolvedToolParamsJson {
-        let params = crate::util::config::resolve_ask_user_question_params_from_disk(
-            self.remote_settings.as_ref(),
-        );
-        crate::session::agent_rebuild::ResolvedToolParamsJson {
-            bash: None,
-            ask_user_question: match serde_json::to_value(params) {
-                Ok(serde_json::Value::Object(map)) => Some(map),
-                _ => None,
-            },
-        }
     }
 }
 /// Shell runtime handle retained while a child is active.

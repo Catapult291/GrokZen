@@ -158,7 +158,6 @@ description = "Path to write review notes"
 | `description`     | 任务的简短标签（3–5 个单词）。                          |
 | `subagent_type`   | 要启动的智能体类型。默认为 `general-purpose`。         |
 | `background`      | 在后台运行子智能体并立即返回子智能体 ID。默认为 `false`。 |
-| `capability_mode` | 限制子智能体工具：`read-only`、`read-write`、`execute` 或 `all`。 |
 | `isolation`       | `none`（共享工作区，默认）或 `worktree`（隔离的 Git 工作树）。 |
 | `resume_from`     | 继续已完成的子智能体对话。传入其子智能体 ID。 |
 | `cwd`             | 子智能体的工作目录。与 `isolation: worktree` 互斥；设置 `resume_from` 时忽略（恢复的子级继承源目录）。 |
@@ -170,16 +169,14 @@ description = "Path to write review notes"
 <a id="capability-modes"></a>
 ## 能力模式
 
-能力模式是对子智能体工具的可选粗粒度过滤器：
+能力模式不是创建子智能体时的参数。子智能体可用的工具由其**智能体类型**以及**角色 / 定义的默认值**决定。`general-purpose` 不受限制（`all`）；内置 `explore` 和 `plan` 类型可以读取、搜索并运行 shell 命令，但不能编辑文件。
 
 | 模式         | 读取 | 写入 | 执行 | 说明                                  |
 | ------------ | ---- | ---- | -------- | -------------------------------------------- |
 | `read-only`  | 是   | 否   | 否       | 读取、搜索和检查（也包括网页搜索和 LSP）；不允许文件编辑或 shell。 |
 | `read-write` | 是   | 是   | 否       | 读取，以及创建、编辑、删除和移动文件。不允许 shell。 |
 | `execute`    | 是   | 否   | 是       | 读取，以及运行 shell 命令和后台任务。不允许文件编辑。 |
-| `all`        | 是   | 是   | 是       | 不受限的工具访问。                    |
-
-如果省略 `capability_mode`，子智能体会使用其智能体类型的工具集。内置的 `explore` 和 `plan` 类型可以读取、搜索并运行 shell 命令，但不能编辑；`general-purpose` 提供完整工具集。
+| `all`        | 是   | 是   | 是       | 不受限的工具访问；`general-purpose` 的默认值。 |
 
 ---
 

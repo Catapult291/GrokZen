@@ -1555,22 +1555,27 @@ impl MvpAgent {
     }
     /// Fetch settings; on a `401` try one self-healing [`AuthManager::auth`]
     /// refresh and re-fetch if it yields a *different* token (recovers a 401
-    /// from a token that expired mid-fetch). The refresh is bounded by
-    /// `STARTUP_AUTH_REFRESH_TIMEOUT` so a wedged IdP can't hang the caller; on
-    /// timeout or error the original `Rejected` stands.
+    /// from a token that expired mid-fetch). The caller waits at most
+    /// `STARTUP_AUTH_REFRESH_TIMEOUT`, but the refresh is spawned and runs to
+    /// completion past the deadline — dropping it mid-exchange could abandon
+    /// an IdP response carrying the rotated refresh token. On timeout or
+    /// error the original `Rejected` stands.
     async fn fetch_settings_self_healing_401(
         &self,
         auth: &crate::auth::GrokAuth,
     ) -> crate::remote::SettingsFetch {
         let outcome = self.fetch_settings(auth).await;
-        if matches!(outcome, crate::remote::SettingsFetch::Rejected)
-            && let Ok(Ok(fresh)) = tokio::time::timeout(
+        if matches!(outcome, crate::remote::SettingsFetch::Rejected) {
+            let manager = self.auth_manager.clone();
+            let attempt = tokio::spawn(async move { manager.auth().await });
+            if let Ok(Ok(Ok(fresh))) = tokio::time::timeout(
                     crate::http::STARTUP_AUTH_REFRESH_TIMEOUT,
-                    self.auth_manager.auth(),
+                    attempt,
                 )
                 .await && fresh.key != auth.key
-        {
-            return self.fetch_settings(&fresh).await;
+            {
+                return self.fetch_settings(&fresh).await;
+            }
         }
         outcome
     }
@@ -2485,6 +2490,7 @@ impl MvpAgent {
             post_unblock_jwt_retry_in_flight: Arc::new(
                 std::sync::atomic::AtomicBool::new(false),
             ),
+            tier_recheck_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             workspace_ops: RefCell::new(None),
             #[cfg(all(feature = "local-workspace", unix))]
             local_workspace_supervisors: Rc::new(RefCell::new(HashMap::new())),
@@ -2520,6 +2526,8 @@ impl MvpAgent {
             auto_gc_spawn_count: std::cell::Cell::new(0),
             #[cfg(test)]
             post_auth_settings_spawn_count: std::cell::Cell::new(0),
+            #[cfg(test)]
+            tier_recheck_run_count: std::cell::Cell::new(0),
         };
         instance
             .auth_manager
@@ -2623,6 +2631,9 @@ impl MvpAgent {
                 continue;
             }
             if busy {
+                if let Some(handle) = self.resident_handle(&id) {
+                    handle.set_status_line_wanted(false);
+                }
                 self.set_session_live_state(&id, SessionLiveState::Working);
                 kept_resident += 1;
                 tracing::info!(
@@ -3898,6 +3909,42 @@ impl MvpAgent {
         }
         resolved
     }
+    /// Whether the requesting client will draw a status row. Session `_meta`
+    /// first, for the same reason as [`Self::resolve_client_io_caps`]: `init`
+    /// holds whichever client started the process, and a leader multiplexes many.
+    pub(super) fn resolve_status_line_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) -> bool {
+        meta.and_then(|m| m.get(xai_grok_status_line::CLIENT_STATUS_LINE_META))
+            .or_else(|| {
+                init
+                    .client_capabilities
+                    .meta
+                    .as_ref()
+                    .and_then(|m| m.get(xai_grok_status_line::STATUS_LINE_CAPABILITY))
+            })
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+    /// Switch the row on for the resident actor an attach reuses and ask it to
+    /// fill it. The store precedes the request because the emitter re-reads the
+    /// capability when the wake lands.
+    pub(super) fn attach_status_line(
+        &self,
+        session_id: &acp::SessionId,
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) {
+        let Some(handle) = self.resident_handle(session_id) else {
+            return;
+        };
+        let wanted = Self::resolve_status_line_capability(meta, init);
+        handle.set_status_line_wanted(wanted);
+        if wanted {
+            handle.request_status_snapshot();
+        }
+    }
     /// Extract per-client terminal/fs capabilities from request `_meta`
     /// (injected by the leader). Falls back to the shared `init` OnceCell.
     pub(super) fn resolve_client_io_caps(
@@ -4594,6 +4641,11 @@ impl MvpAgent {
                 .as_ref()
                 .and_then(|m| m.get("x.ai/gitHeadChanged"))
                 .and_then(|v| v.as_bool());
+            let status_line_enabled = std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(
+                    Self::resolve_status_line_capability(session_meta, init),
+                ),
+            );
             let session_cwd = std::path::Path::new(&session_info.cwd);
             let fs_watch_caps = crate::session::fs_watch::FsWatchCapabilities::resolve(crate::session::fs_watch::CapabilityInputs {
                 client_notify: fs_notify_config.is_some(),
@@ -4639,6 +4691,7 @@ impl MvpAgent {
                     self.codebase_indexes.clone(),
                     client_code_nav_enabled,
                     fs_watch_caps,
+                    status_line_enabled,
                     feedback_proxy_url,
                     feedback_user_token,
                     feedback_alpha_test_key,

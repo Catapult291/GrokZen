@@ -137,6 +137,9 @@ pub struct ConnectFlags {
     pub laziness_debug_log: Option<std::path::PathBuf>,
     /// Storage mode override.
     pub storage_mode: Option<String>,
+    /// Whether this client will draw a status row, advertised as
+    /// `x.ai/statusLine` so the agent can skip an unpainted payload.
+    pub status_line: bool,
     /// Client identifier for ACP Initialize metadata.
     pub client_identifier: Option<String>,
     /// Hunk tracker mode for ACP Initialize capabilities.
@@ -303,6 +306,7 @@ pub async fn connect_via_leader(
         terminal: flags.terminal,
         fs_read: flags.fs_read,
         fs_write: flags.fs_write,
+        status_line: flags.status_line,
     };
 
     startup::enter(StartupPhase::LeaderConnect);
@@ -482,12 +486,14 @@ fn build_initialize_meta(flags: &ConnectFlags) -> serde_json::Value {
 fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
     let hunk_mode =
         crate::settings::canonical_hunk_tracker_mode(flags.hunk_tracker_mode.as_deref());
-    serde_json::json!({
+    let mut meta = serde_json::json!({
         "x.ai/incrementalBashOutput": true,
         "x.ai/hunkTracker": { "mode": hunk_mode },
         "x.ai/bashOutputNoColor": true,
         "x.ai/gitHeadChanged": true,
-    })
+    });
+    meta[xai_grok_status_line::STATUS_LINE_CAPABILITY] = flags.status_line.into();
+    meta
 }
 
 /// Parse `defaultAuthMethodId` from `InitializeResponse.meta`.
@@ -1147,6 +1153,20 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(blank["x.ai/hunkTracker"]["mode"], "agent_only");
+    }
+
+    /// The agent gates the whole payload on this key, so a misspelling on
+    /// either side switches the feature off with nothing to show for it.
+    #[test]
+    fn client_capabilities_meta_advertises_the_status_line_the_config_asked_for() {
+        let key = xai_grok_status_line::STATUS_LINE_CAPABILITY;
+        for wants_a_row in [true, false] {
+            let meta = client_capabilities_meta(&ConnectFlags {
+                status_line: wants_a_row,
+                ..Default::default()
+            });
+            assert_eq!(meta[key], wants_a_row, "status_line={wants_a_row}");
+        }
     }
 
     #[test]

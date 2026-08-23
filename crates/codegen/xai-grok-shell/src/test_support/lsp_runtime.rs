@@ -82,7 +82,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         write_file_enabled: true,
         goal_enabled: false,
         background_workflows_enabled: false,
-        ask_user_question_enabled: true,
+        ask_user_question_enabled: false,
         parent_non_interactive: false,
         parent_cmd_tx: None,
         parent_session_info: None,

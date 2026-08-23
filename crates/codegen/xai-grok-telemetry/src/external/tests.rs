@@ -729,6 +729,8 @@ fn tool_decision_snapshot() {
             subagent_type: None,
             manager_prompt_attempted: Some(true),
             prompt_outcome: Some(events::PermissionPromptOutcome::Reject),
+            prompt_outcome_detail: Some(events::PermissionPromptOutcomeDetail::RejectOnce),
+            remember_tool_approvals: Some(true),
             decision_reason: Some(events::PermissionDecisionReason::AutoDenialLimit),
             classifier_source: Some(events::PermissionClassifierSource::Llm),
             classifier_verdict: Some(events::PermissionClassifierVerdict::Block),
@@ -753,6 +755,8 @@ fn tool_decision_snapshot() {
     for key in [
         "manager_prompt_attempted",
         "prompt_outcome",
+        "prompt_outcome_detail",
+        "remember_tool_approvals",
         "decision_reason",
         "classifier_source",
         "classifier_verdict",

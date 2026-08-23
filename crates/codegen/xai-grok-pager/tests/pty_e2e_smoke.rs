@@ -15,6 +15,8 @@ mod agent_response;
 mod auto_compact_top_row;
 #[path = "pty_e2e/basename_path_demo_pty.rs"]
 mod basename_path_demo_pty;
+#[path = "pty_e2e/connect_ui_timeout_env_override.rs"]
+mod connect_ui_timeout_env_override;
 #[path = "pty_e2e/doubled_lines_out_of_band_repro.rs"]
 mod doubled_lines_out_of_band_repro;
 #[path = "pty_e2e/embedded_mode_boots_without_hanging_on_blocked_backend.rs"]

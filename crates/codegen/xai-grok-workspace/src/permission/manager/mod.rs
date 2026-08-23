@@ -105,10 +105,10 @@ fn mcp_server_prefix_allowed(name: &str, servers: &HashSet<String>) -> bool {
         && parse_mcp_qualified_name(name).is_some_and(|(_, server, _)| servers.contains(server))
 }
 
-/// Pre-decision lookup for an MCP tool. Returns `Some(Decision::Allow)`
-/// when the user has previously granted "always allow" for this exact
-/// tool name or for the tool's server prefix. Returns `None` (i.e. fall
-/// through to the prompt) when no grant exists.
+/// Pre-decision lookup for an MCP tool: `Reject` for a remembered "never
+/// allow" (checked first and before the `ask`-floor early return — deny wins
+/// over any grant, mirroring the bash disallow path), `Allow` for a tool or
+/// server-prefix grant, `None` to fall through to the prompt.
 ///
 /// An `ask` policy rule (`policy_forced_prompt`) normally overrides a grant and
 /// forces a re-prompt. With `remember_tool_approvals` on, an existing grant
@@ -120,6 +120,14 @@ fn mcp_pre_decision(
     policy_forced_prompt: bool,
     remember_tool_approvals: bool,
 ) -> Option<Decision> {
+    // Exact qualified `server__tool` match, same lookup key as
+    // `allowed_mcp_tools`.
+    if state.disallowed_mcp_tools.contains(name) {
+        tracing::debug!(%name, source = "session_denylist_tool", "MCP tool auto-rejected");
+        return Some(Decision::Reject(format!(
+            "User previously rejected `{name}` in this project"
+        )));
+    }
     if policy_forced_prompt && !remember_tool_approvals {
         return None;
     }
@@ -140,6 +148,66 @@ fn mcp_pre_decision(
         return Some(Decision::Allow);
     }
     None
+}
+
+/// Canonical key for a persisted web_fetch deny: the host lowercased with the
+/// trailing dot trimmed — WITHOUT the `www.`-stripping the allow side's
+/// `normalize_domain` applies. Collapsing `www.X` to `X` is harmless for the
+/// exact-match allow lookup but not for the subdomain-broad deny matcher:
+/// `www.com` stored as `com` would deny every `.com` host. Rejecting a `www.`
+/// host therefore denies only that host's subtree; the common direction
+/// (entry `example.com` denying `www.example.com`) still works because `www.`
+/// is an ordinary subdomain label to the matcher.
+pub(crate) fn web_fetch_deny_key(host: &str) -> String {
+    host.trim().trim_end_matches('.').to_lowercase()
+}
+
+/// [`web_fetch_deny_key`] of a raw URL's host, if it parses to a non-empty one.
+pub(crate) fn web_fetch_deny_key_from_url(url: &str) -> Option<String> {
+    let key = web_fetch_deny_key(url::Url::parse(url).ok()?.host_str()?);
+    (!key.is_empty()).then_some(key)
+}
+
+/// The persisted "never allow" entry matching a web_fetch host, if any.
+/// A deny covers the exact host and its subdomains — broader than the
+/// exact-match allow lookup on purpose (denies fail safe) — but never a
+/// parent of the entry.
+/// Returns the matched entry so the rejection reason names the persisted key.
+fn denied_web_fetch_domain<'a>(host: &str, disallowed: &'a HashSet<String>) -> Option<&'a str> {
+    if disallowed.is_empty() {
+        return None;
+    }
+    let domain = web_fetch_deny_key(host);
+    disallowed
+        .iter()
+        .find(|denied| {
+            // A hand-edited empty entry must never match (it would dot-match
+            // any host ending in '.').
+            !denied.is_empty()
+                && (domain == **denied
+                    || (domain.len() > denied.len() + 1
+                        && domain.ends_with(denied.as_str())
+                        && domain.as_bytes()[domain.len() - denied.len() - 1] == b'.'))
+        })
+        .map(String::as_str)
+}
+
+/// Session-deny pre-decision for a web_fetch URL: `Some(Reject)` when the
+/// host (or a parent domain of it) is on `disallowed_web_fetch_domains`.
+/// Consulted before every allow source — static allowlist, persisted grant —
+/// so a remembered deny wins over grants, mirroring the bash disallow path.
+fn web_fetch_deny_pre_decision(parsed_url: &url::Url, state: &PermissionState) -> Option<Decision> {
+    let denied =
+        denied_web_fetch_domain(parsed_url.host_str()?, &state.disallowed_web_fetch_domains)?;
+    tracing::debug!(
+        url = %parsed_url,
+        %denied,
+        source = "session_denylist",
+        "web_fetch domain auto-rejected"
+    );
+    Some(Decision::Reject(format!(
+        "User previously rejected `{denied}` in this project"
+    )))
 }
 
 /// True when `words` is an `rg` invocation that enables a preprocessor.
@@ -1257,13 +1325,22 @@ fn session_grant_pre_decision(
     yolo_pin: Option<&'static str>,
 ) -> Option<(Decision, &'static str)> {
     match access {
-        AccessKind::MCPTool { name, .. } => {
-            mcp_pre_decision(name, state, false, false).map(|d| (d, reasons::SESSION_GRANT))
-        }
+        AccessKind::MCPTool { name, .. } => mcp_pre_decision(name, state, false, false).map(|d| {
+            let reason = if matches!(d, Decision::Reject(_)) {
+                reasons::SESSION_DENY
+            } else {
+                reasons::SESSION_GRANT
+            };
+            (d, reason)
+        }),
         AccessKind::WebFetch(url) => {
             let Ok(parsed_url) = url::Url::parse(url) else {
                 return None;
             };
+            // Remembered deny wins over the static allowlist and any grant.
+            if let Some(reject) = web_fetch_deny_pre_decision(&parsed_url, state) {
+                return Some((reject, reasons::SESSION_DENY));
+            }
             if honor_static_web_allowlist && static_domain_matcher.check(&parsed_url).is_none() {
                 return grant_allow(reasons::STATIC_ALLOWLIST);
             }
@@ -1657,6 +1734,7 @@ fn spawn_permission_manager_with_pin(
                             classifier_verdict: classification
                                 .classifier_verdict()
                                 .map(|v| v.wire_str().to_owned()),
+                            remember_tool_approvals: Some(remember_tool_approvals),
                         };
                         // Exactly one clone to the trace receiver; the identical
                         // event is returned to the requester via the resolution.
@@ -2201,7 +2279,16 @@ fn spawn_permission_manager_with_pin(
                             policy_forced_prompt,
                             remember_tool_approvals,
                         )
-                        .map(|d| (d, reasons::PERSISTED_GRANT)),
+                        .map(|d| {
+                            // A remembered "never allow" reports the same
+                            // trigger as the bash disallow path.
+                            let reason = if matches!(d, Decision::Reject(_)) {
+                                reasons::SESSION_DENY
+                            } else {
+                                reasons::PERSISTED_GRANT
+                            };
+                            (d, reason)
+                        }),
                         AccessKind::Edit(_) => {
                             if allow_edits_for_session && protected_edit.is_none() {
                                 Some((Decision::Allow, reasons::PERSISTED_GRANT))
@@ -2257,7 +2344,13 @@ fn spawn_permission_manager_with_pin(
                         AccessKind::WebFetch(url) => {
                             match url::Url::parse(url) {
                                 Ok(parsed_url) => {
-                                    if static_domain_matcher.check(&parsed_url).is_none() {
+                                    // Remembered deny wins over the static
+                                    // allowlist and any persisted grant.
+                                    if let Some(reject) =
+                                        web_fetch_deny_pre_decision(&parsed_url, &state)
+                                    {
+                                        Some((reject, reasons::SESSION_DENY))
+                                    } else if static_domain_matcher.check(&parsed_url).is_none() {
                                         tracing::debug!(
                                             url = %url,
                                             source = "static_allowlist",
@@ -2445,6 +2538,13 @@ fn spawn_permission_manager_with_pin(
                                         "User rejected the execution and excluded `{prefix}` from future runs in this project"
                                     ))
                                 }
+                                PromptOutcome::RejectAlwaysMcpTool(_)
+                                | PromptOutcome::RejectAlwaysDomain(_) => {
+                                    // Not reachable for Bash access; nothing persisted,
+                                    // so report the plain reject wire value.
+                                    effective_kind = PromptOutcomeKind::RejectOnce;
+                                    Decision::Reject("User rejected the execution".to_owned())
+                                }
                                 PromptOutcome::Cancelled => Decision::Cancelled,
                                 PromptOutcome::FollowupMessage(msg) => {
                                     Decision::FollowupMessage(msg)
@@ -2587,6 +2687,63 @@ fn spawn_permission_manager_with_pin(
                                 PromptOutcome::RejectAlwaysBashCommand(_) => {
                                     // Not reachable for non-bash access; defensive.
                                     Decision::Reject("User rejected the execution".to_owned())
+                                }
+                                PromptOutcome::RejectAlwaysMcpTool(tool_name) => {
+                                    // Persist the name from the current AccessKind,
+                                    // NOT the client-supplied value — same anti-spoof
+                                    // rule as AllowAlwaysMcpTool. Always the exact
+                                    // qualified tool; no server-scope deny exists.
+                                    if let AccessKind::MCPTool {
+                                        name: access_name, ..
+                                    } = &access
+                                    {
+                                        if tool_name != access_name {
+                                            tracing::warn!(
+                                                client_supplied = %tool_name,
+                                                access_name = %access_name,
+                                                "RejectAlwaysMcpTool tool_name mismatch; persisting access-kind name"
+                                            );
+                                        }
+                                        state.disallowed_mcp_tools.insert(access_name.clone());
+                                        persist_state(&cwd, &state, client_id_ref).await;
+                                        Decision::Reject(format!(
+                                            "User rejected the execution and excluded `{access_name}` from future runs in this project"
+                                        ))
+                                    } else {
+                                        // Not an MCP access; nothing persisted.
+                                        effective_kind = PromptOutcomeKind::RejectOnce;
+                                        Decision::Reject("User rejected the execution".to_owned())
+                                    }
+                                }
+                                PromptOutcome::RejectAlwaysDomain(client_domain) => {
+                                    // Persist the domain from the access URL, NOT the
+                                    // client-supplied value — same anti-spoof rule as
+                                    // AllowAlwaysDomain. Deny keys keep the `www.`
+                                    // label (see `web_fetch_deny_key`), matching the
+                                    // enforcement lookup exactly.
+                                    if let Some(domain) = match &access {
+                                        AccessKind::WebFetch(url) => {
+                                            web_fetch_deny_key_from_url(url)
+                                        }
+                                        _ => None,
+                                    } {
+                                        if domain != *client_domain {
+                                            tracing::warn!(
+                                                client_supplied = %client_domain,
+                                                access_domain = %domain,
+                                                "RejectAlwaysDomain mismatch; persisting access-URL domain"
+                                            );
+                                        }
+                                        state.disallowed_web_fetch_domains.insert(domain.clone());
+                                        persist_state(&cwd, &state, client_id_ref).await;
+                                        Decision::Reject(format!(
+                                            "User rejected the execution and excluded `{domain}` from future runs in this project"
+                                        ))
+                                    } else {
+                                        // No parseable non-empty host; nothing persisted.
+                                        effective_kind = PromptOutcomeKind::RejectOnce;
+                                        Decision::Reject("User rejected the execution".to_owned())
+                                    }
                                 }
                                 PromptOutcome::RejectOnce => {
                                     Decision::Reject("User rejected the execution".to_owned())
@@ -3806,6 +3963,47 @@ mod tests {
                 .find(|o| o.kind == acp::PermissionOptionKind::RejectOnce)
                 .map(|o| o.option_id.clone())
                 .expect("bash permission prompt must offer a reject-once option");
+            self.prompts.borrow_mut().push(args);
+            Ok(acp::RequestPermissionResponse::new(
+                acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
+                    option_id,
+                )),
+            ))
+        }
+
+        async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A client that answers every prompt by selecting the option with the
+    /// exact given id, for exercising the persistent "Never allow" rows.
+    struct IdSelectingClient {
+        id: &'static str,
+        prompts: std::rc::Rc<std::cell::RefCell<Vec<acp::RequestPermissionRequest>>>,
+    }
+
+    impl IdSelectingClient {
+        fn new(id: &'static str) -> Self {
+            Self {
+                id,
+                prompts: Default::default(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl acp::Client for IdSelectingClient {
+        async fn request_permission(
+            &self,
+            args: acp::RequestPermissionRequest,
+        ) -> acp::Result<acp::RequestPermissionResponse> {
+            let option_id = args
+                .options
+                .iter()
+                .find(|o| o.option_id.0.as_ref() == self.id)
+                .map(|o| o.option_id.clone())
+                .unwrap_or_else(|| panic!("prompt must offer option `{}`", self.id));
             self.prompts.borrow_mut().push(args);
             Ok(acp::RequestPermissionResponse::new(
                 acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
@@ -8775,6 +8973,91 @@ mod tests {
             let state = PermissionState::default();
             assert!(mcp_pre_decision("linear__list", &state, true, true).is_none());
         }
+
+        #[test]
+        fn pre_decision_deny_wins_over_tool_and_server_grants() {
+            let mut state = PermissionState::default();
+            state.allowed_mcp_tools.insert("linear__list".to_string());
+            state.allowed_mcp_servers.insert("linear".to_string());
+            state
+                .disallowed_mcp_tools
+                .insert("linear__list".to_string());
+            assert!(matches!(
+                mcp_pre_decision("linear__list", &state, false, false),
+                Some(Decision::Reject(r)) if r.contains("previously rejected")
+            ));
+            // The deny is exact tool-scope: a sibling tool of the same server
+            // still rides the server grant.
+            assert!(matches!(
+                mcp_pre_decision("linear__create", &state, false, false),
+                Some(Decision::Allow)
+            ));
+        }
+
+        #[test]
+        fn pre_decision_deny_binds_under_ask_floor_regardless_of_gate() {
+            // Mirrors the bash disallow path: the deny is checked before the
+            // ask-floor early return, in both gate states.
+            let mut state = PermissionState::default();
+            state
+                .disallowed_mcp_tools
+                .insert("linear__list".to_string());
+            for remember in [false, true] {
+                assert!(matches!(
+                    mcp_pre_decision("linear__list", &state, true, remember),
+                    Some(Decision::Reject(_))
+                ));
+            }
+        }
+    }
+
+    mod web_fetch_deny {
+        use super::*;
+
+        fn denied(values: &[&str]) -> HashSet<String> {
+            values.iter().map(|s| (*s).to_string()).collect()
+        }
+
+        #[test]
+        fn matches_exact_host_www_and_subdomains() {
+            let set = denied(&["example.com"]);
+            for host in [
+                "example.com",
+                "www.example.com",
+                "EXAMPLE.com",
+                "api.example.com",
+                "a.b.example.com",
+            ] {
+                assert_eq!(
+                    denied_web_fetch_domain(host, &set),
+                    Some("example.com"),
+                    "{host} must match the deny"
+                );
+            }
+        }
+
+        #[test]
+        fn does_not_match_lookalike_suffixes() {
+            let set = denied(&["example.com"]);
+            for host in ["notexample.com", "example.com.evil.net", "example.org"] {
+                assert_eq!(denied_web_fetch_domain(host, &set), None, "{host}");
+            }
+        }
+
+        /// A `www.X` deny key is never collapsed to `X`: storing `com` for a
+        /// `www.com` rejection would deny every `.com` host.
+        #[test]
+        fn www_host_deny_stays_narrow() {
+            assert_eq!(
+                web_fetch_deny_key_from_url("https://www.com/x").as_deref(),
+                Some("www.com")
+            );
+            let set = denied(&["www.com"]);
+            assert_eq!(denied_web_fetch_domain("www.com", &set), Some("www.com"));
+            for host in ["example.com", "foo.com", "com"] {
+                assert_eq!(denied_web_fetch_domain(host, &set), None, "{host}");
+            }
+        }
     }
 
     /// Auto mode on the real permission gate: allowlist / classifier allow /
@@ -9928,6 +10211,145 @@ mod tests {
                     matches!(&rejected, Decision::Reject(r) if r.contains("previously rejected")),
                     "disallow must Reject via session deny (not prompt failure), got {rejected:?}"
                 );
+            })
+            .await;
+    }
+
+    /// Selecting the MCP "Never allow" row persists the exact tool deny, and
+    /// the deny survives a state reload (a fresh manager rejects without
+    /// prompting).
+    #[tokio::test]
+    async fn reject_always_mcp_persists_and_survives_reload() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+
+                let client = IdSelectingClient::new("reject-always-mcp");
+                let prompts = client.prompts.clone();
+                let (mgr, _e) = manager_with_recording_client_remember(
+                    &cwd,
+                    None,
+                    client,
+                    ClientType::GrokPager,
+                    true,
+                );
+                let access = || AccessKind::MCPTool {
+                    name: "linear__delete_issue".into(),
+                    input: serde_json::Value::Null,
+                };
+                let d = mgr.request(access(), tool_call(), None, None, None).await;
+                assert!(
+                    matches!(&d, Decision::Reject(r) if r.contains("excluded `linear__delete_issue`")),
+                    "never-allow selection must Reject with the persisted key, got {d:?}"
+                );
+                assert_eq!(prompts.borrow().len(), 1);
+
+                let persisted = load_state_from_disk(&cwd, None).await;
+                assert!(persisted.disallowed_mcp_tools.contains("linear__delete_issue"));
+                assert!(
+                    persisted.allowed_mcp_servers.is_empty()
+                        && persisted.allowed_mcp_tools.is_empty(),
+                    "reject row must never mint a grant"
+                );
+
+                // Same manager: remembered deny short-circuits.
+                let d2 = mgr.request(access(), tool_call(), None, None, None).await;
+                assert!(matches!(&d2, Decision::Reject(r) if r.contains("previously rejected")));
+                assert_eq!(prompts.borrow().len(), 1, "no second prompt");
+
+                // Fresh manager over the reloaded state: still denied, no prompt.
+                let reload_client = RecordingClient::default();
+                let reload_prompts = reload_client.prompts.clone();
+                let (reloaded, _e2) = manager_with_recording_client(
+                    &cwd,
+                    None,
+                    reload_client,
+                    ClientType::GrokPager,
+                );
+                let d3 = reloaded.request(access(), tool_call(), None, None, None).await;
+                assert!(matches!(&d3, Decision::Reject(r) if r.contains("previously rejected")));
+                assert_eq!(reload_prompts.borrow().len(), 0);
+            })
+            .await;
+    }
+
+    /// Selecting the web-fetch "Never allow" row persists the normalized
+    /// domain deny, which survives reload and covers subdomains.
+    #[tokio::test]
+    async fn reject_always_domain_persists_and_survives_reload() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+
+                let client = IdSelectingClient::new("reject-always-domain");
+                let prompts = client.prompts.clone();
+                let (mgr, _e) = manager_with_recording_client_remember(
+                    &cwd,
+                    None,
+                    client,
+                    ClientType::GrokPager,
+                    true,
+                );
+                let d = mgr
+                    .request(
+                        AccessKind::WebFetch("https://Example.COM/docs".into()),
+                        tool_call(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .await;
+                assert!(
+                    matches!(&d, Decision::Reject(r) if r.contains("excluded `example.com`")),
+                    "never-allow selection must Reject with the deny key, got {d:?}"
+                );
+                assert_eq!(prompts.borrow().len(), 1);
+
+                let persisted = load_state_from_disk(&cwd, None).await;
+                assert!(
+                    persisted
+                        .disallowed_web_fetch_domains
+                        .contains("example.com")
+                );
+                assert!(persisted.allowed_web_fetch_domains.is_empty());
+
+                // Seed a conflicting allow grant: the deny must still win.
+                let mut with_grant = persisted;
+                with_grant
+                    .allowed_web_fetch_domains
+                    .insert("example.com".to_string());
+                persist_state(&cwd, &with_grant, None).await;
+
+                // Fresh manager over the reloaded state: host, www variant,
+                // and subdomain all denied without prompting, despite the grant.
+                let reload_client = RecordingClient::default();
+                let reload_prompts = reload_client.prompts.clone();
+                let (reloaded, _e2) =
+                    manager_with_recording_client(&cwd, None, reload_client, ClientType::GrokPager);
+                for url in [
+                    "https://example.com/x",
+                    "https://www.example.com/x",
+                    "https://api.example.com/x",
+                ] {
+                    let d2 = reloaded
+                        .request(
+                            AccessKind::WebFetch(url.into()),
+                            tool_call(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                    assert!(
+                        matches!(&d2, Decision::Reject(r) if r.contains("previously rejected")),
+                        "{url}: got {d2:?}"
+                    );
+                }
+                assert_eq!(reload_prompts.borrow().len(), 0);
             })
             .await;
     }

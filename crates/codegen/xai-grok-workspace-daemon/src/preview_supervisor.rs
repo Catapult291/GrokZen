@@ -121,6 +121,10 @@ pub struct PreviewArgs {
     pub allow_public: bool,
     /// → proxy `--workspace-server-port`.
     pub workspace_server_port: Option<u16>,
+    /// → proxy `--discovery-refresh-ms` (candidate-scan cadence). `None` omits
+    /// the flag — a proxy binary predating it rejects the unknown flag and
+    /// would crash-loop — so the env stays unset until the proxy release rolls.
+    pub discovery_refresh_ms: Option<u64>,
     /// `current_dir` for the spawned child. Not forwarded as an arg.
     pub workspace_dir: PathBuf,
 }
@@ -157,6 +161,10 @@ impl PreviewArgs {
         if let Some(port) = self.workspace_server_port {
             argv.push("--workspace-server-port".to_owned());
             argv.push(port.to_string());
+        }
+        if let Some(refresh_ms) = self.discovery_refresh_ms {
+            argv.push("--discovery-refresh-ms".to_owned());
+            argv.push(refresh_ms.to_string());
         }
         argv
     }
@@ -816,6 +824,7 @@ mod tests {
             auth_redirect: Some("https://grok.com/preview-auth".to_owned()),
             allow_public: true,
             workspace_server_port: Some(8470),
+            discovery_refresh_ms: Some(250),
             workspace_dir: PathBuf::from("/workspace"),
         }
     }
@@ -839,6 +848,8 @@ mod tests {
                 "--allow-public",
                 "--workspace-server-port",
                 "8470",
+                "--discovery-refresh-ms",
+                "250",
             ],
         );
     }
@@ -854,11 +865,13 @@ mod tests {
             auth_redirect: None,
             allow_public: false,
             workspace_server_port: None,
+            discovery_refresh_ms: None,
             workspace_dir: PathBuf::from("/workspace"),
         };
         assert!(
             cfg.to_argv().is_empty(),
-            "absent options + false allow_public ⇒ the proxy uses its own defaults"
+            "absent options + false allow_public ⇒ the proxy uses its own \
+             defaults; --discovery-refresh-ms in particular must be omitted"
         );
     }
 

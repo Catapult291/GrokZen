@@ -202,7 +202,14 @@ struct PreviewCliArgs {
     preview_workspace_server_port: Option<u16>,
 }
 impl PreviewCliArgs {
-    fn into_preview_args(self, workspace_dir: PathBuf) -> PreviewArgs {
+    /// `discovery_refresh_ms` is env-sourced (`StatusConfig`), not a CLI flag.
+    /// `None` keeps `--discovery-refresh-ms` out of the proxy argv (see
+    /// [`PreviewArgs::discovery_refresh_ms`]).
+    fn into_preview_args(
+        self,
+        workspace_dir: PathBuf,
+        discovery_refresh_ms: Option<u64>,
+    ) -> PreviewArgs {
         PreviewArgs {
             enabled: self.preview_enabled,
             port: self.preview_port,
@@ -212,6 +219,7 @@ impl PreviewCliArgs {
             auth_redirect: self.preview_auth_redirect,
             allow_public: self.preview_allow_public,
             workspace_server_port: self.preview_workspace_server_port,
+            discovery_refresh_ms,
             workspace_dir,
         }
     }
@@ -447,7 +455,9 @@ async fn run(
     status_config.preview_control_port = args.preview.preview_control_port;
     let preview_shutdown = if args.preview.preview_enabled {
         let control_port = args.preview.preview_control_port;
-        let cfg = args.preview.into_preview_args(cwd.clone());
+        let cfg = args
+            .preview
+            .into_preview_args(cwd.clone(), status_config.preview_discovery_refresh_ms());
         let (tx, rx) = tokio::sync::watch::channel(false);
         tokio::spawn(preview_supervisor::supervise_preview(cfg, rx));
         Some((tx, control_port))
@@ -571,6 +581,36 @@ async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The env-resolved discovery refresh must reach the proxy argv only when
+    /// set; `None` (env unset or 0) yields a refresh-free argv.
+    #[test]
+    fn into_preview_args_forwards_the_discovery_refresh_only_when_resolved() {
+        let cli = || PreviewCliArgs {
+            preview_enabled: true,
+            preview_port: None,
+            preview_control_port: Some(6015),
+            preview_visibility: None,
+            preview_instance_suffix: None,
+            preview_auth_redirect: None,
+            preview_allow_public: false,
+            preview_workspace_server_port: None,
+        };
+        let argv = cli()
+            .into_preview_args(PathBuf::from("/workspace"), Some(500))
+            .to_argv();
+        assert_eq!(
+            argv,
+            vec!["--control-port", "6015", "--discovery-refresh-ms", "500"],
+        );
+        let argv = cli()
+            .into_preview_args(PathBuf::from("/workspace"), None)
+            .to_argv();
+        assert_eq!(
+            argv,
+            vec!["--control-port", "6015"],
+            "without the env the flag must be omitted"
+        );
+    }
     #[test]
     fn hub_connect_failed_dwell_is_within_design_bounds() {
         assert!(HUB_CONNECT_FAILED_DWELL >= Duration::from_millis(500));
@@ -882,7 +922,9 @@ mod tests {
     fn preview_defaults_are_inert() {
         let args = Args::try_parse_from(["xai-workspace-server"]).unwrap();
         assert!(!args.preview.preview_enabled);
-        let cfg = args.preview.into_preview_args(PathBuf::from("/workspace"));
+        let cfg = args
+            .preview
+            .into_preview_args(PathBuf::from("/workspace"), None);
         assert!(!cfg.enabled);
         assert!(
             cfg.to_argv().is_empty(),
@@ -910,7 +952,9 @@ mod tests {
         ])
         .unwrap();
         assert!(args.preview.preview_enabled);
-        let cfg = args.preview.into_preview_args(PathBuf::from("/workspace"));
+        let cfg = args
+            .preview
+            .into_preview_args(PathBuf::from("/workspace"), None);
         assert!(cfg.enabled);
         assert_eq!(cfg.port, Some(6014));
         assert_eq!(cfg.control_port, Some(6015));
@@ -963,7 +1007,9 @@ mod tests {
             "owner",
         ])
         .unwrap();
-        let cfg = args.preview.into_preview_args(PathBuf::from("/workspace"));
+        let cfg = args
+            .preview
+            .into_preview_args(PathBuf::from("/workspace"), None);
         assert_eq!(cfg.visibility, Some(PreviewVisibility::Owner));
         assert_eq!(cfg.to_argv(), vec!["--visibility", "owner"]);
     }

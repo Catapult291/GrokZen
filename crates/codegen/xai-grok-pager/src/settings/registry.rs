@@ -658,9 +658,10 @@ pub fn current_value_for(
             "ask"
         })),
         // remember_tool_approvals: reflects the user-config layer the modal
-        // toggles (other layers feed the effective gate at spawn). None → false.
+        // toggles. None → the resolver-shared default.
         "remember_tool_approvals" => Some(SettingValue::Bool(
-            ui.remember_tool_approvals.unwrap_or(false),
+            ui.remember_tool_approvals
+                .unwrap_or(xai_grok_shell::util::config::DEFAULT_REMEMBER_TOOL_APPROVALS),
         )),
         // ask_user_question timeout: reflects the effective TOML merge; the
         // toggle writes the user layer, and env/remote settings tiers feed the
@@ -988,12 +989,14 @@ mod tests {
                         "vim_mode default drifts from UiConfig::default()"
                     );
                 }
-                // remember_tool_approvals: Option<bool>; None → false.
+                // remember_tool_approvals: anchored on the resolver-shared
+                // const so the modal cannot drift from the gate.
                 ("remember_tool_approvals", SettingKind::Bool { default }) => {
                     assert_eq!(
                         *default,
-                        ui.remember_tool_approvals.unwrap_or(false),
-                        "remember_tool_approvals default drifts from UiConfig::default()"
+                        xai_grok_shell::util::config::DEFAULT_REMEMBER_TOOL_APPROVALS,
+                        "remember_tool_approvals default drifts from the shared \
+                         resolver const in xai-grok-shell"
                     );
                 }
                 // ask_user_question timeout: no UiConfig mirror (lives under

@@ -315,23 +315,32 @@ This section defines exactly how rules are matched.
 
 ### Bash Rules
 
-A `Bash(...)` pattern matches a command in either of two ways:
+A `Bash(...)` pattern matches a command (each chained segment, for `allow` rules — see "Chained commands" below) in either of two ways:
 
 - **Prefix**: the command starts with the pattern text, compared character for character. There is no word-boundary requirement, so `Bash(git)` matches `gitleaks` as well as `git status`. Include a trailing space and wildcard (`Bash(git *)`) to require the prefix to be a whole word.
-- **Glob**: the pattern matches the whole command as a glob. `*` can appear at any position and matches any characters, including spaces and slashes, so `Bash(git * main)` matches `git checkout main`. `?` and `[...]` are also supported.
+- **Glob**: the pattern matches the whole command (or the whole segment) as a glob. `*` can appear at any position and matches any characters, including spaces and slashes, so `Bash(git * main)` matches `git checkout main`. `?` and `[...]` are also supported.
 
-Matching is case-sensitive. Leading whitespace in the command is trimmed before matching; nothing else is normalized.
+Matching is case-sensitive. Leading whitespace in the command is trimmed before matching. For `deny` and `ask` rules the raw command string is otherwise not normalized; segment-level checks additionally match normalized forms (see below).
 
 A trailing `:*` suffix on a Bash rule is stripped to a plain prefix: `Bash(git commit:*)` becomes prefix `git commit`. Because prefixes have no word boundary, a `deny` written as `Bash(sed:*)` also blocks commands such as `sed-custom`.
 
 **Chained commands.** Grok parses each command like a shell and splits it on `&&`, `||`, `;`, `|`, and newlines. The rule actions treat segments differently:
 
 - `deny` and `ask` rules are checked against every segment, and against the whole string. One denied segment rejects the entire command.
-- `allow` rules are checked against the whole command string only. `Bash(git *)` therefore auto-approves `git status && rm -rf /`, because the full string starts with `git `. Pair narrow allow rules with `deny` rules for the patterns you want to block.
+- `allow` rules are conjunctive: the command is auto-approved by rule only when **every** segment independently matches an allow rule. `Bash(git *)` approves `git status && git diff`, but not `git status && rm -rf /` — the `rm` segment matches no allow rule, so the command falls through to the mode's normal handling (a prompt in `default` mode; the classifier in `auto` mode, which may still approve or block it; a denial under `dontAsk`). A single allow rule can therefore never approve a chain that smuggles in an unrelated command.
+
+> **Allow rules are not a closed allowlist.** A command that matches no allow rule is not thereby denied — it falls through to the mode. In `auto` mode the classifier can approve commands your rules never mention. For deny-by-default policies, use `dontAsk` (or always-approve plus `deny` rules for hard blocks), as described under [Configuring Permissions](#configuring-permissions).
 
 Commands that cannot be split into simple segments (subshells, command substitution `$(...)`, backticks, background `&`, control flow) prompt as a single unit when Bash restrictions are configured.
 
-Segment-level checks (`deny` and `ask` rules, remembered grants, and the read-only command list) strip environment-variable prefixes such as `RUST_LOG=debug`, and peel a fixed set of process wrappers (`timeout`, `nice`, `ionice`, `chrt`, `stdbuf`, `env`) so that `deny` and `ask` rules match either the wrapped or the inner command. `deny` and `ask` rules are also checked inside inline scripts passed to `bash -c`. Other wrappers, including `sudo`, `xargs`, and `nohup`, are not peeled; write rules that include them explicitly. `allow` rules do not get this treatment: they match the command string as written, so a leading environment assignment or wrapper keeps an `allow` rule from matching and the command prompts instead.
+Each segment is normalized before rules are matched. Leading environment assignments such as `RUST_LOG=debug` are stripped, and a fixed set of wrappers (`timeout`, `nice`, `ionice`, `chrt`, `stdbuf`, `env`) is peeled away, so rules match the inner command: `Bash(npm test *)` approves `RUST_LOG=debug timeout 30 npm test --workers=4`. This applies to `deny`, `ask`, and `allow` rules, remembered grants, and the read-only command list.
+
+A few more matching details:
+
+- Rules also apply inside a literal script passed to `bash -c`. For `allow`, every command inside that script must itself be allowed.
+- Wrappers not on the list (`sudo`, `xargs`, `nohup`, …) are not peeled. Write rules that name them explicitly.
+- When the parser cannot safely peel a form (for example `env -S`), the command prompts instead of matching an `allow` rule.
+- Matching sees the parsed words joined by single spaces, without shell quotes. Write patterns against the unquoted command.
 
 ### Dangerous Commands
 
@@ -383,19 +392,19 @@ When a tool call requires approval, the permission prompt offers these choices:
 
 ### Per-Command "Always Allow"
 
-A narrower set of options remembers just the specific command, MCP tool, or web-fetch domain being prompted, for example "Always allow `cargo test`". These rows are off by default. Enable them with:
+A narrower set of options remembers just the specific command, MCP tool, or web-fetch domain being prompted, for example "Always allow `cargo test`". These rows are on by default. Disable them with:
 
 ```toml
 # ~/.grok/config.toml
 [ui]
-remember_tool_approvals = true
+remember_tool_approvals = false
 ```
 
-With the gate enabled, prompts gain:
+Organizations can disable them via the same key in `requirements.toml` or managed configuration. With the gate enabled (the default), prompts gain:
 
 - **`Always allow: <command>`**, which persists an allow for the command prefix.
 - A matching "never allow" row, which persists a deny the same way.
-- Equivalent "always allow" rows for MCP tools and web-fetch domains.
+- Equivalent "always allow" and "never allow" rows for MCP tools and web-fetch domains. The "never allow" row always remembers the exact tool (never a whole server) or the exact domain being prompted; a remembered deny wins over any grant, and a denied domain also covers its subdomains.
 
 The remembered prefix is limited to a short form of the command: read-only commands persist just their listed prefix (for example `git status`, not the full argument list), and other commands persist a short leading prefix. The prompt shows exactly what will be remembered before you confirm.
 
@@ -533,7 +542,7 @@ Recommended combination for untrusted code:
 
 - Permission decisions appear in the transcript.
 - The `/always-approve` command toggles always-approve mode; other modes are set through `defaultMode` (see [How to set the mode](#how-to-set-the-mode)).
-- With `[ui] remember_tool_approvals = true`, permission prompts include per-command "Always allow" options that persist for the current project only. See [Interactive Approvals](#interactive-approvals-and-where-they-persist).
+- Permission prompts include per-command "Always allow" options that persist for the current project only (on by default; disable with `[ui] remember_tool_approvals = false`). See [Interactive Approvals](#interactive-approvals-and-where-they-persist).
 - To manage hooks and plugins, run `/hooks` or `/plugins` (on most terminals, **Ctrl+L** also opens the Extensions modal; on VS Code, Cursor, Windsurf, and Zed, `Ctrl+L` is mid-turn interject instead). See [10-hooks.md](10-hooks.md).
 
 ---

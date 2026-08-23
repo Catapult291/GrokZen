@@ -42,6 +42,7 @@ pub const TERMINAL_SUPPORT: DocId = DocId::new("user-guide.terminal-support");
 pub const PERMISSIONS: DocId = DocId::new("user-guide.permissions-and-safety");
 pub const DASHBOARD: DocId = DocId::new("user-guide.dashboard");
 pub const MONITORING_USAGE: DocId = DocId::new("user-guide.monitoring-usage");
+pub const STATUS_LINE: DocId = DocId::new("user-guide.status-line");
 pub const HOOKS_AND_PLUGINS: DocId = DocId::new("reference.hooks-and-plugins");
 pub const CUSTOM_HOOKS: DocId = DocId::new("reference.custom-hooks");
 
@@ -234,6 +235,12 @@ pub static USER_GUIDE: &[Doc] = &[
         "24-monitoring-usage.md",
         "Monitoring Usage (External OpenTelemetry)",
         "Export usage metrics to a customer OpenTelemetry collector"
+    ),
+    guide!(
+        STATUS_LINE,
+        "25-status-line.md",
+        "Status Line",
+        "A bottom row of live session context, or the output of your own script"
     ),
 ];
 

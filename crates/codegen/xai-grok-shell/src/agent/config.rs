@@ -2158,6 +2158,24 @@ impl Config {
                 );
             }
         }
+        if let Some(problem) = config.ui.status_line.problem() {
+            config.config_warnings.push(
+                super::config_model_override_parse::ConfigWarning::config_key(
+                    "ui.status_line".to_owned(),
+                    super::config_model_override_parse::ConfigWarningKind::InvalidValue,
+                    problem.to_string(),
+                ),
+            );
+        }
+        for key in config.ui.status_line.unknown_keys() {
+            config.config_warnings.push(
+                super::config_model_override_parse::ConfigWarning::config_key(
+                    format!("ui.status_line.{key}"),
+                    super::config_model_override_parse::ConfigWarningKind::UnknownField,
+                    "unrecognized config key".to_owned(),
+                ),
+            );
+        }
         super::config_model_override_parse::log_config_warnings(&config.config_warnings);
         if config.grok_com_config.oidc.is_none() {
             config.grok_com_config.oidc = OidcAuthConfig::from_env();

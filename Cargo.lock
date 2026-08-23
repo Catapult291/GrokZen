@@ -13728,7 +13728,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -13806,6 +13806,7 @@ dependencies = [
  "xai-grok-product",
  "xai-grok-sandbox",
  "xai-grok-shell",
+ "xai-grok-status-line",
  "xai-grok-telemetry",
  "xai-grok-test-support",
  "xai-grok-tools",
@@ -13823,7 +13824,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -14141,13 +14142,14 @@ dependencies = [
  "wl-clipboard-rs",
  "xai-grok-config-types",
  "xai-grok-models",
+ "xai-grok-status-line",
  "xai-grok-tools",
  "xai-tty-utils",
 ]
 
 [[package]]
 name = "xai-grok-shell"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -14272,6 +14274,7 @@ dependencies = [
  "xai-grok-shared",
  "xai-grok-shell-base",
  "xai-grok-shell-session-support",
+ "xai-grok-status-line",
  "xai-grok-subagent-resolution",
  "xai-grok-telemetry",
  "xai-grok-test-support",
@@ -14334,6 +14337,16 @@ dependencies = [
  "xai-file-utils",
  "xai-grok-http",
  "xai-grok-version",
+]
+
+[[package]]
+name = "xai-grok-status-line"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "strum 0.27.2",
+ "toml",
 ]
 
 [[package]]
@@ -14572,7 +14585,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-version"
-version = "1.0.5"
+version = "1.0.6"
 dependencies = [
  "semver",
 ]
