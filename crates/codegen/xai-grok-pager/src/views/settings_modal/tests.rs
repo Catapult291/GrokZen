@@ -155,7 +155,7 @@ fn locale_aware_settings_modal_renders_localized_metadata_and_choices() {
 }
 
 #[test]
-fn locale_aware_settings_modal_localizes_follow_up_behavior() {
+fn zh_localization_settings_modal_localizes_follow_up_behavior() {
     let mut state = make_state();
     let follow_up_row = state
         .rows
@@ -220,7 +220,7 @@ fn locale_aware_settings_modal_localizes_follow_up_behavior() {
 }
 
 #[test]
-fn zh_cn_metadata_covers_every_registered_setting_and_choice() {
+fn zh_localization_metadata_covers_every_registered_setting_and_choice() {
     let locale = zh_cn_locale();
     let registry = SettingsRegistry::defaults();
     let snapshot = PagerLocalSnapshot::default();

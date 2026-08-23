@@ -1387,7 +1387,7 @@ mod tests {
     use super::save_setting_choice_toast;
 
     #[test]
-    fn follow_up_behavior_toast_uses_localized_setting_and_choice() {
+    fn zh_localization_follow_up_behavior_toast_uses_localized_setting_and_choice() {
         let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
             locale: crate::locale::UiLocale::ZhCn,
             source: crate::locale::LocaleSource::Cli,
