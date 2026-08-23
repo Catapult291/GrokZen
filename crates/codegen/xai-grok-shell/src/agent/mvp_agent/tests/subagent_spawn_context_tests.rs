@@ -217,6 +217,7 @@ fn model_entry_with_rate_limit(
     info.subagent_rate_limit_max_attempts = attempts;
     crate::agent::config::ModelEntry {
         info,
+        bundled_catalog_entry: false,
         api_key: None,
         env_key: None,
         auth_provider: None,
