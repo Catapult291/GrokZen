@@ -63,6 +63,7 @@ pub(crate) fn localized_known_mcp_tool_name(
         "tasks__create" => ("scrollback.tool.mcp.tasks.create", "Tasks Create"),
         "tasks__update" => ("scrollback.tool.mcp.tasks.update", "Tasks Update"),
         "tasks__get_results" => ("scrollback.tool.mcp.tasks.get_results", "Tasks Get Results"),
+        "tasks__run_now" => ("scrollback.tool.mcp.tasks.run_now", "Tasks Run Now"),
         "tasks__pause" => ("scrollback.tool.mcp.tasks.pause", "Tasks Pause"),
         "tasks__delete" => ("scrollback.tool.mcp.tasks.delete", "Tasks Delete"),
         "tasks__list_trigger_catalog" => (

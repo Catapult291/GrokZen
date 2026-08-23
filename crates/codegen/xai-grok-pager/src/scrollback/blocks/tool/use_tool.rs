@@ -373,6 +373,7 @@ mod tests {
             ("tasks__create", "创建任务"),
             ("tasks__update", "更新任务"),
             ("tasks__get_results", "获取任务结果"),
+            ("tasks__run_now", "立即运行任务"),
             ("tasks__pause", "暂停任务"),
             ("tasks__delete", "删除任务"),
             ("tasks__list_trigger_catalog", "列出触发器目录"),
