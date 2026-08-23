@@ -1381,3 +1381,27 @@ pub(in crate::app::dispatch) fn apply_setting_rollback(
     refresh_open_settings_modals(app);
     companion_effects
 }
+
+#[cfg(test)]
+mod tests {
+    use super::save_setting_choice_toast;
+
+    #[test]
+    fn follow_up_behavior_toast_uses_localized_setting_and_choice() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+
+        assert_eq!(
+            save_setting_choice_toast(
+                &locale,
+                "follow_up_behavior",
+                "Follow-up behavior",
+                "steer",
+                "Steer",
+            ),
+            "✓ 跟进方式：插话",
+        );
+    }
+}

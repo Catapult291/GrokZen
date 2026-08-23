@@ -8,6 +8,142 @@ pub use auto_update::UpdateStatus;
 pub use version::{UpdateConfig, channel_label, channel_name, write_version_cache};
 pub use version_policy::enforce_version_policy_or_exit;
 
+#[cfg(feature = "community-build")]
+const COMMUNITY_INSTALL_MARKER: &str = ".grok-zh-install.json";
+#[cfg(feature = "community-build")]
+const MAX_COMMUNITY_INSTALL_MARKER_BYTES: u64 = 64 * 1024;
+
+/// User-facing launch commands exposed by the community Windows installer.
+#[cfg(feature = "community-build")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommunityCommandNames {
+    pub grok: &'static str,
+    pub agent: &'static str,
+}
+
+#[cfg(feature = "community-build")]
+impl CommunityCommandNames {
+    const COMMUNITY: Self = Self {
+        grok: "grok-zh",
+        agent: "agent-zh",
+    };
+    const COMPATIBILITY: Self = Self {
+        grok: "grok",
+        agent: "agent",
+    };
+}
+
+#[cfg(feature = "community-build")]
+#[derive(serde::Deserialize)]
+struct CommunityInstallMarker {
+    product: String,
+    #[serde(default)]
+    commands: Vec<String>,
+}
+
+#[cfg(feature = "community-build")]
+fn same_search_path_dir(left: &std::path::Path, right: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        left.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
+    }
+}
+
+#[cfg(feature = "community-build")]
+fn search_path_resolves_shim(
+    search_path: Option<&std::ffi::OsStr>,
+    install_dir: &std::path::Path,
+    command: &str,
+) -> bool {
+    let Some(search_path) = search_path else {
+        return false;
+    };
+    let install_dir =
+        std::fs::canonicalize(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
+    const COMMAND_SUFFIXES: &[&str] = &["", ".com", ".exe", ".bat", ".cmd", ".ps1"];
+
+    for entry in std::env::split_paths(search_path) {
+        let normalized_entry = std::fs::canonicalize(&entry).unwrap_or_else(|_| entry.clone());
+        if same_search_path_dir(&normalized_entry, &install_dir) {
+            let expected_shim = entry.join(format!("{command}.cmd"));
+            let has_conflicting_candidate = COMMAND_SUFFIXES
+                .iter()
+                .filter(|suffix| !suffix.eq_ignore_ascii_case(".cmd"))
+                .any(|suffix| entry.join(format!("{command}{suffix}")).is_file());
+            return expected_shim.is_file() && !has_conflicting_candidate;
+        }
+
+        if COMMAND_SUFFIXES
+            .iter()
+            .any(|suffix| entry.join(format!("{command}{suffix}")).is_file())
+        {
+            return false;
+        }
+    }
+
+    false
+}
+
+#[cfg(feature = "community-build")]
+fn community_command_names_in(
+    install_dir: &std::path::Path,
+    search_path: Option<&std::ffi::OsStr>,
+) -> CommunityCommandNames {
+    let marker_path = install_dir.join(COMMUNITY_INSTALL_MARKER);
+    let Ok(metadata) = std::fs::metadata(&marker_path) else {
+        return CommunityCommandNames::COMMUNITY;
+    };
+    if !metadata.is_file() || metadata.len() > MAX_COMMUNITY_INSTALL_MARKER_BYTES {
+        return CommunityCommandNames::COMMUNITY;
+    }
+    let Ok(marker_bytes) = std::fs::read(marker_path) else {
+        return CommunityCommandNames::COMMUNITY;
+    };
+    let marker_bytes = marker_bytes
+        .strip_prefix(b"\xef\xbb\xbf")
+        .unwrap_or(&marker_bytes);
+    let Ok(marker) = serde_json::from_slice::<CommunityInstallMarker>(marker_bytes) else {
+        return CommunityCommandNames::COMMUNITY;
+    };
+    let exposes_compatibility_names = marker.product == "grok-build-zh"
+        && marker.commands.iter().any(|command| command == "grok")
+        && marker.commands.iter().any(|command| command == "agent")
+        && install_dir.join("grok.cmd").is_file()
+        && install_dir.join("agent.cmd").is_file()
+        && search_path_resolves_shim(search_path, install_dir, "grok")
+        && search_path_resolves_shim(search_path, install_dir, "agent");
+    if exposes_compatibility_names {
+        CommunityCommandNames::COMPATIBILITY
+    } else {
+        CommunityCommandNames::COMMUNITY
+    }
+}
+
+/// Detect the launch commands that remain available after a community update.
+///
+/// The installer marker records whether the user enabled the optional
+/// `grok`/`agent` compatibility shims. Both shim files must still exist so a
+/// stale marker never recommends a command the user removed manually.
+/// Both shims must resolve from the install directory before any earlier PATH
+/// candidate so `-NoPathUpdate` and shadowed official commands never cause a
+/// misleading recommendation.
+#[cfg(feature = "community-build")]
+pub fn community_command_names() -> CommunityCommandNames {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+        .map_or(CommunityCommandNames::COMMUNITY, |install_dir| {
+            let search_path = std::env::var_os("PATH");
+            community_command_names_in(&install_dir, search_path.as_deref())
+        })
+}
+
 /// User-facing reason returned when the selected distribution source is not
 /// enabled. Community builds never use the official xAI update sources.
 #[cfg(feature = "community-build")]
@@ -83,6 +219,20 @@ pub(crate) fn ensure_selected_updates_enabled() -> anyhow::Result<()> {
 mod community_build_tests {
     use super::*;
 
+    fn write_install_marker(install_dir: &std::path::Path, commands: &[&str], bom: bool) {
+        let json = serde_json::json!({
+            "product": "grok-build-zh",
+            "commands": commands,
+        })
+        .to_string();
+        let bytes = if bom {
+            [b"\xef\xbb\xbf".as_slice(), json.as_bytes()].concat()
+        } else {
+            json.into_bytes()
+        };
+        std::fs::write(install_dir.join(COMMUNITY_INSTALL_MARKER), bytes).unwrap();
+    }
+
     #[test]
     fn community_build_enables_only_its_fixed_release_source() {
         let supported_target = cfg!(all(
@@ -114,5 +264,77 @@ mod community_build_tests {
         let expected_installer =
             community_updates_enabled().then_some(community_release::COMMUNITY_INSTALLER);
         assert_eq!(auto_update::get_installer().await, expected_installer);
+    }
+
+    #[test]
+    fn community_command_names_require_marker_and_both_live_shims() {
+        let temp = tempfile::tempdir().unwrap();
+        let search_path = std::env::join_paths([temp.path()]).unwrap();
+        assert_eq!(
+            community_command_names_in(temp.path(), Some(&search_path)),
+            CommunityCommandNames::COMMUNITY
+        );
+
+        write_install_marker(temp.path(), &["grok-zh", "agent-zh", "grok", "agent"], true);
+        std::fs::write(temp.path().join("grok.cmd"), b"shim").unwrap();
+        assert_eq!(
+            community_command_names_in(temp.path(), Some(&search_path)),
+            CommunityCommandNames::COMMUNITY
+        );
+
+        std::fs::write(temp.path().join("agent.cmd"), b"shim").unwrap();
+        assert_eq!(
+            community_command_names_in(temp.path(), None),
+            CommunityCommandNames::COMMUNITY
+        );
+        assert_eq!(
+            community_command_names_in(temp.path(), Some(&search_path)),
+            CommunityCommandNames::COMPATIBILITY
+        );
+
+        std::fs::remove_file(temp.path().join("grok.cmd")).unwrap();
+        assert_eq!(
+            community_command_names_in(temp.path(), Some(&search_path)),
+            CommunityCommandNames::COMMUNITY
+        );
+    }
+
+    #[test]
+    fn community_command_names_reject_invalid_or_non_compatibility_markers() {
+        let temp = tempfile::tempdir().unwrap();
+        let search_path = std::env::join_paths([temp.path()]).unwrap();
+        write_install_marker(temp.path(), &["grok-zh", "agent-zh"], false);
+        std::fs::write(temp.path().join("grok.cmd"), b"shim").unwrap();
+        std::fs::write(temp.path().join("agent.cmd"), b"shim").unwrap();
+        assert_eq!(
+            community_command_names_in(temp.path(), Some(&search_path)),
+            CommunityCommandNames::COMMUNITY
+        );
+
+        std::fs::write(temp.path().join(COMMUNITY_INSTALL_MARKER), b"not json").unwrap();
+        assert_eq!(
+            community_command_names_in(temp.path(), Some(&search_path)),
+            CommunityCommandNames::COMMUNITY
+        );
+    }
+
+    #[test]
+    fn community_command_names_reject_shadowed_compatibility_commands() {
+        let install = tempfile::tempdir().unwrap();
+        let shadow = tempfile::tempdir().unwrap();
+        write_install_marker(
+            install.path(),
+            &["grok-zh", "agent-zh", "grok", "agent"],
+            false,
+        );
+        std::fs::write(install.path().join("grok.cmd"), b"shim").unwrap();
+        std::fs::write(install.path().join("agent.cmd"), b"shim").unwrap();
+        std::fs::write(shadow.path().join("grok.exe"), b"shadow").unwrap();
+        let search_path = std::env::join_paths([shadow.path(), install.path()]).unwrap();
+
+        assert_eq!(
+            community_command_names_in(install.path(), Some(&search_path)),
+            CommunityCommandNames::COMMUNITY
+        );
     }
 }

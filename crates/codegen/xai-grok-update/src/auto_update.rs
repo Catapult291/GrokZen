@@ -2957,10 +2957,14 @@ pub async fn run_update(
         {
             tracing::warn!("Failed to persist auto_update=false for pinned install: {e}");
         }
-        if cfg!(feature = "community-build") {
+        #[cfg(feature = "community-build")]
+        {
+            let commands = crate::community_command_names();
             eprintln!("  ✓ grok-zh v{version} 安装成功！");
-            eprintln!("  请重新启动 grok-zh。");
-        } else {
+            eprintln!("  请重新启动 `{}` 或 `{}`。", commands.grok, commands.agent);
+        }
+        #[cfg(not(feature = "community-build"))]
+        {
             eprintln!("  ✓ grok v{} installed successfully!", version);
             eprintln!("  Please restart Grok.");
         }
@@ -3147,9 +3151,13 @@ pub async fn run_update(
     }
 
     if !force && std::env::var_os("GROK_AUTO_UPDATE").is_none() {
-        if cfg!(feature = "community-build") {
-            eprintln!("  请重新启动 grok-zh。");
-        } else {
+        #[cfg(feature = "community-build")]
+        {
+            let commands = crate::community_command_names();
+            eprintln!("  请重新启动 `{}` 或 `{}`。", commands.grok, commands.agent);
+        }
+        #[cfg(not(feature = "community-build"))]
+        {
             eprintln!("  Please restart Grok.");
         }
     }

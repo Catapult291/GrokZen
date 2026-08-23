@@ -155,6 +155,173 @@ fn locale_aware_settings_modal_renders_localized_metadata_and_choices() {
 }
 
 #[test]
+fn locale_aware_settings_modal_localizes_follow_up_behavior() {
+    let mut state = make_state();
+    let follow_up_row = state
+        .rows
+        .iter()
+        .position(
+            |row| matches!(row, RowEntry::Setting { key, .. } if *key == "follow_up_behavior"),
+        )
+        .expect("follow-up behavior setting row");
+    state.selected = follow_up_row;
+
+    let expanded = handle_settings_key(
+        &mut state,
+        &KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+    );
+    assert!(matches!(expanded, SettingsKeyOutcome::Changed));
+
+    let area = Rect::new(0, 0, 120, 40);
+    let locale = zh_cn_locale();
+    let mut browse_buf = Buffer::empty(area);
+    render_settings_modal_with_locale(
+        &mut browse_buf,
+        area,
+        &mut state,
+        false,
+        None,
+        Some(&locale),
+    );
+    let browse_text = buffer_visual_text(&browse_buf);
+    assert!(
+        browse_text.contains("跟进方式")
+            && browse_text.contains("轮次运行期间如何处理你发送的消息。"),
+        "localized follow-up metadata missing: {browse_text:?}",
+    );
+    assert!(
+        !browse_text.contains("Follow-up behavior")
+            && !browse_text.contains("What to do with messages"),
+        "English follow-up metadata leaked into zh-CN browse view: {browse_text:?}",
+    );
+
+    assert!(state.try_enter_picking_enum());
+    let mut picker_buf = Buffer::empty(area);
+    render_settings_modal_with_locale(
+        &mut picker_buf,
+        area,
+        &mut state,
+        false,
+        None,
+        Some(&locale),
+    );
+    let picker_text = buffer_visual_text(&picker_buf);
+    assert!(
+        picker_text.contains("队列") && picker_text.contains("插话"),
+        "localized follow-up choices missing: {picker_text:?}",
+    );
+    assert!(
+        !picker_text.contains("Queue")
+            && !picker_text.contains("Steer")
+            && !picker_text.contains("Hold follow-ups")
+            && !picker_text.contains("Inject follow-ups"),
+        "English follow-up choices leaked into zh-CN picker: {picker_text:?}",
+    );
+}
+
+#[test]
+fn zh_cn_metadata_covers_every_registered_setting_and_choice() {
+    let locale = zh_cn_locale();
+    let registry = SettingsRegistry::defaults();
+    let snapshot = PagerLocalSnapshot::default();
+
+    for meta in registry.all() {
+        let label_fallback = format!("__missing_setting_label:{}__", meta.key);
+        assert_ne!(
+            locale.setting_label(meta.key, &label_fallback).as_ref(),
+            label_fallback.as_str(),
+            "missing zh-CN label for setting {}",
+            meta.key,
+        );
+
+        let description_fallback = format!("__missing_setting_description:{}__", meta.key);
+        assert_ne!(
+            locale
+                .setting_description(meta.key, &description_fallback)
+                .as_ref(),
+            description_fallback.as_str(),
+            "missing zh-CN description for setting {}",
+            meta.key,
+        );
+
+        match &meta.kind {
+            SettingKind::Enum { choices, .. } => {
+                for choice in *choices {
+                    let label_fallback = format!(
+                        "__missing_setting_choice_label:{}:{}__",
+                        meta.key, choice.canonical
+                    );
+                    assert_ne!(
+                        locale
+                            .setting_choice_label(meta.key, choice.canonical, &label_fallback)
+                            .as_ref(),
+                        label_fallback.as_str(),
+                        "missing zh-CN label for setting choice {}:{}",
+                        meta.key,
+                        choice.canonical,
+                    );
+
+                    if !choice.description.is_empty() {
+                        let description_fallback = format!(
+                            "__missing_setting_choice_description:{}:{}__",
+                            meta.key, choice.canonical
+                        );
+                        assert_ne!(
+                            locale
+                                .setting_choice_description(
+                                    meta.key,
+                                    choice.canonical,
+                                    &description_fallback,
+                                )
+                                .as_ref(),
+                            description_fallback.as_str(),
+                            "missing zh-CN description for setting choice {}:{}",
+                            meta.key,
+                            choice.canonical,
+                        );
+                    }
+                }
+            }
+            SettingKind::DynamicEnum { source, .. } => {
+                for choice in crate::settings::dynamic_enum_choices(*source, &snapshot)
+                    .into_iter()
+                    .filter(|choice| choice.canonical.is_empty())
+                {
+                    let label_fallback =
+                        format!("__missing_dynamic_choice_label:{}:_none__", meta.key);
+                    assert_ne!(
+                        locale
+                            .setting_choice_label(meta.key, &choice.canonical, &label_fallback)
+                            .as_ref(),
+                        label_fallback.as_str(),
+                        "missing zh-CN empty-choice label for dynamic setting {}",
+                        meta.key,
+                    );
+
+                    if !choice.description.is_empty() {
+                        let description_fallback =
+                            format!("__missing_dynamic_choice_description:{}:_none__", meta.key);
+                        assert_ne!(
+                            locale
+                                .setting_choice_description(
+                                    meta.key,
+                                    &choice.canonical,
+                                    &description_fallback,
+                                )
+                                .as_ref(),
+                            description_fallback.as_str(),
+                            "missing zh-CN empty-choice description for dynamic setting {}",
+                            meta.key,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[test]
 fn legacy_settings_modal_wrapper_keeps_english_chrome() {
     let mut state = make_state();
     let area = Rect::new(0, 0, 120, 40);
