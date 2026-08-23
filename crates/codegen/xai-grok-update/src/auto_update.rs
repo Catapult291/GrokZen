@@ -582,6 +582,10 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
 fn disk_version_for_installer(installer: &str) -> Option<String> {
     match installer {
         "internal" | "gh-release" => crate::version::installed_on_disk_version(),
+        #[cfg(feature = "community-build")]
+        crate::community_release::COMMUNITY_INSTALLER => {
+            crate::version::installed_on_disk_version()
+        }
         _ => None,
     }
 }
@@ -656,16 +660,18 @@ fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: boo
     })
 }
 
-/// Returns `true` for installer backends whose version source is authoritative
-/// (managed by xAI directly), meaning a pointer rollback is intentional and
-/// should trigger a client downgrade. Returns `false` for backends like npm
-/// where stale corporate registries/proxies can return arbitrarily old versions.
+/// Returns `true` for installer backends whose immutable version source is
+/// authoritative, meaning a pointer rollback is intentional and should trigger
+/// a client downgrade. Returns `false` for backends like npm where stale
+/// corporate registries/proxies can return arbitrarily old versions.
 ///
 /// Users who installed via `install.sh` are classified as `"internal"` by
 /// `get_installer()`, so they also get rollback support.
 fn installer_allows_downgrade(installer: &str) -> bool {
     match installer {
         "internal" | "gh-release" => true,
+        #[cfg(feature = "community-build")]
+        crate::community_release::COMMUNITY_INSTALLER => true,
         "npm" => false,
         _ => false,
     }
@@ -1132,11 +1138,11 @@ pub async fn run_install_script(
     })
 }
 
-/// Install from the exact complete ZIP package recorded by an immutable
+/// Install from the exact complete platform package recorded by an immutable
 /// community Release. The archive is verified against GitHub metadata, its
 /// layout and inner SHA256SUMS are checked, and the extracted executable is
-/// smoke-tested before activation. Companion files remain managed by the full
-/// Windows installer; the updater never accepts a separate raw EXE asset.
+/// smoke-tested before activation. The updater never accepts a separate raw
+/// executable asset.
 #[cfg(feature = "community-build")]
 async fn install_community_release(
     target: Option<&str>,
@@ -1144,21 +1150,22 @@ async fn install_community_release(
 ) -> Result<String> {
     crate::ensure_community_updates_enabled()?;
 
-    #[cfg(not(windows))]
-    {
-        let _ = (target, update_config);
-        anyhow::bail!("community self-update currently supports only x86_64-pc-windows-gnu");
+    let version = match target {
+        Some(version) => version.to_string(),
+        None => crate::community_release::fetch_latest_version(&update_config.channel).await?,
+    };
+    let parsed = Version::parse(&version)
+        .with_context(|| format!("invalid community release version: {version}"))?;
+    if parsed.to_string() != version || !parsed.build.is_empty() {
+        anyhow::bail!("community release version is not canonical: {version}");
+    }
+    let asset = crate::community_release::fetch_asset(&version).await?;
+    if asset.version != version {
+        anyhow::bail!("release asset version does not match the requested version");
     }
 
     #[cfg(windows)]
     {
-        let version = match target {
-            Some(version) => version.to_string(),
-            None => crate::community_release::fetch_latest_version(&update_config.channel).await?,
-        };
-        Version::parse(&version)
-            .with_context(|| format!("invalid community release version: {version}"))?;
-
         let destination = std::env::current_exe().context("locating the running grok-zh.exe")?;
         let destination_name = destination
             .file_name()
@@ -1172,18 +1179,16 @@ async fn install_community_release(
             );
         }
 
-        let asset = crate::community_release::fetch_asset(&version).await?;
-        if asset.version != version {
-            anyhow::bail!("release asset version does not match the requested version");
-        }
         let archive = unique_temp_sibling(&destination, "download.zip");
         let candidate = unique_temp_sibling(&destination, "candidate.exe");
         crate::community_release::download_verified(&asset, &archive).await?;
 
         let archive_for_extract = archive.clone();
         let candidate_for_extract = candidate.clone();
+        let asset_for_extract = asset.clone();
         let extract_result = tokio::task::spawn_blocking(move || {
             crate::community_release::extract_verified_executable(
+                &asset_for_extract,
                 &archive_for_extract,
                 &candidate_for_extract,
             )
@@ -1226,8 +1231,310 @@ async fn install_community_release(
             xai_grok_product::CLI_NAME,
             version
         );
-        Ok(version)
+        return Ok(version);
     }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        return install_community_macos_release(&version, &asset).await;
+    }
+
+    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
+    {
+        let _ = asset;
+        anyhow::bail!(
+            "community self-update supports only x86_64-pc-windows-gnu and aarch64-apple-darwin"
+        );
+    }
+}
+
+#[cfg(all(
+    feature = "community-build",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+fn ensure_private_community_dir(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "refusing to use a symlinked community install directory: {}",
+                path.display()
+            );
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            anyhow::bail!(
+                "community install path is not a directory: {}",
+                path.display()
+            );
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(path).with_context(|| {
+                format!("creating community install directory {}", path.display())
+            })?;
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!("checking community install directory {}", path.display())
+            });
+        }
+    }
+
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("re-checking community install directory {}", path.display()))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!(
+            "community install directory changed type: {}",
+            path.display()
+        );
+    }
+    if metadata.uid() != unsafe { libc::geteuid() } {
+        anyhow::bail!(
+            "community install directory is not owned by the current user: {}",
+            path.display()
+        );
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("securing community install directory {}", path.display()))?;
+    let mode = std::fs::symlink_metadata(path)?.permissions().mode() & 0o777;
+    if mode != 0o700 {
+        anyhow::bail!(
+            "community install directory is not private (mode {mode:o}): {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(
+    feature = "community-build",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+fn validate_community_home_path(path: &std::path::Path) -> Result<()> {
+    use std::path::Component;
+
+    if !path.is_absolute() || path.parent().is_none() {
+        anyhow::bail!(
+            "community GROK_HOME must be an absolute non-root path: {}",
+            path.display()
+        );
+    }
+    let mut current = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir => current.push(std::path::MAIN_SEPARATOR_STR),
+            Component::Normal(name) => current.push(name),
+            _ => {
+                anyhow::bail!(
+                    "community GROK_HOME contains an unsafe path component: {}",
+                    path.display()
+                );
+            }
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                anyhow::bail!(
+                    "community GROK_HOME contains a symlink component: {}",
+                    current.display()
+                );
+            }
+            Ok(metadata) if !metadata.is_dir() => {
+                anyhow::bail!(
+                    "community GROK_HOME contains a non-directory component: {}",
+                    current.display()
+                );
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Only the final GROK_HOME component may be absent. Parent
+                // creation is deliberately forbidden so no unresolved chain
+                // can be followed by create_dir_all.
+                if current != path {
+                    anyhow::bail!(
+                        "community GROK_HOME parent does not exist: {}",
+                        current.display()
+                    );
+                }
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "checking community GROK_HOME component {}",
+                        current.display()
+                    )
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(all(
+    feature = "community-build",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+async fn sync_directory(path: &std::path::Path) -> Result<()> {
+    let dir = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("opening directory for sync {}", path.display()))?;
+    dir.sync_all()
+        .await
+        .with_context(|| format!("syncing directory {}", path.display()))
+}
+
+#[cfg(all(
+    feature = "community-build",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+fn reserve_unique_community_target(base: &std::path::Path) -> Result<std::path::PathBuf> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    for _ in 0..64 {
+        let path = unique_temp_sibling(base, "installed");
+        let mut options = std::fs::OpenOptions::new();
+        options.create_new(true).write(true).mode(0o600);
+        match options.open(&path) {
+            Ok(file) => {
+                if let Err(error) = file.sync_all() {
+                    drop(file);
+                    let _ = std::fs::remove_file(&path);
+                    return Err(error).with_context(|| {
+                        format!("syncing reserved community target {}", path.display())
+                    });
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reserving community target {}", path.display()));
+            }
+        }
+    }
+    anyhow::bail!("unable to reserve a unique community macOS install target")
+}
+
+#[cfg(all(
+    feature = "community-build",
+    target_os = "macos",
+    target_arch = "aarch64"
+))]
+async fn install_community_macos_release(
+    version: &str,
+    asset: &crate::community_release::VerifiedAsset,
+) -> Result<String> {
+    let home = xai_grok_shell::util::grok_home::resolve_grok_home()
+        .ok_or_else(|| anyhow::anyhow!("unable to resolve a user GROK_HOME"))?;
+    validate_community_home_path(&home)?;
+    let bin_dir = home.join("bin");
+    let download_dir = home.join("grok-zh-downloads");
+    for dir in [&home, &bin_dir, &download_dir] {
+        ensure_private_community_dir(dir)?;
+    }
+
+    let archive_base = download_dir.join(&asset.name);
+    let archive = unique_temp_sibling(&archive_base, "download");
+    let target_base = download_dir.join(format!("grok-zh-{version}-macos-aarch64"));
+    let candidate = unique_temp_sibling(&target_base, "candidate");
+
+    crate::community_release::download_verified(asset, &archive).await?;
+    let archive_for_extract = archive.clone();
+    let candidate_for_extract = candidate.clone();
+    let asset_for_extract = asset.clone();
+    let extract_result = tokio::task::spawn_blocking(move || {
+        crate::community_release::extract_verified_executable(
+            &asset_for_extract,
+            &archive_for_extract,
+            &candidate_for_extract,
+        )
+    })
+    .await;
+    let _ = tokio::fs::remove_file(&archive).await;
+    match extract_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            let _ = tokio::fs::remove_file(&candidate).await;
+            return Err(error).context("validating the community macOS release package");
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&candidate).await;
+            anyhow::bail!("community macOS release verifier failed: {error}");
+        }
+    }
+
+    let version_output = match smoke_test_binary(&candidate).await {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&candidate).await;
+            anyhow::bail!("downloaded community macOS binary failed verification: {error}");
+        }
+    };
+    if !community_version_output_matches(&version_output, version) {
+        let _ = tokio::fs::remove_file(&candidate).await;
+        anyhow::bail!(
+            "downloaded community macOS binary reported an unexpected version: {}",
+            truncate_err(&version_output, 200)
+        );
+    }
+
+    let installed = match reserve_unique_community_target(&target_base) {
+        Ok(path) => path,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&candidate).await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = tokio::fs::rename(&candidate, &installed).await {
+        let _ = tokio::fs::remove_file(&candidate).await;
+        let _ = tokio::fs::remove_file(&installed).await;
+        return Err(error).with_context(|| {
+            format!(
+                "publishing verified community binary {}",
+                installed.display()
+            )
+        });
+    }
+    if let Err(error) = sync_directory(&download_dir).await {
+        tracing::warn!(
+            path = %download_dir.display(),
+            "verified community macOS binary is installed but directory sync failed: {error:#}"
+        );
+    }
+
+    // Every install gets a fresh immutable target. Atomic link replacement
+    // changes only the two canonical entry points and deliberately keeps old
+    // targets so a still-running Mach-O process retains its executable inode.
+    if let Err(error) = swap_community_bin_links(&installed, &bin_dir).await {
+        // Do not delete `installed`: a rollback failure may have left one link
+        // pointing at it, and preserving a harmless orphan is safer than a
+        // dangling canonical entry point.
+        return Err(error).context("activating the community macOS entry points");
+    }
+    if let Err(error) = sync_directory(&bin_dir).await {
+        tracing::warn!(
+            path = %bin_dir.display(),
+            "community macOS entry points are active but directory sync failed: {error:#}"
+        );
+    }
+
+    let _ = config::update_config(|state| {
+        state.cli.installer = Some(crate::community_release::COMMUNITY_INSTALLER.to_string());
+    })
+    .await;
+    eprintln!(
+        "  已从 {}/releases 安装 {} v{}。",
+        xai_grok_product::COMMUNITY_RELEASE_REPO,
+        xai_grok_product::CLI_NAME,
+        version
+    );
+    Ok(version.to_string())
 }
 
 /// Detect the current platform (os, arch) for binary downloads.
@@ -1979,9 +2286,114 @@ async fn swap_managed_bin_links(
 ) -> Result<std::path::PathBuf> {
     let grok_name = if cfg!(windows) { "grok.exe" } else { "grok" };
     let agent_name = if cfg!(windows) { "agent.exe" } else { "agent" };
-    let grok_link = bin_dir.join(grok_name);
-    let agent_link = bin_dir.join(agent_name);
-    let link_paths: [std::path::PathBuf; 2] = [grok_link.clone(), agent_link];
+    swap_managed_entrypoint_links(binary_path, bin_dir, grok_name, agent_name, None).await
+}
+
+#[cfg(all(unix, feature = "community-build"))]
+fn managed_community_target_path(target: &std::path::Path) -> bool {
+    !target.is_absolute()
+        && target.parent() == Some(std::path::Path::new("../grok-zh-downloads"))
+        && target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(crate::version::version_from_community_macos_binary_name)
+            .is_some()
+}
+
+#[cfg(all(unix, feature = "community-build"))]
+async fn validate_existing_community_entrypoint(
+    path: &std::path::Path,
+    allow_canonical_indirection: bool,
+) -> Result<()> {
+    let metadata = match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("checking entry point {}", path.display()));
+        }
+    };
+    if !metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "refusing to replace an unmanaged entry point: {}",
+            path.display()
+        );
+    }
+    let target = tokio::fs::read_link(path)
+        .await
+        .with_context(|| format!("reading entry point {}", path.display()))?;
+    if allow_canonical_indirection && target == std::path::Path::new("grok-zh") {
+        return Ok(());
+    }
+    if !managed_community_target_path(&target) {
+        anyhow::bail!(
+            "refusing to replace an unmanaged community link: {} -> {}",
+            path.display(),
+            target.display()
+        );
+    }
+    let resolved = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("entry point has no parent: {}", path.display()))?
+        .join(&target);
+    let target_metadata = tokio::fs::symlink_metadata(&resolved)
+        .await
+        .with_context(|| format!("checking managed target {}", resolved.display()))?;
+    if target_metadata.file_type().is_symlink() || !target_metadata.is_file() {
+        anyhow::bail!(
+            "managed community target is not a regular file: {}",
+            resolved.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(all(unix, feature = "community-build"))]
+async fn swap_community_bin_links(
+    binary_path: &std::path::Path,
+    bin_dir: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    // `agent-zh` follows the canonical `grok-zh` link instead of duplicating
+    // its version target. Concurrent updaters can then race only on one
+    // version pointer; both command names always converge on the same inode.
+    let binary_target = relative_symlink_target(binary_path, &bin_dir.join("grok-zh"));
+    if !managed_community_target_path(&binary_target) {
+        anyhow::bail!(
+            "refusing to activate a community binary outside the managed download directory: {}",
+            binary_path.display()
+        );
+    }
+    let binary_metadata = tokio::fs::symlink_metadata(binary_path)
+        .await
+        .with_context(|| format!("checking community binary {}", binary_path.display()))?;
+    if binary_metadata.file_type().is_symlink() || !binary_metadata.is_file() {
+        anyhow::bail!(
+            "community binary is not a regular file: {}",
+            binary_path.display()
+        );
+    }
+    validate_existing_community_entrypoint(&bin_dir.join("grok-zh"), false).await?;
+    validate_existing_community_entrypoint(&bin_dir.join("agent-zh"), true).await?;
+
+    swap_managed_entrypoint_links(
+        binary_path,
+        bin_dir,
+        "grok-zh",
+        "agent-zh",
+        Some(std::path::Path::new("grok-zh")),
+    )
+    .await
+}
+
+async fn swap_managed_entrypoint_links(
+    binary_path: &std::path::Path,
+    bin_dir: &std::path::Path,
+    primary_name: &str,
+    secondary_name: &str,
+    secondary_target: Option<&std::path::Path>,
+) -> Result<std::path::PathBuf> {
+    let primary_link = bin_dir.join(primary_name);
+    let secondary_link = bin_dir.join(secondary_name);
+    let link_paths: [std::path::PathBuf; 2] = [primary_link.clone(), secondary_link];
 
     // Capture every link up-front so a 2nd-link capture failure can't
     // strand the 1st mid-swap.
@@ -2000,31 +2412,43 @@ async fn swap_managed_bin_links(
         }
     }
 
-    let mut completed: Vec<&LinkRollback> = Vec::with_capacity(captured.len());
+    let mut completed: Vec<(&LinkRollback, Option<std::path::PathBuf>)> =
+        Vec::with_capacity(captured.len());
     for (i, (link_path, rollback)) in link_paths.iter().zip(captured.iter()).enumerate() {
+        let target = if i == 1 {
+            secondary_target.unwrap_or(binary_path)
+        } else {
+            binary_path
+        };
         #[cfg(unix)]
         let swap_result = {
-            let rel_target = relative_symlink_target(binary_path, link_path);
+            let rel_target = relative_symlink_target(target, link_path);
             atomic_symlink_swap(&rel_target, link_path).await
         };
+        #[cfg(unix)]
+        let rollback_expected = Some(relative_symlink_target(target, link_path));
         #[cfg(windows)]
-        let swap_result = windows_replace_exe(binary_path, link_path).await;
+        let swap_result = windows_replace_exe(target, link_path).await;
+        #[cfg(windows)]
+        let rollback_expected = None;
         #[cfg(not(any(unix, windows)))]
         let swap_result: Result<()> = {
             // No managed bin layout on this target; no-op.
-            let _ = (binary_path, link_path);
+            let _ = (target, link_path);
             Ok(())
         };
+        #[cfg(not(any(unix, windows)))]
+        let rollback_expected = None;
 
         match swap_result {
-            Ok(()) => completed.push(rollback),
+            Ok(()) => completed.push((rollback, rollback_expected)),
             Err(e) => {
                 // Restore each successful swap in reverse. On restore
                 // failure keep the .rollback.bak as a recovery artifact
                 // (Windows only) and warn!; the swap error propagates so
                 // `reinstall_hint` is the user-visible message.
-                for prior in completed.iter().rev() {
-                    if let Err(restore_err) = prior.restore().await {
+                for (prior, expected) in completed.iter().rev() {
+                    if let Err(restore_err) = prior.restore(expected.as_deref()).await {
                         let backup_note = prior.backup_path().map_or(String::new(), |p| {
                             format!(" (prior binary preserved at {})", p.display())
                         });
@@ -2050,7 +2474,7 @@ async fn swap_managed_bin_links(
     for cap in &captured {
         cap.cleanup().await;
     }
-    Ok(grok_link)
+    Ok(primary_link)
 }
 
 /// Snapshot of a managed-bin link's prior state for rollback in
@@ -2138,7 +2562,25 @@ impl LinkRollback {
         None
     }
 
-    async fn restore(&self) -> Result<()> {
+    async fn restore(&self, expected_current: Option<&std::path::Path>) -> Result<()> {
+        #[cfg(not(unix))]
+        let _ = expected_current;
+        #[cfg(unix)]
+        if let Some(expected) = expected_current {
+            match tokio::fs::read_link(self.link_path()).await {
+                Ok(current) if current == expected => {}
+                Ok(_) => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "checking current link before rollback {}",
+                            self.link_path().display()
+                        )
+                    });
+                }
+            }
+        }
         match self {
             LinkRollback::Absent { link_path } => {
                 // Remove the link we created. NotFound (someone else
@@ -2492,7 +2934,15 @@ async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_
 }
 
 fn installer_manages_bin_entrypoints(installer: &str) -> bool {
-    matches!(installer, "internal" | "gh-release")
+    if matches!(installer, "internal" | "gh-release") {
+        return true;
+    }
+    #[cfg(feature = "community-build")]
+    {
+        return installer == crate::community_release::COMMUNITY_INSTALLER;
+    }
+    #[cfg(not(feature = "community-build"))]
+    false
 }
 
 #[cfg_attr(not(any(unix, windows)), allow(clippy::unused_async))]
@@ -2503,8 +2953,38 @@ async fn heal_managed_install(installer: &str) {
 
     #[cfg(any(unix, windows))]
     {
-        let bin_dir = grok_home().join("bin");
+        #[cfg(feature = "community-build")]
+        if installer == crate::community_release::COMMUNITY_INSTALLER {
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            let bin_dir = {
+                let Some(home) = xai_grok_shell::util::grok_home::resolve_grok_home() else {
+                    return;
+                };
+                if let Err(error) = validate_community_home_path(&home) {
+                    tracing::warn!("refusing to reconcile an unsafe community home: {error:#}");
+                    return;
+                }
+                let bin_dir = home.join("bin");
+                let download_dir = home.join("grok-zh-downloads");
+                for dir in [&home, &bin_dir, &download_dir] {
+                    if let Err(error) = ensure_private_community_dir(dir) {
+                        tracing::warn!(
+                            path = %dir.display(),
+                            "refusing to reconcile an unsafe community install directory: {error:#}"
+                        );
+                        return;
+                    }
+                }
+                bin_dir
+            };
+            #[cfg(all(unix, not(all(target_os = "macos", target_arch = "aarch64"))))]
+            let bin_dir = grok_home().join("bin");
+            #[cfg(unix)]
+            reconcile_secondary_to_fixed_target(&bin_dir, "grok-zh", "agent-zh").await;
+            return;
+        }
 
+        let bin_dir = grok_home().join("bin");
         #[cfg(unix)]
         reconcile_agent_to_grok(&bin_dir).await;
 
@@ -2515,26 +2995,80 @@ async fn heal_managed_install(installer: &str) {
 
 #[cfg(unix)]
 async fn reconcile_agent_to_grok(bin_dir: &std::path::Path) {
-    let grok_link = bin_dir.join("grok");
-    let agent_link = bin_dir.join("agent");
+    reconcile_secondary_to_primary(bin_dir, "grok", "agent").await;
+}
 
-    let Ok(grok_target) = tokio::fs::read_link(&grok_link).await else {
-        return;
-    };
-    if tokio::fs::metadata(&grok_link).await.is_err() {
+#[cfg(all(unix, feature = "community-build"))]
+async fn reconcile_secondary_to_fixed_target(
+    bin_dir: &std::path::Path,
+    primary_name: &str,
+    secondary_name: &str,
+) {
+    let primary_link = bin_dir.join(primary_name);
+    let secondary_link = bin_dir.join(secondary_name);
+    if let Err(error) = validate_existing_community_entrypoint(&primary_link, false).await {
+        tracing::warn!(
+            "refusing to reconcile {secondary_name}: canonical {primary_name} is unmanaged: {error:#}"
+        );
         return;
     }
-    if let Ok(agent_target) = tokio::fs::read_link(&agent_link).await
-        && agent_target == grok_target
+    if tokio::fs::metadata(&primary_link).await.is_err() {
+        return;
+    }
+    let desired_target = std::path::Path::new(primary_name);
+    if let Ok(current_target) = tokio::fs::read_link(&secondary_link).await
+        && current_target == desired_target
     {
         return;
     }
-    match atomic_symlink_swap(&grok_target, &agent_link).await {
+    if let Err(error) = validate_existing_community_entrypoint(&secondary_link, true).await {
+        tracing::warn!(
+            "refusing to replace unmanaged {secondary_name} during reconciliation: {error:#}"
+        );
+        return;
+    }
+    match atomic_symlink_swap(desired_target, &secondary_link).await {
         Ok(()) => tracing::info!(
-            grok_target = %grok_target.display(),
-            "reconciled agent bin symlink to grok target"
+            primary = primary_name,
+            secondary = secondary_name,
+            "reconciled secondary bin symlink to canonical primary entry point"
         ),
-        Err(e) => tracing::warn!("failed to reconcile agent bin symlink: {e:#}"),
+        Err(error) => tracing::warn!(
+            "failed to reconcile {secondary_name} bin symlink to {primary_name}: {error:#}"
+        ),
+    }
+}
+
+#[cfg(unix)]
+async fn reconcile_secondary_to_primary(
+    bin_dir: &std::path::Path,
+    primary_name: &str,
+    secondary_name: &str,
+) {
+    let primary_link = bin_dir.join(primary_name);
+    let secondary_link = bin_dir.join(secondary_name);
+
+    let Ok(primary_target) = tokio::fs::read_link(&primary_link).await else {
+        return;
+    };
+    if tokio::fs::metadata(&primary_link).await.is_err() {
+        return;
+    }
+    if let Ok(secondary_target) = tokio::fs::read_link(&secondary_link).await
+        && secondary_target == primary_target
+    {
+        return;
+    }
+    match atomic_symlink_swap(&primary_target, &secondary_link).await {
+        Ok(()) => tracing::info!(
+            primary = primary_name,
+            secondary = secondary_name,
+            target = %primary_target.display(),
+            "reconciled secondary bin symlink to primary target"
+        ),
+        Err(e) => tracing::warn!(
+            "failed to reconcile {secondary_name} bin symlink to {primary_name}: {e:#}"
+        ),
     }
 }
 
@@ -3442,8 +3976,90 @@ mod tests {
     fn test_installer_manages_bin_entrypoints_gate() {
         assert!(installer_manages_bin_entrypoints("internal"));
         assert!(installer_manages_bin_entrypoints("gh-release"));
+        #[cfg(feature = "community-build")]
+        assert!(installer_manages_bin_entrypoints(
+            crate::community_release::COMMUNITY_INSTALLER
+        ));
         assert!(!installer_manages_bin_entrypoints("npm"));
         assert!(!installer_manages_bin_entrypoints("unknown"));
+    }
+
+    #[cfg(all(unix, feature = "community-build"))]
+    #[tokio::test]
+    async fn test_community_entrypoints_share_one_immutable_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let downloads = dir.path().join("grok-zh-downloads");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&downloads).unwrap();
+        let target = downloads.join("grok-zh-1.0.7-macos-aarch64.1-0.installed");
+        std::fs::write(&target, "community").unwrap();
+
+        let primary = swap_community_bin_links(&target, &bin).await.unwrap();
+
+        assert_eq!(primary, bin.join("grok-zh"));
+        for name in ["grok-zh", "agent-zh"] {
+            let link = bin.join(name);
+            assert!(link.is_symlink(), "{name} must be a symlink");
+            assert_eq!(std::fs::read_to_string(link).unwrap(), "community");
+        }
+        assert_eq!(
+            std::fs::read_link(bin.join("agent-zh")).unwrap(),
+            std::path::PathBuf::from("grok-zh")
+        );
+    }
+
+    #[cfg(all(unix, feature = "community-build"))]
+    #[tokio::test]
+    async fn test_community_entrypoints_refuse_unmanaged_existing_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let downloads = dir.path().join("grok-zh-downloads");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&downloads).unwrap();
+        let target = downloads.join("grok-zh-1.0.7-macos-aarch64.1-0.installed");
+        std::fs::write(&target, "community").unwrap();
+
+        std::os::unix::fs::symlink("/tmp/unmanaged-grok", bin.join("grok-zh")).unwrap();
+        let error = swap_community_bin_links(&target, &bin).await.unwrap_err();
+        assert!(error.to_string().contains("unmanaged community link"));
+        assert_eq!(
+            std::fs::read_link(bin.join("grok-zh")).unwrap(),
+            std::path::PathBuf::from("/tmp/unmanaged-grok")
+        );
+
+        std::fs::remove_file(bin.join("grok-zh")).unwrap();
+        std::fs::write(bin.join("agent-zh"), "user file").unwrap();
+        let error = swap_community_bin_links(&target, &bin).await.unwrap_err();
+        assert!(error.to_string().contains("unmanaged entry point"));
+        assert_eq!(
+            std::fs::read_to_string(bin.join("agent-zh")).unwrap(),
+            "user file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_link_rollback_does_not_overwrite_a_concurrent_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("grok");
+        std::os::unix::fs::symlink("old", &link).unwrap();
+        let rollback = LinkRollback::capture(&link).await.unwrap();
+        atomic_symlink_swap(std::path::Path::new("ours"), &link)
+            .await
+            .unwrap();
+        atomic_symlink_swap(std::path::Path::new("winner"), &link)
+            .await
+            .unwrap();
+
+        rollback
+            .restore(Some(std::path::Path::new("ours")))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_link(&link).unwrap(),
+            std::path::PathBuf::from("winner")
+        );
     }
 
     #[cfg(unix)]
@@ -4776,6 +5392,14 @@ mod tests {
     #[test]
     fn test_installer_allows_downgrade_gh_release() {
         assert!(installer_allows_downgrade("gh-release"));
+    }
+
+    #[cfg(feature = "community-build")]
+    #[test]
+    fn test_installer_allows_downgrade_community_release() {
+        assert!(installer_allows_downgrade(
+            crate::community_release::COMMUNITY_INSTALLER
+        ));
     }
 
     #[test]

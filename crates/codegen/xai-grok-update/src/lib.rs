@@ -218,11 +218,11 @@ pub const fn official_update_sources_allowed() -> bool {
 pub const fn community_updates_enabled() -> bool {
     cfg!(feature = "community-build")
         && xai_grok_product::AUTO_UPDATE_ENABLED
-        && cfg!(all(
+        && (cfg!(all(
             target_os = "windows",
             target_arch = "x86_64",
             target_env = "gnu"
-        ))
+        )) || cfg!(all(target_os = "macos", target_arch = "aarch64")))
 }
 
 pub(crate) fn ensure_updates_enabled() -> anyhow::Result<()> {
@@ -273,7 +273,7 @@ mod community_build_tests {
             target_os = "windows",
             target_arch = "x86_64",
             target_env = "gnu"
-        ));
+        )) || cfg!(all(target_os = "macos", target_arch = "aarch64"));
         assert_eq!(updates_enabled(), supported_target);
         assert!(!default_auto_update_enabled());
         assert_eq!(community_updates_enabled(), supported_target);

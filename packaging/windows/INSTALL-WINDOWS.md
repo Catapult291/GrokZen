@@ -9,7 +9,7 @@
    下载 `grok-zh-<version>-windows-x86_64-gnu.zip`。开发测试也可从
    **Actions → CI** 下载短期 Artifact。
 2. 解压一次；Release ZIP 内直接是安装包内容。
-3. 确认目录中至少包含：
+3. 确认目录中恰好包含以下受管文件和目录（`SHA256SUMS.txt` 是包内清单，不列入它自身的哈希项）：
 
    ```text
    grok-zh.exe
@@ -19,8 +19,15 @@
    [可选]替换原始启动方式.cmd
    Install-GrokZh.ps1
    INSTALL-WINDOWS.md
-   SHA256SUMS.txt
+   LICENSE-grok-build.txt
    BUILD-INFO.txt
+   licenses/ripgrep/COPYING
+   licenses/ripgrep/LICENSE-MIT
+   licenses/ripgrep/UNLICENSE
+   licenses/project/THIRD-PARTY-NOTICES
+   licenses/project/THIRD_PARTY_NOTICES.md
+   licenses/project/NOTICE
+   SHA256SUMS.txt
    ```
 
 `Install-GrokZh.ps1` 会在写入任何安装目录前，自动核对 `SHA256SUMS.txt` 中的

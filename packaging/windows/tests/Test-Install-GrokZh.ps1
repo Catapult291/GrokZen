@@ -81,6 +81,21 @@ try {
     Copy-Item -LiteralPath $guide -Destination (Join-Path $package 'INSTALL-WINDOWS.md')
     Set-Content -LiteralPath (Join-Path $package 'BUILD-INFO.txt') `
         -Value "Version: installer-test`nTarget: x86_64-pc-windows-gnu" -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $package 'LICENSE-grok-build.txt') `
+        -Value 'Apache-2.0 test license' -Encoding UTF8
+    $licenseFiles = [ordered]@{
+        'licenses/ripgrep/COPYING' = 'ripgrep COPYING'
+        'licenses/ripgrep/LICENSE-MIT' = 'ripgrep MIT'
+        'licenses/ripgrep/UNLICENSE' = 'ripgrep UNLICENSE'
+        'licenses/project/THIRD-PARTY-NOTICES' = 'project third-party notices'
+        'licenses/project/THIRD_PARTY_NOTICES.md' = 'project tool notices'
+        'licenses/project/NOTICE' = 'project NOTICE'
+    }
+    foreach ($entry in $licenseFiles.GetEnumerator()) {
+        $path = Join-Path $package $entry.Key
+        New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+        Set-Content -LiteralPath $path -Value $entry.Value -Encoding UTF8
+    }
 
     $names = @(
         'grok-zh.exe',
@@ -89,7 +104,15 @@ try {
         '一键安装.cmd',
         '[可选]替换原始启动方式.cmd',
         'Install-GrokZh.ps1',
-        'INSTALL-WINDOWS.md'
+        'INSTALL-WINDOWS.md',
+        'LICENSE-grok-build.txt',
+        'BUILD-INFO.txt',
+        'licenses/ripgrep/COPYING',
+        'licenses/ripgrep/LICENSE-MIT',
+        'licenses/ripgrep/UNLICENSE',
+        'licenses/project/THIRD-PARTY-NOTICES',
+        'licenses/project/THIRD_PARTY_NOTICES.md',
+        'licenses/project/NOTICE'
     )
     $lines = foreach ($name in $names) {
         $hash = (Get-FileHash -LiteralPath (Join-Path $package $name) -Algorithm SHA256).Hash
@@ -126,6 +149,11 @@ try {
     Assert-True (Test-Path -LiteralPath (Join-Path $defaultInstall 'grok-zh.exe')) '未安装 grok-zh.exe'
     Assert-True (Test-Path -LiteralPath (Join-Path $defaultInstall 'agent-zh.cmd')) '未安装 agent-zh.cmd'
     Assert-True (Test-Path -LiteralPath (Join-Path $defaultInstall 'rg.exe')) '未在 grok-zh.exe 同目录安装 rg.exe'
+    Assert-True (Test-Path -LiteralPath (Join-Path $defaultInstall 'BUILD-INFO.txt')) '未安装受校验的构建信息'
+    Assert-True (Test-Path -LiteralPath (Join-Path $defaultInstall 'LICENSE-grok-build.txt')) '未安装受校验的主许可证'
+    foreach ($relativeLicense in $licenseFiles.Keys) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $defaultInstall $relativeLicense) -PathType Leaf) "未安装受校验的许可证文件：$relativeLicense"
+    }
     Assert-True (!(Test-Path -LiteralPath (Join-Path $defaultInstall '一键安装.cmd'))) '一键入口只应保留在解压包根，不应复制到安装目录'
     Assert-True (!(Test-Path -LiteralPath (Join-Path $defaultInstall '[可选]替换原始启动方式.cmd'))) '可选入口只应保留在解压包根，不应复制到安装目录'
     Assert-True (!(Test-Path -LiteralPath (Join-Path $defaultInstall 'Install-GrokZh.ps1'))) '安装脚本只应保留在解压包根，不应复制到运行目录'
