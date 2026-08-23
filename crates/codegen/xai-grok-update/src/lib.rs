@@ -56,6 +56,34 @@ fn same_search_path_dir(left: &std::path::Path, right: &std::path::Path) -> bool
 }
 
 #[cfg(feature = "community-build")]
+fn command_search_suffixes(path_ext: Option<&std::ffi::OsStr>) -> Vec<String> {
+    const DEFAULT_WINDOWS_PATHEXT: &str =
+        ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL";
+    let path_ext = path_ext
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| DEFAULT_WINDOWS_PATHEXT.to_string());
+    let mut suffixes = vec![String::new(), ".ps1".to_string()];
+    for raw_suffix in path_ext.split(';') {
+        let raw_suffix = raw_suffix.trim();
+        if raw_suffix.is_empty() {
+            continue;
+        }
+        let suffix = if raw_suffix.starts_with('.') {
+            raw_suffix.to_string()
+        } else {
+            format!(".{raw_suffix}")
+        };
+        if !suffixes
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(&suffix))
+        {
+            suffixes.push(suffix);
+        }
+    }
+    suffixes
+}
+
+#[cfg(feature = "community-build")]
 fn search_path_resolves_shim(
     search_path: Option<&std::ffi::OsStr>,
     install_dir: &std::path::Path,
@@ -66,20 +94,26 @@ fn search_path_resolves_shim(
     };
     let install_dir =
         std::fs::canonicalize(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
-    const COMMAND_SUFFIXES: &[&str] = &["", ".com", ".exe", ".bat", ".cmd", ".ps1"];
+    let command_suffixes = command_search_suffixes(std::env::var_os("PATHEXT").as_deref());
+    if !command_suffixes
+        .iter()
+        .any(|suffix| suffix.eq_ignore_ascii_case(".cmd"))
+    {
+        return false;
+    }
 
     for entry in std::env::split_paths(search_path) {
         let normalized_entry = std::fs::canonicalize(&entry).unwrap_or_else(|_| entry.clone());
         if same_search_path_dir(&normalized_entry, &install_dir) {
             let expected_shim = entry.join(format!("{command}.cmd"));
-            let has_conflicting_candidate = COMMAND_SUFFIXES
+            let has_conflicting_candidate = command_suffixes
                 .iter()
                 .filter(|suffix| !suffix.eq_ignore_ascii_case(".cmd"))
                 .any(|suffix| entry.join(format!("{command}{suffix}")).is_file());
             return expected_shim.is_file() && !has_conflicting_candidate;
         }
 
-        if COMMAND_SUFFIXES
+        if command_suffixes
             .iter()
             .any(|suffix| entry.join(format!("{command}{suffix}")).is_file())
         {
@@ -335,6 +369,28 @@ mod community_build_tests {
         assert_eq!(
             community_command_names_in(install.path(), Some(&search_path)),
             CommunityCommandNames::COMMUNITY
+        );
+    }
+
+    #[test]
+    fn command_search_suffixes_honor_pathext_and_powershell_scripts() {
+        let suffixes =
+            command_search_suffixes(Some(std::ffi::OsStr::new(".EXE;.CMD;.VBS;.JS;CMD")));
+
+        for expected in ["", ".ps1", ".exe", ".cmd", ".vbs", ".js"] {
+            assert!(
+                suffixes
+                    .iter()
+                    .any(|suffix| suffix.eq_ignore_ascii_case(expected)),
+                "missing command search suffix {expected:?}: {suffixes:?}",
+            );
+        }
+        assert_eq!(
+            suffixes
+                .iter()
+                .filter(|suffix| suffix.eq_ignore_ascii_case(".cmd"))
+                .count(),
+            1,
         );
     }
 }
