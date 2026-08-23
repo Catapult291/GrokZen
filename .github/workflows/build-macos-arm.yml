@@ -1,117 +1,323 @@
-# 在 GitHub 托管的 Apple Silicon runner 上编译 grok-zh（仅 aarch64-apple-darwin）。
-# 每次成功构建都上传 Artifact；推送 v* tag 时额外创建 GitHub Release。
+# 在 GitHub 托管的 Apple Silicon runner 上构建未签名的 grok-zh 预览版。
+# 正式 Release 由唯一的发布工作流统一编排；本工作流只上传 Actions Artifact。
 name: Build macOS ARM
 
 on:
+  pull_request:
+    branches:
+      - zh-dev
   push:
     branches:
-      - main
       - zh-dev
-    tags:
-      - "v*"
   workflow_dispatch:
+    inputs:
+      version:
+        description: 可选的内嵌版本（默认为 CI 构建编号）
+        required: false
+        type: string
 
-# Artifact 上传只需 contents:read；创建 Release 需要 contents:write。
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: macos-arm-${{ github.ref }}
+  group: macos-arm-preview-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-macos-arm:
-    name: macOS aarch64
-    runs-on: macos-latest
+    name: macOS ARM64 预览版
+    runs-on: macos-15
     timeout-minutes: 180
     env:
-      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: "3"
+      CARGO_CACHE_SCHEMA: macos-arm-v1
       CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      RUSTUP_TOOLCHAIN: 1.94.0-aarch64-apple-darwin
       TARGET: aarch64-apple-darwin
-      ARCHIVE_NAME: grok-zh-aarch64-apple-darwin.tar.gz
 
     steps:
       - name: 检出代码
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
 
-      - name: 确认 runner 为 Apple Silicon
+      - name: 选择预览版本
+        id: preview
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          requested="${REQUESTED_VERSION:-}"
+          if [[ -z "${requested//[[:space:]]/}" ]]; then
+            package_version="$({
+              sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' \
+                crates/codegen/xai-grok-pager-bin/Cargo.toml
+            } | head -n 1)"
+            if [[ -z "${package_version}" ]]; then
+              echo "::error::无法读取 pager-bin 软件包版本。"
+              exit 1
+            fi
+            version="${package_version}-zh.ci.${GITHUB_RUN_NUMBER}"
+          else
+            version="${requested#"${requested%%[![:space:]]*}"}"
+            version="${version%"${version##*[![:space:]]}"}"
+          fi
+          semver_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if (( ${#version} > 64 )) || [[ ! "${version}" =~ ${semver_pattern} ]]; then
+            echo "::error::版本无效：${version}"
+            exit 1
+          fi
+          package_name="grok-zh-${version}-macos-aarch64"
+          archive_name="${package_name}.tar.gz"
+          {
+            echo "GROK_VERSION=${version}"
+            echo "PACKAGE_NAME=${package_name}"
+            echo "ARCHIVE_NAME=${archive_name}"
+          } >> "${GITHUB_ENV}"
+          {
+            echo "package_name=${package_name}"
+            echo "archive_name=${archive_name}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: 确认 Apple Silicon runner
         run: |
           set -euo pipefail
           arch="$(uname -m)"
           echo "uname -m = ${arch}"
           if [[ "${arch}" != "arm64" ]]; then
-            echo "::error::期望 Apple Silicon runner（arm64），实际为 ${arch}。请把 runs-on 改成 macos-14 / macos-15。"
+            echo "::error::期望 Apple Silicon runner（arm64），实际为 ${arch}。"
             exit 1
           fi
 
-      - name: 安装 Rust 目标三元组
+      - name: 配置固定版本的 Rust、DotSlash 和 protoc
         run: |
           set -euo pipefail
-          # rust-toolchain.toml 会固定 1.94.0；host target 会自动加入。
-          rustup show
-          rustup target add "${TARGET}"
+          rustup toolchain install "${RUSTUP_TOOLCHAIN}" \
+            --profile minimal --component rustfmt
+          rustup target add --toolchain "${RUSTUP_TOOLCHAIN}" "${TARGET}"
+
+          cargo_home="${RUNNER_TEMP}/grok-zh-cargo"
+          target_dir="${RUNNER_TEMP}/grok-zh-target"
+          dotslash_cache="${RUNNER_TEMP}/grok-zh-dotslash"
+          tools_dir="${RUNNER_TEMP}/grok-zh-tools"
+          mkdir -p "${cargo_home}" "${target_dir}" "${dotslash_cache}" "${tools_dir}"
+
+          dotslash_version="0.5.9"
+          dotslash_archive="${RUNNER_TEMP}/dotslash-macos-arm64.tar.gz"
+          dotslash_uri="https://github.com/facebook/dotslash/releases/download/v${dotslash_version}/dotslash-macos-arm64.v${dotslash_version}.tar.gz"
+          dotslash_sha256="eef15be1b554de7b1409cb0c69c24f2cd04f19c0f101ad69fcdf9d66d4d51639"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "${dotslash_archive}" "${dotslash_uri}"
+          printf '%s  %s\n' "${dotslash_sha256}" "${dotslash_archive}" |
+            shasum -a 256 -c -
+          tar -xzf "${dotslash_archive}" -C "${tools_dir}"
+          chmod 0755 "${tools_dir}/dotslash"
+
+          echo "${tools_dir}" >> "${GITHUB_PATH}"
+          {
+            echo "CARGO_HOME=${cargo_home}"
+            echo "CARGO_TARGET_DIR=${target_dir}"
+            echo "DOTSLASH_CACHE=${dotslash_cache}"
+            echo "PROTOC=${GITHUB_WORKSPACE}/bin/protoc"
+          } >> "${GITHUB_ENV}"
+
+          export PATH="${tools_dir}:${PATH}"
+          export DOTSLASH_CACHE="${dotslash_cache}"
+          export PROTOC="${GITHUB_WORKSPACE}/bin/protoc"
           rustc --version --verbose
           cargo --version --verbose
-
-      - name: 安装 dotslash 与 protoc
-        run: |
-          set -euo pipefail
-          # 构建脚本优先通过 DotSlash 解析仓库内 bin/protoc；
-          # brew protobuf 作为 PROTOC / PATH 回退。
-          cargo install dotslash
-          echo "${HOME}/.cargo/bin" >> "${GITHUB_PATH}"
-          export PATH="${HOME}/.cargo/bin:${PATH}"
-          brew install protobuf
-          echo "PROTOC=$(command -v protoc)" >> "${GITHUB_ENV}"
           dotslash --version
-          protoc --version
-          ./bin/protoc --version
+          "${PROTOC}" --version
 
-      - name: 编译 grok-zh（aarch64-apple-darwin）
-        run: |
-          set -euo pipefail
-          cargo build --locked -p xai-grok-pager-bin --release --target "${TARGET}"
-
-      - name: 打包 tar.gz
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          bin="target/${TARGET}/release/grok-zh"
-          if [[ ! -f "${bin}" ]]; then
-            echo "::error::找不到编译产物：${bin}"
-            exit 1
-          fi
-          file "${bin}"
-          if ! file "${bin}" | grep -q 'arm64'; then
-            echo "::error::产物不是 arm64：$(file "${bin}")"
-            exit 1
-          fi
-          cp "${bin}" dist/grok-zh
-          chmod +x dist/grok-zh
-          tar -C dist -czf "dist/${ARCHIVE_NAME}" grok-zh
-          shasum -a 256 "dist/${ARCHIVE_NAME}" | tee "dist/${ARCHIVE_NAME}.sha256"
-          ls -lh dist
-
-      - name: 上传 Artifact
-        uses: actions/upload-artifact@v4
+      - name: 恢复 Cargo 依赖缓存
+        id: cargo_home_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          name: grok-zh-aarch64-apple-darwin
           path: |
-            dist/${{ env.ARCHIVE_NAME }}
-            dist/${{ env.ARCHIVE_NAME }}.sha256
+            ${{ runner.temp }}/grok-zh-cargo/registry
+            ${{ runner.temp }}/grok-zh-cargo/git
+            ${{ runner.temp }}/grok-zh-dotslash
+          key: grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-
+            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
+
+      - name: 恢复 Cargo macOS release-dist 缓存
+        id: cargo_target_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release-dist
+          key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-
+
+      - name: 验证格式与基础本地化
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo fetch --locked --target "${TARGET}"
+          cargo test --frozen -j "${CARGO_BUILD_JOBS}" -p xai-grok-locale
+
+      - name: 构建 macOS ARM64 预览版
+        run: |
+          set -euo pipefail
+          cargo build --frozen -j "${CARGO_BUILD_JOBS}" \
+            --target "${TARGET}" \
+            -p xai-grok-pager-bin \
+            --profile release-dist \
+            --features release-dist
+
+      - name: 打包并验证未签名预览版
+        run: |
+          set -euo pipefail
+          dist="${GITHUB_WORKSPACE}/dist"
+          package="${dist}/${PACKAGE_NAME}"
+          built_bin="${CARGO_TARGET_DIR}/${TARGET}/release-dist/grok-zh"
+          mkdir -p "${package}"
+          if [[ ! -f "${built_bin}" ]]; then
+            echo "::error::找不到编译产物：${built_bin}"
+            exit 1
+          fi
+          cp "${built_bin}" "${package}/grok-zh"
+          chmod 0755 "${package}/grok-zh"
+          cp LICENSE "${package}/LICENSE-grok-build.txt"
+          cp SOURCE_REV "${package}/SOURCE_REV"
+          cp THIRD-PARTY-NOTICES "${package}/THIRD-PARTY-NOTICES.txt"
+          cp crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md \
+            "${package}/THIRD-PARTY-NOTICES-xai-grok-tools.md"
+          cp third_party/NOTICE "${package}/NOTICE-third-party.txt"
+          cp packaging/macos/INSTALL-MACOS.md "${package}/INSTALL-MACOS.md"
+
+          binary_info="$(file "${package}/grok-zh")"
+          binary_archs="$(lipo -archs "${package}/grok-zh")"
+          if [[ "${binary_archs}" != "arm64" ]] || [[ "${binary_info}" != *arm64* ]]; then
+            echo "::error::产物不是纯 ARM64 Mach-O：${binary_info}; archs=${binary_archs}"
+            exit 1
+          fi
+          version_output="$("${package}/grok-zh" --version | head -n 1)"
+          if [[ "${version_output}" != "grok-zh ${GROK_VERSION} ("* ]]; then
+            echo "::error::grok-zh 版本冒烟失败：${version_output}"
+            exit 1
+          fi
+          source_rev="$(tr -d '\r\n' < SOURCE_REV)"
+          rustc_info="$(rustc --version)"
+          cargo_info="$(cargo --version)"
+          dotslash_info="$(dotslash --version | head -n 1)"
+          protoc_info="$("${PROTOC}" --version | head -n 1)"
+          cat > "${package}/BUILD-INFO.txt" <<EOF
+          Grok Build 简体中文 macOS ARM64 CI 预览版
+          Product: grok-build-zh
+          License: Apache-2.0
+          Version: ${GROK_VERSION}
+          Commit: ${GITHUB_SHA}
+          Upstream source revision: ${source_rev}
+          Repository: ${GITHUB_REPOSITORY}
+          Target: ${TARGET}
+          Profile: release-dist (Thin LTO, codegen-units=1, split-debuginfo=off)
+          Rust: ${rustc_info}
+          Cargo: ${cargo_info}
+          DotSlash: ${dotslash_info}
+          Protoc: ${protoc_info}
+          Mach-O: ${binary_info}
+          Architectures: ${binary_archs}
+          Code signing: unsigned
+          Apple notarization: not submitted
+          Executable smoke-tested by CI: true (--version only)
+          Default command: grok-zh
+          EOF
+          sed -i '' 's/^          //' "${package}/BUILD-INFO.txt"
+
+          manifest_files=(
+            grok-zh
+            BUILD-INFO.txt
+            INSTALL-MACOS.md
+            LICENSE-grok-build.txt
+            NOTICE-third-party.txt
+            SOURCE_REV
+            THIRD-PARTY-NOTICES.txt
+            THIRD-PARTY-NOTICES-xai-grok-tools.md
+          )
+          : > "${package}/SHA256SUMS.txt"
+          for name in "${manifest_files[@]}"; do
+            (
+              cd "${package}"
+              shasum -a 256 "${name}"
+            ) >> "${package}/SHA256SUMS.txt"
+          done
+          (
+            cd "${package}"
+            shasum -a 256 -c SHA256SUMS.txt
+          )
+
+          archive="${dist}/${ARCHIVE_NAME}"
+          COPYFILE_DISABLE=1 tar -C "${package}" -czf "${archive}" .
+          (
+            cd "${dist}"
+            shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+            shasum -a 256 -c "${ARCHIVE_NAME}.sha256"
+          )
+          tar -tzf "${archive}"
+          verify_root="${RUNNER_TEMP}/grok-zh-macos-verify-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ -e "${verify_root}" ]]; then
+            echo "::error::验证目录已经存在：${verify_root}"
+            exit 1
+          fi
+          mkdir -p "${verify_root}"
+          COPYFILE_DISABLE=1 tar -xzf "${archive}" -C "${verify_root}"
+          (
+            cd "${verify_root}"
+            shasum -a 256 -c SHA256SUMS.txt
+          )
+          verify_version_output="$("${verify_root}/grok-zh" --version | head -n 1)"
+          if [[ "${verify_version_output}" != "grok-zh ${GROK_VERSION} ("* ]]; then
+            echo "::error::解包后的 grok-zh 版本冒烟失败：${verify_version_output}"
+            exit 1
+          fi
+          ls -lh "${archive}" "${archive}.sha256"
+
+      - name: 上传 macOS ARM64 预览版
+        id: preview_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.preview.outputs.package_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/${{ steps.preview.outputs.archive_name }}
+            dist/${{ steps.preview.outputs.archive_name }}.sha256
           if-no-files-found: error
+          compression-level: 0
           retention-days: 14
 
-      - name: 创建 GitHub Release（仅 tag）
-        if: startsWith(github.ref, 'refs/tags/v')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 在摘要中发布制品详情
         run: |
-          set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" \
-            "dist/${ARCHIVE_NAME}" \
-            "dist/${ARCHIVE_NAME}.sha256" \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "grok-zh ${GITHUB_REF_NAME} (macOS ARM)" \
-            --generate-notes \
-            --verify-tag
+          cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
+          ## macOS ARM64 预览版
+
+          - 版本：\`${GROK_VERSION}\`
+          - 制品：[${PACKAGE_NAME}](${{ steps.preview_artifact.outputs.artifact-url }})
+          - Actions Artifact SHA-256：\`${{ steps.preview_artifact.outputs.artifact-digest }}\`
+          - 目标：\`${TARGET}\`
+          - 软件包外层校验：\`${ARCHIVE_NAME}.sha256\`
+          - 软件包内层校验：\`SHA256SUMS.txt\`
+          - 已在 Apple Silicon runner 上执行 \`grok-zh --version\`。
+          - 未经过 Apple Developer ID 签名或公证，仅用于预览测试。
+          EOF
+
+      - name: 保存 Cargo macOS release 缓存
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release-dist
+          key: ${{ steps.cargo_target_cache.outputs.cache-primary-key }}
+
+      - name: 保存 Cargo 依赖缓存
+        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/grok-zh-cargo/registry
+            ${{ runner.temp }}/grok-zh-cargo/git
+            ${{ runner.temp }}/grok-zh-dotslash
+          key: ${{ steps.cargo_home_cache.outputs.cache-primary-key }}
