@@ -3220,7 +3220,7 @@ mod tests {
             target_os = "windows",
             target_arch = "x86_64",
             target_env = "gnu"
-        ));
+        )) || cfg!(all(target_os = "macos", target_arch = "aarch64"));
         assert_eq!(xai_grok_update::updates_enabled(), supported_target);
         assert!(!xai_grok_update::official_update_sources_allowed());
         // Debug binaries still suppress background update checks.
