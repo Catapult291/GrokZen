@@ -33,6 +33,11 @@
 
 当前稳定版为 `v1.0.5`，提供 Windows x86_64 GNU 完整 ZIP。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) 下载。
 
+`zh-dev` 另提供由 GitHub 托管 Apple Silicon runner 构建的 macOS ARM64
+[预览 Artifact](https://github.com/JoyElliot/grok-build-Chinese/actions/workflows/build-macos-arm.yml)。
+该产物只用于构建与真实设备测试，尚未使用 Apple Developer ID 签名或公证，也不会独立
+创建 Release；安装和安全边界见 [macOS ARM64 预览说明](packaging/macos/INSTALL-MACOS.md)。
+
 已建立的产品与数据边界：
 
 - 可执行文件：`grok-zh.exe`
@@ -150,6 +155,7 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 ## 文档
 
 - Windows 自动安装：[`packaging/windows/INSTALL-WINDOWS.md`](packaging/windows/INSTALL-WINDOWS.md)
+- macOS ARM64 预览：[`packaging/macos/INSTALL-MACOS.md`](packaging/macos/INSTALL-MACOS.md)
 - 中文用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/README.md)
 - 中文入门教程：[`crates/codegen/xai-grok-pager/docs/tutorial/zh-CN/`](crates/codegen/xai-grok-pager/docs/tutorial/zh-CN/)
 - 英文上游用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/README.md)
