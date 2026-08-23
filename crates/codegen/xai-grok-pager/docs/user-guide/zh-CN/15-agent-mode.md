@@ -28,7 +28,7 @@ grok-zh agent --always-approve serve --bind 127.0.0.1:2419 --secret <token>
 }
 ```
 
-交互式 TUI 用户通常保留默认的询问模式（或使用 auto）。参见[权限与安全](22-permissions-and-safety.md)。
+交互式 TUI 用户通常保留默认模式（或显式选择 ask 或 auto）。参见[权限与安全](22-permissions-and-safety.md)。
 
 ---
 

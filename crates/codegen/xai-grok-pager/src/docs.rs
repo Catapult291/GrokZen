@@ -456,7 +456,8 @@ static ZH_CN_DOCS: &[DocTranslation] = &[
     zh_doc!(
         CONFIG_REFERENCE,
         "配置参考",
-        "config.toml、managed_config.toml 和 requirements.toml 的字段列表"
+        "config.toml、managed_config.toml 和 requirements.toml 的字段列表",
+        "26-config-reference.md"
     ),
     zh_reference_doc!(
         HOOKS_AND_PLUGINS,

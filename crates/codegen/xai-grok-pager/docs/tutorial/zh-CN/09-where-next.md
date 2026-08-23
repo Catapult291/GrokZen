@@ -13,7 +13,7 @@
 ## 良好习惯
 
 - 会话会自动保存。使用 `grok-zh -c` 恢复最新会话，或使用 `/resume`
-  （`Ctrl+S`）选择一个会话。
+  （`F3`）选择一个会话。
 - 会话太长而变慢？`/compact` 释放上下文；`/context` 显示上下文使用情况。
 - 自动化一切：`grok-zh -p "summarize new TODOs" --output-format json`
   以无头模式运行——非常适合脚本和 CI。

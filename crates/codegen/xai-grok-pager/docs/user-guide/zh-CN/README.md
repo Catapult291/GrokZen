@@ -53,3 +53,4 @@
 | 23 | [智能体面板](23-dashboard.md) | 本地会话和分支的集中概览 |
 | 24 | [使用量监控（外部 OpenTelemetry）](24-monitoring-usage.md) | 客户端 OTEL 导出 |
 | 25 | [状态栏](25-status-line.md) | 底部状态行：内置分段、命令脚本和标准输入 JSON 约定 |
+| 26 | [配置参考](26-config-reference.md) | `config.toml`、`managed_config.toml` 和 `requirements.toml` 的字段列表 |

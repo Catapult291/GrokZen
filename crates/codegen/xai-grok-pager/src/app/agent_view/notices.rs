@@ -436,7 +436,11 @@ impl AgentView {
             OpenUrlResult::BrowserUnavailable => {
                 self.scrollback
                     .push_block(RenderBlock::system(browser_unavailable_message(url)));
-                self.show_toast("Browser unavailable - URL shown above");
+                let message = self.scrollback.locale().named_static_text(
+                    "browser.unavailable_url_shown",
+                    "Browser unavailable - URL shown above",
+                );
+                self.show_toast(message);
             }
         }
     }

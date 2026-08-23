@@ -311,7 +311,7 @@ Grok Build 会在智能体屏幕的侧窗格中显示运行中和已完成的工
 
 生成子智能体时，父级回滚区会添加一个紧凑的生命周期块：
 
-- `Subagent running: "do the thing" (Implementer · grok-3) — Thinking`
+- `Subagent running: "do the thing" (Implementer · grok-3) · Thinking`
 - 对于后台子智能体：`Subagent started: "..."`
 
 运行中时，该块显示实时活动后缀（例如“Running: cargo test”“Compacting”“Retrying (2/3)”），取自子级的轮次跟踪器。项目符号会根据状态动画显示（或着色）。

@@ -466,7 +466,7 @@ fn localized_validation_error<'a>(
     let (id, fallback) = match english {
         "Value cannot be empty" => ("settings.ui.validation.empty", english),
         "Value cannot contain whitespace" => ("settings.ui.validation.whitespace", english),
-        "Model catalog still loading \u{2014} try again" => {
+        "Model catalog still loading, try again" => {
             ("settings.ui.validation.model_loading", english)
         }
         _ if english.starts_with("Unknown model: \"") && english.ends_with('"') => {
@@ -3468,7 +3468,7 @@ fn build_shortcuts_with_locale(
 
 #[cfg(test)]
 mod localization_tests {
-    use super::int_step_footer_labels;
+    use super::{int_step_footer_labels, localized_validation_error};
 
     #[test]
     fn zh_localization_settings_int_step_footer_uses_locale() {
@@ -3483,6 +3483,18 @@ mod localization_tests {
         assert_eq!(
             int_step_footer_labels(1, 100, None),
             ("↑/↓ +/-1", "←/→ +/-5")
+        );
+    }
+
+    #[test]
+    fn zh_localization_model_catalog_loading_validation_uses_locale() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        assert_eq!(
+            localized_validation_error(Some(&locale), "Model catalog still loading, try again"),
+            "模型目录仍在加载，请稍后重试"
         );
     }
 }
