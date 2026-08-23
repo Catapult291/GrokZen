@@ -1238,7 +1238,6 @@ pub(crate) fn wait_until(timeout: Duration, mut cond: impl FnMut() -> bool) -> b
 /// Dump assistant/tool/user messages (skipping the huge system prompt) from
 /// every request body, to inspect tool args / tool results / user queries in
 /// a failure message without printing megabytes of `{:#?}` bodies.
-#[cfg(unix)]
 pub(crate) fn dump_non_system_messages(bodies: &[serde_json::Value]) -> String {
     let mut out = String::new();
     for (i, b) in bodies.iter().enumerate() {

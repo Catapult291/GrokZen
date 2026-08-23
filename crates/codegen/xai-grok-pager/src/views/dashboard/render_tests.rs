@@ -49,7 +49,14 @@ fn slash_dropdown_never_paints_outside_a_short_dashboard() {
         );
         let dispatch_rect = Rect::new(0, area.bottom().saturating_sub(2), 80, 1);
 
-        render_slash_dropdown(&mut buf, area, dispatch_rect, &Theme::default(), &mut state);
+        render_slash_dropdown(
+            &mut buf,
+            area,
+            dispatch_rect,
+            &Theme::default(),
+            &mut state,
+            None,
+        );
 
         // Six rows above the input is well past the 3-row minimum panel, so a `None` here
         // would mean the dropdown stopped rendering instead of clamping.
