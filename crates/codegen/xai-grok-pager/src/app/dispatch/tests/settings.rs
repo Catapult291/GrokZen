@@ -1645,7 +1645,7 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             let _ = dispatch(Action::SetVimMode(true), app);
         }
         "remember_tool_approvals" => {
-            let _ = dispatch(Action::SetRememberToolApprovals(true), app);
+            let _ = dispatch(Action::SetRememberToolApprovals(false), app);
         }
         "toolset.ask_user_question.timeout_enabled" => {
             let _ = dispatch(Action::SetAskUserQuestionTimeoutEnabled(false), app);

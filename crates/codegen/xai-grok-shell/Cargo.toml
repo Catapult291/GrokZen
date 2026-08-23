@@ -1,7 +1,7 @@
 [package]
 license = "Apache-2.0"
 name = "xai-grok-shell"
-version = "1.0.5"
+version = "1.0.6"
 edition.workspace = true
 
 [features]
@@ -127,6 +127,7 @@ xai-grok-paths = { path = "../xai-grok-paths" }
 xai-grok-shell-base = { workspace = true }
 xai-grok-shell-session-support = { workspace = true }
 xai-grok-shared = { workspace = true }
+xai-grok-status-line = { workspace = true }
 xai-tracing-macros = { path = "../xai-tracing-macros" }
 xai-fsnotify = { path = "../xai-fsnotify" }
 xai-codebase-graph = { path = "../xai-codebase-graph" }
@@ -196,6 +197,8 @@ siphasher = { workspace = true }
 windows = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+# The fixture that builds a `[ui.status_line]` section field by field.
+xai-grok-status-line = { workspace = true, features = ["test-support"] }
 criterion = { workspace = true }
 # Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).
 ctor = { workspace = true }

@@ -200,8 +200,7 @@ pub(crate) fn to_creation_mode(t: WorktreeType) -> xai_fast_worktree::CreationMo
 }
 
 // ============================================================================
-// Btrfs delegate factory -- injected by binaries that link a concrete
-// snapshot helper delegate
+// Btrfs delegate factory
 // ============================================================================
 
 /// Process-global factory producing the btrfs delegate, if any.
@@ -245,7 +244,7 @@ fn get_head_commit(repo: &Repository) -> Result<String> {
 // In-progress tracking
 // ============================================================================
 
-// Process-local, best-effort dedup of duplicate async spawns within one process —
+// Process-local, best-effort dedup of duplicate async spawns within one process;
 // NOT a cross-process lock: in proxy mode `prepare` (hub) and creation (shell) are
 // different processes, so correctness does not depend on it.
 static WORKTREE_IN_PROGRESS: OnceLock<TokioMutex<HashSet<String>>> = OnceLock::new();
@@ -279,34 +278,27 @@ pub async fn mark_worktree_complete(session_id: &str) {
 // Background Copy Infrastructure
 // ============================================================================
 
-/// Default parallelism config for background tasks.
-/// This will leave some cores free in case foreground tasks are handled.
+/// Leaves some cores free for foreground work.
 pub const DEFAULT_BG_PARALLELISM: usize = 2;
 
-/// Tracks a background ignored file copy task for cancellation.
 struct BackgroundCopyTask {
-    /// Cancellation token for async cancellation via tokio::select!
-    /// Also used by the sync copy engine via is_cancelled()
     cancellation_token: CancellationToken,
 }
 
-/// Context for managing background copy operations.
-/// Stores active copy tasks and allows cancellation when worktrees are removed.
-/// Using `Arc<Mutex>` to support spawning tasks across threads.
+/// Tracks active background copy tasks so they can be cancelled when a worktree
+/// is removed.
 #[derive(Default, Clone)]
 pub struct BackgroundCopyContext {
     tasks: Arc<Mutex<HashMap<String, BackgroundCopyTask>>>,
 }
 
 impl BackgroundCopyContext {
-    /// Create a new empty context.
     pub fn new() -> Self {
         Self {
             tasks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Register a background copy task for a worktree.
     fn register(&self, worktree_path: String, cancellation_token: CancellationToken) {
         self.tasks
             .lock()
@@ -314,7 +306,6 @@ impl BackgroundCopyContext {
             .insert(worktree_path, BackgroundCopyTask { cancellation_token });
     }
 
-    /// Unregister a background copy task.
     fn unregister(&self, worktree_path: &str) {
         self.tasks
             .lock()
@@ -322,8 +313,7 @@ impl BackgroundCopyContext {
             .remove(worktree_path);
     }
 
-    /// Cancel a background copy task.
-    /// Returns true if a task was cancelled, false if no task was running.
+    /// Returns true if a task was cancelled, false if none was running.
     pub fn cancel(&self, worktree_path: &str) -> bool {
         let task = self
             .tasks
@@ -332,9 +322,8 @@ impl BackgroundCopyContext {
             .remove(worktree_path);
 
         if let Some(task) = task {
-            // Cancel the token -- this triggers both:
-            // 1. tokio::select! cancellation branch (async)
-            // 2. The sync copy engine via is_cancelled() check
+            // Cancel triggers both the tokio::select! branch and the sync copy
+            // engine's is_cancelled() check.
             task.cancellation_token.cancel();
             true
         } else {
@@ -351,7 +340,6 @@ pub struct BackgroundCopyGuard {
 }
 
 impl BackgroundCopyGuard {
-    /// Create a new guard and register the background copy task.
     pub fn new(
         context: BackgroundCopyContext,
         worktree_path: String,
@@ -371,7 +359,6 @@ impl Drop for BackgroundCopyGuard {
     }
 }
 
-/// Run background ignored file copy task.
 pub async fn run_background_ignored_copy<N: WorktreeNotificationSender>(
     context: BackgroundCopyContext,
     session_id: String,
@@ -397,8 +384,7 @@ pub async fn run_background_ignored_copy<N: WorktreeNotificationSender>(
 
     // Run the copy in a blocking task (copy_ignored_only does blocking I/O)
     let copy_handle = tokio::task::spawn_blocking(move || {
-        // Build and run the copy with cancellation support
-        // The token's is_cancelled() method is used by the sync copy engine
+        // The token's is_cancelled() is polled by the sync copy engine.
         let builder = WorktreeBuilder::new(&source, &dest)
             .ignored_files_mode(IgnoredFilesMode::CopyOnly {
                 skip_patterns: patterns,
@@ -414,30 +400,23 @@ pub async fn run_background_ignored_copy<N: WorktreeNotificationSender>(
     // Get abort handle before moving copy_handle into select!
     let abort_handle = copy_handle.abort_handle();
 
-    // Use tokio::select! to race the copy against cancellation
     let copy_result = {
-        // Register the task using the guard pattern -- automatically unregisters on drop
         let _guard =
             BackgroundCopyGuard::new(context, worktree_path.clone(), cancellation_token.clone());
 
         tokio::select! {
             biased;
 
-            // Cancellation branch -- wins immediately when token is cancelled
-            // The sync copy engine will also see this via is_cancelled()
+            // Biased: cancellation wins immediately; the sync copy engine also sees it via is_cancelled().
             _ = cancellation_token.cancelled() => {
-                // Abort the blocking task
                 abort_handle.abort();
-                // Return a cancelled result
                 None
             }
 
-            // Normal completion branch
             result = copy_handle => Some(result)
         }
     };
 
-    // Send completion notification
     match copy_result {
         Some(Ok((Ok(report), was_cancelled))) => {
             if was_cancelled {
@@ -471,7 +450,6 @@ pub async fn run_background_ignored_copy<N: WorktreeNotificationSender>(
                 .await;
         }
         Some(Err(e)) => {
-            // Task was aborted (JoinError)
             let cancelled = e.is_cancelled();
             notifier
                 .send_worktree_status(WorktreeStatus::IgnoredCopyError {
@@ -487,7 +465,6 @@ pub async fn run_background_ignored_copy<N: WorktreeNotificationSender>(
                 .await;
         }
         None => {
-            // Cancelled via tokio::select!
             notifier
                 .send_worktree_status(WorktreeStatus::IgnoredCopyError {
                     session_id,
@@ -535,7 +512,7 @@ pub enum WorktreeStatus {
         /// subdirectory offset inside the new worktree.
         #[serde(rename = "sourceGitRoot", skip_serializing_if = "Option::is_none")]
         source_git_root: Option<String>,
-        /// NEW optional field -- only present when dirty copying is used
+        /// Only present when dirty copying is used.
         #[serde(rename = "copiedChanges", skip_serializing_if = "Option::is_none")]
         copied_changes: Option<CopiedChangesSummary>,
     },
@@ -546,8 +523,7 @@ pub enum WorktreeStatus {
         message: String,
     },
 
-    // === NEW VARIANTS (additive -- old clients ignore unknown status values) ===
-    /// Emitted when analyzing the source worktree for dirty state
+    // === NEW VARIANTS (additive; old clients ignore unknown status values) ===
     #[serde(rename = "analyzing")]
     Analyzing {
         #[serde(rename = "sessionId")]
@@ -555,7 +531,6 @@ pub enum WorktreeStatus {
         message: String,
     },
 
-    /// Emitted with source worktree information and dirty state summary
     #[serde(rename = "sourceInfo")]
     SourceInfo {
         #[serde(rename = "sessionId")]
@@ -568,7 +543,6 @@ pub enum WorktreeStatus {
         dirty_state: DirtyStateSummary,
     },
 
-    /// Emitted during dirty file copying with progress
     #[serde(rename = "copyingChanges")]
     CopyingChanges {
         #[serde(rename = "sessionId")]
@@ -581,8 +555,6 @@ pub enum WorktreeStatus {
         current_file: Option<String>,
     },
 
-    // === BACKGROUND IGNORED FILE COPY VARIANTS ===
-    /// Background ignored file copy started
     #[serde(rename = "copyingIgnored")]
     CopyingIgnored {
         #[serde(rename = "sessionId")]
@@ -592,7 +564,6 @@ pub enum WorktreeStatus {
         message: String,
     },
 
-    /// Background ignored file copy completed
     #[serde(rename = "ignoredCopyComplete")]
     IgnoredCopyComplete {
         #[serde(rename = "sessionId")]
@@ -605,7 +576,6 @@ pub enum WorktreeStatus {
         dirs_created: u64,
     },
 
-    /// Background ignored file copy failed/cancelled
     #[serde(rename = "ignoredCopyError")]
     IgnoredCopyError {
         #[serde(rename = "sessionId")]
@@ -634,21 +604,17 @@ pub trait WorktreeNotificationSender {
 // Human-Readable Worktree Naming
 // ============================================================================
 
-/// Maximum length for a sanitized label.
 pub const MAX_LABEL_LEN: usize = 64;
-/// Maximum suffix attempts for collision resolution.
 pub const MAX_COLLISION_SUFFIX: u32 = 100;
 
-/// Metadata key for the human-readable worktree label.
 pub use xai_fast_worktree::META_KEY_LABEL;
-/// Metadata key for whether the label was user-provided. Unlike
-/// META_KEY_LABEL, no record consumer below this crate reads it.
+/// Unlike META_KEY_LABEL, no record consumer below this crate reads this key.
 pub const META_KEY_USER_PROVIDED: &str = "user_provided";
 
 /// Sanitize a user-provided label into a filesystem-safe directory name.
 ///
 /// Lowercases, replaces spaces/underscores with hyphens, strips non-alphanumeric
-/// characters (except hyphens -- dots are removed by this filter, making `.` and
+/// characters (except hyphens; dots are removed by this filter, making `.` and
 /// `..` impossible), deduplicates consecutive hyphens, trims leading/trailing
 /// hyphens, and truncates to [`MAX_LABEL_LEN`] characters.
 pub fn sanitize_label(name: &str) -> String {
@@ -661,14 +627,11 @@ pub fn sanitize_label(name: &str) -> String {
             _ => {}
         }
     }
-    // Collapse consecutive hyphens.
     let collapsed = collapse_hyphens(&out);
-    // Trim leading/trailing hyphens.
     let trimmed = collapsed.trim_matches('-');
     if trimmed.is_empty() {
         return String::new();
     }
-    // Truncate to MAX_LABEL_LEN (clean break at hyphen boundary).
     truncate_label(trimmed)
 }
 
@@ -706,9 +669,6 @@ pub fn auto_label() -> String {
 }
 
 /// Derive a worktree label from optional user input.
-///
-/// If the user provides a non-empty name, sanitize it; otherwise generate
-/// an automatic label.
 pub fn derive_worktree_label(user_input: Option<&str>) -> String {
     match user_input {
         Some(name) if !name.trim().is_empty() => {
@@ -765,7 +725,6 @@ pub fn resolve_label_collision(base_dir: &Path, label: &str) -> String {
             return suffixed;
         }
     }
-    // Fallback: auto-generate a unique label.
     auto_label()
 }
 
@@ -901,7 +860,7 @@ pub fn touch_worktree_for_cwd(cwd: &str) {
     if let Some((db, record)) = worktree_record_for_cwd(cwd)
         && let Err(e) = db.touch(&record.id)
     {
-        // A failing touch silently degrades expiry back to created_at —
+        // A failing touch silently degrades expiry back to created_at;
         // leave log evidence without bothering callers.
         tracing::debug!(error = %e, id = %record.id, "worktree touch failed");
     }
@@ -939,7 +898,6 @@ pub async fn prepare_worktree_creation(req: &CreateWorktreeRequest) -> PrepareWo
         };
     }
 
-    // If worktree exists, return its HEAD
     if tokio::fs::metadata(&worktree_path).await.is_ok() {
         let commit = git_cli(Path::new(&worktree_path), &["rev-parse", "HEAD"])
             .await
@@ -955,7 +913,6 @@ pub async fn prepare_worktree_creation(req: &CreateWorktreeRequest) -> PrepareWo
         };
     }
 
-    // Verify source is a valid git repository/worktree
     if git_cli(source_path, &["rev-parse", "--git-dir"])
         .await
         .is_err()
@@ -995,7 +952,6 @@ pub async fn create_worktree_async<N: WorktreeNotificationSender + Clone + 'stat
     let result = create_worktree_streaming(&req, &notifier).await;
     mark_worktree_complete(&session_id).await;
 
-    // Check if we should run background ignored file copy
     let should_copy_ignored_in_background =
         req.copy_ignored_in_background && matches!(&result, WorktreeStatus::Created { .. });
 
@@ -1008,8 +964,7 @@ pub async fn create_worktree_async<N: WorktreeNotificationSender + Clone + 'stat
 
     notifier.send_worktree_status(result).await;
 
-    // Run background ignored file copy if requested (spawned as separate task)
-    // Using spawn_local because the notifier uses non-Send futures internally
+    // spawn_local because the notifier uses non-Send futures internally.
     if should_copy_ignored_in_background && let Some(worktree_path) = worktree_path {
         let notifier = notifier.clone();
         tokio::task::spawn_local(async move {
@@ -1063,7 +1018,6 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
         "CREATE_START: creating worktree via WorktreeBuilder"
     );
 
-    // Emit progress notification
     notifier
         .send_worktree_status(WorktreeStatus::Progress {
             session_id: session_id.clone(),
@@ -1071,14 +1025,12 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
         })
         .await;
 
-    // Map WorktreeCopyMode to xai_fast_worktree::WorkingTreeMode
     let working_tree_mode = match req.copy_mode {
         WorktreeCopyMode::Dirty => WorkingTreeMode::PreserveWorkingTree,
         WorktreeCopyMode::Clean => WorkingTreeMode::CleanAll,
     };
 
-    // Use xai-fast-worktree for high-performance worktree creation
-    // Note: WorktreeBuilder::create() is a blocking operation, so we use spawn_blocking
+    // WorktreeBuilder::create() is blocking, so run it on spawn_blocking.
     let source_path = req.source_path.clone();
     let dest_path = worktree_path_str.clone();
     let git_ref = req.git_ref.clone();
@@ -1101,7 +1053,6 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
         if git_dir_is_directory {
             WorktreeType::Standalone
         } else {
-            // Standalone requested but source is a linked worktree -- fall back to Linked
             tracing::warn!(
                 target: WORKTREE_LOG,
                 session_id = %session_id,
@@ -1147,7 +1098,6 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
             .session_id(session_id_for_builder)
             .metadata(label_metadata);
 
-        // Apply git_ref if specified (branch, tag, or commit SHA)
         if let Some(ref git_ref) = git_ref {
             builder = builder.git_ref(git_ref);
         }
@@ -1194,7 +1144,6 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
         }
     };
 
-    // Map WorktreeReport to CopiedChangesSummary
     let (dirty_modified, dirty_untracked, dirty_deleted) =
         if req.copy_mode == WorktreeCopyMode::Dirty {
             report
@@ -1213,7 +1162,6 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
             (0, 0, 0)
         };
 
-    // Collect warnings from both unignored and ignored copies
     let mut warnings = report.unignored_copy.issues;
     let ignored_files_copied = if let Some(ignored) = report.ignored_copy {
         warnings.extend(ignored.issues);
@@ -1447,7 +1395,7 @@ pub async fn rehydrate_subagent_worktree(
 /// path can't find.
 ///
 /// Standalone worktrees keep the snapshot in their own `.git`, which is
-/// destroyed on removal — so after capturing, the snapshot is transferred into
+/// destroyed on removal, so after capturing, the snapshot is transferred into
 /// `source_repo` (which survives the worktree) and verified to resolve there
 /// before returning `Ok`. The blocking fast-worktree work runs on a blocking
 /// thread.
@@ -1489,7 +1437,7 @@ pub async fn remove_subagent_worktree(worktree_path: &Path) -> Result<()> {
 }
 
 /// Test-only thin wrapper: snapshot then remove (capture-first). NOT for
-/// production use — the completion path drives [`snapshot_subagent_worktree`] and
+/// production use: the completion path drives [`snapshot_subagent_worktree`] and
 /// [`remove_subagent_worktree`] separately so it can persist the ref between the
 /// two steps (removing without persisting first is a crash-safety footgun).
 #[cfg(test)]
@@ -1597,7 +1545,6 @@ pub async fn prepare_worktree_from_worktree(
 ) -> PrepareWorktreeResult {
     let source_path = Path::new(&req.source_worktree_path);
 
-    // Verify the source path is a valid git worktree
     if git_cli(source_path, &["rev-parse", "--git-dir"])
         .await
         .is_err()
@@ -1626,7 +1573,6 @@ pub async fn prepare_worktree_from_worktree(
         .ok()
         .map(|p| p.to_string_lossy().to_string());
 
-    // Check if creation is already in progress
     if is_worktree_in_progress(&req.new_session_id).await {
         return PrepareWorktreeResult {
             response: Ok(CreateWorktreeResponse::Creating {
@@ -1638,7 +1584,6 @@ pub async fn prepare_worktree_from_worktree(
         };
     }
 
-    // If worktree already exists, return its HEAD commit
     if tokio::fs::metadata(&worktree_path).await.is_ok() {
         let commit = git_cli(Path::new(&worktree_path), &["rev-parse", "HEAD"])
             .await
@@ -1750,7 +1695,6 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
         }
     };
 
-    // Emit analyzing notification
     notifier
         .send_worktree_status(WorktreeStatus::Analyzing {
             session_id: session_id.clone(),
@@ -1758,7 +1702,6 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
         })
         .await;
 
-    // Emit progress notification
     notifier
         .send_worktree_status(WorktreeStatus::Progress {
             session_id: session_id.clone(),
@@ -1766,13 +1709,11 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
         })
         .await;
 
-    // Map WorktreeCopyMode to xai_fast_worktree::WorkingTreeMode
     let working_tree_mode = match req.copy_mode {
         WorktreeCopyMode::Dirty => WorkingTreeMode::PreserveWorkingTree,
         WorktreeCopyMode::Clean => WorkingTreeMode::CleanAll,
     };
 
-    // Use xai-fast-worktree -- it handles copying from any worktree path
     let source_worktree_path = req.source_worktree_path.clone();
     let dest_path = worktree_path_str.clone();
     let git_ref = req.git_ref.clone();
@@ -1834,12 +1775,10 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
                 .session_id(session_id_for_builder)
                 .metadata(label_metadata);
 
-            // Apply git_ref if specified (branch, tag, or commit SHA)
             if let Some(ref git_ref) = git_ref {
                 builder = builder.git_ref(git_ref);
             }
 
-            // Apply cancellation token if provided (fork cancel support)
             if let Some(token) = cancel_token {
                 builder = builder.cancellation_token(token);
             }
@@ -1909,7 +1848,6 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
         return WorktreeStatus::Cancelled { session_id };
     }
 
-    // Build CopiedChangesSummary from the report
     let (dirty_modified, dirty_untracked, dirty_deleted) =
         if req.copy_mode == WorktreeCopyMode::Dirty {
             report
@@ -1994,7 +1932,6 @@ pub async fn create_worktree_from_worktree_sync(
     let worktree_path_str =
         resolve_fork_worktree_path(source_path, &req.new_session_id, req.label.as_deref())?;
 
-    // Check if worktree already exists
     if tokio::fs::metadata(&worktree_path_str).await.is_ok() {
         let commit = git_cli(Path::new(&worktree_path_str), &["rev-parse", "HEAD"])
             .await
@@ -2009,7 +1946,6 @@ pub async fn create_worktree_from_worktree_sync(
         });
     }
 
-    // Map WorktreeCopyMode to xai_fast_worktree::WorkingTreeMode
     let working_tree_mode = match req.copy_mode {
         WorktreeCopyMode::Dirty => WorkingTreeMode::PreserveWorkingTree,
         WorktreeCopyMode::Clean => WorkingTreeMode::CleanAll,
@@ -2066,7 +2002,6 @@ pub async fn create_worktree_from_worktree_sync(
             .session_id(session_id_for_builder)
             .metadata(label_metadata);
 
-        // Apply git_ref if specified (branch, tag, or commit SHA)
         if let Some(ref git_ref) = git_ref {
             builder = builder.git_ref(git_ref);
         }
@@ -2080,7 +2015,6 @@ pub async fn create_worktree_from_worktree_sync(
     .await
     .map_err(|e| anyhow::anyhow!("Worktree creation task failed: {}", e))??;
 
-    // Build CopiedChangesSummary from the report
     let (dirty_modified, dirty_untracked, dirty_deleted) =
         if req.copy_mode == WorktreeCopyMode::Dirty {
             report
@@ -2143,7 +2077,6 @@ async fn get_apply_context(worktree_path: &str) -> Result<ApplyContext> {
         let wt_repo = Repository::open(&wt_path)?;
         let wt_head = get_head_commit(&wt_repo)?;
 
-        // Find the main repository (via commondir)
         let main_git_dir = wt_repo.commondir().to_path_buf();
         let main_repo_path = main_git_dir
             .parent()
@@ -2160,7 +2093,6 @@ async fn get_apply_context(worktree_path: &str) -> Result<ApplyContext> {
         let main_tree = wt_repo.find_commit(main_oid)?.tree()?;
         let wt_tree = wt_repo.find_commit(wt_oid)?.tree()?;
 
-        // Compare committed changes: main HEAD to worktree HEAD
         let mut opts = DiffOptions::new();
         let diff = wt_repo.diff_tree_to_tree(Some(&main_tree), Some(&wt_tree), Some(&mut opts))?;
 
@@ -2375,7 +2307,7 @@ pub async fn create_jj_workspace(
 
     let name = req.new_session_id.replace(['/', '\\', '.'], "-");
 
-    // Ensure parent directory exists -- jj workspace add doesn't create it.
+    // Ensure parent directory exists: jj workspace add doesn't create it.
     if let Some(parent) = Path::new(&dest).parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
@@ -2428,7 +2360,7 @@ pub async fn remove_jj_workspace(workspace_path: &str) -> Result<()> {
 }
 
 // ============================================================================
-// Resume / Rehydrate types (types only -- impl stays in shell)
+// Resume / Rehydrate types (types only; impl stays in shell)
 // ============================================================================
 
 /// Request to resume an existing session in a fresh worktree.
@@ -2457,7 +2389,7 @@ pub struct ResumeSessionInWorktreeRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResumeSessionInWorktreeResponse {
-    /// The *forked* session ID (not the original) -- load this in the worktree.
+    /// The *forked* session ID (not the original); load this in the worktree.
     pub session_id: String,
     pub worktree_path: String,
     /// Working directory inside the worktree, preserving any subdirectory
@@ -2638,19 +2570,10 @@ fn worktree_auto_gc_settings_from_toml(
         .and_then(|v| xai_grok_config_types::WorktreeAutoGcSettings::deserialize(v.clone()).ok())
 }
 
-/// Env + `$GROK_HOME/config.toml` only — this process has no remote-settings
-/// blob (unlike shell agent init, which resolves env > TOML > remote). Because a
-/// server-side `worktree_auto_gc` kill-switch / staged-rollout / dry-run is
-/// invisible here, this path opts in only when local config explicitly enables
-/// it (`[worktree.auto_gc] enabled = true`); otherwise it returns `None` and the
-/// caller skips the pass entirely.
-///
-/// Skipping (rather than running a forced dry-run) is deliberate: the shell
-/// agent already runs the authoritative remote-aware pass against the same
-/// `$GROK_HOME` DB. A forced dry-run here would still spend the pass budget and,
-/// worse, stamp the shared throttle meta — blacking out the real deleting pass
-/// for a full `min_interval`. Skipping keeps the same fail-safe (never delete
-/// against an unseen remote policy) at none of that cost.
+/// Remote-blind (env + `$GROK_HOME/config.toml` only): opts in only when local
+/// `[worktree.auto_gc] enabled = true`, else returns `None`. A forced dry-run
+/// would stamp the shared throttle and black out the shell agent's
+/// authoritative remote-aware pass over the same DB, so skip instead.
 fn resolve_worktree_auto_gc_local() -> Option<xai_fast_worktree::ResolvedWorktreeAutoGc> {
     let local = if let Ok(home) = resolve_grok_home() {
         let path = home.join("config.toml");
@@ -2759,7 +2682,6 @@ fn scan_worktree_dirs_on_disk(main_repo_root: &std::path::Path) -> Vec<String> {
     let mut paths: Vec<String> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        // Only include directories that look like git worktrees.
         .filter(|e| e.path().join(".git").exists())
         .filter_map(|e| {
             dunce::canonicalize(e.path())
@@ -2827,7 +2749,7 @@ mod tests {
     }
 
     /// The workspace hook is remote-blind, so it runs only on an explicit local
-    /// opt-in. Without one it must return `None` (skip) — not a forced dry-run
+    /// opt-in. Without one it must return `None` (skip), not a forced dry-run
     /// pass, which would stamp the shared throttle and black out the shell
     /// agent's real deleting pass.
     #[test]
@@ -2858,9 +2780,6 @@ mod tests {
         );
     }
 
-    // ── snapshot_and_remove_subagent_worktree ────────────────────────────
-
-    /// Run a git command in `dir` and return trimmed stdout (test-only helper).
     fn git_out(dir: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .current_dir(dir)
@@ -3033,8 +2952,6 @@ mod tests {
             "directory must be preserved when the snapshot fails"
         );
     }
-
-    // ── worktree_record_for_cwd / touch_worktree_for_cwd ─────────────────
 
     // Crate-shared env lock + env guards bundled as ONE value so the env
     // restores before the lock releases by struct field order (see lib.rs),
@@ -3326,7 +3243,7 @@ mod tests {
         );
     }
 
-    /// Counts terminal worktree statuses — one per creator that ran to completion.
+    /// Counts terminal worktree statuses: one per creator that ran to completion.
     #[derive(Clone)]
     struct TerminalStatusCounter {
         terminal: std::sync::Arc<std::sync::atomic::AtomicUsize>,

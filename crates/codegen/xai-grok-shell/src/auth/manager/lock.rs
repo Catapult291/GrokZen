@@ -1093,8 +1093,8 @@ mod tests {
         let confirm = StdDuration::from_secs(12);
         // Refresh-sized budget: Phase 2 gives up the confirmation slice.
         assert_eq!(
-            phase2_budget(StdDuration::from_secs(45), confirm),
-            StdDuration::from_secs(33)
+            phase2_budget(StdDuration::from_secs(25), confirm),
+            StdDuration::from_secs(13)
         );
         // Budget below the delay: Phase 3 never confirms, so Phase 2
         // keeps everything.
@@ -1134,8 +1134,8 @@ mod tests {
 
     /// The caller's `timeout` is the TOTAL budget: a live-but-stale holder
     /// forces the full Phase-2 wait + Phase-3 confirmation, and the sum
-    /// must still land within the budget (pre-fix: `timeout + confirm`,
-    /// ~57 s on a 45 s request).
+    /// must still land within the budget (pre-fix it overran by the confirm
+    /// delay: `timeout + confirm`, ~57 s on the then-45 s refresh budget).
     #[cfg(unix)]
     #[tokio::test]
     async fn total_wait_stays_within_timeout_budget() {

@@ -372,7 +372,7 @@ Grok 会为每个钩子进程设置多个环境变量。编写需要感知上下
 <a id="using-variables-in-command-and-url-fields"></a>
 #### 在 `command` 和 `url` 字段中使用变量
 
-`command` 和 `url` 都支持 `${VAR}` 与 `$VAR` 展开。完整细节（包括加载时与运行时展开、`env` 映射查找顺序，以及参数展开修饰符（如 `${VAR:-default}`）的处理）请参阅 custom-hooks 参考。
+`command` 和 `url` 都支持 `${VAR}` 与 `$VAR` 展开。在 Windows PowerShell 中，已知的 `$VAR` 引用会改写为 `$env:VAR`，以便从子进程环境读取。完整细节（包括加载时与运行时展开、`env` 映射查找顺序，以及参数展开修饰符（如 `${VAR:-default}`）的处理）请参阅 custom-hooks 参考。
 
 ---
 

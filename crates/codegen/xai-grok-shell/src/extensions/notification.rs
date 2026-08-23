@@ -583,6 +583,9 @@ pub enum SessionUpdate {
         /// List of (plugin_name, old_version, new_version).
         updates: Vec<(String, String, String)>,
     },
+    /// Status snapshot for client status lines. Send-only: never persisted,
+    /// since the next emit supersedes it.
+    SessionStatus(Box<xai_grok_status_line::StatusLineContext>),
     /// Session summary was generated for a new session.
     /// Sent after the first user prompt when the LLM generates a title.
     SessionSummaryGenerated {

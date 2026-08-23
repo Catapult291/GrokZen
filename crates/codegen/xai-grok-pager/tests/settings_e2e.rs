@@ -479,8 +479,8 @@ fn space_on_remember_tool_approvals_dispatches_typed_setter() {
     let mut s = make_state();
     navigate_to(&mut s, "remember_tool_approvals");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
-    // Default is false, so toggling flips it on.
-    assert_set_bool_action(outcome, "remember_tool_approvals", true);
+    // Default is true, so toggling flips it off.
+    assert_set_bool_action(outcome, "remember_tool_approvals", false);
 }
 
 /// The Ask-Question timeout row renders in Agent & Approval directly above
@@ -779,7 +779,7 @@ fn mouse_click_on_remember_tool_approvals_indicator_toggles_in_one_click() {
         72,
         row_y,
     );
-    assert_set_bool_action(outcome, "remember_tool_approvals", true);
+    assert_set_bool_action(outcome, "remember_tool_approvals", false);
 }
 
 /// Value-column click toggles the Ask-Question timeout in one click.
@@ -2058,7 +2058,7 @@ fn defaults_round_trip_through_registry() {
             "follow_up_behavior" => SettingValue::Enum("queue"),
             "simple_mode" => SettingValue::Bool(true),
             "vim_mode" => SettingValue::Bool(false),
-            "remember_tool_approvals" => SettingValue::Bool(false),
+            "remember_tool_approvals" => SettingValue::Bool(true),
             "toolset.ask_user_question.timeout_enabled" => SettingValue::Bool(true),
             "keep_text_selection" => SettingValue::Enum("flash"),
             "theme" => SettingValue::Enum("groknight"),

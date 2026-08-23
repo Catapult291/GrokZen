@@ -431,6 +431,16 @@ pub(crate) enum SwapOutcome {
 pub struct WorkspaceHandle {
     pub(crate) shared: Arc<WorkspaceShared>,
 }
+type AcknowledgedNotifyChannel = (
+    xai_grok_tools::notification::types::ToolNotificationHandle,
+    tokio::sync::mpsc::UnboundedReceiver<
+        xai_grok_tools::notification::AcknowledgedToolNotification,
+    >,
+);
+/// Builds with no forwarder. They must not open the channel, because an unread one blocks every delete.
+fn acknowledged_notify_channel(_enabled: bool) -> Option<AcknowledgedNotifyChannel> {
+    None
+}
 /// Client-fs resolution base: request paths resolve against `base`,
 /// `canonical` is the matching canonicalization-containment boundary.
 pub(crate) struct ClientFsBase {
@@ -873,8 +883,7 @@ impl WorkspaceHandle {
         let config = tool_config.unwrap_or_else(|| self.shared.default_tool_config.clone());
         let mcp_snapshot = self.shared.mcp_tools_snapshot.load_full();
         let hub_snapshot = self.shared.hub_tools_snapshot.load_full();
-        let system_notify_channel = system_notifications
-            .then(xai_grok_tools::notification::types::ToolNotificationHandle::channel);
+        let system_notify_channel = acknowledged_notify_channel(system_notifications);
         let system_notify_handle = system_notify_channel.as_ref().map(|(h, _)| h.clone());
         let (effective, toolset, terminal_backend) = {
             let _span = LocalSpan::enter_with_local_parent("tool_server.toolset_resolve")
@@ -4433,7 +4442,24 @@ async fn persist_and_enqueue_tool_state(
     upload_queue: Arc<xai_file_utils::queue::UploadQueue>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let toolset = session.toolset();
-    let state_path = toolset.save_and_flush_persistence().await.to_path_buf();
+    let Some(state_path) = toolset
+        .save_and_flush_persistence()
+        .await
+        .map(std::path::Path::to_path_buf)
+    else {
+        dc_log!(
+            debug,
+            session_id = %session_id,
+            turn_number,
+            phase = "tool_state",
+            outcome = "skipped",
+            skip_reason = "no_state_path",
+            "workspace: tool_state upload skipped, session has no state directory"
+        );
+        crate::upload::record_upload_outcome("tool_state", "skipped");
+        crate::upload::record_upload_skipped("tool_state", "no_state_path");
+        return Ok(());
+    };
     let bytes = tokio::fs::read(&state_path).await.map_err(|e| {
         format!(
             "failed to read flushed tool_state from {}: {e}",

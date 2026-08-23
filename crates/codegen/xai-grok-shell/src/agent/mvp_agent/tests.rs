@@ -1188,6 +1188,7 @@ fn make_test_handle(
         chat_state_handle: xai_chat_state::ChatStateHandle::noop(),
         signals_handle: crate::session::signals::SessionSignalsHandle::new(),
         gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        status_line_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_servers: vec![],
         initial_client_mcp_servers: vec![],
         display_cwd: None,
@@ -5016,6 +5017,202 @@ fn post_auth_settings_not_coalesced_by_in_flight_reapply() {
         assert!(agent.post_auth_settings_in_flight.get());
     });
 }
+/// The tier re-check work is single-flight across every caller: back-to-back
+/// gated initializes run at most one live check, and an awaited
+/// authenticate-path check skips — rather than doubles or waits out — a
+/// check already wedged on a stalled subscription endpoint. Drives the exact
+/// block `initialize` runs when `tier_allowed` is false (the full
+/// `initialize` fires once-per-process GROK_HOME cleanup work that a unit
+/// test must not run against the developer's real home).
+#[test]
+fn gated_reconnect_tier_recheck_is_single_flight() {
+    run_local_for_bridge_test(|| async {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking accept loop");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let accept_stop = stop.clone();
+        let accept_thread = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while !accept_stop.load(std::sync::atomic::Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((stream, _)) => held.push(stream),
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let agent = build_minimal_agent_for_tests();
+        agent.cfg.borrow_mut().endpoints.cli_chat_proxy_base_url =
+            Some(format!("http://{addr}/v1"));
+        agent.cfg.borrow_mut().remote_settings = Some(crate::util::config::RemoteSettings {
+            allow_access: Some(false),
+            ..Default::default()
+        });
+        let auth = crate::auth::GrokAuth {
+            key: "gated-user-key".into(),
+            user_id: "user-gated".into(),
+            auth_mode: crate::auth::AuthMode::Oidc,
+            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_owned()),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..crate::auth::GrokAuth::test_default()
+        };
+        agent.auth_manager.hot_swap(auth.clone());
+        *agent.allow_access_resolved_for.borrow_mut() = Some(auth.user_id.clone());
+        agent.tier_allowed.set(false);
+        for _ in 0..2 {
+            if !agent.tier_allowed.get() {
+                agent.spawn_tier_recheck();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            agent.tier_recheck_run_count.get(),
+            1,
+            "the second spawned check must skip the claimed re-check"
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            agent.enforce_grok_code_access(&auth),
+        )
+        .await
+        .expect("an awaited check must skip, not wait out, the wedged re-check");
+        assert_eq!(
+            agent.tier_recheck_run_count.get(),
+            1,
+            "the awaited check must not run a second concurrent re-check"
+        );
+        assert!(
+            !agent.tier_allowed.get(),
+            "the gate stays until a re-check resolves"
+        );
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        accept_thread.join().expect("accept loop joins");
+    });
+}
+/// The check's own mint spawns a `/user` enrichment that can rewrite the
+/// in-memory user_id to the proxy-canonical value mid-check; the identity
+/// guard must read that normalization as the same account (it is the id the
+/// check's own bearer resolved to), while a live id matching neither the
+/// started nor the canonical id is a real switch and still discards.
+#[test]
+fn tier_recheck_identity_guard_accepts_enrichment_canonical_user_id() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let auth = crate::auth::GrokAuth {
+            key: "seeded-key".into(),
+            user_id: "canonical-user".into(),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..crate::auth::GrokAuth::test_default()
+        };
+        agent.auth_manager.hot_swap(auth);
+        assert!(!agent.tier_recheck_identity_changed("seeded-user", Some("canonical-user")));
+        assert!(!agent.tier_recheck_identity_changed("canonical-user", None));
+        assert!(!agent.tier_recheck_identity_changed("canonical-user", Some("other-user")));
+        assert!(agent.tier_recheck_identity_changed("seeded-user", Some("other-user")));
+        assert!(agent.tier_recheck_identity_changed("seeded-user", None));
+        assert!(agent.tier_recheck_identity_changed("seeded-user", Some("")));
+    });
+}
+/// The other half of the reconnect paywall flash (the wedged test above
+/// locks the "gate holds while the check is in flight" half): a re-check
+/// that confirms a qualifying tier lifts `tier_allowed`, so the flash a
+/// subscribed user can see on a gated reconnect clears. Settings stay
+/// absent (the mock 404s `/settings`), modeling the remote-fetch-failed /
+/// disabled arm where the confirmed tier is the authority for the lift;
+/// the bearer's tier claim already matches the live tier, so the
+/// post-unblock mint is skipped and no refresher is needed.
+#[test]
+fn gated_reconnect_recheck_lifts_gate_clearing_paywall_flash() {
+    run_local_for_bridge_test(|| async {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking accept loop");
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let accept_stop = stop.clone();
+        let accept_thread = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            while !accept_stop.load(std::sync::atomic::Ordering::Acquire) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                        let mut head = Vec::new();
+                        let mut byte = [0u8; 1];
+                        while !head.ends_with(b"\r\n\r\n") {
+                            match stream.read(&mut byte) {
+                                Ok(1) => head.push(byte[0]),
+                                _ => break,
+                            }
+                        }
+                        let head = String::from_utf8_lossy(&head);
+                        let response = if head.contains("/user?include=subscription") {
+                            let body =
+                                r#"{"userId":"user-flash","subscriptionTier":"SuperGrokPro"}"#;
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                        } else {
+                            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\
+                             Connection: close\r\n\r\n"
+                                .to_owned()
+                        };
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        let temp_dir = tempfile::tempdir().unwrap();
+        let auth_manager = std::sync::Arc::new(crate::auth::AuthManager::new(
+            temp_dir.path(),
+            crate::auth::GrokComConfig::default(),
+        ));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let gateway = GatewaySender::new(tx);
+        let cfg = crate::agent::config::Config::default();
+        let agent = MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config");
+        agent.cfg.borrow_mut().endpoints.cli_chat_proxy_base_url =
+            Some(format!("http://{addr}/v1"));
+        let auth = crate::auth::GrokAuth {
+            key: jwt_with_tier(5),
+            user_id: "user-flash".into(),
+            auth_mode: crate::auth::AuthMode::Oidc,
+            oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_owned()),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            ..crate::auth::GrokAuth::test_default()
+        };
+        agent.auth_manager.hot_swap(auth);
+        agent.tier_allowed.set(false);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            agent.retry_subscription_check(),
+        )
+        .await
+        .expect("re-check must finish well inside its bounded awaits");
+        assert!(
+            agent.tier_allowed.get(),
+            "a confirmed qualifying tier must lift the gate — the reconnect paywall flash clears"
+        );
+        assert_eq!(
+            agent.tier_recheck_run_count.get(),
+            1,
+            "the lift came from exactly one claimed re-check"
+        );
+        stop.store(true, std::sync::atomic::Ordering::Release);
+        accept_thread.join().expect("accept loop joins");
+    });
+}
 /// Agent with pre-loaded auth, a gateway receiver (to assert emitted
 /// notifications), and the proxy URL pointed at a mock `/v1/settings`.
 fn build_agent_with_auth_and_proxy(
@@ -6479,3 +6676,129 @@ mod soft_default_settings_emit {
 }
 #[cfg(feature = "dhat-heap")]
 mod dhat_soak;
+/// A leader multiplexes many clients behind one `initialize`, so the answer
+/// has to travel with the session: without the session-meta read, one terminal
+/// with the row off decides for every other terminal sharing the leader.
+/// Silence means off, since the payload costs a git discovery and three round
+/// trips.
+#[test]
+fn session_meta_outranks_the_client_that_started_the_process() {
+    let says_nothing = || {
+        acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+            acp::ClientCapabilities::new()
+                .fs(acp::FileSystemCapabilities::new())
+                .terminal(false),
+        )
+    };
+    let wants_a_row = |meta: Option<acp::Meta>, init: acp::InitializeRequest| {
+        MvpAgent::resolve_status_line_capability(meta.as_ref(), &init)
+    };
+    let on = init_advertising_status_line(true);
+    let off = init_advertising_status_line(false);
+    assert!(
+        wants_a_row(Some(status_line_meta(true)), off),
+        "a leader that wants a row outranks the client that started the process"
+    );
+    assert!(
+        !wants_a_row(Some(status_line_meta(false)), on),
+        "a `/minimal` client attaching to a leader a full-screen pager started \
+         was charged for a row it cannot draw"
+    );
+    assert!(
+        wants_a_row(None, init_advertising_status_line(true)),
+        "with no leader the client that initialized is the client that asked"
+    );
+    assert!(!wants_a_row(None, init_advertising_status_line(false)));
+    assert!(
+        !wants_a_row(Some(acp::Meta::new()), says_nothing()),
+        "a leader that injected nothing leaves a silent client off"
+    );
+    assert!(!wants_a_row(None, says_nothing()));
+}
+#[tokio::test(flavor = "current_thread")]
+async fn an_attach_that_draws_a_row_switches_it_on_and_asks_for_a_fill() {
+    let agent = build_minimal_agent_for_tests();
+    let session_id = acp::SessionId::new("status-line-attach");
+    let (cmd_tx, mut commands) =
+        tokio::sync::mpsc::unbounded_channel::<crate::session::SessionCommand>();
+    let mut handle = make_test_handle("test-model", false, None);
+    handle.cmd_tx = cmd_tx;
+    let row = handle.status_line_enabled.clone();
+    agent.insert_resident(&session_id, handle);
+    let init = init_advertising_status_line(false);
+    agent.attach_status_line(&session_id, Some(&status_line_meta(false)), &init);
+    assert!(
+        !row.load(std::sync::atomic::Ordering::Relaxed),
+        "an attach that cannot draw a row switched it on"
+    );
+    assert!(
+        commands.try_recv().is_err(),
+        "an attach that cannot draw a row asked the actor to build one"
+    );
+    agent.attach_status_line(&session_id, Some(&status_line_meta(true)), &init);
+    assert!(
+        row.load(std::sync::atomic::Ordering::Relaxed),
+        "the attach left the row off, so the emitter wakes and builds nothing"
+    );
+    assert!(
+        matches!(
+            commands.try_recv(),
+            Ok(crate::session::SessionCommand::EmitStatusSnapshot)
+        ),
+        "the attach never asked for a snapshot, so the transient row never fills"
+    );
+}
+/// A resident session outlives the client that drew its row, and the emitter
+/// re-reads the flag on every wake, so a latch that only ever rose would keep
+/// building payloads for a row nobody paints. Driven through the real
+/// disconnect, not the setter, since the wiring is the part that can rot.
+#[test]
+fn a_disconnect_switches_the_row_off_and_the_next_attach_switches_it_on() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let sid = acp::SessionId::new("sess-status-line-busy");
+        let (handle, _tx, rx) = make_live_session_handle(&sid, None);
+        let row = handle.status_line_enabled.clone();
+        agent.insert_resident(&sid, handle);
+        let _actor = spawn_fake_actor(rx, true);
+        let init = init_advertising_status_line(true);
+        agent.attach_status_line(&sid, Some(&status_line_meta(true)), &init);
+        assert!(row.load(std::sync::atomic::Ordering::Relaxed));
+        drive_disconnect_many(&agent, &[&sid]).await;
+        assert!(
+            agent.is_resident(&sid),
+            "the busy session must stay resident"
+        );
+        assert!(
+            !row.load(std::sync::atomic::Ordering::Relaxed),
+            "the last client that could draw the row is gone, so the agent is \
+             still assembling payloads nobody paints"
+        );
+        agent.attach_status_line(&sid, Some(&status_line_meta(true)), &init);
+        assert!(
+            row.load(std::sync::atomic::Ordering::Relaxed),
+            "the row has to come back with the next client"
+        );
+    });
+}
+fn status_line_meta(enabled: bool) -> acp::Meta {
+    let mut meta = acp::Meta::new();
+    meta.insert(
+        xai_grok_status_line::CLIENT_STATUS_LINE_META.to_string(),
+        serde_json::json!(enabled),
+    );
+    meta
+}
+fn init_advertising_status_line(enabled: bool) -> acp::InitializeRequest {
+    let mut meta = serde_json::Map::new();
+    meta.insert(
+        xai_grok_status_line::STATUS_LINE_CAPABILITY.to_string(),
+        serde_json::json!(enabled),
+    );
+    acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_capabilities(
+        acp::ClientCapabilities::new()
+            .fs(acp::FileSystemCapabilities::new())
+            .terminal(false)
+            .meta(meta),
+    )
+}

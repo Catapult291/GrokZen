@@ -50,8 +50,8 @@ simple_mode = true                     # readline 风格的提示编辑（默认
 vim_mode = false                       # Vim 风格的回滚导航键（默认：false）
 max_thoughts_width = 120               # 推理显示的最大列宽
 default_selected_permission = "always_allow_all_sessions" # 首次审批提示中预先选中的行
-remember_tool_approvals = false        # 在权限提示中显示每条命令的“始终允许”选项；
-                                       # 按项目记住授权（默认：false）；见 22-permissions-and-safety.md
+remember_tool_approvals = true         # 在权限提示中显示每条命令的“始终允许”选项；
+                                       # 按项目记住授权（默认：true）；见 22-permissions-and-safety.md
 show_thinking_blocks = true            # 在 TUI 中显示智能体思考块（默认：true）
 group_tool_verbs = true                # 将连续的 read/search/list 工具调用和子智能体行
                                        # ——以及其中已完成的思考——折叠成一行（默认：true）
@@ -121,7 +121,7 @@ default_selected_permission = "allow_once"
 
 回答首次提示后，光标会变为**粘滞**状态：后续每次提示都会预选你上次确认的选项（例如只选一次“否”后，后续提示会从拒绝行开始），并跨越编辑 / bash / MCP 提示持续到重启。因此此设置只决定起始位置。
 
-值不区分大小写；未设置或无法识别的值会回退到 `always_allow_all_sessions`。`allow_command_always` 行始终只针对正在审批的具体操作（命令 / 工具 / 域 / 编辑会话），绝不是全局允许一切——全局允许由 `always_allow_all_sessions` 提供。请注意，只有 `[ui] remember_tool_approvals = true`（默认 false）时才会显示每条命令的“始终允许”行。参见 [22-permissions-and-safety.md](22-permissions-and-safety.md)。
+值不区分大小写；未设置或无法识别的值会回退到 `always_allow_all_sessions`。`allow_command_always` 行始终只针对正在审批的具体操作（命令 / 工具 / 域 / 编辑会话），绝不是全局允许一切——全局允许由 `always_allow_all_sessions` 提供。启用 `[ui] remember_tool_approvals` 时会显示每条命令的“始终允许”行；该设置默认启用，设为 `false` 可隐藏这些选项。参见 [22-permissions-and-safety.md](22-permissions-and-safety.md)。
 
 也可以用 `GROK_DEFAULT_SELECTED_PERMISSION` 覆盖此设置，适用于不应修改 `config.toml` 的无头或智能体测试运行。优先级：环境变量 → `config.toml` → `always_allow_all_sessions`。
 
@@ -500,6 +500,21 @@ timeout_secs = 5
 在受影响的会话中运行 `/doctor`。它会显示检测到的通知和焦点问题、相关配置文件以及解决步骤。显式设置 `method = "bel"` 会被视为有意选择。`method = "none"` 会关闭通知和焦点检查结果。
 
 **防止休眠未生效：**在 macOS 上，防休眠通过 CoreFoundation 使用 `IOPMAssertionCreateWithName`；在 Linux 上使用 `systemd-inhibit`（必须位于 `$PATH`）。请确认相关工具可用。防休眠仅在智能体回合期间启用，回合结束时会自动释放。
+
+<a id="status-line"></a>
+### 状态栏
+
+全屏分页器底部可以显示一行可选状态栏；默认关闭。通过 `[ui.status_line]` 启用：
+
+```toml
+[ui.status_line]
+type = "builtin"                # builtin | command | disabled
+items = ["cwd", "model", "context"]
+```
+
+其他键包括 `items`（按顺序显示的内置分段）、`command`、`padding` 和 `refresh_interval`（秒；定时重新运行 `command` 状态栏，让告警页面或 CI 状态也能在会话空闲时更新）。[状态栏指南](25-status-line.md)列出了全部选项、命令脚本从标准输入读取的 JSON 约定以及示例脚本。
+
+最小模式没有状态栏；它会改用终端标签页标题（参见[通知](#notifications)中的 `title.items`）。
 
 <a id="keyboard-shortcuts"></a>
 ### 键盘快捷键

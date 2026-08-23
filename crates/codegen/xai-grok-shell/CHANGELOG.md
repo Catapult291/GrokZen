@@ -1,6 +1,30 @@
 # Changelog
 
-[1.0.5 简体中文更新说明](changelogs/1.0.5.zh-CN.md) · [1.0.3 简体中文更新说明](changelogs/1.0.3.zh-CN.md)
+[1.0.6 简体中文更新说明](changelogs/1.0.6.zh-CN.md) · [1.0.5 简体中文更新说明](changelogs/1.0.5.zh-CN.md) · [1.0.3 简体中文更新说明](changelogs/1.0.3.zh-CN.md)
+
+# 1.0.6 — 2026-08-18
+
+## Breaking Changes
+
+- **Subagent spawning** no longer accepts capability_mode; tool access is now controlled only by agent type.
+
+## Features
+
+- **Shift+arrow keys** now extend text selections in the prompt like a standard text field.
+- **Optional status line** can now display live session info or script output at the bottom of the pager.
+- **grok clone** can now fetch a repo into a content store and mount a projected working tree.
+
+## Bug Fixes
+
+- **Subagents** no longer show multiple-choice questions; only the primary agent can ask them.
+- **Fixed session startup hangs** on large or unhealthy git repositories.
+- **Queued messages** during goals no longer starve, and editing queued prompts works reliably.
+- **Consent notice** on first launch now shows clickable links and handles keyboard/mouse correctly.
+- **Ctrl+C then edit** a prompt now correctly removes the original text from the conversation.
+- **Double-clicking** a terminal command result now shows the complete output instead of a preview.
+- **Consent notice links** are now stricter and more reliable on all terminals.
+- **Video generation** now surfaces a clear ZDR error instead of raw API responses when output storage is required.
+- **Project hooks** on Windows now correctly expand $CLAUDE_PROJECT_DIR when invoking PowerShell scripts.
 
 # 1.0.5 — 2026-08-15
 

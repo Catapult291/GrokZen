@@ -99,6 +99,44 @@ fn parse_mcp_config_with_oauth_extracts_byo_client_id() {
     );
     assert!(!oauth.contains_key("plain"));
 }
+/// The merge recurses into nested tables and only ever inserts, so a key
+/// inside `[ui.status_line]` that this build does not model is not at risk
+/// from a settings write. The status-line parser relies on this: it reports
+/// an unknown key rather than refusing to persist the section over it.
+#[test]
+fn merge_section_preserves_unmodeled_fields_inside_a_nested_table() {
+    let mut table = TomlMap::new();
+    let mut status_line = TomlMap::new();
+    status_line.insert("type".into(), TomlValue::String("builtin".into()));
+    status_line.insert("colour".into(), TomlValue::String("red".into()));
+    let mut ui = TomlMap::new();
+    ui.insert("status_line".into(), TomlValue::Table(status_line));
+    table.insert("ui".into(), TomlValue::Table(ui));
+    let cfg = crate::agent::config::UiConfig {
+        status_line: xai_grok_status_line::test_support::StatusLineConfigFixture::from_kind(
+            xai_grok_status_line::StatusLineType::Command,
+        )
+        .with_command("~/status_line.sh")
+        .into_config(),
+        ..Default::default()
+    };
+    merge_section(&mut table, "ui", &cfg);
+    let written = table
+        .get("ui")
+        .and_then(|v| v.as_table())
+        .and_then(|t| t.get("status_line"))
+        .and_then(|v| v.as_table())
+        .expect("the section survives");
+    assert_eq!(
+        written.get("colour").and_then(|v| v.as_str()),
+        Some("red"),
+        "a key this build does not model must survive a write of the ones it does"
+    );
+    assert_eq!(
+        written.get("type").and_then(|v| v.as_str()),
+        Some("command")
+    );
+}
 #[test]
 fn merge_section_preserves_unmodeled_fields() {
     let mut table = TomlMap::new();

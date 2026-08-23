@@ -860,6 +860,12 @@ enum OverlayEntryData {
 const MAX_TASKS_HEIGHT: u16 = 8;
 const MAX_TASKS_FRACTION: f32 = 0.15;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct TaskStatusCounts {
+    pub(crate) running: usize,
+    pub(crate) paused_workflows: usize,
+}
+
 pub struct TasksPane {
     ui_locale: crate::locale::LocaleContext,
     /// Display list: sorted `items` with group headers inserted and
@@ -1148,31 +1154,22 @@ impl TasksPane {
         // Build the display list: group headers + (non-collapsed) items.
         self.rebuild_entries();
 
-        // Count running for edge detection. Replay-restored bg tasks are
-        // excluded: on resume they are historical context (cold loads
-        // reconcile them away within the same `session/load`; on warm
-        // reconnects they are ambient, not new activity), so they must not
-        // flash the overlay open on every resume.
-        let running_count = bg_tasks
-            .values()
-            .filter(|t| t.status == BgTaskStatus::Running && !t.restored_from_replay)
-            .count()
-            + subagents
+        let counts = Self::status_counts_from(bg_tasks, subagents, scheduled, workflow_runs);
+        // Replay-restored bg tasks are ambient history and must not auto-open on resume.
+        let running_count = counts.running.saturating_sub(
+            bg_tasks
                 .values()
-                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
-                .count()
-            + scheduled.len()
-            + workflow_runs.iter().filter(|run| run.is_active()).count();
+                .filter(|task| task.status == BgTaskStatus::Running && task.restored_from_replay)
+                .count(),
+        );
 
-        // Auto-show: running went from 0 to N
         if running_count > 0 && self.prev_running_count == 0 {
             self.overlay.show();
             self.opened_by_auto = true;
         }
 
-        // Auto-close: running went from N to 0, auto-shown, not focused
         if running_count == 0
-            && self.prev_running_count > 0
+            && counts.paused_workflows == 0
             && self.overlay.visible
             && !self.overlay.focused
             && self.opened_by_auto
@@ -1254,23 +1251,38 @@ impl TasksPane {
         }
     }
 
-    pub fn running_count(
+    pub(crate) fn status_counts(
         &self,
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
         workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
-    ) -> usize {
-        bg_tasks
-            .values()
-            .filter(|t| t.status == BgTaskStatus::Running)
-            .count()
-            + subagents
+    ) -> TaskStatusCounts {
+        Self::status_counts_from(bg_tasks, subagents, scheduled, workflow_runs)
+    }
+
+    fn status_counts_from(
+        bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
+        subagents: &HashMap<String, SubagentInfo>,
+        scheduled: &HashMap<String, ScheduledTaskInfo>,
+        workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+    ) -> TaskStatusCounts {
+        TaskStatusCounts {
+            running: bg_tasks
                 .values()
-                .filter(|s| s.is_running() && s.workflow_run_id.is_none())
+                .filter(|task| task.status == BgTaskStatus::Running)
                 .count()
-            + scheduled.len()
-            + workflow_runs.iter().filter(|run| run.is_active()).count()
+                + subagents
+                    .values()
+                    .filter(|subagent| subagent.is_running() && subagent.workflow_run_id.is_none())
+                    .count()
+                + scheduled.len()
+                + workflow_runs.iter().filter(|run| run.is_active()).count(),
+            paused_workflows: workflow_runs
+                .iter()
+                .filter(|run| !run.is_active() && !run.is_terminal())
+                .count(),
+        }
     }
 
     // -- Visibility ----------------------------------------------------------
@@ -2084,6 +2096,10 @@ impl TasksPane {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "tasks_pane_status_tests.rs"]
+mod status_tests;
 
 #[cfg(test)]
 mod tests {
@@ -3641,8 +3657,11 @@ mod tests {
                 .all(|e| !matches!(e, TaskEntry::Agent { .. }))
         );
         assert_eq!(
-            pane.running_count(&BTreeMap::new(), &subagents, &HashMap::new(), &runs),
-            1
+            pane.status_counts(&BTreeMap::new(), &subagents, &HashMap::new(), &runs),
+            TaskStatusCounts {
+                running: 1,
+                paused_workflows: 0,
+            }
         );
     }
 

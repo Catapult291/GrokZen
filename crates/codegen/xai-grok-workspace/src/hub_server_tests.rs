@@ -349,6 +349,71 @@ async fn tasks_snapshot_rpc_lists_outstanding_background_tasks() {
         loop_task.next_fire_at
     );
 }
+/// Unknown ids report deleted:false. This session asks for no notifications, so nothing acknowledges a removal and a live loop still errors.
+/// `hub_session_deletes_a_live_scheduled_task` covers the session that does ask.
+#[tokio::test]
+async fn delete_scheduled_task_rpc_reports_honestly() {
+    use xai_grok_workspace_types::rpc::workspace::DeleteScheduledTaskResponse;
+    let handle = make_handle();
+    let cfg = background_capable_cfg();
+    let session = handle
+        .create_session_with_config(
+            "del-rpc",
+            None,
+            Some(cfg.clone()),
+            CapabilityMode::All,
+            None,
+            false,
+        )
+        .expect("create background-capable session");
+    session.set_bind_tool_config_fingerprint(serde_json::to_value(&cfg).ok());
+    seed_scheduled_task(session.toolset().as_ref(), "loop-del-1").await;
+    let handler = WorkspaceRpcHandler::new(handle.clone());
+    async fn delete(
+        handler: &WorkspaceRpcHandler,
+        task_id: &str,
+    ) -> Result<DeleteScheduledTaskResponse, WorkspaceError> {
+        handler
+            .dispatch(
+                "workspace.delete_scheduled_task",
+                serde_json::json!({"session_id": "del-rpc", "task_id": task_id}),
+                Some("del-rpc"),
+            )
+            .await
+            .map(|value| serde_json::from_value(value).expect("decode delete response"))
+    }
+    let missing = delete(&handler, "no-such-loop").await.expect("unknown id");
+    assert_eq!(missing.task_id, "no-such-loop");
+    assert!(!missing.deleted, "an unknown id must report false");
+    let live = delete(&handler, "loop-del-1").await;
+    let err = live.expect_err("a live loop must error until the durable gate is satisfied");
+    assert!(
+        err.to_string().contains("durab"),
+        "expected the durability refusal, got: {err}"
+    );
+    let snap_value = handler
+        .dispatch(
+            "workspace.tasks_snapshot",
+            serde_json::json!({"session_id": "del-rpc"}),
+            Some("del-rpc"),
+        )
+        .await
+        .expect("tasks_snapshot after refusal");
+    let snap: TasksSnapshotResponse = serde_json::from_value(snap_value).expect("decode snapshot");
+    assert_eq!(
+        snap.scheduled_tasks.len(),
+        1,
+        "a refused delete must leave the loop scheduled"
+    );
+}
+/// Populate the real scheduler state; the production actor serves the RPC.
+async fn seed_scheduled_task(toolset: &FinalizedToolset, id: &str) {
+    let mut resources = toolset.resources.lock().await;
+    let state = resources.get_or_default::<State<SchedulerState>>();
+    let mut task = ScheduledTask::new(300, "check CI".into(), true, false);
+    task.id = id.into();
+    state.tasks.push(task);
+}
 /// `workspace.kill_task`: kills a running BG task and reports not_found for
 /// unknown ids; after kill the task leaves `tasks_snapshot`.
 #[tokio::test]

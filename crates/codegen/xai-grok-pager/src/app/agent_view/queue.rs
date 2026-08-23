@@ -1608,12 +1608,12 @@ mod watcher_tests {
     use crate::views::turn_status::Watchers;
     use crate::views::workflows::WorkflowRunSnapshot;
 
-    fn active_workflow(run_id: &str) -> WorkflowRunSnapshot {
+    fn workflow(run_id: &str, status: &str) -> WorkflowRunSnapshot {
         WorkflowRunSnapshot {
             run_id: run_id.to_owned(),
             name: "workflow".to_owned(),
             objective: "objective".to_owned(),
-            status: "active".to_owned(),
+            status: status.to_owned(),
             management_available: true,
             builtin: false,
             phases: Vec::new(),
@@ -1686,7 +1686,7 @@ mod watcher_tests {
     #[test]
     fn workflow_children_coalesce_into_one_workflow_watcher() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.workflow_runs.push(active_workflow("wf-1"));
+        agent.workflow_runs.push(workflow("wf-1", "active"));
         let mut child_a = test_fixtures::running_subagent_info("child-a");
         child_a.workflow_run_id = Some("wf-1".into());
         let mut child_b = test_fixtures::running_subagent_info("child-b");
@@ -1707,9 +1707,17 @@ mod watcher_tests {
     }
 
     #[test]
+    fn paused_workflows_are_not_running_watchers() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.workflow_runs.push(workflow("wf-1", "user_paused"));
+
+        assert_eq!(agent.watchers(), Watchers::default());
+    }
+
+    #[test]
     fn standalone_subagent_and_workflow_remain_distinct_watchers() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
-        agent.workflow_runs.push(active_workflow("wf-1"));
+        agent.workflow_runs.push(workflow("wf-1", "active"));
         let mut workflow_child = test_fixtures::running_subagent_info("workflow-child");
         workflow_child.workflow_run_id = Some("wf-1".into());
         agent

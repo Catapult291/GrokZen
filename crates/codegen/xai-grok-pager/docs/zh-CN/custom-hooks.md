@@ -182,7 +182,7 @@ Grok 会向每个钩子进程注入以下变量：
 1. 处理器自己的 `env` 映射。
 2. 当前进程环境（Grok 自身可见的环境）。
 
-如果两处都未设置某个引用，则按字面保留（例如 `${UNSET}` 仍是字面字符串）。运行时 `sh -c` 分支可能会在变量后来被设置时解析它；否则运行器会拒绝生成进程，并给出清晰的 “required env var(s) not set” 错误。
+如果两处都未设置某个引用，则会**按字面保留**（例如 `${UNSET}` 仍是字面字符串）。运行器注入的名称（`CLAUDE_PROJECT_DIR`、`GROK_WORKSPACE_ROOT`、`GROK_HOOK_EVENT`、`GROK_HOOK_NAME`、`GROK_SESSION_ID`）不会在加载时从 Grok 进程环境读取。Unix 的 `sh -c` 会从子进程环境展开它们；Windows PowerShell 会把 `$VAR` 改写为 `$env:VAR`；HTTP `url` 则在请求时替换它们。命令中剩余的未解析引用会以“required env var(s) not set”拒绝执行。
 
 对于 HTTP 钩子，`url` 还会在请求时（SSRF 验证前立即）再次展开，因此插件注入的变量（如 `${GROK_PLUGIN_ROOT}/check`）会根据插件实际路径解析。
 
@@ -241,6 +241,7 @@ POSIX 参数展开形式——`${VAR:-default}`、`${VAR-default}`、`${VAR:=x}`
 - **钩子没有运行？** → 在非 VS Code 系列按 `Ctrl+L`（或在任何地方运行 `/hooks`），查看它是否已加载并匹配。
 - **项目钩子被忽略？** → 先信任项目。
 - **找不到脚本？** → 检查路径是否相对于 `.json` 文件，以及脚本是否可执行（`chmod +x`）。
+- **出现 `The argument '/.claude/hooks/….ps1' to the -File parameter does not exist`？** → PowerShell 把 `$CLAUDE_PROJECT_DIR` 当成了空值。除非设置 `GROK_SHELL=cmd`，Grok 会将它改写为 `$env:CLAUDE_PROJECT_DIR`。
 - **看到错误？** → 检查 pager 日志（通常位于 tracing 窗格或 `~/.grok/logs`）。
 
 ## 更多示例

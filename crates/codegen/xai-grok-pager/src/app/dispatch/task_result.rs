@@ -521,7 +521,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
             http_status,
             prompt_id,
-        } => handle_prompt_response(app, agent_id, result, http_status, prompt_id),
+        } => {
+            let effects = handle_prompt_response(app, agent_id, result, http_status, prompt_id);
+            app.refresh_status_line_for(agent_id);
+            effects
+        }
         TaskResult::SendPromptNowFailed {
             agent_id,
             session_id,
@@ -1451,6 +1455,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 agent.session.available_commands_generation += 1;
                 super::super::acp_handler::refresh_workflow_run_capabilities(agent);
             }
+            vec![]
+        }
+        TaskResult::StatusLineCommandFinished { id, outcome } => {
+            app.on_status_line_command_finished(id, outcome);
             vec![]
         }
         TaskResult::AuthCopyFeedbackTimeout { generation } => {

@@ -43,7 +43,7 @@
 |---|----------|-------------|
 | 14 | [无头模式与脚本](14-headless-mode.md) | `grok-zh -p`、输出格式、CI/CD 集成和管道 |
 | 15 | [智能体模式与 IDE 集成](15-agent-mode.md) | ACP stdio 传输、WebSocket 中继和 SDK 集成 |
-| 16 | [子智能体与角色](16-subagents.md) | 并行子会话、智能体类型、角色和能力模式 |
+| 16 | [子智能体与角色](16-subagents.md) | 并行子会话、智能体类型、角色和工具访问模式 |
 | 17 | [会话管理](17-sessions.md) | 保存、加载、恢复、回退、压缩和会话持久化格式 |
 | 18 | [沙箱模式](18-sandbox.md) | 操作系统级文件系统和网络隔离配置 |
 | 19 | [计划模式](19-plan-mode.md) | 结构化规划、计划文件编辑以及编码前的审批 |
@@ -52,3 +52,4 @@
 | 22 | [权限与安全](22-permissions-and-safety.md) | 模式（always-approve、auto、ask）、规则、匹配、钩子和示例 |
 | 23 | [智能体面板](23-dashboard.md) | 本地会话和分支的集中概览 |
 | 24 | [使用量监控（外部 OpenTelemetry）](24-monitoring-usage.md) | 客户端 OTEL 导出 |
+| 25 | [状态栏](25-status-line.md) | 底部状态行：内置分段、命令脚本和标准输入 JSON 约定 |

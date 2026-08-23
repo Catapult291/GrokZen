@@ -48,6 +48,19 @@ pub(crate) const PROMPT: &str = "go";
 /// unambiguous sentinel word that we can `wait_for_text` on.
 pub(crate) const MOCK_RESPONSE_SENTINEL: &str = "MOCKRESPONSE";
 
+/// The sandbox's unified log (shell-written; forwarded pager entries land
+/// here too). No cross-process helper exists to reuse whole:
+/// `xai_grok_telemetry::unified_log::path()` resolves the calling process's
+/// own grok home and the file-name const is private, so this composes the
+/// sandbox grok home with the exported `LOG_DIR`.
+pub(crate) fn unified_log_path(content: &ContentController) -> PathBuf {
+    content
+        .sandbox()
+        .grok_home()
+        .join(xai_grok_telemetry::unified_log::LOG_DIR)
+        .join("unified.jsonl")
+}
+
 // ── Undo-tip e2e helpers ────────────────────────────────────────────────
 
 /// Suffix of the undo-tip banner, now "Input cleared · ctrl+z to undo" on all

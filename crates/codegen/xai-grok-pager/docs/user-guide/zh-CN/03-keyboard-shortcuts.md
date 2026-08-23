@@ -382,11 +382,17 @@ TUI 支持鼠标交互：
 选中文本：         中键或 Shift+Insert（Linux X11/XWayland PRIMARY）
 粘贴图像：         Alt+V（仅 Windows——截图/“复制图像”）
 全选：             Cmd+A（macOS，仅 Ghostty——参见下方说明）
+选择文本：         Shift+←/→（字符） · Alt+Shift+←/→（单词） ·
+                   Cmd+Shift+←/→（可视行） · Shift+Home/End（逻辑行） ·
+                   Shift+↑/↓（行）
+复制 / 剪切：      Cmd+C / Cmd+X（存在选区时；支持 Kitty 键盘协议的终端）
 离开：             Tab（返回回滚区）
 取消（运行中）：   Ctrl+C（空提示；非空草稿先清除）
 清除（空闲）：     800ms 内按 Esc Esc（非空提示）
 回退（空闲）：     800ms 内按 Esc Esc（空提示 + 有消息）
 ```
+
+存在选区时，输入字符、按 `Enter` 或粘贴会替换选区；删除和按词删除快捷键只删除选区；方向键会把选区收拢到对应边缘（按词/按行移动会从该边缘继续）；`Esc` 或 `Tab` 会取消高亮，同时仍执行各自的常规操作。请注意，`Shift+←/→` 只有在**提示框**获得焦点时才选择文本；回滚区获得焦点时，相同快捷键会在各轮之间跳转（参见上方“导航”）。
 
 > **Cmd+A 仅限 Ghostty。** Grok 的应用内 `Cmd+A` 处理器仅在检测到终端为 Ghostty 时连接。其他终端会在终端层吞掉 `Cmd+A`（Apple Terminal、默认 iTerm2），或在终端内应用自己的“全选”行为（Kitty、WezTerm）。在非 Ghostty 终端上，此绑定不执行任何操作，按键会落到终端的原生行为。
 >

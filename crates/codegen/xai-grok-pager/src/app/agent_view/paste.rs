@@ -1230,37 +1230,21 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn regression_question_modal_fullscreen_overcommit() {
-        use crate::appearance::{LayoutConfig, ScrollbarConfig};
+        use crate::views::agent::AgentViewLayoutParams;
         use ratatui::layout::Rect;
         let area = Rect::new(0, 0, 80, 25);
-        let reserved: u16 = 1 + 5 + 1 + 3;
+        let params = AgentViewLayoutParams {
+            area,
+            shortcuts_height: 1,
+            ..Default::default()
+        };
         let unclamped: u16 = area.height + 3 + 5;
         assert!(unclamped > area.height);
-        let clamped = unclamped.min(area.height.saturating_sub(reserved));
-        assert!(clamped + reserved <= area.height);
-        let layout_cfg = LayoutConfig::default();
-        let scrollbar_cfg = ScrollbarConfig::default();
-        let layout = AgentViewLayout::compute(
-            area,
-            &layout_cfg,
-            &scrollbar_cfg,
-            0,
-            clamped,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            1,
-            false,
-        );
+        let clamped = unclamped.min(AgentViewLayout::rows_available_for_prompt(params));
+        let layout = AgentViewLayout::compute(AgentViewLayoutParams {
+            prompt_height: clamped,
+            ..params
+        });
         assert!(layout.prompt.y + layout.prompt.height <= area.height);
     }
     /// Wiping a substantial main-prompt draft routes `Action::ShowUndoTip`:

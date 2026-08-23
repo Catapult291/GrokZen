@@ -17,7 +17,7 @@ mod enrichment;
 pub(super) mod lock;
 #[path = "manager/remedy.rs"]
 mod remedy;
-pub(crate) use remedy::{AuthRemedy, SilentRefresh};
+pub(crate) use remedy::{AuthRemedy, BoundedRefresh, SilentRefresh};
 #[path = "manager/sleep_gate.rs"]
 mod sleep_gate;
 
@@ -61,15 +61,70 @@ pub(crate) enum RefreshReason {
     ServerRejected,
 }
 
+/// Why [`AuthManager::try_use_disk_token`] — the single enforcement point
+/// for disk-token adoption — declined a disk token. Names the decision
+/// instead of collapsing every decline into a bare `None`, so callers can
+/// carry it into the structured log and tests can assert the exact guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DiskTokenDecline {
+    /// No token on disk for this scope (or `auth.json` was unreadable).
+    Missing,
+    /// The disk token is expired (buffer-inclusive, like every adopt path).
+    Expired,
+    /// The disk token was minted before the live in-memory one (beyond skew
+    /// tolerance): disk lagging memory (`update()` keeps a successful mint
+    /// in memory when its disk write fails), not a sibling rotation.
+    LaggingMemoryMint,
+    /// `ServerRejected` only: the disk key matches the rejected bearer, so
+    /// no sibling has refreshed yet.
+    SameKeyAsRejected,
+}
+
+impl DiskTokenDecline {
+    /// Stable name for structured-log payloads.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Expired => "expired",
+            Self::LaggingMemoryMint => "lagging_memory_mint",
+            Self::SameKeyAsRejected => "same_key_as_rejected",
+        }
+    }
+}
+
 /// Timeout for acquiring the advisory `auth.json.lock` file lock.
 /// Used by advisory (non-critical) lock sites: `flow.rs`, `enrichment.rs`,
 /// `recovery.rs`.
 pub(crate) const AUTH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(10);
 
 /// Lock timeout for `refresh_chain`, held across the IdP call to prevent
-/// refresh-token reuse. Must exceed the external-auth refresh budget
-/// (a single 7s run) so followers wait rather than retry.
-const REFRESH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(45);
+/// refresh-token reuse. Sized against the OIDC exchange that actually holds
+/// the flock: one refresh POST gets a 15s HTTP budget with up to two retries
+/// (`refresh_retry_policy` in `auth/oidc/protocol.rs`), plus discovery and
+/// JWKS fetches on a cold cache. A healthy single attempt fits with margin;
+/// a degraded IdP running the full retry ladder does not — followers then go
+/// transient at 25s + `LOCK_TIMEOUT_WAIT` instead of waiting the ladder out.
+/// Deliberate tradeoff: adopt-or-transient is the design, so a follower that
+/// cannot adopt a sibling's mint retries on its caller's backoff rather than
+/// pinning startup-path callers behind a slow leader (pre-fix: 45s waits).
+const REFRESH_LOCK_TIMEOUT: StdDuration = StdDuration::from_secs(25);
+
+/// Budget for [`AuthManager::refresh_chain_bounded`] at RPC-path call sites:
+/// covers one full healthy OIDC token attempt (15s HTTP budget) plus flock
+/// acquisition margin, while staying below `REFRESH_LOCK_TIMEOUT`.
+pub(crate) const BEST_EFFORT_REFRESH_TIMEOUT: StdDuration = StdDuration::from_secs(20);
+const _: () = assert!(
+    BEST_EFFORT_REFRESH_TIMEOUT.as_millis() < REFRESH_LOCK_TIMEOUT.as_millis(),
+    "an RPC-path bounded refresh must never wait out a full lock convoy"
+);
+// Defense-in-depth pin of the pager's default 30s startup connect gate
+// (30_000; not importable here): startup awaits are separately bounded well
+// below it, but this keeps the flock budget from silently regrowing past the
+// gate the field incident died on.
+const _: () = assert!(
+    REFRESH_LOCK_TIMEOUT.as_millis() + LOCK_TIMEOUT_WAIT.as_millis() < 30_000,
+    "one lock acquisition attempt plus LOCK_TIMEOUT_WAIT must fit the pager's default startup gate"
+);
 
 /// Long poll interval used by the proactive refresh task when no
 /// productive refresh is possible (see [`compute_proactive_sleep`]).
@@ -1055,25 +1110,52 @@ impl AuthManager {
 
     /// Accept a sibling-rotated disk token. On `ServerRejected`, the
     /// disk key must differ from in-memory (else no one refreshed).
+    ///
+    /// Single enforcement point for disk adoption: `try_adopt_disk_token`
+    /// (refresh chains) and `pick_up_sibling_token` (`auth()` / proactive
+    /// loop) both route here, so the guards and the shared `hot_swap`
+    /// cannot drift between the two paths.
     pub(crate) fn try_use_disk_token(
         &self,
         disk_auth: Option<&GrokAuth>,
         reason: RefreshReason,
-    ) -> Option<GrokAuth> {
-        let disk_auth = disk_auth?;
+    ) -> Result<GrokAuth, DiskTokenDecline> {
+        let Some(disk_auth) = disk_auth else {
+            return Err(DiskTokenDecline::Missing);
+        };
         if self.is_token_expired(disk_auth) {
-            return None;
+            return Err(DiskTokenDecline::Expired);
+        }
+        // A disk token minted before the live in-memory one is not a sibling
+        // rotation — it's disk lagging memory (`update()` keeps a successful
+        // mint in memory when its disk write fails). Adopting it would clobber
+        // the fresher credential; on `ServerRejected` it would restore the very
+        // bearer the caller is rejecting. Skew tolerance: on a shared/networked
+        // auth.json a sibling machine's clock can stamp a genuinely newer
+        // rotation slightly older, so fail toward adoption within the window —
+        // a wrong adopt self-corrects via 401 -> ServerRejected, a wrong mint
+        // burns the refresh-token family (60s matches PROVIDER_TOKEN_EXPIRY_SKEW).
+        const DISK_MINT_SKEW_TOLERANCE: Duration = Duration::seconds(60);
+        // `current_or_expired()`, not `current()`: adoption runs exactly when
+        // the live bearer needs a refresh — canonically inside the five-minute
+        // early-invalidation buffer, which `current()` hides. Reading through
+        // `current()` skipped this guard in precisely the window that routes
+        // callers here; a buffered bearer is still the newest local mint and
+        // must not be clobbered by a lagging disk token.
+        if let Some(current) = self.current_or_expired()
+            && disk_auth.create_time + DISK_MINT_SKEW_TOLERANCE < current.create_time
+        {
+            return Err(DiskTokenDecline::LaggingMemoryMint);
         }
         if reason == RefreshReason::ServerRejected {
             let current_key = self.inner.read().as_ref().map(|a| a.key.clone());
             if current_key.as_deref() == Some(&disk_auth.key) {
-                tracing::info!("auth: disk token same as rejected token, skipping");
-                return None;
+                return Err(DiskTokenDecline::SameKeyAsRejected);
             }
         }
         tracing::info!("auth: another process already refreshed, using disk token");
         self.hot_swap(disk_auth.clone());
-        Some(disk_auth.clone())
+        Ok(disk_auth.clone())
     }
 
     /// Re-read disk and try to adopt a sibling-written token, emitting
@@ -1089,7 +1171,30 @@ impl AuthManager {
         let prev = self
             .current_or_expired()
             .map(|a| bearer_suffix(&a.key).to_owned());
-        let refreshed = self.try_use_disk_token(disk_auth.as_ref(), reason)?;
+        let refreshed = match self.try_use_disk_token(disk_auth.as_ref(), reason) {
+            Ok(refreshed) => refreshed,
+            // `Missing` / `Expired` are the steady state at every
+            // refresh-chain callsite (usually there is no sibling token to
+            // adopt); only the two guard declines are decisions worth a
+            // structured-log line when reconstructing a rotation chain.
+            Err(
+                decline @ (DiskTokenDecline::LaggingMemoryMint
+                | DiskTokenDecline::SameKeyAsRejected),
+            ) => {
+                xai_grok_telemetry::unified_log::info(
+                    "auth: disk token declined",
+                    None,
+                    Some(serde_json::json!({
+                        "decline": decline.as_str(),
+                        "refresh_reason": format!("{reason:?}"),
+                        "prev_key_prefix": prev,
+                        "disk_key_prefix": disk_auth.as_ref().map(|a| bearer_suffix(&a.key)),
+                    })),
+                );
+                return None;
+            }
+            Err(_) => return None,
+        };
         let adopted = bearer_suffix(&refreshed.key);
         xai_grok_telemetry::unified_log::info(
             msg,
@@ -1674,6 +1779,21 @@ impl AuthManager {
             return Err(err);
         }
 
+        // 1c. Adopt a sibling's already-rotated token before contending the
+        //     flock: most convoy acquisitions are pure adoptions needing no
+        //     exclusivity, and skipping the flock is the cross-process win.
+        //     Runs under the in-process mutex (after steps 1/1b re-validated
+        //     memory and the verdict), so a stale disk snapshot can never
+        //     clobber a concurrent local mint. Same-key ServerRejected falls
+        //     through via `try_use_disk_token`'s key guard; the under-lock
+        //     adopt in `acquire_refresh_lock_or_adopt` remains the
+        //     authoritative last check.
+        if let Some(refreshed) =
+            self.try_adopt_disk_token(reason, "auth: refresh adopted sibling token pre-lock")
+        {
+            return Ok(refreshed);
+        }
+
         // 2. Acquire the exclusive file lock (or adopt a sibling token). The
         //    returned guard is held (via `file_lock` below) across the IdP call
         //    so only one participant ever spends a given refresh token.
@@ -2065,7 +2185,8 @@ impl AuthManager {
 
     /// Re-read auth.json from disk and update the in-memory cache (used by the
     /// refresh chains). Non-destructive: only updates in-memory if disk has a
-    /// different valid token (a sibling process wrote a fresher one).
+    /// different valid token that passes the shared adoption guards in
+    /// [`Self::try_use_disk_token`] (a sibling process wrote a fresher one).
     ///
     /// Returns `true` only when in-memory state was actually replaced, so
     /// callers can log adoption truthfully instead of inferring it from
@@ -2077,24 +2198,40 @@ impl AuthManager {
             Ok(map) => lookup_auth(&map, &self.scope),
             _ => None,
         };
-        if let Some(ref a) = auth
-            && !self.is_token_expired(a)
-            && self.is_different_token(a)
-        {
-            tracing::info!("auth: picked up sibling-written token from disk");
-            xai_grok_telemetry::unified_log::info(
-                "auth: pick_up_sibling_token adopted",
-                None,
-                Some(serde_json::json!({
-                    "adopted_key_prefix": bearer_suffix(&a.key),
-                    "expires_at": a.expires_at.map(|e| e.to_rfc3339()),
-                    "rt_prefix": a.refresh_token.as_deref().map(bearer_suffix),
-                })),
-            );
-            self.with_inner_write(|inner| *inner = Some(a.clone()));
-            return true;
+        // Same-key disk state is "nothing to adopt" under this caller's
+        // contract (return `true` only on an actual replacement), not a
+        // decline — filtered before the shared path so it never logs as one.
+        let Some(auth) = auth.filter(|a| self.is_different_token(a)) else {
+            return false;
+        };
+        // Shared enforcement point: expiry, the lagging-mint guard, and the
+        // `hot_swap` all live in `try_use_disk_token`, so this path can no
+        // longer replace a newer in-memory mint with an older disk token or
+        // bypass the sticky-verdict handling in the shared swap.
+        match self.try_use_disk_token(Some(&auth), RefreshReason::PreRequest) {
+            Ok(adopted) => {
+                xai_grok_telemetry::unified_log::info(
+                    "auth: pick_up_sibling_token adopted",
+                    None,
+                    Some(serde_json::json!({
+                        "adopted_key_prefix": bearer_suffix(&adopted.key),
+                        "expires_at": adopted.expires_at.map(|e| e.to_rfc3339()),
+                        "rt_prefix": adopted.refresh_token.as_deref().map(bearer_suffix),
+                    })),
+                );
+                true
+            }
+            Err(decline) => {
+                // `auth()` calls this per-request: a persistently lagging or
+                // expired disk token would spam unified_log from here, so
+                // declines carry their name at trace level only.
+                tracing::debug!(
+                    decline = decline.as_str(),
+                    "auth: sibling disk token declined"
+                );
+                false
+            }
         }
-        false
     }
 
     /// Check if a candidate auth has a different token than what's in memory.

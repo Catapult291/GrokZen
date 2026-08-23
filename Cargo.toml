@@ -58,6 +58,7 @@ members = [
     "crates/codegen/xai-grok-shell",
     "crates/codegen/xai-grok-shell-base",
     "crates/codegen/xai-grok-shell-session-support",
+    "crates/codegen/xai-grok-status-line",
     "crates/codegen/xai-grok-subagent-resolution",
     "crates/codegen/xai-grok-telemetry",
     "crates/codegen/xai-grok-test-support",
@@ -336,6 +337,7 @@ xai-grok-shared = { path = "crates/codegen/xai-grok-shared" }
 xai-grok-shell = { path = "crates/codegen/xai-grok-shell" }
 xai-grok-shell-base = { path = "crates/codegen/xai-grok-shell-base" }
 xai-grok-shell-session-support = { path = "crates/codegen/xai-grok-shell-session-support" }
+xai-grok-status-line = { path = "crates/codegen/xai-grok-status-line" }
 xai-grok-telemetry = { path = "crates/codegen/xai-grok-telemetry" }
 xai-grok-test-support = { path = "crates/codegen/xai-grok-test-support" }
 xai-grok-tools = { path = "crates/codegen/xai-grok-tools" }
@@ -404,6 +406,14 @@ panic = "unwind"
 inherits = "release-dist"
 # All settings now match the parent — this is an intentional alias.
 
+# Size-optimized profile for prod-admin-cli distribution builds. Cargo ignores
+# profiles in non-root manifests, so this lives here instead of the CLI crate.
+[profile.admin-cli-dist]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
 
 [profile.dev]
 panic = "abort"

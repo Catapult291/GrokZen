@@ -58,7 +58,24 @@ const DEFAULT_SCHEDULED_TASK_KEEP_AWAKE_MS: u64 =
 const MAX_SCHEDULED_TASK_KEEP_AWAKE_MS: u64 = 7 * 24 * 3_600_000; // 7 days
 const DEFAULT_PREVIEW_STATE_POLL_INTERVAL_MS: u64 = 5_000;
 /// Poll-interval floor; `0` would busy-loop the watcher against loopback.
-const MIN_PREVIEW_STATE_POLL_INTERVAL_MS: u64 = 100;
+/// Doubles as the gap floor between consecutive long-poll requests in
+/// `crate::preview_state`, so a proxy that ignores `?wait` can't be hot-looped.
+pub(crate) const MIN_PREVIEW_STATE_POLL_INTERVAL_MS: u64 = 100;
+/// Default preview-state long-poll hold; `0` disables long-polling entirely
+/// (the watcher keeps today's fixed-interval cadence).
+const DEFAULT_PREVIEW_STATE_WAIT_SECS: u64 = 0;
+/// Ceiling on the long-poll hold, mirroring the proxy's own `?wait` clamp
+/// (`xai-grok-preview-proxy` clamps held requests to 15s).
+const MAX_PREVIEW_STATE_WAIT_SECS: u64 = 15;
+/// Default preview-proxy discovery refresh passthrough; `0` means the
+/// supervisor omits `--discovery-refresh-ms` and the proxy uses its default.
+const DEFAULT_PREVIEW_DISCOVERY_REFRESH_MS: u64 = 0;
+/// Discovery-refresh floor, mirroring the proxy's own flag floor; anything
+/// lower would rescan `/proc/net/tcp` in a near-busy loop.
+const MIN_PREVIEW_DISCOVERY_REFRESH_MS: u64 = 100;
+/// Discovery-refresh ceiling: past 10s the preview-state document goes stale
+/// enough to defeat the reporter, so a seconds-for-ms typo is repaired.
+const MAX_PREVIEW_DISCOVERY_REFRESH_MS: u64 = 10_000;
 
 /// Tunable timing/threshold constants for the workspace tool server.
 #[derive(Debug, Clone)]
@@ -116,6 +133,18 @@ pub struct StatusConfig {
     /// Poll cadence (`GROK_WORKSPACE_PREVIEW_STATE_POLL_INTERVAL_MS`);
     /// floored by [`validate`](Self::validate).
     pub preview_state_poll_interval: Duration,
+    /// Preview-state long-poll hold (`GROK_WORKSPACE_PREVIEW_STATE_WAIT_SECS`):
+    /// once the proxy's document carries a `generation`, the watcher holds
+    /// `GET ?wait=<secs>&if_generation=<gen>` instead of fixed-interval
+    /// polling. Zero (the default) disables long-polling; clamped to the
+    /// proxy's own 15s hold ceiling by [`validate`](Self::validate).
+    pub preview_state_wait: Duration,
+    /// Preview-proxy discovery-scan cadence passthrough
+    /// (`GROK_WORKSPACE_PREVIEW_DISCOVERY_REFRESH_MS`), forwarded by the
+    /// supervisor as `--discovery-refresh-ms`. Zero (the default) omits the
+    /// flag, leaving the proxy default; nonzero is clamped into [100ms, 10s]
+    /// by [`validate`](Self::validate).
+    pub preview_discovery_refresh: Duration,
     /// Proxy loopback control port from the `--preview-control-port` CLI flag
     /// (set by `workspace_server`, not env); `None` ⇒ the proxy default.
     pub preview_control_port: Option<u16>,
@@ -161,6 +190,8 @@ impl Default for StatusConfig {
             preview_state_poll_interval: Duration::from_millis(
                 DEFAULT_PREVIEW_STATE_POLL_INTERVAL_MS,
             ),
+            preview_state_wait: Duration::from_secs(DEFAULT_PREVIEW_STATE_WAIT_SECS),
+            preview_discovery_refresh: Duration::from_millis(DEFAULT_PREVIEW_DISCOVERY_REFRESH_MS),
             preview_control_port: None,
             session_restored: false,
             revive_script_configured: false,
@@ -234,6 +265,14 @@ impl StatusConfig {
                 "GROK_WORKSPACE_PREVIEW_STATE_POLL_INTERVAL_MS",
                 defaults.preview_state_poll_interval,
             ),
+            preview_state_wait: secs_or(
+                "GROK_WORKSPACE_PREVIEW_STATE_WAIT_SECS",
+                defaults.preview_state_wait,
+            ),
+            preview_discovery_refresh: ms_or(
+                "GROK_WORKSPACE_PREVIEW_DISCOVERY_REFRESH_MS",
+                defaults.preview_discovery_refresh,
+            ),
             preview_control_port: defaults.preview_control_port,
             session_restored: std::env::var("GROK_SESSION_RESTORED").as_deref() == Ok("true"),
             revive_script_configured: std::env::var("GROK_REVIVE_SCRIPT_CONFIGURED").as_deref()
@@ -281,6 +320,13 @@ impl StatusConfig {
         } else {
             Duration::ZERO
         }
+    }
+
+    /// The `--discovery-refresh-ms` value the supervisor forwards to the
+    /// proxy: `None` when the passthrough is off (zero), which omits the flag.
+    pub fn preview_discovery_refresh_ms(&self) -> Option<u64> {
+        let ms = self.preview_discovery_refresh.as_millis() as u64;
+        (ms != 0).then_some(ms)
     }
 
     /// Warn on (and, where load-bearing, repair) inconsistent values.
@@ -353,6 +399,31 @@ impl StatusConfig {
                 "GROK_WORKSPACE preview-state poll interval below floor; floored"
             );
             self.preview_state_poll_interval = min_poll;
+        }
+        let wait_cap = Duration::from_secs(MAX_PREVIEW_STATE_WAIT_SECS);
+        // Zero stays zero: it is the documented long-poll kill switch.
+        if self.preview_state_wait > wait_cap {
+            tracing::warn!(
+                wait = ?self.preview_state_wait,
+                clamped_wait = ?wait_cap,
+                "GROK_WORKSPACE preview-state wait above the proxy's hold ceiling; clamped"
+            );
+            self.preview_state_wait = wait_cap;
+        }
+        // Zero stays zero: it means "omit the flag", not a cadence.
+        if self.preview_discovery_refresh > Duration::ZERO {
+            let refresh = self.preview_discovery_refresh.clamp(
+                Duration::from_millis(MIN_PREVIEW_DISCOVERY_REFRESH_MS),
+                Duration::from_millis(MAX_PREVIEW_DISCOVERY_REFRESH_MS),
+            );
+            if refresh != self.preview_discovery_refresh {
+                tracing::warn!(
+                    refresh = ?self.preview_discovery_refresh,
+                    clamped_refresh = ?refresh,
+                    "GROK_WORKSPACE preview discovery refresh out of range; clamped to 100ms..=10s"
+                );
+                self.preview_discovery_refresh = refresh;
+            }
         }
     }
 }
@@ -458,6 +529,9 @@ mod tests {
         );
         assert!(!cfg.preview_state_reporter_enabled);
         assert_eq!(cfg.preview_state_poll_interval, Duration::from_secs(5));
+        assert_eq!(cfg.preview_state_wait, Duration::ZERO);
+        assert_eq!(cfg.preview_discovery_refresh, Duration::ZERO);
+        assert_eq!(cfg.preview_discovery_refresh_ms(), None);
         assert!(!cfg.session_restored);
         assert!(!cfg.revive_script_configured);
         assert!(!cfg.resume_nudge_disabled);
@@ -493,6 +567,90 @@ mod tests {
         unsafe { std::env::remove_var(interval_var) };
         let cfg = StatusConfig::from_env();
         assert!(!cfg.preview_state_reporter_enabled);
+    }
+
+    #[test]
+    fn preview_state_wait_env_parses_and_clamps_to_the_proxy_hold_ceiling() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "GROK_WORKSPACE_PREVIEW_STATE_WAIT_SECS";
+
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            StatusConfig::from_env().preview_state_wait,
+            Duration::ZERO,
+            "unset ⇒ long-poll disabled"
+        );
+
+        unsafe { std::env::set_var(var, "10") };
+        assert_eq!(
+            StatusConfig::from_env().preview_state_wait,
+            Duration::from_secs(10)
+        );
+
+        unsafe { std::env::set_var(var, "60") };
+        assert_eq!(
+            StatusConfig::from_env().preview_state_wait,
+            Duration::from_secs(MAX_PREVIEW_STATE_WAIT_SECS),
+            "the proxy clamps ?wait to 15s; a larger value only inflates the client timeout"
+        );
+
+        unsafe { std::env::set_var(var, "not-a-number") };
+        assert_eq!(
+            StatusConfig::from_env().preview_state_wait,
+            Duration::ZERO,
+            "unparseable falls back to the disabled default"
+        );
+
+        unsafe { std::env::remove_var(var) };
+    }
+
+    #[test]
+    fn preview_discovery_refresh_env_parses_floors_and_clamps() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "GROK_WORKSPACE_PREVIEW_DISCOVERY_REFRESH_MS";
+
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(
+            StatusConfig::from_env().preview_discovery_refresh_ms(),
+            None,
+            "unset ⇒ the supervisor omits --discovery-refresh-ms"
+        );
+
+        unsafe { std::env::set_var(var, "0") };
+        assert_eq!(
+            StatusConfig::from_env().preview_discovery_refresh_ms(),
+            None,
+            "explicit zero is the documented omit switch"
+        );
+
+        unsafe { std::env::set_var(var, "500") };
+        assert_eq!(
+            StatusConfig::from_env().preview_discovery_refresh_ms(),
+            Some(500)
+        );
+
+        unsafe { std::env::set_var(var, "50") };
+        assert_eq!(
+            StatusConfig::from_env().preview_discovery_refresh_ms(),
+            Some(MIN_PREVIEW_DISCOVERY_REFRESH_MS),
+            "sub-floor values would near-busy-loop the proxy's /proc scan"
+        );
+
+        unsafe { std::env::set_var(var, "60000") };
+        assert_eq!(
+            StatusConfig::from_env().preview_discovery_refresh_ms(),
+            Some(MAX_PREVIEW_DISCOVERY_REFRESH_MS),
+            "a seconds-for-ms typo is repaired to the ceiling"
+        );
+
+        unsafe { std::env::set_var(var, "abc") };
+        assert_eq!(
+            StatusConfig::from_env().preview_discovery_refresh_ms(),
+            None,
+            "unparseable falls back to the omit default"
+        );
+
+        unsafe { std::env::remove_var(var) };
     }
 
     /// `parse_or` returns the default when the variable is unset. Uses a
@@ -608,6 +766,8 @@ mod tests {
             "GROK_WORKSPACE_RPC_ACTIVITY_WINDOW_MS",
             "GROK_WORKSPACE_PRESENCE_KEEPALIVE_ENABLED",
             "GROK_WORKSPACE_PRESENCE_ACTIVITY_WINDOW_MS",
+            "GROK_WORKSPACE_PREVIEW_STATE_WAIT_SECS",
+            "GROK_WORKSPACE_PREVIEW_DISCOVERY_REFRESH_MS",
             "GROK_SESSION_RESTORED",
             "GROK_REVIVE_SCRIPT_CONFIGURED",
             "GROK_RESUME_NUDGE_DISABLED",
@@ -641,6 +801,11 @@ mod tests {
         assert_eq!(
             cfg.presence_activity_window,
             default.presence_activity_window
+        );
+        assert_eq!(cfg.preview_state_wait, default.preview_state_wait);
+        assert_eq!(
+            cfg.preview_discovery_refresh,
+            default.preview_discovery_refresh
         );
         assert_eq!(cfg.session_restored, default.session_restored);
         assert_eq!(
