@@ -32,11 +32,11 @@
 
 正式 Tag 工作流会为 ZIP 与 `.sha256` 自动生成 GitHub Actions 构建来源证明。下载后可用
 GitHub CLI 核对不可变 Release、资产和构建工作流；以下命令已使用当前仓库
-`JoyElliot/grok-build-Chinese`；以下命令以待发布的 `1.0.3` 为例，发布后执行：
+`JoyElliot/grok-build-Chinese`；以下命令以 `1.0.5` 为例，发布后执行：
 
 ```powershell
 $repo = 'JoyElliot/grok-build-Chinese'
-$version = '1.0.3'
+$version = '1.0.5'
 $tag = "v$version"
 $zip = ".\grok-zh-$version-windows-x86_64-gnu.zip"
 $assets = @($zip, "$zip.sha256")
