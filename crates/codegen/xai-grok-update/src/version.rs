@@ -502,8 +502,28 @@ pub use xai_grok_version::installed as get_installed_grok_version;
 pub fn installed_on_disk_version() -> Option<String> {
     #[cfg(unix)]
     {
-        let app = xai_grok_shell::util::grok_home::grok_application();
+        let app = if cfg!(feature = "community-build") {
+            xai_grok_shell::util::grok_home::resolve_grok_home()?
+                .join("bin")
+                .join(xai_grok_product::CLI_NAME)
+        } else {
+            xai_grok_shell::util::grok_home::grok_application()
+        };
         let target = std::fs::read_link(&app).ok()?;
+        if cfg!(feature = "community-build") {
+            if target.is_absolute()
+                || target.parent()? != std::path::Path::new("../grok-zh-downloads")
+            {
+                return None;
+            }
+            let resolved = app.parent()?.join(&target);
+            let metadata = std::fs::symlink_metadata(resolved).ok()?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return None;
+            }
+            return version_from_community_macos_binary_name(target.file_name()?.to_str()?);
+        }
+
         // metadata() follows the symlink: Err means the target is gone
         // (dangling link) and the version it names is not actually on disk.
         std::fs::metadata(&app).ok()?;
@@ -521,23 +541,51 @@ pub fn installed_on_disk_version() -> Option<String> {
 /// pre-releases: `grok-0.1.150-alpha.1-linux-x86_64` → `0.1.150-alpha.1`)
 /// and the npm layout without a platform suffix (`grok-0.1.150`,
 /// `grok-0.1.150-alpha.1`): everything between the `{bin_prefix}-` prefix
-/// and the first platform-OS component is the version, validated as semver
+/// and a recognized platform suffix is the version, validated as semver
 /// so unknown layouts (`grok-latest`, `grok-pager-*` when `bin_prefix` is
 /// `grok`) return `None` instead of garbage.
 ///
 /// Shared by the disk-version probe above and `cleanup_old_downloads` in
 /// `auto_update` — keep it the single place that understands this naming.
 pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -> Option<String> {
-    const PLATFORM_OS: &[&str] = &["macos", "linux", "darwin", "windows"];
     let suffix = name.strip_prefix(bin_prefix)?.strip_prefix('-')?;
-    let parts: Vec<&str> = suffix.split('-').collect();
-    let platform_start = parts
+    const PLATFORM_SUFFIXES: &[&str] = &[
+        "-macos-aarch64",
+        "-macos-x86_64",
+        "-darwin-arm64",
+        "-darwin-aarch64",
+        "-darwin-x86_64",
+        "-linux-aarch64",
+        "-linux-x86_64",
+        "-windows-aarch64.exe",
+        "-windows-x86_64.exe",
+        "-windows-aarch64",
+        "-windows-x86_64",
+    ];
+    let version = PLATFORM_SUFFIXES
         .iter()
-        .position(|p| PLATFORM_OS.contains(p))
-        .unwrap_or(parts.len());
-    let ver_str = parts[..platform_start].join("-");
-    Version::parse(&ver_str).ok()?;
-    Some(ver_str)
+        .find_map(|platform| suffix.strip_suffix(platform))
+        .unwrap_or(suffix);
+    Version::parse(version).ok()?;
+    Some(version.to_string())
+}
+
+pub(crate) fn version_from_community_macos_binary_name(name: &str) -> Option<String> {
+    let suffix = name.strip_prefix("grok-zh-")?;
+    let (version, nonce) = suffix.rsplit_once("-macos-aarch64.")?;
+    let nonce = nonce.strip_suffix(".installed")?;
+    if nonce.is_empty()
+        || !nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return None;
+    }
+    let parsed = Version::parse(version).ok()?;
+    if !parsed.build.is_empty() || parsed.to_string() != version {
+        return None;
+    }
+    Some(version.to_string())
 }
 
 /// Fetch the stable channel pointer for caching alongside the version.
@@ -695,6 +743,8 @@ mod tests {
             // would make an alpha install masquerade as the release and
             // mask alpha → stable updates.
             ("grok-0.1.220-alpha.4-linux-x86_64", Some("0.1.220-alpha.4")),
+            ("grok-1.0.7-linux-macos-aarch64", Some("1.0.7-linux")),
+            ("grok-1.0.7-macos-macos-aarch64", Some("1.0.7-macos")),
             ("grok-0.1.220-alpha.4", Some("0.1.220-alpha.4")), // npm layout
             ("grok-pager-0.1.5-darwin-arm64", None),           // "pager" is not a version
             ("grok-garbage-darwin-arm64", None),               // unparseable version
@@ -719,6 +769,28 @@ mod tests {
                 .as_deref(),
             Some("0.1.5")
         );
+
+        assert_eq!(
+            version_from_community_macos_binary_name("grok-zh-1.0.7-macos-aarch64.42-0.installed")
+                .as_deref(),
+            Some("1.0.7")
+        );
+        assert_eq!(
+            version_from_community_macos_binary_name(
+                "grok-zh-1.0.8-linux.macos-alpha.2-macos-aarch64.7-3.installed"
+            )
+            .as_deref(),
+            Some("1.0.8-linux.macos-alpha.2")
+        );
+        for invalid in [
+            "grok-zh-1.0.7",
+            "grok-zh-1.0.7-macos-aarch64.installed",
+            "grok-zh-1.0.7-macos-aarch64.bad/name.installed",
+            "grok-zh-1.0.7-macos-aarch64.42-0.candidate",
+            "grok-zh-1.0.7+local-macos-aarch64.42-0.installed",
+        ] {
+            assert_eq!(version_from_community_macos_binary_name(invalid), None);
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────

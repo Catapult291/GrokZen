@@ -1,4 +1,4 @@
-# 在 GitHub 托管的 Apple Silicon runner 上构建未签名的 grok-zh 预览版。
+# 在 GitHub 托管的 Apple Silicon runner 上构建未签名的 grok-zh。
 # 正式 Release 由唯一的发布工作流统一编排；本工作流只上传 Actions Artifact。
 name: Build macOS ARM
 
@@ -15,19 +15,40 @@ on:
         description: 可选的内嵌版本（默认为 CI 构建编号）
         required: false
         type: string
+  workflow_call:
+    inputs:
+      version:
+        description: 正式 Release 使用的严格 SemVer
+        required: true
+        type: string
+      release_build:
+        description: 标记这是统一 Release 工作流调用的正式构建
+        required: true
+        type: boolean
+    outputs:
+      package_name:
+        value: ${{ jobs.build-macos-arm.outputs.package_name }}
+      archive_name:
+        value: ${{ jobs.build-macos-arm.outputs.archive_name }}
+      artifact_name:
+        value: ${{ jobs.build-macos-arm.outputs.artifact_name }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: macos-arm-preview-${{ github.event.pull_request.number || github.ref }}
+  group: macos-arm-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   build-macos-arm:
-    name: macOS ARM64 预览版
+    name: ${{ inputs.release_build && 'macOS ARM64 Release' || 'macOS ARM64 预览版' }}
     runs-on: macos-15
     timeout-minutes: 180
+    outputs:
+      package_name: ${{ steps.preview.outputs.package_name }}
+      archive_name: ${{ steps.preview.outputs.archive_name }}
+      artifact_name: ${{ steps.preview.outputs.artifact_name }}
     env:
       CARGO_BUILD_JOBS: "3"
       CARGO_CACHE_SCHEMA: macos-arm-v1
@@ -43,7 +64,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: 选择预览版本
+      - name: 选择构建版本
         id: preview
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
@@ -79,6 +100,7 @@ jobs:
           {
             echo "package_name=${package_name}"
             echo "archive_name=${archive_name}"
+            echo "artifact_name=${package_name}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: 确认 Apple Silicon runner
@@ -161,7 +183,7 @@ jobs:
           cargo fetch --locked --target "${TARGET}"
           cargo test --frozen -j "${CARGO_BUILD_JOBS}" -p xai-grok-locale
 
-      - name: 构建 macOS ARM64 预览版
+      - name: 构建 macOS ARM64
         run: |
           set -euo pipefail
           cargo build --frozen -j "${CARGO_BUILD_JOBS}" \
@@ -170,7 +192,9 @@ jobs:
             --profile release-dist \
             --features release-dist
 
-      - name: 打包并验证未签名预览版
+      - name: 打包并验证未签名构建
+        env:
+          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
         run: |
           set -euo pipefail
           dist="${GITHUB_WORKSPACE}/dist"
@@ -190,6 +214,8 @@ jobs:
             "${package}/THIRD-PARTY-NOTICES-xai-grok-tools.md"
           cp third_party/NOTICE "${package}/NOTICE-third-party.txt"
           cp packaging/macos/INSTALL-MACOS.md "${package}/INSTALL-MACOS.md"
+          cp packaging/macos/Install-GrokZh.sh "${package}/Install-GrokZh.sh"
+          chmod 0755 "${package}/Install-GrokZh.sh"
 
           binary_info="$(file "${package}/grok-zh")"
           binary_archs="$(lipo -archs "${package}/grok-zh")"
@@ -207,8 +233,13 @@ jobs:
           cargo_info="$(cargo --version)"
           dotslash_info="$(dotslash --version | head -n 1)"
           protoc_info="$("${PROTOC}" --version | head -n 1)"
+          if [[ "${IS_RELEASE_BUILD}" == "true" ]]; then
+            build_label="GitHub Release"
+          else
+            build_label="CI 预览版"
+          fi
           cat > "${package}/BUILD-INFO.txt" <<EOF
-          Grok Build 简体中文 macOS ARM64 CI 预览版
+          Grok Build 简体中文 macOS ARM64 ${build_label}
           Product: grok-build-zh
           License: Apache-2.0
           Version: ${GROK_VERSION}
@@ -225,8 +256,9 @@ jobs:
           Architectures: ${binary_archs}
           Code signing: unsigned
           Apple notarization: not submitted
-          Executable smoke-tested by CI: true (--version only)
-          Default command: grok-zh
+          Binary version smoke-tested by CI: true
+          Installer and managed links smoke-tested by CI: true
+          Default commands after installation: grok-zh, agent-zh
           EOF
           sed -i '' 's/^          //' "${package}/BUILD-INFO.txt"
 
@@ -234,6 +266,7 @@ jobs:
             grok-zh
             BUILD-INFO.txt
             INSTALL-MACOS.md
+            Install-GrokZh.sh
             LICENSE-grok-build.txt
             NOTICE-third-party.txt
             SOURCE_REV
@@ -253,7 +286,7 @@ jobs:
           )
 
           archive="${dist}/${ARCHIVE_NAME}"
-          COPYFILE_DISABLE=1 tar -C "${package}" -czf "${archive}" .
+          COPYFILE_DISABLE=1 tar --format=ustar -C "${package}" -czf "${archive}" .
           (
             cd "${dist}"
             shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
@@ -276,13 +309,37 @@ jobs:
             echo "::error::解包后的 grok-zh 版本冒烟失败：${verify_version_output}"
             exit 1
           fi
+
+          install_home="${RUNNER_TEMP}/grok-zh-install-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          if [[ -e "${install_home}" ]]; then
+            echo "::error::安装器验证目录已经存在：${install_home}"
+            exit 1
+          fi
+          GROK_HOME="${install_home}" "${verify_root}/Install-GrokZh.sh"
+          bin_dir="${install_home}/bin"
+          first_target="$(readlink "${bin_dir}/grok-zh")"
+          [[ "${first_target}" == ../grok-zh-downloads/grok-zh-*-macos-aarch64.*.installed ]]
+          [[ "$(readlink "${bin_dir}/agent-zh")" == "grok-zh" ]]
+          [[ ! -e "${bin_dir}/grok" && ! -L "${bin_dir}/grok" ]]
+          [[ ! -e "${bin_dir}/agent" && ! -L "${bin_dir}/agent" ]]
+          installed_version="$("${bin_dir}/grok-zh" --version | head -n 1)"
+          [[ "${installed_version}" == "grok-zh ${GROK_VERSION} ("* ]]
+
+          GROK_HOME="${install_home}" "${verify_root}/Install-GrokZh.sh" --with-compat-aliases
+          second_target="$(readlink "${bin_dir}/grok-zh")"
+          [[ "${second_target}" == ../grok-zh-downloads/grok-zh-*-macos-aarch64.*.installed ]]
+          [[ "${second_target}" != "${first_target}" ]]
+          [[ -f "${bin_dir}/${first_target}" ]]
+          [[ -f "${bin_dir}/${second_target}" ]]
+          alias_version="$("${bin_dir}/grok" --version | head -n 1)"
+          [[ "${alias_version}" == "grok-zh ${GROK_VERSION} ("* ]]
           ls -lh "${archive}" "${archive}.sha256"
 
-      - name: 上传 macOS ARM64 预览版
+      - name: 上传 macOS ARM64 构建
         id: preview_artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ${{ steps.preview.outputs.package_name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ steps.preview.outputs.artifact_name }}
           path: |
             dist/${{ steps.preview.outputs.archive_name }}
             dist/${{ steps.preview.outputs.archive_name }}.sha256
@@ -291,9 +348,18 @@ jobs:
           retention-days: 14
 
       - name: 在摘要中发布制品详情
+        env:
+          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
         run: |
+          if [[ "${IS_RELEASE_BUILD}" == "true" ]]; then
+            summary_title="macOS ARM64 Release 构建"
+            usage_note="未经过 Apple Developer ID 签名或公证；发布时由统一 Release 工作流校验并设为不可变。"
+          else
+            summary_title="macOS ARM64 预览版"
+            usage_note="未经过 Apple Developer ID 签名或公证，仅用于预览测试。"
+          fi
           cat >> "${GITHUB_STEP_SUMMARY}" <<EOF
-          ## macOS ARM64 预览版
+          ## ${summary_title}
 
           - 版本：\`${GROK_VERSION}\`
           - 制品：[${PACKAGE_NAME}](${{ steps.preview_artifact.outputs.artifact-url }})
@@ -301,8 +367,8 @@ jobs:
           - 目标：\`${TARGET}\`
           - 软件包外层校验：\`${ARCHIVE_NAME}.sha256\`
           - 软件包内层校验：\`SHA256SUMS.txt\`
-          - 已在 Apple Silicon runner 上执行 \`grok-zh --version\`。
-          - 未经过 Apple Developer ID 签名或公证，仅用于预览测试。
+          - 已在 Apple Silicon runner 上执行二次安装、入口链接与 \`grok-zh --version\` 验证。
+          - ${usage_note}
           EOF
 
       - name: 保存 Cargo macOS release 缓存

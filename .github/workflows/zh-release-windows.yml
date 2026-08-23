@@ -6,19 +6,25 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 concurrency:
-  group: zh-release-${{ github.ref_name }}
+  group: zh-release-publisher
   cancel-in-progress: false
 
 jobs:
   windows-x64-gnu:
-    name: Windows x64 GNU 发布
+    name: Windows x64 GNU 构建
     runs-on: windows-2022
     timeout-minutes: 180
+    outputs:
+      release_tag: ${{ steps.release_meta.outputs.release_tag }}
+      grok_version: ${{ steps.release_meta.outputs.grok_version }}
+      zip_name: ${{ steps.release_meta.outputs.zip_name }}
+      is_prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
+      include_macos: ${{ steps.release_meta.outputs.include_macos }}
+      windows_artifact_name: ${{ steps.release_meta.outputs.windows_artifact_name }}
+      notes_artifact_name: ${{ steps.release_meta.outputs.notes_artifact_name }}
     env:
       CARGO_BUILD_JOBS: "4"
       CARGO_INCREMENTAL: "0"
@@ -35,6 +41,7 @@ jobs:
           fetch-depth: 0
 
       - name: 验证标签、版本与发布冲突
+        id: release_meta
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -44,6 +51,12 @@ jobs:
             throw "Release Tag 必须是严格三段 vA.B.C 或三段预发布格式，且不得含 build metadata：$tag"
           }
           $version = $matches.version
+          if ($version.Length -gt 64) {
+            throw "Release 版本长度不得超过 64 个字符：$version"
+          }
+          [uint64]$major = $matches['major']
+          [uint64]$minor = $matches['minor']
+          [uint64]$patch = $matches['patch']
           $tagBaseVersion = ($version -split '-', 2)[0]
           foreach ($number in @($matches['major'], $matches['minor'], $matches['patch'])) {
             [uint64]$parsedNumber = 0
@@ -103,11 +116,30 @@ jobs:
             throw "Release $tag 已存在；不可变发布不得覆盖。"
           }
           $packageName = "grok-zh-$version-windows-x86_64-gnu"
+          $zipName = "$packageName.zip"
+          $includeMacos = $major -gt 1 -or
+            ($major -eq 1 -and $minor -gt 0) -or
+            ($major -eq 1 -and $minor -eq 0 -and $patch -ge 7)
+          $isPrerelease = $version.Contains('-').ToString().ToLowerInvariant()
+          $windowsArtifactName = "grok-zh-windows-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $notesArtifactName = "grok-zh-release-notes-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           "RELEASE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "GROK_VERSION=$version" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "PACKAGE_NAME=$packageName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
-          "IS_PRERELEASE=$($version.Contains('-').ToString().ToLowerInvariant())" |
+          "ZIP_NAME=$zipName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "IS_PRERELEASE=$isPrerelease" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          @{
+            release_tag = $tag
+            grok_version = $version
+            zip_name = $zipName
+            is_prerelease = $isPrerelease
+            include_macos = $includeMacos.ToString().ToLowerInvariant()
+            windows_artifact_name = $windowsArtifactName
+            notes_artifact_name = $notesArtifactName
+          }.GetEnumerator() | ForEach-Object {
+            "$($_.Key)=$($_.Value)" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
+          }
 
       - name: 预生成并验证中文更新日志
         shell: pwsh
@@ -125,6 +157,15 @@ jobs:
           "RELEASE_NOTES_PATH=$notes" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "## $env:GROK_VERSION 更新日志" | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           Get-Content -LiteralPath $notes | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - name: 上传 Release 更新日志
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.release_meta.outputs.notes_artifact_name }}
+          path: ${{ env.RELEASE_NOTES_PATH }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
       - name: 配置固定版本的 Rust、MinGW 和 protoc
         shell: pwsh
@@ -303,28 +344,14 @@ jobs:
           foreach ($licenseName in @('COPYING', 'LICENSE-MIT', 'UNLICENSE')) {
             $license = Get-ChildItem $rgExtract -Filter $licenseName -Recurse -File |
               Select-Object -First 1
-            if ($license) {
-              Copy-Item $license.FullName $rgLicenseDir
+            if (!$license) {
+              throw "下载的 ripgrep 压缩包缺少许可证文件：$licenseName"
             }
+            Copy-Item $license.FullName $rgLicenseDir
           }
           Copy-Item 'THIRD-PARTY-NOTICES' $projectNoticeDir
           Copy-Item 'crates\codegen\xai-grok-tools\THIRD_PARTY_NOTICES.md' $projectNoticeDir
           Copy-Item 'third_party\NOTICE' $projectNoticeDir
-
-          $manifestNames = @(
-            'grok-zh.exe',
-            'agent-zh.cmd',
-            'rg.exe',
-            '一键安装.cmd',
-            '[可选]替换原始启动方式.cmd',
-            'Install-GrokZh.ps1',
-            'INSTALL-WINDOWS.md'
-          )
-          $manifest = foreach ($name in $manifestNames) {
-            $hash = (Get-FileHash -LiteralPath (Join-Path $package $name) -Algorithm SHA256).Hash
-            "$hash  $name"
-          }
-          $manifest | Set-Content (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
 
           $signature = (Get-AuthenticodeSignature $packageExe).Status
           $pe = (& 'C:\mingw64\bin\objdump.exe' -f $packageExe |
@@ -348,6 +375,29 @@ jobs:
           Default commands after installation: grok-zh, agent-zh
           "@.Trim() | Set-Content (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
 
+          $manifestNames = @(
+            'grok-zh.exe',
+            'agent-zh.cmd',
+            'rg.exe',
+            '一键安装.cmd',
+            '[可选]替换原始启动方式.cmd',
+            'Install-GrokZh.ps1',
+            'INSTALL-WINDOWS.md',
+            'LICENSE-grok-build.txt',
+            'BUILD-INFO.txt',
+            'licenses/ripgrep/COPYING',
+            'licenses/ripgrep/LICENSE-MIT',
+            'licenses/ripgrep/UNLICENSE',
+            'licenses/project/THIRD-PARTY-NOTICES',
+            'licenses/project/THIRD_PARTY_NOTICES.md',
+            'licenses/project/NOTICE'
+          )
+          $manifest = foreach ($name in $manifestNames) {
+            $hash = (Get-FileHash -LiteralPath (Join-Path $package $name) -Algorithm SHA256).Hash
+            "$hash  $name"
+          }
+          $manifest | Set-Content (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
+
           if (Get-ChildItem $package -Filter '*.zip' -Recurse -File) {
             throw '安装包目录不得包含嵌套 ZIP。'
           }
@@ -370,7 +420,15 @@ jobs:
             '一键安装.cmd',
             '[可选]替换原始启动方式.cmd',
             'Install-GrokZh.ps1',
-            'INSTALL-WINDOWS.md'
+            'INSTALL-WINDOWS.md',
+            'LICENSE-grok-build.txt',
+            'BUILD-INFO.txt',
+            'licenses/ripgrep/COPYING',
+            'licenses/ripgrep/LICENSE-MIT',
+            'licenses/ripgrep/UNLICENSE',
+            'licenses/project/THIRD-PARTY-NOTICES',
+            'licenses/project/THIRD_PARTY_NOTICES.md',
+            'licenses/project/NOTICE'
           )
           $manifestPath = Join-Path $verifyRoot 'SHA256SUMS.txt'
           if (!(Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
@@ -387,15 +445,18 @@ jobs:
           foreach ($rawLine in (Get-Content -LiteralPath $manifestPath -Encoding UTF8)) {
             $lineNumber++
             $line = $rawLine.TrimStart([char]0xFEFF)
-            $match = [regex]::Match($line, '^(?<hash>[0-9A-Fa-f]{64})  (?<name>[^\\/]+)$')
+            $match = [regex]::Match($line, '^(?<hash>[0-9A-Fa-f]{64})  (?<name>[^\\]+)$')
             if (!$match.Success) {
               throw "SHA256SUMS.txt 第 $lineNumber 行格式无效。"
             }
             $name = $match.Groups['name'].Value
             $isAscii = $name -cmatch '^[\x00-\x7F]+$'
+            $pathParts = $name.Split('/')
             if ($name.Trim() -ne $name -or
+                $name.StartsWith('/') -or
                 $name.Contains(':') -or
-                $name -in @('.', '..') -or
+                $pathParts.Count -eq 0 -or
+                ($pathParts | Where-Object { $_ -in @('', '.', '..') }).Count -ne 0 -or
                 $required -cnotcontains $name -or
                 (!$isAscii -and $allowedUnicodeNames -cnotcontains $name)) {
               throw "SHA256SUMS.txt 包含不安全或未批准的文件名：$name"
@@ -423,6 +484,18 @@ jobs:
               throw "Release ZIP 清单缺少必需文件：$name"
             }
           }
+          $expectedFiles = @($required + 'SHA256SUMS.txt')
+          $actualFiles = @(Get-ChildItem -LiteralPath $verifyRoot -Recurse -File | ForEach-Object {
+            [IO.Path]::GetRelativePath($verifyRoot, $_.FullName).Replace(
+              [IO.Path]::DirectorySeparatorChar,
+              '/'
+            )
+          })
+          $missingFiles = @($expectedFiles | Where-Object { $actualFiles -cnotcontains $_ })
+          $extraFiles = @($actualFiles | Where-Object { $expectedFiles -cnotcontains $_ })
+          if ($missingFiles.Count -ne 0 -or $extraFiles.Count -ne 0) {
+            throw "Release ZIP 文件集合不精确；缺少：$($missingFiles -join ', ')；额外：$($extraFiles -join ', ')"
+          }
           $verifyExe = Join-Path $verifyRoot 'grok-zh.exe'
           $versionOutput = (& $verifyExe --version | Select-Object -First 1).Trim()
           if ($LASTEXITCODE -ne 0 -or
@@ -439,14 +512,138 @@ jobs:
           "DIST_DIR=$dist" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "ZIP_NAME=$zipName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: 为 Release 资产生成构建来源证明
+
+      - name: 上传 Windows Release 资产
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.release_meta.outputs.windows_artifact_name }}
+          path: |
+            dist/${{ steps.release_meta.outputs.zip_name }}
+            dist/${{ steps.release_meta.outputs.zip_name }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  macos-arm-release:
+    name: macOS ARM64 构建
+    needs: windows-x64-gnu
+    if: ${{ needs.windows-x64-gnu.outputs.include_macos == 'true' }}
+    uses: ./.github/workflows/build-macos-arm.yml
+    with:
+      version: ${{ needs.windows-x64-gnu.outputs.grok_version }}
+      release_build: true
+
+  release-attestations:
+    name: 生成 Release 资产构建来源证明
+    needs:
+      - windows-x64-gnu
+      - macos-arm-release
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.windows-x64-gnu.result == 'success' &&
+        (
+          needs.macos-arm-release.result == 'success' ||
+          (
+            needs.macos-arm-release.result == 'skipped' &&
+            needs.windows-x64-gnu.outputs.include_macos == 'false'
+          )
+        )
+      }}
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      ZIP_NAME: ${{ needs.windows-x64-gnu.outputs.zip_name }}
+      MAC_ARCHIVE_NAME: ${{ needs.macos-arm-release.outputs.archive_name }}
+    steps:
+      - name: 下载 Windows Release 资产
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.windows-x64-gnu.outputs.windows_artifact_name }}
+          path: dist
+
+      - name: 下载 macOS Release 资产
+        if: ${{ needs.windows-x64-gnu.outputs.include_macos == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.macos-arm-release.outputs.artifact_name }}
+          path: dist
+
+      - name: 为 Windows Release 资产生成构建来源证明
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             ${{ github.workspace }}/dist/${{ env.ZIP_NAME }}
             ${{ github.workspace }}/dist/${{ env.ZIP_NAME }}.sha256
 
+      - name: 为 macOS Release 资产生成构建来源证明
+        if: ${{ needs.windows-x64-gnu.outputs.include_macos == 'true' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ github.workspace }}/dist/${{ env.MAC_ARCHIVE_NAME }}
+            ${{ github.workspace }}/dist/${{ env.MAC_ARCHIVE_NAME }}.sha256
+
+  release-publisher:
+    name: 核验并发布唯一 Release
+    needs:
+      - windows-x64-gnu
+      - macos-arm-release
+      - release-attestations
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.windows-x64-gnu.result == 'success' &&
+        needs.release-attestations.result == 'success' &&
+        (
+          needs.macos-arm-release.result == 'success' ||
+          (
+            needs.macos-arm-release.result == 'skipped' &&
+            needs.windows-x64-gnu.outputs.include_macos == 'false'
+          )
+        )
+      }}
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      attestations: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.windows-x64-gnu.outputs.release_tag }}
+      GROK_VERSION: ${{ needs.windows-x64-gnu.outputs.grok_version }}
+      ZIP_NAME: ${{ needs.windows-x64-gnu.outputs.zip_name }}
+      MAC_ARCHIVE_NAME: ${{ needs.macos-arm-release.outputs.archive_name }}
+      INCLUDE_MACOS: ${{ needs.windows-x64-gnu.outputs.include_macos }}
+      IS_PRERELEASE: ${{ needs.windows-x64-gnu.outputs.is_prerelease }}
+      DIST_DIR: ${{ github.workspace }}\dist
+      RELEASE_NOTES_PATH: ${{ github.workspace }}\release-notes\release-notes.md
+    steps:
+      - name: 下载 Windows Release 资产
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.windows-x64-gnu.outputs.windows_artifact_name }}
+          path: dist
+
+      - name: 下载 Release 更新日志
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.windows-x64-gnu.outputs.notes_artifact_name }}
+          path: release-notes
+
+      - name: 下载 macOS Release 资产
+        if: ${{ needs.windows-x64-gnu.outputs.include_macos == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.macos-arm-release.outputs.artifact_name }}
+          path: dist
+
       - name: 创建 Draft、核验资产并发布
+        id: publish
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -455,9 +652,65 @@ jobs:
             (Join-Path $dist $env:ZIP_NAME),
             (Join-Path $dist "$env:ZIP_NAME.sha256")
           )
+          if ($env:INCLUDE_MACOS -eq 'true') {
+            $assets += @(
+              (Join-Path $dist $env:MAC_ARCHIVE_NAME),
+              (Join-Path $dist "$env:MAC_ARCHIVE_NAME.sha256")
+            )
+          }
           $notes = $env:RELEASE_NOTES_PATH
           if (!(Test-Path -LiteralPath $notes -PathType Leaf)) {
             throw "缺少预生成的 Release 更新日志：$notes"
+          }
+          foreach ($assetPath in $assets) {
+            if (!(Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+              throw "缺少待发布资产：$assetPath"
+            }
+          }
+          function Assert-ChecksumSidecar([string]$archivePath) {
+            $sidecarPath = "$archivePath.sha256"
+            $archiveName = Split-Path $archivePath -Leaf
+            $sidecarLines = @(Get-Content -LiteralPath $sidecarPath -Encoding UTF8)
+            if ($sidecarLines.Count -ne 1 -or
+                $sidecarLines[0] -cnotmatch '^(?<hash>[0-9a-f]{64})  (?<name>[^\\/]+)$' -or
+                $matches.name -cne $archiveName) {
+              throw "校验文件格式或目标文件名无效：$sidecarPath"
+            }
+            $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($matches.hash -cne $archiveHash) {
+              throw "校验文件内容与资产 SHA-256 不一致：$sidecarPath"
+            }
+          }
+          Assert-ChecksumSidecar (Join-Path $dist $env:ZIP_NAME)
+          if ($env:INCLUDE_MACOS -eq 'true') {
+            Assert-ChecksumSidecar (Join-Path $dist $env:MAC_ARCHIVE_NAME)
+          }
+          $expectedLocalNames = @($assets | ForEach-Object { Split-Path $_ -Leaf })
+          [Array]::Sort($expectedLocalNames, [StringComparer]::Ordinal)
+          $actualLocalNames = @(
+            Get-ChildItem -LiteralPath $dist -File | ForEach-Object Name
+          )
+          [Array]::Sort($actualLocalNames, [StringComparer]::Ordinal)
+          if (($expectedLocalNames -join "`n") -cne ($actualLocalNames -join "`n")) {
+            throw "发布目录不是精确资产集合：$($actualLocalNames -join ', ')"
+          }
+
+          $releasePages = @(
+            gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" |
+              ConvertFrom-Json
+          )
+          if ($LASTEXITCODE -ne 0) {
+            throw "发布前无法读取现有 Release 列表：$LASTEXITCODE"
+          }
+          $existing = @(
+            foreach ($page in $releasePages) {
+              foreach ($candidate in @($page)) {
+                if ($candidate.tag_name -ceq $env:RELEASE_TAG) { $candidate }
+              }
+            }
+          )
+          if ($existing.Count -ne 0) {
+            throw "Release $env:RELEASE_TAG 已存在；不可变发布不得覆盖。"
           }
 
           function Resolve-RemoteTagCommit {
@@ -493,7 +746,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "创建 Draft Release 失败：$LASTEXITCODE"
           }
-
           # GitHub's tag lookup endpoint does not expose draft releases. Enumerate
           # the authenticated release list and require one exact draft instead.
           $releaseMatches = @()
@@ -518,6 +770,7 @@ jobs:
             throw "没有找到唯一的 Draft Release：$env:RELEASE_TAG"
           }
           $releaseId = $releaseMatches[0].id
+          "release_id=$releaseId" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
           $release = $null
           for ($attempt = 0; $attempt -lt 15; $attempt++) {
             $releaseJson = (& gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" 2>$null) -join "`n"
@@ -551,10 +804,7 @@ jobs:
           if ($release.name -cne $env:GROK_VERSION -or $release.body.Trim() -cne $expectedNotes) {
             throw 'Draft Release 的标题或正文与预生成更新日志不一致。'
           }
-          $expectedNames = @(
-            $env:ZIP_NAME,
-            "$env:ZIP_NAME.sha256"
-          )
+          $expectedNames = @($assets | ForEach-Object { Split-Path $_ -Leaf })
           [Array]::Sort($expectedNames, [StringComparer]::Ordinal)
           $actualNames = @($release.assets | ForEach-Object name)
           [Array]::Sort($actualNames, [StringComparer]::Ordinal)
@@ -572,15 +822,51 @@ jobs:
             }
           }
 
-          $editArgs = @('release', 'edit', $env:RELEASE_TAG, '--repo', $env:GITHUB_REPOSITORY, '--draft=false')
-          if ($env:IS_PRERELEASE -eq 'true') {
-            $editArgs += @('--prerelease', '--latest=false')
-          } else {
-            $editArgs += '--latest'
+          # Re-read the exact captured Draft immediately before publication.
+          # Publishing by numeric ID avoids editing a replacement Release that
+          # happens to reuse the same Tag name.
+          $beforePublish = gh api "repos/$env:GITHUB_REPOSITORY/releases/$releaseId" |
+            ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or !$beforePublish.draft -or
+              [int64]$beforePublish.id -ne [int64]$releaseId -or
+              $beforePublish.tag_name -cne $env:RELEASE_TAG -or
+              $beforePublish.name -cne $env:GROK_VERSION -or
+              $beforePublish.body.Trim() -cne $expectedNotes) {
+            throw '发布前 Draft Release 的身份或元数据发生变化。'
           }
-          & gh @editArgs
+          $beforeNames = @($beforePublish.assets | ForEach-Object name)
+          [Array]::Sort($beforeNames, [StringComparer]::Ordinal)
+          if (($expectedNames -join "`n") -cne ($beforeNames -join "`n")) {
+            throw '发布前 Draft Release 的资产集合发生变化。'
+          }
+          foreach ($asset in $beforePublish.assets) {
+            $localHash = (Get-FileHash (Join-Path $dist $asset.name) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($asset.state -cne 'uploaded' -or
+                $asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+                $asset.digest.Substring('sha256:'.Length) -cne $localHash) {
+              throw "发布前 $($asset.name) 的状态或 digest 发生变化。"
+            }
+          }
+          $remoteTagCommit = Resolve-RemoteTagCommit
+          if ($remoteTagCommit -cne $env:GITHUB_SHA) {
+            throw "发布前远端 Tag 指向发生变化：tag=$remoteTagCommit workflow=$env:GITHUB_SHA"
+          }
+
+          $isPrerelease = $env:IS_PRERELEASE -eq 'true'
+          $publishArgs = @(
+            'api', '--method', 'PATCH',
+            "repos/$env:GITHUB_REPOSITORY/releases/$releaseId",
+            '-F', 'draft=false',
+            '-F', "prerelease=$($isPrerelease.ToString().ToLowerInvariant())",
+            '-f', "make_latest=$(if ($isPrerelease) { 'false' } else { 'true' })"
+          )
+          $publishJson = (& gh @publishArgs) -join "`n"
           if ($LASTEXITCODE -ne 0) {
             throw "发布 Release 失败：$LASTEXITCODE"
+          }
+          $publishResult = $publishJson | ConvertFrom-Json
+          if ([int64]$publishResult.id -ne [int64]$releaseId -or [bool]$publishResult.draft) {
+            throw '发布 API 返回了错误的 Release 身份或仍处于 Draft 状态。'
           }
 
           $published = $null
@@ -599,7 +885,8 @@ jobs:
             }
             Start-Sleep -Seconds 2
           }
-          if ($null -eq $published -or [bool]$published.draft -or ![bool]$published.immutable) {
+          if ($null -eq $published -or [int64]$published.id -ne [int64]$releaseId -or
+              [bool]$published.draft -or ![bool]$published.immutable) {
             throw 'Release 发布后未进入 immutable 状态。'
           }
           if ([bool]$published.prerelease -ne [bool]($env:IS_PRERELEASE -eq 'true')) {
@@ -624,7 +911,81 @@ jobs:
               throw "Release 发布后 $($asset.name) 的 digest 与本地资产不一致。"
             }
           }
+          foreach ($assetPath in $assets) {
+            & gh attestation verify $assetPath `
+              --repo $env:GITHUB_REPOSITORY `
+              --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/zh-release-windows.yml" `
+              --source-ref "refs/tags/$env:RELEASE_TAG"
+            if ($LASTEXITCODE -ne 0) {
+              throw "Release 资产的构建来源证明验证失败：$assetPath"
+            }
+          }
           $remoteTagCommit = Resolve-RemoteTagCommit
           if ($remoteTagCommit -cne $env:GITHUB_SHA) {
             throw "Release 发布后远端 Tag 指向发生变化：tag=$remoteTagCommit workflow=$env:GITHUB_SHA"
           }
+
+      - name: 失败时清理本次遗留的 Draft Release
+        if: ${{ failure() || cancelled() }}
+        shell: pwsh
+        env:
+          CREATED_RELEASE_ID: ${{ steps.publish.outputs.release_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = $null
+          if (![string]::IsNullOrWhiteSpace($env:CREATED_RELEASE_ID)) {
+            $releaseJson = (& gh api "repos/$env:GITHUB_REPOSITORY/releases/$env:CREATED_RELEASE_ID" 2>$null) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or !$releaseJson) {
+              Write-Error "无法核对待清理的 Draft Release：$env:CREATED_RELEASE_ID"
+              exit 1
+            }
+            $release = $releaseJson | ConvertFrom-Json
+          } else {
+            # The publisher failed before it could persist a numeric ID. There
+            # may be no Release yet, or gh release create may have uploaded only
+            # part of it. Recover only one exact Draft for this Tag/title;
+            # ambiguity is left for manual inspection.
+            $releasePages = @(
+              gh api --paginate --slurp "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" |
+                ConvertFrom-Json
+            )
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error '无法查找本次可能遗留的 Draft Release。'
+              exit 1
+            }
+            $draftMatches = @(
+              foreach ($page in $releasePages) {
+                foreach ($candidate in @($page)) {
+                  if ($candidate.draft -and
+                      $candidate.tag_name -ceq $env:RELEASE_TAG -and
+                      $candidate.name -ceq $env:GROK_VERSION) {
+                    $candidate
+                  }
+                }
+              }
+            )
+            if ($draftMatches.Count -eq 0) {
+              Write-Host '没有找到本次 Tag 的遗留 Draft Release。'
+              exit 0
+            }
+            if ($draftMatches.Count -ne 1) {
+              Write-Error "找到 $($draftMatches.Count) 个候选 Draft，拒绝自动删除。"
+              exit 1
+            }
+            $release = $draftMatches[0]
+          }
+          if ((![string]::IsNullOrWhiteSpace($env:CREATED_RELEASE_ID) -and
+               [int64]$release.id -ne [int64]$env:CREATED_RELEASE_ID) -or
+              $release.tag_name -cne $env:RELEASE_TAG -or
+              $release.name -cne $env:GROK_VERSION -or
+              ![bool]$release.draft) {
+            Write-Error '本次 Release 已发布或身份发生变化，拒绝自动删除；请人工核对。'
+            exit 1
+          }
+          $deleteId = [int64]$release.id
+          gh api --method DELETE "repos/$env:GITHUB_REPOSITORY/releases/$deleteId"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "无法清理遗留 Draft Release：$deleteId"
+            exit 1
+          }
+          Write-Host "已清理遗留 Draft Release：$deleteId"

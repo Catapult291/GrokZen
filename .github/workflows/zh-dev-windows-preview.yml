@@ -425,32 +425,22 @@ jobs:
           Copy-Item -LiteralPath $rgSource.FullName -Destination (Join-Path $package 'rg.exe')
 
           Copy-Item -LiteralPath 'LICENSE' -Destination (Join-Path $package 'LICENSE-grok-build.txt')
-          $rgLicenseDir = Join-Path $package 'licenses\ripgrep'
-          New-Item -ItemType Directory -Path $rgLicenseDir -Force | Out-Null
+          $licenseRoot = Join-Path $package 'licenses'
+          $rgLicenseDir = Join-Path $licenseRoot 'ripgrep'
+          $projectNoticeDir = Join-Path $licenseRoot 'project'
+          New-Item -ItemType Directory -Path $rgLicenseDir,$projectNoticeDir -Force | Out-Null
           foreach ($licenseName in @('COPYING', 'LICENSE-MIT', 'UNLICENSE')) {
             $license = Get-ChildItem -LiteralPath $rgExtract -Filter $licenseName -Recurse -File |
               Select-Object -First 1
-            if ($license) {
-              Copy-Item -LiteralPath $license.FullName -Destination $rgLicenseDir
+            if (!$license) {
+              throw "下载的 ripgrep 压缩包缺少许可证文件：$licenseName"
             }
+            Copy-Item -LiteralPath $license.FullName -Destination $rgLicenseDir
           }
-
-          $manifestNames = @(
-            'grok-zh.exe',
-            'agent-zh.cmd',
-            'rg.exe',
-            '一键安装.cmd',
-            '[可选]替换原始启动方式.cmd',
-            'Install-GrokZh.ps1',
-            'INSTALL-WINDOWS.md'
-          )
-          $manifestLines = foreach ($name in $manifestNames) {
-            $path = Join-Path $package $name
-            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
-            "$hash  $name"
-          }
-          $manifestLines | Set-Content `
-            -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
+          Copy-Item -LiteralPath 'THIRD-PARTY-NOTICES' -Destination $projectNoticeDir
+          Copy-Item -LiteralPath 'crates\codegen\xai-grok-tools\THIRD_PARTY_NOTICES.md' `
+            -Destination $projectNoticeDir
+          Copy-Item -LiteralPath 'third_party\NOTICE' -Destination $projectNoticeDir
 
           $signature = (Get-AuthenticodeSignature -LiteralPath $packageExe).Status
           $pe = (& $objdump -f $packageExe | Select-String 'file format').Line.Trim()
@@ -466,6 +456,31 @@ jobs:
           Default commands after installation: grok-zh, agent-zh
           Optional command takeover: grok, agent
           "@.Trim() | Set-Content -LiteralPath (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
+
+          $manifestNames = @(
+            'grok-zh.exe',
+            'agent-zh.cmd',
+            'rg.exe',
+            '一键安装.cmd',
+            '[可选]替换原始启动方式.cmd',
+            'Install-GrokZh.ps1',
+            'INSTALL-WINDOWS.md',
+            'LICENSE-grok-build.txt',
+            'BUILD-INFO.txt',
+            'licenses/ripgrep/COPYING',
+            'licenses/ripgrep/LICENSE-MIT',
+            'licenses/ripgrep/UNLICENSE',
+            'licenses/project/THIRD-PARTY-NOTICES',
+            'licenses/project/THIRD_PARTY_NOTICES.md',
+            'licenses/project/NOTICE'
+          )
+          $manifestLines = foreach ($name in $manifestNames) {
+            $path = Join-Path $package $name
+            $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+            "$hash  $name"
+          }
+          $manifestLines | Set-Content `
+            -LiteralPath (Join-Path $package 'SHA256SUMS.txt') -Encoding utf8
 
           $topLevelEntries = @(Get-ChildItem -LiteralPath $dist -Force)
           if ($topLevelEntries.Count -ne 1 -or !$topLevelEntries[0].PSIsContainer) {
