@@ -1,7 +1,7 @@
 <a id="configuration"></a>
 # 配置
 
-Grok 会从配置文件、环境变量和 CLI 标志中读取设置。本页介绍常用选项。
+Grok 会从配置文件、环境变量和 CLI 标志中读取设置。本页介绍常用选项。`config.toml`、`managed_config.toml` 和 `requirements.toml` 的完整字段列表见 [26-config-reference.md](26-config-reference.md)（启动时会提取到 `~/.grok/docs/user-guide/`）。
 
 ---
 
@@ -43,6 +43,7 @@ top_p = 0.95
 max_completion_tokens = 8192
 max_retries = 8
 inference_idle_timeout_secs = 600
+subagent_rate_limit_max_attempts = 8
 stream_tool_calls = true
 
 [ui]
@@ -275,6 +276,8 @@ url = "https://mcp.example.com/api/mcp"  # HTTP/SSE 传输
 headers = { "x-mcp-session-id" = "{{session_id}}" }
 ```
 
+远程（HTTP/SSE）服务器默认会收到 `User-Agent: grok-cli/<version>` 标头；`headers` 中有效的 `User-Agent` 会覆盖它（Figma 服务器使用不带版本的 `grok-cli`）。详情见 [MCP 服务器](07-mcp-servers.md)。
+
 MCP 服务器也可以在 `.grok/config.toml` 中按项目设置。项目级配置会贡献 `[mcp_servers]`、`[plugins]` 和 `[permission]` 规则；其他所有节仅从 `~/.grok/config.toml` 加载。
 
 `[mcp_servers]` 和 `[plugins]` 的优先级为：`.grok/config.toml`（当前目录）> `<repo-root>/.grok/config.toml` > `~/.grok/config.toml`。`[permission]` 规则不按优先级覆盖，而是在所有文件之间合并，顺序为 `deny` > `ask` > `allow`（见[22-permissions-and-safety.md](22-permissions-and-safety.md)）。
@@ -338,7 +341,7 @@ enabled = false                       # 禁用后台工作流（或使用 GROK_W
 
 项目工作流从 `<repo-root>/.grok/workflows/` 发现；用户工作流从 `~/.grok/workflows/` 发现。发现和调用依据脚本的 `meta.name`，因此每个文件名应与其 `meta.name` 保持一致。内置名称优先于项目名称，项目名称优先于用户名称，因此应在各作用域中保持名称唯一。
 
-每次启动都会获得会话唯一的显示句柄，例如 `deep-research-2`。你可以在 `/workflows` 运行面板中看到该句柄，并将其传给 `/workflow pause`、`resume` 或 `stop`——内部运行 ID 不会出现在命令中。带编号的句柄不是可复用的定义名称，因此在选择新的唯一 `meta.name` 并自行保存编辑后的脚本之前，面板会禁用**保存**。示例请参见[斜杠命令](04-slash-commands.md)。
+每次启动都会获得会话唯一的显示句柄，例如 `deep-research-2`。你可以在 `/workflow runs` 运行面板中看到该句柄，并将其传给 `/workflow pause`、`resume` 或 `stop`——内部运行 ID 不会出现在命令中。带编号的句柄不是可复用的定义名称，因此在选择新的唯一 `meta.name` 并自行保存编辑后的脚本之前，面板会禁用**保存**。示例请参见[斜杠命令](04-slash-commands.md)。
 
 <a id="skills"></a>
 ### 技能

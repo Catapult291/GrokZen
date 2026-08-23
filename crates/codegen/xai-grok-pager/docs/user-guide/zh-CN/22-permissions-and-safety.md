@@ -17,8 +17,10 @@
 
 | 情况 | 模式 |
 | --------- | ---- |
-| 交互式 TUI | Default（ask），或使用 auto 以配合后台检查、减少提示 |
+| 交互式 TUI | 使用 auto 配合后台检查、减少提示，或使用 ask 自行批准每个操作 |
 | 脚本、SDK、CI、代理服务器 | Always-approve；添加 [deny 规则](#configuring-permissions)或钩子来设置硬限制 |
+
+如果尚未选择模式，新的交互式会话会使用当前默认值。一旦通过 `Shift+Tab`、`/settings`、`permission_mode` 配置项或 `--permission-mode` 标志选择模式，你的选择就始终优先并会被记住。无头运行（`grok-zh -p`）、`agent stdio` 和代理服务器始终以 **ask** 启动。
 
 ```bash
 grok-zh -p "Run the tests" --always-approve
@@ -422,6 +424,8 @@ remember_tool_approvals = false
 
 交互式授权保存在主目录下 Grok 自己的状态目录中，并以启动 Grok 的 Git 仓库（仓库根目录）为作用域，因此在仓库根目录接受的授权也适用于从同一仓库子目录启动的会话。仓库之外的授权以启动目录为作用域，每个 Git 工作树分别保存自己的授权。一个项目中的授权绝不会应用到另一个项目；授权不会写入仓库，也不建议手动编辑。
 
+若要检查或重置某个项目的授权，请打开 Grok 主目录（主目录下的 `.grok`，或 `$GROK_HOME`）中的 `sessions` 子目录：其中每个以 URL 编码作用域根目录命名的项目目录都包含 `permission.toml`（以及按客户端区分的 `permission_<client>.toml`），列出已记住的命令前缀、glob、MCP 工具或服务器、web-fetch 域名以及“永不允许”项。删除该文件即可重置该项目的授权；下次匹配的工具调用会重新提示。请把它视为只读状态；若要*添加*规则，请使用声明式 `[permission]` 配置。
+
 交互式授权是个人、按机器保存的状态。若要使用可在代码审查中查看并与队友共享的允许列表，请改用项目 .grok/config.toml 中的声明式规则。
 
 ---
@@ -559,7 +563,7 @@ rules = [
 
 1. **优先使用窄范围模式。**Bash(git *) 比裸 Bash allow 规则授予的访问权限更少。
 2. **组合多层防护。**dontAsk、窄范围 allow 规则、限制性钩子和沙箱会分别施加限制。
-3. **审查来自不熟悉来源的项目配置。**.grok/config.toml 和 .claude/settings.json 中的项目权限规则（包括 allow 规则）无需单独的信任提示即可生效。在不熟悉的 checkout 中工作前，审查这些规则以及项目钩子（见 [10-hooks.md](10-hooks.md) 的安全说明）。
+3. **审查来自不熟悉来源的项目配置。**`.grok/config.toml` 和 `.claude/settings.json` 中的项目权限规则受文件夹信任保护：不受信任的 checkout 会跳过项目规则（包括 `allow` 规则和 `defaultMode`），并在发现这些规则时询问是否信任文件夹。授予信任后规则才会生效，因此在信任陌生 checkout 前，请审查这些规则和项目钩子（见 [10-hooks.md](10-hooks.md) 的安全说明）。
 4. **测试策略。**设置 defaultMode: "dontAsk"（或安装 PreToolUse 钩子）后，运行代表性命令并确认哪些会被阻止。
 5. **把只读命令列表当作便利功能，而不是安全边界。**
 

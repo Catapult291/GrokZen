@@ -3,7 +3,7 @@
 
 代理仪表盘列出此 pager 进程中的每个顶层会话——包括本地会话和分叉——并按状态分组。在一个界面中，你可以查看、回复、附加、置顶、重命名、停止会话，或分派新代理。子代理不会单独列出；它们在父代理下运行，而父代理已经显示工作正在进行。
 
-它不是代理模态框（/config-agents /agents——定义和 persona）、会话选择器（/resume / Ctrl+S——磁盘上的过往对话），也不是工作流运行 UI（/workflows）。
+它不是代理模态框（`/config-agents` / `/agents`——定义和 persona）、会话选择器（`/resume` / `F3`——磁盘上的过往对话），也不是工作流运行 UI（`/workflow runs`）。
 
 ---
 
@@ -127,7 +127,7 @@
 
 选中代理的**模型**以及在 always-approve（yolo）模式下的 **always-approve** 标志位于面板底部边框（与分派框相同的徽章位置），回答问题时也会显示。列表行不再重复模型或 always-approve 徽章。
 
-**Shift+Tab 会循环切换 peek 代理的模式**（Normal → Plan → Always-approve → Normal），作用于**实时代理**。在分派框上，Shift+Tab 只会为*下一个*代理暂存模式。
+**Shift+Tab 会循环切换 peek 代理的模式**（Normal → Plan → Auto（启用时）→ Always-approve → Normal），作用于**实时代理**。在分派框上，Shift+Tab 只会为*下一个*代理暂存模式。
 
 与分派（仅限新会话）不同，peek 回复会**与选中的代理对话**：
 

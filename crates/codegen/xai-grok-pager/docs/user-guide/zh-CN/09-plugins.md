@@ -105,7 +105,7 @@ grok-zh plugin details <name>                # 显示插件组件清单
 <a id="in-the-terminal-ui"></a>
 ### 在终端 UI 中
 
-在 VS Code 系列之外按 `Ctrl+L`，或在任何终端中使用 `/plugins`（VS Code 系列必须使用），打开插件模态窗口。窗口有五个选项卡：**Hooks**、**Plugins**、**Marketplace**、**Skills** 和 **MCP Servers**；使用 `Tab` / `Shift+Tab` 切换。`/hooks`、`/marketplace`、`/skills` 和 `/mcps` 命令会在对应选项卡打开模态窗口。
+在 VS Code 系列之外按 `Ctrl+L`，或在任何终端中使用 `/plugins`（VS Code 系列必须使用），打开插件模态窗口。窗口有六个选项卡：**Hooks**、**Plugins**、**Marketplace**、**Skills**、**Workflows** 和 **MCP Servers**；使用 `Tab` / `Shift+Tab` 切换。`/hooks`、`/marketplace`、`/skills`、`/workflows` 和 `/mcps` 命令会在对应选项卡打开模态窗口。
 
 在 **Plugins** 选项卡中，按 `Enter` 展开插件，查看其名称、版本、作用域（`cli`、`project`、`user`、`custom path` 或市场源名称）、技能、智能体、钩子、MCP 服务器（插件不受信任时显示为 `blocked`）、描述和路径。然后：
 
@@ -130,6 +130,8 @@ grok-zh plugin details <name>                # 显示插件组件清单
 | `u` | 更新选中的插件 |
 
 Marketplace 选项卡中的组件摘要仅对发布了 [`plugin-index.json`](#add-a-catalog-optional) 目录的市场显示。破坏性操作会请求确认：按小写 `y` 确认，按任何其他键（包括 `Esc`）取消。
+
+在 **Workflows** 选项卡中（可直接运行 `/workflows` 打开，或从上述页面按 `Tab` 切换），浏览 Grok 已发现的已保存工作流：内置工作流、项目 `.grok/workflows/` 和用户 `~/.grok/workflows/`。每行显示工作流名称、来源和描述；按 `Enter` 展开路径与适用场景说明，按 `r` 重新加载，按 `/` 搜索。此处仅供浏览——请使用 `/workflow <name>` 或工作流自己的斜杠命令启动。
 
 <a id="turn-plugins-on-or-off-in-config"></a>
 ### 在配置中开关插件

@@ -53,17 +53,15 @@
 
 ### `/edit-prompt`
 
-在精简模式中，为空编写器打开外部编辑器。Grok 会依次解析 `$VISUAL`、`$EDITOR` 和 `vi`；命令值可以包含带引号的参数。保存会替换草稿但不发送，保存空文件会清除草稿。精简模式之外隐藏此命令。
+在任一渲染模式中为提示打开外部编辑器。Grok 会依次解析 `$VISUAL`、`$EDITOR` 和 `vi`；命令值可以包含带引号的参数。保存会替换草稿但不发送，保存空文件会清除草稿。在编写器中输入 `/edit-prompt` 必然会替换原有内容，因此编辑器从空草稿开始；若要编辑**已有**草稿，请从命令面板选择**在外部编辑器中编辑提示**（精简模式也可按 `Ctrl+G`）。该路径会保留文本，并拒绝在不扁平化附件的情况下处理粘贴内容、文件引用或图像芯片。
 
 ```
 /edit-prompt
 ```
 
-要编辑**已有**草稿（当终端或多路复用器占用了 `Ctrl+G`），请打开命令面板，选择**在外部编辑器中编辑提示**。该直接路径会保留现有文本，并拒绝在不扁平化附件的情况下处理粘贴内容、文件引用或图像芯片。在编写器中输入 `/edit-prompt` 必然会替换该输入，因此会从空草稿开始。
-
 ### `/copy`
 
-将最近一条回复复制到剪贴板。传入数字可复制倒数第 N 条回复，或传入文件路径将文本写入文件而不是剪贴板（通过 SSH 时本地剪贴板通常不可达，这很方便）。
+将最近一条回复的 Markdown 源文本复制到剪贴板。传入数字可复制倒数第 N 条回复，或传入文件路径将文本写入文件而不是剪贴板（通过 SSH 时本地剪贴板通常不可达，这很方便）。
 
 ```
 /copy
@@ -131,7 +129,7 @@
 | `/always-approve` | 跳过所有权限提示 | 返回 ask |
 | `/auto` | 分类器批准安全工具（危险工具仍可能提示） | 返回 ask |
 
-另一个模式处于活动状态时运行其中一个会切换模式——例如始终批准已启用时运行 `/auto` 会切换到 auto。只有启用 auto 权限模式功能时才会显示 `/auto`。你还可以使用 `Shift+Tab`（循环 Normal / Plan / Always-approve）、`Ctrl+O` 或 `/settings` 更改模式。
+另一个模式处于活动状态时运行其中一个会切换模式——例如始终批准已启用时运行 `/auto` 会切换到 auto。只有启用 auto 权限模式功能时才会显示 `/auto`。你还可以使用 `Shift+Tab`（循环 Normal / Plan / Auto（启用时）/ Always-approve）、`Ctrl+O` 或 `/settings` 更改模式。
 
 ### `/multiline`
 
@@ -141,7 +139,7 @@
 
 打开提示历史搜索：按最新到最旧的顺序对本会话的提示进行模糊搜索，然后按 `Enter` 或 `Tab` 将匹配项放回提示框。
 
-快速召回时，也可在空提示框中按 `↑`。面板打开时会预填最近一条提示；`↑`/`↓` 在条目间移动（每个条目都会落入输入框），在最新条目之后按 `↓` 会关闭面板，输入会就地编辑召回的提示。
+快速召回时，也可在空提示框中按 `↑`。有排队提示时，该按键会把焦点移入队列面板并选中最后一行；否则，面板打开时会预填最近一条提示，`↑`/`↓` 在条目间移动（每个条目都会落入输入框），在最新条目之后按 `↓` 会关闭面板，输入会就地编辑召回的提示。
 
 ### `/compact-mode`
 
@@ -154,9 +152,9 @@
 <a id="minimal-and-fullscreen"></a>
 ### `/minimal` 和 `/fullscreen`
 
-在另一种渲染模式中重新打开当前会话。`/minimal`（在全屏模式中提供）切换到实验性的回滚区原生模式；`/fullscreen`（在精简模式中提供；别名 `/full`）切回标准全屏模式。两者都只在本次会话中针对同一对话重新启动 pager——不会修改 `config.toml`，重新启动横幅会提醒如何切回。`--minimal` / `--fullscreen` CLI 标志的作用域同样限于会话。要让普通 `grok-zh` 默认以指定模式打开，请使用 `/settings` → **默认屏幕模式**，或设置 `[ui] screen_mode`。
+在当前进程中将会话切换到另一种渲染模式。`/minimal`（在全屏模式中提供）切换到实验性的回滚区原生模式；`/fullscreen`（在精简模式中提供；别名 `/full`）切回标准全屏模式。切换不会重启进程，因此正在运行的轮次会继续流式输出，编写器草稿、排队提示和权限模式也会保留；标记（精简模式中的已提交行、全屏模式中的 toast）会提醒如何切回。两者都只影响本次会话，不会修改 `config.toml`；`--minimal` / `--fullscreen` CLI 标志的作用域同样限于会话。要让普通 `grok-zh` 默认以指定模式打开，请使用 `/settings` → **默认屏幕模式**，或设置 `[ui] screen_mode`。（如果进程内切换在特殊终端中表现异常，可设置 `GROK_SCREEN_MODE_SWITCH=exec` 恢复旧的重启 pager 行为。）
 
-有少数命令只能在两种模式之一中工作，因为另一种模式不存在它们驱动的界面：`/find`、`/jump`、`/timeline`、`/theme`、`/tutorial`、`/workflows` 和 `/dashboard` 仅限全屏，而 `/expand` 和 `/edit-prompt` 仅限精简。这些命令在不能运行它们的模式下会从命令菜单和面板中隐藏。即使你直接输入，Grok 也会说明原因，并指向真正有用的选项。如果只有另一种模式可用，就会提示切换模式：`/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` 如果当前模式已经能以其他方式完成任务，则会改为说明该方式：`/expand isn't available in fullscreen mode — press Tab to focus the scrollback, then → on the block.` 其他命令在两种模式下都可用。注意，`--no-alt-screen` 在此仍算全屏，因此会保留仅限全屏的命令。
+有少数命令只能在两种模式之一中工作，因为另一种模式不存在它们驱动的界面：`/find`、`/jump`、`/timeline`、`/theme`、`/tutorial` 和 `/dashboard` 仅限全屏，而 `/expand` 仅限精简。`/workflow runs` 不同：它在全屏模式打开运行面板，在精简模式降级为文本概览，而不是拒绝执行。这些命令在不能运行它们的模式下会从命令菜单和面板中隐藏。即使你直接输入，Grok 也会说明原因，并指向真正有用的选项。如果只有另一种模式可用，就会提示切换模式：`/theme isn't available in minimal mode (minimal renders with your terminal's own palette). Run /fullscreen to switch this session.` 如果当前模式已经能以其他方式完成任务，则会改为说明该方式：`/expand isn't available in fullscreen mode: press Tab to focus the scrollback, then → on the block.` 其他命令在两种模式下都可用。注意，`--no-alt-screen` 在此仍算全屏，因此会保留仅限全屏的命令。
 
 ### `/plan`
 
@@ -205,7 +203,7 @@
 
 ## Hooks 和插件
 
-`/hooks`、`/plugins`、`/marketplace` 和 `/skills` 都会打开同一个扩展模态框，只是分别位于各自的标签页。
+`/hooks`、`/plugins`、`/marketplace`、`/skills` 和 `/workflows` 都会打开同一个扩展模态框，只是分别位于各自的标签页。
 
 ### `/hooks`
 
@@ -288,21 +286,27 @@ Shell 还支持子命令（`/plugins list`、`/plugins install <source>`、`/plu
 /deep-research 比较 PostgreSQL 17 和 MySQL 9 的迁移风险
 ```
 
-命令会立即返回——在 `/workflows` 中查看进度，最终报告会自行出现在对话中。
+命令会立即返回——在 `/workflow runs` 中查看进度，最终报告会自行出现在对话中。
 
-模型启动的工作流可以在 `workflow` 工具上设置 `agent_budget`。它是逻辑子智能体调用的绝对累计上限：每次 `agent()` 调用和 `parallel()` 面板中的每一项都会消耗一个槽位，而 schema 修正重试不会消耗。默认值为 128，显式值可为 1–1,024；如果面板会超过剩余预算，则会在其子项启动前被拒绝。除此之外，主机配置的上限（默认 32）约束每次运行中同时执行的子项数量；更大的面板会排队，并仍然作为屏障。`budget()` 会将上限报告为 `total`，已接纳调用报告为 `spent`，`reserved`（始终为零）以及 `remaining`。命名的斜杠启动使用默认预算。
+工作流使用绝对累计 `agent_budget` 上限约束逻辑子智能体调用：每次 `agent()` 调用和 `parallel()` 面板中的每一项都会消耗一个槽位，而 schema 修正重试不会消耗。默认值为 128，显式值可为 1–1,024；如果面板会超过剩余预算，则会在其子项启动前被拒绝。模型启动的工作流通过 `workflow` 工具设置 `agent_budget`；命名的斜杠启动可使用 `--agent-budget N` 或 JSON 参数中的 `agent_budget`。命名启动还可用 `--effort LEVEL` 或 JSON `effort` 设置子智能体推理强度，而不改变当前会话的 `/effort`；子脚本自身的 `effort` 选项优先。除此之外，主机配置的上限（默认 32）约束每次运行中同时执行的子项数量；更大的面板会排队，并仍然作为屏障。`budget()` 会将上限报告为 `total`，已接纳调用报告为 `spent`，`reserved`（始终为零）以及 `remaining`。
 
 ### `/workflow`
 
-启动已保存的工作流，或通过 `/workflows` 中显示的会话唯一显示名称管理运行中的工作流。两次启动同一工作流时，显示名称会编号（`review-changes`、`review-changes-2`）；你无需接触内部运行 ID。
+启动已保存的工作流，或通过会话唯一显示名称管理运行中的工作流。两次启动同一工作流时，显示名称会编号（`review-changes`、`review-changes-2`）；你无需接触内部运行 ID。单独运行 `/workflow` 会打印本会话运行的文本概览。
+
+输入 `/workflow` 和一个空格即可自动补全已保存的工作流名称（内置、项目和用户）以及管理动词 `runs`、`pause`、`resume`、`stop`、`save`。选择名称只会填入并提供启动标志，按 Enter 后才会运行；`pause` / `resume` / `stop` / `save` 会列出本会话的运行句柄，单独输入 `/workflow stop` 不会擅自选择运行。
 
 ```
-/workflow review-changes {"target":"origin/main...HEAD"}
+/workflow review-changes --agent-budget 256 --effort high {"target":"origin/main...HEAD"}
+/workflow review-changes {"target":"origin/main...HEAD","agent_budget":256,"effort":"high"}
+/workflow runs
 /workflow pause review-changes
 /workflow resume review-changes
 /workflow stop review-changes-2
 /workflow save review-changes
 ```
+
+`/workflow runs` 会在完整 TUI 中打开实时的 **Workflow Runs** dashboard，显示活动运行和保留运行，而不是已保存定义目录。每行显示运行的显示名称、阶段、智能体列表、进度和结果。在运行详情视图中，`p` 暂停，`r` 恢复普通暂停，`x` 停止。预算受限的运行不能直接恢复：`r` 会返回 Shell 的拒绝（需要通过传入更高 `agent_budget` 的模型／工具恢复来提高上限），而 `x` 仍会停止。`s` 保存运行脚本，但对已知内置工作流和编号的重复句柄会隐藏；这种情况下，请选择新的唯一 `meta.name` 并显式保存编辑后的脚本。在精简模式和非 TUI 客户端中，`/workflow runs` 会打印与单独 `/workflow` 相同的文本概览。
 
 项目工作流位于 `.grok/workflows/*.rhai`；用户工作流位于 `~/.grok/workflows/*.rhai`。同进程暂停/恢复会根据已提交的主机调用结果，继续原始的不可变脚本、参数和 `agent_budget` 上限——要迭代，请编辑返回的脚本副本，并作为新运行启动。
 
@@ -310,7 +314,7 @@ Shell 还支持子命令（`/plugins list`、`/plugins install <source>`、`/plu
 
 ### `/workflows`
 
-打开实时工作流**运行** dashboard——显示活动运行和保留运行，而不是已保存定义的目录。每行显示运行的显示名称、阶段、智能体列表、进度和结果。在运行详情视图中，`p` 暂停，`r` 恢复普通暂停，`x` 停止。预算受限的运行不能直接恢复：`r` 会返回 Shell 的拒绝（请使用传入更高 `agent_budget` 的模型/工具恢复来提高上限），而 `x` 仍会停止。`s` 保存运行脚本，但对已知内置工作流和编号的重复句柄会隐藏此操作——对于这些情况，请选择新的唯一 `meta.name`，并显式保存编辑后的脚本。
+在 **Workflows** 标签页打开扩展模态框，以只读方式浏览 Grok 发现的已保存工作流（内置、项目 `.grok/workflows/` 和用户 `~/.grok/workflows/`），每项会显示来源、描述和路径。模型也会在会话前言的技能列表下看到同一目录。使用 `/workflow <name>`（或工作流自己的斜杠命令）启动，再到 `/workflow runs` 中监控。
 
 ---
 
@@ -322,7 +326,7 @@ Shell 还支持子命令（`/plugins list`、`/plugins install <source>`、`/plu
 
 ### `/feedback [message]`
 
-报告问题或发送反馈。有消息时立即发送；不带参数时打开用于撰写长报告的面板：`Enter` 发送，`Esc` 丢弃。
+报告问题或发送反馈。命令会打开报告面板：`Enter` 发送，`Esc` 丢弃。带消息时会将其预填到面板中，发送前仍可编辑；在 `--minimal` 模式下，带消息仍会立即发送。
 
 ```
 /feedback

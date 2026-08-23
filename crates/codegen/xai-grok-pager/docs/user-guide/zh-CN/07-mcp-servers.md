@@ -64,6 +64,8 @@ url = "https://mcp.example.com/api"
 headers = { "Authorization" = "Bearer token" }
 ```
 
+MCP 数据面请求（JSON-RPC 和 SSE）以及匿名访问探测默认会携带 `User-Agent: grok-cli/<version>` 标头，其中 `<version>` 是 Grok 二进制版本。OAuth 发现、客户端注册和令牌请求由 rmcp OAuth 客户端发出，保持其自身行为（不添加默认 `User-Agent`）。服务器 `headers` 中有效的 `User-Agent` 会覆盖默认值；无效值会在解析标头时被丢弃并给出警告，因此服务器仍会收到默认值。Figma MCP 服务器例外：服务器名为 `figma`、旧版托管名为 `grok_com_figma`，或主机位于 `figma.com`（均不区分大小写）时，会发送不带版本的 `grok-cli`；配置中自定义的 `User-Agent` 仍然优先。
+
 <a id="streamable-http-with-session-id"></a>
 ### 可流式 HTTP 与会话 ID
 
