@@ -30,6 +30,12 @@
       "first_parent": "f97161ecaf6de761bf10e000cb49be22db621352",
       "upstream_tip": "19d42e35c07a9c9244f03f6df0c4c353f970d4f9",
       "upstream_base": "d92c5b0b8582fda358de1f97446aa74af44a464f"
+    },
+    {
+      "merge_sha": "5d5ed7ccad9bfc457e331c3324591ba9117e610b",
+      "first_parent": "ab3c753312678069bdfd24078c8bebe18eee7cc3",
+      "upstream_tip": "07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8",
+      "upstream_base": "19d42e35c07a9c9244f03f6df0c4c353f970d4f9"
     }
   ],
   "local_merges": [
