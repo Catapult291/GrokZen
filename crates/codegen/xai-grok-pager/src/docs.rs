@@ -43,6 +43,7 @@ pub const PERMISSIONS: DocId = DocId::new("user-guide.permissions-and-safety");
 pub const DASHBOARD: DocId = DocId::new("user-guide.dashboard");
 pub const MONITORING_USAGE: DocId = DocId::new("user-guide.monitoring-usage");
 pub const STATUS_LINE: DocId = DocId::new("user-guide.status-line");
+pub const CONFIG_REFERENCE: DocId = DocId::new("user-guide.config-reference");
 pub const HOOKS_AND_PLUGINS: DocId = DocId::new("reference.hooks-and-plugins");
 pub const CUSTOM_HOOKS: DocId = DocId::new("reference.custom-hooks");
 
@@ -242,6 +243,12 @@ pub static USER_GUIDE: &[Doc] = &[
         "Status Line",
         "A bottom row of live session context, or the output of your own script"
     ),
+    guide!(
+        CONFIG_REFERENCE,
+        "26-config-reference.md",
+        "Configuration Reference",
+        "Field list for config.toml, managed_config.toml, and requirements.toml"
+    ),
 ];
 
 /// Non-user-guide reference docs. Separate from USER_GUIDE because they
@@ -439,6 +446,17 @@ static ZH_CN_DOCS: &[DocTranslation] = &[
         "使用量监控（外部 OpenTelemetry）",
         "将使用量指标导出到用户的 OpenTelemetry 收集器",
         "24-monitoring-usage.md"
+    ),
+    zh_doc!(
+        STATUS_LINE,
+        "状态行",
+        "会话上下文实时底栏，或自定义脚本的输出",
+        "25-status-line.md"
+    ),
+    zh_doc!(
+        CONFIG_REFERENCE,
+        "配置参考",
+        "config.toml、managed_config.toml 和 requirements.toml 的字段列表"
     ),
     zh_reference_doc!(
         HOOKS_AND_PLUGINS,
@@ -740,12 +758,8 @@ mod tests {
         for doc in USER_GUIDE {
             let path = docs_dir.join(doc.filename);
             assert!(path.exists(), "Expected doc {} to exist", doc.filename);
-            assert_eq!(
-                std::fs::read_to_string(&path).unwrap(),
-                doc.content,
-                "Content mismatch for {}",
-                doc.filename
-            );
+            let got = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(got, doc.content, "Content mismatch for {}", doc.filename);
         }
         assert!(
             !docs_dir.join("99-removed.md").exists(),

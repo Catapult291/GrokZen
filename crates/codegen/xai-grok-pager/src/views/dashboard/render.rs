@@ -761,7 +761,7 @@ fn render_dashboard_banner(
         let hint = dashboard_static(
             locale,
             "dashboard.banner.empty",
-            " No sessions yet — Esc to dispatch one. ",
+            " No sessions yet. Esc to dispatch one. ",
         );
         let trunc = truncate_str(hint, inner.width as usize);
         buf.set_string(
@@ -2924,19 +2924,19 @@ fn render_no_match_with_locale(
         Filter::Agent(n) => dashboard_text(
             locale,
             "dashboard.filter.agent",
-            "No agents match `a:{value}` — press Esc to clear the filter.",
+            "No agents match `a:{value}`. Press Esc to clear the filter.",
         )
         .replace("{value}", n),
         Filter::State(s) => dashboard_text(
             locale,
             "dashboard.filter.state",
-            "No agents in state `{state}` — press Esc to clear the filter.",
+            "No agents in state `{state}`: press Esc to clear the filter.",
         )
         .replace("{state}", localized_row_state(locale, *s)),
         Filter::Substring(n) => dashboard_text(
             locale,
             "dashboard.filter.substring",
-            "No rows match `{value}` — press Esc to clear the filter.",
+            "No rows match `{value}`: press Esc to clear the filter.",
         )
         .replace("{value}", n),
     };
@@ -3094,6 +3094,11 @@ fn paint_dispatch_config_badge(
         DashboardDispatchMode::Plan => flags.push(PromptFlag {
             text: dashboard_static(locale, "mode.plan.label", "plan"),
             color: Some(theme.accent_plan),
+            bold: false,
+        }),
+        DashboardDispatchMode::Auto => flags.push(PromptFlag {
+            text: "auto",
+            color: Some(theme.accent_system),
             bold: false,
         }),
         DashboardDispatchMode::AlwaysApprove => flags.push(PromptFlag {
@@ -3415,6 +3420,12 @@ fn dispatch_text_rows(state: &DashboardState, dispatch_width: u16, area_height: 
         .desired_height(content_w, &style, false, max_text_rows)
 }
 
+/// Top and bottom border rows of a dispatch dropdown panel.
+const DROPDOWN_CHROME_ROWS: u16 = 2;
+
+/// Smallest panel that still carries both borders and one item row.
+const MIN_DROPDOWN_PANEL_ROWS: u16 = DROPDOWN_CHROME_ROWS + 1;
+
 /// Render the `/command` completion dropdown above the dispatch box.
 /// Mirrors `agent_view`'s slash dropdown chrome. No-op (and clears the
 /// stored hit rect) when the dropdown is closed.
@@ -3443,19 +3454,17 @@ fn render_slash_dropdown(
     // Height in wrapped lines, not items (see `desired_item_rows`);
     // items render inset 1 col on each side.
     let item_rows = desired_item_rows(&snap.matches, dispatch_rect.width.saturating_sub(2));
-    let panel_h = item_rows.saturating_add(2);
-    let max_top = dispatch_rect.y.saturating_sub(1);
-    if max_top <= area.y || panel_h == 0 {
+    // The bottom is pinned to the input, so a panel taller than the space above it
+    // would start above `area` and paint off the buffer.
+    let panel_h = item_rows
+        .saturating_add(DROPDOWN_CHROME_ROWS)
+        .min(dispatch_rect.y.saturating_sub(area.y));
+    if panel_h < MIN_DROPDOWN_PANEL_ROWS {
         state.slash_dropdown_items_area = None;
         state.slash_dropdown_hit = Default::default();
         return;
     }
-    let top_y = max_top.saturating_sub(panel_h - 1);
-    if top_y < area.y {
-        state.slash_dropdown_items_area = None;
-        state.slash_dropdown_hit = Default::default();
-        return;
-    }
+    let top_y = dispatch_rect.y - panel_h;
     let panel_x = dispatch_rect.x;
     let panel_width = dispatch_rect.width;
     if panel_width < 4 {
@@ -3499,7 +3508,7 @@ fn render_slash_dropdown(
         x: items_x,
         y: top_y + 1,
         width: items_width,
-        height: item_rows,
+        height: panel_h - DROPDOWN_CHROME_ROWS,
     };
     state.slash_dropdown_hit = render_slash(
         buf,
@@ -4237,7 +4246,7 @@ pub fn popup_rect(view: Rect) -> Rect {
 ///
 /// When the popup area is too small for the bordered frame
 /// (`area.height < 5` or `area.width < 10`), paints a minimal
-/// fallback ("terminal too small — Esc to close") instead of leaving
+/// fallback ("terminal too small: Esc to close") instead of leaving
 /// the user staring at an empty box and
 /// returns `(None, None, false)`.
 pub fn render_popup_overlay(
@@ -4324,7 +4333,7 @@ pub fn render_popup_overlay_with_locale(
                 dashboard_static(
                     locale,
                     "dashboard.popup.too_small",
-                    "(terminal too small — Esc to close)",
+                    "(terminal too small: Esc to close)",
                 ),
                 area.width.saturating_sub(2) as usize,
             );

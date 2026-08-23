@@ -37,6 +37,19 @@ pub fn localized_snapshot(
         return snap;
     }
 
+    if let Some(placeholder) = snap.args_placeholder.as_mut() {
+        let key = match placeholder.as_str() {
+            "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]" => {
+                Some("slash.command.workflow.arg_placeholder")
+            }
+            "[feedback text]" => Some("slash.command.feedback.arg_placeholder"),
+            _ => None,
+        };
+        if let Some(key) = key {
+            *placeholder = locale.named_text(key, placeholder).into_owned();
+        }
+    }
+
     for row in &mut snap.matches {
         match row.command_canonical.as_deref() {
             Some(canonical) if row.localize_description => {
@@ -118,6 +131,9 @@ fn localized_argument_display_with_presentation(
     description: &str,
     presentation: Option<ArgPresentation>,
 ) -> String {
+    if matches!(presentation, Some(ArgPresentation::Opaque)) {
+        return text.to_string();
+    }
     let (base, marker_id, marker_english) = match presentation {
         Some(ArgPresentation::BundledModel { is_current, .. })
         | Some(ArgPresentation::DynamicModel { is_current }) => {
@@ -170,6 +186,7 @@ fn localized_argument_display_with_presentation(
         Some(ArgPresentation::BundledModel { .. }) | Some(ArgPresentation::DynamicModel { .. }) => {
             None
         }
+        Some(ArgPresentation::Opaque) => unreachable!("opaque text returns above"),
         None => match (base, description) {
             ("how-to", "Browse in-TUI How-to Guides") => {
                 Some("slash.command.docs.arg.how-to.label")
@@ -200,6 +217,7 @@ fn localized_argument_display_with_presentation(
         Some(ArgPresentation::BundledModel { .. }) | Some(ArgPresentation::DynamicModel { .. }) => {
             None
         }
+        Some(ArgPresentation::Opaque) => unreachable!("opaque text returns above"),
         _ => description
             .strip_prefix("Open \"")
             .and_then(|rest| rest.strip_suffix('"'))
@@ -237,6 +255,9 @@ fn localized_argument_description_with_presentation(
     english: &str,
     presentation: Option<ArgPresentation>,
 ) -> String {
+    if matches!(presentation, Some(ArgPresentation::Opaque)) {
+        return english.to_string();
+    }
     if let Some(ArgPresentation::ReasoningEffort(level)) = presentation {
         let id = match level {
             xai_grok_shell::sampling::types::ReasoningEffort::None => {
@@ -303,6 +324,18 @@ fn localized_argument_description_with_presentation(
         "Quick, fast implementations" => Some("slash.arg.model_effort.low.description"),
         "View usage" => Some("slash.command.usage.arg.show.description"),
         "Manage billing" => Some("slash.command.usage.arg.manage.description"),
+        "Set the cumulative child-agent cap (1–1,024)" => {
+            Some("slash.command.workflow.arg.agent_budget.description")
+        }
+        "Show workflow runs (dashboard; text overview in minimal)" => {
+            Some("slash.command.workflow.arg.runs.description")
+        }
+        "Pause a running workflow" => Some("slash.command.workflow.arg.pause.description"),
+        "Resume a paused workflow" => Some("slash.command.workflow.arg.resume.description"),
+        "Stop a workflow run" => Some("slash.command.workflow.arg.stop.description"),
+        "Save a run's script as a named workflow" => {
+            Some("slash.command.workflow.arg.save.description")
+        }
         _ => None,
     };
     if let Some(id) = catalog_id {
@@ -1223,6 +1256,8 @@ mod tests {
         colliding_workflow.command_canonical = Some("goal".to_string());
         let mut colliding_argument_phrase = row("/dynamic", "Heavy reasoning");
         colliding_argument_phrase.command_canonical = Some("dynamic".to_string());
+        let mut opaque_workflow = row("High Effort (active)", "Heavy reasoning");
+        opaque_workflow.presentation = Some(ArgPresentation::Opaque);
         let mut bundled_skill = row(
             "/build-with-ai",
             "Build AI apps on SpaceXAI (XAI_API_KEY + api.x.ai)",
@@ -1240,6 +1275,7 @@ mod tests {
                 shell_goal,
                 colliding_workflow,
                 colliding_argument_phrase,
+                opaque_workflow,
                 bundled_skill,
             ],
             ..Default::default()
@@ -1285,10 +1321,18 @@ mod tests {
             "dynamic ACP commands must not collide with argument translations"
         );
         assert_eq!(
-            localized.matches[8].description,
+            localized.matches[8].display, "High Effort (active)",
+            "opaque workflow rows must preserve server-authored labels"
+        );
+        assert_eq!(
+            localized.matches[8].description, "Heavy reasoning",
+            "opaque workflow rows must preserve server-authored descriptions"
+        );
+        assert_eq!(
+            localized.matches[9].description,
             "在 SpaceXAI 上构建 AI 应用（XAI_API_KEY + api.x.ai）"
         );
-        assert_eq!(localized.matches[8].insert_text, raw.matches[8].insert_text);
+        assert_eq!(localized.matches[9].insert_text, raw.matches[9].insert_text);
     }
 
     #[test]

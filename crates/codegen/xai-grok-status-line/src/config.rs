@@ -16,45 +16,24 @@ pub enum ResolvedStatusLine<'a> {
     Command { command: &'a str },
 }
 
-/// Fields are private because two are bounded on read: only the accessors
-/// apply the refresh clamp and the padding cap.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct StatusLineConfig {
-    /// `None` when the section named no mode, which is not
-    /// `Some(StatusLineType::Disabled)`: that is a user switching the row off,
-    /// and it outranks any problem with the keys around it.
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     kind: Option<StatusLineType>,
     #[serde(skip_serializing_if = "Option::is_none")]
     command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     items: Option<Vec<StatusLineItem>>,
-    /// `None` rather than 0, so an explicit `padding = 0` still counts as a
-    /// touched section.
     #[serde(skip_serializing_if = "Option::is_none")]
     padding: Option<u16>,
-    /// Seconds. `None`, the default, keeps the row event-driven: it only
-    /// schedules a timer for a section that asked for one.
     #[serde(skip_serializing_if = "Option::is_none")]
     refresh_interval: Option<u64>,
-    /// The retired `refresh_interval_ms` key was present, whatever its value.
-    /// There is no setting behind it any more, only the problem naming its
-    /// replacement, so like `parse_problem` it is excluded from `Serialize`
-    /// and `PartialEq`.
-    #[serde(skip)]
-    has_retired_refresh_interval_ms: bool,
-    /// Why this section could not be read in full. Excluded from `Serialize`
-    /// and from `PartialEq`: a parse problem is not a user setting.
     #[serde(skip)]
     parse_problem: Option<String>,
-    /// Keys this build does not know. Kept out of `parse_problem`, which would
-    /// reserve a row for what is most likely a newer client's key.
     #[serde(skip)]
     unknown_keys: Vec<String>,
 }
 
-/// `parse_problem` and `unknown_keys` are excluded: equality decides whether
-/// the section is written back, and a problem is not a user setting.
 /// Destructured so a new field is a compile error rather than a silent hole.
 impl PartialEq for StatusLineConfig {
     fn eq(&self, other: &Self) -> bool {
@@ -64,7 +43,6 @@ impl PartialEq for StatusLineConfig {
             items,
             padding,
             refresh_interval,
-            has_retired_refresh_interval_ms: _,
             parse_problem: _,
             unknown_keys: _,
         } = self;
@@ -76,7 +54,6 @@ impl PartialEq for StatusLineConfig {
     }
 }
 
-/// Every field is lenient, for the reason in the module docs.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct RawStatusLineConfig {
@@ -86,12 +63,8 @@ struct RawStatusLineConfig {
     items: Option<Lenient<Vec<Lenient<String>>>>,
     padding: Option<Lenient<u16>>,
     refresh_interval: Option<Lenient<u64>>,
-    /// Retired. Read for presence only, so the problem can name the key's
-    /// replacement; any value counts, a malformed one included.
-    refresh_interval_ms: Option<serde::de::IgnoredAny>,
-    /// Reported rather than dropped: `#[serde(untagged)]` replays the table
-    /// through a fresh deserializer, so `[ui] typo = 1` warns through
-    /// `serde_ignored` while `[ui.status_line] typo = 1` would not.
+    /// `#[serde(untagged)]` replays the table through a fresh deserializer,
+    /// so a typo here is reported through `serde_ignored` rather than dropped.
     #[serde(flatten)]
     unknown: BTreeMap<String, serde::de::IgnoredAny>,
 }
@@ -103,14 +76,10 @@ enum Lenient<T> {
     Malformed(serde::de::IgnoredAny),
 }
 
-/// One field, or `None` with `field` recorded. The `Option` is the field's own
-/// absence, which is not a problem to report.
 fn lenient<T>(field: &str, value: Option<Lenient<T>>, ignored: &mut Vec<String>) -> Option<T> {
     lenient_element(field, value?, ignored)
 }
 
-/// The same for a value that is there by construction, such as an element of a
-/// field that parsed.
 fn lenient_element<T>(field: &str, value: Lenient<T>, ignored: &mut Vec<String>) -> Option<T> {
     match value {
         Lenient::Read(value) => Some(value),
@@ -123,9 +92,6 @@ fn lenient_element<T>(field: &str, value: Lenient<T>, ignored: &mut Vec<String>)
 
 impl<'de> Deserialize<'de> for StatusLineConfig {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // The section is lenient as a whole, not only its fields: the parse
-        // below never sees a non-table, and `[ui.status_line] = "builtin"` is a
-        // plausible way to typo a nested one.
         let Lenient::Read(fields) = Lenient::<RawStatusLineConfig>::deserialize(deserializer)?
         else {
             return Ok(Self {
@@ -159,14 +125,10 @@ impl<'de> Deserialize<'de> for StatusLineConfig {
             }),
             padding: lenient("padding", fields.padding, &mut ignored),
             refresh_interval: lenient("refresh_interval", fields.refresh_interval, &mut ignored),
-            has_retired_refresh_interval_ms: fields.refresh_interval_ms.is_some(),
             unknown_keys: fields.unknown.into_keys().collect(),
             parse_problem: None,
         };
 
-        // One report per distinct problem, first-seen order. A bad element
-        // pushes the bare key name, so `items = [7, 8]` would otherwise render
-        // as `ignored items, items`.
         let mut seen = BTreeSet::new();
         ignored.retain(|entry| seen.insert(entry.clone()));
         config.parse_problem = if !ignored.is_empty() {
@@ -188,37 +150,19 @@ impl StatusLineConfig {
         StatusLineItem::Context,
     ];
 
-    /// Floor on the timer, matching the minimum users of the common status
-    /// line convention arrive expecting. One second cannot stack runs: the
-    /// run slot admits one run at a time, and a poll due behind it coalesces
-    /// into a single owed run.
     pub const MIN_REFRESH_INTERVAL_SECS: u64 = 1;
 
-    /// Cap on the timer, one day. Bounded so no config value reaches
-    /// `Instant` arithmetic unchecked: `i64::MAX` seconds panics the pager at
-    /// startup when the event loop computes `Instant::now() + interval`.
+    /// Capped: unbounded seconds panic `Instant::now() + interval`.
     pub const MAX_REFRESH_INTERVAL_SECS: u64 = 86_400;
 
     const MAX_PADDING_PER_SIDE: u16 = 16;
 
-    /// The mode the section named. `None` when it named none, which is not the
-    /// same as `disabled`.
     pub fn declared_kind(&self) -> Option<StatusLineType> {
         self.kind
     }
 
     pub fn has_custom_items(&self) -> bool {
         self.items.is_some()
-    }
-
-    pub fn has_custom_refresh_interval(&self) -> bool {
-        self.refresh_interval.is_some()
-    }
-
-    /// Whether the section still carries the retired `refresh_interval_ms`
-    /// key. For telemetry, so the retirement problem's audience is visible.
-    pub fn has_retired_refresh_interval_ms(&self) -> bool {
-        self.has_retired_refresh_interval_ms
     }
 
     pub fn unknown_keys(&self) -> &[String] {
@@ -229,10 +173,6 @@ impl StatusLineConfig {
         self.kind.unwrap_or_default()
     }
 
-    /// The timer a `command` row asked for, clamped on the way out like the
-    /// padding. `None` for every other mode, including a command section that
-    /// does not resolve, so no caller can schedule a timer for a row that
-    /// runs nothing.
     pub fn refresh_interval(&self) -> Option<Duration> {
         let secs = self.refresh_interval?;
         match self.resolve() {
@@ -259,21 +199,12 @@ impl StatusLineConfig {
             items,
             padding,
             refresh_interval,
-            // The retired key still marks a touched section, so a section
-            // holding nothing else reports "needs type" rather than vanishing.
-            has_retired_refresh_interval_ms,
             parse_problem: _,
             unknown_keys: _,
         } = self;
-        command.is_some()
-            || items.is_some()
-            || padding.is_some()
-            || refresh_interval.is_some()
-            || *has_retired_refresh_interval_ms
+        command.is_some() || items.is_some() || padding.is_some() || refresh_interval.is_some()
     }
 
-    /// True when the row occupies space. A row whose config could not be read
-    /// is reserved so its problem has somewhere to paint.
     pub fn reserves_a_row(&self) -> bool {
         self.resolve().is_some() || self.problem_to_paint().is_some()
     }
@@ -293,15 +224,10 @@ impl StatusLineConfig {
         }
     }
 
-    /// What is wrong with the section, seen or not. Callers that report rather
-    /// than paint read this one.
     pub fn problem(&self) -> Option<&str> {
         if let Some(problem) = &self.parse_problem {
             return Some(problem);
         }
-        // What the mode still needs comes before the timer problems below: a
-        // section that resolves nothing paints this one into the row, and a
-        // report-only message must not cover it.
         if self.resolve().is_none() {
             return match self.effective_kind() {
                 StatusLineType::Command => {
@@ -316,23 +242,13 @@ impl StatusLineConfig {
             };
         }
         // A timer under `builtin` schedules nothing, so it is reported rather
-        // than left looking like it polls.
         if self.refresh_interval.is_some() && self.kind == Some(StatusLineType::Builtin) {
             return Some("[ui.status_line] refresh_interval needs type = \"command\"");
-        }
-        if self.has_retired_refresh_interval_ms {
-            return Some(
-                "[ui.status_line] refresh_interval_ms is retired: updates are debounced \
-                 automatically; refresh_interval re-runs a command row every N seconds; a \
-                 script that should call out less can read a cache on state runs",
-            );
         }
         None
     }
 
-    /// The subset of [`Self::problem`] the row may paint. `None` once the user
-    /// wrote `type = "disabled"`, so a typo cannot switch the row back on. The
-    /// rest reach the user through `grok inspect`.
+    /// `None` under `type = "disabled"`, so a typo cannot switch the row back on.
     pub fn problem_to_paint(&self) -> Option<&str> {
         if self.kind == Some(StatusLineType::Disabled) || self.resolve().is_some() {
             return None;
@@ -344,9 +260,6 @@ impl StatusLineConfig {
         self.items.as_deref().unwrap_or(Self::DEFAULT_ITEMS)
     }
 
-    /// Whether the row can change on its own mid-turn, which is the only reason
-    /// to recompute through one. A script may read the clock, so `command` can,
-    /// and a builtin row defers to [`StatusLineItem::varies_mid_turn`].
     pub fn changes_during_a_turn(&self) -> bool {
         match self.effective_kind() {
             StatusLineType::Builtin => self
@@ -378,9 +291,6 @@ impl StatusLineConfig {
 pub enum StatusLineType {
     Builtin,
     Command,
-    /// The spellings a user reaches for to switch the row off all land here,
-    /// rather than painting a problem at someone who said what they meant.
-    /// `to_string` keeps [`Self::as_str`] on the canonical one.
     #[default]
     #[strum(
         to_string = "disabled",
@@ -396,8 +306,6 @@ impl StatusLineType {
         self.into()
     }
 
-    /// Trimmed here and case-folded by the derive, and [`StatusLineItem::parse`]
-    /// reads the same way, so the section's two vocabularies share one rule.
     fn parse(text: &str) -> Option<Self> {
         text.trim().parse().ok()
     }
@@ -427,12 +335,8 @@ pub enum StatusLineItem {
 }
 
 impl StatusLineItem {
-    /// Derived from the variants, so a new segment cannot slip past the tests.
     pub const ALL: &'static [StatusLineItem] = Self::VARIANTS;
 
-    /// Whether this segment moves on its own mid-turn, with no new payload behind
-    /// it. A row keeps recomputing through a turn when any of its segments says
-    /// yes. No wildcard arm, so a new segment must be classified here.
     pub const fn varies_mid_turn(self) -> bool {
         match self {
             Self::TurnTimer => true,
@@ -449,8 +353,6 @@ impl StatusLineItem {
     }
 }
 
-/// A child of this module, since it sets the private fields above. Not
-/// `#[cfg(test)]`: its callers are tests in other crates.
 #[path = "config_test_support.rs"]
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;

@@ -57,6 +57,86 @@ fn ask_user_question_merge_writes_subtable_without_splatting_toolset() {
         "scalar [toolset] must be replaced so the write lands"
     );
 }
+/// The `[telemetry]` write merges only `trace_upload`: hand-written sibling
+/// telemetry keys survive, and an all-None config leaves the section alone.
+#[test]
+fn telemetry_merge_writes_trace_upload_without_splatting_section() {
+    let root_val: TomlValue =
+        toml::from_str("[telemetry]\ncustom_telemetry_flag = true\n").unwrap();
+    let mut root = root_val.as_table().unwrap().clone();
+    let telemetry = super::super::mcp::TelemetryPersistConfig {
+        trace_upload: Some(true),
+    };
+    merge_section(&mut root, "telemetry", &telemetry);
+    let section = root.get("telemetry").and_then(|v| v.as_table()).unwrap();
+    assert_eq!(
+        section.get("trace_upload").and_then(|v| v.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        section
+            .get("custom_telemetry_flag")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "hand-written sibling keys must survive the merge"
+    );
+    let reparsed = load_config_from_toml(&TomlValue::Table(root.clone()));
+    assert_eq!(reparsed.telemetry.trace_upload, Some(true));
+    let untouched_val: TomlValue = toml::from_str("[telemetry]\nevents_url = \"x\"\n").unwrap();
+    let mut untouched = untouched_val.as_table().unwrap().clone();
+    merge_section(
+        &mut untouched,
+        "telemetry",
+        &super::super::mcp::TelemetryPersistConfig::default(),
+    );
+    assert_eq!(
+        untouched
+            .get("telemetry")
+            .and_then(|v| v.get("events_url"))
+            .and_then(|v| v.as_str()),
+        Some("x"),
+        "all-None must leave the existing section untouched"
+    );
+}
+/// The `[features]` write merges only `feedback_trace_card`: hand-written
+/// sibling feature keys survive, and an all-None config leaves the section
+/// alone.
+#[test]
+fn features_merge_writes_feedback_trace_card_without_splatting_section() {
+    let root_val: TomlValue = toml::from_str("[features]\nweb_fetch = true\n").unwrap();
+    let mut root = root_val.as_table().unwrap().clone();
+    let features = super::super::mcp::FeaturesPersistConfig {
+        feedback_trace_card: Some(false),
+    };
+    merge_section(&mut root, "features", &features);
+    let section = root.get("features").and_then(|v| v.as_table()).unwrap();
+    assert_eq!(
+        section.get("feedback_trace_card").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        section.get("web_fetch").and_then(|v| v.as_bool()),
+        Some(true),
+        "hand-written sibling keys must survive the merge"
+    );
+    let reparsed = load_config_from_toml(&TomlValue::Table(root.clone()));
+    assert_eq!(reparsed.features.feedback_trace_card, Some(false));
+    let untouched_val: TomlValue = toml::from_str("[features]\nvoice_mode = false\n").unwrap();
+    let mut untouched = untouched_val.as_table().unwrap().clone();
+    merge_section(
+        &mut untouched,
+        "features",
+        &super::super::mcp::FeaturesPersistConfig::default(),
+    );
+    assert_eq!(
+        untouched
+            .get("features")
+            .and_then(|v| v.get("voice_mode"))
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "all-None must leave the existing section untouched"
+    );
+}
 #[test]
 fn transport_oauth_client_id_takes_priority_over_block() {
     let json = r#"{

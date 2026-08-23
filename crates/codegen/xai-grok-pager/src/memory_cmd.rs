@@ -95,7 +95,7 @@ fn run_clear(
             "{}",
             locale.named_text(
                 "memory.cli.nothing_to_clear",
-                "Nothing to clear \u{2014} no memory files found."
+                "Nothing to clear: no memory files found."
             )
         );
         return Ok(());

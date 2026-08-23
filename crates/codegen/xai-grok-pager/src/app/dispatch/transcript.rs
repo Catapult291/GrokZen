@@ -94,7 +94,7 @@ pub(super) fn dispatch_copy_assistant_message(
             if let Some(entry) = agent.scrollback.entry(i)
                 && let RenderBlock::AgentMessage(msg) = &entry.block
             {
-                agent_messages.push(msg.copy_text(false));
+                agent_messages.push(msg.copy_text(true));
             }
         }
 
@@ -194,7 +194,7 @@ pub(super) fn dispatch_copy_assistant_message(
                 let message = localized_template(
                     &locale,
                     "transcript.copy.clipboard_unreachable",
-                    "Clipboard unreachable — wrote {path}{stats}",
+                    "Clipboard unreachable: wrote {path}{stats}",
                     &[("{path}", &path), ("{stats}", &stats)],
                 );
                 agent.scrollback.push_block(RenderBlock::system(message));
@@ -313,7 +313,7 @@ pub(super) fn dispatch_export_conversation(
                     localized_template(
                         &locale,
                         "transcript.export.clipboard_unreachable",
-                        "Clipboard unreachable — conversation written to {path}{stats}",
+                        "Clipboard unreachable: conversation written to {path}{stats}",
                         &[("{path}", &path), ("{stats}", &stats)],
                     )
                 }
@@ -571,6 +571,7 @@ fn extensions_tab_slash_name(tab: crate::views::extensions_modal::ExtensionsTab)
         ExtensionsTab::Plugins => "plugins",
         ExtensionsTab::Marketplace => "marketplace",
         ExtensionsTab::Skills => "skills",
+        ExtensionsTab::Workflows => "workflows",
         ExtensionsTab::McpServers => "mcps",
     }
 }
@@ -673,12 +674,17 @@ pub(super) fn dispatch_open_config_agents_modal(
         .and_then(model_agent_type_from_info);
     let session_id = agent.session.session_id.clone();
     let active_agent = agent.session_agent_name.clone();
+    // One-shot plugin discovery (same gating as `/mcp doctor` and `inspect`)
+    // so plugin-provided agents are listed alongside native ones.
+    let plugin_registry = xai_grok_shell::util::config::load_cli_plugin_registry(&cwd);
+    let plugin_registry = (!plugin_registry.is_empty()).then_some(plugin_registry);
     let mut modal = AgentsModalState::new(
         &cwd,
         &toggle,
         &bundle,
         model_agent_type.as_deref(),
         active_agent,
+        plugin_registry,
     );
     if let Some(tab) = initial_tab {
         modal.active_tab = tab;

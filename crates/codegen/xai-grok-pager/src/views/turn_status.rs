@@ -5,7 +5,7 @@
 //! - Spinner (left, slowed to ~7.5fps)
 //! - Activity label (colored per activity type, truncates if needed)
 //! - Phase timer `Xs` (gray, never truncates)
-//! - Queued-send hint `· N queued — Enter to send now` (gray, sendable waits only)
+//! - Queued-send hint `· N queued, Enter to send now` (gray, sendable waits only)
 //! - Fill space
 //! - Turn timer `Xm Ys` and optional token count `⇣Nk` (right-aligned, gray)
 //! - Cancel button `[stop]` (right-aligned, red on hover)
@@ -378,7 +378,7 @@ pub fn render_turn_status(
             turn_format(
                 locale,
                 "turn.queue.send_now",
-                " \u{00b7} {count} queued — Enter to send now",
+                " \u{00b7} {count} queued, Enter to send now",
                 &[("count", held_queue.to_string())],
             )
         } else if held_queue > 0 {
@@ -668,7 +668,7 @@ pub fn render_turn_status(
                 turn_format(
                     locale,
                     "turn.queue.send_now",
-                    " · {count} queued — Enter to send now",
+                    " · {count} queued, Enter to send now",
                     &[("count", held_queue.to_string())],
                 )
             } else {
@@ -1705,7 +1705,7 @@ mod tests {
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
         assert!(
-            text.contains("1 queued — Enter to send now"),
+            text.contains("1 queued, Enter to send now"),
             "parked with a held row must advertise the queued hint, got: {text:?}"
         );
         assert!(
@@ -1734,7 +1734,7 @@ mod tests {
         args.held_queue_top_sendable = true;
         let text = render_row_text(args, 80);
         assert!(
-            text.contains("Waiting on subagent… 5m59s · 1 queued — Enter to send now"),
+            text.contains("Waiting on subagent… 5m59s · 1 queued, Enter to send now"),
             "phase timer must sit between the wait label and the queued hint, got: {text:?}"
         );
     }

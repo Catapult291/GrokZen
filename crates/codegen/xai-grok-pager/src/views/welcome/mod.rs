@@ -619,7 +619,13 @@ fn render_prompt_and_version(
             width: tip_centered.width.saturating_sub(inset * 2),
             height: tip_centered.height,
         };
-        crate::tips::render::render_tip_with_locale(tip_inset, buf, tip_text, Some(locale));
+        crate::tips::render::render_tip_with_locale(
+            tip_inset,
+            buf,
+            tip_text,
+            crate::tips::render::HINT_INSET,
+            Some(locale),
+        );
     }
     let prompt_result = prompt::render_prompt_with_locale(
         prompt_centered,
@@ -1969,9 +1975,9 @@ fn render_welcome_done(
         ];
         &gate_menu
     } else {
-        let (key_w, key_s, key_q, key_i_with_x) = (
+        let (key_w, key_resume, key_q, key_i_with_x) = (
             "ctrl+w",
-            "ctrl+s",
+            "f3",
             if in_vscode_family { "ctrl+d" } else { "ctrl+q" },
             "ctrl+i  [x]",
         );
@@ -1994,7 +2000,10 @@ fn render_welcome_done(
             key_w,
             p.locale.text(crate::locale::TextKey::SessionNewWorktree),
         ));
-        items.push((key_s, p.locale.text(crate::locale::TextKey::SessionResume)));
+        items.push((
+            key_resume,
+            p.locale.text(crate::locale::TextKey::SessionResume),
+        ));
         // "Changelog" above Quit; no shortcut — opened by click (row or block).
         if show_changelog_action {
             items.push(("", p.locale.text(crate::locale::TextKey::WelcomeChangelog)));

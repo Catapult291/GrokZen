@@ -19,23 +19,15 @@ pub(crate) mod metrics;
 /// Shortest gap between event-driven recomputes. A constant rather than a
 /// config knob: the one cadence a user can set is the `refresh_interval`
 /// timer, and this debounce only keeps a busy turn from re-running a script
-/// every frame. A change that must show at once (a force) and an owed poll
-/// drop to [`MIN_REFRESH_INTERVAL_MS`] instead, so those may run after 100ms rather
-/// than 300. Together the two are what comments here and in
 /// `status_line_policy` call the throttle.
 pub(crate) const EVENT_DEBOUNCE: Duration = Duration::from_millis(300);
 
-/// Floor under a forced or poll-owed run, so a window drag or a poll landing
-/// mid-recompute still cannot run a script per frame.
 pub(crate) const MIN_REFRESH_INTERVAL_MS: Duration = Duration::from_millis(100);
 
 pub(crate) const ABANDON_AFTER: Duration = Duration::from_secs(30);
 
-/// The consecutive poll failure at which the error text paints; below it the
-/// row keeps its last confirmed output. A transient endpoint outage must not
-/// paint an error over hours of good answers, but from here on the script
 /// itself is broken and stops being papered over with stale data.
-pub(crate) const POLL_FAILURES_TO_PAINT: u32 = 3;
+pub(crate) const REFRESH_FAILURES_TO_PAINT: u32 = 3;
 
 const _: () = assert!(
     ABANDON_AFTER.as_secs() >= command::COMMAND_TIMEOUT.as_secs() * 2,
@@ -119,7 +111,6 @@ impl RunState {
 
     /// Abandon a run that has held the slot past [`ABANDON_AFTER`], counting
     /// it once. Returns the trigger of a run newly parked as `Abandoned`; a
-    /// dropped superseded run reports `None`, since its owed poll was
     /// already re-raised when it was superseded.
     fn abandon_if_past_deadline(&mut self, now: Instant) -> Option<StatusLineTrigger> {
         let (next, run, abandoned_trigger) = match *self {
@@ -180,34 +171,26 @@ pub enum RunOutcome {
 }
 
 /// What [`StatusLineState::finish_command_run`] did with a result, so the
-/// caller can log the poll outcomes without the state knowing about logs.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum FinishDisposition {
-    /// Painted, dropped as stale, or owed nothing — no poll story to tell.
     Applied,
-    /// A poll run failed and the last confirmed output was kept.
-    PollFailureKept { error: String, failures: u32 },
-    /// A poll run's failure painted: enough failures in a row, or nothing
-    /// confirmed on the row to keep.
-    PollFailurePainted { error: String, failures: u32 },
+    RefreshFailureKept { error: String, failures: u32 },
+    RefreshFailurePainted { error: String, failures: u32 },
 }
 
 #[derive(Default)]
 pub(crate) struct StatusLineState {
     content: Option<Arc<StatusLineDisplay>>,
     settled: bool,
+    answered: bool,
     last_update: Option<Instant>,
     forced: bool,
-    /// The poll timer fired and no run has answered for it yet. Consumed by
-    /// the run that starts, not by the tick that saw it, so a poll due while
-    /// a run holds the slot is owed the next one.
-    poll_pending: bool,
-    /// Consecutive failed poll runs of the user's script, reset by any run
+    refresh_due: bool,
     /// that succeeds. The configured command is fixed for the life of the
     /// process, so the count deliberately survives [`Self::invalidate`]: an
     /// agent switch does not absolve a broken script. A future config reload
     /// must reset it when the command changes.
-    poll_failures: u32,
+    refresh_failures: u32,
     run: RunState,
     next_run_id: RunId,
     changed: bool,
@@ -255,12 +238,10 @@ impl StatusLineState {
 
     /// Settle with no content, leaving `last_update` alone so a later snapshot
     /// paints at once. A force left standing would demand ticks forever, and
-    /// so would a pending poll: whatever starved this update of a context
-    /// starves the run the poll is waiting for too.
     pub(crate) fn settle_empty(&mut self) {
         self.settled = true;
         self.clear_force();
-        self.poll_pending = false;
+        self.refresh_due = false;
     }
 
     #[must_use = "dropping the flag loses the redraw it was asking for"]
@@ -269,9 +250,8 @@ impl StatusLineState {
     }
 
     pub(crate) fn is_due(&self, now: Instant) -> bool {
-        // A pending poll drops to the floor like a force: its interval was
         // already served by the timer that raised it.
-        let interval = if self.forced || self.poll_pending {
+        let interval = if self.forced || self.refresh_due {
             MIN_REFRESH_INTERVAL_MS
         } else {
             EVENT_DEBOUNCE
@@ -302,26 +282,22 @@ impl StatusLineState {
         self.forced
     }
 
-    /// The poll timer fired: the next run is a `poll` run, throttle floored.
-    pub(crate) fn request_poll(&mut self) {
-        self.poll_pending = true;
+    pub(crate) fn request_refresh(&mut self) {
+        self.refresh_due = true;
     }
 
-    /// A config that no longer polls takes the request with it, or a stale
-    /// pending poll demands ticks nothing will consume.
-    pub(crate) fn cancel_poll_request(&mut self) {
-        self.poll_pending = false;
+    pub(crate) fn cancel_refresh_request(&mut self) {
+        self.refresh_due = false;
     }
 
-    pub(crate) fn poll_pending(&self) -> bool {
-        self.poll_pending
+    pub(crate) fn refresh_due(&self) -> bool {
+        self.refresh_due
     }
 
     pub(crate) fn abandon_if_past_deadline(&mut self, now: Instant) {
-        // Mirrors the supersede re-raise: a poll run abandoned unanswered
         // must not swallow the cycle the timer scheduled.
-        if self.run.abandon_if_past_deadline(now) == Some(StatusLineTrigger::Poll) {
-            self.poll_pending = true;
+        if self.run.abandon_if_past_deadline(now) == Some(StatusLineTrigger::RefreshInterval) {
+            self.refresh_due = true;
         }
     }
 
@@ -347,8 +323,8 @@ impl StatusLineState {
         if self.command_in_flight(now) {
             return None;
         }
-        let trigger = if std::mem::take(&mut self.poll_pending) {
-            StatusLineTrigger::Poll
+        let trigger = if std::mem::take(&mut self.refresh_due) {
+            StatusLineTrigger::RefreshInterval
         } else {
             StatusLineTrigger::State
         };
@@ -372,7 +348,7 @@ impl StatusLineState {
 
     /// A superseded run's output is dropped rather than painted.
     /// [`AfterSupersede`] already settled what replaces it.
-    #[must_use = "the disposition carries the poll failure the caller must log"]
+    #[must_use = "the disposition carries the refresh failure the caller must log"]
     pub(crate) fn finish_command_run(
         &mut self,
         now: Instant,
@@ -387,12 +363,8 @@ impl StatusLineState {
             }
             RunState::Abandoned(run) if run.id == id => {
                 self.run = RunState::Idle;
-                // The abandon re-raised this run's poll, and this late result
-                // is that poll's answer: consumed here, or one timer cycle
-                // paints and then runs a second time, and a failure would
-                // strike twice.
-                if run.trigger == StatusLineTrigger::Poll {
-                    self.poll_pending = false;
+                if run.trigger == StatusLineTrigger::RefreshInterval {
+                    self.refresh_due = false;
                 }
                 self.apply_run_outcome(run.trigger, outcome)
             }
@@ -412,9 +384,6 @@ impl StatusLineState {
         disposition
     }
 
-    /// A state run's failure paints, since the user just did something and is
-    /// owed the truth about their script. A poll run's failure keeps the last
-    /// confirmed output until [`POLL_FAILURES_TO_PAINT`], which owns the why.
     fn apply_run_outcome(
         &mut self,
         trigger: StatusLineTrigger,
@@ -422,7 +391,8 @@ impl StatusLineState {
     ) -> FinishDisposition {
         match outcome {
             RunOutcome::Output(line) => {
-                self.poll_failures = 0;
+                self.refresh_failures = 0;
+                self.answered = true;
                 self.settle_with_session_content(display_for(&line));
                 FinishDisposition::Applied
             }
@@ -431,20 +401,17 @@ impl StatusLineState {
                     self.settle_with_session_content(display_for(&text));
                     FinishDisposition::Applied
                 }
-                StatusLineTrigger::Poll => {
-                    self.poll_failures = self.poll_failures.saturating_add(1);
-                    let failures = self.poll_failures;
-                    // With nothing confirmed on the row there is nothing to
-                    // keep, so the first failure paints rather than leaving
-                    // a blank row.
-                    if failures >= POLL_FAILURES_TO_PAINT || self.content.is_none() {
+                StatusLineTrigger::RefreshInterval => {
+                    self.refresh_failures = self.refresh_failures.saturating_add(1);
+                    let failures = self.refresh_failures;
+                    if failures >= REFRESH_FAILURES_TO_PAINT || !self.answered {
                         self.settle_with_session_content(display_for(&text));
-                        FinishDisposition::PollFailurePainted { error, failures }
+                        FinishDisposition::RefreshFailurePainted { error, failures }
                     } else {
                         // Settled without touching the content: the row keeps
                         // its last answer rather than waiting on this one.
                         self.settled = true;
-                        FinishDisposition::PollFailureKept { error, failures }
+                        FinishDisposition::RefreshFailureKept { error, failures }
                     }
                 }
             },
@@ -457,11 +424,9 @@ impl StatusLineState {
     pub(crate) fn supersede_command_run(&mut self, after: AfterSupersede) {
         self.run = match self.run {
             RunState::Running(run) => {
-                // The fetch a superseded poll run carried is still owed, or a
-                // resize landing mid-poll would swallow the run the timer
                 // scheduled until the next fire.
-                if run.trigger == StatusLineTrigger::Poll {
-                    self.poll_pending = true;
+                if run.trigger == StatusLineTrigger::RefreshInterval {
+                    self.refresh_due = true;
                 }
                 RunState::Superseded(run)
             }
@@ -512,12 +477,12 @@ impl StatusLineState {
 
     /// Clear the content and leave the row unsettled, so ticks continue until an
     /// answer arrives. Contrast [`Self::settle_empty`]; the force goes with it,
-    /// but `poll_pending` deliberately survives: a poll owed while the welcome
     /// screen had no agent is kept for the first run after one appears.
     pub(crate) fn invalidate(&mut self) {
         self.supersede_command_run(AfterSupersede::NoRun);
         self.write_content(None);
         self.settled = false;
+        self.answered = false;
     }
 }
 

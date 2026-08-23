@@ -31,6 +31,7 @@ use tokio_util::sync::CancellationToken;
 use crate::copy::CopyStats;
 pub use crate::copy::DirtyFilesReport;
 use crate::copy::ParallelCopyConfig;
+pub use crate::nfs::NfsWorktreeOpts;
 
 /// Result from a delegated btrfs snapshot creation.
 #[derive(Debug, Clone)]
@@ -206,6 +207,10 @@ pub struct WorktreeReport {
     pub commit: String,
     pub unignored_copy: CopyReport,
     pub ignored_copy: Option<CopyReport>,
+    /// Dispatch arm that actually ran (`nfs` / `overlay` / `btrfs` / `copy` / `git` / `standalone`).
+    pub resolved_strategy: &'static str,
+    /// Arm-specific metadata persisted into worktrees.db.
+    pub strategy_metadata: Option<serde_json::Value>,
 }
 
 /// High-level builder API for creating fast git worktrees.
@@ -233,6 +238,7 @@ pub struct WorktreeBuilder {
     worktree_id: Option<String>,
     #[cfg(feature = "metadata")]
     metadata: Option<serde_json::Value>,
+    nfs: Option<NfsWorktreeOpts>,
 }
 
 impl std::fmt::Debug for WorktreeBuilder {
@@ -270,6 +276,7 @@ impl WorktreeBuilder {
             worktree_id: None,
             #[cfg(feature = "metadata")]
             metadata: None,
+            nfs: None,
         }
     }
 
@@ -382,27 +389,53 @@ impl WorktreeBuilder {
         self
     }
 
+    /// Explicit grove worktree enablement (macOS NFS / Linux FUSE).
+    /// The library never reads pager config.
+    pub fn grove_worktree(mut self, opts: NfsWorktreeOpts) -> Self {
+        self.nfs = Some(opts);
+        self
+    }
+
+    /// Deprecated alias for [`Self::grove_worktree`].
+    pub fn nfs_worktree(self, opts: NfsWorktreeOpts) -> Self {
+        self.grove_worktree(opts)
+    }
+
     /// Create the worktree using the configured options.
     ///
     /// This is a **blocking** operation. Callers should use `spawn_blocking`
     /// when calling from async contexts.
     pub fn create(self) -> Result<WorktreeReport> {
-        // Clone source/git_ref/creation_mode for DB registration before the move
-        // into WorktreePlan. These are one-per-create, not a hot path.
+        // One canonical dest for the plan id, IPC idempotency key, and DB id.
+        let dest = crate::worktree::plan::canonicalize_for_id(&self.dest);
+        let worktree_id = {
+            #[cfg(feature = "metadata")]
+            {
+                self.worktree_id
+                    .unwrap_or_else(|| crate::worktree::plan::worktree_id_from_path(&dest))
+            }
+            #[cfg(not(feature = "metadata"))]
+            {
+                crate::worktree::plan::worktree_id_from_path(&dest)
+            }
+        };
+        if !crate::nfs::is_safe_worktree_id(&worktree_id) {
+            anyhow::bail!("invalid worktree id from dest: {worktree_id}");
+        }
+
         #[cfg(feature = "metadata")]
         let meta_fields = (
             self.worktree_kind,
             self.session_id,
-            self.worktree_id,
+            worktree_id.clone(),
             self.source.clone(),
-            self.creation_mode.as_db_str(),
             self.git_ref.clone(),
             self.metadata,
         );
 
         let plan = crate::worktree::WorktreePlan {
             source: self.source,
-            dest: self.dest,
+            dest,
             git_ref: self.git_ref,
             parallelism: self.parallelism,
             channel_buffer: self.channel_buffer,
@@ -412,23 +445,28 @@ impl WorktreeBuilder {
             creation_mode: self.creation_mode,
             cancellation_token: self.cancellation_token,
             btrfs_delegate: self.btrfs_delegate,
+            worktree_id,
+            nfs: self.nfs,
         };
 
         let result = crate::worktree::execute_plan(plan).map_err(annotate_disk_full)?;
 
         #[cfg(feature = "metadata")]
         {
-            let (kind, session_id, wt_id, source, creation_mode, git_ref, metadata) = meta_fields;
+            let (kind, session_id, wt_id, source, git_ref, mut metadata) = meta_fields;
             if let Some(kind) = kind {
+                if let Some(sm) = result.strategy_metadata.clone() {
+                    metadata = Some(merge_strategy_metadata(metadata, sm));
+                }
                 register_worktree(
                     &result.worktree_path,
                     &source,
                     kind,
-                    creation_mode,
+                    result.resolved_strategy,
                     &git_ref,
                     &result.commit,
                     session_id,
-                    wt_id,
+                    Some(wt_id),
                     metadata,
                 );
             }
@@ -442,6 +480,8 @@ impl WorktreeBuilder {
             commit: result.commit,
             unignored_copy,
             ignored_copy: result.ignored_stats.map(Into::into),
+            resolved_strategy: result.resolved_strategy,
+            strategy_metadata: result.strategy_metadata,
         })
     }
 
@@ -555,6 +595,23 @@ fn annotate_disk_full(err: anyhow::Error) -> anyhow::Error {
     }
 }
 
+#[cfg(feature = "metadata")]
+fn merge_strategy_metadata(
+    caller: Option<serde_json::Value>,
+    strategy: serde_json::Value,
+) -> serde_json::Value {
+    match (caller, strategy) {
+        (Some(serde_json::Value::Object(mut a)), serde_json::Value::Object(b)) => {
+            for (k, v) in b {
+                a.insert(k, v);
+            }
+            serde_json::Value::Object(a)
+        }
+        (Some(c), _) if c.is_object() => c,
+        (_, s) => s,
+    }
+}
+
 /// Result of removing a worktree.
 #[derive(Clone, Debug)]
 pub struct RemoveReport {
@@ -619,6 +676,20 @@ fn remove_worktree_from_disk(
 
     #[cfg(not(target_os = "linux"))]
     let _ = delegate;
+
+    // NFS: daemon-first verified unmount. Never `umount -f`, never rm -rf a live mount.
+    {
+        match crate::nfs::try_nfs_remove(worktree_path) {
+            Ok(Some(report)) => return Ok(report),
+            Ok(None) => {}
+            Err(e) => {
+                // Fail closed for any NFS arm Err (inconclusive mount table, live non-grove NFS,
+                // or post-marker teardown). Swallowing would let the caller rm -rf a dest that
+                // may still be mounted or only partially cleaned.
+                return Err(e);
+            }
+        }
+    }
 
     #[cfg(target_os = "linux")]
     {

@@ -1910,9 +1910,7 @@ fn prompt_response_request_failed_banner_suppresses_turn_failed_and_toast() {
         dispatch(
             Action::TaskComplete(TaskResult::PromptResponse {
                 agent_id: id,
-                result: Err(
-                    "Server error (500) \u{2014} Something went wrong on our side.".to_string(),
-                ),
+                result: Err("Server error (500): Something went wrong on our side.".to_string()),
                 http_status: Some(500),
                 prompt_id: None,
             }),
@@ -1965,7 +1963,7 @@ fn prompt_response_formatted_401_suppresses_turn_failed_and_stashes_prompt() {
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
             agent_id: id,
-            result: Err("Request failed (401) \u{2014} Invalid or expired credentials".to_string()),
+            result: Err("Request failed (401): Invalid or expired credentials".to_string()),
             http_status: Some(401),
             prompt_id: None,
         }),
@@ -2007,9 +2005,7 @@ fn prompt_response_formatted_402_takes_credit_limit_path() {
     dispatch(
         Action::TaskComplete(TaskResult::PromptResponse {
             agent_id: id,
-            result: Err(
-                "Request failed (402) \u{2014} Grok Build usage balance exhausted".to_string(),
-            ),
+            result: Err("Request failed (402): Grok Build usage balance exhausted".to_string()),
             http_status: None,
             prompt_id: None,
         }),
@@ -3460,7 +3456,7 @@ fn fullscreen_mode_blocks_minimal_only_slash_command() {
     let refusal = last_system_text(&app, AgentId(0));
     assert_eq!(
         refusal,
-        "/expand isn't available in fullscreen mode — press Tab to focus the scrollback, \
+        "/expand isn't available in fullscreen mode: press Tab to focus the scrollback, \
          then → on the block."
     );
 }
@@ -4756,4 +4752,211 @@ fn suggestion_debounce_routes_by_agent_id_not_active_view() {
         )),
         "expiry must fetch for the arming agent even off-screen: {effects:?}"
     );
+}
+
+mod prompt_stash_dispatch_tests {
+    use super::test_app_with_agent;
+    use crate::app::actions::Action;
+    use crate::app::agent::AgentId;
+    use crate::app::agent_view::StashCause;
+    use crate::app::dispatch::router::dispatch;
+
+    /// Esc-Esc clear hands the draft to the stash rather than dropping it. Ranking and restore semantics belong to `agent_view::prompt_stash`.
+    #[test]
+    fn clear_prompt_stashes_the_cleared_draft() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .set_text("cleared draft");
+
+        let effects = dispatch(Action::ClearPrompt, &mut app);
+
+        assert!(effects.is_empty());
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "composer must be cleared");
+        let stash = agent.prompt_stash.as_ref().expect("draft was stashed");
+        assert_eq!(stash.prompt.text, "cleared draft");
+        assert_eq!(stash.cause, StashCause::ClearedDraft);
+    }
+
+    /// The clear records history and the stash contributes its own entry, so a `!` draft has to
+    /// be recorded with the same `! ` prefix or the Up browse lists it twice.
+    #[test]
+    fn clearing_a_shell_draft_leaves_one_history_entry() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt_input_mode = crate::app::agent_view::PromptInputMode::Bash;
+            agent.prompt.set_text("git status");
+        }
+
+        dispatch(Action::ClearPrompt, &mut app);
+
+        let history = app.agents[&id].combined_prompt_history();
+        let texts: Vec<&str> = history.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["! git status"]);
+    }
+
+    #[test]
+    fn clear_prompt_on_empty_composer_stashes_nothing() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+
+        dispatch(Action::ClearPrompt, &mut app);
+
+        assert!(app.agents.get(&id).unwrap().prompt_stash.is_none());
+    }
+
+    #[test]
+    fn chord_stashed_draft_auto_restores_after_next_send() {
+        // Both sends consume the composer, so both hand the draft back.
+        let sends = [
+            Action::SendPrompt("quick side question".into()),
+            Action::SendBashCommand("git status".into()),
+        ];
+
+        for send in sends {
+            let label = format!("{send:?}");
+            let mut app = test_app_with_agent();
+            let id = AgentId(0);
+            {
+                let agent = app.agents.get_mut(&id).unwrap();
+                agent.prompt.set_text("stashed thought");
+                agent.stash_prompt_draft(StashCause::Chord);
+            }
+
+            dispatch(send, &mut app);
+
+            let agent = app.agents.get(&id).unwrap();
+            assert_eq!(
+                agent.prompt.text(),
+                "stashed thought",
+                "{label} must restore the stash"
+            );
+            assert!(agent.prompt_stash.is_none(), "{label} left the slot full");
+        }
+    }
+
+    /// `SendPromptNow` also force-sends a queued row, which never touched the composer.
+    /// Only the caller that consumed the draft reports it, so the queued-row case must leave the stash alone.
+    #[test]
+    fn a_queued_row_send_now_leaves_the_stash_alone() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("stashed thought");
+            agent.stash_prompt_draft(StashCause::Chord);
+        }
+
+        dispatch(
+            Action::SendPromptNow {
+                text: "a queued row".into(),
+                images: vec![],
+            },
+            &mut app,
+        );
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "the composer was never the source");
+        assert!(agent.prompt_stash.is_some(), "the stash must stay put");
+    }
+
+    /// A `#` note with no text is refused, so it never consumed a draft and must not hand the
+    /// stash back. The marker has to sit after the guard, not before it.
+    #[test]
+    fn a_rejected_remember_note_does_not_restore_the_stash() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("stashed thought");
+            agent.stash_prompt_draft(StashCause::Chord);
+        }
+
+        dispatch(Action::SendRememberNote("   ".into()), &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "the refused note restores nothing");
+        assert!(agent.prompt_stash.is_some(), "the stash must stay put");
+    }
+
+    /// A handler that rejects the action never consumed the draft, so the stash must stay put.
+    #[test]
+    fn a_rejected_send_does_not_restore_the_stash() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.prompt.set_text("stashed thought");
+            agent.stash_prompt_draft(StashCause::Chord);
+            agent.prompt.set_text("never sent");
+        }
+        app.reconnect_pending = true;
+
+        dispatch(Action::SendPrompt("never sent".into()), &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(
+            agent.prompt.text(),
+            "never sent",
+            "the draft is still unsent"
+        );
+        assert!(
+            agent.prompt_stash.is_some(),
+            "a refused send must not hand the stash back"
+        );
+    }
+
+    /// An Esc-Esc-cleared draft is a discard: it must NOT bounce back after the next send. Chord pop and history browse remain its recovery paths.
+    #[test]
+    fn esc_cleared_draft_does_not_auto_restore_after_send() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        app.agents
+            .get_mut(&id)
+            .unwrap()
+            .prompt
+            .set_text("discarded draft");
+
+        dispatch(Action::ClearPrompt, &mut app);
+        dispatch(Action::SendPrompt("next prompt".into()), &mut app);
+
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(agent.prompt.text(), "", "discarded draft must stay stashed");
+        assert!(agent.prompt_stash.is_some());
+    }
+
+    /// Auto-restore never overwrites composer state the user already touched.
+    #[test]
+    fn auto_restore_declines_on_a_non_empty_or_moded_composer() {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.prompt.set_text("stashed thought");
+        agent.stash_prompt_draft(StashCause::Chord);
+
+        agent.prompt.set_text("already typing");
+
+        agent.auto_restore_stash_after_send();
+
+        assert_eq!(agent.prompt.text(), "already typing");
+        assert!(agent.prompt_stash.is_some());
+
+        agent.prompt.set_text("");
+        agent.prompt_input_mode = crate::app::agent_view::PromptInputMode::Bash;
+
+        agent.auto_restore_stash_after_send();
+
+        assert_eq!(
+            agent.prompt.text(),
+            "",
+            "moded composer must not be overwritten"
+        );
+        assert!(agent.prompt_stash.is_some());
+    }
 }

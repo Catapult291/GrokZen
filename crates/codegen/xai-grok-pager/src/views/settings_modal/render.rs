@@ -1990,7 +1990,7 @@ fn render_editing_value_with_locale(
                 StringValidator::KnownModel => localized_named_text(
                     locale,
                     "settings.ui.empty_use_default",
-                    "<empty — use shell default>",
+                    "<empty: uses shell default>",
                 ),
                 StringValidator::NonEmptyToken | StringValidator::Any => {
                     localized_named_text(locale, "settings.ui.type_value", "<type a value>")
@@ -2093,7 +2093,7 @@ fn render_int_stepper(
         // current value, so this branch should be unreachable, but
         // a blank cell would be confusing if a future refactor
         // dropped the seed.
-        "—".to_string()
+        "-".to_string()
     } else {
         buffer.to_string()
     };

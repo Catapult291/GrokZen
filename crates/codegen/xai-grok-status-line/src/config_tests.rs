@@ -76,7 +76,6 @@ fn value_it_cannot_read_is_named_and_the_ui_table_survives() {
         ("[status_line]\ntype = \"buitlin\"\n", "type = \"buitlin\""),
         ("status_line = \"builtin\"\n", "must be a table"),
         ("[status_line]\npadding = 2\n", "needs type"),
-        ("[status_line]\nrefresh_interval_ms = 500\n", "needs type"),
     ] {
         names_the_problem(ui_toml(section), expect, section);
     }
@@ -229,7 +228,6 @@ fn every_field_survives_a_save_and_a_reload() {
         items: Some(vec![StatusLineItem::Cwd, StatusLineItem::TurnTimer]),
         padding: Some(2),
         refresh_interval: Some(300),
-        has_retired_refresh_interval_ms: true,
         parse_problem: Some("not written".into()),
         unknown_keys: vec!["colour".into()],
     };
@@ -241,17 +239,13 @@ fn every_field_survives_a_save_and_a_reload() {
             "type": "builtin", "command": "~/status_line.sh",
             "items": ["cwd", "turn-timer"], "padding": 2, "refresh_interval": 300,
         }),
-        "a problem, an unknown key, and a retired key are not settings to write back"
+        "a problem and an unknown key are not settings to write back"
     );
 
     let reloaded: StatusLineConfig =
         serde_json::from_value(written).expect("what we wrote parses back");
     assert_eq!(reloaded, saved);
-    assert!(
-        reloaded.parse_problem.is_none()
-            && reloaded.unknown_keys.is_empty()
-            && !reloaded.has_retired_refresh_interval_ms
-    );
+    assert!(reloaded.parse_problem.is_none() && reloaded.unknown_keys.is_empty());
 }
 
 #[test]
@@ -307,10 +301,6 @@ fn unusable_numbers_are_capped_where_they_are_read() {
 
 #[test]
 fn refresh_interval_is_command_only_and_clamped() {
-    let polled = ui(r#"{"type": "command", "command": "x", "refresh_interval": 300}"#).status_line;
-    assert_eq!(polled.refresh_interval(), Some(Duration::from_secs(300)));
-    assert!(polled.problem().is_none());
-
     let floored = StatusLineConfigFixture::from_kind(StatusLineType::Command)
         .with_command("x")
         .with_refresh_interval(Some(0))
@@ -350,56 +340,18 @@ fn refresh_interval_is_command_only_and_clamped() {
         builtin
             .problem()
             .is_some_and(|p| p.contains("refresh_interval needs type = \"command\"")),
-        "a timer under builtin is reported rather than left looking like it polls"
+        "a timer under builtin is reported rather than left looking like it refreshes"
     );
     assert!(
         builtin.problem_to_paint().is_none(),
         "the builtin row still draws its segments"
     );
 
+    let empty = r#"{"type": "builtin", "items": [], "refresh_interval": 300}"#;
+    names_the_problem(ui(empty), "needs at least one item", empty);
+
     // The off switch outranks its neighbours, like a stray `command` does.
     let off = ui(r#"{"type": "disabled", "refresh_interval": 300}"#).status_line;
     assert!(off.refresh_interval().is_none(), "off schedules nothing");
     assert!(off.problem().is_none() && !off.reserves_a_row());
-}
-
-#[test]
-fn retired_refresh_interval_ms_is_reported_and_never_painted_over_a_working_row() {
-    for section in [
-        r#"{"type": "command", "command": "x", "refresh_interval_ms": 500}"#,
-        // Presence is what retires the key, so a value we cannot read names
-        // the same replacement instead of an "ignored" report.
-        r#"{"type": "command", "command": "x", "refresh_interval_ms": "fast"}"#,
-    ] {
-        let row = ui(section).status_line;
-        assert_eq!(
-            row.resolve(),
-            Some(ResolvedStatusLine::Command { command: "x" }),
-            "{section}"
-        );
-        assert!(
-            row.problem()
-                .is_some_and(|p| p.contains("refresh_interval_ms is retired")),
-            "{section} reported {:?}",
-            row.problem()
-        );
-        assert!(
-            row.problem_to_paint().is_none(),
-            "report-only: the working row keeps painting its output"
-        );
-    }
-
-    // What the mode still needs outranks every timer message: a row with
-    // nothing to draw paints its own problem, not a report-only one.
-    for section in [
-        r#"{"type": "builtin", "items": [], "refresh_interval": 300}"#,
-        r#"{"type": "builtin", "items": [], "refresh_interval_ms": 500}"#,
-    ] {
-        names_the_problem(ui(section), "needs at least one item", section);
-    }
-
-    // Alone in a typeless section the retired key still marks it touched, so
-    // it reports what the section needs rather than vanishing.
-    let alone = r#"{"refresh_interval_ms": 500}"#;
-    names_the_problem(ui(alone), "needs type", alone);
 }

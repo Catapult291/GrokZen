@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - zh-dev
+  pull_request:
+    branches:
+      - zh-dev
   workflow_dispatch:
     inputs:
       version:
@@ -15,7 +18,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: zh-dev-windows-preview-${{ github.ref }}
+  group: zh-dev-multiplatform-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -363,7 +366,7 @@ jobs:
       - name: 上传构建资源监控与 Cargo timings
         id: monitor_artifact
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: grok-zh-build-monitor-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
@@ -493,9 +496,9 @@ jobs:
 
       - name: 上传绿色预览版
         id: preview_artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: grok-zh-windows-${{ github.run_number }}
+          name: grok-zh-windows-${{ github.run_id }}-${{ github.run_attempt }}
           path: dist/${{ steps.preview.outputs.package_name }}
           if-no-files-found: error
           compression-level: 6
@@ -558,3 +561,57 @@ jobs:
             ${{ runner.temp }}/grok-zh-cargo/registry
             ${{ runner.temp }}/grok-zh-cargo/git
           key: ${{ steps.cargo_home_cache.outputs.cache-primary-key }}
+
+  linux-x64-gnu-preview:
+    name: Linux x64 GNU 预览版
+    uses: ./.github/workflows/build-linux-x64.yml
+    with:
+      version: ${{ inputs.version }}
+      release_build: false
+
+  macos-arm-preview:
+    name: macOS ARM64 预览版
+    uses: ./.github/workflows/build-macos-arm.yml
+    with:
+      version: ${{ inputs.version }}
+      release_build: false
+
+  multiplatform-result:
+    name: 三端构建汇总
+    if: ${{ always() }}
+    needs:
+      - windows-gnu-preview
+      - linux-x64-gnu-preview
+      - macos-arm-preview
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      WINDOWS_RESULT: ${{ needs.windows-gnu-preview.result }}
+      LINUX_RESULT: ${{ needs.linux-x64-gnu-preview.result }}
+      MACOS_RESULT: ${{ needs.macos-arm-preview.result }}
+      LINUX_ARTIFACT: ${{ needs.linux-x64-gnu-preview.outputs.artifact_name }}
+      MACOS_ARTIFACT: ${{ needs.macos-arm-preview.outputs.artifact_name }}
+    steps:
+      - name: 验证三个目标均成功
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'Windows: %s\nLinux: %s\nmacOS: %s\n' \
+            "${WINDOWS_RESULT}" "${LINUX_RESULT}" "${MACOS_RESULT}"
+          if [[ "${WINDOWS_RESULT}" != success \
+            || "${LINUX_RESULT}" != success \
+            || "${MACOS_RESULT}" != success ]]; then
+            echo '::error::至少一个平台构建未成功。'
+            exit 1
+          fi
+          if [[ -z "${LINUX_ARTIFACT}" || -z "${MACOS_ARTIFACT}" ]]; then
+            echo '::error::可复用工作流没有返回完整的制品名称。'
+            exit 1
+          fi
+          {
+            echo '## 三端预览构建通过'
+            echo
+            echo "- Windows x64 GNU：${WINDOWS_RESULT}"
+            echo "- Linux x86_64 GNU：${LINUX_RESULT}（${LINUX_ARTIFACT}）"
+            echo "- macOS ARM64：${MACOS_RESULT}（${MACOS_ARTIFACT}）"
+          } >> "${GITHUB_STEP_SUMMARY}"

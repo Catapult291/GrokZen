@@ -583,6 +583,7 @@ async fn scrape_activity_loop(
     let url = activity_url(control_port);
     // A fixed loopback control endpoint never redirects, so a 3xx is anomalous —
     // don't follow it; it classifies as `BadResponse`.
+    #[allow(clippy::disallowed_methods)] // localhost preview server; TLS policy N/A
     let client = match reqwest::Client::builder()
         .timeout(PREVIEW_ACTIVITY_SCRAPE_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -692,6 +693,7 @@ async fn scrape_metrics_loop(
         return;
     }
     let url = metrics_url(control_port);
+    #[allow(clippy::disallowed_methods)] // localhost preview server; TLS policy N/A
     let client = match reqwest::Client::builder()
         .timeout(PREVIEW_ACTIVITY_SCRAPE_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
@@ -1334,6 +1336,7 @@ mod tests {
     }
 
     fn scrape_client() -> reqwest::Client {
+        #[allow(clippy::disallowed_methods)] // localhost preview server; TLS policy N/A
         reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
             .redirect(reqwest::redirect::Policy::none())
@@ -1460,6 +1463,7 @@ mod tests {
     #[tokio::test]
     async fn scrape_activity_treats_a_hung_endpoint_as_absent() {
         let port = serve_accept_then_hang().await;
+        #[allow(clippy::disallowed_methods)] // localhost preview server; TLS policy N/A
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(150))
             .redirect(reqwest::redirect::Policy::none())

@@ -96,7 +96,7 @@ pub struct AgentBuilder {
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
     app_builder_deployer_config:
-        xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
+        xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     subagents_enabled: bool,
     background_workflows_enabled: bool,
@@ -180,6 +180,7 @@ fn merge_tool_params(
 fn apply_workflow_tool_gates(
     tool_config: &mut xai_grok_tools::registry::types::ToolServerConfig,
     background_workflows_enabled: bool,
+    is_subagent: bool,
 ) {
     use xai_grok_tools::types::tool::ToolKind;
     if background_workflows_enabled {
@@ -187,6 +188,11 @@ fn apply_workflow_tool_gates(
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::GoalUpdate));
     } else {
+        tool_config
+            .tools
+            .retain(|tool| tool.kind != Some(ToolKind::Workflow));
+    }
+    if is_subagent {
         tool_config
             .tools
             .retain(|tool| tool.kind != Some(ToolKind::Workflow));
@@ -500,7 +506,7 @@ impl AgentBuilder {
     /// Set the deploy service configuration.
     pub fn with_app_builder_deployer_config(
         mut self,
-        config: xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
+        config: xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
     ) -> Self {
         self.app_builder_deployer_config = config;
         self
@@ -793,7 +799,11 @@ impl AgentBuilder {
             );
             tool_config.tools.retain(|tool| tool.id != ask_user_id);
         }
-        apply_workflow_tool_gates(&mut tool_config, self.background_workflows_enabled);
+        apply_workflow_tool_gates(
+            &mut tool_config,
+            self.background_workflows_enabled,
+            self.prompt_audience == crate::prompt::context::PromptAudience::Subagent,
+        );
         let task_tool_id = format!(
             "{}:{}",
             xai_grok_tools::types::tool::ToolNamespace::GrokBuild,

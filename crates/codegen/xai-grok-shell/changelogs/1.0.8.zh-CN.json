@@ -1,0 +1,52 @@
+[
+  {
+    "category": "features",
+    "description": "MCP 服务器现在可以通过与问题提示相同的弹窗请求填写表单或确认打开 URL。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "下载仅包含一个文件的文件夹时，现在生成的 zip 解压后仍会保留文件夹结构。",
+    "breaking_change": false
+  },
+  {
+    "category": "performance",
+    "description": "同时打开许多子智能体时，加载其历史记录不再导致界面卡住。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "模型臆造不存在的工具时，失败的工具调用现在会明确说明该工具不存在。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "Ctrl+S 现在可以暂存当前提示词草稿，让你先发送其他内容，之后再恢复草稿。",
+    "breaking_change": false
+  },
+  {
+    "category": "performance",
+    "description": "**并发子智能体**现在启动得更快，并且不再卡住父会话。",
+    "breaking_change": true
+  },
+  {
+    "category": "fixes",
+    "description": "**状态栏**刷新计时器现在采用一致的命名，并且不会再对有意隐藏的行显示错误。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**/workflow** 现在会自动补全已保存的工作流名称，并且只为暂停、继续、停止和保存操作显示有效的运行。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**工作流智能体行**现在显示当前上下文用量，而不是累计令牌数。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "等待子智能体或任务期间，**跟进消息**现在会立即发送，包括使用 /btw 之后。",
+    "breaking_change": false
+  }
+]

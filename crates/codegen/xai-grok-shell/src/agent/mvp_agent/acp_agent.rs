@@ -508,6 +508,7 @@ impl acp::Agent for MvpAgent {
                     // away-recap poll and the manual `/recap` on this so a
                     // disabled feature produces zero `x.ai/recap` traffic.
                     "sessionRecap": self.cfg.borrow().is_session_recap_enabled(),
+                    "feedbackTraceOffer": self.feedback_trace_offer(),
                     "voiceMode": self.cfg.borrow().is_voice_mode_enabled(),
                 })
                         .as_object()
@@ -2254,9 +2255,8 @@ impl acp::Agent for MvpAgent {
                 )
             }
             "x.ai/interject" => crate::extensions::interject::handle(self, &args).await,
-            "x.ai/feedback" | "x.ai/feedback/dismiss" | "x.ai/btw" => {
-                crate::extensions::feedback::handle(self, &args).await
-            }
+            "x.ai/feedback" | "x.ai/feedback/dismiss" | "x.ai/feedback/upload-trace"
+            | "x.ai/btw" => crate::extensions::feedback::handle(self, &args).await,
             "x.ai/recap" => crate::extensions::recap::handle(self, &args).await,
             "x.ai/cloud/terminate" => {
                 crate::extensions::auth_gate::require_xai_auth(

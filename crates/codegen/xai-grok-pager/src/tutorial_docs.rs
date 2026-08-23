@@ -102,7 +102,7 @@ pub static TUTORIAL_TOPICS: &[TutorialTopic] = &[
         "tutorial.make-it-yours",
         "08-make-it-yours.md",
         "Make It Yours",
-        "just ask — AGENTS.md, memory, themes",
+        "just ask: AGENTS.md, memory, themes",
         Some(crate::docs::PROJECT_RULES)
     ),
     topic_en!(

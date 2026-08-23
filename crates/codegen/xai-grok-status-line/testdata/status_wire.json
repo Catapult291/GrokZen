@@ -54,5 +54,5 @@
     "branch": "feature-x",
     "main_worktree_root": "/home/user/project"
   },
-  "trigger": "poll"
+  "trigger": "refresh_interval"
 }

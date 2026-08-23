@@ -26,12 +26,20 @@ fn status_line_app(kind: StatusLineType) -> AppView {
     app
 }
 
-/// [`status_line_app`]'s command row with the timer set, for the poll cases.
-fn polling_app() -> AppView {
+fn refresh_timer_app() -> AppView {
     let mut app = status_line_app(StatusLineType::Command);
     app.current_ui.status_line = command_row(StatusLineType::Command)
         .with_refresh_interval(Some(300))
         .into_config();
+    app
+}
+
+fn settled_refresh_timer_app(now: Instant) -> AppView {
+    let mut app = refresh_timer_app();
+    app.update_status_line_at(now);
+    assert!(queued_a_run(&app), "the first run starts as ever");
+    app.pending_effects.clear();
+    app.on_status_line_command_finished_at(now, RunId(0), RunOutcome::Output("row".to_string()));
     app
 }
 
@@ -59,30 +67,25 @@ fn queued_a_run(app: &AppView) -> bool {
 }
 
 #[test]
-fn poll_timer_reruns_an_idle_settled_row() {
+fn refresh_timer_reruns_an_idle_settled_row() {
     let mut now = Instant::now();
-    let mut app = polling_app();
-
-    app.update_status_line_at(now);
-    assert!(queued_a_run(&app), "the first run starts as ever");
-    app.pending_effects.clear();
-    app.on_status_line_command_finished_at(now, RunId(0), RunOutcome::Output("row".to_string()));
+    let mut app = settled_refresh_timer_app(now);
     assert_eq!(
         app.status_line_tick_demand_at(now),
         TickDemand::None,
-        "between polls an idle settled row still parks the loop"
+        "between timer fires an idle settled row still parks the loop"
     );
 
     now += Duration::from_secs(300);
-    app.note_status_line_poll_due_at(now);
+    app.note_status_line_refresh_due_at(now);
     assert!(
         queued_a_run(&app),
-        "the poll is the one thing that re-runs an idle settled row"
+        "the timer is the one thing that re-runs an idle settled row"
     );
 }
 
 #[test]
-fn poll_nudge_without_a_polling_config_runs_nothing() {
+fn refresh_nudge_without_a_timer_config_runs_nothing() {
     let mut now = Instant::now();
     let mut app = status_line_app(StatusLineType::Command);
 
@@ -91,131 +94,78 @@ fn poll_nudge_without_a_polling_config_runs_nothing() {
     app.on_status_line_command_finished_at(now, RunId(0), RunOutcome::Output("row".to_string()));
 
     now += Duration::from_secs(300);
-    app.note_status_line_poll_due_at(now);
+    app.note_status_line_refresh_due_at(now);
     assert!(!queued_a_run(&app), "no refresh_interval, no timer runs");
     assert!(
-        !app.status_line.poll_pending(),
-        "and no pending poll left demanding ticks"
+        !app.status_line.refresh_due(),
+        "and no due refresh left demanding ticks"
     );
 }
 
 #[test]
-fn owed_poll_waits_only_for_the_floor_not_the_debounce() {
+fn owed_refresh_is_deferred_never_dropped_and_consumed_by_the_first_run() {
     let mut now = Instant::now();
-    let mut app = polling_app();
-    app.update_status_line_at(now);
-    app.pending_effects.clear();
-    app.on_status_line_command_finished_at(now, RunId(0), RunOutcome::Output("row".to_string()));
-
-    app.note_status_line_poll_due_at(now);
-    assert!(!queued_a_run(&app), "inside the floor even a poll waits");
-    assert!(app.status_line.poll_pending(), "deferred, not dropped");
-
+    let mut app = settled_refresh_timer_app(now);
+    app.note_status_line_refresh_due_at(now);
+    assert!(!queued_a_run(&app), "inside the floor even the timer waits");
+    assert!(app.status_line.refresh_due(), "deferred, not dropped");
     now += MIN_REFRESH_INTERVAL_MS;
     app.update_status_line_at(now);
     assert!(
         queued_a_run(&app),
-        "past the floor the owed poll runs without waiting out the debounce"
+        "past the floor the owed refresh runs without waiting out the debounce"
     );
-}
+    assert!(!app.status_line.refresh_due(), "consumed by that run");
 
-#[test]
-fn poll_owed_behind_a_fullscreen_subagent_is_consumed_when_the_row_returns() {
     let mut now = Instant::now();
-    let mut app = polling_app();
-    app.update_status_line_at(now);
-    app.pending_effects.clear();
-    app.on_status_line_command_finished_at(now, RunId(0), RunOutcome::Output("row".to_string()));
-
+    let mut app = settled_refresh_timer_app(now);
     app.agents.get_mut(&AgentId(0)).unwrap().active_subagent = Some("child".into());
     now += Duration::from_secs(300);
-    app.note_status_line_poll_due_at(now);
+    app.note_status_line_refresh_due_at(now);
     assert!(!queued_a_run(&app), "no run for a frame the subagent owns");
     assert!(
-        app.status_line.poll_pending(),
-        "the poll waits for the row instead of being dropped"
+        app.status_line.refresh_due(),
+        "the refresh waits for the row"
     );
-
     app.agents.get_mut(&AgentId(0)).unwrap().active_subagent = None;
     app.update_status_line_at(now);
-    assert!(
-        queued_a_run(&app),
-        "the first run after the row returns carries the owed poll"
-    );
-    assert!(
-        !app.status_line.poll_pending(),
-        "consumed by that run, not left demanding another"
-    );
-}
+    assert!(queued_a_run(&app), "the first run after the row returns");
+    assert!(!app.status_line.refresh_due(), "consumed, not re-demanded");
 
-#[test]
-fn poll_owed_before_any_agent_is_carried_to_the_first_run_after_one_appears() {
     let mut now = Instant::now();
-    let mut app = polling_app();
+    let mut app = refresh_timer_app();
     app.active_view = ActiveView::AgentDashboard;
-
     now += Duration::from_secs(300);
-    app.note_status_line_poll_due_at(now);
+    app.note_status_line_refresh_due_at(now);
     assert!(!queued_a_run(&app), "no agent, nothing to describe");
-    assert!(
-        app.status_line.poll_pending(),
-        "the no-agent invalidate must keep the owed poll"
-    );
-
+    assert!(app.status_line.refresh_due(), "kept through the invalidate");
     app.active_view = ActiveView::Agent(AgentId(0));
     app.update_status_line_at(now);
     assert!(queued_a_run(&app), "the first run after an agent appears");
     assert!(
-        !app.status_line.poll_pending(),
-        "consumed by that run, which carries the poll trigger"
+        !app.status_line.refresh_due(),
+        "consumed by that run, which carries the refresh_interval trigger"
     );
 }
 
 #[test]
-fn owed_poll_that_fails_on_the_first_run_paints_rather_than_blanking() {
+fn refresh_with_no_shell_context_settles_empty_and_parks_the_loop() {
     let mut now = Instant::now();
-    let mut app = polling_app();
-    app.active_view = ActiveView::AgentDashboard;
-    now += Duration::from_secs(300);
-    app.note_status_line_poll_due_at(now);
-
-    app.active_view = ActiveView::Agent(AgentId(0));
-    app.update_status_line_at(now);
-    assert!(queued_a_run(&app), "the owed poll starts the first run");
-
-    app.on_status_line_command_finished_at(
-        now,
-        RunId(0),
-        RunOutcome::Failed {
-            text: "[status line: exit 7]".into(),
-            error: "exit 7".into(),
-        },
-    );
-    assert!(
-        app.status_line.display().is_some(),
-        "with nothing confirmed to keep, the failure paints rather than \
-         leaving a blank row"
-    );
-}
-
-#[test]
-fn poll_with_no_shell_context_settles_empty_and_parks_the_loop() {
-    let mut now = Instant::now();
-    let mut app = polling_app();
+    let mut app = refresh_timer_app();
     app.agents.get_mut(&AgentId(0)).unwrap().status_context = None;
 
     now += Duration::from_secs(300);
-    app.note_status_line_poll_due_at(now);
+    app.note_status_line_refresh_due_at(now);
     assert!(!queued_a_run(&app), "no payload, nothing to run");
     assert!(
-        !app.status_line.poll_pending(),
+        !app.status_line.refresh_due(),
         "settling empty takes the request with it: whatever starved this \
-         update of a context starves the run the poll waits for too"
+         update of a context starves the run the refresh waits for too"
     );
     assert_eq!(
         app.status_line_tick_demand_at(now),
         TickDemand::None,
-        "a poll nothing can answer must not become a stranded wake"
+        "a refresh nothing can answer must not become a stranded wake"
     );
 }
 

@@ -23,7 +23,7 @@ mod import_claude;
 mod interject;
 mod jump;
 mod modes;
-mod notes;
+pub(crate) mod notes;
 mod permissions;
 mod prompt;
 mod queue;
@@ -42,6 +42,7 @@ pub(in crate::app) use auth::scrollback_has_recent_error_banner;
 pub(crate) use billing::{UPSELL_URL_PAYG, UPSELL_URL_UPGRADE, is_credit_limit_error};
 pub(crate) use modes::{downgrade_displayed_auto_if_gated, effective_auto};
 pub(crate) use notes::FEEDBACK_QUESTION_LABEL;
+pub(crate) use notes::FEEDBACK_TRACE_UPLOAD_TIMEOUT_MS;
 #[cfg(test)]
 pub(crate) use notes::recap_unavailable_toast;
 pub(crate) use notes::{recap_unavailable_toast_with_locale, scrollback_has_user_messages};

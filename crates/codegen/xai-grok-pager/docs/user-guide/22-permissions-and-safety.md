@@ -17,8 +17,10 @@ Modes set a baseline. Allow, ask, and deny [rules](#configuring-permissions) sti
 
 | Situation | Mode |
 | --------- | ---- |
-| Interactive TUI | Default (ask), or auto for fewer prompts with background checks |
+| Interactive TUI | Auto for fewer prompts with background checks, or ask to approve every action yourself |
 | Scripts, SDKs, CI, agent servers | Always-approve; add [deny rules](#configuring-permissions) or hooks for hard limits |
+
+If you haven't chosen a mode, new interactive sessions use the current default. Once you pick one (via `Shift+Tab`, `/settings`, a `permission_mode` config entry, or a `--permission-mode` flag), your choice always wins and is remembered. Headless runs (`grok -p`), `agent stdio`, and agent servers always start in **ask**.
 
 ```bash
 grok -p "Run the tests" --always-approve
@@ -414,6 +416,8 @@ Commands on the [dangerous list](#dangerous-commands) (for example `git push` an
 
 Interactive grants are stored in Grok's own state directory under your home directory, scoped to the git repository you launched Grok in (its repository root), so a grant accepted at the repo root also applies in sessions started from a subdirectory of the same repository. Outside a git repository, grants are scoped to the launch directory, and each git worktree keeps its own grants. A grant made in one project never applies in another, grants are not written into the repository, and they are not meant to be hand-edited.
 
+To inspect or reset a project's grants, open the `sessions` subdirectory of your Grok home (the `.grok` directory under your home directory, or `$GROK_HOME`): each project directory there (URL-encoded scope root) holds a `permission.toml` (plus per-client `permission_<client>.toml` variants) listing the remembered command prefixes, globs, MCP tools/servers, web-fetch domains, and "never allow" entries. Deleting the file resets that project's grants; the next matching tool call prompts again. Treat it as read-only state — to *add* rules, use the declarative `[permission]` configuration instead.
+
 Interactive grants are personal, per-machine state. For an allowlist you can review in code review and share with teammates, use declarative rules in the project's `.grok/config.toml` instead.
 
 ---
@@ -551,7 +555,7 @@ Recommended combination for untrusted code:
 
 1. **Prefer narrow patterns.** `Bash(git *)` grants less access than a bare `Bash` allow rule.
 2. **Combine layers.** `dontAsk`, narrow allow rules, a restrictive hook, and the sandbox each restrict independently.
-3. **Review project configuration from unfamiliar sources.** Project permission rules in `.grok/config.toml` and `.claude/settings.json`, including `allow` rules, apply without a separate trust prompt. Review them, and any project hooks, before working in an unfamiliar checkout (see the security notes in [10-hooks.md](10-hooks.md)).
+3. **Review project configuration from unfamiliar sources.** Project permission rules in `.grok/config.toml` and `.claude/settings.json` are gated on folder trust: an untrusted checkout's project rules (including `allow` rules and `defaultMode`) are skipped, and their presence triggers the folder-trust question. Trusting the folder applies them, so review them — and any project hooks — before granting trust to an unfamiliar checkout (see the security notes in [10-hooks.md](10-hooks.md)).
 4. **Test your policy.** With `defaultMode: "dontAsk"` set (or your `PreToolUse` hook installed), run representative commands and confirm what is blocked.
 5. **Treat the read-only command list as a convenience, not a security boundary.**
 

@@ -1,6 +1,6 @@
 # Configuration
 
-Grok reads settings from config files, environment variables, and CLI flags. This page covers the common options.
+Grok reads settings from config files, environment variables, and CLI flags. This page covers the common options. The field list for `config.toml`, `managed_config.toml`, and `requirements.toml` is [26-config-reference.md](26-config-reference.md) (extracted to `~/.grok/docs/user-guide/` on launch).
 
 ---
 
@@ -58,6 +58,7 @@ top_p = 0.95
 max_completion_tokens = 8192
 max_retries = 8
 inference_idle_timeout_secs = 600
+subagent_rate_limit_max_attempts = 8
 stream_tool_calls = true
 
 [ui]
@@ -298,6 +299,10 @@ url = "https://mcp.example.com/api/mcp"  # HTTP/SSE transport
 headers = { "x-mcp-session-id" = "{{session_id}}" }
 ```
 
+Remote (HTTP/SSE) servers receive a default `User-Agent: grok-cli/<version>` header; a
+valid `User-Agent` entry in `headers` overrides it (Figma servers receive bare
+`grok-cli`). See [MCP servers](07-mcp-servers.md) for details.
+
 MCP servers can also be set per-project in `.grok/config.toml`. Project-scoped config contributes `[mcp_servers]`, `[plugins]`, and `[permission]` rules; every other section loads only from `~/.grok/config.toml`.
 
 Priority for `[mcp_servers]` and `[plugins]`: `.grok/config.toml` (current dir) > `<repo-root>/.grok/config.toml` > `~/.grok/config.toml`. `[permission]` rules aren't overridden by priority — they merge across all files with `deny` > `ask` > `allow` (see [22-permissions-and-safety.md](22-permissions-and-safety.md)).
@@ -358,7 +363,7 @@ enabled = false                       # disable background workflows (or GROK_WO
 
 Project workflows are discovered from `<repo-root>/.grok/workflows/`; user workflows from `~/.grok/workflows/`. Discovery and invocation key off the script's `meta.name`, so keep each filename aligned with its `meta.name`. Built-ins win over project names, and project names win over user names, so keep names unique across scopes.
 
-Each launch gets a session-unique display handle such as `deep-research-2`. That handle is what you see in the `/workflows` run dashboard and pass to `/workflow pause`, `resume`, or `stop` — the internal run IDs never surface in commands. A numbered handle isn't a reusable definition name, so the dashboard disables **save** until you pick a new unique `meta.name` and save the edited script yourself. See [Slash Commands](04-slash-commands.md) for examples.
+Each launch gets a session-unique display handle such as `deep-research-2`. That handle is what you see in the `/workflow runs` dashboard and pass to `/workflow pause`, `resume`, or `stop` — the internal run IDs never surface in commands. A numbered handle isn't a reusable definition name, so the dashboard disables **save** until you pick a new unique `meta.name` and save the edited script yourself. See [Slash Commands](04-slash-commands.md) for examples.
 
 ### Skills
 

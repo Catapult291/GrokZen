@@ -42,12 +42,12 @@ pub(crate) fn version_mismatch_banner_with_locale(
         .map(|locale| {
             locale.named_text(
                 "acp.version_mismatch",
-                "⚠ Version mismatch: client {client_version}, leader {leader_version} — restart grok to match",
+                "⚠ Version mismatch: client {client_version}, leader {leader_version}. Restart grok to match",
             )
         })
         .unwrap_or_else(|| {
             Cow::Borrowed(
-                "⚠ Version mismatch: client {client_version}, leader {leader_version} — restart grok to match",
+                "⚠ Version mismatch: client {client_version}, leader {leader_version}. Restart grok to match",
             )
         });
     let banner = template

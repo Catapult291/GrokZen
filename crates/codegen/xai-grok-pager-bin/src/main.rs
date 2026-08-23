@@ -26,7 +26,6 @@ mod jemalloc_malloc_conf {
     static MALLOC_CONF: MallocConfPtr = MallocConfPtr(CONF.as_ptr());
 }
 use anyhow::Result;
-use std::env;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use tokio_util::sync::CancellationToken;
@@ -47,6 +46,47 @@ use xai_grok_shell::leader::{
 use xai_grok_shell::leader::{
     ControlPayload, LeaderClient, LeaderEnvUrls, connect_or_spawn, socket_path_for_ws_url,
 };
+use xai_grok_telemetry::process_info::{
+    Entrypoint, Interactivity, ProcessIdentity, ReleaseChannel, set_identity, set_release_channel,
+};
+fn process_identity(command: Option<&Command>, is_interactive: bool) -> Option<ProcessIdentity> {
+    use xai_grok_telemetry::process_info::LeaderMode::Standalone;
+    let (entrypoint, interactivity) = match command {
+        Some(Command::Agent(_)) => return None,
+        Some(Command::Dashboard) => return None,
+        Some(Command::Login { .. }) => (Entrypoint::Cli, Interactivity::Interactive),
+        Some(
+            Command::Inspect { .. }
+            | Command::Doctor(_)
+            | Command::Leader(_)
+            | Command::Logout
+            | Command::Mcp(_)
+            | Command::Plugin(_)
+            | Command::Memory(_)
+            | Command::Models
+            | Command::Sessions(_)
+            | Command::Setup { .. }
+            | Command::Share(_)
+            | Command::Wrap(_)
+            | Command::Export(_)
+            | Command::Trace(_)
+            | Command::Update { .. }
+            | Command::Version { .. }
+            | Command::Completions { .. }
+            | Command::Worktree(_)
+            | Command::DiskUsage(_)
+            | Command::Workspace(_),
+        ) => (Entrypoint::Cli, Interactivity::Unattended),
+        None if is_interactive => return None,
+        None => (Entrypoint::Headless, Interactivity::Unattended),
+    };
+    Some(ProcessIdentity {
+        entrypoint,
+        leader: Standalone,
+        interactivity,
+    })
+}
+use std::env;
 use xai_grok_update::{UpdateConfig, auto_update, enforce_version_policy_or_exit};
 
 fn localized_cli_template(
@@ -1511,6 +1551,21 @@ async fn run_agent_command(
     if let Some(profile) = disabled_by_confinement {
         warn_leader_disabled_by_sandbox(profile);
     }
+    use xai_grok_telemetry::process_info::LeaderMode::{Attached, Standalone};
+    set_identity(ProcessIdentity {
+        entrypoint: match &agent_args.mode {
+            Some(AgentCmd::Stdio) => Entrypoint::Embedded,
+            Some(AgentCmd::Leader(_)) => Entrypoint::Leader,
+            Some(AgentCmd::Serve(_)) => Entrypoint::Workspace,
+            Some(AgentCmd::Headless(_)) | None => Entrypoint::Headless,
+        },
+        leader: if use_leader || matches!(agent_args.mode, Some(AgentCmd::Leader(_))) {
+            Attached
+        } else {
+            Standalone
+        },
+        interactivity: Interactivity::Unattended,
+    });
     let managed_install = is_managed_install(
         std::env::current_exe().ok(),
         &xai_grok_shell::util::grok_home::grok_home(),
@@ -2200,6 +2255,9 @@ fn main() {
     if let Some(code) = xai_grok_pager::voice::maybe_run_capture_subprocess() {
         std::process::exit(code);
     }
+    set_release_channel(ReleaseChannel::from_label(
+        xai_grok_update::channel_name().unwrap_or_default(),
+    ));
     let args = PagerArgs::parse_cli();
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
         return;
@@ -2299,7 +2357,7 @@ async fn async_main(
     args: PagerArgs,
     startup_locale: std::sync::Arc<xai_grok_pager::locale::LocaleContext>,
 ) -> Result<()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    xai_grok_extra_ca::ensure_default_crypto_provider();
     let mut args = args.apply_cwd()?;
     if let Some(ref mode) = args.compaction_mode {
         unsafe { std::env::set_var("GROK_COMPACTION_MODE", mode) };
@@ -2365,6 +2423,9 @@ async fn async_main(
     } else {
         xai_grok_workspace::permission::ClientType::Generic
     });
+    if let Some(identity) = process_identity(args.command.as_ref(), is_interactive) {
+        set_identity(identity);
+    }
     let update_config = build_update_config();
     if let Some(command) = args.command.take() {
         match command {

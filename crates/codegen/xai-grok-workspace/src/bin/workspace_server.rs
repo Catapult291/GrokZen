@@ -322,7 +322,7 @@ async fn run(
     oom_protection: std::io::Result<()>,
     oom_protect_applied: Option<bool>,
 ) -> anyhow::Result<()> {
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    xai_grok_extra_ca::ensure_default_crypto_provider();
     use tracing_subscriber::layer::SubscriberExt as _;
     use tracing_subscriber::util::SubscriberInitExt as _;
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()

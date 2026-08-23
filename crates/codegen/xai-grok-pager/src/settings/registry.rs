@@ -356,15 +356,15 @@ pub fn canonical_voice_stt_language(value: Option<&str>) -> &'static str {
 }
 
 /// Canonicalize a raw hunk-tracker mode to a registry choice. Case-insensitive
-/// and trimmed; `disabled` aliases `off`; unknown/blank/`None` → `agent_only`.
+/// and trimmed; `disabled` aliases `off`; unknown/blank/`None` → `off`.
 pub fn canonical_hunk_tracker_mode(value: Option<&str>) -> &'static str {
     let raw = value.unwrap_or_default().trim();
     if raw.eq_ignore_ascii_case("all_dirty") {
         "all_dirty"
-    } else if raw.eq_ignore_ascii_case("off") || raw.eq_ignore_ascii_case("disabled") {
-        "off"
-    } else {
+    } else if raw.eq_ignore_ascii_case("agent_only") {
         "agent_only"
+    } else {
+        "off"
     }
 }
 
@@ -1086,7 +1086,7 @@ mod tests {
                         "voice_stt_language default drifts from UiConfig::default()",
                     );
                 }
-                // hunk_tracker_mode: Option<String>; None → "agent_only".
+                // hunk_tracker_mode: Option<String>; None → "off".
                 ("hunk_tracker_mode", SettingKind::Enum { default, .. }) => {
                     assert_eq!(
                         ui.hunk_tracker_mode, None,
@@ -1424,10 +1424,14 @@ mod tests {
         assert_eq!(canonical_hunk_tracker_mode(Some("  OFF  ")), "off");
         assert_eq!(canonical_hunk_tracker_mode(Some("Disabled")), "off");
         assert_eq!(canonical_hunk_tracker_mode(Some("All_Dirty")), "all_dirty");
-        // Unknown / blank / absent → the `agent_only` default.
-        assert_eq!(canonical_hunk_tracker_mode(Some("bogus")), "agent_only");
-        assert_eq!(canonical_hunk_tracker_mode(Some("")), "agent_only");
-        assert_eq!(canonical_hunk_tracker_mode(None), "agent_only");
+        assert_eq!(
+            canonical_hunk_tracker_mode(Some("  Agent_Only  ")),
+            "agent_only"
+        );
+        // Unknown / blank / absent → the `off` default.
+        assert_eq!(canonical_hunk_tracker_mode(Some("bogus")), "off");
+        assert_eq!(canonical_hunk_tracker_mode(Some("")), "off");
+        assert_eq!(canonical_hunk_tracker_mode(None), "off");
     }
 
     #[test]

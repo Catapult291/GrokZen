@@ -290,7 +290,7 @@ Subagents appear in several places in the interactive TUI:
 
 When a subagent is spawned, a compact lifecycle block is added to the *parent's* scrollback:
 
-- `Subagent running: "do the thing" (Implementer · grok-3) — Thinking`
+- `Subagent running: "do the thing" (Implementer · grok-3) · Thinking`
 - Or for background subagents: `Subagent started: "..."`
 
 While running, the block shows a live activity suffix (e.g. "Running: cargo test", "Compacting", "Retrying (2/3)") pulled from the child's turn tracker. The bullet animates (or is colored) according to state.

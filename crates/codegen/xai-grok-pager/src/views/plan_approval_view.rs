@@ -17,9 +17,9 @@ pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 
 The agent exited plan mode without writing a plan.
 
-- **Approve** — leave plan mode and start implementing
-- **Request changes** — send the agent back to planning
-- **Quit** — abandon and turn plan mode off
+- **Approve**: leave plan mode and start implementing
+- **Request changes**: send the agent back to planning
+- **Quit**: abandon and turn plan mode off
 ";
 
 pub fn empty_plan_placeholder_with_locale(locale: Option<&crate::locale::LocaleContext>) -> String {
@@ -55,10 +55,10 @@ pub fn plan_approval_status_label_with_locale(
             .map(|locale| {
                 locale.named_static_text(
                     "plan.approval.status.empty",
-                    "No plan written — approve or request changes",
+                    "No plan written: approve or request changes",
                 )
             })
-            .unwrap_or("No plan written — approve or request changes")
+            .unwrap_or("No plan written: approve or request changes")
     }
 }
 
@@ -430,7 +430,7 @@ mod tests {
         assert_eq!(plan_approval_status_label(true), "Waiting on plan approval");
         assert_eq!(
             plan_approval_status_label(false),
-            "No plan written — approve or request changes"
+            "No plan written: approve or request changes"
         );
         // Placeholder must be non-empty so the line viewer accepts it.
         assert!(!EMPTY_PLAN_PLACEHOLDER.trim().is_empty());

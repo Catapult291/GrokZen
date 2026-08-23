@@ -612,6 +612,15 @@ pub struct ScreenModeRelaunch {
     /// Active session to reopen via `--resume`.
     pub session_id: String,
 }
+/// A consented `/feedback` trace upload deferred until the coding-data
+/// sharing opt-in write claimed at `seq` resolves.
+#[derive(Debug, Clone)]
+pub struct PendingFeedbackTraceUpload {
+    /// The `coding_data_write_seq` generation this upload waits on.
+    pub seq: u64,
+    pub agent_id: AgentId,
+    pub session_id: acp::SessionId,
+}
 /// Root view component — owns all application state.
 pub struct AppView {
     /// Taken by whichever path reaches a usable session (or interactive idle) first.
@@ -726,6 +735,10 @@ pub struct AppView {
     /// Whether the plugin marketplace CTA is enabled. Env `GROK_PLUGIN_CTA`
     /// overrides `RemoteSettings.plugin_cta` (remote settings); defaults to `false`.
     pub plugin_cta_enabled: bool,
+    /// Marketplace source name the plugin CTA draws candidates from, when
+    /// `[marketplace].plugin_cta_marketplace` is set in the effective config.
+    /// `None` keeps the default xAI Official source.
+    pub plugin_cta_marketplace: Option<String>,
     pub workspace_dashboard_enabled: bool,
     /// Consumer billing surface (credit fetches / warnings). False for team
     /// and API-key auth. `/usage` itself stays available for session token/cost
@@ -807,6 +820,16 @@ pub struct AppView {
     /// resolved by the shell and advertised on ACP initialize (`sessionRecap`).
     /// When false, the pager must not request recaps (zero `x.ai/recap` traffic).
     pub session_recap_available: bool,
+    /// Shell-advertised eligibility for the `/feedback` trace-upload offer,
+    /// exactly as received (initialize meta / auth-meta refreshes). Read it
+    /// through [`Self::feedback_trace_offer`], which subtracts the latch.
+    pub shell_feedback_trace_offer: bool,
+    /// A persisted card answer was made this session; keeps auth-meta
+    /// refreshes from re-offering before the async config write lands.
+    pub feedback_trace_choice_latched: bool,
+    /// Trace upload parked until the same card answer's sharing opt-in write
+    /// confirms (the storage proxy rejects uploads while opted out).
+    pub feedback_trace_upload_pending: Option<PendingFeedbackTraceUpload>,
     /// Stateful prompt widget rendered on the welcome screen (persists input across frames).
     pub welcome_prompt: PromptWidget,
     /// The single slash-command MRU/recency store. Owned here and injected
@@ -1213,8 +1236,11 @@ pub struct AppView {
     /// Doc viewer overlay for the welcome screen (release notes via Ctrl+L).
     pub welcome_doc_viewer: Option<crate::views::modal::ActiveModal>,
     /// Whether the pager uses fullscreen (alt-screen) or inline mode.
-    /// Set from the resolved terminal state at startup.
+    /// Set from the resolved terminal state at startup; updated by the
+    /// in-process `/minimal` ⇄ `/fullscreen` switch (`mode_switch`).
     pub(crate) screen_mode: super::ScreenMode,
+    /// Pending in-process mode-switch target, consumed by the event loop.
+    pub(crate) pending_screen_mode_switch: Option<super::ScreenMode>,
     /// Onboarding tutorial overlay, if open. Top-level (not per-agent) so it
     /// works over both the welcome screen and an agent session. Opened by
     /// `/tutorial` (also in the command palette).
@@ -1305,6 +1331,12 @@ impl AppView {
                 .as_deref()
                 .is_some_and(|r| r.eq_ignore_ascii_case("admin"))
     }
+    /// Whether `/feedback` may offer the trace-consent card: the shell
+    /// advertised the offer and no card answer latched it off this session.
+    /// Derived so no code path can fabricate an offer the shell never made.
+    pub fn feedback_trace_offer(&self) -> bool {
+        self.shell_feedback_trace_offer && !self.feedback_trace_choice_latched
+    }
     /// Why `coding_data_sharing` is locked for this user (`None` = editable).
     /// Mirrors the dispatch guards in `set_coding_data_sharing`.
     pub fn coding_data_sharing_lock(&self) -> Option<crate::settings::CodingDataSharingLock> {
@@ -1391,6 +1423,7 @@ impl AppView {
         self.is_zdr = meta.is_zdr;
         self.team_role = meta.team_role.clone();
         self.coding_data_retention_opt_out = meta.coding_data_retention_opt_out;
+        self.shell_feedback_trace_offer = meta.feedback_trace_offer;
         self.gate = meta.gate.clone();
         if was_gated && self.gate.is_none() {
             self.paywall_check_started = None;
@@ -1683,9 +1716,11 @@ impl AppView {
             import_claude_modal: None,
             welcome_doc_viewer: None,
             screen_mode: ScreenMode::Inline,
+            pending_screen_mode_switch: None,
             show_resolved_model: true,
             sharing_enabled: false,
             plugin_cta_enabled: false,
+            plugin_cta_marketplace: None,
             workspace_dashboard_enabled: false,
             usage_visible: true,
             has_external_auth_provider: false,
@@ -1704,6 +1739,9 @@ impl AppView {
             scheduler_background_loops_seed: true,
             cancel_rewind_enabled: true,
             session_recap_available: false,
+            shell_feedback_trace_offer: false,
+            feedback_trace_choice_latched: false,
+            feedback_trace_upload_pending: None,
             tutorial: None,
             dashboard: None,
             dashboard_return: None,
@@ -3841,7 +3879,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             if key!('w', CONTROL).matches(key) && ctx.cwd_has_git_ancestor {
                 return InputOutcome::Action(Action::OpenNewWorktreeDialog);
             }
-            if key!('s', CONTROL).matches(key) {
+            if key!(F(3)).matches(key) {
                 return InputOutcome::Action(Action::FetchSessionList);
             }
             if ctx.has_pending_update && key!('u', CONTROL).matches(key) {
@@ -5622,6 +5660,17 @@ impl AppView {
                     .iter()
                     .any(|c| c.name == "workflow")
                     || !agent.workflow_runs.is_empty(),
+            );
+            agent.prompt.slash_controller.set_workflow_runs(
+                agent
+                    .workflow_runs
+                    .iter()
+                    .map(|run| crate::slash::command::WorkflowRunChoice {
+                        name: run.name.clone(),
+                        status: run.status.clone(),
+                        builtin: run.builtin,
+                    })
+                    .collect(),
             );
             if agent.acp_synced_generation != agent.session.available_commands_generation {
                 agent.prompt.sync_acp_commands(

@@ -872,12 +872,14 @@ impl WorkspaceHandle {
         if session_id.is_empty() {
             return Err(WorkspaceError::EmptyAgentId);
         }
-        let mut sessions = self.shared.sessions.write();
-        if self.shared.activity_tracker.is_draining() {
-            return Err(WorkspaceError::ShuttingDown);
-        }
-        if sessions.contains_key(&session_id) {
-            return Err(WorkspaceError::SessionAlreadyExists(session_id));
+        {
+            let sessions = self.shared.sessions.read();
+            if self.shared.activity_tracker.is_draining() {
+                return Err(WorkspaceError::ShuttingDown);
+            }
+            if sessions.contains_key(&session_id) {
+                return Err(WorkspaceError::SessionAlreadyExists(session_id));
+            }
         }
         let session_env = Arc::new(std::collections::HashMap::new());
         let config = tool_config.unwrap_or_else(|| self.shared.default_tool_config.clone());
@@ -920,14 +922,37 @@ impl WorkspaceHandle {
             system_notifications,
             system_notify_channel,
         ));
-        tracing::info!(session_id = %session_id, "create_session: new session created");
-        sessions.insert(session_id, session.clone());
+        self.insert_session_guarded(&session)?;
+        tracing::info!(session_id = %session.session_id(), "create_session: new session created");
         record_toolset_swap(
             &self.shared.activity_tracker,
             "create",
             session.session_id(),
         );
         Ok(session)
+    }
+    /// Insert under the write lock the evict drain shares, so a racing insert is
+    /// seen by the evict or rejected here; rejection tears down what resolve spawned.
+    fn insert_session_guarded(&self, session: &Arc<WorkspaceSession>) -> WorkspaceResult<()> {
+        let rejection = {
+            let mut sessions = self.shared.sessions.write();
+            if self.shared.activity_tracker.is_draining() {
+                Some(WorkspaceError::ShuttingDown)
+            } else if sessions.contains_key(session.session_id()) {
+                Some(WorkspaceError::SessionAlreadyExists(
+                    session.session_id().to_owned(),
+                ))
+            } else {
+                sessions.insert(session.session_id().to_owned(), Arc::clone(session));
+                None
+            }
+        };
+        if let Some(err) = rejection {
+            session.cancel_hunk_tracker();
+            session.shutdown_terminal_backend();
+            return Err(err);
+        }
+        Ok(())
     }
     /// Update a session's tool config with auth and serialization; the RPC
     /// handler derives `caller_session_id` from the server-bound envelope.
@@ -2994,18 +3019,7 @@ impl WorkspaceHandle {
             false,
             None,
         ));
-        {
-            let mut sessions = self.shared.sessions.write();
-            if self.shared.activity_tracker.is_draining() {
-                session.cancel_hunk_tracker();
-                return Err(WorkspaceError::ShuttingDown);
-            }
-            if sessions.contains_key(&config.agent_id) {
-                session.cancel_hunk_tracker();
-                return Err(WorkspaceError::SessionAlreadyExists(config.agent_id));
-            }
-            sessions.insert(config.agent_id.clone(), session.clone());
-        }
+        self.insert_session_guarded(&session)?;
         record_toolset_swap(&self.shared.activity_tracker, "fork", session.session_id());
         self.finalize_session_setup(&session).await;
         Ok(session)

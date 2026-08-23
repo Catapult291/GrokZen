@@ -78,7 +78,7 @@ fn every_field_survives_a_round_trip_through_the_shared_fixture() {
             branch: Some("feature-x".into()),
             main_worktree_root: Some(DIR.into()),
         }),
-        trigger: Some(StatusLineTrigger::Poll),
+        trigger: Some(StatusLineTrigger::RefreshInterval),
     };
 
     assert_eq!(
@@ -89,16 +89,10 @@ fn every_field_survives_a_round_trip_through_the_shared_fixture() {
     let parsed: StatusLineContext =
         serde_json::from_value(wire_fixture()).expect("the wire shape must parse back");
     assert_eq!(parsed, ctx, "a name the type writes but cannot read back");
-}
 
-/// The spellings scripts branch on. Serde derives them from the variant
-/// names, so a rename over there would silently rewire every script that
-/// reads `trigger`.
-#[test]
-fn trigger_spellings_are_pinned_to_the_wire() {
     assert_eq!(
-        serde_json::to_value(StatusLineTrigger::Poll).unwrap(),
-        json!("poll")
+        serde_json::to_value(StatusLineTrigger::RefreshInterval).unwrap(),
+        json!("refresh_interval")
     );
     assert_eq!(
         serde_json::to_value(StatusLineTrigger::State).unwrap(),

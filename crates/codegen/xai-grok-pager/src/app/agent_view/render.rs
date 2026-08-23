@@ -3,7 +3,8 @@
 use super::{
     ActivePane, AgentPane, AgentView, AgentViewLayout, BlockingCard, CtaPhase, EscStep,
     InlineMediaHitAreas, KeyOwner, MODE_BANNER_FADE_TICKS, PromptMode, collect_citation_links,
-    dropdown_items_width, record_dot_pulse, render_dropdown_chrome_with_locale, supports_osc22,
+    dropdown_content_inset, dropdown_items_width, record_dot_pulse,
+    render_dropdown_chrome_with_locale, supports_osc22,
 };
 use crate::actions::{ActionId, ActionRegistry};
 use crate::key;
@@ -123,7 +124,8 @@ impl AgentView {
         if self.active_subagent.as_deref() != Some(child_sid.as_str()) {
             self.close_subagent_fullscreen();
         }
-        crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
+        let replay_outcome = crate::app::subagent::ensure_subagent_child_replayed(self, &child_sid);
+        tracing::debug!(child_sid = %child_sid, ?replay_outcome, "opened subagent fullscreen");
         self.active_subagent = Some(child_sid);
     }
     /// Close the fullscreen subagent takeover (if any), evicting the closed
@@ -131,8 +133,24 @@ impl AgentView {
     /// for rationale and guards). All close sites route through here.
     pub(crate) fn close_subagent_fullscreen(&mut self) {
         if let Some(child_sid) = self.active_subagent.take() {
-            crate::app::subagent::evict_finished_child_view(self, &child_sid);
+            let _ = crate::app::subagent::evict_finished_child_view(self, &child_sid);
         }
+    }
+    /// Fetch a child view for applying a live update, hydrating a resumed
+    /// child's inherited transcript first so the incoming block never closes
+    /// the replay window (see
+    /// [`crate::app::subagent::replay_resumed_child_before_live_block`]). The
+    /// funnel for every apply that can be a resumed child's *first* live block:
+    /// the ACP and xAI child ingresses and the finish-path finalize. Reads and
+    /// precedence-exempt writers (background task blocks, tool-call argument
+    /// deltas, each transitively preceded by a funneled block) use the field
+    /// directly.
+    pub(crate) fn child_view_for_live_update_mut(
+        &mut self,
+        child_sid: &str,
+    ) -> Option<&mut AgentView> {
+        crate::app::subagent::replay_resumed_child_before_live_block(self, child_sid);
+        self.subagent_views.get_mut(child_sid).map(|v| &mut **v)
     }
     /// Shortcut hints for the plan-approval prompt/comment focus states.
     ///
@@ -251,10 +269,11 @@ impl AgentView {
                     esc,
                 ]
             }
-            QuestionFocus::InputMode if qv.is_feedback() => {
+            QuestionFocus::InputMode if qv.is_feedback_report() => {
                 vec![HintItem::new(key!(Enter), "send"), esc]
             }
             QuestionFocus::InputMode => vec![HintItem::new(key!(Enter), "submit"), esc],
+            QuestionFocus::Navigation if qv.is_feedback_trace() => vec![esc],
             QuestionFocus::Navigation => {
                 vec![
                     HintItem::new(key!(Tab), "next answer"),
@@ -407,6 +426,13 @@ impl AgentView {
                     .map(|qv| self.question_shortcut_hints(qv, locale))
                     .unwrap_or_default(),
             ),
+            KeyOwner::Card(BlockingCard::McpElicitation) => ShortcutsBarContent::Surface(vec![
+                HintItem::new(key!(Enter), "accept / toggle"),
+                HintItem::new(key!('d'), "decline"),
+                HintItem::new(key!('c', CONTROL), "cancel"),
+                HintItem::new(key!(Tab), "next field"),
+                self.card_esc_hint(),
+            ]),
             KeyOwner::Pane => ShortcutsBarContent::Pane(self.normal_pane_hints(
                 registry,
                 esc_owned_before_agent,
@@ -1176,10 +1202,7 @@ impl AgentView {
             },
             show_accent_line: false,
             show_borders: true,
-            title: self
-                .display_name
-                .as_deref()
-                .map(|s| crate::views::session_title::sanitize_display_text(s).into_owned()),
+            title: self.prompt_caption(),
             image_preview: true,
         };
         let next = crate::views::session_title::rename_source_title_raw(self)
@@ -1199,7 +1222,7 @@ impl AgentView {
                     banner_height
                 } else {
                     banner_height.max(crate::tips::render::tip_height_with_locale(
-                        inner_width,
+                        inner_width.saturating_sub(crate::tips::render::HINT_INSET),
                         tip_text,
                         locale,
                     ))
@@ -1231,16 +1254,21 @@ impl AgentView {
                 .desired_height(inner_width, &prompt_style, true, max_prompt_height)
         };
         let overlay_content_w = inner_width.saturating_sub(QUESTION_VIEW_HPAD) as usize;
-        let permission_view_h = if let Some(perm) = self.permission_queue.front() {
-            crate::views::permission_view::permission_view_height(
-                perm,
-                area.height,
-                overlay_content_w,
-            )
+        let slot_card = self.blocking_card();
+        let permission_view_h = if slot_card == Some(BlockingCard::Permission) {
+            if let Some(perm) = self.permission_queue.front() {
+                crate::views::permission_view::permission_view_height(
+                    perm,
+                    area.height,
+                    overlay_content_w,
+                )
+            } else {
+                0
+            }
         } else {
             0
         };
-        let question_view_h = if permission_view_h == 0 {
+        let question_view_h = if slot_card == Some(BlockingCard::Question) {
             if let Some(ref mut qv) = self.question_view {
                 crate::views::question_view::question_view_height(
                     qv,
@@ -1253,22 +1281,33 @@ impl AgentView {
         } else {
             0
         };
-        let rewind_view_h = if permission_view_h == 0 && question_view_h == 0 {
-            if let Some(ref rw) = self.rewind_state {
-                crate::views::rewind::rewind_overlay_height(&rw.phase, area.height)
+        let elicitation_view_h = if slot_card == Some(BlockingCard::McpElicitation) {
+            if let Some(ref ev) = self.elicitation_view {
+                crate::views::elicitation_view::elicitation_view_height_with_locale(
+                    ev,
+                    area.height,
+                    overlay_content_w,
+                    locale,
+                )
             } else {
                 0
             }
         } else {
             0
         };
-        let cancel_turn_view_h =
-            if permission_view_h == 0 && question_view_h == 0 && rewind_view_h == 0 {
-                if self.cancel_turn_view.is_some() {
-                    modal::cancel_turn_panel_height(area.height)
+        let rewind_view_h =
+            if permission_view_h == 0 && question_view_h == 0 && elicitation_view_h == 0 {
+                if let Some(ref rw) = self.rewind_state {
+                    crate::views::rewind::rewind_overlay_height(&rw.phase, area.height)
                 } else {
                     0
                 }
+            } else {
+                0
+            };
+        let cancel_turn_view_h =
+            if slot_card == Some(BlockingCard::CancelTurn) && rewind_view_h == 0 {
+                modal::cancel_turn_panel_height(area.height)
             } else {
                 0
             };
@@ -1308,7 +1347,7 @@ impl AgentView {
         let feedback_pane = self
             .question_view
             .as_ref()
-            .is_some_and(|qv| qv.is_feedback());
+            .is_some_and(|qv| qv.is_feedback_report());
         let inline_prompt_max = ((area.height as u32) / 3).clamp(3, 15) as u16;
         let question_prompt_body_h = if question_view_h == 0 || !is_question_input_mode {
             0
@@ -1360,6 +1399,8 @@ impl AgentView {
             question_view_h.saturating_sub(freeform_offset)
                 + question_prompt_body_h
                 + question_footer_h
+        } else if elicitation_view_h > 0 {
+            elicitation_view_h
         } else if rewind_view_h > 0 {
             rewind_view_h
         } else if jump_view_h > 0 {
@@ -1525,9 +1566,7 @@ impl AgentView {
         }
         let overlay_blocks_rail_hover = self.jump_state.is_some()
             || self.rewind_state.is_some()
-            || self.question_view.is_some()
-            || !self.permission_queue.is_empty()
-            || self.cancel_turn_view.is_some()
+            || self.blocking_card().is_some()
             || self.block_viewer.is_some();
         if layout.timeline_width > 0 {
             self.sync_pending_user_input_marks();
@@ -2403,8 +2442,14 @@ impl AgentView {
                         .tracker
                         .running_execute_tool_call_id()
                         .is_some();
-                let is_pending_user_input =
-                    !self.permission_queue.is_empty() || self.question_view.is_some();
+                let is_pending_user_input = matches!(
+                    self.blocking_card(),
+                    Some(
+                        BlockingCard::Permission
+                            | BlockingCard::Question
+                            | BlockingCard::McpElicitation
+                    )
+                );
                 let goal_verifying = self
                     .goal_state
                     .as_ref()
@@ -2527,7 +2572,13 @@ impl AgentView {
                 && banner_height > 0
                 && let Some(tip_text) = tip
             {
-                crate::tips::render::render_tip_with_locale(layout.banner, buf, tip_text, locale);
+                crate::tips::render::render_tip_with_locale(
+                    layout.banner,
+                    buf,
+                    tip_text,
+                    crate::tips::render::HINT_INSET,
+                    locale,
+                );
             }
             if !announcement_banner_owns_slot
                 && tip_row_visible
@@ -3108,7 +3159,7 @@ impl AgentView {
                     let avail_w = footer_w.saturating_sub(3);
                     buf.set_line_safe(content_x, footer_y, &left_line, avail_w);
                     let is_last = qv.active_tab >= qv.questions.len().saturating_sub(1);
-                    let enter_label = if feedback_pane {
+                    let enter_label = if feedback_pane || qv.is_feedback_trace() {
                         localized_ui_label(locale, "shortcut.send", "send")
                     } else if qv.is_on_freeform_row() {
                         localized_ui_label(locale, "shortcut.edit", "edit")
@@ -3183,6 +3234,25 @@ impl AgentView {
                 self.hit_question_scrollbar.set(sb_rect);
             } else {
                 self.hit_question_scrollbar.clear();
+            }
+        } else if elicitation_view_h > 0 {
+            self.elicit_hits.clear();
+            if let Some(ev) = self.elicitation_view.as_mut() {
+                let elicit_area = Rect {
+                    x: layout.prompt.x,
+                    y: layout.prompt.y,
+                    width: layout.prompt.width,
+                    height: layout.prompt.height,
+                };
+                crate::views::elicitation_view::render_elicitation_view_with_locale(
+                    buf,
+                    elicit_area,
+                    ev,
+                    &theme,
+                    prompt_focused,
+                    Some(&mut self.elicit_hits),
+                    locale,
+                );
             }
         } else if rewind_view_h > 0 {
             if let Some(ref rw) = self.rewind_state {
@@ -3308,9 +3378,8 @@ impl AgentView {
                             buf.set_line_safe(hint_x, top_border_y, &hint_line, hint_w);
                         }
                     }
-                    let content_inset = 1 + layout_cfg.eff_hpad_left(compact);
-                    let items_x = layout.prompt.x + content_inset;
-                    let items_width = layout.prompt.width.saturating_sub(content_inset);
+                    let items_x = layout.prompt.x + dropdown_content_inset();
+                    let items_width = dropdown_items_width(layout.prompt);
                     let items_area = Rect {
                         x: items_x,
                         y: top_border_y + 1,
@@ -3334,7 +3403,7 @@ impl AgentView {
             };
             let snap = localized_snapshot(self.prompt.slash_snapshot(), locale);
             let item_count = snap.matches.len();
-            let items_width = dropdown_items_width(layout.prompt, layout_cfg, compact);
+            let items_width = dropdown_items_width(layout.prompt);
             let item_rows = desired_item_rows(&snap.matches, items_width);
             if item_rows > 0 {
                 if let Some(chrome) = render_dropdown_chrome_with_locale(
@@ -3457,9 +3526,8 @@ impl AgentView {
                         );
                     }
                 }
-                let content_inset = 1 + layout_cfg.eff_hpad_left(compact);
-                let items_x = layout.prompt.x + content_inset;
-                let items_width = layout.prompt.width.saturating_sub(content_inset);
+                let items_x = layout.prompt.x + dropdown_content_inset();
+                let items_width = dropdown_items_width(layout.prompt);
                 let items_area_rect = Rect {
                     x: items_x,
                     y: top_border_y + 1,
@@ -4696,13 +4764,14 @@ impl AgentView {
             let live: crate::views::workflows::WorkflowAgentLiveMap = self
                 .subagent_sessions
                 .iter()
-                .filter(|(_, info)| info.workflow_run_id.is_some() && info.is_running())
+                .filter(|(_, info)| info.workflow_run_id.is_some())
                 .map(|(id, info)| {
                     (
                         id.clone(),
                         crate::views::workflows::WorkflowAgentLiveStatus {
                             activity: info.activity_label.clone(),
-                            tokens_used: info.tokens_used,
+                            context_tokens: info.tokens_used,
+                            context_window_tokens: info.context_window_tokens,
                             elapsed_ms: Some(info.display_elapsed().as_millis() as u64),
                         },
                     )
@@ -5292,6 +5361,41 @@ mod feedback_input_tests {
             sides,
             bottom - top - 1,
             "every text row of the box needs both side rules\n{screen}"
+        );
+    }
+    #[test]
+    fn feedback_trace_question_renders_options() {
+        let mut agent = feedback_agent();
+        {
+            let qv = agent.question_view.as_mut().expect("pane");
+            qv.begin_feedback_trace_stage("clipboard is broken over ssh".into(), vec![]);
+        }
+        let screen = render_text(&mut agent);
+        for fragment in ["Opt-in to provide your trace", "retain and train"] {
+            assert!(
+                screen.contains(fragment),
+                "trace question label missing ({fragment})\n{screen}"
+            );
+        }
+        for option in ["Opt in", "Opt out this time"] {
+            assert!(screen.contains(option), "{option} missing\n{screen}");
+        }
+        let selected_row = screen
+            .lines()
+            .find(|l| l.contains("Opt in") && !l.contains("Opt out"))
+            .expect("first option row");
+        assert!(
+            selected_row.contains('\u{25cf}'),
+            "turning trace upload on must render preselected\n{screen}"
+        );
+        assert!(
+            screen.contains("Enter:send"),
+            "footer must offer send\n{screen}"
+        );
+        assert!(
+            !screen.contains("dismiss"),
+            "the trace card cannot be dismissed without sending; the bar must \
+             not promise it\n{screen}"
         );
     }
     /// A shrunk box must not paint over the shortcuts bar or leave the user typing into a pane that renders nothing.

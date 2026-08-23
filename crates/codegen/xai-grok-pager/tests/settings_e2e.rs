@@ -2076,7 +2076,7 @@ fn defaults_round_trip_through_registry() {
             "display_refresh_auto_cadence" => SettingValue::Bool(true),
             "coding_data_sharing" => SettingValue::Enum("opt-out"),
             "default_selected_permission" => SettingValue::Enum("always_allow_all_sessions"),
-            "hunk_tracker_mode" => SettingValue::Enum("agent_only"),
+            "hunk_tracker_mode" => SettingValue::Enum("off"),
             "voice_keybind_enabled" => SettingValue::Bool(true),
             "voice_capture_mode" => SettingValue::Enum("hold"),
             "voice_stt_language" => SettingValue::Enum("en"),
@@ -6187,7 +6187,7 @@ fn mouse_click_on_screen_mode_indicator_opens_picker_in_one_click() {
 // ---------------------------------------------------------------------------
 
 /// Enter on the `hunk_tracker_mode` row opens the picker seeded at the
-/// default `agent_only`.
+/// default `off`.
 #[test]
 fn enter_on_hunk_tracker_mode_row_enters_picking_enum() {
     let mut s = make_state();
@@ -6206,8 +6206,8 @@ fn enter_on_hunk_tracker_mode_row_enters_picking_enum() {
             assert_eq!(*key, "hunk_tracker_mode");
             assert_eq!(
                 original_value,
-                &SettingValue::Enum("agent_only"),
-                "default UiConfig hunk_tracker_mode → original 'agent_only'"
+                &SettingValue::Enum("off"),
+                "default UiConfig hunk_tracker_mode → original 'off'"
             );
         }
         other => panic!("expected PickingEnum mode, got {other:?}"),
@@ -6230,8 +6230,9 @@ fn hunk_tracker_mode_picker_nav_does_not_dispatch_preview() {
         let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
         assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
 
-        if matches!(nav_key, KeyCode::Up | KeyCode::Char('k')) {
-            let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+        // Seed is `off` (last choice), so step off the bottom before a Down/j.
+        if matches!(nav_key, KeyCode::Down | KeyCode::Char('j')) {
+            let _ = handle_settings_key(&mut s, &press(KeyCode::Up));
         }
 
         let outcome = handle_settings_key(&mut s, &press(*nav_key));
@@ -6246,15 +6247,15 @@ fn hunk_tracker_mode_picker_nav_does_not_dispatch_preview() {
 
 /// Enter on the focused picker choice commits via
 /// `Action::SetHunkTrackerMode(String)` carrying the registry canonical. Seed
-/// is `agent_only` (index 0); one Down moves to `all_dirty` (index 1). Pins
-/// the canonical-string payload that `action_for_enum_commit` forwards.
+/// is `off` (index 2); one Up moves to `all_dirty` (index 1). Pins the
+/// canonical-string payload that `action_for_enum_commit` forwards.
 #[test]
 fn hunk_tracker_mode_picker_enter_dispatches_set_commit() {
     let mut s = make_state();
     navigate_to(&mut s, "hunk_tracker_mode");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    // Fresh state seeds the picker at "agent_only"; Down moves to "all_dirty".
-    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    // Fresh state seeds the picker at "off"; Up moves to "all_dirty".
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Up));
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     match outcome {
         SettingsKeyOutcome::Action(Action::SetHunkTrackerMode(mode)) => {

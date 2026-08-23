@@ -3224,7 +3224,7 @@ async fn progress_publisher_delivers_ticks_to_parent_cmd_channel() {
             tokio::task::yield_now().await;
             let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
             let cancel = tokio_util::sync::CancellationToken::new();
-            spawn_progress_publisher(
+            let _publisher = spawn_progress_publisher(
                 signals,
                 test_gateway(),
                 "parent-1".to_string(),

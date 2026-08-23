@@ -118,14 +118,13 @@ async fn validate_hook_url(url: &str) -> Result<(), String> {
 }
 
 fn build_hook_client(timeout_ms: u64) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_millis(timeout_ms))
-        // `validate_hook_url` only vets the initial URL, not redirect targets.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        // A default fallback would follow redirects and drop the timeout,
-        // reopening the SSRF path; build only fails on a TLS init fault.
-        .expect("hook HTTP client config is valid")
+    xai_grok_extra_ca::build_reqwest_client(|builder| {
+        builder
+            .timeout(Duration::from_millis(timeout_ms))
+            // `validate_hook_url` only vets the initial URL, not redirect targets.
+            .redirect(reqwest::redirect::Policy::none())
+    })
+    .expect("hook HTTP client config is valid")
 }
 
 /// POST the serialized `HookEventEnvelope` to `spec.url` and parse the response

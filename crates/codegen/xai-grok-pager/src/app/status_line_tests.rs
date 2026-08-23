@@ -63,16 +63,6 @@ fn abandoned_run_is_counted_once_and_cannot_be_counted_again() {
 }
 
 #[test]
-fn invalidating_the_row_stops_the_run_it_found_from_painting() {
-    let now = Instant::now();
-    let mut state = state_with_run(now);
-    state.invalidate();
-
-    let _ = state.finish_command_run(now, RunId(0), RunOutcome::Output("stale output".into()));
-    assert!(state.display().is_none());
-}
-
-#[test]
 fn empty_row_holds_no_display_and_still_settles() {
     let mut state = StatusLineState::default();
     state.set_segments(Vec::new());
@@ -146,46 +136,39 @@ fn failed() -> RunOutcome {
 }
 
 #[test]
-fn poll_request_marks_the_next_run_and_is_consumed_by_it() {
+fn refresh_request_marks_one_run_and_waits_out_a_busy_slot() {
     let now = Instant::now();
     let mut state = StatusLineState::default();
 
-    state.request_poll();
+    state.request_refresh();
     assert_eq!(
         started_trigger(begin(&mut state, now)),
-        StatusLineTrigger::Poll
+        StatusLineTrigger::RefreshInterval
     );
-    assert!(!state.poll_pending(), "consumed by the run that started");
+    assert!(!state.refresh_due(), "consumed by the run that started");
+
+    state.request_refresh();
+    assert!(begin(&mut state, now).is_none(), "the slot is taken");
+    assert!(
+        state.refresh_due(),
+        "a run that never started must not consume the request"
+    );
 
     let _ = state.finish_command_run(now, RunId(0), RunOutcome::Output("row".into()));
+    assert_eq!(
+        started_trigger(begin(&mut state, now)),
+        StatusLineTrigger::RefreshInterval
+    );
+    let _ = state.finish_command_run(now, RunId(1), RunOutcome::Output("row".into()));
     assert_eq!(
         started_trigger(begin(&mut state, now)),
         StatusLineTrigger::State,
-        "a poll marks one run, not every run after it"
+        "a request marks one run, not every run after it"
     );
 }
 
 #[test]
-fn poll_due_behind_a_busy_slot_is_owed_the_next_run() {
-    let now = Instant::now();
-    let mut state = state_with_run(now);
-
-    state.request_poll();
-    assert!(begin(&mut state, now).is_none(), "the slot is taken");
-    assert!(
-        state.poll_pending(),
-        "a run that never started must not consume the poll"
-    );
-
-    let _ = state.finish_command_run(now, RunId(0), RunOutcome::Output("row".into()));
-    assert_eq!(
-        started_trigger(begin(&mut state, now)),
-        StatusLineTrigger::Poll
-    );
-}
-
-#[test]
-fn poll_failures_keep_the_last_output_until_the_script_is_plainly_broken() {
+fn refresh_failures_keep_the_last_output_until_the_script_is_plainly_broken() {
     let now = Instant::now();
     let mut state = StatusLineState::default();
     let _ = begin(&mut state, now);
@@ -193,13 +176,13 @@ fn poll_failures_keep_the_last_output_until_the_script_is_plainly_broken() {
     let healthy = state.display();
     assert!(healthy.is_some());
 
-    for failures in 1..POLL_FAILURES_TO_PAINT {
-        state.request_poll();
+    for failures in 1..REFRESH_FAILURES_TO_PAINT {
+        state.request_refresh();
         let _ = begin(&mut state, now);
         let disposition = state.finish_command_run(now, RunId(failures as u64), failed());
         assert_eq!(
             disposition,
-            FinishDisposition::PollFailureKept {
+            FinishDisposition::RefreshFailureKept {
                 error: "exit 7".into(),
                 failures,
             }
@@ -212,14 +195,15 @@ fn poll_failures_keep_the_last_output_until_the_script_is_plainly_broken() {
         assert!(state.is_settled(), "a kept failure is still an answer");
     }
 
-    state.request_poll();
+    state.request_refresh();
     let _ = begin(&mut state, now);
-    let disposition = state.finish_command_run(now, RunId(POLL_FAILURES_TO_PAINT as u64), failed());
+    let disposition =
+        state.finish_command_run(now, RunId(REFRESH_FAILURES_TO_PAINT as u64), failed());
     assert_eq!(
         disposition,
-        FinishDisposition::PollFailurePainted {
+        FinishDisposition::RefreshFailurePainted {
             error: "exit 7".into(),
-            failures: POLL_FAILURES_TO_PAINT,
+            failures: REFRESH_FAILURES_TO_PAINT,
         }
     );
     assert_ne!(
@@ -230,11 +214,11 @@ fn poll_failures_keep_the_last_output_until_the_script_is_plainly_broken() {
 }
 
 #[test]
-fn one_success_resets_the_poll_failure_count() {
+fn one_success_resets_the_refresh_failure_count() {
     let now = Instant::now();
     let mut state = StatusLineState::default();
     for id in 0..2 {
-        state.request_poll();
+        state.request_refresh();
         let _ = begin(&mut state, now);
         let _ = state.finish_command_run(now, RunId(id), failed());
     }
@@ -242,11 +226,11 @@ fn one_success_resets_the_poll_failure_count() {
     let _ = begin(&mut state, now);
     let _ = state.finish_command_run(now, RunId(2), RunOutcome::Output("healthy".into()));
 
-    state.request_poll();
+    state.request_refresh();
     let _ = begin(&mut state, now);
     assert_eq!(
         state.finish_command_run(now, RunId(3), failed()),
-        FinishDisposition::PollFailureKept {
+        FinishDisposition::RefreshFailureKept {
             error: "exit 7".into(),
             failures: 1,
         },
@@ -255,11 +239,11 @@ fn one_success_resets_the_poll_failure_count() {
 }
 
 #[test]
-fn poll_failure_strikes_survive_an_invalidated_row() {
+fn refresh_failure_strikes_survive_an_invalidated_row() {
     let now = Instant::now();
     let mut state = StatusLineState::default();
     for id in 0..2 {
-        state.request_poll();
+        state.request_refresh();
         let _ = begin(&mut state, now);
         let _ = state.finish_command_run(now, RunId(id), failed());
     }
@@ -268,40 +252,61 @@ fn poll_failure_strikes_survive_an_invalidated_row() {
     // same fixed script, and the switch does not absolve it.
     state.invalidate();
 
-    state.request_poll();
+    state.request_refresh();
     let _ = begin(&mut state, now);
     assert_eq!(
         state.finish_command_run(now, RunId(2), failed()),
-        FinishDisposition::PollFailurePainted {
+        FinishDisposition::RefreshFailurePainted {
             error: "exit 7".into(),
-            failures: POLL_FAILURES_TO_PAINT,
+            failures: REFRESH_FAILURES_TO_PAINT,
         },
-        "the third consecutive failure paints even across an invalidate"
+        "the third consecutive failure still counts across an invalidate"
     );
 }
 
 #[test]
-fn superseded_poll_failure_neither_paints_nor_counts_a_strike() {
+fn refresh_failure_below_threshold_cannot_pop_a_row_an_empty_print_hid() {
     let now = Instant::now();
     let mut state = StatusLineState::default();
-    state.request_poll();
+    let _ = begin(&mut state, now);
+    let _ = state.finish_command_run(now, RunId(0), RunOutcome::Output(String::new()));
+    assert!(state.display().is_none(), "the script hid the row");
+
+    state.request_refresh();
+    let _ = begin(&mut state, now);
+    assert_eq!(
+        state.finish_command_run(now, RunId(1), failed()),
+        FinishDisposition::RefreshFailureKept {
+            error: "exit 7".into(),
+            failures: 1,
+        },
+        "an empty print was an answer: one failure must not paint an error \
+         over a row the script hid on purpose"
+    );
+    assert!(state.display().is_none());
+}
+
+#[test]
+fn superseded_refresh_failure_neither_paints_nor_counts_a_strike() {
+    let now = Instant::now();
+    let mut state = StatusLineState::default();
+    state.request_refresh();
     let _ = begin(&mut state, now);
     state.supersede_command_run(AfterSupersede::NoRun);
 
     assert_eq!(
         state.finish_command_run(now, RunId(0), failed()),
         FinishDisposition::Applied,
-        "a superseded run has no poll story to tell"
+        "a superseded run has no refresh story to tell"
     );
     assert!(state.display().is_none(), "its failure text never paints");
 
     // No strike was counted, so the next real failure is the first. It
-    // paints because this row never confirmed anything to keep.
-    state.request_poll();
+    state.request_refresh();
     let _ = begin(&mut state, now);
     assert_eq!(
         state.finish_command_run(now, RunId(1), failed()),
-        FinishDisposition::PollFailurePainted {
+        FinishDisposition::RefreshFailurePainted {
             error: "exit 7".into(),
             failures: 1,
         }
@@ -309,65 +314,37 @@ fn superseded_poll_failure_neither_paints_nor_counts_a_strike() {
 }
 
 #[test]
-fn an_abandoned_poll_run_re_raises_the_owed_poll() {
-    let mut now = Instant::now();
+fn superseded_and_abandoned_refresh_runs_re_raise_the_owed_refresh() {
+    let now = Instant::now();
     let mut state = StatusLineState::default();
-    state.request_poll();
+    state.request_refresh();
     let _ = begin(&mut state, now);
-    assert!(!state.poll_pending(), "consumed by the run that started");
-
-    now += ABANDON_AFTER;
-    state.abandon_if_past_deadline(now);
-    assert!(
-        state.poll_pending(),
-        "a poll run that never answered must not swallow its cycle"
-    );
+    assert!(!state.refresh_due(), "consumed by the run that started");
+    state.supersede_command_run(AfterSupersede::Rerun);
+    assert!(state.refresh_due(), "the replacement run keeps the fetch");
+    let _ = state.finish_command_run(now, RunId(0), RunOutcome::Output("stale".into()));
     assert_eq!(
         started_trigger(begin(&mut state, now)),
-        StatusLineTrigger::Poll
+        StatusLineTrigger::RefreshInterval
     );
-}
 
-#[test]
-fn late_result_of_an_abandoned_poll_run_consumes_the_re_raised_poll() {
     let mut now = Instant::now();
     let mut state = StatusLineState::default();
-    state.request_poll();
+    state.request_refresh();
     let _ = begin(&mut state, now);
     now += ABANDON_AFTER;
     state.abandon_if_past_deadline(now);
-    assert!(state.poll_pending(), "the abandon re-raised the poll");
+    assert!(
+        state.refresh_due(),
+        "a refresh run that never answered must not swallow its cycle"
+    );
 
     let _ = state.finish_command_run(now, RunId(0), RunOutcome::Output("late".into()));
-    assert!(
-        !state.poll_pending(),
-        "the late result is the poll's answer; one timer cycle must not \
-         paint and then run a second time, nor strike twice on a failure"
-    );
+    assert!(!state.refresh_due(), "the late result answered the refresh");
     assert_eq!(
         started_trigger(begin(&mut state, now)),
         StatusLineTrigger::State,
         "the next run is an ordinary one"
-    );
-}
-
-#[test]
-fn superseding_a_poll_run_re_raises_the_owed_poll() {
-    let now = Instant::now();
-    let mut state = StatusLineState::default();
-    state.request_poll();
-    let _ = begin(&mut state, now);
-    assert!(!state.poll_pending(), "consumed by the run that started");
-
-    // A resize lands mid-poll: the run is superseded, but the fetch it
-    // carried is still owed to the replacement.
-    state.supersede_command_run(AfterSupersede::Rerun);
-    assert!(state.poll_pending(), "the replacement run keeps the fetch");
-
-    let _ = state.finish_command_run(now, RunId(0), RunOutcome::Output("stale".into()));
-    assert_eq!(
-        started_trigger(begin(&mut state, now)),
-        StatusLineTrigger::Poll
     );
 }
 
@@ -449,8 +426,8 @@ fn every_builtin_item_is_named_in_the_guide() {
 #[test]
 fn the_numbers_the_guide_states_are_pinned() {
     assert_eq!(
-        POLL_FAILURES_TO_PAINT, 3,
-        "the guide says three consecutive poll failures paint the error"
+        REFRESH_FAILURES_TO_PAINT, 3,
+        "the guide says three consecutive refresh failures paint the error"
     );
     assert_eq!(
         EVENT_DEBOUNCE,

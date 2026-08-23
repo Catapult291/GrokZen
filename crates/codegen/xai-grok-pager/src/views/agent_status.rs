@@ -327,7 +327,7 @@ pub fn active_phase_label_with_locale(
 /// Returns the empty string when both fields are absent / zero — no
 /// classifier run has been reserved yet, so there is no meaningful
 /// counter. Callers render it only when non-empty: the chip drops the
-/// `(n/m)` suffix, the modal falls back to an em-dash.
+/// `(n/m)` suffix, the modal falls back to a hyphen.
 pub fn classifier_attempts_label(goal: &GoalDisplayState) -> String {
     let attempt = goal.classifier_runs_attempted.unwrap_or(0);
     let max = goal.classifier_max_runs.unwrap_or(0);

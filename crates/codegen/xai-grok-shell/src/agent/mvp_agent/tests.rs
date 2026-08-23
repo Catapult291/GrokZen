@@ -624,7 +624,11 @@ async fn upload_harness_trace_turns_build_per_turn_manifest() {
         "turn_messages.json",
         ArtifactResult::Succeeded,
     );
-    let m0 = build_manifest(&ctx0.artifact_tracker, resolve_upload_method(ctx0));
+    let m0 = build_manifest(
+        &ctx0.artifact_tracker,
+        resolve_upload_method(&ctx0.gcs_config),
+        None,
+    );
     assert!(matches!(
         m0.artifacts.get("metadata.json"),
         Some(ArtifactStatus::Succeeded)
@@ -635,7 +639,11 @@ async fn upload_harness_trace_turns_build_per_turn_manifest() {
     ));
     assert!(m0.fully_uploaded, "both succeeded → fully_uploaded");
     let ctx1 = &built[1].0;
-    let before = build_manifest(&ctx1.artifact_tracker, resolve_upload_method(ctx1));
+    let before = build_manifest(
+        &ctx1.artifact_tracker,
+        resolve_upload_method(&ctx1.gcs_config),
+        None,
+    );
     assert!(
         before.artifacts.is_empty(),
         "per-turn tracker: turn 1 must not inherit turn 0's artifacts",
@@ -653,7 +661,11 @@ async fn upload_harness_trace_turns_build_per_turn_manifest() {
             error: None,
         },
     );
-    let m1 = build_manifest(&ctx1.artifact_tracker, resolve_upload_method(ctx1));
+    let m1 = build_manifest(
+        &ctx1.artifact_tracker,
+        resolve_upload_method(&ctx1.gcs_config),
+        None,
+    );
     assert!(
         !m1.fully_uploaded,
         "a failed turn_messages flips fully_uploaded",
@@ -1121,7 +1133,7 @@ async fn file_toolset_override_e2e_to_finalized_toolset() {
         lsp: None,
         image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig::default(),
         video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig::default(),
-        app_builder_deployer_config: xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig::default(),
+        app_builder_deployer_config: xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig::default(),
         api_key_provider: None,
         auth_provider: None,
         attribution_callback: None,
@@ -1375,6 +1387,21 @@ async fn apply_supported_effort_assigns_only_when_supported() {
     assert_eq!(none_cfg.reasoning_effort, Some(ReasoningEffort::Low));
 }
 #[test]
+fn resolve_new_session_effort_hint_prefers_meta_over_current() {
+    use crate::agent::mvp_agent::reasoning_effort::resolve_new_session_effort_hint;
+    use xai_grok_sampling_types::ReasoningEffort;
+    assert_eq!(
+        resolve_new_session_effort_hint(Some(ReasoningEffort::High), Some(ReasoningEffort::Low)),
+        Some(ReasoningEffort::High),
+    );
+    assert_eq!(
+        resolve_new_session_effort_hint(None, Some(ReasoningEffort::Low)),
+        Some(ReasoningEffort::Low),
+        "/new and /clear with no _meta hint must keep last-used / config effort",
+    );
+    assert_eq!(resolve_new_session_effort_hint(None, None), None);
+}
+#[test]
 fn split_new_session_effort_routes_hint_to_one_slot() {
     use crate::agent::mvp_agent::reasoning_effort::{NewSessionEffort, split_new_session_effort};
     use xai_grok_sampling_types::ReasoningEffort;
@@ -1446,6 +1473,48 @@ async fn new_session_meta_effort_seeds_spawn_for_supported_model_and_drops_for_u
         EffortTarget::NewSession,
     );
     assert_eq!(plain_cfg.reasoning_effort, None);
+}
+/// `/new` / `/clear` send no `_meta.reasoningEffort`. The last-used / config
+/// default must seed spawn so a fresh chat does not snap back to the catalog
+/// default (`high` on grok-4.6).
+#[tokio::test]
+async fn new_session_without_meta_keeps_current_effort_over_catalog_default() {
+    use crate::agent::config::{EndpointsConfig, ModelEntry};
+    use crate::agent::mvp_agent::reasoning_effort::{
+        EffortTarget, NewSessionEffort, resolve_new_session_effort_hint, split_new_session_effort,
+    };
+    use xai_grok_sampling_types::ReasoningEffort;
+    let agent = build_minimal_agent_for_tests();
+    let mut supported = ModelEntry::fallback("effort-model", &EndpointsConfig::default());
+    supported.info.supports_reasoning_effort = true;
+    supported.info.reasoning_effort = Some(ReasoningEffort::High);
+    agent
+        .models_manager
+        .insert_test_entry("effort-model", supported.clone());
+    agent
+        .models_manager
+        .set_current_reasoning_effort(Some(ReasoningEffort::Low));
+    let hint =
+        resolve_new_session_effort_hint(None, agent.models_manager.current_reasoning_effort());
+    let route = split_new_session_effort(None, hint);
+    assert_eq!(route, NewSessionEffort::Spawn(ReasoningEffort::Low));
+    let spawn_effort = match route {
+        NewSessionEffort::Spawn(effort) => Some(effort),
+        NewSessionEffort::Switch(_) | NewSessionEffort::None => None,
+    };
+    let mut cfg = agent.prepare_sampling_config_for_model(&supported, None);
+    assert_eq!(cfg.reasoning_effort, Some(ReasoningEffort::High));
+    agent.models_manager.apply_supported_effort(
+        &mut cfg,
+        spawn_effort,
+        &acp::SessionId::new("new-session-current-effort"),
+        EffortTarget::NewSession,
+    );
+    assert_eq!(
+        cfg.reasoning_effort,
+        Some(ReasoningEffort::Low),
+        "/clear must keep last-used / config effort, not the catalog default",
+    );
 }
 /// Drive the real `restore_persisted_model` for a session pinned to an
 /// effort-capable model and report the effort it lands on the session handle.
@@ -2085,6 +2154,87 @@ fn build_agent_with_auth(auth: crate::auth::GrokAuth) -> MvpAgent {
     let cfg = AgentConfig::default();
     MvpAgent::new(gateway, &cfg, auth_manager, None).expect("valid test config")
 }
+fn make_trace_card_eligible(agent: &MvpAgent) {
+    let mut cfg = agent.cfg.borrow_mut();
+    cfg.feature_values
+        .insert(crate::agent::config::Feature::FeedbackTraceCard, true);
+    cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
+    cfg.telemetry.trace_upload = Some(false);
+}
+fn personal_xai_oauth_auth() -> crate::auth::GrokAuth {
+    crate::auth::GrokAuth {
+        auth_mode: crate::auth::AuthMode::Oidc,
+        oidc_issuer: Some(crate::auth::XAI_OAUTH2_ISSUER.to_string()),
+        ..crate::auth::GrokAuth::test_default()
+    }
+}
+#[tokio::test]
+#[serial_test::serial]
+async fn feedback_trace_offer_asks_personal_oauth_accounts() {
+    use xai_grok_test_support::EnvGuard;
+    let _e1 = EnvGuard::unset("GROK_TELEMETRY_ENABLED");
+    let _e2 = EnvGuard::unset("GROK_TELEMETRY_TRACE_UPLOAD");
+    let _e3 = EnvGuard::unset("GROK_FEEDBACK_TRACE_CARD");
+    let agent = build_agent_with_auth(personal_xai_oauth_auth());
+    make_trace_card_eligible(&agent);
+    assert!(agent.feedback_trace_offer(), "every gate is open");
+    assert!(
+        agent
+            .one_shot_feedback_gcs_config("sid".into())
+            .await
+            .is_some(),
+        "the consented upload path must be open too"
+    );
+}
+#[tokio::test]
+#[serial_test::serial]
+async fn feedback_trace_offer_suppressed_for_team_accounts_even_admins() {
+    use xai_grok_test_support::EnvGuard;
+    let _e1 = EnvGuard::unset("GROK_TELEMETRY_ENABLED");
+    let _e2 = EnvGuard::unset("GROK_TELEMETRY_TRACE_UPLOAD");
+    let _e3 = EnvGuard::unset("GROK_FEEDBACK_TRACE_CARD");
+    for role in ["Admin", "Member"] {
+        let agent = build_agent_with_auth(crate::auth::GrokAuth {
+            team_name: Some("acme".into()),
+            team_role: Some(role.into()),
+            ..personal_xai_oauth_auth()
+        });
+        make_trace_card_eligible(&agent);
+        assert!(
+            !agent.feedback_trace_offer(),
+            "team {role} must not be offered the individual trace card"
+        );
+        assert!(
+            agent
+                .one_shot_feedback_gcs_config("sid".into())
+                .await
+                .is_none(),
+            "team {role} must not have a one-shot upload path"
+        );
+    }
+}
+#[tokio::test]
+#[serial_test::serial]
+async fn feedback_trace_offer_suppressed_for_managed_deployments() {
+    use xai_grok_test_support::EnvGuard;
+    let _e1 = EnvGuard::unset("GROK_TELEMETRY_ENABLED");
+    let _e2 = EnvGuard::unset("GROK_TELEMETRY_TRACE_UPLOAD");
+    let _e3 = EnvGuard::unset("GROK_FEEDBACK_TRACE_CARD");
+    let agent = build_agent_with_auth(personal_xai_oauth_auth());
+    make_trace_card_eligible(&agent);
+    agent.cfg.borrow_mut().endpoints.deployment_key = Some("dk-test".into());
+    assert!(
+        !agent.feedback_trace_offer(),
+        "a deployment key must suppress the card even with personal OAuth"
+    );
+    assert!(
+        agent
+            .one_shot_feedback_gcs_config("sid".into())
+            .await
+            .is_none(),
+        "a deployment key must close the one-shot upload path"
+    );
+}
 /// Regression: boot-time plugin discovery is deferred past ACP
 /// `initialize`, so the shared plugin registry starts empty.
 /// `resolve_mcp_servers` reads that snapshot to merge plugin-contributed
@@ -2567,6 +2717,7 @@ fn find_model_by_id_prefers_key_then_falls_back_to_slug() {
             agent_type: config::default_agent_type(),
             inference_idle_timeout_secs: None,
             max_retries: None,
+            subagent_rate_limit_max_attempts: None,
             hidden: false,
             supported_in_api: true,
             reasoning_effort: None,
@@ -4170,11 +4321,11 @@ async fn drive_disconnect_many(agent: &MvpAgent, sids: &[&acp::SessionId]) {
     use acp::Agent as _;
     let ids: Vec<&str> = sids.iter().map(|s| s.0.as_ref()).collect();
     let params = serde_json::json!({ "sessionIds": ids });
-    let raw = serde_json::value::to_raw_value(&params).unwrap();
+    let params_json = serde_json::value::to_raw_value(&params).unwrap();
     agent
         .ext_notification(acp::ExtNotification::new(
             "x.ai/internal/evict_sessions",
-            raw.into(),
+            params_json.into(),
         ))
         .await
         .expect("evict_sessions notification must be handled");
@@ -4185,11 +4336,11 @@ async fn drive_disconnect_many(agent: &MvpAgent, sids: &[&acp::SessionId]) {
 async fn drive_close(agent: &MvpAgent, session_id: &str) -> Result<acp::ExtResponse, acp::Error> {
     use acp::Agent as _;
     let params = serde_json::json!({ "sessionId": session_id });
-    let raw = serde_json::value::to_raw_value(&params).unwrap();
+    let params_json = serde_json::value::to_raw_value(&params).unwrap();
     agent
         .ext_method(acp::ExtRequest::new(
             "x.ai/session/close",
-            std::sync::Arc::from(raw),
+            std::sync::Arc::from(params_json),
         ))
         .await
 }
@@ -4263,9 +4414,9 @@ async fn ext_notification_forwards_each_queue_method_to_session_actor() {
         ),
     ];
     for (method, params) in cases {
-        let raw = serde_json::value::to_raw_value(&params).expect("serialize queue params");
+        let params_json = serde_json::value::to_raw_value(&params).expect("serialize queue params");
         agent
-            .ext_notification(acp::ExtNotification::new(method, raw.into()))
+            .ext_notification(acp::ExtNotification::new(method, params_json.into()))
             .await
             .unwrap_or_else(|e| panic!("{method} ext_notification failed: {e}"));
         let cmd = cmd_rx.try_recv().unwrap_or_else(|e| {
@@ -4393,9 +4544,9 @@ async fn ext_notification_queue_rejects_unknown_method_missing_id_and_unknown_se
         ),
     ];
     for (method, params) in negatives {
-        let raw = serde_json::value::to_raw_value(&params).expect("serialize queue params");
+        let params_json = serde_json::value::to_raw_value(&params).expect("serialize queue params");
         agent
-            .ext_notification(acp::ExtNotification::new(method, raw.into()))
+            .ext_notification(acp::ExtNotification::new(method, params_json.into()))
             .await
             .unwrap_or_else(|e| panic!("{method} ext_notification must not fail: {e}"));
         assert!(
@@ -4407,7 +4558,7 @@ async fn ext_notification_queue_rejects_unknown_method_missing_id_and_unknown_se
         );
     }
     let agent_empty = build_minimal_agent_for_tests();
-    let raw = serde_json::value::to_raw_value(&serde_json::json!({
+    let params_json = serde_json::value::to_raw_value(&serde_json::json!({
         "sessionId": "ghost",
         "id": "p1",
     }))
@@ -4415,7 +4566,7 @@ async fn ext_notification_queue_rejects_unknown_method_missing_id_and_unknown_se
     agent_empty
         .ext_notification(acp::ExtNotification::new(
             "x.ai/queue/release_edit",
-            raw.into(),
+            params_json.into(),
         ))
         .await
         .expect("queue edit for a missing session must not error");
@@ -4434,11 +4585,11 @@ async fn ext_notification_queue_edit_survives_dropped_actor_mailbox() {
         "sessionId": sid.0.as_ref(),
         "id": "p-hold",
     });
-    let raw = serde_json::value::to_raw_value(&params).expect("serialize queue params");
+    let params_json = serde_json::value::to_raw_value(&params).expect("serialize queue params");
     agent
         .ext_notification(acp::ExtNotification::new(
             "x.ai/queue/hold_edit",
-            raw.into(),
+            params_json.into(),
         ))
         .await
         .expect("queue edit must not error when the session actor mailbox is gone");
@@ -6672,6 +6823,42 @@ mod soft_default_settings_emit {
                 let _ = args.response_tx.send(Ok(()));
             })
             .await;
+    }
+}
+#[test]
+fn subagent_rate_limit_max_attempts_resolution_precedence() {
+    for (config_toml, remote, env, expected) in [
+        (Some(3), Some(5), Some(7), 7),
+        (Some(3), Some(5), None, 3),
+        (None, Some(5), None, 5),
+        (None, None, None, 8),
+        (None, None, Some(100), 32),
+        (Some(50), None, None, 32),
+        (None, Some(99), None, 32),
+    ] {
+        assert_eq!(
+            resolve_subagent_rate_limit_max_attempts(config_toml, remote, env),
+            expected,
+            "config={config_toml:?} remote={remote:?} env={env:?}"
+        );
+    }
+}
+#[test]
+fn subagent_rate_limit_max_attempts_env_is_parsed_leniently() {
+    for (input, expected) in [
+        (None, None),
+        (Some(""), None),
+        (Some("   "), None),
+        (Some("abc"), None),
+        (Some("-1"), None),
+        (Some("99999999999"), None),
+        (Some(" 5 "), Some(5)),
+    ] {
+        assert_eq!(
+            parse_subagent_rate_limit_max_attempts(input),
+            expected,
+            "input={input:?}"
+        );
     }
 }
 #[cfg(feature = "dhat-heap")]

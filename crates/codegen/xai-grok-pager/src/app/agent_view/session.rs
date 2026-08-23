@@ -149,6 +149,9 @@ impl AgentView {
             bash_turn: false,
             cron_task_id: None,
             stashed_prompt: None,
+            prompt_stash: None,
+            draft_consumed: false,
+            prompt_stash_evicted: Vec::new(),
             credit_limit_stashed_prompt: None,
             reauth_stashed_prompt: None,
             active_modal: None,
@@ -298,6 +301,9 @@ impl AgentView {
             hit_sb_copy: Default::default(),
             hit_sb_view: Default::default(),
             question_view: None,
+            elicitation_view: None,
+            pending_elicitation: None,
+            elicit_hits: Vec::new(),
             hit_question_scrollbar: Default::default(),
             hovered_question_item: None,
             question_scrollbar_dragging: false,
@@ -544,7 +550,7 @@ impl AgentView {
                 "session reload superseded without finalize; restoring previous stash first"
             );
             if self.apply_reload_outcome(prev, false) {
-                crate::memory_release::release_retained_memory_with("reload-supersede");
+                crate::memory_release::release_retained_memory("reload-supersede");
             }
         }
         while self.scrollback.in_batch() {
@@ -641,7 +647,7 @@ impl AgentView {
         if let Some(reload) = self.session_reload.take()
             && self.apply_reload_outcome(reload, false)
         {
-            crate::memory_release::release_retained_memory_with("reload-abort");
+            crate::memory_release::release_retained_memory("reload-abort");
         }
     }
     /// Finalize the reload window opened for `generation`.
@@ -653,7 +659,7 @@ impl AgentView {
         match self.session_reload.take() {
             Some(reload) if reload.generation == generation => {
                 if self.apply_reload_outcome(reload, success) {
-                    crate::memory_release::release_retained_memory_with("reload-finalize");
+                    crate::memory_release::release_retained_memory("reload-finalize");
                 }
                 true
             }

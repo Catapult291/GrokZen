@@ -98,7 +98,7 @@ impl AppView {
                 && self.current_ui.status_line.changes_during_a_turn(),
             has_agent: source.is_some(),
             forced: self.status_line.force_pending(),
-            poll_pending: self.status_line.poll_pending(),
+            refresh_due: self.status_line.refresh_due(),
             run: self.status_line.run_slot(now),
         })
     }
@@ -113,12 +113,8 @@ impl AppView {
         // owed its count, and the path below no longer reaches it.
         self.status_line.abandon_if_past_deadline(now);
 
-        // The section is read once per process, so no config can stop polling
-        // mid-run today; cleared anyway so a future config reload that
-        // switches polling off cannot strand a pending poll demanding ticks
-        // nothing will consume.
         if self.current_ui.status_line.refresh_interval().is_none() {
-            self.status_line.cancel_poll_request();
+            self.status_line.cancel_refresh_request();
         }
 
         if self.screen_mode.is_minimal() || source.is_none() {
@@ -235,7 +231,7 @@ impl AppView {
         outcome: RunOutcome,
     ) {
         let disposition = self.status_line.finish_command_run(now, id, outcome);
-        let Some(line) = poll_failure_log(disposition) else {
+        let Some(line) = refresh_failure_log(disposition) else {
             return;
         };
         let session_id = self.status_line_session_id();
@@ -244,10 +240,10 @@ impl AppView {
             "consecutive_failures": line.failures,
         }));
         match line.level {
-            PollFailureLogLevel::Warn => {
+            RefreshFailureLogLevel::Warn => {
                 crate::unified_log::warn(line.message, session_id.as_deref(), context);
             }
-            PollFailureLogLevel::Debug => {
+            RefreshFailureLogLevel::Debug => {
                 crate::unified_log::debug(line.message, session_id.as_deref(), context);
             }
         }
@@ -277,23 +273,19 @@ impl AppView {
             .supersede_command_run(AfterSupersede::Rerun);
     }
 
-    /// The timer the event loop arms, `None` for a row that does not poll.
     pub(crate) fn status_line_refresh_interval(&self) -> Option<std::time::Duration> {
         self.current_ui.status_line.refresh_interval()
     }
 
-    /// The event loop's poll timer lands here. A row that cannot run now (a
-    /// fullscreen subagent's frame, the welcome screen, a busy slot) is owed
-    /// one run when it can — never a burst for the polls that were missed.
-    pub(crate) fn note_status_line_poll_due(&mut self) {
-        self.note_status_line_poll_due_at(Instant::now());
+    pub(crate) fn note_status_line_refresh_due(&mut self) {
+        self.note_status_line_refresh_due_at(Instant::now());
     }
 
-    pub(crate) fn note_status_line_poll_due_at(&mut self, now: Instant) {
+    pub(crate) fn note_status_line_refresh_due_at(&mut self, now: Instant) {
         if self.status_line_refresh_interval().is_none() {
             return;
         }
-        self.status_line.request_poll();
+        self.status_line.request_refresh();
         self.update_status_line_at(now);
     }
 
@@ -379,7 +371,7 @@ struct TickInputs {
     turn_timer_running: bool,
     has_agent: bool,
     forced: bool,
-    poll_pending: bool,
+    refresh_due: bool,
     run: RunSlot,
 }
 
@@ -392,7 +384,7 @@ fn status_line_tick_demand(
         turn_timer_running,
         has_agent,
         forced,
-        poll_pending,
+        refresh_due,
         run,
     }: TickInputs,
 ) -> TickDemand {
@@ -412,56 +404,47 @@ fn status_line_tick_demand(
     if turn_timer_running || source_changed || client_fields_changed || !settled || forced {
         return TickDemand::Slow;
     }
-    // Reached only with the row drawn and the slot free, so the tick asked
-    // for here runs a poll the floor deferred. A poll behind a busy slot
-    // rides the task-completion tick instead, and one behind a hidden row
-    // waits for the update that returns the frame: ticks never spin while
-    // the row is hidden.
-    if poll_pending {
+    if refresh_due {
         return TickDemand::Slow;
     }
     TickDemand::None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PollFailureLogLevel {
+enum RefreshFailureLogLevel {
     Warn,
     Debug,
 }
 
-/// One poll-failure line for `unified.jsonl`, everything the caller logs.
-struct PollFailureLogLine {
-    level: PollFailureLogLevel,
+struct RefreshFailureLogLine {
+    level: RefreshFailureLogLevel,
     message: &'static str,
     error: String,
     failures: u32,
 }
 
 /// The `unified.jsonl` line a run's disposition earns, which is the promise
-/// the guide makes about poll failures. A failure that newly paints (a blank
-/// row's first, or the strike that crossed the threshold) is user visible
-/// and warns; a kept failure and the steady-state repeats past the threshold
-/// drop to debug, so a script broken all night cannot write a warn line per
-/// interval.
-fn poll_failure_log(disposition: FinishDisposition) -> Option<PollFailureLogLine> {
+fn refresh_failure_log(disposition: FinishDisposition) -> Option<RefreshFailureLogLine> {
     match disposition {
         FinishDisposition::Applied => None,
-        FinishDisposition::PollFailureKept { error, failures } => Some(PollFailureLogLine {
-            level: PollFailureLogLevel::Debug,
-            message: "status_line: poll run failed; keeping the last output",
+        FinishDisposition::RefreshFailureKept { error, failures } => Some(RefreshFailureLogLine {
+            level: RefreshFailureLogLevel::Debug,
+            message: "status_line: refresh run failed; keeping the last output",
             error,
             failures,
         }),
-        FinishDisposition::PollFailurePainted { error, failures } => Some(PollFailureLogLine {
-            level: if failures <= super::status_line::POLL_FAILURES_TO_PAINT {
-                PollFailureLogLevel::Warn
-            } else {
-                PollFailureLogLevel::Debug
-            },
-            message: "status_line: poll run failed; painting the error",
-            error,
-            failures,
-        }),
+        FinishDisposition::RefreshFailurePainted { error, failures } => {
+            Some(RefreshFailureLogLine {
+                level: if failures <= super::status_line::REFRESH_FAILURES_TO_PAINT {
+                    RefreshFailureLogLevel::Warn
+                } else {
+                    RefreshFailureLogLevel::Debug
+                },
+                message: "status_line: refresh run failed; painting the error",
+                error,
+                failures,
+            })
+        }
     }
 }
 

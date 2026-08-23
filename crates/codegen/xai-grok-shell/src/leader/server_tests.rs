@@ -848,6 +848,7 @@ fn is_interaction_request_detects_only_interaction_methods() {
         "session/request_permission",
         "x.ai/ask_user_question",
         "x.ai/exit_plan_mode",
+        "x.ai/mcp/elicit",
     ] {
         let payload = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"{m}","params":{{}}}}"#);
         assert!(
@@ -857,7 +858,11 @@ fn is_interaction_request_detects_only_interaction_methods() {
     }
     // Gateway-wrapped ext methods (the actual wire shape for ask_user_question
     // / exit_plan_mode): `_`-prefixed top-level method, real method nested.
-    for m in ["x.ai/ask_user_question", "x.ai/exit_plan_mode"] {
+    for m in [
+        "x.ai/ask_user_question",
+        "x.ai/exit_plan_mode",
+        "x.ai/mcp/elicit",
+    ] {
         let payload = format!(
             r#"{{"jsonrpc":"2.0","id":1,"method":"_{m}","params":{{"method":"{m}","params":{{}}}}}}"#
         );

@@ -208,3 +208,48 @@ async fn subagent_spawn_context_inherits_parent_process_scope() {
         "the child sees the owner enrolled through the parent scope"
     );
 }
+
+fn model_entry_with_rate_limit(
+    slug: &str,
+    attempts: Option<u32>,
+) -> crate::agent::config::ModelEntry {
+    let mut info = crate::agent::config::ModelInfo::fallback(slug);
+    info.subagent_rate_limit_max_attempts = attempts;
+    crate::agent::config::ModelEntry {
+        info,
+        api_key: None,
+        env_key: None,
+        auth_provider: None,
+        api_base_url: None,
+    }
+}
+
+#[tokio::test]
+async fn subagent_spawn_context_resolves_rate_limit_attempts_against_child_model() {
+    let agent = build_minimal_agent_for_tests();
+    let sid = acp::SessionId::new("parent-rate-limit");
+    agent.insert_resident(&sid, make_test_handle("parent-model", false, None));
+
+    let mut ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
+    let mut models = indexmap::IndexMap::new();
+    models.insert(
+        "parent-model".to_string(),
+        model_entry_with_rate_limit("parent-model", Some(4)),
+    );
+    models.insert(
+        "child-model".to_string(),
+        model_entry_with_rate_limit("child-model", Some(0)),
+    );
+    ctx.available_models = models;
+
+    assert_eq!(
+        ctx.resolve_subagent_rate_limit_max_attempts("child-model"),
+        0,
+        "a subagent on a different model must honor that model's disable (0), not the parent's"
+    );
+    assert_eq!(
+        ctx.resolve_subagent_rate_limit_max_attempts("parent-model"),
+        4,
+        "the per-model lookup keys on the passed model id"
+    );
+}

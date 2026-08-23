@@ -96,6 +96,18 @@ impl ChatStateHandle {
         let _ = self.cmd_tx.send(ChatStateCommand::PushToolResult { item });
     }
 
+    /// Persist model output already included in the provider's usage total.
+    pub fn push_model_output(&self, item: ConversationItem) {
+        let _ = self.cmd_tx.send(ChatStateCommand::PushModelOutput { item });
+    }
+
+    /// Persist model output whose provider response omitted usage.
+    pub fn push_unreported_model_output(&self, item: ConversationItem) {
+        let _ = self
+            .cmd_tx
+            .send(ChatStateCommand::PushUnreportedModelOutput { item });
+    }
+
     /// Record accumulated token usage.
     pub fn record_token_usage(&self, total_tokens: u64) {
         let _ = self

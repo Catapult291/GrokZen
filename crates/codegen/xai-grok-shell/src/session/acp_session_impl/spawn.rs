@@ -62,6 +62,23 @@ fn configured_memory_retrieval_mode(
         Some(_) => FtsOnly,
     }
 }
+/// Choose the sampler's own 429 retry threshold for a session's inference path.
+///
+/// Invariant (one layer per role, never stacked, never zero):
+/// subagents pace 429s themselves via the turn-level pacer, so while that pacer
+/// is active (`pacer_max_attempts > 0`) the sampler's own 429 retry is disabled
+/// ([`xai_grok_sampler::RATE_LIMIT_RETRY_DISABLED`]). If the pacer is disabled
+/// (`pacer_max_attempts == 0`) the subagent falls back to the sampler's own 429
+/// retry ([`xai_grok_sampler::RATE_LIMIT_RETRY_THRESHOLD`]) so disabling the
+/// pacer is a true rollback rather than zero 429 handling. Main sessions always
+/// keep the sampler retry.
+fn subagent_sampler_rate_limit_threshold(is_subagent: bool, pacer_max_attempts: u32) -> u32 {
+    if is_subagent && pacer_max_attempts > 0 {
+        xai_grok_sampler::RATE_LIMIT_RETRY_DISABLED
+    } else {
+        xai_grok_sampler::RATE_LIMIT_RETRY_THRESHOLD
+    }
+}
 #[cfg(all(test, unix))]
 #[path = "spawn_runtime_containment_tests.rs"]
 mod runtime_containment_tests;
@@ -117,6 +134,40 @@ mod cli_catchall_drop_tests {
         let (kept, dropped) = drop_cli_catchall_allows(rules, None);
         assert_eq!(kept.len(), 3);
         assert!(dropped.is_empty());
+    }
+}
+#[cfg(test)]
+mod subagent_rate_limit_threshold_tests {
+    use super::subagent_sampler_rate_limit_threshold;
+    use xai_grok_sampler::{RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD};
+    #[test]
+    fn main_session_always_keeps_sampler_retry() {
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(false, 0),
+            RATE_LIMIT_RETRY_THRESHOLD
+        );
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(false, 8),
+            RATE_LIMIT_RETRY_THRESHOLD
+        );
+    }
+    #[test]
+    fn subagent_with_disabled_pacer_falls_back_to_sampler_retry() {
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(true, 0),
+            RATE_LIMIT_RETRY_THRESHOLD
+        );
+    }
+    #[test]
+    fn subagent_with_active_pacer_disables_sampler_retry() {
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(true, 1),
+            RATE_LIMIT_RETRY_DISABLED
+        );
+        assert_eq!(
+            subagent_sampler_rate_limit_threshold(true, 8),
+            RATE_LIMIT_RETRY_DISABLED
+        );
     }
 }
 /// Spawns a session actor and returns the session handle plus a receiver for permission events.
@@ -201,11 +252,12 @@ pub(crate) async fn spawn_session_actor(
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
+    subagent_rate_limit_max_attempts: u32,
     web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
-    app_builder_deployer_config: xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
+    app_builder_deployer_config: xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     goal_enabled: bool,
     background_workflows_enabled: bool,
@@ -247,6 +299,7 @@ pub(crate) async fn spawn_session_actor(
     max_turns: Option<usize>,
     forked_tool_override: Option<Vec<ToolSpec>>,
     is_chat_kind: bool,
+    spawn_timer: Option<xai_grok_telemetry::subagent_spawn::SharedSubagentSpawnTimer>,
 ) -> Result<
     (
         SessionHandle,
@@ -261,6 +314,7 @@ pub(crate) async fn spawn_session_actor(
             "max_turns must be greater than 0".to_string(),
         ));
     }
+    let wf_sid: String = session_info.id.0.to_string();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     tracing::info!(
         "Session '{}' created with {} MCP servers",
@@ -950,7 +1004,8 @@ pub(crate) async fn spawn_session_actor(
             None
         },
     });
-    let agent = rebuild_spec
+    let builder_started_at = std::time::Instant::now();
+    let (agent, agent_build_elapsed) = rebuild_spec
         .build_agent_with_initial_overrides(
             agent_definition,
             persisted_announcement_state
@@ -968,13 +1023,13 @@ pub(crate) async fn spawn_session_actor(
             );
             e
         })?;
+    let reservations_for_bridge = task_completion_reservations.clone();
     agent
         .tool_bridge()
-        .update_resource(task_completion_reservations.clone())
-        .await;
-    agent
-        .tool_bridge()
-        .update_resource(task_wake_suppressed)
+        .update_resources_with(|resources| {
+            resources.insert(reservations_for_bridge);
+            resources.insert(task_wake_suppressed);
+        })
         .await;
     let memory_retrieval_mode = configured_memory_retrieval_mode(memory_config.as_ref());
     let harness_metrics = if !startup_hints.is_subagent
@@ -1048,6 +1103,17 @@ pub(crate) async fn spawn_session_actor(
     ) {
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
+    if let Some(ref timer) = spawn_timer {
+        use xai_grok_telemetry::subagent_spawn::SubagentSpawnPhase;
+        timer.record(SubagentSpawnPhase::AgentBuild, agent_build_elapsed);
+        timer.record(
+            SubagentSpawnPhase::ToolSetup,
+            builder_started_at
+                .elapsed()
+                .saturating_sub(agent_build_elapsed),
+        );
+    }
+    crate::waterfall::mark(&wf_sid, crate::waterfall::stage::SB_AGENT_BUILT);
     let system_prompt = agent.system_prompt().to_string();
     let mut prompt_context = agent.prompt_context().clone();
     prompt_context.normalize_for_persistence();
@@ -1188,7 +1254,10 @@ pub(crate) async fn spawn_session_actor(
     }
     let sampler_retry_policy = xai_grok_sampler::RetryPolicy {
         max_retries: max_retries.unwrap_or(5),
-        rate_limit_retry_threshold: 2,
+        rate_limit_retry_threshold: subagent_sampler_rate_limit_threshold(
+            is_subagent_spawn,
+            subagent_rate_limit_max_attempts,
+        ),
         retry_only_before_output,
     };
     let (sampler_event_tx, sampler_event_rx) =
@@ -1421,6 +1490,7 @@ pub(crate) async fn spawn_session_actor(
                     objective,
                     args,
                     agent_budget: input.agent_budget,
+                    effort: None,
                     resume_run_id: input.resume_from_run_id.clone(),
                 };
                 let launch_outcome = {
@@ -1556,7 +1626,9 @@ pub(crate) async fn spawn_session_actor(
         file_state_tracker,
         rewind_pending_prompt: std::sync::Mutex::new(None),
         delivery_tools: std::cell::RefCell::new(startup_hints.delivery_tools.clone()),
-        attach_non_interactive: std::cell::Cell::new(startup_hints.non_interactive),
+        attach_non_interactive: std::rc::Rc::new(std::cell::Cell::new(
+            startup_hints.non_interactive,
+        )),
         startup_hints,
         forked_tool_override,
         compaction: super::compaction_config::CompactionConfig {
@@ -1609,6 +1681,7 @@ pub(crate) async fn spawn_session_actor(
         inference_idle_timeout: Duration::from_secs(inference_idle_timeout_secs),
         max_turns,
         max_retries: xai_grok_sampler::resolve_max_retries(max_retries),
+        rate_limit_waits: RateLimitWaitConfig::with_max_attempts(subagent_rate_limit_max_attempts),
         pending_interjections: InterjectionBuffer::new(),
         pending_skill_reminders: Mutex::new(Vec::new()),
         idle_flush_timeout: memory_config
@@ -2054,7 +2127,9 @@ pub(crate) async fn spawn_session_actor(
             xai_grok_telemetry::session_ctx::log_event_dual(telemetry_enabled, ev);
         });
     }
+    let hosting = xai_grok_telemetry::activity::SESSIONS_ACTIVE.enter();
     tokio::task::spawn_local(async move {
+        let _hosting = hosting;
         xai_grok_telemetry::session_ctx::with_session_ctx(
             telemetry_ctx,
             run_session(
@@ -2216,11 +2291,12 @@ pub(crate) async fn spawn_session_on_thread(
     session_client_identifier: Option<String>,
     inference_idle_timeout_secs: u64,
     max_retries: Option<u32>,
+    subagent_rate_limit_max_attempts: u32,
     web_search_sampling_config: Option<xai_grok_sampler::SamplerConfig>,
     web_fetch_config: xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig,
     image_gen_config: xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig,
     video_gen_config: xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig,
-    app_builder_deployer_config: xai_grok_tools::implementations::grok_build::deploy_app::AppBuilderDeployerConfig,
+    app_builder_deployer_config: xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig,
     write_file_enabled: bool,
     goal_enabled: bool,
     background_workflows_enabled: bool,
@@ -2263,6 +2339,7 @@ pub(crate) async fn spawn_session_on_thread(
     max_turns: Option<usize>,
     forked_tool_override: Option<Vec<ToolSpec>>,
     is_chat_kind: bool,
+    spawn_timer: Option<xai_grok_telemetry::subagent_spawn::SharedSubagentSpawnTimer>,
 ) -> Result<
     (
         SessionHandle,
@@ -2315,7 +2392,7 @@ pub(crate) async fn spawn_session_on_thread(
                 }
             };
             let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, async move {
+            let actor_main = async move {
                 let _trace_span = parent_traceparent.as_ref().map(|tp| {
                     let meta = serde_json::json!({ "traceparent": tp })
                         .as_object()
@@ -2392,6 +2469,7 @@ pub(crate) async fn spawn_session_on_thread(
                         session_client_identifier,
                         inference_idle_timeout_secs,
                         max_retries,
+                        subagent_rate_limit_max_attempts,
                         web_search_sampling_config,
                         web_fetch_config,
                         image_gen_config,
@@ -2434,6 +2512,7 @@ pub(crate) async fn spawn_session_on_thread(
                         max_turns,
                         forked_tool_override,
                         is_chat_kind,
+                        spawn_timer,
                     )
                     .await
                     {
@@ -2449,7 +2528,9 @@ pub(crate) async fn spawn_session_on_thread(
                     system_prompt,
                 }));
                 let _ = session_done_rx.await;
-            });
+            };
+            local.block_on(&rt, actor_main);
+            rt.block_on(xai_grok_telemetry::session_ctx::drain_at_session_exit());
         });
     let join_handle = match join_handle {
         Ok(h) => h,

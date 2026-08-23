@@ -378,7 +378,7 @@ pub(crate) fn seed_consent_state_from_gate(
 
 /// Pause terminal input and wait up to `timeout` for the reader to acknowledge.
 /// Returns with the pause still asserted; the handoff owner resumes the reader.
-fn park_input_reader(
+pub(super) fn park_input_reader(
     input_paused: &std::sync::atomic::AtomicBool,
     reader_parked: &std::sync::atomic::AtomicBool,
     timeout: Duration,
@@ -439,11 +439,30 @@ fn suspend_for_child(
         .is_minimal()
         .then(|| crossterm::cursor::position().ok())
         .flatten();
-    if screen_mode.is_fullscreen() {
-        xai_grok_shell::util::with_locked_stderr(|stderr| {
-            let _ = crossterm::execute!(stderr, crossterm::terminal::LeaveAlternateScreen);
-        });
-    }
+    // Fullscreen stays on the alternate screen: a full-screen child (editor /
+    // pager) draws over it directly, so the primary screen — the user's shell
+    // — never flashes through while the child spawns. The child's own
+    // alt-screen exit may land the terminal back on the primary screen, so
+    // the return path re-enters without probing and the caller repaints.
+    // Quiesce input reporting before leaving raw mode: with the Kitty
+    // protocol or focus/mouse reporting still armed, the reports arriving in
+    // the cooked-mode window before the child raws the tty (the Ctrl+G key
+    // *releases*, a focus event) are echoed as visible escape codes.
+    let kitty_pushed = crate::app::kitty_flags_pushed();
+    let mouse_captured = crate::app::MOUSE_CAPTURE_ENABLED.load(Ordering::Acquire);
+    xai_grok_shell::util::with_locked_stderr(|stderr| {
+        if kitty_pushed {
+            let _ = crossterm::execute!(stderr, crossterm::event::PopKeyboardEnhancementFlags);
+        }
+        let _ = crossterm::execute!(
+            stderr,
+            crossterm::event::DisableFocusChange,
+            crossterm::event::DisableBracketedPaste,
+        );
+        if mouse_captured {
+            let _ = crossterm::execute!(stderr, crossterm::event::DisableMouseCapture);
+        }
+    });
     let _ = crossterm::terminal::disable_raw_mode();
     run_child();
     let _ = crossterm::terminal::enable_raw_mode();
@@ -452,6 +471,27 @@ fn suspend_for_child(
             let _ = crossterm::execute!(stderr, crossterm::terminal::EnterAlternateScreen);
         });
     }
+    // Re-arm everything quiesced above, plus whatever the child reset on its
+    // own exit (vim disables mouse, focus and bracketed paste) — losing
+    // bracketed paste turns the next paste into raw keystrokes.
+    xai_grok_shell::util::with_locked_stderr(|stderr| {
+        if kitty_pushed {
+            let _ = crossterm::execute!(
+                stderr,
+                crossterm::event::PushKeyboardEnhancementFlags(
+                    crate::terminal::pushed_kitty_flags()
+                )
+            );
+        }
+        let _ = crossterm::execute!(
+            stderr,
+            crossterm::event::EnableFocusChange,
+            crossterm::event::EnableBracketedPaste,
+        );
+        if mouse_captured {
+            let _ = crossterm::execute!(stderr, crossterm::event::EnableMouseCapture);
+        }
+    });
     // Discard child-exit ANSI query replies (DA/DSR/cursor reports) the terminal
     // buffered; reader is parked, so the main thread is the only crossterm caller.
     while crossterm::event::poll(Duration::from_millis(0)).unwrap_or(false) {
@@ -719,9 +759,9 @@ fn run_pending_suspends(
     }
     *suspend_retry_after = None;
 
-    // $EDITOR suspend: leave alt screen, disable raw mode, spawn
-    // editor, wait for exit, then restore. Preparation materializes prompt
-    // drafts only immediately before this safe terminal handoff.
+    // $EDITOR suspend: disable raw mode, spawn the editor, wait for exit,
+    // then restore. Preparation materializes prompt drafts only immediately
+    // before this safe terminal handoff.
     if let Some(request) = app.pending_editor.take() {
         let retry_request = request.clone();
         match crate::app::external_editor::prepare(app, request) {
@@ -783,7 +823,7 @@ fn run_pending_suspends(
 
     // /transcript suspend: open the rendered transcript in $PAGER,
     // then restore and delete the temp file. Shares the editor's
-    // suspend/restore dance (reader park, raw mode, alt screen).
+    // suspend/restore dance (reader park, raw mode).
     if let Some(path) = app.pending_pager_path.take() {
         let ansi = std::mem::take(&mut app.pending_pager_ansi);
         let pager = std::env::var("PAGER")
@@ -861,6 +901,202 @@ fn run_pending_suspends(
         suspend_wait_reports.pager_reported = false;
     }
     Ok(())
+}
+
+/// Consume a pending in-process `/minimal` ⇄ `/fullscreen` switch; returns
+/// `true` when the caller must quit (exec fallback armed on `app.relaunch`).
+fn localized_mode_switch_reason(locale: &crate::locale::LocaleContext, reason: &str) -> String {
+    let text = |id: &str, english: &str| locale.named_text(id, english).into_owned();
+    for (prefix, id, english) in [
+        (
+            "terminal writer failed: ",
+            "mode.switch.reason.writer_failed",
+            "terminal writer failed: {error}",
+        ),
+        (
+            "inline viewport probe failed: ",
+            "mode.switch.reason.inline_probe",
+            "inline viewport probe failed: {error}",
+        ),
+        (
+            "fullscreen viewport rebuild failed: ",
+            "mode.switch.reason.fullscreen_rebuild",
+            "fullscreen viewport rebuild failed: {error}",
+        ),
+    ] {
+        if let Some(error) = reason.strip_prefix(prefix) {
+            return text(id, english).replace("{error}", error);
+        }
+    }
+    match reason {
+        "terminal input reader did not park before the mode switch" => text(
+            "mode.switch.reason.input_reader",
+            "terminal input reader did not park before the mode switch",
+        ),
+        "terminal writer did not drain before the mode switch" => text(
+            "mode.switch.reason.writer_drain",
+            "terminal writer did not drain before the mode switch",
+        ),
+        "inline is not a switch target" => text(
+            "mode.switch.reason.inline_target",
+            "inline is not a switch target",
+        ),
+        _ => reason.to_owned(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_pending_mode_switch(
+    app: &mut AppView,
+    terminal: &mut PagerTerminal,
+    minimal_live_rows: u16,
+    input_paused: &std::sync::atomic::AtomicBool,
+    reader_parked: &std::sync::atomic::AtomicBool,
+    input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
+    presenter: &mut Presenter,
+    tasks: &mut JoinSet<TaskResult>,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
+    status_line_refresh_interval: &mut Option<Duration>,
+    status_line_refresh_at: &mut Option<Instant>,
+) -> bool {
+    let Some(target) = app.pending_screen_mode_switch.take() else {
+        return false;
+    };
+    let from = app.screen_mode;
+    if target == from {
+        return false;
+    }
+    match crate::app::mode_switch::transition_terminal(
+        terminal,
+        from,
+        target,
+        minimal_live_rows,
+        input_paused,
+        reader_parked,
+        input_rx,
+    ) {
+        crate::app::mode_switch::ModeSwitchOutcome::Switched => {
+            crate::app::mode_switch::reseed_screen_mode(app, target);
+            // Disarm in minimal or the command keeps running for an unpainted row.
+            *status_line_refresh_interval =
+                if super::status_line::draws_a_row(app.screen_mode, &app.current_ui.status_line) {
+                    app.status_line_refresh_interval()
+                } else {
+                    None
+                };
+            *status_line_refresh_at = status_line_refresh_interval.map(|iv| Instant::now() + iv);
+            if target.is_minimal() {
+                let switch_message = app
+                    .locale
+                    .named_text(
+                        "mode.switch.to_minimal",
+                        "Switched to minimal mode · /fullscreen to go back",
+                    )
+                    .into_owned();
+                crate::theme::reset_cursor_color();
+                crate::app::mode_switch::dismiss_fullscreen_only_surfaces(app);
+                super::MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN
+                    .store(true, std::sync::atomic::Ordering::Release);
+                // A committed block, not a toast: toasts never render in minimal.
+                if let ActiveView::Agent(id) = app.active_view
+                    && let Some(agent) = app.agents.get_mut(&id)
+                {
+                    crate::app::mode_switch::push_block_behind_live_stream(
+                        &mut agent.scrollback,
+                        crate::scrollback::block::RenderBlock::system(switch_message),
+                    );
+                }
+            } else {
+                let switch_message = app
+                    .locale
+                    .named_text(
+                        "mode.switch.to_fullscreen",
+                        "Switched to fullscreen mode · /minimal to go back",
+                    )
+                    .into_owned();
+                crate::theme::apply_cursor_color();
+                super::MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN
+                    .store(false, std::sync::atomic::Ordering::Release);
+                // Capture is back on: clear the mouse-off banner like the toggle-on path.
+                for agent in app.agents.values_mut() {
+                    agent.set_sticky_toast_recursive(None);
+                }
+                // Not `screen_mode_switch_hint`: it only surfaces on switch_to_agent.
+                if let ActiveView::Agent(id) = app.active_view
+                    && let Some(agent) = app.agents.get_mut(&id)
+                {
+                    agent.show_toast(&switch_message);
+                }
+            }
+            tracing::info!(
+                from = from.meta_label(),
+                to = target.meta_label(),
+                "in-process screen-mode switch"
+            );
+            presenter.request_presentation(app, terminal, true);
+            false
+        }
+        crate::app::mode_switch::ModeSwitchOutcome::Aborted(reason) => {
+            tracing::warn!(%reason, "screen-mode switch aborted; staying in current mode");
+            let localized_reason = localized_mode_switch_reason(&app.locale, &reason);
+            let mode = if target.is_minimal() {
+                app.locale
+                    .named_text(
+                        "settings.setting.screen_mode.choice.minimal.label",
+                        target.meta_label(),
+                    )
+                    .into_owned()
+            } else {
+                app.locale
+                    .named_text(
+                        "settings.setting.screen_mode.choice.fullscreen.label",
+                        target.meta_label(),
+                    )
+                    .into_owned()
+            };
+            let message = app
+                .locale
+                .named_text(
+                    "mode.switch.error",
+                    "Couldn't switch to {mode} mode: {reason}",
+                )
+                .replace("{mode}", &mode)
+                .replace("{reason}", &localized_reason);
+            if let ActiveView::Agent(id) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&id)
+            {
+                // An abort can land mid-turn in minimal too; same stream hazard.
+                crate::app::mode_switch::push_block_behind_live_stream(
+                    &mut agent.scrollback,
+                    crate::scrollback::block::RenderBlock::system(message),
+                );
+            }
+            presenter.request_presentation(app, terminal, true);
+            false
+        }
+        crate::app::mode_switch::ModeSwitchOutcome::NeedsExecFallback(reason) => {
+            tracing::error!(%reason, "screen-mode switch failed; falling back to exec relaunch");
+            if let Some(session_id) = app.active_session_id().map(str::to_owned) {
+                app.relaunch = Some(crate::app::app_view::ScreenModeRelaunch {
+                    minimal: target.is_minimal(),
+                    session_id,
+                });
+            }
+            let effs: Vec<super::actions::Effect> = app
+                .agents
+                .values()
+                .filter_map(|a| {
+                    a.session.session_id.as_ref().map(|sid| {
+                        super::actions::Effect::UnregisterActiveSession {
+                            session_id: sid.clone(),
+                        }
+                    })
+                })
+                .collect();
+            let _ = process_effects(effs, tasks, app, progress_tx);
+            true
+        }
+    }
 }
 
 /// Minimal mode opens an empty session after the welcome branch (now, or
@@ -963,9 +1199,10 @@ pub(crate) async fn run(
         remote_permission_mode,
     );
     app.default_yolo = launch_yolo.yolo;
-    // Gated launch-auto (CLI `--permission-mode auto` or config). Hoisted so it can
+    // Gated launch-auto (CLI `--permission-mode auto`, config, or the
+    // interactive soft default when nothing selects a mode). Hoisted so it can
     // be re-applied after `load_initial_ui_config()` replaces `current_ui` below.
-    let launch_auto = xai_grok_shell::util::config::effective_auto_for_launch(
+    let launch_auto = xai_grok_shell::util::config::effective_auto_for_launch_interactive(
         args.yolo,
         args.permission_mode_flag.as_deref(),
         remote_permission_mode,
@@ -973,10 +1210,12 @@ pub(crate) async fn run(
     if launch_auto {
         app.current_ui.permission_mode = Some("auto".into());
     }
-    // One effective-config read for launch-mode ownership + the display
-    // resolve below (the launch resolvers above keep their own internal read).
-    let launch_effective_ui = xai_grok_shell::config::load_effective_config()
-        .ok()
+    // One effective-config read for launch-mode ownership, the display
+    // resolve below, and the plugin-CTA marketplace key (the launch resolvers
+    // above keep their own internal read).
+    let launch_effective_config = xai_grok_shell::config::load_effective_config().ok();
+    let launch_effective_ui = launch_effective_config
+        .as_ref()
         .and_then(|root| root.get("ui").cloned());
     // Soft-default owns the mode only when neither CLI nor effective TOML
     // claimed it; while owned, `settings/update` pushes may re-arm it.
@@ -1084,6 +1323,9 @@ pub(crate) async fn run(
     app.plugin_cta_enabled = xai_grok_config::env_bool("GROK_PLUGIN_CTA")
         .or_else(|| remote_settings.as_ref().and_then(|s| s.plugin_cta))
         .unwrap_or(false);
+    app.plugin_cta_marketplace = launch_effective_config
+        .as_ref()
+        .and_then(plugin_cta_marketplace_from);
     app.workspace_dashboard_enabled = xai_grok_config::env_bool("GROK_WORKSPACE_DASHBOARD")
         .or_else(|| {
             remote_settings
@@ -1112,6 +1354,7 @@ pub(crate) async fn run(
         .unwrap_or(true);
     app.cancel_rewind_enabled = connection.cancel_rewind_enabled;
     apply_session_recap_available(&mut app, connection.session_recap_available);
+    app.shell_feedback_trace_offer = connection.feedback_trace_offer;
 
     // Preserve auth methods so logout→re-login works without restarting.
     app.auth_methods = connection.auth_methods.clone();
@@ -1703,11 +1946,13 @@ pub(crate) async fn run(
     let reader_parked_thread = reader_parked.clone();
     std::thread::spawn(move || {
         use std::sync::atomic::Ordering;
-        // Short enough that a pause / receiver-drop is observed promptly, long
-        // enough to keep the thread parked when idle. A `poll()` timeout here
-        // does NOT wake the main loop -- only a successful `send` does -- so the
-        // idle event loop still parks (no reintroduced metronome tick).
-        const POLL_TIMEOUT: Duration = Duration::from_millis(100);
+        // Bounds how long a tty handoff (external editor / pager) waits for
+        // this thread to park: the pause flag is only observed between
+        // `poll()` calls, so the timeout is the handoff latency. A `poll()`
+        // timeout here does NOT wake the main loop -- only a successful
+        // `send` does -- so the idle event loop still parks (no reintroduced
+        // metronome tick); the extra idle wakeups are this thread's alone.
+        const POLL_TIMEOUT: Duration = Duration::from_millis(20);
         let mut consecutive_event_errors: u32 = 0;
         loop {
             // Shutdown observed within one poll cycle in every state (idle or
@@ -1789,15 +2034,15 @@ pub(crate) async fn run(
 
     // `[ui.status_line] refresh_interval`: re-runs a command row on a timer.
     // Read once, like the section it comes from, so a future config reload
-    // must run this arming again; unarmed where this process can never draw
-    // the row.
-    let status_line_refresh_interval: Option<Duration> =
+    // must run this arming again; unarmed while the current mode cannot draw
+    // the row. Re-derived on a mode switch (`run_pending_mode_switch`).
+    let mut status_line_refresh_interval: Option<Duration> =
         if super::status_line::draws_a_row(app.screen_mode, &app.current_ui.status_line) {
             app.status_line_refresh_interval()
         } else {
             None
         };
-    let mut status_line_poll_at: Option<Instant> =
+    let mut status_line_refresh_at: Option<Instant> =
         status_line_refresh_interval.map(|interval| Instant::now() + interval);
 
     const GATE_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -2153,6 +2398,23 @@ pub(crate) async fn run(
             return Err(e);
         }
 
+        // In-process `/minimal` ⇄ `/fullscreen` switch, queued by dispatch.
+        if run_pending_mode_switch(
+            &mut app,
+            terminal,
+            config_watcher.current().minimal_live_rows,
+            &input_paused,
+            &reader_parked,
+            &mut input_rx,
+            &mut presenter,
+            &mut tasks,
+            &progress_tx,
+            &mut status_line_refresh_interval,
+            &mut status_line_refresh_at,
+        ) {
+            break;
+        }
+
         // Lazy voice pipeline: only after `/voice` or Ctrl+Space while gates
         // allow. Consume the queued cold-start, carrying its hold-ownership and
         // bound target forward into the live recording it spawns.
@@ -2315,8 +2577,8 @@ pub(crate) async fn run(
             }
         };
 
-        let status_line_poll = async {
-            match status_line_poll_at {
+        let status_line_refresh = async {
+            match status_line_refresh_at {
                 Some(at) => sleep_until(at).await,
                 None => std::future::pending().await,
             }
@@ -2543,8 +2805,9 @@ pub(crate) async fn run(
                     app.pending_update_version = Some(latest.clone());
                     // The full TUI surfaces this on the welcome screen, which
                     // minimal has none of — commit a one-line notice into
-                    // native scrollback instead (update notice).
-                    if term_state.screen_mode.is_minimal() {
+                    // native scrollback instead (update notice). `app`, not
+                    // `term_state`: the mode can switch at runtime.
+                    if app.screen_mode.is_minimal() {
                         dispatch::commit_minimal_update_notice(&mut app, &latest);
                     }
                     presenter.request(false);
@@ -2664,7 +2927,7 @@ pub(crate) async fn run(
                     let effs = vec![Effect::FetchBilling {
                         agent_id: id,
                         silent: true,
-                        nonce: 0,
+                        nonce: Default::default(),
                     }];
                     if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
                         break;
@@ -2686,12 +2949,10 @@ pub(crate) async fn run(
                 }
             }
 
-            _ = status_line_poll => {
-                status_line_poll_at = None;
-                // Raises the pending poll and runs the update; the run's effect
+            _ = status_line_refresh => {
+                status_line_refresh_at = None;
                 // lands in `pending_effects`, drained below like every arm's.
-                app.note_status_line_poll_due();
-                // A poll that could not run yet is carried to the run it is
+                app.note_status_line_refresh_due();
                 // owed; `status_line_tick_demand` owns the routing.
                 schedule_tick(&mut animation_tick_at, &app, tick_interval);
                 if app.status_line.take_changed() {
@@ -2701,7 +2962,7 @@ pub(crate) async fn run(
                 // long a run takes; the owed-run rule above is what keeps a
                 // slow script from stacking runs behind the timer.
                 if let Some(interval) = status_line_refresh_interval {
-                    status_line_poll_at = Some(Instant::now() + interval);
+                    status_line_refresh_at = Some(Instant::now() + interval);
                 }
             }
 
@@ -3288,6 +3549,18 @@ fn apply_session_recap_available(app: &mut AppView, available: bool) {
     if let Some(dashboard) = app.dashboard.as_mut() {
         dashboard.set_recap_visible(available);
     }
+}
+
+/// `[marketplace].plugin_cta_marketplace` from an effective config: the
+/// marketplace source name the plugin CTA draws candidates from instead of
+/// xAI Official. Empty/whitespace-only values count as unset.
+fn plugin_cta_marketplace_from(config: &toml::Value) -> Option<String> {
+    let name = config
+        .get("marketplace")?
+        .get("plugin_cta_marketplace")?
+        .as_str()?
+        .trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn should_pregenerate_away_recap(app: &AppView) -> bool {
@@ -4449,6 +4722,7 @@ mod tests {
             label: None,
             git_ref: None,
             model_id: None,
+            permission_mode_override: None,
             preferred_session_id: None,
             chat_kind: false,
         };
@@ -4673,6 +4947,7 @@ mod tests {
             label: None,
             git_ref: None,
             model_id: None,
+            permission_mode_override: None,
             preferred_session_id: None,
             chat_kind: false,
         };
@@ -6118,5 +6393,62 @@ mod tests {
             app.active_view = view;
             assert!(finish_run(&mut app).exit_info.is_none());
         }
+    }
+
+    #[test]
+    fn plugin_cta_marketplace_from_managed_layer() {
+        let layers = xai_grok_config::ConfigLayers {
+            managed: toml::from_str(
+                "[marketplace]\nplugin_cta_marketplace = \"SpaceX Marketplace\"\n",
+            )
+            .unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            plugin_cta_marketplace_from(&layers.effective_config_base()),
+            Some("SpaceX Marketplace".to_string())
+        );
+    }
+
+    #[test]
+    fn plugin_cta_marketplace_from_user_wins_over_managed() {
+        let layers = xai_grok_config::ConfigLayers {
+            managed: toml::from_str(
+                "[marketplace]\nplugin_cta_marketplace = \"Managed Marketplace\"\n",
+            )
+            .unwrap(),
+            user: toml::from_str("[marketplace]\nplugin_cta_marketplace = \"User Marketplace\"\n")
+                .unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            plugin_cta_marketplace_from(&layers.effective_config_base()),
+            Some("User Marketplace".to_string())
+        );
+    }
+
+    #[test]
+    fn plugin_cta_marketplace_from_unset_or_empty_is_none() {
+        let unset = xai_grok_config::ConfigLayers::default();
+        assert_eq!(
+            plugin_cta_marketplace_from(&unset.effective_config_base()),
+            None
+        );
+        let empty = xai_grok_config::ConfigLayers {
+            managed: toml::from_str("[marketplace]\nplugin_cta_marketplace = \"\"\n").unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            plugin_cta_marketplace_from(&empty.effective_config_base()),
+            None
+        );
+        let blank = xai_grok_config::ConfigLayers {
+            user: toml::from_str("[marketplace]\nplugin_cta_marketplace = \"   \"\n").unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            plugin_cta_marketplace_from(&blank.effective_config_base()),
+            None
+        );
     }
 }

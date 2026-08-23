@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 use tokio_tungstenite::{
-    connect_async,
+    connect_async_tls_with_config,
     tungstenite::{Message, Utf8Bytes, client::IntoClientRequest},
 };
 use tokio_util::sync::CancellationToken;
@@ -431,8 +431,10 @@ async fn connect_to_relay(
                     .map_err(|e| anyhow::Error::from(e).context("WebSocket handshake via proxy failed"))?;
                 Ok((ws, resp))
             } else {
-                // Direct path: no proxy needed.
-                connect_async(req)
+                // The default connector never sees the shared trust config.
+                let connector =
+                    tokio_tungstenite::Connector::Rustls(xai_grok_extra_ca::rustls_client_config());
+                connect_async_tls_with_config(req, None, false, Some(connector))
                     .await
                     .map_err(|e| anyhow::Error::from(e).context("WebSocket connection failed"))
             }

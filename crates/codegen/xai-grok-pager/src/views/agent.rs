@@ -865,16 +865,26 @@ pub(crate) fn localize_hint_labels(
             "nav" => Some(("shortcut.nav", "nav")),
             "navigate" => Some(("shortcut.navigate", "navigate")),
             "accept" => Some(("shortcut.accept", "accept")),
+            "accept / toggle" => Some(("shortcut.accept_toggle", "accept / toggle")),
+            "decline" => Some(("shortcut.decline", "decline")),
+            "next field" => Some(("shortcut.next_field", "next field")),
+            "drill" => Some(("shortcut.drill", "drill")),
+            "dismiss" => Some(("shortcut.dismiss", "dismiss")),
             "submit" => Some(("shortcut.submit", "submit")),
             "back" => Some(("shortcut.back", "back")),
+            "next answer" => Some(("shortcut.next_answer", "next answer")),
+            "unselect" => Some(("shortcut.unselect", "unselect")),
             "send" => Some(("shortcut.send", "send")),
             "save" => Some(("shortcut.save", "save")),
             "save comment" => Some(("shortcut.save_comment", "save comment")),
             "cancel" => Some(("shortcut.cancel", "cancel")),
             "confirm" => Some(("shortcut.confirm", "confirm")),
             "select" => Some(("shortcut.select", "select")),
+            "scope" => Some(("shortcut.scope", "scope")),
+            "edit pattern" => Some(("shortcut.edit_pattern", "edit pattern")),
             "collapse" => Some(("shortcut.collapse", "collapse")),
             "expand" => Some(("shortcut.expand", "expand")),
+            "always-approve" => Some(("shortcut.always_approve", "always-approve")),
             "plan" => Some(("shortcut.plan", "plan")),
             "approve" => Some(("shortcut.approve", "approve")),
             "copy plan" => Some(("shortcut.copy_plan", "copy plan")),
@@ -929,6 +939,10 @@ pub(crate) fn localize_hint_labels(
             "stop" => Some(("shortcut.stop", "stop")),
             "agents" => Some(("shortcut.agents", "agents")),
             "dashboard" => Some(("shortcut.dashboard", "dashboard")),
+            "skip" => Some(("shortcut.skip", "skip")),
+            "permission" => Some(("shortcut.permission", "permission")),
+            "cancel turn" => Some(("shortcut.cancel_turn", "cancel turn")),
+            "elicitation" => Some(("shortcut.elicitation", "elicitation")),
             _ => None,
         };
         if let Some((id, english)) = mapping {
@@ -2548,10 +2562,18 @@ mod tests {
         let mut hints = vec![
             HintItem::new(crate::key!(Enter), "send"),
             HintItem::new(crate::key!(' '), "prompt"),
+            HintItem::new(crate::key!(Enter), "accept / toggle"),
+            HintItem::new(crate::key!('d'), "decline"),
+            HintItem::new(crate::key!(Tab), "next field"),
+            HintItem::new(crate::key!(Tab), "elicitation"),
         ];
         localize_hint_labels(&mut hints, Some(&locale));
         assert_eq!(hints[0].label, "发送");
         assert_eq!(hints[1].label, "提示输入");
+        assert_eq!(hints[2].label, "接受/切换");
+        assert_eq!(hints[3].label, "拒绝");
+        assert_eq!(hints[4].label, "下一字段");
+        assert_eq!(hints[5].label, "MCP 请求");
 
         let registry = ActionRegistry::defaults();
         let action_hint = registry
