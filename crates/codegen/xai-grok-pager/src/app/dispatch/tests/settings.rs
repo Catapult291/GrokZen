@@ -165,7 +165,7 @@ fn plugin_cta_catalog_reload_empty_candidates_resets_matched_phase() {
     let id = AgentId(0);
     {
         let cta = &mut app.agents.get_mut(&id).unwrap().plugin_cta;
-        cta.official_source_present = true;
+        cta.source_url_or_path = Some(xai_grok_plugin_marketplace::OFFICIAL_SOURCE_GIT_URL.into());
         cta.candidates = vec![cta_entry("figma", "not_installed")];
         cta.phase = CtaPhase::Matched {
             plugin_relative_path: "plugins/figma".into(),

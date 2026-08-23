@@ -93,6 +93,8 @@ pub(crate) use types::*;
 pub use types::{TodoGateDecision, TodoGateReason};
 #[path = "acp_session_impl/goal.rs"]
 mod goal;
+#[path = "acp_session_impl/named_workflow_args.rs"]
+mod named_workflow_args;
 #[path = "acp_session_impl/tool_layer_images.rs"]
 mod tool_layer_images;
 #[path = "acp_session_impl/turn.rs"]
@@ -104,6 +106,11 @@ use tool_layer_images::*;
 mod auth_retry;
 pub(crate) use auth_retry::{
     AuthRetryDecision, AuthRetrySchedule, human_duration, pace_uncharged_resubmit,
+};
+#[path = "acp_session_impl/rate_limit_waits.rs"]
+mod rate_limit_waits;
+pub(crate) use rate_limit_waits::{
+    RateLimitWaitBudget, RateLimitWaitConfig, RateLimitWaitDecision,
 };
 #[path = "acp_session_impl/image_strip.rs"]
 mod image_strip;
@@ -510,6 +517,7 @@ fn managed_gateway_error_to_tool_error(
         }
     }
 }
+#[allow(clippy::disallowed_methods)]
 #[cfg(test)]
 mod managed_gateway_error_tests {
     use super::*;
@@ -743,12 +751,9 @@ pub(crate) struct SessionActor {
     /// per-attachment policy may.
     pub(crate) delivery_tools: std::cell::RefCell<Vec<String>>,
     /// `nonInteractive` for the CURRENT attachment (same lifecycle as
-    /// `delivery_tools`). Drives operational can-a-human-act-now decisions —
-    /// today the MCP OAuth interactivity on (re)init, which pairs with the
-    /// `UpdateMcpServers` sent by the same resident load. The frozen
     /// `startup_hints.non_interactive` keeps governing spawn-time structure
     /// (system prompt variant, user-message prefix, git-status mode).
-    pub(crate) attach_non_interactive: std::cell::Cell<bool>,
+    pub(crate) attach_non_interactive: std::rc::Rc<std::cell::Cell<bool>>,
     /// Verbatim mirror-fork override: when `Some`, every turn sends this exact
     /// parent tool schema instead of the locally-built toolset, keeping the
     /// child's request prefix byte-identical to the parent for radix cache reuse.
@@ -760,11 +765,11 @@ pub(crate) struct SessionActor {
     pub(crate) memory: super::memory_state::SessionMemory,
     /// Telemetry counters for session summary.
     pub(crate) session_start: std::time::Instant,
-    /// Per-chunk idle timeout for inference streaming. If no SSE chunk is received
-    /// within this duration, the stream is aborted with a non-retryable error.
-    /// Resolved at construction: per-model config.toml → remote settings → 300s default.
+    /// Per-chunk idle timeout for inference streaming; a stall aborts the stream.
     pub(crate) inference_idle_timeout: Duration,
     pub(crate) max_retries: u32,
+    /// Fixed bounds on a subagent turn's 429 waiting.
+    pub(crate) rate_limit_waits: RateLimitWaitConfig,
     /// Maximum tool-use turns before the session stops. `None` = unlimited.
     pub(crate) max_turns: Option<usize>,
     /// Pending mid-turn interjections from the user (Ctrl+Enter).
@@ -2018,6 +2023,9 @@ mod parallel_dispatch_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/prompt_context_persistence_tests.rs"]
 mod prompt_context_persistence_tests;
+#[cfg(test)]
+#[path = "acp_session_tests/turn/rate_limit_backoff_tests.rs"]
+mod rate_limit_backoff_tests;
 #[cfg(test)]
 #[path = "acp_session_tests/session_thread_tests.rs"]
 mod session_thread_tests;

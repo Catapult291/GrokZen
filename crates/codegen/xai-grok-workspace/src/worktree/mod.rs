@@ -1082,6 +1082,7 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
     );
     let session_id_for_builder = session_id.clone();
     let btrfs_delegate = btrfs_delegate_from_env();
+    let grove_enabled = req.grove_worktree.unwrap_or(false);
     let user_provided_label = req.worktree_path.is_none()
         && req
             .label
@@ -1105,6 +1106,9 @@ pub async fn create_worktree_streaming<N: WorktreeNotificationSender>(
         // Wire up btrfs delegate for rootless snapshot support.
         if let Some(delegate) = btrfs_delegate {
             builder = builder.btrfs_delegate(delegate);
+        }
+        if grove_enabled {
+            builder = builder.grove_worktree(xai_fast_worktree::NfsWorktreeOpts::default());
         }
 
         builder.create()
@@ -1479,6 +1483,8 @@ pub struct CreateWorktreeFromWorktreeRequest {
     /// When absent, an automatic `YYYY-MM-DD-<uuid>` label is generated.
     #[serde(default)]
     pub label: Option<String>,
+    #[serde(default, alias = "nfsWorktree", alias = "nfs_worktree")]
+    pub grove_worktree: Option<bool>,
     /// Optional cancellation token. When tripped, the file copy is aborted
     /// mid-flight and the partial worktree is cleaned up.
     #[serde(skip)]
@@ -1501,6 +1507,7 @@ impl CreateWorktreeFromWorktreeRequest {
             git_ref: self.git_ref,
             worktree_type: self.worktree_type,
             label: self.label,
+            grove_worktree: self.grove_worktree,
         }
     }
 }
@@ -1514,6 +1521,7 @@ impl From<CreateWorktreeFromWorktreeRequestWire> for CreateWorktreeFromWorktreeR
             git_ref: w.git_ref,
             worktree_type: w.worktree_type,
             label: w.label,
+            grove_worktree: w.grove_worktree,
             // Runtime-only fields, never on the wire.
             cancellation_token: None,
             resolved_dest_path: None,
@@ -1764,6 +1772,7 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
         );
         let session_id_for_builder = session_id.clone();
         let btrfs_delegate = btrfs_delegate_from_env();
+        let grove_enabled = req.grove_worktree.unwrap_or(false);
         let label_for_meta = label_from_path(&worktree_path_str);
         let label_metadata = build_label_metadata(&label_for_meta, false);
         tokio::task::spawn_blocking(move || {
@@ -1785,6 +1794,9 @@ pub async fn create_worktree_from_worktree_streaming<N: WorktreeNotificationSend
 
             if let Some(delegate) = btrfs_delegate {
                 builder = builder.btrfs_delegate(delegate);
+            }
+            if grove_enabled {
+                builder = builder.grove_worktree(xai_fast_worktree::NfsWorktreeOpts::default());
             }
 
             builder.create()
@@ -1991,6 +2003,7 @@ pub async fn create_worktree_from_worktree_sync(
     );
     let session_id_for_builder = req.new_session_id.clone();
     let btrfs_delegate = btrfs_delegate_from_env();
+    let grove_enabled = req.grove_worktree.unwrap_or(false);
     let label_for_meta = label_from_path(&worktree_path_str);
     let label_metadata = build_label_metadata(&label_for_meta, false);
     let report = tokio::task::spawn_blocking(move || {
@@ -2008,6 +2021,9 @@ pub async fn create_worktree_from_worktree_sync(
 
         if let Some(delegate) = btrfs_delegate {
             builder = builder.btrfs_delegate(delegate);
+        }
+        if grove_enabled {
+            builder = builder.grove_worktree(xai_fast_worktree::NfsWorktreeOpts::default());
         }
 
         builder.create()
@@ -2507,6 +2523,59 @@ pub fn gc_worktrees_mgmt(
         ..Default::default()
     };
     fw_gc_worktrees(&db, &opts)
+}
+
+fn resolve_mgmt_path(id_or_path: &str) -> Result<std::path::PathBuf> {
+    // DB lookup only. resolve_worktree_by_id_or_path canonicalizes and
+    // exists() on path misses, which hangs on a wedged NFS dest before
+    // salvage/clean/detach can run.
+    let db = open_db()?;
+    if let Some(rec) = db.get(id_or_path)? {
+        return Ok(rec.path);
+    }
+    Ok(std::path::PathBuf::from(id_or_path))
+}
+
+pub fn detach_worktree_mgmt(
+    id_or_path: &str,
+    allow_copy: bool,
+) -> Result<xai_fast_worktree::DetachReply> {
+    let path = resolve_mgmt_path(id_or_path)?;
+    let client = xai_fast_worktree::NfsWorktreeClient::from_opts(
+        &xai_fast_worktree::NfsWorktreeOpts::default(),
+    );
+    client.detach_worktree(&path, allow_copy)
+}
+
+pub fn salvage_worktree_mgmt(
+    id_or_path: &str,
+    out: &str,
+) -> Result<xai_fast_worktree::SalvageReply> {
+    let path = resolve_mgmt_path(id_or_path)?;
+    let client = xai_fast_worktree::NfsWorktreeClient::from_opts(
+        &xai_fast_worktree::NfsWorktreeOpts::default(),
+    );
+    match client.salvage_worktree(&path, std::path::Path::new(out)) {
+        Ok(r) => Ok(r),
+        Err(e) if e.to_string().contains("unreachable") => {
+            xai_fast_worktree::local_salvage(&path, std::path::Path::new(out))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn clean_artifacts_mgmt(id_or_path: &str) -> Result<xai_fast_worktree::CleanArtifactsReply> {
+    let path = resolve_mgmt_path(id_or_path)?;
+    let client = xai_fast_worktree::NfsWorktreeClient::from_opts(
+        &xai_fast_worktree::NfsWorktreeOpts::default(),
+    );
+    match client.clean_artifacts(&path) {
+        Ok(r) => Ok(r),
+        Err(e) if e.to_string().contains("unreachable") => {
+            xai_fast_worktree::local_clean_artifacts(&path)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Map settings → resolve layer (shared by shell + workspace).
@@ -3129,6 +3198,7 @@ mod tests {
             ignored_skip_patterns: vec![],
             worktree_type: None,
             label: None,
+            grove_worktree: None,
         };
 
         let result = prepare_worktree_creation(&req).await;
@@ -3185,6 +3255,7 @@ mod tests {
             ignored_skip_patterns: vec![],
             worktree_type: None,
             label: None,
+            grove_worktree: None,
         };
 
         let notifier = MarkerProbeNotifier {
@@ -3227,6 +3298,7 @@ mod tests {
             git_ref: None,
             worktree_type: None,
             label: None,
+            grove_worktree: None,
             cancellation_token: None,
             resolved_dest_path: None,
         };
@@ -3291,6 +3363,7 @@ mod tests {
             ignored_skip_patterns: vec![],
             worktree_type: None,
             label: None,
+            grove_worktree: None,
         };
         let notifier = TerminalStatusCounter {
             terminal: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),

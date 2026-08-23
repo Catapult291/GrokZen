@@ -496,7 +496,12 @@ fn is_scheduled_task_inject_prompt(json: &serde_json::Value) -> bool {
 fn is_interaction_request(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
-        Some("session/request_permission" | "x.ai/ask_user_question" | "x.ai/exit_plan_mode")
+        Some(
+            "session/request_permission"
+                | "x.ai/ask_user_question"
+                | "x.ai/exit_plan_mode"
+                | "x.ai/mcp/elicit",
+        )
     )
 }
 /// Extract the `tool_call_id` an interaction reverse-request carries, so the

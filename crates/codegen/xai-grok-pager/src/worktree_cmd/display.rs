@@ -1,25 +1,21 @@
-use std::io::Write;
-use std::path::Path;
-
-use unicode_width::UnicodeWidthStr;
-use xai_fast_worktree::WorktreeRecord;
-
 use super::{DbStats, GcReport, RebuildReport};
 use crate::fs_size::{Volume, physical_dir_size};
 use crate::locale::LocaleContext;
 use crate::util::{format_bytes, pad_to_width, truncate_to_width, unix_now};
+use std::io::Write;
+use std::path::Path;
+use unicode_width::UnicodeWidthStr;
+use xai_fast_worktree::WorktreeRecord;
 
 const REPO_WIDTH: usize = 6;
 const BRANCH_WIDTH: usize = 20;
 const AGE_WIDTH: usize = 10;
 const GC_LABEL_WIDTH: usize = 26;
-
 /// Truncate-then-pad to exactly `width` display columns; headers and data
 /// share it so the two stay aligned.
 fn cell(s: &str, width: usize) -> String {
     pad_to_width(&truncate_to_width(s, width), width)
 }
-
 fn localized_named(
     locale: &LocaleContext,
     id: &str,
@@ -77,7 +73,6 @@ fn format_age_with_locale(created_at: i64, now: i64, locale: &LocaleContext) -> 
         &[("count", &count)],
     )
 }
-
 pub fn print_table(records: &[WorktreeRecord], out: &mut impl Write) -> std::io::Result<()> {
     print_table_with_locale(records, out, &LocaleContext::default())
 }
@@ -95,7 +90,6 @@ pub fn print_table_with_locale(
         )?;
         return Ok(());
     }
-
     let id_header = locale.named_text("worktree.column.id", "ID");
     let type_header = locale.named_text("worktree.column.type", "TYPE");
     let repo_header = locale.named_text("worktree.column.repo", "REPO");
@@ -103,28 +97,22 @@ pub fn print_table_with_locale(
     let branch_header = locale.named_text("worktree.column.branch", "BRANCH");
     let age_header = locale.named_text("worktree.column.age", "AGE");
     let path_header = locale.named_text("worktree.column.path", "PATH");
-
     let id_width = records
         .iter()
         .map(|r| UnicodeWidthStr::width(r.id.as_str()))
         .max()
         .unwrap_or(0)
         .max(16);
-
     let label_width = records
         .iter()
         .map(|r| r.label().map_or(0, UnicodeWidthStr::width))
         .max()
         .unwrap_or(0)
         .clamp(5, 24);
-
-    // Derived, not fixed: `cell` truncates rather than shifting, and
-    // `subagent` already fills 8 columns.
     let type_width = records
         .iter()
         .map(|r| UnicodeWidthStr::width(kind_label(r.kind.as_str(), locale).as_str()))
         .fold(UnicodeWidthStr::width(type_header.as_ref()), usize::max);
-
     writeln!(
         out,
         "  {} {} {} {} {} {} {}",
@@ -158,7 +146,6 @@ pub fn print_table_with_locale(
             path,
         )?;
     }
-
     let total = records.len();
     let by_kind: std::collections::BTreeMap<&str, usize> =
         records
@@ -192,12 +179,10 @@ pub fn print_table_with_locale(
         )
     )
 }
-
 pub fn print_json(records: &[WorktreeRecord], out: &mut impl Write) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(records).unwrap_or_else(|_| "[]".to_string());
     writeln!(out, "{json}")
 }
-
 pub fn print_show(rec: &WorktreeRecord, out: &mut impl Write) -> std::io::Result<()> {
     print_show_with_locale(rec, out, &LocaleContext::default())
 }
@@ -290,10 +275,7 @@ pub fn print_show_with_locale(
     if let Some(label) = rec.label() {
         write_show_field(out, locale, "worktree.show.label", "Label", label)?;
     }
-
     if rec.path.exists() {
-        // Anchored to the worktree's own volume: one tree, not a share of
-        // some other total.
         let size = physical_dir_size(&rec.path, Volume::of(&rec.path));
         let bytes = size.measure.bytes().unwrap_or_default();
         let label = format!(
@@ -324,7 +306,6 @@ pub fn print_show_with_locale(
     }
     Ok(())
 }
-
 pub fn print_stats(stats: &DbStats, out: &mut impl Write) -> std::io::Result<()> {
     print_stats_with_locale(stats, out, &LocaleContext::default())
 }
@@ -364,7 +345,6 @@ pub fn print_stats_with_locale(
         format_bytes(stats.db_file_bytes),
     )
 }
-
 pub fn print_gc(report: &GcReport, out: &mut impl Write) -> std::io::Result<()> {
     print_gc_with_locale(report, out, &LocaleContext::default())
 }
@@ -521,7 +501,6 @@ pub fn print_gc_with_locale(
     }
     Ok(())
 }
-
 pub fn print_rebuild(report: &RebuildReport, out: &mut impl Write) -> std::io::Result<()> {
     print_rebuild_with_locale(report, out, &LocaleContext::default())
 }
@@ -558,7 +537,6 @@ pub fn print_rebuild_with_locale(
         report.already_tracked,
     )
 }
-
 fn format_timestamp(ts: i64) -> String {
     let dt = chrono::DateTime::from_timestamp(ts, 0);
     match dt {
@@ -566,15 +544,12 @@ fn format_timestamp(ts: i64) -> String {
         None => ts.to_string(),
     }
 }
-
 fn abbreviate_home(path: &Path) -> String {
     crate::util::abbreviate_path(&path.to_string_lossy()).into_owned()
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn print_table_never_truncates_long_ids() {
         let long_id = "a".repeat(40);
@@ -583,7 +558,6 @@ mod tests {
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains(&long_id), "full ID must be present: {text}");
     }
-
     fn make_record(id: &str, label: &str) -> WorktreeRecord {
         crate::test_util::make_worktree_record(
             id,
@@ -591,7 +565,15 @@ mod tests {
             label,
         )
     }
-
+    #[test]
+    fn print_show_non_nfs_omits_nfs_block() {
+        let rec = make_record("wt-copy", "c");
+        let mut out = Vec::new();
+        print_show(&rec, &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(!text.contains("Strategy:       nfs"), "{text}");
+        assert!(!text.contains("clean-artifacts"), "{text}");
+    }
     #[test]
     fn print_table_pads_cjk_labels_by_display_width() {
         let records = vec![

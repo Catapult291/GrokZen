@@ -157,6 +157,10 @@ pub struct VideoGenClient {
     tier_restricted: bool,
     /// See [`VideoGenConfig::Enabled`]'s `zdr_restricted`.
     zdr_restricted: bool,
+    /// Per-request session-id header; kept off `default_headers` so the
+    /// transport stays session-independent and cacheable.
+    session_header: Option<HeaderValue>,
+    defaults_have_session_header: bool,
 }
 
 impl VideoGenClient {
@@ -207,21 +211,32 @@ impl VideoGenClient {
             Ok::<(), xai_tool_runtime::ToolError>(())
         })?;
 
-        let http = xai_grok_extra_ca::with_extra_root_certificates(
-            reqwest::Client::builder().default_headers(headers),
-        )
-        .build()
+        // Process-cached; the session id is attached per request, not here.
+        let defaults_have_session_header =
+            headers.contains_key(super::image_gen::SESSION_ID_HEADER);
+        let key = crate::util::shared_http::cache_key("video_gen", &headers);
+        let http = crate::util::shared_http::cached_client(key, || {
+            xai_grok_extra_ca::build_reqwest_client(|builder| {
+                builder.default_headers(headers.clone())
+            })
+        })
         .map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
                 "Failed to build HTTP client: {e}"
             ))
         })?;
 
-        let download_http = xai_grok_extra_ca::with_extra_root_certificates(
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(VIDEO_DOWNLOAD_TIMEOUT_SECS)),
-        )
-        .build()
+        // Distinct client (download timeout, no default headers); an empty
+        // header map routes it through the same `CacheKey` constructor.
+        let download_key = crate::util::shared_http::cache_key(
+            "video_gen_download",
+            &reqwest::header::HeaderMap::new(),
+        );
+        let download_http = crate::util::shared_http::cached_client(download_key, || {
+            xai_grok_extra_ca::build_reqwest_client(|builder| {
+                builder.timeout(std::time::Duration::from_secs(VIDEO_DOWNLOAD_TIMEOUT_SECS))
+            })
+        })
         .map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
                 "Failed to build download client: {e}"
@@ -241,7 +256,39 @@ impl VideoGenClient {
             attribution_callback: None,
             tier_restricted: *tier_restricted,
             zdr_restricted: *zdr_restricted,
+            session_header: None,
+            defaults_have_session_header,
         })
+    }
+
+    /// Attach the session-id header per start/poll request; a
+    /// caller-provided `extra_headers` value is never overridden.
+    /// Every Imagine video API request goes through here so no call site
+    /// can miss the bearer or per-request session header (the presigned
+    /// download client stays separate: its URLs carry their own auth).
+    fn request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        sent_bearer: Option<&str>,
+    ) -> reqwest::RequestBuilder {
+        let mut req = self.http.request(method, url);
+        if let Some(key) = sent_bearer {
+            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
+        }
+        if let Some(ref session) = self.session_header {
+            req = req.header(super::image_gen::SESSION_ID_HEADER, session.clone());
+        }
+        req
+    }
+
+    pub fn with_session_id(mut self, session_id: &str) -> Self {
+        if !self.defaults_have_session_header
+            && let Ok(value) = HeaderValue::from_str(session_id)
+        {
+            self.session_header = Some(value);
+        }
+        self
     }
 
     /// Whether the current user's tier (free / X Basic) is zero-limited on
@@ -313,14 +360,10 @@ impl VideoGenClient {
         };
 
         let sent_bearer = self.current_bearer().await;
-        let mut req = self
-            .http
-            .post(&start_url)
+        let req = self
+            .request(reqwest::Method::POST, &start_url, sent_bearer.as_deref())
             .timeout(std::time::Duration::from_secs(VIDEO_START_TIMEOUT_SECS))
             .json(&payload);
-        if let Some(ref key) = sent_bearer {
-            req = req.header(AUTHORIZATION, format!("Bearer {key}"));
-        }
 
         let response = req.send().await.map_err(|e| {
             xai_tool_runtime::ToolError::invalid_arguments(format!(
@@ -384,10 +427,9 @@ impl VideoGenClient {
             }
 
             let poll_sent_bearer = self.current_bearer().await;
-            let mut poll_req = self.http.get(&poll_url).timeout(poll_timeout);
-            if let Some(ref key) = poll_sent_bearer {
-                poll_req = poll_req.header(AUTHORIZATION, format!("Bearer {key}"));
-            }
+            let poll_req = self
+                .request(reqwest::Method::GET, &poll_url, poll_sent_bearer.as_deref())
+                .timeout(poll_timeout);
 
             let poll_response = poll_req.send().await.map_err(|e| {
                 xai_tool_runtime::ToolError::invalid_arguments(format!(
@@ -715,16 +757,6 @@ pub enum VideoGenConfig {
 impl VideoGenConfig {
     pub fn is_enabled(&self) -> bool {
         matches!(self, Self::Enabled { .. })
-    }
-
-    /// Stamp [`super::image_gen::SESSION_ID_HEADER`] onto `extra_headers`.
-    /// A caller-provided value is never overwritten. No-op when `Disabled`.
-    pub fn stamp_session_id_header(&mut self, session_id: &str) {
-        if let Self::Enabled { extra_headers, .. } = self {
-            extra_headers
-                .entry(super::image_gen::SESSION_ID_HEADER.to_string())
-                .or_insert_with(|| session_id.to_string());
-        }
     }
 }
 
@@ -1289,6 +1321,43 @@ impl xai_tool_runtime::Tool for ReferenceToVideoTool {
 
 #[cfg(test)]
 mod tests {
+    // Mirrors image_gen's post_json pinning: every start/poll request must
+    // route through request(), which attaches both bearer and session id.
+    #[tokio::test]
+    async fn request_attaches_session_and_bearer_headers() {
+        let cfg = VideoGenConfig::Enabled {
+            api_key: "k".into(),
+            base_url: "https://api.x.ai/v1".into(),
+            extra_headers: indexmap::IndexMap::new(),
+            zdr_video_output_s3: None,
+            tier_restricted: false,
+            zdr_restricted: false,
+        };
+        let client = VideoGenClient::new(&cfg, None)
+            .unwrap()
+            .with_session_id("sess-7");
+        let req = client
+            .request(
+                reqwest::Method::POST,
+                "https://api.x.ai/v1/videos",
+                Some("tok"),
+            )
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers()
+                .get(super::super::image_gen::SESSION_ID_HEADER)
+                .and_then(|v| v.to_str().ok()),
+            Some("sess-7")
+        );
+        assert_eq!(
+            req.headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer tok")
+        );
+    }
+
     use super::*;
     use crate::types::tool_metadata::test_ctx_with_call_id;
 

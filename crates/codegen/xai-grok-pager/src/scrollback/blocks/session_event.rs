@@ -180,7 +180,7 @@ impl SessionEvent {
             }
             SessionEvent::TurnHalted { elapsed } => {
                 format!(
-                    "Agent was unable to make progress \u{2014} turn ended in {}.",
+                    "Agent was unable to make progress. Turn ended in {}.",
                     format_duration(*elapsed)
                 )
             }
@@ -246,7 +246,7 @@ impl SessionEvent {
                 headline, detail, ..
             } => crate::app::error_display::banner_message(headline, detail),
             SessionEvent::ReAuthRequired => {
-                "Authentication required \u{2014} your session has expired or your \
+                "Authentication required: your session has expired or your \
                  credentials were rejected. Run /login to re-authenticate, then resend \
                  your message."
                     .to_string()
@@ -279,14 +279,11 @@ impl SessionEvent {
                 format!("Memory saved ({trigger}) \u{2192} {short_path}  \u{00b7}  /memory to view")
             }
             SessionEvent::GoalCompleted { elapsed } => {
-                format!(
-                    "Goal complete \u{2014} {} end-to-end.",
-                    format_duration(*elapsed)
-                )
+                format!("Goal complete in {} end-to-end.", format_duration(*elapsed))
             }
             SessionEvent::Recap { summary, auto: _ } => {
-                // Always "Recap —" (manual `/recap` and auto return-from-away).
-                format!("Recap \u{2014} {summary}")
+                // Always "Recap:" (manual `/recap` and auto return-from-away).
+                format!("Recap: {summary}")
             }
         }
     }
@@ -942,7 +939,7 @@ mod tests {
         let event = SessionEvent::GoalCompleted {
             elapsed: Duration::from_secs(619),
         };
-        assert_eq!(event.message(), "Goal complete \u{2014} 10m19s end-to-end.");
+        assert_eq!(event.message(), "Goal complete in 10m19s end-to-end.");
     }
 
     #[test]
@@ -952,7 +949,7 @@ mod tests {
         };
         assert_eq!(
             event.message(),
-            "Agent was unable to make progress \u{2014} turn ended in 45s."
+            "Agent was unable to make progress. Turn ended in 45s."
         );
     }
 
@@ -1062,10 +1059,7 @@ mod tests {
             headline: "Server error (500)".into(),
             detail: "upstream exploded".into(),
         };
-        assert_eq!(
-            event.message(),
-            "Server error (500) \u{2014} upstream exploded"
-        );
+        assert_eq!(event.message(), "Server error (500): upstream exploded");
         let block = SessionEventBlock::new(event);
         let theme = Theme::current();
         assert_eq!(
@@ -1186,13 +1180,13 @@ mod tests {
             summary: "refactored the parser".into(),
             auto: false,
         };
-        assert_eq!(manual.message(), "Recap \u{2014} refactored the parser");
+        assert_eq!(manual.message(), "Recap: refactored the parser");
 
         let auto = SessionEvent::Recap {
             summary: "refactored the parser".into(),
             auto: true,
         };
-        assert_eq!(auto.message(), "Recap \u{2014} refactored the parser");
+        assert_eq!(auto.message(), "Recap: refactored the parser");
     }
 
     /// `ctx()` with an overridden display mode / selection state.

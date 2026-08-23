@@ -319,6 +319,7 @@ pub async fn run_stdio_agent(
         })
         .await;
     crate::terminal::pty_session::close_all().await;
+    xai_grok_telemetry::session_ctx::drain_at_process_exit().await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     result
 }

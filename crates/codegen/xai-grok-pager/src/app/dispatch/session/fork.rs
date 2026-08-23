@@ -336,6 +336,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             git_ref: None,
             // Fork resumes the parent session, which carries its own model.
             model_id: None,
+            permission_mode_override: None,
             preferred_session_id: None,
             chat_kind: parent_chat_kind,
         }]
@@ -436,7 +437,7 @@ pub(in crate::app::dispatch) fn build_child_fork_marker_with_locale(
     locale: Option<&crate::locale::LocaleContext>,
 ) -> String {
     let header = if let Some(cmd) = switch_hint {
-        let english = "Session {session_id} (forked from {parent_sid}) \u{2014} use {command} to switch between sessions";
+        let english = "Session {session_id} (forked from {parent_sid}), use {command} to switch between sessions";
         if let Some(locale) = locale {
             localized_template(
                 locale,

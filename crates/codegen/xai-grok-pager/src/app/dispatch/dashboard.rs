@@ -1,6 +1,8 @@
 //! Dashboard dispatchers: attach, overlays, rows, renames, and permissions.
 
-use super::ctx::{show_welcome, surface_yolo_launch_block_notice};
+use super::ctx::{
+    show_welcome, surface_yolo_launch_block_notice, sync_active_permission_mode_mirror,
+};
 use super::dashboard_telemetry::{
     log_dashboard_attached, log_dashboard_closed, log_dashboard_launched, log_dashboard_opened,
 };
@@ -16,7 +18,7 @@ use super::session::load::focus_if_session_already_open;
 use super::session::modal::dispatch_sessions_confirm_close;
 use super::turn::dispatch_cancel_turn;
 use super::voice::{merge_prompt_with_voice_interim, voice_stop_on_submit};
-use crate::app::actions::{Action, Effect};
+use crate::app::actions::{Action, Effect, PermissionModeKind};
 use crate::app::agent::{AgentId, DeferredModelSwitch};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, DashboardReturn, TrustState};
@@ -90,13 +92,16 @@ pub(super) fn ensure_dashboard_state(app: &mut AppView) {
 }
 
 /// Configure the dashboard for display: snapshot app-wide state (cwd, models,
-/// plugins, `default_yolo`) and reset per-session staging. Shared by
+/// plugins, permission mode) and reset per-session staging. Shared by
 /// `dispatch_open_dashboard` and the overlay-cycle path; no-op if unallocated.
 fn configure_dashboard_state(app: &mut AppView) {
     let bootstrap_commands = app.bootstrap_acp_commands.clone();
     let models = app.models.clone();
     let disable_plugins = app.appearance.disable_plugins;
     let default_yolo = app.default_yolo;
+    let default_auto = app.auto_mode_gate
+        && !default_yolo
+        && app.current_ui.permission_mode.as_deref() == Some("auto");
     let cwd = app.cwd.clone();
     let cwd_has_git_ancestor = app.cwd_has_git_ancestor;
     let has_agents = !app.agents.is_empty();
@@ -123,6 +128,8 @@ fn configure_dashboard_state(app: &mut AppView) {
         d.pending_model = None;
         d.pending_mode = if default_yolo {
             crate::views::dashboard::DashboardDispatchMode::AlwaysApprove
+        } else if default_auto {
+            crate::views::dashboard::DashboardDispatchMode::Auto
         } else {
             crate::views::dashboard::DashboardDispatchMode::Normal
         };
@@ -737,6 +744,65 @@ fn open_dashboard_worktree_dialog(
     vec![]
 }
 
+fn resolve_pending_dispatch_mode(
+    app: &mut AppView,
+) -> (
+    crate::views::dashboard::DashboardDispatchMode,
+    Option<&'static str>,
+) {
+    use crate::views::dashboard::DashboardDispatchMode;
+
+    let staged = app
+        .dashboard
+        .as_ref()
+        .map(|dashboard| dashboard.pending_mode)
+        .unwrap_or_default();
+    let (resolved, warning) = match staged {
+        DashboardDispatchMode::Auto if !app.auto_mode_gate => (DashboardDispatchMode::Normal, None),
+        DashboardDispatchMode::AlwaysApprove if app.yolo_policy_block.is_some() => {
+            (DashboardDispatchMode::Normal, app.yolo_policy_block)
+        }
+        _ => (staged, None),
+    };
+    if resolved != staged
+        && let Some(dashboard) = app.dashboard.as_mut()
+    {
+        dashboard.pending_mode = resolved;
+    }
+    (resolved, warning)
+}
+
+fn permission_mode_for_dispatch(
+    mode: crate::views::dashboard::DashboardDispatchMode,
+) -> PermissionModeKind {
+    use crate::views::dashboard::DashboardDispatchMode;
+    match mode {
+        DashboardDispatchMode::Normal | DashboardDispatchMode::Plan => PermissionModeKind::Ask,
+        DashboardDispatchMode::Auto => PermissionModeKind::Auto,
+        DashboardDispatchMode::AlwaysApprove => PermissionModeKind::AlwaysApprove,
+    }
+}
+
+fn set_create_permission_mode(
+    effects: &mut [Effect],
+    mode: crate::views::dashboard::DashboardDispatchMode,
+) {
+    let mode = Some(permission_mode_for_dispatch(mode));
+    for effect in effects {
+        match effect {
+            Effect::CreateSession {
+                permission_mode_override,
+                ..
+            }
+            | Effect::CreateWorktreeSession {
+                permission_mode_override,
+                ..
+            } => *permission_mode_override = mode,
+            _ => {}
+        }
+    }
+}
+
 /// Create a new session AND switch into its detail view. Routed from the
 /// `[+ New Agent]` button and Enter-on-empty-prompt while it's focused.
 /// Mirrors `dispatch_dashboard_dispatch`'s new-session arm with `attach=true`,
@@ -750,15 +816,11 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
         return open_dashboard_worktree_dialog(app, None, /* attach */ true);
     }
     let pending_model = app.dashboard.as_ref().and_then(|d| d.pending_model.clone());
-    let pending_mode = app
-        .dashboard
-        .as_ref()
-        .map(|d| d.pending_mode)
-        .unwrap_or_default();
+    let (pending_mode, policy_block) = resolve_pending_dispatch_mode(app);
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
     log_dashboard_launched("new_agent_button");
-    let (new_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
-    let policy_block = app.yolo_policy_block;
+    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id);
+    set_create_permission_mode(&mut effects, pending_mode);
     if let Some(agent) = app.agents.get_mut(&new_id) {
         apply_pending_dispatch_config(agent, pending_model.as_ref(), pending_mode, policy_block);
     }
@@ -777,6 +839,7 @@ pub(super) fn dispatch_dashboard_create_new_agent_with_detail(app: &mut AppView)
         d.attached_agent = Some(new_id);
     }
     app.active_view = ActiveView::Agent(new_id);
+    sync_active_permission_mode_mirror(app);
     surface_yolo_launch_block_notice(app, new_id);
     effects
 }
@@ -1049,11 +1112,6 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
         None => (None, false),
     };
     let pending_model = app.dashboard.as_ref().and_then(|d| d.pending_model.clone());
-    let pending_mode = app
-        .dashboard
-        .as_ref()
-        .map(|d| d.pending_mode)
-        .unwrap_or_default();
     if !app.cwd_has_git_ancestor {
         if let Some(d) = app.dashboard.as_mut() {
             // Restore the typed prompt if the cwd stopped being a repo.
@@ -1064,6 +1122,7 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
         }
         return vec![];
     }
+    let (pending_mode, policy_block) = resolve_pending_dispatch_mode(app);
     let (prompt_text, mut images, chip_elements) = if let Some(stashed) = prompt.take() {
         let (text, images, chip_elements) = stashed.into_submission();
         (Some(text), images, chip_elements)
@@ -1071,8 +1130,9 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
         (None, Vec::new(), Vec::new())
     };
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
-    let effects =
+    let mut effects =
         dispatch_new_worktree_session(app, None, label, prompt_text, model_id, None, None);
+    set_create_permission_mode(&mut effects, pending_mode);
     if let Some(new_id) = effects.iter().find_map(|e| match e {
         Effect::CreateWorktreeSession { agent_id, .. } => Some(*agent_id),
         _ => None,
@@ -1081,7 +1141,6 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
         // worktree agent (base model is seeded via the effect's `model_id`),
         // then carry any pasted images onto the replayed prompt — both mirror
         // `dispatch_dashboard_dispatch`.
-        let policy_block = app.yolo_policy_block;
         if let Some(agent) = app.agents.get_mut(&new_id) {
             apply_pending_dispatch_config(
                 agent,
@@ -1102,10 +1161,16 @@ pub(super) fn dispatch_dashboard_confirm_worktree(
                 d.focus_row(crate::views::dashboard::DashboardRowId::TopLevel(new_id));
                 d.attached_agent = Some(new_id);
             }
+            sync_active_permission_mode_mirror(app);
         } else {
             // Plain Enter: undo the view switch `dispatch_new_worktree_session`
             // made and stay on the dashboard.
             app.active_view = ActiveView::AgentDashboard;
+            if let Some(warning) = policy_block
+                && let Some(dashboard) = app.dashboard.as_mut()
+            {
+                dashboard.set_error_toast(warning);
+            }
         }
     }
     crate::prompt_images::drain_and_cleanup(&mut images);
@@ -1278,11 +1343,7 @@ pub(super) fn dispatch_dashboard_dispatch(
     // `/plan`) onto the new session: the model id seeds `CreateSession`, and
     // effort / plan are applied post-creation by `apply_pending_dispatch_config`.
     let pending_model = app.dashboard.as_ref().and_then(|d| d.pending_model.clone());
-    let pending_mode = app
-        .dashboard
-        .as_ref()
-        .map(|d| d.pending_mode)
-        .unwrap_or_default();
+    let (pending_mode, policy_block) = resolve_pending_dispatch_mode(app);
     let model_id = pending_model.as_ref().map(|m| m.id.clone());
     let prompt_state = app
         .dashboard
@@ -1297,8 +1358,8 @@ pub(super) fn dispatch_dashboard_dispatch(
         });
     let (prompt_text, mut pasted_images, chip_elements) = prompt_state.into_submission();
     log_dashboard_launched("prompt");
-    let (new_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
-    let policy_block = app.yolo_policy_block;
+    let (new_id, mut effects) = dispatch_new_session_inner_with_id(app, model_id);
+    set_create_permission_mode(&mut effects, pending_mode);
     if let Some(agent) = app.agents.get_mut(&new_id) {
         agent.session.enqueue_prompt(prompt_text);
         if let Some(entry) = agent.session.pending_prompts.back_mut() {
@@ -1330,6 +1391,7 @@ pub(super) fn dispatch_dashboard_dispatch(
             d.attached_agent = Some(new_id);
         }
         app.active_view = ActiveView::Agent(new_id);
+        sync_active_permission_mode_mirror(app);
         surface_yolo_launch_block_notice(app, new_id);
     } else {
         // Plain Enter (Send) stays on the dashboard, no auto-select.
@@ -1341,9 +1403,7 @@ pub(super) fn dispatch_dashboard_dispatch(
         // `apply_pending_dispatch_config` clamps a pinned always-approve to
         // Normal and toasts the new agent, but that toast is invisible while the
         // view stays on the dashboard — mirror it on the dashboard's error slot.
-        let enabling =
-            pending_mode == crate::views::dashboard::DashboardDispatchMode::AlwaysApprove;
-        if let Some(warning) = yolo_enable_blocked(app, enabling)
+        if let Some(warning) = policy_block
             && let Some(d) = app.dashboard.as_mut()
         {
             d.set_error_toast(warning);
@@ -1719,30 +1779,27 @@ pub(super) fn apply_pending_dispatch_config(
             prev_model_id: None,
         });
     }
+    let pending_mode =
+        if policy_block.is_some() && pending_mode == DashboardDispatchMode::AlwaysApprove {
+            DashboardDispatchMode::Normal
+        } else {
+            pending_mode
+        };
+    agent.session.yolo_mode = pending_mode == DashboardDispatchMode::AlwaysApprove;
+    agent.session.auto_mode = pending_mode == DashboardDispatchMode::Auto;
     match pending_mode {
-        DashboardDispatchMode::Normal => {
-            // Explicit normal overrides any `app.default_yolo` seed.
-            agent.session.yolo_mode = false;
-        }
+        DashboardDispatchMode::Normal
+        | DashboardDispatchMode::Auto
+        | DashboardDispatchMode::AlwaysApprove => {}
         DashboardDispatchMode::Plan => {
-            agent.session.yolo_mode = false;
             agent.deferred_session_mode = Some(xai_grok_tools::types::SessionMode::Plan);
             // Optimistic so the agent view reflects plan mode immediately when
             // opened via Ctrl+S, before the ACP round-trip confirms it.
             agent.plan_mode_pending = Some(true);
         }
-        // Backstop: staging is already gated, but this write sits outside
-        // `set_yolo_mode_inner`, so re-check the pin here.
-        DashboardDispatchMode::AlwaysApprove => {
-            if let Some(warning) = policy_block {
-                agent.session.yolo_mode = false;
-                agent.show_toast(warning);
-            } else {
-                // Client-side auto-approve for the spawned session (per-spawn;
-                // not persisted as a global default).
-                agent.session.yolo_mode = true;
-            }
-        }
+    }
+    if let Some(warning) = policy_block {
+        agent.show_toast(warning);
     }
 }
 
@@ -1760,8 +1817,8 @@ pub(super) fn apply_pending_dispatch_config(
 ///
 /// `attach` (Ctrl+S) additionally walks into the agent's detail
 /// view, mirroring the dispatch input's send+open affordance.
-/// Cycle the PEEKED agent's live mode (Normal → Plan → Always-Approve →
-/// Normal), the peek-panel counterpart to `DashboardCycleMode`. Reuses
+/// Cycle the PEEKED agent's live mode using the agent prompt's gated rotation,
+/// the peek-panel counterpart to `DashboardCycleMode`. Reuses
 /// the shared cycle body `dispatch_cycle_mode_and_sync` by temporarily
 /// targeting the peeked agent (the same `active_view` swap as
 /// `dispatch_dashboard_toggle_auto_approve`), so the peek behaves exactly

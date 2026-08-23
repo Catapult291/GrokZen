@@ -34,6 +34,63 @@ fn fallback_ttl_when_no_expires_at() {
     assert!(!is_expired(&auth));
 }
 
+#[tokio::test]
+async fn refresh_path_lock_acquire_attaches_the_heartbeat() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
+
+    let outcome = mgr
+        .acquire_refresh_lock_or_adopt(RefreshReason::PreRequest)
+        .await
+        .expect("uncontended refresh-lock acquire");
+    let super::refresh_chain::LockOutcome::Held(guard) = outcome else {
+        panic!("an empty auth dir has no sibling token to adopt");
+    };
+    assert!(
+        guard.heartbeat.is_some(),
+        "the refresh-path hold must carry the heartbeat that placates old binaries"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn lock_loss_revalidation_adopts_the_sibling_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = GrokComConfig::default();
+    let scope = cfg.auth_scope();
+    let mgr = Arc::new(AuthManager::new(dir.path(), cfg));
+
+    let guard = mgr
+        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT, lock::Heartbeat::Attach)
+        .await
+        .into_guard()
+        .expect("initial acquire");
+    let lock_path = dir.path().join("auth.json.lock");
+    std::fs::remove_file(&lock_path).unwrap();
+    std::fs::write(&lock_path, b"").unwrap();
+
+    let fresh_disk = GrokAuth {
+        key: "fresh-key-from-sibling".into(),
+        auth_mode: AuthMode::Oidc,
+        refresh_token: Some("new-rt".into()),
+        expires_at: Some(Utc::now() + Duration::hours(1)),
+        ..GrokAuth::test_default()
+    };
+    let mut store = AuthStore::new();
+    store.insert(scope, fresh_disk);
+    write_auth_json(&dir.path().join("auth.json"), &store).unwrap();
+
+    let outcome = mgr
+        .revalidate_lock_or_reacquire(guard, RefreshReason::PreRequest)
+        .await
+        .expect("lock-loss revalidation must re-acquire on the live inode");
+    let super::refresh_chain::LockOutcome::Adopted(adopted) = outcome else {
+        panic!("a sibling token persisted during lock loss must be adopted");
+    };
+    assert_eq!(adopted.key, "fresh-key-from-sibling");
+}
+
 #[test]
 fn has_usable_disk_token_reads_disk_independent_of_memory() {
     let dir = tempfile::tempdir().unwrap();
@@ -775,8 +832,9 @@ async fn disk_refresh_wins_over_expired_in_memory() {
 
     // Acquire lock + read disk (mirrors flow.rs logic)
     let _lock = mgr
-        .try_lock_auth_file_async(StdDuration::from_secs(1))
-        .await;
+        .try_lock_auth_file_async(StdDuration::from_secs(1), lock::Heartbeat::Skip)
+        .await
+        .into_guard();
     assert!(_lock.is_some());
 
     let disk_auth = mgr.read_disk_auth();
@@ -873,12 +931,10 @@ async fn refresh_chain_adopts_sibling_pre_lock_without_flock() {
         delay: StdDuration::ZERO,
     }));
 
-    // Hold the flock for the whole call through the production acquisition
-    // path, so live holder info is on disk and the waiter's stale-break
-    // machinery cannot void the hold.
     let _held = mgr
-        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT)
+        .try_lock_auth_file_async(REFRESH_LOCK_TIMEOUT, lock::Heartbeat::Attach)
         .await
+        .into_guard()
         .expect("uncontended first acquisition");
 
     let adopted = tokio::time::timeout(

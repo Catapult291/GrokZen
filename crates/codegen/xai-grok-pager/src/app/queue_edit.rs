@@ -498,7 +498,7 @@ impl AgentView {
                 .locale()
                 .named_static_text(
                     "prompt.queue.mid_turn_deferred",
-                    "Can't send this mid-turn — it runs when the current turn ends",
+                    "Can't send this mid-turn: it runs when the current turn ends",
                 )
                 .to_string();
             self.show_toast(&message);
@@ -1045,6 +1045,7 @@ mod tests {
             target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                 agent_id: agent.session.id,
                 images_dir: None,
+                from_feedback_pane: false,
             },
             source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                 text: crate::app::actions::ClipboardTextRead::Success(None),

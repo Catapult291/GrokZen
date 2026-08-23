@@ -1445,9 +1445,8 @@ pub struct RecapRequestFile {
     pub x_grok_req_id: String,
     /// Sampling conversation id (`recap-{uuid}`).
     pub x_grok_conv_id: String,
-    /// Whether reasoning/thinking blocks were stripped from the prefix
-    /// (Anthropic Messages backend only; other backends keep reasoning
-    /// verbatim for prompt-cache warmth).
+    /// Whether the side-call requested reasoning/thinking removal before
+    /// budgeting. The over-budget path removes reasoning independently.
     pub strip_reasoning: bool,
     /// Reminder tag used in the recap instruction (`system-reminder` or
     /// the alternate `system_reminder` form).

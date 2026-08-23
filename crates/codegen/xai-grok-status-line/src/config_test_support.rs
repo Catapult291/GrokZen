@@ -31,8 +31,6 @@ impl StatusLineConfigFixture {
         self
     }
 
-    /// Seconds as a user would write them; `None` leaves the row event-driven.
-    /// The clamp still applies, on the way back out.
     pub fn with_refresh_interval(mut self, secs: Option<u64>) -> Self {
         self.config.refresh_interval = secs;
         self

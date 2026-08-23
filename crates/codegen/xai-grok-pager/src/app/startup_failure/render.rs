@@ -84,7 +84,7 @@ impl Advice {
             let _ = write!(
                 explanation,
                 " On a slow machine or network filesystem, a larger startup \
-                 budget can help — set it with the command below."
+                 budget can help. Set it with the command below."
             );
         }
         explanation

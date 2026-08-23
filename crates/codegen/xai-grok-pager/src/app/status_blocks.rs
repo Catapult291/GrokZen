@@ -325,7 +325,7 @@ pub(crate) fn session_usage_block_text_with_locale(
                 status_text(
                     locale,
                     "status.usage.model_row",
-                    "    {model} — {input} in / {output} out · {cost}",
+                    "    {model}: {input} in / {output} out · {cost}",
                 )
                 .replace("{model}", model)
                 .replace("{input}", &group_thousands(m.input_tokens))
@@ -589,8 +589,8 @@ mod tests {
             .insert("grok-4".into(), model_row(50, 5, None));
         let text = session_usage_block_text(&usage);
         assert!(text.contains("By model:"), "{text}");
-        assert!(text.contains("grok-build — 100 in / 10 out"), "{text}");
-        assert!(text.contains("grok-4 — 50 in / 5 out"), "{text}");
+        assert!(text.contains("grok-build: 100 in / 10 out"), "{text}");
+        assert!(text.contains("grok-4: 50 in / 5 out"), "{text}");
     }
 
     #[test]

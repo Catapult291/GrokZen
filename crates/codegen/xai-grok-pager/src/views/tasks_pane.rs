@@ -477,7 +477,7 @@ impl TaskEntry {
         ];
         if let Some(activity) = activity {
             spans.push(Span::styled(
-                format!(" \u{2014} {activity}"),
+                format!(" \u{00b7} {activity}"),
                 Style::default().fg(theme.gray),
             ));
         }
@@ -591,7 +591,7 @@ impl TaskEntry {
         ];
         if !suffix.is_empty() {
             spans.push(Span::styled(
-                format!(" \u{2014} {suffix}"),
+                format!(" \u{00b7} {suffix}"),
                 Style::default().fg(theme.gray),
             ));
         }
@@ -3284,7 +3284,7 @@ mod tests {
             _ => panic!("expected Agent variant"),
         };
         let suffix = styled.spans.last().unwrap();
-        assert_eq!(suffix.content.as_ref(), " \u{2014} Running: cargo build");
+        assert_eq!(suffix.content.as_ref(), " \u{00b7} Running: cargo build");
         assert_eq!(suffix.style.fg, Some(Theme::current().gray));
         assert!(
             !label.contains("cargo build"),

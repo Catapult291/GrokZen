@@ -70,8 +70,6 @@ impl StatusLineMetrics {
                 row_shows_a_problem: cfg.problem_to_paint().is_some(),
                 items: items_label(cfg),
                 custom_items: cfg.has_custom_items(),
-                custom_refresh_interval: cfg.has_custom_refresh_interval(),
-                has_retired_refresh_interval_ms: cfg.has_retired_refresh_interval_ms(),
             },
         );
     }

@@ -3,23 +3,12 @@
 name: Build macOS ARM
 
 on:
-  pull_request:
-    branches:
-      - zh-dev
-  push:
-    branches:
-      - zh-dev
-  workflow_dispatch:
-    inputs:
-      version:
-        description: 可选的内嵌版本（默认为 CI 构建编号）
-        required: false
-        type: string
   workflow_call:
     inputs:
       version:
-        description: 正式 Release 使用的严格 SemVer
-        required: true
+        description: 正式 Release 使用的严格 SemVer；预览构建留空即可
+        required: false
+        default: ''
         type: string
       release_build:
         description: 标记这是统一 Release 工作流调用的正式构建
@@ -68,9 +57,14 @@ jobs:
         id: preview
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
+          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
         run: |
           set -euo pipefail
           requested="${REQUESTED_VERSION:-}"
+          if [[ "${IS_RELEASE_BUILD}" == "true" && -z "${requested//[[:space:]]/}" ]]; then
+            echo "::error::正式构建必须显式提供严格 SemVer 版本。"
+            exit 1
+          fi
           if [[ -z "${requested//[[:space:]]/}" ]]; then
             package_version="$({
               sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' \
@@ -372,14 +366,14 @@ jobs:
           EOF
 
       - name: 保存 Cargo macOS release 缓存
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && !inputs.release_build && github.ref == 'refs/heads/zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release-dist
           key: ${{ steps.cargo_target_cache.outputs.cache-primary-key }}
 
       - name: 保存 Cargo 依赖缓存
-        if: ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && !inputs.release_build && github.ref == 'refs/heads/zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

@@ -576,7 +576,7 @@ pub fn render_persona_detail_with_locale(
                             let hint = persona_text(
                                 locale,
                                 "persona.instructions.collapsed_hint",
-                                "  ... ({count} more lines — e to expand, j/k to scroll)",
+                                "  ... ({count} more lines: e to expand, j/k to scroll)",
                             )
                             .replace("{count}", &(total - max_collapsed).to_string());
                             buf.set_string(
@@ -637,7 +637,7 @@ pub fn render_persona_detail_with_locale(
             } else {
                 Style::default().fg(theme.gray_dim)
             };
-            buf.set_string(value_x, y, "\u{2014}", empty_style);
+            buf.set_string(value_x, y, "-", empty_style);
         } else if value.width() <= value_w {
             // Fits on one line.
             let val_style = if let Some(bg) = row_bg {

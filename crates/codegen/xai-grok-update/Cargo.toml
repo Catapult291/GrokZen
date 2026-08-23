@@ -13,6 +13,7 @@ futures = { workspace = true }
 flate2 = { workspace = true, optional = true }
 indicatif = { workspace = true }
 reqwest = { workspace = true }
+xai-grok-extra-ca = { workspace = true }
 semver = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

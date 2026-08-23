@@ -293,6 +293,7 @@ impl SessionActor {
         self: &Arc<Self>,
         request: TurnInputRequest,
     ) -> PromptTurnResult {
+        let _active = xai_grok_telemetry::activity::TURNS_ACTIVE.enter();
         let TurnInputRequest {
             prompt_id,
             input_origin,
@@ -2106,6 +2107,7 @@ impl SessionActor {
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut todo_gate_fires: u32 = 0;
         let mut auth_retry_schedule = AuthRetrySchedule::new();
+        let mut rate_limit_waits = self.rate_limit_wait_budget();
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
         let mut structured_output_retries: u32 = 0;
@@ -2351,7 +2353,10 @@ impl SessionActor {
                 })),
             );
             let model_timer = std::time::Instant::now();
-            let (response, latency) = match self.run_turn_via_sampler(request.clone()).await {
+            let (response, latency) = match self
+                .run_turn_via_sampler(request.clone(), &mut rate_limit_waits)
+                .await
+            {
                 Ok(SamplerTurnOutcome::Response(r, latency)) => (r, latency),
                 Err(error) => {
                     self.tool_context.fail_task_output_usage_closed();
@@ -2563,7 +2568,15 @@ impl SessionActor {
             }
             self.record_response_token_usage(&response, Some(model_duration_ms));
             let response_completed = self.response_completed_update(&response);
-            if let Some(pt) = prompt_timing.take() {
+            if let Some(mut pt) = prompt_timing.take() {
+                pt.record_stream_latency(
+                    latency.time_to_first_token_ms,
+                    latency.time_to_last_byte_ms,
+                );
+                pt.record_model_result(
+                    latency.attempts,
+                    response.usage.as_ref().map(|u| u.completion_tokens),
+                );
                 let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
                 let mcp_tools = self
                     .agent
@@ -2641,16 +2654,9 @@ impl SessionActor {
                 stop_reason == Some(xai_grok_sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
             let final_answer_text = json_schema.is_some().then(|| response.assistant_text());
-            for item in response.items {
-                match item {
-                    xai_grok_sampling_types::ConversationItem::Assistant(_) => {
-                        self.record_assistant_response(item).await;
-                    }
-                    _ => {
-                        self.chat_state_handle.push_tool_result(item);
-                    }
-                }
-            }
+            let usage_reported = response.usage.is_some();
+            self.record_response_items(response.items, usage_reported)
+                .await;
             if let Some(text) = fallback_text {
                 tracing::warn!(
                     text_len = text.len(),

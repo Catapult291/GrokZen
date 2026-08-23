@@ -1,7 +1,7 @@
 //! Feedback, remember-note, btw, and recap dispatchers.
 
 use super::ctx::{NO_SESSION_NOTICE, with_active_agent};
-use crate::app::actions::Effect;
+use crate::app::actions::{Effect, FeedbackTraceChoice};
 use crate::app::agent::AgentId;
 use crate::app::agent_view::{AgentView, PromptInputMode};
 use crate::app::app_view::{ActiveView, AppView};
@@ -32,8 +32,7 @@ fn next_rewrite_nonce() -> u64 {
     REWRITE_NONCE.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Bare `/feedback` pane label (first paragraph of the question chrome).
-pub(crate) const FEEDBACK_QUESTION_LABEL: &str = "How can we improve Grok Build?";
+pub(crate) use crate::views::question_view::FEEDBACK_QUESTION_LABEL;
 
 /// Minimal mode has no toast surface, so the notice goes to the transcript instead.
 fn feedback_notice(app: &mut AppView, message: &str) {
@@ -87,8 +86,13 @@ fn feedback_pane_blocked(
     }
 }
 
-/// Open the freeform report pane for bare `/feedback`. Inline text never uses this.
-pub(super) fn dispatch_open_feedback_pane(app: &mut AppView) -> Vec<Effect> {
+/// Open the freeform report pane. Early exits drop `images`, whose owner
+/// cleans up the staged temp files.
+pub(super) fn dispatch_open_feedback_pane(
+    app: &mut AppView,
+    prefill: Option<String>,
+    mut images: crate::views::prompt_widget::FeedbackImages,
+) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -104,6 +108,16 @@ pub(super) fn dispatch_open_feedback_pane(app: &mut AppView) -> Vec<Effect> {
         return vec![];
     }
 
+    // An individual coding-data opt-out does not suppress the offer: the card
+    // is how opted-out users switch sharing back on. ZDR/team locks have no
+    // self-serve path, so they still suppress it. Minimal mode never offers:
+    // its `/feedback <text>` path documents sends without a consent card.
+    let offer_trace = app.feedback_trace_offer()
+        && app.coding_data_sharing_lock().is_none()
+        && app.team_name.is_none()
+        && !app.is_zdr
+        && !app.screen_mode.is_minimal();
+    let offer_reenables_sharing = app.coding_data_retention_opt_out;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -125,11 +139,50 @@ pub(super) fn dispatch_open_feedback_pane(app: &mut AppView) -> Vec<Effect> {
         stashed,
     )
     .with_local_kind(LocalQuestionKind::Feedback);
-    // Freeform-only: start typing immediately.
+    state.feedback_offer_trace = offer_trace;
+    state.feedback_offer_reenables_sharing = offer_reenables_sharing;
+    let prefill_text = prefill.filter(|s| !s.is_empty());
+    if let Some(text) = prefill_text.as_ref()
+        && let Some(slot) = state.per_question_freeform.get_mut(0)
+    {
+        *slot = text.clone();
+    }
     let freeform = state.activate_freeform_input();
     agent.prompt.set_text_preserving(&freeform);
+    // Inline `/feedback` composed alongside pasted images: the prefill kept
+    // their `[Image #N]` placeholders as plain text, so rebind the drained
+    // records to them and the pane shows live, removable chips.
+    let image_count = images.len();
+    agent.prompt.adopt_images(images.take());
+
+    let session_id = agent.session.session_id.clone();
+    let report = prefill_text.unwrap_or_default();
+    crate::unified_log::info(
+        "feedback.pane_open",
+        session_id.as_ref().map(|s| s.0.as_ref()),
+        Some(serde_json::json!({
+            "prefill_chars": report.chars().count(),
+            "prefill_images": image_count,
+            "offer_trace": offer_trace,
+            "screen_mode": app.screen_mode.meta_label(),
+        })),
+    );
     agent.question_view = Some(state);
     vec![]
+}
+
+/// How long the background trace upload may run before it is reported as
+/// failed; longer than the shell's own upload timeout so its error wins.
+pub(crate) const FEEDBACK_TRACE_UPLOAD_TIMEOUT_MS: u64 = 150_000;
+
+/// The `[telemetry] trace_upload = true` write the /feedback card's "Yes"
+/// collects.
+pub(super) fn persist_trace_upload_consent() -> Effect {
+    Effect::PersistSetting {
+        key: "trace_upload",
+        value: crate::settings::SettingValue::Bool(true),
+        rollback_value: crate::settings::SettingValue::Bool(false),
+    }
 }
 
 /// Enter remember mode: visual change to prompt bar (remember accent, `#` prefix).
@@ -142,56 +195,327 @@ pub(super) fn dispatch_enter_remember_mode(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
+/// Close the trace-consent funnel opened by `FeedbackTraceCardShown`. Every
+/// outcome of a shown card (answer, Esc, displacement) must log exactly once.
+pub(crate) fn log_trace_consent_selected(reenables_sharing: bool, choice: FeedbackTraceChoice) {
+    use xai_grok_telemetry::events::{FeedbackTraceConsentChoice, FeedbackTraceConsentSelected};
+    xai_grok_telemetry::session_ctx::log_event(FeedbackTraceConsentSelected {
+        choice: match choice {
+            FeedbackTraceChoice::AlwaysUpload => FeedbackTraceConsentChoice::TurnOn,
+            FeedbackTraceChoice::NeverAsk => FeedbackTraceConsentChoice::NeverAsk,
+            FeedbackTraceChoice::NoUpload => FeedbackTraceConsentChoice::NoUpload,
+        },
+        reenables_sharing,
+    });
+}
+
+/// The `feedback.send` unified log plus the POST effect for a committed
+/// report. Single writer for both, shared with the displaced-card path.
+pub(crate) fn feedback_send_effect(
+    agent_id: AgentId,
+    session_id: agent_client_protocol::SessionId,
+    text: String,
+    images: Vec<xai_grok_shell::session::FeedbackImage>,
+    trace: Option<FeedbackTraceChoice>,
+    displaced: bool,
+) -> Effect {
+    let mut payload = serde_json::json!({
+        "chars": text.chars().count(),
+        "images": images.len(),
+        "trace": match trace {
+            Some(choice) => format!("{choice:?}"),
+            None => "NotOffered".to_string(),
+        },
+    });
+    if displaced {
+        payload["displaced"] = serde_json::Value::Bool(true);
+    }
+    crate::unified_log::info("feedback.send", Some(session_id.0.as_ref()), Some(payload));
+    Effect::SendFeedback {
+        agent_id,
+        session_id,
+        feedback_text: text,
+        images,
+    }
+}
+
+/// Commit a report: encode images (with the dropped-attachment notice), close
+/// the consent funnel, apply the "no text and no surviving images means do not
+/// send" rule, and build the send effect. The single owner of that policy,
+/// shared by [`dispatch_send_feedback`] and the displaced-consent-card path in
+/// `acp_handler`. `displaced` selects that path's user-facing copy.
+pub(crate) fn commit_feedback(
+    agent: &mut crate::app::agent_view::AgentView,
+    coding_data_retention_opt_out: bool,
+    id: AgentId,
+    session_id: agent_client_protocol::SessionId,
+    text: String,
+    images: crate::views::prompt_widget::FeedbackImages,
+    trace: Option<FeedbackTraceChoice>,
+    displaced: bool,
+) -> Option<Effect> {
+    // Encode before the emptiness check: encoding can drop attachments, and
+    // a report left with no text and no images must not go out blank.
+    let (encoded_images, dropped) = encode_feedback_images(images, agent.scrollback.locale());
+    if let Some(notice) = dropped {
+        agent.scrollback.push_block(RenderBlock::system(notice));
+    }
+
+    // A shown consent card closes its funnel exactly once, sent or not.
+    if let Some(choice) = trace {
+        log_trace_consent_selected(coding_data_retention_opt_out, choice);
+    }
+
+    let trimmed = text.trim().to_string();
+    if trimmed.is_empty() && encoded_images.is_empty() {
+        let (key, english) = if displaced {
+            (
+                "feedback.cancelled_interrupted",
+                "/feedback cancelled because another question opened.",
+            )
+        } else {
+            ("feedback.text_required", "Please provide feedback text.")
+        };
+        let message = note_static(agent.scrollback.locale(), key, english).to_string();
+        agent.scrollback.push_block(RenderBlock::system(message));
+        return None;
+    }
+
+    let (key, english) = if displaced {
+        (
+            "feedback.sent_without_trace",
+            "Another question interrupted /feedback. Your report was sent without a trace.",
+        )
+    } else {
+        (
+            "feedback.thanks",
+            "Thanks for the feedback! The Grok Build team is on it.",
+        )
+    };
+    let message = note_static(agent.scrollback.locale(), key, english).to_string();
+    agent.scrollback.push_block(RenderBlock::system(message));
+
+    Some(feedback_send_effect(
+        id,
+        session_id,
+        trimmed,
+        encoded_images,
+        trace,
+        displaced,
+    ))
+}
+
 /// Thank-you is shown immediately; POST is a background effect. The composer is not cleared: the text arrives with the action, not from the prompt.
-pub(super) fn dispatch_send_feedback(app: &mut AppView, text: String) -> Vec<Effect> {
-    let feedback_required = note_static(
-        app.locale.as_ref(),
-        "feedback.text_required",
-        "Please provide feedback text.",
-    );
+/// Early exits drop `images`, whose owner cleans up the staged temp files.
+pub(super) fn dispatch_send_feedback(
+    app: &mut AppView,
+    text: String,
+    images: crate::views::prompt_widget::FeedbackImages,
+    trace: Option<FeedbackTraceChoice>,
+) -> Vec<Effect> {
     let no_session = note_static(
         app.locale.as_ref(),
         "session.no_active_period",
         "No active session.",
-    );
-    let feedback_thanks = note_static(
-        app.locale.as_ref(),
-        "feedback.thanks",
-        "Thanks for the feedback! The Grok Build team is on it.",
-    );
+    )
+    .to_string();
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
+    let coding_data_retention_opt_out = app.coding_data_retention_opt_out;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
 
     agent.ephemeral_tip.clear_on_submit();
 
-    let trimmed = text.trim().to_string();
-    if trimmed.is_empty() {
-        agent
-            .scrollback
-            .push_block(RenderBlock::system(feedback_required.to_string()));
-        return vec![];
-    }
-
     let Some(session_id) = agent.session.session_id.clone() else {
-        agent
-            .scrollback
-            .push_block(RenderBlock::system(no_session.to_string()));
+        agent.scrollback.push_block(RenderBlock::system(no_session));
         return vec![];
     };
 
-    agent
-        .scrollback
-        .push_block(RenderBlock::system(feedback_thanks.to_string()));
+    let Some(send) = commit_feedback(
+        agent,
+        coding_data_retention_opt_out,
+        id,
+        session_id.clone(),
+        text,
+        images,
+        trace,
+        false,
+    ) else {
+        // Nothing went out, so no trace-upload side effects either.
+        return vec![];
+    };
 
-    vec![Effect::SendFeedback {
-        agent_id: id,
-        session_id,
-        feedback_text: trimmed,
-    }]
+    let mut effects = vec![send];
+    match trace {
+        None | Some(FeedbackTraceChoice::NoUpload) => {}
+        Some(FeedbackTraceChoice::NeverAsk) => {
+            app.feedback_trace_choice_latched = true;
+            effects.push(Effect::PersistSetting {
+                key: "feedback_trace_card",
+                value: crate::settings::SettingValue::Bool(false),
+                rollback_value: crate::settings::SettingValue::Bool(false),
+            });
+        }
+        Some(FeedbackTraceChoice::AlwaysUpload) => {
+            app.feedback_trace_choice_latched = true;
+            // The storage proxy rejects uploads while the account is opted
+            // out of coding-data sharing, so an opted-out account flips
+            // sharing first and parks the upload on that write generation.
+            let mut park_seq = None;
+            if app.coding_data_retention_opt_out {
+                let (sharing, outcome) = super::status::set_coding_data_sharing_tracked(
+                    app,
+                    true,
+                    xai_grok_telemetry::events::CodingDataConsentSource::FeedbackTraceCard,
+                );
+                effects.extend(sharing);
+                match outcome {
+                    super::status::SharingWriteOutcome::Claimed(seq) => park_seq = Some(seq),
+                    // Sharing is already on (the opt-out mirror was stale):
+                    // nothing to wait on, upload now.
+                    super::status::SharingWriteOutcome::AlreadySet => {}
+                    // The guard refused the opt-in this consent depends on:
+                    // send the report alone — no upload, no persisted
+                    // consent, and no latch, since nothing happened.
+                    super::status::SharingWriteOutcome::Refused => {
+                        app.feedback_trace_choice_latched = false;
+                        return effects;
+                    }
+                }
+            }
+            match park_seq {
+                // The consent persist also waits for the confirm: written
+                // now, a failed opt-in would leave `trace_upload = true` on
+                // disk while the storage proxy keeps rejecting uploads.
+                Some(seq) => {
+                    app.feedback_trace_upload_pending =
+                        Some(crate::app::app_view::PendingFeedbackTraceUpload {
+                            seq,
+                            agent_id: id,
+                            session_id,
+                        });
+                }
+                None => {
+                    effects.push(Effect::UploadFeedbackTrace {
+                        agent_id: id,
+                        session_id,
+                    });
+                    effects.push(persist_trace_upload_consent());
+                }
+            }
+        }
+    }
+    effects
+}
+
+fn encode_feedback_images(
+    images: crate::views::prompt_widget::FeedbackImages,
+    locale: &crate::locale::LocaleContext,
+) -> (Vec<xai_grok_shell::session::FeedbackImage>, Option<String>) {
+    use base64::Engine as _;
+    use xai_grok_shell::session::{
+        MAX_FEEDBACK_IMAGE_BYTES, MAX_FEEDBACK_IMAGE_TOTAL_BYTES, MAX_FEEDBACK_IMAGES,
+        feedback_image_extension,
+    };
+
+    let mut encoded = Vec::new();
+    let mut over_count = 0usize;
+    let mut unsupported = 0usize;
+    let mut too_large = 0usize;
+    let mut unreadable = 0usize;
+    let mut total_bytes = 0usize;
+    for image in images.as_slice() {
+        let Some((bytes, mime_type)) = crate::prompt_images::load_for_send(image) else {
+            unreadable += 1;
+            continue;
+        };
+        if encoded.len() >= MAX_FEEDBACK_IMAGES {
+            over_count += 1;
+            continue;
+        }
+        if feedback_image_extension(&mime_type).is_none() {
+            unsupported += 1;
+            continue;
+        }
+        if bytes.len() > MAX_FEEDBACK_IMAGE_BYTES
+            || total_bytes + bytes.len() > MAX_FEEDBACK_IMAGE_TOTAL_BYTES
+        {
+            too_large += 1;
+            continue;
+        }
+        total_bytes += bytes.len();
+        encoded.push(xai_grok_shell::session::FeedbackImage {
+            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            mime_type,
+            file_name: image
+                .source_path
+                .as_deref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned()),
+        });
+    }
+    // Encoding done with the records; dropping the owner deletes the
+    // staged temp files.
+    drop(images);
+
+    let dropped = over_count + unsupported + too_large + unreadable;
+    let notice = (dropped > 0).then(|| {
+        const MIB: usize = 1024 * 1024;
+        let mut reasons = Vec::new();
+        if over_count > 0 {
+            reasons.push(
+                note_text(
+                    locale,
+                    "feedback.images.over_limit",
+                    "{count} over the {limit}-image limit",
+                )
+                .replace("{count}", &over_count.to_string())
+                .replace("{limit}", &MAX_FEEDBACK_IMAGES.to_string()),
+            );
+        }
+        if unsupported > 0 {
+            reasons.push(
+                note_text(
+                    locale,
+                    "feedback.images.unsupported",
+                    "{count} in a format feedback can't carry (PNG, JPEG, or GIF only)",
+                )
+                .replace("{count}", &unsupported.to_string()),
+            );
+        }
+        if too_large > 0 {
+            reasons.push(
+                note_text(
+                    locale,
+                    "feedback.images.too_large",
+                    "{count} over the size limit ({each} MB each, {total} MB combined)",
+                )
+                .replace("{count}", &too_large.to_string())
+                .replace("{each}", &(MAX_FEEDBACK_IMAGE_BYTES / MIB).to_string())
+                .replace(
+                    "{total}",
+                    &(MAX_FEEDBACK_IMAGE_TOTAL_BYTES / MIB).to_string(),
+                ),
+            );
+        }
+        if unreadable > 0 {
+            reasons.push(
+                note_text(locale, "feedback.images.unreadable", "{count} unreadable")
+                    .replace("{count}", &unreadable.to_string()),
+            );
+        }
+        note_text(
+            locale,
+            "feedback.images.dropped",
+            "Dropped {dropped} image attachment(s) from the feedback: {reasons}.",
+        )
+        .replace("{dropped}", &dropped.to_string())
+        .replace("{reasons}", &reasons.join(", "))
+    });
+    (encoded, notice)
 }
 
 /// Send a raw remember note for LLM-powered rewriting via `x.ai/memory/rewrite`.
@@ -224,6 +548,8 @@ pub(super) fn dispatch_send_remember_note(app: &mut AppView, text: String) -> Ve
         return vec![];
     }
 
+    agent.note_draft_consumed();
+
     let cwd = agent.session.cwd.clone();
 
     let Some(session_id) = agent.session.session_id.clone() else {
@@ -237,7 +563,7 @@ pub(super) fn dispatch_send_remember_note(app: &mut AppView, text: String) -> Ve
             cached_lines: None,
             cwd,
             agent_id: id,
-            rewrite_nonce: 0, // no rewrite in flight, nonce unused
+            rewrite_nonce: Default::default(), // no rewrite in flight, nonce unused
         });
         return vec![];
     };

@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "1.0.6"
+version = "1.0.8"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -188,16 +188,8 @@ xai-grok-pager-pty-harness = { path = "../xai-grok-pager-pty-harness" }
 # In-process leader-cluster harness (mock inference server; no cycle:
 # xai-grok-test-support depends on neither the pager nor the shell).
 xai-grok-test-support = { workspace = true, features = [] }
-# Ring CryptoProvider install for the in-process leader-cluster tests. Explicit
-# spec mirroring the shell's, NOT `workspace = true`: the workspace pin enables
-# aws-lc-rs, under which `rustls::crypto::ring` does not exist. Dev-only — the
-# production lib deliberately dropped rustls (moved to xai-grok-pager-bin).
-rustls = { version = "0.23", default-features = false, features = [
-    "ring",
-    "logging",
-    "std",
-    "tls12",
-] }
+# Provider install for the in-process leader-cluster tests.
+xai-grok-extra-ca = { workspace = true }
 
 [[bench]]
 name = "render"

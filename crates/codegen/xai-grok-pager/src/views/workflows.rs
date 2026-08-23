@@ -23,7 +23,8 @@ pub struct WorkflowAgentRowView {
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowAgentLiveStatus {
     pub activity: Option<String>,
-    pub tokens_used: Option<u64>,
+    pub context_tokens: Option<u64>,
+    pub context_window_tokens: Option<u64>,
     pub elapsed_ms: Option<u64>,
 }
 
@@ -80,6 +81,7 @@ impl WorkflowRunSnapshot {
                 | "infra_paused"
                 | "blocked"
                 | "failed"
+                | "cancelled"
         )
     }
 
@@ -545,17 +547,6 @@ fn agent_glyph_and_style(state: &str, theme: &Theme) -> (&'static str, Style) {
     }
 }
 
-fn fmt_tokens(tokens: u64, locale: Option<&LocaleContext>) -> String {
-    if tokens > 0 {
-        workflow_text(locale, "workflows.tokens", "{tokens} tok").replace(
-            "{tokens}",
-            &format_tokens_compact(i64::try_from(tokens).unwrap_or(i64::MAX)),
-        )
-    } else {
-        String::new()
-    }
-}
-
 fn plural(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("{n} {noun}")
@@ -633,7 +624,9 @@ pub fn render_workflows_with_locale(
     let (shortcuts, sizing) =
         modal_config_with_locale(in_detail, has_run_list, selected_run, locale);
     let config = ModalWindowConfig {
-        title: workflow_static(locale, "workflows.title", "Workflows"),
+        // "Workflow Runs", not "Workflows": that name belongs to the
+        // extensions-modal catalog tab.
+        title: workflow_static(locale, "workflows.runs_title", "Workflow Runs"),
         tabs: None,
         shortcuts: &shortcuts,
         sizing,
@@ -717,7 +710,7 @@ fn render_list(
             format_elapsed(run.live_elapsed_ms())
         );
         let label = format!(
-            "{} — {}",
+            "{} · {}",
             strip_control(&run.name),
             strip_control(&run.objective)
         );
@@ -831,20 +824,20 @@ fn render_detail(
             workflow_text(
                 locale,
                 "workflows.budget.maximum",
-                "budget limited — maximum agent budget reached; start a new run",
+                "budget limited: maximum agent budget reached; start a new run",
             )
         } else if let Some(pause) = run.pause_message.as_deref().filter(|s| !s.is_empty()) {
             workflow_text(
                 locale,
                 "workflows.budget.raise_with_reason",
-                "budget limited — bare resume disabled; raise agent budget via agent/tool — {reason}",
+                "budget limited: bare resume disabled; raise agent budget via agent/tool. {reason}",
             )
             .replace("{reason}", &strip_control(pause))
         } else {
             workflow_text(
                 locale,
                 "workflows.budget.raise_above",
-                "budget limited — bare resume disabled; raise agent budget above {count} via agent/tool",
+                "budget limited: bare resume disabled; raise agent budget above {count} via agent/tool",
             )
             .replace("{count}", &run.agents_used.to_string())
         };
@@ -852,7 +845,7 @@ fn render_detail(
     } else if let Some(pause) = run.pause_message.as_deref() {
         Some((
             format!(
-                "{} — {}",
+                "{}: {}",
                 localized_status(locale, &run.status),
                 strip_control(pause)
             ),
@@ -863,7 +856,7 @@ fn render_detail(
             workflow_text(
                 locale,
                 "workflows.failed_hint",
-                "failed — see scrollback for details; r resumes from the journal",
+                "failed: see scrollback for details; r resumes from the journal",
             ),
             Style::default().fg(theme.accent_error),
         ))
@@ -1130,26 +1123,37 @@ fn render_detail(
         } else {
             agent_glyph_and_style(&agent.state, theme)
         };
-        let live_status = running.then(|| live.get(&agent.agent_id)).flatten();
-        let tokens_val = live_status
-            .and_then(|l| l.tokens_used)
-            .unwrap_or(agent.tokens_used);
+        let live_status = live.get(&agent.agent_id);
         let elapsed_ms = if running {
             live_status.and_then(|l| l.elapsed_ms).unwrap_or(0)
         } else {
             agent.duration_ms
         };
         let mut meta_parts: Vec<String> = Vec::new();
-        let tokens_txt = fmt_tokens(tokens_val, locale);
-        if !tokens_txt.is_empty() {
-            meta_parts.push(tokens_txt);
+        if let Some((context_tokens, context_window_tokens)) = live_status.and_then(|status| {
+            status
+                .context_tokens
+                .zip(status.context_window_tokens.filter(|&window| window > 0))
+        }) {
+            let context_label = workflow_static(locale, "dashboard.peek.status.context", "context");
+            meta_parts.push(format!(
+                "{} / {} {context_label}",
+                format_tokens_compact(i64::try_from(context_tokens).unwrap_or(i64::MAX)),
+                format_tokens_compact(i64::try_from(context_window_tokens).unwrap_or(i64::MAX)),
+            ));
         }
         if elapsed_ms > 0 {
             meta_parts.push(format_elapsed(elapsed_ms));
         }
-        let tokens = meta_parts.join(" · ");
-        let tokens_w = unicode_width::UnicodeWidthStr::width(tokens.as_str()) as u16;
-        let tokens_x = roster_inner.right().saturating_sub(tokens_w + 1);
+        let meta = truncate_to_width(
+            &meta_parts.join(" · "),
+            roster_inner.width.saturating_sub(6) as usize,
+        );
+        let meta_w = unicode_width::UnicodeWidthStr::width(meta.as_str()) as u16;
+        let meta_x = roster_inner
+            .right()
+            .saturating_sub(meta_w + 1)
+            .max(roster_inner.x + 4);
 
         span_at(
             buf,
@@ -1169,26 +1173,26 @@ fn render_detail(
             y,
             &label,
             Style::default().fg(theme.text_primary),
-            tokens_x,
+            meta_x,
         );
         let label_w = unicode_width::UnicodeWidthStr::width(label.as_str()) as u16;
         let mut trail_x = roster_inner.x + 2 + label_w + 2;
         if let Some(model) = agent.model.as_deref() {
-            let model_txt = truncate_to_width(model, tokens_x.saturating_sub(trail_x + 1) as usize);
+            let model_txt = truncate_to_width(model, meta_x.saturating_sub(trail_x + 1) as usize);
             span_at(
                 buf,
                 trail_x,
                 y,
                 &model_txt,
                 Style::default().fg(theme.gray),
-                tokens_x,
+                meta_x,
             );
             trail_x += unicode_width::UnicodeWidthStr::width(model_txt.as_str()) as u16 + 2;
         }
         if let Some(activity) = live_status.and_then(|l| l.activity.as_deref()) {
             let activity_txt = truncate_to_width(
-                &format!("— {}", strip_control(activity)),
-                tokens_x.saturating_sub(trail_x + 1) as usize,
+                &format!("· {}", strip_control(activity)),
+                meta_x.saturating_sub(trail_x + 1) as usize,
             );
             span_at(
                 buf,
@@ -1196,14 +1200,14 @@ fn render_detail(
                 y,
                 &activity_txt,
                 Style::default().fg(theme.gray_dim),
-                tokens_x,
+                meta_x,
             );
         }
         span_at(
             buf,
-            tokens_x,
+            meta_x,
             y,
-            &tokens,
+            &meta,
             Style::default().fg(theme.gray_dim),
             roster_inner.right(),
         );
@@ -1928,7 +1932,8 @@ mod tests {
             "a2".to_owned(),
             WorkflowAgentLiveStatus {
                 activity: Some("Running: rg -n needle /data".to_owned()),
-                tokens_used: Some(42_000),
+                context_tokens: Some(129_000),
+                context_window_tokens: Some(500_000),
                 elapsed_ms: Some(75_000),
             },
         );
@@ -1938,11 +1943,39 @@ mod tests {
             text.contains("● 0/1"),
             "running phase gets a ● marker: {text}"
         );
-        assert!(text.contains("— Running: rg -n needle"), "{text}");
+        assert!(text.contains("· Running: r"), "{text}");
         assert!(
-            text.contains("42k tok · 1m15s"),
-            "live tokens + elapsed match the header meta style: {text}"
+            text.contains("129k / 500k context · 1m15s"),
+            "workflow rows show current context instead of cumulative usage: {text}"
         );
+    }
+
+    #[test]
+    fn completed_agent_keeps_final_context_and_omits_cumulative_tokens() {
+        let mut run = make_run("wf_1", "deep-research", "complete");
+        run.current_phase = Some("Plan".to_owned());
+        run.agents.truncate(1);
+        run.agents[0].tokens_used = 375_136;
+        run.agents[0].duration_ms = 75_000;
+        let runs = vec![&run];
+        let mut state = WorkflowsViewState::default();
+        state.normalize(&runs);
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buf = Buffer::empty(area);
+        let mut live = WorkflowAgentLiveMap::default();
+        live.insert(
+            "a1".to_owned(),
+            WorkflowAgentLiveStatus {
+                context_tokens: Some(72_281),
+                context_window_tokens: Some(500_000),
+                elapsed_ms: Some(75_000),
+                ..Default::default()
+            },
+        );
+        render_workflows(&mut buf, area, &runs, &mut state, 0, &live);
+        let text = buf_text(&buf, area);
+        assert!(text.contains("72.3k / 500k context · 1m15s"), "{text}");
+        assert!(!text.contains("375k"), "must omit cumulative usage: {text}");
     }
 
     #[test]

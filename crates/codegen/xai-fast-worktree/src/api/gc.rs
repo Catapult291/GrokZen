@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -238,6 +238,15 @@ pub struct GcReport {
     pub names_collected: u64,
     #[serde(default)]
     pub remove_failed: u64,
+    /// Grove pin-ref union-liveness sweep (`refs/grok/worktrees/*`).
+    #[serde(default)]
+    pub pin_gc_examined: u64,
+    #[serde(default)]
+    pub pin_gc_pruned: u64,
+    #[serde(default)]
+    pub pin_gc_deferred: u64,
+    #[serde(default)]
+    pub pin_gc_kept: u64,
 }
 
 impl GcReport {
@@ -266,14 +275,32 @@ fn is_expired(rec: &crate::db::WorktreeRecord, now: i64, max_age: i64) -> bool {
     last_active(rec) < now.saturating_sub(max_age.max(0))
 }
 
-fn is_guarded(rec: &crate::db::WorktreeRecord, live_cwds: &[PathBuf]) -> bool {
-    rec.creator_pid.is_some_and(is_pid_alive) || cwd_within(Path::new(&rec.path), live_cwds)
+/// Dest is a kernel/NFS mount. `exists()` and `canonicalize` can hang;
+/// probe the mount table only (never the dest inode).
+fn dest_must_not_stat(path: &Path) -> bool {
+    !crate::nfs::dest_is_known_unmounted(path)
 }
 
-/// True when one of `in_use` lies at or inside `wt_path`
+fn rec_cwd_within(rec: &crate::db::WorktreeRecord, live_cwds: &[PathBuf]) -> bool {
+    let path = Path::new(&rec.path);
+    if crate::worktree::is_grove_strategy(&rec.creation_mode) || dest_must_not_stat(path) {
+        // Never canonicalize an NFS dest (wedged mount hang), including
+        // linked/copy rows whose dest is a live grove mount.
+        return live_cwds
+            .iter()
+            .any(|cwd| crate::nfs::dest_path_contains(path, cwd));
+    }
+    cwd_within(path, live_cwds)
+}
+
+fn is_guarded(rec: &crate::db::WorktreeRecord, live_cwds: &[PathBuf]) -> bool {
+    rec.creator_pid.is_some_and(is_pid_alive) || rec_cwd_within(rec, live_cwds)
+}
+
+/// True when one of `in_use` lies at or inside the worktree dest
 /// (see `GcOptions::keep_worktrees_containing`).
-fn worktree_holds_in_use_path(wt_path: &Path, in_use: &[PathBuf]) -> bool {
-    !in_use.is_empty() && cwd_within(wt_path, in_use)
+fn worktree_holds_in_use_path(rec: &crate::db::WorktreeRecord, in_use: &[PathBuf]) -> bool {
+    !in_use.is_empty() && rec_cwd_within(rec, in_use)
 }
 
 /// Single verdict on whether an age pass may reclaim a worktree. Every other
@@ -306,7 +333,7 @@ fn classify(
     // `force` is the operator override: it ignores liveness and in-use guards.
     if !opts.force
         && (is_guarded(rec, live_cwds)
-            || worktree_holds_in_use_path(Path::new(&rec.path), &opts.keep_worktrees_containing))
+            || worktree_holds_in_use_path(rec, &opts.keep_worktrees_containing))
     {
         return Eligibility::Guarded;
     }
@@ -331,7 +358,19 @@ fn reclaim_dead_records(db: &WorktreeDb, opts: &GcOptions, report: &mut GcReport
         })?;
         let dead = all
             .iter()
-            .filter(|rec| rec.status == WorktreeStatus::Dead || !Path::new(&rec.path).exists())
+            .filter(|rec| {
+                if rec.status == WorktreeStatus::Dead {
+                    return true;
+                }
+                let path = Path::new(&rec.path);
+                // `exists()` hangs on a wedged grove NFS dest.
+                if crate::worktree::is_grove_strategy(&rec.creation_mode)
+                    || dest_must_not_stat(path)
+                {
+                    return crate::nfs::nfs_record_is_dead(path, None);
+                }
+                std::fs::symlink_metadata(path).is_err()
+            })
             .count();
         report.dead_removed = u64::try_from(dead).unwrap_or(u64::MAX);
         return Ok(());
@@ -488,6 +527,13 @@ fn reclaim_expired_worktrees(
             Eligibility::Reclaimable => {}
         }
         let path = Path::new(&rec.path);
+        if dest_must_not_stat(path) {
+            // Any kernel mount: never exists()/gate. judge_one and dispose_of
+            // stat dest; remove_worktree also symlink_metadata after the NFS
+            // arm. Unmounted leftover dirs fall through for dest reuse.
+            report.skipped_alive += 1;
+            continue;
+        }
         if Instant::now() >= deadline {
             report.not_judged += 1;
             stopped_at.get_or_insert_with(|| rec.id.clone());
@@ -591,7 +637,51 @@ fn run_pass(
         reclaim_expired_worktrees(db, opts, pass, delegate, now, hook, &mut report)?;
     }
 
+    reclaim_orphan_pins(db, opts, now, &mut report);
+
     Ok(report)
+}
+
+/// Union-liveness pin sweep. Never fails the worktree GC pass: one grove
+/// data dir must not block dead/age reclaim.
+fn reclaim_orphan_pins(db: &WorktreeDb, opts: &GcOptions, now: i64, report: &mut GcReport) {
+    let recs = match db.list(&ListFilter {
+        include_dead: true,
+        ..Default::default()
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "pin GC: worktrees.db list failed");
+            return;
+        }
+    };
+    let existing = crate::nfs::identities_from_worktree_records(&recs);
+    let mut seen = HashSet::new();
+    let mut pruned_ids = HashSet::new();
+    for dir in crate::nfs::candidate_data_dirs() {
+        if dir.as_os_str().is_empty() || !seen.insert(dir.clone()) {
+            continue;
+        }
+        match crate::nfs::gc_orphan_pins(&dir, &existing, now, opts.dry_run) {
+            Ok(r) => {
+                report.pin_gc_examined = report.pin_gc_examined.saturating_add(r.examined);
+                report.pin_gc_deferred = report.pin_gc_deferred.saturating_add(r.deferred_grace);
+                report.pin_gc_kept = report.pin_gc_kept.saturating_add(r.kept_live);
+                for id in r.pruned_ids {
+                    if pruned_ids.insert(id) {
+                        report.pin_gc_pruned = report.pin_gc_pruned.saturating_add(1);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    dir = %dir.display(),
+                    error = %e,
+                    "pin GC: grove data dir sweep failed"
+                );
+            }
+        }
+    }
 }
 
 const META_LAST_AGE_CURSOR: &str = "last_age_cursor";

@@ -8,6 +8,7 @@ mod modes;
 mod notes;
 mod permissions;
 mod prompt;
+mod queue_release;
 mod rewind;
 mod router;
 mod session;
@@ -41,7 +42,7 @@ use super::dashboard::{
 };
 use super::modes::{
     YOLO_ON_UNDER_PLAN_TOAST, active_agent_plan_nudge_state, dispatch_cycle_mode_and_sync,
-    permission_mode_toast, yolo_toast_with_locale,
+    downgrade_displayed_auto_if_gated, permission_mode_toast, yolo_toast_with_locale,
 };
 use super::permissions::drain_permission_queue;
 use super::prompt::{dispatch_doctor, dispatch_send_prompt, dispatch_send_prompt_inner};
@@ -263,6 +264,7 @@ fn test_app() -> AppView {
         import_claude_modal: None,
         welcome_doc_viewer: None,
         screen_mode: crate::app::ScreenMode::Inline,
+        pending_screen_mode_switch: None,
         pending_effects: Vec::new(),
         pending_editor: None,
         pending_pager_path: None,
@@ -272,6 +274,7 @@ fn test_app() -> AppView {
         show_resolved_model: true,
         sharing_enabled: false,
         plugin_cta_enabled: false,
+        plugin_cta_marketplace: None,
         workspace_dashboard_enabled: false,
         usage_visible: true,
         has_external_auth_provider: false,
@@ -290,6 +293,9 @@ fn test_app() -> AppView {
         scheduler_background_loops_seed: true,
         cancel_rewind_enabled: true,
         session_recap_available: false,
+        shell_feedback_trace_offer: false,
+        feedback_trace_choice_latched: false,
+        feedback_trace_upload_pending: None,
         tutorial: None,
         dashboard: None,
         dashboard_return: None,

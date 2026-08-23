@@ -420,6 +420,46 @@ impl Drop for StashedPrompt {
     }
 }
 
+/// Feedback attachments in transit between the composer, the trace-consent
+/// card, and the send dispatch.
+///
+/// Owns its staged temp files: dropping without [`take`](Self::take) deletes them.
+#[derive(Debug, Default)]
+pub struct FeedbackImages(Vec<PastedImage>);
+
+impl From<Vec<PastedImage>> for FeedbackImages {
+    fn from(images: Vec<PastedImage>) -> Self {
+        Self(images)
+    }
+}
+
+impl Drop for FeedbackImages {
+    fn drop(&mut self) {
+        crate::prompt_images::drain_and_cleanup(&mut self.0);
+    }
+}
+
+impl FeedbackImages {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Read access for encoding; cleanup stays with this owner.
+    pub fn as_slice(&self) -> &[PastedImage] {
+        &self.0
+    }
+
+    /// Hand the records to a consumer that takes over cleanup (the prompt
+    /// widget adopting them as live chips).
+    pub fn take(&mut self) -> Vec<PastedImage> {
+        std::mem::take(&mut self.0)
+    }
+}
+
 impl StashedPrompt {
     pub(crate) fn from_submission(
         text: String,
@@ -2902,6 +2942,45 @@ impl PromptWidget {
         );
     }
 
+    /// Adopt previously drained images by binding them to the `[Image #N]`
+    /// placeholders already present in the buffer, matched by display
+    /// number. The `/feedback` pane uses this to turn an inline command's
+    /// pasted attachments back into live, removable chips inside the
+    /// prefill text. Images without a matching placeholder are cleaned up:
+    /// nothing in the buffer references them, so they could never be
+    /// removed by the user nor drained for send.
+    pub fn adopt_images(&mut self, mut images: Vec<PastedImage>) {
+        if images.is_empty() {
+            return;
+        }
+        let text = self.textarea.text().to_owned();
+        let mut chips: Vec<crate::app::agent::ChipElement> = Vec::new();
+        let mut adopted: Vec<PastedImage> = Vec::new();
+        for m in chip_placeholder_regex().find_iter(&text) {
+            // The `:`-suffixed regex arm never parses (no closing bracket
+            // in the match), which is correct: only the canonical
+            // `[Image #N]` emitter form carries an exact chip range.
+            let Some(number) = parse_image_display_number(m.as_str()) else {
+                continue;
+            };
+            let Some(pos) = images.iter().position(|img| img.display_number == number) else {
+                continue;
+            };
+            chips.push(crate::app::agent::ChipElement {
+                range: m.range(),
+                kind: KIND_IMAGE,
+                display: Some(chip_line(format!("Image #{number}"))),
+            });
+            adopted.push(images.remove(pos));
+        }
+        crate::prompt_images::drain_and_cleanup(&mut images);
+        if adopted.is_empty() {
+            return;
+        }
+        self.restore_chip_elements(&chips);
+        self.set_images(adopted);
+    }
+
     /// Expose the underlying textarea for element access.
     pub fn textarea(&self) -> &xai_ratatui_textarea::TextArea {
         &self.textarea
@@ -3182,29 +3261,26 @@ impl PromptWidget {
                 }
             }
 
-            // Session title inlined in the divider (` title `, right-aligned
-            // ending 2 cells before ╮) in the shared chrome-caption style;
-            // the pad spaces blank the adjacent `─`.
-            if let Some(title) = style
+            // Caption inlined in the divider, right-aligned ending 2 cells before ╮.
+            // The pad spaces blank the adjacent `─`; corners plus 2-cell insets stay plain border.
+            let caption = style
                 .title
                 .as_deref()
                 .map(str::trim)
-                .filter(|t| !t.is_empty())
+                .filter(|t| !t.is_empty());
+            let max_w = area.width.saturating_sub(6);
+            if let Some(caption) = caption
+                && max_w >= 6
             {
-                // Corners plus 2-cell insets on both sides stay plain border.
-                let max_w = area.width.saturating_sub(6);
-                if max_w >= 6 {
-                    let label = format!(" {title} ");
-                    let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
-                    let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
-                    let x = area.x + area.width.saturating_sub(3 + label_w);
-                    buf.set_string(
-                        x,
-                        div_y,
-                        &trunc,
-                        Self::chrome_caption_style(bg, &theme, style.focused),
-                    );
-                }
+                let label = format!(" {caption} ");
+                let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
+                let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
+                buf.set_string(
+                    area.x + area.width.saturating_sub(3 + label_w),
+                    div_y,
+                    &trunc,
+                    Self::chrome_caption_style(bg, &theme, style.focused),
+                );
             }
         }
 
@@ -3261,7 +3337,10 @@ impl PromptWidget {
         // same snapshot, so clone once. Capture flags for later ghost text
         // suppression to avoid a second clone.
         let (slash_active, slash_has_inline_ghost) = {
-            let snap = self.slash_state.snapshot();
+            let snap = crate::views::slash_dropdown::localized_snapshot(
+                self.slash_state.snapshot(),
+                locale,
+            );
 
             // Slash command-name highlight color. Minimal mode is monochrome, so
             // recolor to primary text (no visible accent) — typed `/commands`

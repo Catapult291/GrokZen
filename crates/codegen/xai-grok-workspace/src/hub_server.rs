@@ -969,6 +969,15 @@ impl WorkspaceRpcHandler {
             <WorktreeShowReq as WorkspaceRpc>::METHOD => {
                 dispatch_op::<WorktreeShowReq>(params, &self.workspace, None).await
             }
+            <WorktreeDetachReq as WorkspaceRpc>::METHOD => {
+                dispatch_op::<WorktreeDetachReq>(params, &self.workspace, None).await
+            }
+            <WorktreeSalvageReq as WorkspaceRpc>::METHOD => {
+                dispatch_op::<WorktreeSalvageReq>(params, &self.workspace, None).await
+            }
+            <WorktreeCleanArtifactsReq as WorkspaceRpc>::METHOD => {
+                dispatch_op::<WorktreeCleanArtifactsReq>(params, &self.workspace, None).await
+            }
             <WorktreeGcReq as WorkspaceRpc>::METHOD => {
                 dispatch_op::<WorktreeGcReq>(params, &self.workspace, None).await
             }

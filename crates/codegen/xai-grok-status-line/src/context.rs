@@ -42,23 +42,16 @@ pub struct StatusLineContext {
     pub worktree: Option<StatusLineWorktree>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn: Option<StatusLineTurn>,
-    /// Why this run was invoked. Stamped by the client per run, like
-    /// `session_name`: present on a command row's stdin, absent from the
-    /// notification, which describes the session rather than a run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trigger: Option<StatusLineTrigger>,
 }
 
-/// What invoked a command run, so a script can hit the network on `poll`
-/// and read its cache on `state` instead of curling three times a second
-/// through a turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StatusLineTrigger {
-    /// A session state change, or the continuous refresh during a turn.
     State,
-    /// The `refresh_interval` timer, which fires even on an idle session.
-    Poll,
+    #[serde(rename = "refresh_interval")]
+    RefreshInterval,
 }
 
 impl Default for StatusLineContext {

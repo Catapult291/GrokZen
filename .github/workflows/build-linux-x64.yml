@@ -1,0 +1,345 @@
+# 在 GitHub 托管的 Ubuntu runner 上构建 Linux x86_64 GNU 预览版。
+# 当前 Linux 资产只上传到 Actions Artifact，不加入正式 Release。
+name: Build Linux x64 GNU
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 正式构建使用的严格 SemVer；预览构建留空即可
+        required: false
+        default: ''
+        type: string
+      release_build:
+        description: 标记是否由正式发布流程调用
+        required: true
+        type: boolean
+    outputs:
+      package_name:
+        value: ${{ jobs.build-linux-x64.outputs.package_name }}
+      archive_name:
+        value: ${{ jobs.build-linux-x64.outputs.archive_name }}
+      artifact_name:
+        value: ${{ jobs.build-linux-x64.outputs.artifact_name }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-x64-gnu-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux-x64:
+    name: ${{ inputs.release_build && 'Linux x64 GNU Release' || 'Linux x64 GNU 预览版' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      package_name: ${{ steps.package_meta.outputs.package_name }}
+      archive_name: ${{ steps.package_meta.outputs.archive_name }}
+      artifact_name: ${{ steps.package_meta.outputs.artifact_name }}
+    env:
+      CARGO_BUILD_JOBS: "3"
+      CARGO_CACHE_SCHEMA: linux-x64-v1
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      RUSTUP_TOOLCHAIN: 1.94.0-x86_64-unknown-linux-gnu
+      TARGET: x86_64-unknown-linux-gnu
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: 选择构建版本
+        id: package_meta
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="$REQUESTED_VERSION"
+          if [[ "$IS_RELEASE_BUILD" == "true" \
+            && -z "$(printf '%s' "$requested" | tr -d '[:space:]')" ]]; then
+            echo "::error::正式构建必须显式提供严格 SemVer 版本。"
+            exit 1
+          fi
+          if [[ -z "$(printf '%s' "$requested" | tr -d '[:space:]')" ]]; then
+            package_version="$(sed -nE 's/^version[[:space:]]*=[[:space:]]*"([^"]+)"[[:space:]]*$/\1/p' \
+              crates/codegen/xai-grok-pager-bin/Cargo.toml | head -n 1)"
+            if [[ -z "$package_version" ]]; then
+              echo "::error::无法读取 pager-bin 软件包版本。"
+              exit 1
+            fi
+            version="$package_version-zh.ci.$GITHUB_RUN_NUMBER"
+          else
+            version="$(printf '%s' "$requested" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+          fi
+          semver_pattern='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if (( ${#version} > 64 )) || [[ ! "$version" =~ $semver_pattern ]]; then
+            echo "::error::版本无效：$version"
+            exit 1
+          fi
+          package_name="grok-zh-$version-linux-x86_64-gnu"
+          archive_name="$package_name.tar.gz"
+          {
+            echo "GROK_VERSION=$version"
+            echo "PACKAGE_NAME=$package_name"
+            echo "ARCHIVE_NAME=$archive_name"
+          } >> "$GITHUB_ENV"
+          {
+            echo "package_name=$package_name"
+            echo "archive_name=$archive_name"
+            echo "artifact_name=$package_name-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 安装 Linux 构建依赖
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            binutils build-essential ca-certificates clang cmake curl file \
+            libasound2-dev libclang-dev libdbus-1-dev libssl-dev nasm pkg-config
+
+      - name: 配置固定版本的 Rust 与构建目录
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" \
+            --profile minimal --component rustfmt
+          rustup target add --toolchain "$RUSTUP_TOOLCHAIN" "$TARGET"
+          cargo_home="$RUNNER_TEMP/grok-zh-cargo"
+          target_dir="$RUNNER_TEMP/grok-zh-target"
+          dotslash_cache="$RUNNER_TEMP/grok-zh-dotslash"
+          tools_dir="$RUNNER_TEMP/grok-zh-tools"
+          mkdir -p "$cargo_home" "$target_dir" "$dotslash_cache" "$tools_dir/bin"
+          echo "$tools_dir/bin" >> "$GITHUB_PATH"
+          {
+            echo "CARGO_HOME=$cargo_home"
+            echo "CARGO_TARGET_DIR=$target_dir"
+            echo "DOTSLASH_CACHE=$dotslash_cache"
+            echo "TOOLS_DIR=$tools_dir"
+            echo "PROTOC=$GITHUB_WORKSPACE/bin/protoc"
+          } >> "$GITHUB_ENV"
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: 恢复 Cargo 依赖与工具缓存
+        id: cargo_home_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/grok-zh-cargo/registry
+            ${{ runner.temp }}/grok-zh-cargo/git
+            ${{ runner.temp }}/grok-zh-dotslash
+            ${{ runner.temp }}/grok-zh-tools
+          key: grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-
+            grok-zh-cargo-home-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-
+
+      - name: 恢复 Cargo Linux release-dist 缓存
+        id: cargo_target_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release-dist
+          key: grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml', 'bin/protoc') }}-
+            grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-
+
+      - name: 安装并验证 DotSlash 与 protoc
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -x "$TOOLS_DIR/bin/dotslash" ]]; then
+            cargo install --locked --version 0.5.9 --root "$TOOLS_DIR" dotslash
+          fi
+          chmod 0755 "$TOOLS_DIR/bin/dotslash" "$PROTOC"
+          "$TOOLS_DIR/bin/dotslash" --version
+          "$PROTOC" --version
+
+      - name: 验证格式与基础本地化
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all -- --check
+          cargo fetch --locked --target "$TARGET"
+          cargo test --frozen -j "$CARGO_BUILD_JOBS" -p xai-grok-locale
+
+      - name: 构建 Linux x86_64 GNU
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --frozen -j "$CARGO_BUILD_JOBS" \
+            --target "$TARGET" \
+            -p xai-grok-pager-bin \
+            --profile release-dist \
+            --features release-dist
+
+      - name: 打包并验证 Linux 构建
+        env:
+          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dist="$GITHUB_WORKSPACE/dist"
+          package="$dist/$PACKAGE_NAME"
+          built_bin="$CARGO_TARGET_DIR/$TARGET/release-dist/grok-zh"
+          mkdir -p "$package"
+          if [[ ! -f "$built_bin" ]]; then
+            echo "::error::找不到编译产物：$built_bin"
+            exit 1
+          fi
+          cp "$built_bin" "$package/grok-zh"
+          chmod 0755 "$package/grok-zh"
+          cp LICENSE "$package/LICENSE-grok-build.txt"
+          cp SOURCE_REV "$package/SOURCE_REV"
+          cp THIRD-PARTY-NOTICES "$package/THIRD-PARTY-NOTICES.txt"
+          cp crates/codegen/xai-grok-tools/THIRD_PARTY_NOTICES.md \
+            "$package/THIRD-PARTY-NOTICES-xai-grok-tools.md"
+          cp third_party/NOTICE "$package/NOTICE-third-party.txt"
+          cp packaging/linux/INSTALL-LINUX.md "$package/INSTALL-LINUX.md"
+
+          binary_info="$(file "$package/grok-zh")"
+          machine_info="$(readelf -h "$package/grok-zh" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+          if [[ "$binary_info" != *"ELF 64-bit"* ]] || [[ "$machine_info" != "Advanced Micro Devices X86-64" ]]; then
+            echo "::error::产物不是 x86_64 ELF：$binary_info；Machine=$machine_info"
+            exit 1
+          fi
+          version_output="$("$package/grok-zh" --version | head -n 1)"
+          if [[ "$version_output" != "grok-zh $GROK_VERSION ("* ]]; then
+            echo "::error::grok-zh 版本冒烟失败：$version_output"
+            exit 1
+          fi
+          source_rev="$(tr -d '\r\n' < SOURCE_REV)"
+          rustc_info="$(rustc --version)"
+          cargo_info="$(cargo --version)"
+          dotslash_info="$(dotslash --version | head -n 1)"
+          protoc_info="$("$PROTOC" --version | head -n 1)"
+          dynamic_info="$(ldd "$package/grok-zh" || true)"
+          if [[ "$IS_RELEASE_BUILD" == "true" ]]; then
+            build_label="Release 候选"
+          else
+            build_label="CI 预览版"
+          fi
+          {
+            echo "Grok Build 简体中文 Linux x86_64 GNU $build_label"
+            echo "Product: grok-build-zh"
+            echo "License: Apache-2.0"
+            echo "Version: $GROK_VERSION"
+            echo "Commit: $GITHUB_SHA"
+            echo "Upstream source revision: $source_rev"
+            echo "Repository: $GITHUB_REPOSITORY"
+            echo "Target: $TARGET"
+            echo "Profile: release-dist (Thin LTO, codegen-units=1, split-debuginfo=off)"
+            echo "Rust: $rustc_info"
+            echo "Cargo: $cargo_info"
+            echo "DotSlash: $dotslash_info"
+            echo "Protoc: $protoc_info"
+            echo "ELF: $binary_info"
+            echo "Machine: $machine_info"
+            echo "Binary version smoke-tested by CI: true"
+            echo "Automatic update support: false (Actions preview artifact only)"
+            echo "Dynamic dependencies:"
+            printf '%s\n' "$dynamic_info"
+          } > "$package/BUILD-INFO.txt"
+
+          manifest_files=(
+            grok-zh
+            BUILD-INFO.txt
+            INSTALL-LINUX.md
+            LICENSE-grok-build.txt
+            NOTICE-third-party.txt
+            SOURCE_REV
+            THIRD-PARTY-NOTICES.txt
+            THIRD-PARTY-NOTICES-xai-grok-tools.md
+          )
+          : > "$package/SHA256SUMS.txt"
+          for name in "${manifest_files[@]}"; do
+            (
+              cd "$package"
+              sha256sum "$name"
+            ) >> "$package/SHA256SUMS.txt"
+          done
+          (
+            cd "$package"
+            sha256sum -c SHA256SUMS.txt
+          )
+
+          archive="$dist/$ARCHIVE_NAME"
+          tar --format=ustar -C "$package" -czf "$archive" .
+          (
+            cd "$dist"
+            sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
+            sha256sum -c "$ARCHIVE_NAME.sha256"
+          )
+          tar -tzf "$archive"
+          verify_root="$RUNNER_TEMP/grok-zh-linux-verify-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ -e "$verify_root" ]]; then
+            echo "::error::验证目录已经存在：$verify_root"
+            exit 1
+          fi
+          mkdir -p "$verify_root"
+          tar -xzf "$archive" -C "$verify_root"
+          (
+            cd "$verify_root"
+            sha256sum -c SHA256SUMS.txt
+          )
+          verify_version_output="$("$verify_root/grok-zh" --version | head -n 1)"
+          if [[ "$verify_version_output" != "grok-zh $GROK_VERSION ("* ]]; then
+            echo "::error::解包后的 grok-zh 版本冒烟失败：$verify_version_output"
+            exit 1
+          fi
+          ls -lh "$archive" "$archive.sha256"
+
+      - name: 上传 Linux x86_64 GNU 构建
+        id: preview_artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.package_meta.outputs.artifact_name }}
+          path: |
+            dist/${{ steps.package_meta.outputs.archive_name }}
+            dist/${{ steps.package_meta.outputs.archive_name }}.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: 在摘要中发布制品详情
+        shell: bash
+        run: |
+          {
+            echo "## Linux x86_64 GNU 预览版"
+            echo
+            echo "- 版本：$GROK_VERSION"
+            echo "- 制品：$PACKAGE_NAME"
+            echo "- Actions Artifact：${{ steps.preview_artifact.outputs.artifact-url }}"
+            echo "- Actions Artifact SHA-256：${{ steps.preview_artifact.outputs.artifact-digest }}"
+            echo "- 目标：$TARGET"
+            echo "- 软件包外层校验：$ARCHIVE_NAME.sha256"
+            echo "- 软件包内层校验：SHA256SUMS.txt"
+            echo "- 已验证 ELF 架构、包内外校验和及解包后的 grok-zh --version。"
+            echo "- 当前仅为 Actions 预览制品，不加入 Release，也不启用自动更新。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 保存 Cargo Linux release-dist 缓存
+        if: ${{ success() && !inputs.release_build && github.ref == 'refs/heads/zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release-dist
+          key: ${{ steps.cargo_target_cache.outputs.cache-primary-key }}
+
+      - name: 保存 Cargo 依赖与工具缓存
+        if: ${{ success() && !inputs.release_build && github.ref == 'refs/heads/zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ runner.temp }}/grok-zh-cargo/registry
+            ${{ runner.temp }}/grok-zh-cargo/git
+            ${{ runner.temp }}/grok-zh-dotslash
+            ${{ runner.temp }}/grok-zh-tools
+          key: ${{ steps.cargo_home_cache.outputs.cache-primary-key }}

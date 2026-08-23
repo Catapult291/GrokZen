@@ -25,7 +25,7 @@ use crate::permission::gate_preflight::GatePreflight;
 use crate::permission::policy::{CompiledPolicy, ShellWord};
 use crate::permission::prompter::{AcpPrompter, PromptOutcome, PromptOutcomeKind};
 use crate::permission::shell_access::{
-    command_write_paths_in_tree, edit_target_protection, is_safe_write_sink, tree_has_opaque_shell,
+    command_write_paths_split, edit_target_protection, is_safe_write_sink, tree_has_opaque_shell,
     words_are_opaque_shell,
 };
 use crate::permission::state::{
@@ -617,6 +617,10 @@ struct BashEvaluation {
     /// single source for grant/sandbox floor disposition and classifier
     /// evidence. `ExecOrAmbientGit` may be added later by the ambient git scan.
     assessment: BashSecurityAssessment,
+    /// An unsafe write target came from a redirect (`> f`), which allow-rule
+    /// word matching cannot see — so no configured allow rule may vouch for it.
+    /// `true` (fail closed) on undecomposable scripts.
+    redirect_write: bool,
     /// Raw segment word lists for ambient cwd tracking (git present, flags clean).
     ambient_segments: Option<Vec<Vec<String>>>,
 }
@@ -668,12 +672,23 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             exact_grant,
             all_segments_granted: false,
             assessment,
+            redirect_write: true,
             ambient_segments: None,
         };
     };
-    if command_write_paths_in_tree(tree.root_node(), cmd)
-        .into_iter()
-        .any(|path| !is_safe_write_sink(&path))
+    let writes = command_write_paths_split(tree.root_node(), cmd);
+    // An unextractable write-redirect target (`> $OUT`) is a write nothing can
+    // vouch for: it both counts as FileWrite and pins `redirect_write`.
+    let redirect_write = writes.unextracted_write_redirect
+        || writes
+            .redirect_paths
+            .iter()
+            .any(|path| !is_safe_write_sink(path));
+    if redirect_write
+        || writes
+            .word_paths
+            .iter()
+            .any(|path| !is_safe_write_sink(path))
     {
         assessment.insert(Finding::FileWrite);
     }
@@ -699,6 +714,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
             exact_grant,
             all_segments_granted: false,
             assessment,
+            redirect_write: true,
             ambient_segments: None,
         };
     };
@@ -750,6 +766,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
                 exact_grant,
                 all_segments_granted,
                 assessment: std::mem::take(&mut assessment),
+                redirect_write,
                 ambient_segments: None,
             };
         }
@@ -835,6 +852,7 @@ fn evaluate_bash(cmd: &str, state: &PermissionState, honor_safe_lists: bool) -> 
         exact_grant,
         all_segments_granted,
         assessment,
+        redirect_write,
         ambient_segments,
     }
 }
@@ -1187,6 +1205,21 @@ fn persisted_bash_auto_allows(
 /// [`BashSecurityAssessment`] — no re-derivation of per-effect fields.
 fn bash_request_floor_requires_prompt(evaluation: Option<&BashEvaluation>) -> bool {
     evaluation.is_some_and(|e| !e.exact_grant && e.assessment.constrains_broad_grant())
+}
+
+/// Whether a configured allow rule clears the bash request floor in ask/dontAsk
+/// (GB-5153). Requires ALL of: the assessment is `FileWrite`-only (other floor
+/// findings describe effects outside the rule's matched words), the writes are
+/// command-word operands rather than redirects (which word matching cannot
+/// see), and narrow allow rules authorize every segment (`Bash(*)` catch-alls
+/// stay floored). Auto mode instead routes floored commands to its classifier.
+fn narrow_allow_clears_write_floor(
+    evaluation: Option<&BashEvaluation>,
+    policy: Option<&CompiledPolicy>,
+    access: &AccessKind,
+) -> bool {
+    evaluation.is_some_and(|e| e.assessment.is_file_write_only() && !e.redirect_write)
+        && policy.is_some_and(|p| p.narrow_allow_authorizes(access))
 }
 
 /// A request has no static-analysis findings at all — the only case where a
@@ -2210,7 +2243,13 @@ fn spawn_permission_manager_with_pin(
                         Some(Decision::Allow)
                             if protected_edit.is_some()
                                 || auto_forced_prompt
-                                || bash_request_floor_requires_prompt(bash_evaluation.as_ref()) =>
+                                || (bash_request_floor_requires_prompt(
+                                    bash_evaluation.as_ref(),
+                                ) && !narrow_allow_clears_write_floor(
+                                    bash_evaluation.as_ref(),
+                                    compiled_policy.as_ref(),
+                                    &access,
+                                )) =>
                         {
                             // Auto forced a prompt (classifier timeout/unavailable/
                             // denial-limit on a findings-bearing command): a broad
@@ -5740,6 +5779,126 @@ mod tests {
                     assert!(matches!(decision, Decision::Reject(_)), "{cmd}");
                 }
                 assert_eq!(prompts.borrow().len(), 2);
+            })
+            .await;
+    }
+
+    /// `redirect_write` provenance: word-operand writes leave it false; literal
+    /// and unextractable (`> $OUT`) redirect targets pin it true (fail closed),
+    /// so `narrow_allow_clears_write_floor` can never vouch for a redirect.
+    #[test]
+    fn evaluate_bash_pins_redirect_write_provenance() {
+        let state = PermissionState::default();
+        assert!(!evaluate_bash("touch CANARY", &state, true).redirect_write);
+        assert!(evaluate_bash("cat payload > out", &state, true).redirect_write);
+        assert!(evaluate_bash("touch CANARY > $OUT", &state, true).redirect_write);
+        // Safe sinks are not real file writes.
+        assert!(!evaluate_bash("cat payload > /dev/null", &state, true).redirect_write);
+    }
+
+    /// GB-5153: a narrow allow rule clears the FileWrite floor for word-operand
+    /// writes — `Bash(touch:*)` + `touch CANARY` auto-allows as `policy_allow`
+    /// in ask AND dontAsk (headless auto-cancels prompts, so the old floor made
+    /// allowlists unusable for writes).
+    #[tokio::test]
+    async fn narrow_bash_allow_clears_word_visible_write_floor() {
+        use crate::permission::rules::parse_permission_rule;
+        use crate::permission::types::{PermissionConfig, RuleAction};
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                for prompt_policy in [PromptPolicy::Ask, PromptPolicy::Deny] {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let rule = parse_permission_rule("Bash(touch:*)", RuleAction::Allow).unwrap();
+                    let mut config = PermissionConfig::new(vec![rule]);
+                    config.prompt_policy = prompt_policy;
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, mut events) = manager_with_recording_client(
+                        &cwd,
+                        Some(config),
+                        client,
+                        ClientType::Generic,
+                    );
+                    let d = mgr
+                        .request(
+                            AccessKind::Bash("touch CANARY".into()),
+                            tool_call(),
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                    assert_eq!(
+                        d,
+                        Decision::Allow,
+                        "narrow allow must clear the write floor ({prompt_policy:?})"
+                    );
+                    let ev = events.try_recv().expect("event must be emitted");
+                    assert_eq!(ev.decision_reason.as_deref(), Some(reasons::POLICY_ALLOW));
+                    assert!(!ev.user_prompted);
+                    assert_eq!(prompts.borrow().len(), 0, "{prompt_policy:?}");
+                }
+            })
+            .await;
+    }
+
+    /// The narrow-allow floor exception must NOT extend to effects the rule's
+    /// matcher cannot see: redirect writes, mixed findings (env injection), and
+    /// catch-all rules all stay floored to a prompt.
+    #[tokio::test]
+    async fn narrow_bash_allow_does_not_clear_invisible_or_mixed_floors() {
+        use crate::permission::rules::parse_permission_rule;
+        use crate::permission::types::{PermissionConfig, RuleAction};
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                // (rule, command): each would auto-allow under the GB-5153
+                // exception if its guard were dropped.
+                let cases = [
+                    // Redirect write: `Bash(cat:*)` matches words "cat payload"
+                    // but the `> out` write is invisible to the matcher.
+                    ("Bash(cat:*)", "cat payload > out"),
+                    // Unextractable redirect target (Bugbot): the write exists
+                    // but nothing can vouch for it.
+                    ("Bash(touch:*)", "touch CANARY > $OUT"),
+                    // Mixed findings: env injection alongside the word write.
+                    ("Bash(touch:*)", "LD_PRELOAD=/x/e.so touch CANARY"),
+                    // Catch-all: `narrow_allow_authorizes` excludes it.
+                    ("Bash(*)", "touch CANARY"),
+                ];
+                for (rule_str, cmd) in cases {
+                    let tmp = tempfile::tempdir().unwrap();
+                    let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                    let rule = parse_permission_rule(rule_str, RuleAction::Allow).unwrap();
+                    let config = PermissionConfig::new(vec![rule]);
+                    let client = RecordingClient::default();
+                    let prompts = client.prompts.clone();
+                    let (mgr, mut events) = manager_with_recording_client(
+                        &cwd,
+                        Some(config),
+                        client,
+                        ClientType::Generic,
+                    );
+                    let d = mgr
+                        .request(AccessKind::Bash(cmd.into()), tool_call(), None, None, None)
+                        .await;
+                    assert!(
+                        matches!(d, Decision::Reject(_)),
+                        "{rule_str} + {cmd} must stay floored, got {d:?}"
+                    );
+                    assert_eq!(prompts.borrow().len(), 1, "{rule_str} + {cmd}");
+                    let ev = events.try_recv().expect("event must be emitted");
+                    assert!(ev.user_prompted, "{rule_str} + {cmd}");
+                    assert_ne!(
+                        ev.decision_reason.as_deref(),
+                        Some(reasons::POLICY_ALLOW),
+                        "{rule_str} + {cmd}"
+                    );
+                }
             })
             .await;
     }

@@ -57,6 +57,7 @@ use crate::app::actions::{
     TaskResult,
 };
 use crate::app::agent::AgentId;
+use crate::app::agent_view::AgentDeferredSend;
 use crate::app::app_view::{ActiveView, AppView, AuthState};
 use crate::scrollback::block::RenderBlock;
 use agent_client_protocol as acp;
@@ -190,11 +191,9 @@ fn drain_clipboard_target(target: &ClipboardPasteTarget, app: &mut AppView) -> V
                 return vec![];
             };
             let resend = agent.take_deferred_send_after_paste();
-            let action = if is_active {
-                resend.and_then(|kind| agent.build_deferred_send_action(kind))
-            } else {
-                None
-            };
+            let action = resend
+                .filter(|kind| is_active || matches!(kind, AgentDeferredSend::Stash))
+                .and_then(|kind| agent.resume_deferred_send(kind));
             let mut effects = std::mem::take(&mut agent.pending_effects);
             if let Some(action) = action {
                 effects.extend(dispatch(action, app));
@@ -920,7 +919,6 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 && agent.session.session_id.as_ref() == Some(&session_id)
                 && let Some(ref mut modal) = agent.extensions_modal
             {
-                modal.seed_workflows_group_once();
                 modal.workflows_data = match result {
                     Ok(workflows) => TabDataState::Loaded(workflows),
                     Err(e) => TabDataState::Error(e),
@@ -1304,6 +1302,18 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 agent
                     .scrollback
                     .push_block(crate::scrollback::block::RenderBlock::system(message));
+            }
+            vec![]
+        }
+        TaskResult::FeedbackTraceUploaded { agent_id, error } => {
+            if let Some(error) = error
+                && let Some(agent) = app.agents.get_mut(&agent_id)
+            {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::system(format!(
+                        "Couldn't upload a session trace; your feedback was still sent. {error}"
+                    )));
             }
             vec![]
         }

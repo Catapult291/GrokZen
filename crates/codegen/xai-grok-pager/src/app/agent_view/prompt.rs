@@ -19,42 +19,49 @@ impl AgentView {
         self.session.prompt_history_loading && self.prompt.text().is_empty()
     }
 
-    /// Build the combined prompt history, deduped by `text.trim()`: this
-    /// session's prompts first (scrollback `UserPrompt` blocks, newest
+    /// Build the combined prompt history, deduped by `text.trim()`: unsent
+    /// drafts first (the stash, then drafts it replaced), then this
+    /// session's prompts (scrollback `UserPrompt` blocks, newest
     /// first), then the fetched history (`session.prompt_history`).
     ///
-    /// Scrollback-first is load-bearing: the fetch races the shell-side
-    /// append of a fresh session's first prompts (and `PromptHistoryLoaded`
-    /// replaces the local list), so a just-sent prompt may exist only as a
-    /// scrollback block — it must still rank newest.
+    /// Drafts rank ahead of sent prompts so Up reaches a set-aside draft first.
+    /// Scrollback-before-fetched is load-bearing: the fetch races the
+    /// shell-side append of a fresh session's first prompts (and
+    /// `PromptHistoryLoaded` replaces the local list), so a just-sent prompt
+    /// may exist only as a scrollback block and must still rank newest.
     pub fn combined_prompt_history(&self) -> Vec<crate::views::history_search::HistoryEntry> {
         use crate::scrollback::block::RenderBlock;
         use crate::views::history_search::HistoryEntry;
         use std::collections::HashSet;
 
+        fn push_unique(out: &mut Vec<HistoryEntry>, seen: &mut HashSet<String>, text: String) {
+            let key = text.trim().to_string();
+            if !key.is_empty() && seen.insert(key) {
+                out.push(HistoryEntry { text });
+            }
+        }
+
         let mut seen: HashSet<String> = HashSet::new();
         let mut history = Vec::new();
+
+        if let Some(entry) = &self.prompt_stash {
+            push_unique(&mut history, &mut seen, entry.history_text());
+        }
+
+        for text in &self.prompt_stash_evicted {
+            push_unique(&mut history, &mut seen, text.clone());
+        }
 
         for i in (0..self.scrollback.len()).rev() {
             if let Some(entry) = self.scrollback.entry(i)
                 && let RenderBlock::UserPrompt(block) = &entry.block
             {
-                let key = block.text.trim().to_string();
-                if !key.is_empty() && seen.insert(key) {
-                    history.push(HistoryEntry {
-                        text: block.text.clone(),
-                    });
-                }
+                push_unique(&mut history, &mut seen, block.text.clone());
             }
         }
 
         for prompt in &self.session.prompt_history {
-            let key = prompt.trim().to_string();
-            if !key.is_empty() && seen.insert(key) {
-                history.push(HistoryEntry {
-                    text: prompt.clone(),
-                });
-            }
+            push_unique(&mut history, &mut seen, prompt.clone());
         }
 
         history
@@ -435,40 +442,25 @@ impl AgentView {
 
         // 0b. (History-panel intercept lives at the top of this fn.)
 
-        // 0c. Prompt history panel. Two entry points, one panel:
-        //   - /history: search mode — the composer is the filter query.
-        //   - Up on an empty prompt: browse mode — opens with the newest
-        //     prompt filled into the composer; Up/Down step with
-        //     live-populate, Down at the newest closes, typing detaches to
-        //     edit. Down never opens the panel.
-        // Browse activation is Normal-input-mode only (recalling a chat
-        // prompt into a Bash/Remember composer would submit it under that
-        // mode); a recalled `! cmd` entry flips the composer to Bash itself.
+        // 0c. Up on an empty prompt: the queue claims it, the prompt history panel takes it when the queue is empty. Two entry points, one panel:
+        //   - /history: search mode, the composer is the filter query.
+        //   - Up on an empty prompt: browse mode, opens with the newest prompt filled into the composer.
+        //     Up/Down step with live-populate, Down at the newest closes, typing detaches to edit. Down never opens the panel.
+        // Browse activation is Normal-input-mode only (recalling a chat prompt into a Bash/Remember composer would submit it under that mode).
+        // A recalled `! cmd` entry flips the composer to Bash itself.
         if self.prompt_mode == PromptMode::Normal
             && self.prompt.text().is_empty()
             && !self.prompt.file_search_visible()
             && key!(Up).matches(key)
             && self.prompt_input_mode == PromptInputMode::Normal
         {
-            let history = self.combined_prompt_history();
-            let current_text = self.prompt.text().to_string();
-            if !history.is_empty() {
-                // Activation fails when the matcher thread can't start; then
-                // the panel can never populate, and filling the composer
-                // would only be undone by the next Down/Enter.
-                let opened = self
-                    .prompt
-                    .history_search
-                    .activate_browse(&history, &current_text);
-                if opened {
-                    // The daemon fills the panel async; fill the newest
-                    // entry deterministically from the input slice.
-                    let newest = history[0].text.clone();
-                    self.populate_prompt_from_history(&newest);
-                }
+            // The queue holds the text just written, newer than any history entry.
+            if let Some(outcome) = self.try_focus_queue_from_prompt() {
+                return outcome;
             }
-            // Consumed even with empty history (Up on an empty composer
-            // has no cursor motion to fall back to).
+
+            self.open_history_browse_at_newest();
+            // Consumed even with empty history (Up on an empty composer has no cursor motion to fall back to).
             return InputOutcome::Changed;
         }
 
@@ -659,6 +651,7 @@ impl AgentView {
                             // Drain images BEFORE set_text("") wipes the chip elements.
                             let images = self.prompt.drain_images();
                             self.prompt.set_text("");
+                            self.note_draft_consumed();
                             return InputOutcome::Action(Action::SendPromptNow { text, images });
                         }
                     } else if turn_running
@@ -674,6 +667,18 @@ impl AgentView {
                 }
                 ActionId::ToggleMultiline => {
                     return InputOutcome::Action(Action::SetMultilineMode(!self.multiline_mode));
+                }
+                ActionId::StashPrompt => {
+                    let outcome = self.handle_stash_prompt_key();
+                    // A declined chord falls through like an unclaimed key.
+                    if !matches!(outcome, InputOutcome::Unchanged) {
+                        crate::actions::log_shortcut_used(
+                            key,
+                            ActionId::StashPrompt,
+                            When::PromptFocused.telemetry_name(),
+                        );
+                        return outcome;
+                    }
                 }
                 other => {
                     if let Some(outcome) = resolve_action(Some(other)) {
@@ -794,6 +799,25 @@ impl AgentView {
             // A dropped highlight must repaint even when nothing claims the key.
             _ if dropped_highlight => InputOutcome::Changed,
             _ => InputOutcome::Unchanged,
+        }
+    }
+
+    /// Browse mode fills the composer with the newest entry as it opens.
+    fn open_history_browse_at_newest(&mut self) {
+        let history = self.combined_prompt_history();
+        let current_text = self.prompt.text().to_string();
+        if !history.is_empty() {
+            // Activation fails when the matcher thread can't start, and the panel can never populate then.
+            // Filling the composer would only be undone by the next Down/Enter.
+            let opened = self
+                .prompt
+                .history_search
+                .activate_browse(&history, &current_text);
+            // The daemon fills the panel later, so take the newest entry from the history already in hand.
+            if opened && let Some(entry) = history.first() {
+                let newest = entry.text.clone();
+                self.populate_prompt_from_history(&newest);
+            }
         }
     }
 
@@ -983,6 +1007,29 @@ impl AgentView {
         }
     }
 
+    /// Commit a recalled history entry into the composer. Shared by the keyboard accept and the
+    /// mouse click, which drifted apart once and left the mouse path holding a duplicate draft.
+    pub(in crate::app) fn accept_history_entry(&mut self, text: &str) {
+        // Restore bash mode from a `! ` history entry unless Remember is active.
+        if self.prompt_input_mode != PromptInputMode::Remember
+            && let Some(cmd) = text.strip_prefix("! ")
+        {
+            self.prompt_input_mode = PromptInputMode::Bash;
+            self.prompt.set_text(cmd);
+        } else if self.prompt_input_mode == PromptInputMode::Bash {
+            self.prompt_input_mode = PromptInputMode::Normal;
+            self.prompt.set_text(text);
+        } else {
+            self.prompt.set_text(text);
+        }
+
+        let len = self.prompt.textarea.text().len();
+        self.prompt.textarea.set_cursor(len);
+        self.reclaim_stash_recalled_into_composer();
+        // Drop the recomputed `@`-completion context (same suppression as populate).
+        self.prompt.file_search.clear_context();
+    }
+
     /// Close the history panel and restore the pre-open composer (Esc, and
     /// browse-mode Down past the newest entry).
     fn close_history_restoring_saved(&mut self) {
@@ -1022,26 +1069,9 @@ impl AgentView {
                 .map(str::to_owned)
             {
                 self.prompt.history_search.deactivate();
-                // Restore bash mode from a `! ` history entry unless Remember is active.
-                if self.prompt_input_mode != PromptInputMode::Remember
-                    && let Some(cmd) = text.strip_prefix("! ")
-                {
-                    self.prompt_input_mode = PromptInputMode::Bash;
-                    self.prompt.set_text(cmd);
-                } else if self.prompt_input_mode == PromptInputMode::Bash {
-                    self.prompt_input_mode = PromptInputMode::Normal;
-                    self.prompt.set_text(&text);
-                } else {
-                    self.prompt.set_text(&text);
-                }
-                // Move cursor to end of text.
-                let len = self.prompt.textarea.text().len();
-                self.prompt.textarea.set_cursor(len);
-                // Drop the recomputed `@`-completion context (same
-                // suppression as populate).
-                self.prompt.file_search.clear_context();
+                self.accept_history_entry(&text);
             } else {
-                // No results — just deactivate.
+                // No results, just deactivate.
                 self.close_history_restoring_saved();
             }
             return InputOutcome::Changed;
@@ -1093,6 +1123,7 @@ impl AgentView {
         // keep the populated text, and apply the key as a normal edit.
         if browse {
             self.prompt.history_search.deactivate();
+            self.reclaim_stash_recalled_into_composer();
             self.prompt.textarea.input(*key);
             // The populated text may be a slash command — refresh completion.
             self.prompt.refresh_slash(&self.session.models);
@@ -2038,5 +2069,78 @@ mod apple_terminal_ctrl_o_upgrade_cta_tests {
             matches!(outcome, InputOutcome::Changed),
             "idle Ctrl+Enter must stay a silent interject no-op, got {outcome:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod queue_recall_tests {
+    use super::*;
+    use crate::app::agent_view::test_fixtures::make_running_agent;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn up(agent: &mut AgentView) -> InputOutcome {
+        agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+    }
+
+    /// Focus lands on the bottom row, not the top one send-now takes.
+    #[test]
+    fn up_focuses_the_queue_on_its_bottom_row() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+
+        up(&mut agent);
+
+        assert_eq!(agent.active_pane, AgentPane::Queue);
+        assert!(agent.queue.overlay.focused);
+        let bottom = *agent.queue.entry_ids().last().unwrap();
+        assert_eq!(agent.queue.selected_id(), Some(bottom));
+    }
+
+    #[test]
+    fn up_leaves_the_composer_and_history_untouched() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+        agent.session.prompt_history = vec!["an older prompt".into()];
+
+        up(&mut agent);
+
+        assert!(agent.prompt.text().is_empty());
+        assert!(!matches!(
+            agent.prompt_mode,
+            PromptMode::EditingQueued { .. }
+        ));
+        assert!(!agent.prompt.history_search.is_browse());
+    }
+
+    /// Up stays cursor motion while the composer holds text.
+    #[test]
+    fn up_with_a_non_empty_composer_leaves_the_queue_alone() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+        agent.prompt.set_text("half a thought");
+
+        up(&mut agent);
+
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+        assert_eq!(agent.prompt.text(), "half a thought");
+    }
+
+    #[test]
+    fn up_falls_back_to_history_with_an_empty_queue() {
+        let mut agent = make_running_agent();
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+        agent.session.pending_prompts.clear();
+        agent.shared_queue.clear();
+        agent.sync_queue_pane();
+        agent.session.prompt_history = vec!["an older prompt".into()];
+
+        up(&mut agent);
+
+        assert_eq!(agent.active_pane, AgentPane::Prompt);
+        assert_eq!(agent.prompt.text(), "an older prompt");
     }
 }

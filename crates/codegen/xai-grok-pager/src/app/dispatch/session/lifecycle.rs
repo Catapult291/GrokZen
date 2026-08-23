@@ -563,6 +563,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
         agent_id,
         cwd: effective_cwd,
         model_id,
+        permission_mode_override: None,
         preferred_session_id,
         chat_kind,
     });
@@ -1164,6 +1165,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         label,
         git_ref,
         model_id,
+        permission_mode_override: None,
         preferred_session_id,
         chat_kind,
     }];
@@ -1230,7 +1232,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
             let message = localized_template(
                 locale.as_ref(),
                 "session.created.switch_hint",
-                "Session {session_id} \u{2014} use {command} to switch between sessions",
+                "Session {session_id}, use {command} to switch between sessions",
                 &[("{session_id}", &session_id), ("{command}", cmd)],
             );
             agent.scrollback.push_block(RenderBlock::system(message));
@@ -1296,7 +1298,7 @@ pub(in crate::app::dispatch) fn handle_session_created(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
-            nonce: 0,
+            nonce: Default::default(),
         });
         if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {
@@ -1413,7 +1415,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
         effects.push(Effect::FetchBilling {
             agent_id,
             silent: true,
-            nonce: 0,
+            nonce: Default::default(),
         });
         if let Some(switch) = deferred {
             effects.push(Effect::SwitchModel {

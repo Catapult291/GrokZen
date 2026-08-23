@@ -1801,7 +1801,7 @@ fn reconcile_error_formats_marker_and_defers_to_banner() {
 
     assert_eq!(
         run(false).as_deref(),
-        Some("Request failed \u{2014} boom. Try sending again."),
+        Some("Request failed: boom. Try sending again."),
         "the raw agent_result must render as a formatted marker"
     );
     assert_eq!(

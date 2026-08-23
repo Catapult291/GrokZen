@@ -181,6 +181,8 @@ mod tests {
                 billing_surface_visible: true,
                 usage_command_visible: true,
                 workflows_available: true,
+                saved_workflows: &[],
+                workflow_runs: &[],
                 screen_mode: crate::app::ScreenMode::Fullscreen,
                 current_title: None,
             };
@@ -205,6 +207,8 @@ mod tests {
                 billing_surface_visible: true,
                 usage_command_visible: true,
                 workflows_available: true,
+                saved_workflows: &[],
+                workflow_runs: &[],
                 screen_mode: crate::app::ScreenMode::Fullscreen,
                 current_title: None,
             };
@@ -230,6 +234,8 @@ mod tests {
                 billing_surface_visible: true,
                 usage_command_visible: true,
                 workflows_available: true,
+                saved_workflows: &[],
+                workflow_runs: &[],
                 screen_mode: crate::app::ScreenMode::Fullscreen,
                 current_title: None,
             };
@@ -256,6 +262,8 @@ mod tests {
                 billing_surface_visible: true,
                 usage_command_visible: true,
                 workflows_available: true,
+                saved_workflows: &[],
+                workflow_runs: &[],
                 screen_mode: crate::app::ScreenMode::Fullscreen,
                 current_title: None,
             };
@@ -286,6 +294,8 @@ mod tests {
                 billing_surface_visible: true,
                 usage_command_visible: true,
                 workflows_available: true,
+                saved_workflows: &[],
+                workflow_runs: &[],
                 screen_mode: crate::app::ScreenMode::Fullscreen,
                 current_title: None,
             };

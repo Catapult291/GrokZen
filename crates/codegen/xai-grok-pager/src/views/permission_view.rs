@@ -1369,7 +1369,7 @@ fn render_pattern_preview_line(
         }
         Some(pattern) if xai_grok_workspace::permission::bash_glob_is_catchall(pattern) => {
             spans.push(Span::styled(
-                "\u{2717} matches everything \u{2014} won't be saved",
+                "\u{2717} matches everything, won't be saved",
                 Style::default().fg(theme.accent_error),
             ));
             spans.push(sep);
@@ -4337,7 +4337,7 @@ mod tests {
         // Soft-fail only on auto-check issues when running the harness.
         assert!(
             issues.is_empty(),
-            "{} auto-check issue(s) — see stdout above",
+            "{} auto-check issue(s) \u{2014} see stdout above",
             issues.len()
         );
     }

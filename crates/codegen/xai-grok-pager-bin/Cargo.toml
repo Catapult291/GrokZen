@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager-bin"
-version = "1.0.6"
+version = "1.0.8"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -53,12 +53,7 @@ xai-tty-utils = { workspace = true }
 xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
 xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
-rustls = { version = "0.23", default-features = false, features = [
-    "ring",
-    "logging",
-    "std",
-    "tls12",
-] }
+xai-grok-extra-ca = { workspace = true }
 
 # Binary hardening: compile-time string + control-flow obfuscation.
 obfstr = { workspace = true }

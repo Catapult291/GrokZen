@@ -1065,6 +1065,31 @@ pub(crate) fn quit_minimal(harness: &mut PtyHarness) {
     }
 }
 
+/// Write a local non-interactive editor script into `dir` and return the
+/// quoted command to hand to `$VISUAL`. Both bodies receive the draft path
+/// as their first argument.
+pub(crate) fn fake_editor_command(
+    dir: &std::path::Path,
+    unix_body: &str,
+    windows_body: &str,
+) -> String {
+    if cfg!(windows) {
+        let script = dir.join("local-editor.cmd");
+        std::fs::write(&script, windows_body).expect("write Windows editor script");
+        format!("cmd /C '{}'", script.display())
+    } else {
+        let script = dir.join("local-editor.sh");
+        std::fs::write(&script, unix_body).expect("write Unix editor script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+                .expect("make editor executable");
+        }
+        format!("'{}'", script.display())
+    }
+}
+
 const EXIT_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn resolve_exit_status_poll<T, E>(
