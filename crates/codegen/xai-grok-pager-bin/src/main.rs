@@ -2662,10 +2662,14 @@ async fn async_main(
     match result {
         Ok(true) => {
             let adopted = bg_update_wait.lock().await.take();
+            let commands = xai_grok_update::community_command_names();
             if finish_update_on_exit(adopted).await {
-                eprintln!("更新已安装。运行 `grok-zh` 启动。");
+                eprintln!(
+                    "更新已安装。运行 `{}` 或 `{}` 启动。",
+                    commands.grok, commands.agent
+                );
             } else {
-                eprintln!("更新未完成。运行 `grok-zh update` 重试。");
+                eprintln!("更新未完成。运行 `{} update` 重试。", commands.grok);
             }
             Ok(())
         }

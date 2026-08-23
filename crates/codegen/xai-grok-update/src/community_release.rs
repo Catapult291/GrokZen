@@ -393,11 +393,19 @@ pub(crate) async fn download_verified(asset: &VerifiedAsset, destination: &Path)
         Ok(())
     }
     .await;
-    progress.finish_and_clear();
+    finish_download_progress(&progress, result.is_ok());
     if result.is_err() && created_destination {
         let _ = tokio::fs::remove_file(destination).await;
     }
     result
+}
+
+fn finish_download_progress(progress: &ProgressBar, succeeded: bool) {
+    if succeeded {
+        progress.finish();
+    } else {
+        progress.finish_and_clear();
+    }
 }
 
 fn validate_archive_layout(archive: &mut zip::ZipArchive<File>) -> Result<()> {
@@ -638,6 +646,60 @@ mod tests {
 
     use super::*;
 
+    #[derive(Clone, Debug, Default)]
+    struct RecordingTerm {
+        contents: std::sync::Arc<std::sync::Mutex<String>>,
+    }
+
+    impl RecordingTerm {
+        fn contents(&self) -> String {
+            self.contents.lock().unwrap().clone()
+        }
+    }
+
+    impl indicatif::TermLike for RecordingTerm {
+        fn width(&self) -> u16 {
+            120
+        }
+
+        fn move_cursor_up(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_down(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_right(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn move_cursor_left(&self, _n: usize) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn write_line(&self, line: &str) -> std::io::Result<()> {
+            let mut contents = self.contents.lock().unwrap();
+            contents.push_str(line);
+            contents.push('\n');
+            Ok(())
+        }
+
+        fn write_str(&self, value: &str) -> std::io::Result<()> {
+            self.contents.lock().unwrap().push_str(value);
+            Ok(())
+        }
+
+        fn clear_line(&self) -> std::io::Result<()> {
+            self.contents.lock().unwrap().clear();
+            Ok(())
+        }
+
+        fn flush(&self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn release(tag: &str, prerelease: bool, immutable: bool) -> ApiRelease {
         ApiRelease {
             tag_name: tag.to_string(),
@@ -810,6 +872,50 @@ mod tests {
                 .template(DOWNLOAD_PROGRESS_TEMPLATE)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn completed_community_download_keeps_its_final_progress() {
+        use indicatif::ProgressDrawTarget;
+
+        let terminal = RecordingTerm::default();
+        let progress = ProgressBar::with_draw_target(
+            Some(100),
+            ProgressDrawTarget::term_like(Box::new(terminal.clone())),
+        );
+        progress.set_style(
+            ProgressStyle::default_bar()
+                .template(DOWNLOAD_PROGRESS_TEMPLATE)
+                .unwrap(),
+        );
+        progress.set_position(100);
+
+        finish_download_progress(&progress, true);
+
+        assert!(terminal.contents().contains("100%"));
+    }
+
+    #[test]
+    fn failed_community_download_clears_partial_progress() {
+        use indicatif::ProgressDrawTarget;
+
+        let terminal = RecordingTerm::default();
+        let progress = ProgressBar::with_draw_target(
+            Some(100),
+            ProgressDrawTarget::term_like(Box::new(terminal.clone())),
+        );
+        progress.set_style(
+            ProgressStyle::default_bar()
+                .template(DOWNLOAD_PROGRESS_TEMPLATE)
+                .unwrap(),
+        );
+        progress.set_position(50);
+        progress.tick();
+        assert!(!terminal.contents().is_empty());
+
+        finish_download_progress(&progress, false);
+
+        assert!(terminal.contents().is_empty());
     }
 
     #[test]

@@ -1124,7 +1124,13 @@ pub(in crate::app::dispatch) fn set_follow_up_behavior(
         crate::appearance::FollowUpBehavior::Queue => "Queue",
         crate::appearance::FollowUpBehavior::Steer => "Steer",
     };
-    app.show_toast(&format!("\u{2713} Follow-up behavior: {label}"));
+    show_setting_choice_toast(
+        app,
+        "follow_up_behavior",
+        "Follow-up behavior",
+        new.as_canonical(),
+        label,
+    );
     vec![Effect::PersistSetting {
         key: "follow_up_behavior",
         value: crate::settings::SettingValue::Enum(new.as_canonical()),

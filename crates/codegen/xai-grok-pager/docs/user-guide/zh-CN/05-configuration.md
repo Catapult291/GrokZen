@@ -62,6 +62,9 @@ collapsed_edit_blocks = false          # 将编辑显示为单行 +N/-M diffstat
 page_flip_on_send = true               # 将刚发送的提示固定在视口顶部，使
                                        # 回复从新页面开始（默认：true）；设为 false
                                        # 后发送不会移动滚动位置
+follow_up_behavior = "queue"           # 轮次中途跟进："queue"（等待轮次结束，默认）或
+                                       # "steer"（普通 Enter 仍先显示在队列，然后在下一个
+                                       # 工具／模型安全间隙插话）。参见“键盘快捷键 → 活动轮次期间”。
 screen_mode = "fullscreen"             # 默认渲染模式："fullscreen" | "minimal"
                                        #（未设置 → fullscreen）；可通过 /settings → 默认屏幕模式设置
 
