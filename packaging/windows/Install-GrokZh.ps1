@@ -933,8 +933,9 @@ if ($requestedUninstallOfficial) {
 
 Write-Host ''
 Write-Host "安装完成：$InstallDir"
-Write-Host '默认命令：grok-zh、agent-zh'
 if ($provideOfficialNames) {
+    Write-Host '主启动命令：grok、agent'
+    Write-Host '兼容命令：grok-zh、agent-zh'
     Write-Host '已启用命令接管：grok 和 agent 现在使用本安装目录中的可恢复兼容脚本。'
     Write-Host '当前安装进程中的命令解析结果：'
     foreach ($commandName in @('grok', 'agent')) {
@@ -960,6 +961,8 @@ if ($provideOfficialNames) {
             Write-Warning "  $commandName 仍被其他程序、别名或 Machine Path 遮蔽；请继续使用 $commandName-zh，或检查 Get-Command $commandName -All。"
         }
     }
+} else {
+    Write-Host '默认命令：grok-zh、agent-zh'
 }
 if ($requestedUninstallOfficial) {
     Write-Host "官方命令处理结果：已将 $($movedOfficial.Count) 个文件移入备份；共享数据目录 $GrokHome 未更改。"
@@ -972,14 +975,20 @@ if ($NoPathUpdate.IsPresent) {
 Write-Host ''
 Write-Host '接下来怎么启动：' -ForegroundColor Green
 Write-Host '  1. 完全关闭已有的 PowerShell / Windows Terminal 窗口。'
-Write-Host '  2. 打开一个新终端，输入 grok-zh 启动中文版。'
-Write-Host '  3. 也可以输入 agent-zh 启动代理模式。'
 if ($provideOfficialNames) {
-    Write-Host '  4. grok 和 agent 兼容命令也已启用。'
+    Write-Host '  2. 打开一个新终端，输入 grok 启动中文版。'
+    Write-Host '  3. 也可以输入 agent 启动代理模式。'
+    Write-Host '  4. grok-zh 和 agent-zh 兼容命令仍可使用。'
 } else {
+    Write-Host '  2. 打开一个新终端，输入 grok-zh 启动中文版。'
+    Write-Host '  3. 也可以输入 agent-zh 启动代理模式。'
     Write-Host '可选方案：如希望直接输入 grok 或 agent，请双击解压包中的 [可选]替换原始启动方式.cmd。' -ForegroundColor Yellow
 }
 if ($ShowProgress.IsPresent) {
     Write-Host '通过双击入口运行时，脚本结束后会等待按键再关闭窗口，安装结果不会一闪而过。'
 }
-Write-Host '验证命令：grok-zh --version; agent-zh --help'
+if ($provideOfficialNames) {
+    Write-Host '验证命令：grok --version; agent --help'
+} else {
+    Write-Host '验证命令：grok-zh --version; agent-zh --help'
+}

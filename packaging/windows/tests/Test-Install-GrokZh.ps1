@@ -254,8 +254,13 @@ try {
     Set-Content -LiteralPath (Join-Path $fakeHome 'config.toml') -Value '# must survive' -Encoding Ascii
 
     $takeoverInstall = Join-Path $testRoot 'takeover-install'
-    & $installer -PackageDir $package -InstallDir $takeoverInstall -GrokHome $fakeHome `
-        -UninstallOfficial -NoPathUpdate -Confirm:$false
+    $takeoverOutput = @(& $installer -PackageDir $package -InstallDir $takeoverInstall -GrokHome $fakeHome `
+        -UninstallOfficial -NoPathUpdate -Confirm:$false 6>&1)
+    $takeoverOutputText = $takeoverOutput -join "`n"
+    Assert-True ($takeoverOutputText.Contains('新终端，输入 grok 启动中文版')) '命令接管后仍未提示使用 grok 启动'
+    Assert-True ($takeoverOutputText.Contains('输入 agent 启动代理模式')) '命令接管后仍未提示使用 agent 启动代理模式'
+    Assert-True (!$takeoverOutputText.Contains('新终端，输入 grok-zh 启动中文版')) '命令接管后仍把 grok-zh 显示为主启动命令'
+    Assert-True ($takeoverOutputText.Contains('验证命令：grok --version; agent --help')) '命令接管后的验证命令未切换到 grok/agent'
     Assert-True (Test-Path -LiteralPath (Join-Path $takeoverInstall 'grok.cmd')) '命令接管未创建 grok.cmd'
     Assert-True (Test-Path -LiteralPath (Join-Path $takeoverInstall 'agent.cmd')) '命令接管未创建 agent.cmd'
     Assert-True (!(Test-Path -LiteralPath (Join-Path $fakeOfficialBin 'grok.exe'))) '未移动官方 grok.exe'
