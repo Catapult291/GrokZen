@@ -564,17 +564,63 @@ jobs:
 
   linux-x64-gnu-preview:
     name: Linux x64 GNU 预览版
-    uses: ./.github/workflows/build-linux-x64.yml
-    with:
-      version: ${{ inputs.version }}
-      release_build: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      package_name: ${{ steps.build.outputs.package_name }}
+      archive_name: ${{ steps.build.outputs.archive_name }}
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+    env:
+      CARGO_BUILD_JOBS: "3"
+      CARGO_CACHE_SCHEMA: linux-x64-v1
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      DOTSLASH_VERSION: "0.5.9"
+      DOTSLASH_SHA256: 7400dd0dbdf05d3be4e604b62807eb1bcbaa0d1bced010d30746243759e0ac03
+      RUSTUP_TOOLCHAIN: 1.94.0-x86_64-unknown-linux-gnu
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: 构建并验证 Linux x64 GNU
+        id: build
+        uses: ./.github/actions/build-linux-x64
+        with:
+          version: ${{ inputs.version }}
+          release_build: 'false'
 
   macos-arm-preview:
     name: macOS ARM64 预览版
-    uses: ./.github/workflows/build-macos-arm.yml
-    with:
-      version: ${{ inputs.version }}
-      release_build: false
+    runs-on: macos-15
+    timeout-minutes: 180
+    outputs:
+      package_name: ${{ steps.build.outputs.package_name }}
+      archive_name: ${{ steps.build.outputs.archive_name }}
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+    env:
+      CARGO_BUILD_JOBS: "3"
+      CARGO_CACHE_SCHEMA: macos-arm-v1
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      RUSTUP_TOOLCHAIN: 1.94.0-aarch64-apple-darwin
+      TARGET: aarch64-apple-darwin
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: 构建并验证 macOS ARM64
+        id: build
+        uses: ./.github/actions/build-macos-arm
+        with:
+          version: ${{ inputs.version }}
+          release_build: 'false'
 
   multiplatform-result:
     name: 三端构建汇总
