@@ -204,6 +204,10 @@ try {
     Assert-True ($interactiveKeep.ExitCode -eq 0) "交互方案 1 执行失败：$($interactiveKeep.Stderr)"
     Assert-True (Test-Path -LiteralPath (Join-Path $interactiveKeepInstall 'grok.cmd')) '交互方案 1 未创建 grok.cmd'
     Assert-True (Test-Path -LiteralPath (Join-Path $interactiveKeepInstall 'agent.cmd')) '交互方案 1 未创建 agent.cmd'
+    # Windows PowerShell 5.1 redirects Chinese text through the active OEM
+    # codepage, so assert the ASCII command tokens that identify the branch.
+    Assert-True ($interactiveKeep.Stdout.Contains('grok --version; agent --help')) '交互方案 1 的验证命令未切换到 grok/agent'
+    Assert-True (!$interactiveKeep.Stdout.Contains('grok-zh --version; agent-zh --help')) '交互方案 1 仍输出普通安装的验证命令'
 
     $interactiveEofInstall = Join-Path $testRoot 'interactive-eof-install'
     $interactiveEof = Invoke-InteractiveInstaller `
