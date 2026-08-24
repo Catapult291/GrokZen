@@ -145,7 +145,6 @@ jobs:
           rustc --version --verbose
           cargo --version --verbose
           dotslash --version
-          "${PROTOC}" --version
 
       - name: 恢复 Cargo 依赖缓存
         id: cargo_home_cache
@@ -173,6 +172,8 @@ jobs:
       - name: 验证格式与基础本地化
         run: |
           set -euo pipefail
+          # protoc 会写入 DOTSLASH_CACHE，必须在缓存恢复完成后再调用。
+          "${PROTOC}" --version
           cargo fmt --all -- --check
           cargo fetch --locked --target "${TARGET}"
           cargo test --frozen -j "${CARGO_BUILD_JOBS}" -p xai-grok-locale
