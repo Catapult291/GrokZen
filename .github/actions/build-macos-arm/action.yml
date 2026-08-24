@@ -1,63 +1,30 @@
-# 在 GitHub 托管的 Apple Silicon runner 上构建未签名的 grok-zh。
-# 正式 Release 由唯一的发布工作流统一编排；本工作流只上传 Actions Artifact。
 name: Build macOS ARM
-
-on:
-  workflow_call:
-    inputs:
-      version:
-        description: 正式 Release 使用的严格 SemVer；预览构建留空即可
-        required: false
-        default: ''
-        type: string
-      release_build:
-        description: 标记这是统一 Release 工作流调用的正式构建
-        required: true
-        type: boolean
-    outputs:
-      package_name:
-        value: ${{ jobs.build-macos-arm.outputs.package_name }}
-      archive_name:
-        value: ${{ jobs.build-macos-arm.outputs.archive_name }}
-      artifact_name:
-        value: ${{ jobs.build-macos-arm.outputs.artifact_name }}
-
-permissions:
-  contents: read
-
-concurrency:
-  group: macos-arm-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  build-macos-arm:
-    name: ${{ inputs.release_build && 'macOS ARM64 Release' || 'macOS ARM64 预览版' }}
-    runs-on: macos-15
-    timeout-minutes: 180
-    outputs:
-      package_name: ${{ steps.preview.outputs.package_name }}
-      archive_name: ${{ steps.preview.outputs.archive_name }}
-      artifact_name: ${{ steps.preview.outputs.artifact_name }}
-    env:
-      CARGO_BUILD_JOBS: "3"
-      CARGO_CACHE_SCHEMA: macos-arm-v1
-      CARGO_INCREMENTAL: "0"
-      CARGO_NET_RETRY: "10"
-      CARGO_HTTP_TIMEOUT: "120"
-      RUSTUP_TOOLCHAIN: 1.94.0-aarch64-apple-darwin
-      TARGET: aarch64-apple-darwin
-
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
+description: 在 GitHub 托管的 Apple Silicon runner 上构建并验证未签名的 macOS ARM64 制品
+inputs:
+  version:
+    description: 正式 Release 使用的严格 SemVer；预览构建留空即可
+    required: false
+    default: ''
+  release_build:
+    description: 标记这是统一 Release 工作流调用的正式构建
+    required: true
+outputs:
+  package_name:
+    value: ${{ steps.preview.outputs.package_name }}
+  archive_name:
+    value: ${{ steps.preview.outputs.archive_name }}
+  artifact_name:
+    value: ${{ steps.preview.outputs.artifact_name }}
+runs:
+  using: composite
+  steps:
 
       - name: 选择构建版本
         id: preview
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
-          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
+          IS_RELEASE_BUILD: ${{ inputs.release_build }}
+        shell: bash
         run: |
           set -euo pipefail
           requested="${REQUESTED_VERSION:-}"
@@ -98,6 +65,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: 确认 Apple Silicon runner
+        shell: bash
         run: |
           set -euo pipefail
           arch="$(uname -m)"
@@ -108,6 +76,7 @@ jobs:
           fi
 
       - name: 配置固定版本的 Rust、DotSlash 和 protoc
+        shell: bash
         run: |
           set -euo pipefail
           rustup toolchain install "${RUSTUP_TOOLCHAIN}" \
@@ -170,6 +139,7 @@ jobs:
             grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-dist-
 
       - name: 验证格式与基础本地化
+        shell: bash
         run: |
           set -euo pipefail
           # protoc 会写入 DOTSLASH_CACHE，必须在缓存恢复完成后再调用。
@@ -179,6 +149,7 @@ jobs:
           cargo test --frozen -j "${CARGO_BUILD_JOBS}" -p xai-grok-locale
 
       - name: 构建 macOS ARM64
+        shell: bash
         run: |
           set -euo pipefail
           cargo build --frozen -j "${CARGO_BUILD_JOBS}" \
@@ -189,7 +160,8 @@ jobs:
 
       - name: 打包并验证未签名构建
         env:
-          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
+          IS_RELEASE_BUILD: ${{ inputs.release_build }}
+        shell: bash
         run: |
           set -euo pipefail
           dist="${GITHUB_WORKSPACE}/dist"
@@ -344,7 +316,8 @@ jobs:
 
       - name: 在摘要中发布制品详情
         env:
-          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
+          IS_RELEASE_BUILD: ${{ inputs.release_build }}
+        shell: bash
         run: |
           if [[ "${IS_RELEASE_BUILD}" == "true" ]]; then
             summary_title="macOS ARM64 Release 构建"
@@ -367,14 +340,14 @@ jobs:
           EOF
 
       - name: 保存 Cargo macOS release 缓存
-        if: ${{ success() && !inputs.release_build && github.ref == 'refs/heads/zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && inputs.release_build != 'true' && github.ref == 'refs/heads/zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release-dist
           key: ${{ steps.cargo_target_cache.outputs.cache-primary-key }}
 
       - name: 保存 Cargo 依赖缓存
-        if: ${{ success() && !inputs.release_build && github.ref == 'refs/heads/zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && inputs.release_build != 'true' && github.ref == 'refs/heads/zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

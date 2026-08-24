@@ -33,8 +33,8 @@
 
 当前稳定版为 `v1.0.5`，提供 Windows x86_64 GNU 完整 ZIP。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) 下载。
 
-`zh-dev` 另提供由 GitHub 托管 Apple Silicon runner 构建的 macOS ARM64
-[预览 Artifact](https://github.com/JoyElliot/grok-build-Chinese/actions/workflows/build-macos-arm.yml)。
+`zh-dev` 的统一 [CI 工作流](https://github.com/JoyElliot/grok-build-Chinese/actions/workflows/zh-dev-windows-preview.yml)
+另提供由 GitHub 托管 Apple Silicon runner 构建的 macOS ARM64 预览 Artifact。
 该产物只用于构建与真实设备测试，尚未使用 Apple Developer ID 签名或公证，也不会独立
 创建 Release；正式 Tag 则由统一发布工作流汇总 Windows 与 macOS 资产。安装和安全边界见
 [macOS ARM64 安装说明](packaging/macos/INSTALL-MACOS.md)。

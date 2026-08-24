@@ -528,10 +528,32 @@ jobs:
     name: macOS ARM64 构建
     needs: windows-x64-gnu
     if: ${{ needs.windows-x64-gnu.outputs.include_macos == 'true' }}
-    uses: ./.github/workflows/build-macos-arm.yml
-    with:
-      version: ${{ needs.windows-x64-gnu.outputs.grok_version }}
-      release_build: true
+    runs-on: macos-15
+    timeout-minutes: 180
+    outputs:
+      package_name: ${{ steps.build.outputs.package_name }}
+      archive_name: ${{ steps.build.outputs.archive_name }}
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+    env:
+      CARGO_BUILD_JOBS: "3"
+      CARGO_CACHE_SCHEMA: macos-arm-v1
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      RUSTUP_TOOLCHAIN: 1.94.0-aarch64-apple-darwin
+      TARGET: aarch64-apple-darwin
+    steps:
+      - name: 检出发布标签
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: 构建并验证 macOS ARM64
+        id: build
+        uses: ./.github/actions/build-macos-arm
+        with:
+          version: ${{ needs.windows-x64-gnu.outputs.grok_version }}
+          release_build: 'true'
 
   release-attestations:
     name: 生成 Release 资产构建来源证明

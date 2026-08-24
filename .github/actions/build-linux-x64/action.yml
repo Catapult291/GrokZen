@@ -1,65 +1,29 @@
-# 在 GitHub 托管的 Ubuntu runner 上构建 Linux x86_64 GNU 预览版。
-# 当前 Linux 资产只上传到 Actions Artifact，不加入正式 Release。
 name: Build Linux x64 GNU
-
-on:
-  workflow_call:
-    inputs:
-      version:
-        description: 正式构建使用的严格 SemVer；预览构建留空即可
-        required: false
-        default: ''
-        type: string
-      release_build:
-        description: 标记是否由正式发布流程调用
-        required: true
-        type: boolean
-    outputs:
-      package_name:
-        value: ${{ jobs.build-linux-x64.outputs.package_name }}
-      archive_name:
-        value: ${{ jobs.build-linux-x64.outputs.archive_name }}
-      artifact_name:
-        value: ${{ jobs.build-linux-x64.outputs.artifact_name }}
-
-permissions:
-  contents: read
-
-concurrency:
-  group: linux-x64-gnu-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
-jobs:
-  build-linux-x64:
-    name: ${{ inputs.release_build && 'Linux x64 GNU Release' || 'Linux x64 GNU 预览版' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    outputs:
-      package_name: ${{ steps.package_meta.outputs.package_name }}
-      archive_name: ${{ steps.package_meta.outputs.archive_name }}
-      artifact_name: ${{ steps.package_meta.outputs.artifact_name }}
-    env:
-      CARGO_BUILD_JOBS: "3"
-      CARGO_CACHE_SCHEMA: linux-x64-v1
-      CARGO_INCREMENTAL: "0"
-      CARGO_NET_RETRY: "10"
-      CARGO_HTTP_TIMEOUT: "120"
-      DOTSLASH_VERSION: "0.5.9"
-      DOTSLASH_SHA256: 7400dd0dbdf05d3be4e604b62807eb1bcbaa0d1bced010d30746243759e0ac03
-      RUSTUP_TOOLCHAIN: 1.94.0-x86_64-unknown-linux-gnu
-      TARGET: x86_64-unknown-linux-gnu
-
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
+description: 在 GitHub 托管的 Ubuntu runner 上构建并验证 Linux x86_64 GNU 预览制品
+inputs:
+  version:
+    description: 正式构建使用的严格 SemVer；预览构建留空即可
+    required: false
+    default: ''
+  release_build:
+    description: 标记是否由正式发布流程调用
+    required: true
+outputs:
+  package_name:
+    value: ${{ steps.package_meta.outputs.package_name }}
+  archive_name:
+    value: ${{ steps.package_meta.outputs.archive_name }}
+  artifact_name:
+    value: ${{ steps.package_meta.outputs.artifact_name }}
+runs:
+  using: composite
+  steps:
 
       - name: 选择构建版本
         id: package_meta
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
-          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
+          IS_RELEASE_BUILD: ${{ inputs.release_build }}
         shell: bash
         run: |
           set -euo pipefail
@@ -191,7 +155,7 @@ jobs:
 
       - name: 打包并验证 Linux 构建
         env:
-          IS_RELEASE_BUILD: ${{ inputs.release_build || false }}
+          IS_RELEASE_BUILD: ${{ inputs.release_build }}
         shell: bash
         run: |
           set -euo pipefail
@@ -335,14 +299,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 保存 Cargo Linux release-dist 缓存
-        if: ${{ success() && !inputs.release_build && github.ref == 'refs/heads/zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && inputs.release_build != 'true' && github.ref == 'refs/heads/zh-dev' && steps.cargo_target_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release-dist
           key: ${{ steps.cargo_target_cache.outputs.cache-primary-key }}
 
       - name: 保存 Cargo 依赖与工具缓存
-        if: ${{ success() && !inputs.release_build && github.ref == 'refs/heads/zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
+        if: ${{ success() && inputs.release_build != 'true' && github.ref == 'refs/heads/zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
