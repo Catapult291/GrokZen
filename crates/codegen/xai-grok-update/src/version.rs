@@ -556,6 +556,7 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
         "-darwin-aarch64",
         "-darwin-x86_64",
         "-linux-aarch64",
+        "-linux-x64",
         "-linux-x86_64",
         "-windows-aarch64.exe",
         "-windows-x86_64.exe",
@@ -792,6 +793,11 @@ mod tests {
             version_from_versioned_binary_name("grok-pager-0.1.5-darwin-arm64", "grok-pager")
                 .as_deref(),
             Some("0.1.5")
+        );
+        assert_eq!(
+            version_from_versioned_binary_name("grok-pager-0.1.151-linux-x64", "grok-pager")
+                .as_deref(),
+            Some("0.1.151")
         );
 
         assert_eq!(
