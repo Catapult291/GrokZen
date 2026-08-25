@@ -313,11 +313,19 @@ runs:
             "$verify_root/Install-GrokZh.sh" --with-compat-aliases
           GROK_HOME="$install_home/.grok" \
             "$verify_root/Install-GrokZh.sh"
-          for command in grok-zh agent-zh grok agent; do
+          for command in grok-zh grok; do
             test -L "$install_home/.grok/bin/$command"
             installed_version="$("$install_home/.grok/bin/$command" --version | head -n 1)"
             [[ "$installed_version" == "grok-zh $GROK_VERSION ("* ]] || {
               echo "::error::安装入口 $command 的版本冒烟失败：$installed_version"
+              exit 1
+            }
+          done
+          for command in agent-zh agent; do
+            test -L "$install_home/.grok/bin/$command"
+            agent_help="$("$install_home/.grok/bin/$command" --help)"
+            [[ "$agent_help" == *" agent "* ]] || {
+              echo "::error::Agent 安装入口 $command 的帮助信息冒烟失败。"
               exit 1
             }
           done
