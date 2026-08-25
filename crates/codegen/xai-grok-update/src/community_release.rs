@@ -51,6 +51,20 @@ const WINDOWS_REQUIRED_PACKAGE_FILES: [&str; 15] = [
     "licenses/project/THIRD_PARTY_NOTICES.md",
     "licenses/project/NOTICE",
 ];
+// v1.0.5 was published with the current 15-file ZIP layout, but its inner
+// manifest predates the license/build-metadata expansion and contains only
+// these seven executable/installer files. The outer asset digest still covers
+// the complete ZIP. Keep this compatibility profile pinned to that exact
+// trusted Release version instead of accepting arbitrary partial manifests.
+const WINDOWS_V1_0_5_MANIFEST_FILES: [&str; 7] = [
+    "grok-zh.exe",
+    "agent-zh.cmd",
+    "rg.exe",
+    ONE_CLICK_INSTALLER,
+    COMMAND_SETUP_INSTALLER,
+    "Install-GrokZh.ps1",
+    "INSTALL-WINDOWS.md",
+];
 const WINDOWS_APPROVED_PACKAGE_DIRS: [&str; 3] =
     ["licenses", "licenses/ripgrep", "licenses/project"];
 const MACOS_REQUIRED_PACKAGE_FILES: [&str; 9] = [
@@ -802,9 +816,14 @@ fn hash_manifest_entry(
 
 /// Validate the complete ZIP package and extract only its verified executable
 /// to a new sibling file. Companion files remain managed by the full Windows
-/// installer; they are nevertheless required and hashed here so a partial or
-/// malformed package can never activate its executable.
-fn extract_verified_windows_executable(archive_path: &Path, destination: &Path) -> Result<()> {
+/// installer; they are nevertheless required by the exact archive layout and
+/// covered by the verified outer asset digest. Every file declared by the
+/// version-pinned inner manifest is hashed again here before activation.
+fn extract_verified_windows_executable(
+    asset: &VerifiedAsset,
+    archive_path: &Path,
+    destination: &Path,
+) -> Result<()> {
     if std::fs::symlink_metadata(destination).is_ok() {
         anyhow::bail!(
             "refusing to overwrite an existing extraction target: {}",
@@ -817,7 +836,12 @@ fn extract_verified_windows_executable(archive_path: &Path, destination: &Path) 
         let mut archive = zip::ZipArchive::new(archive_file)
             .context("opening the downloaded community release as ZIP")?;
         validate_archive_layout(&mut archive, &WINDOWS_REQUIRED_PACKAGE_FILES)?;
-        let hashes = read_inner_manifest(&mut archive, &WINDOWS_REQUIRED_PACKAGE_FILES)?;
+        let manifest_files: &[&str] = if asset.version == "1.0.5" {
+            &WINDOWS_V1_0_5_MANIFEST_FILES
+        } else {
+            &WINDOWS_REQUIRED_PACKAGE_FILES
+        };
+        let hashes = read_inner_manifest(&mut archive, manifest_files)?;
         for (name, expected) in hashes {
             let extracted = (name == "grok-zh.exe").then_some(destination);
             let actual = hash_manifest_entry(&mut archive, &name, extracted)?;
@@ -1105,7 +1129,7 @@ pub(crate) fn extract_verified_executable(
 ) -> Result<()> {
     match asset.archive_kind {
         CommunityArchiveKind::WindowsZip => {
-            extract_verified_windows_executable(archive_path, destination)
+            extract_verified_windows_executable(asset, archive_path, destination)
         }
         CommunityArchiveKind::MacosTarGz => {
             extract_verified_macos_executable(archive_path, destination)
@@ -1207,6 +1231,21 @@ mod tests {
             .collect()
     }
 
+    fn verified_windows_asset(version: &str) -> VerifiedAsset {
+        let name = format!("grok-zh-{version}-windows-x86_64-gnu.zip");
+        VerifiedAsset {
+            version: version.to_string(),
+            download_url: format!(
+                "https://github.com/{}/releases/download/v{version}/{name}",
+                release_repo()
+            ),
+            name,
+            size: 1,
+            sha256: "ab".repeat(32),
+            archive_kind: CommunityArchiveKind::WindowsZip,
+        }
+    }
+
     fn sha256_hex(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
@@ -1217,7 +1256,7 @@ mod tests {
             .collect()
     }
 
-    fn package_entries() -> Vec<(String, Vec<u8>)> {
+    fn package_entries_with_manifest(manifest_files: &[&str]) -> Vec<(String, Vec<u8>)> {
         let mut entries = vec![
             ("grok-zh.exe".to_string(), b"verified executable".to_vec()),
             ("agent-zh.cmd".to_string(), b"agent wrapper".to_vec()),
@@ -1267,11 +1306,24 @@ mod tests {
         ];
         let manifest = entries
             .iter()
+            .filter(|(name, _)| manifest_files.contains(&name.as_str()))
             .map(|(name, bytes)| format!("{}  {name}", sha256_hex(bytes)))
             .collect::<Vec<_>>()
             .join("\n");
         entries.push(("SHA256SUMS.txt".to_string(), manifest.into_bytes()));
         entries
+    }
+
+    fn package_entries() -> Vec<(String, Vec<u8>)> {
+        package_entries_with_manifest(&WINDOWS_REQUIRED_PACKAGE_FILES)
+    }
+
+    fn extract_current_windows_executable(archive_path: &Path, destination: &Path) -> Result<()> {
+        extract_verified_windows_executable(
+            &verified_windows_asset("1.0.6"),
+            archive_path,
+            destination,
+        )
     }
 
     fn write_zip(path: &Path, entries: &[(String, Vec<u8>)]) {
@@ -1606,9 +1658,67 @@ mod tests {
         let candidate = temp.path().join("candidate.exe");
         write_zip(&archive, &package_entries());
 
-        extract_verified_windows_executable(&archive, &candidate).unwrap();
+        extract_current_windows_executable(&archive, &candidate).unwrap();
         assert_eq!(std::fs::read(candidate).unwrap(), b"verified executable");
         assert!(!temp.path().join("rg.exe").exists());
+    }
+
+    #[test]
+    fn published_v1_0_5_legacy_manifest_extracts_verified_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("release.zip");
+        let candidate = temp.path().join("candidate.exe");
+        write_zip(
+            &archive,
+            &package_entries_with_manifest(&WINDOWS_V1_0_5_MANIFEST_FILES),
+        );
+
+        extract_verified_executable(&verified_windows_asset("1.0.5"), &archive, &candidate)
+            .unwrap();
+        assert_eq!(std::fs::read(candidate).unwrap(), b"verified executable");
+        assert!(!temp.path().join("rg.exe").exists());
+    }
+
+    #[test]
+    fn legacy_manifest_is_rejected_for_other_release_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("release.zip");
+        let candidate = temp.path().join("candidate.exe");
+        write_zip(
+            &archive,
+            &package_entries_with_manifest(&WINDOWS_V1_0_5_MANIFEST_FILES),
+        );
+
+        let error =
+            extract_verified_executable(&verified_windows_asset("1.0.6"), &archive, &candidate)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("manifest does not contain the exact approved file set"),
+            "{error:#}"
+        );
+        assert!(!candidate.exists());
+    }
+
+    #[test]
+    fn published_v1_0_5_legacy_manifest_still_checks_inner_hashes() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("release.zip");
+        let candidate = temp.path().join("candidate.exe");
+        let mut entries = package_entries_with_manifest(&WINDOWS_V1_0_5_MANIFEST_FILES);
+        entries
+            .iter_mut()
+            .find(|(name, _)| name == "grok-zh.exe")
+            .unwrap()
+            .1 = b"tampered executable".to_vec();
+        write_zip(&archive, &entries);
+
+        let error =
+            extract_verified_executable(&verified_windows_asset("1.0.5"), &archive, &candidate)
+                .unwrap_err();
+        assert!(error.to_string().contains("inner SHA-256 mismatch"));
+        assert!(!candidate.exists());
     }
 
     #[test]
@@ -1624,7 +1734,7 @@ mod tests {
             .1 = b"tampered executable".to_vec();
         write_zip(&archive, &entries);
 
-        let error = extract_verified_windows_executable(&archive, &candidate).unwrap_err();
+        let error = extract_current_windows_executable(&archive, &candidate).unwrap_err();
         assert!(error.to_string().contains("inner SHA-256 mismatch"));
         assert!(!candidate.exists());
     }
@@ -1638,28 +1748,28 @@ mod tests {
         let mut entries = package_entries();
         entries.push(("../escape.txt".to_string(), b"escape".to_vec()));
         write_zip(&traversal, &entries);
-        assert!(extract_verified_windows_executable(&traversal, &candidate).is_err());
+        assert!(extract_current_windows_executable(&traversal, &candidate).is_err());
         assert!(!candidate.exists());
 
         let internal_parent = temp.path().join("internal-parent.zip");
         let mut entries = package_entries();
         entries.push(("nested/../escape.txt".to_string(), b"escape".to_vec()));
         write_zip(&internal_parent, &entries);
-        assert!(extract_verified_windows_executable(&internal_parent, &candidate).is_err());
+        assert!(extract_current_windows_executable(&internal_parent, &candidate).is_err());
         assert!(!candidate.exists());
 
         let current_segment = temp.path().join("current-segment.zip");
         let mut entries = package_entries();
         entries.push(("./escape.txt".to_string(), b"escape".to_vec()));
         write_zip(&current_segment, &entries);
-        assert!(extract_verified_windows_executable(&current_segment, &candidate).is_err());
+        assert!(extract_current_windows_executable(&current_segment, &candidate).is_err());
         assert!(!candidate.exists());
 
         let duplicate_normalized_entry = temp.path().join("duplicate-normalized-entry.zip");
         let mut entries = package_entries();
         entries.push(("RG.EXE".to_string(), b"duplicate ripgrep".to_vec()));
         write_zip(&duplicate_normalized_entry, &entries);
-        let error = extract_verified_windows_executable(&duplicate_normalized_entry, &candidate)
+        let error = extract_current_windows_executable(&duplicate_normalized_entry, &candidate)
             .unwrap_err();
         assert!(error.to_string().contains("duplicate path"), "{error:#}");
         assert!(!candidate.exists());
@@ -1668,7 +1778,7 @@ mod tests {
         let mut entries = package_entries();
         entries.push(("É.txt".to_string(), b"ambiguous on Windows".to_vec()));
         write_zip(&non_ascii_entry, &entries);
-        assert!(extract_verified_windows_executable(&non_ascii_entry, &candidate).is_err());
+        assert!(extract_current_windows_executable(&non_ascii_entry, &candidate).is_err());
         assert!(!candidate.exists());
 
         let non_ascii_manifest = temp.path().join("non-ascii-manifest.zip");
@@ -1681,7 +1791,7 @@ mod tests {
             .1
             .extend_from_slice(format!("\n{}  É.txt", "00".repeat(32)).as_bytes());
         write_zip(&non_ascii_manifest, &entries);
-        assert!(extract_verified_windows_executable(&non_ascii_manifest, &candidate).is_err());
+        assert!(extract_current_windows_executable(&non_ascii_manifest, &candidate).is_err());
         assert!(!candidate.exists());
 
         let duplicate_unicode_manifest = temp.path().join("duplicate-unicode-manifest.zip");
@@ -1695,7 +1805,7 @@ mod tests {
             .extend_from_slice(format!("\n{}  {ONE_CLICK_INSTALLER}", "00".repeat(32)).as_bytes());
         write_zip(&duplicate_unicode_manifest, &entries);
         assert!(
-            extract_verified_windows_executable(&duplicate_unicode_manifest, &candidate).is_err()
+            extract_current_windows_executable(&duplicate_unicode_manifest, &candidate).is_err()
         );
         assert!(!candidate.exists());
 
@@ -1718,7 +1828,7 @@ mod tests {
                 .join("\n")
                 .into_bytes();
             write_zip(&incomplete, &entries);
-            assert!(extract_verified_windows_executable(&incomplete, &candidate).is_err());
+            assert!(extract_current_windows_executable(&incomplete, &candidate).is_err());
             assert!(!candidate.exists());
         }
     }
