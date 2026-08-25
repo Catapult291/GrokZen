@@ -55,7 +55,7 @@ fn same_search_path_dir(left: &std::path::Path, right: &std::path::Path) -> bool
     }
 }
 
-#[cfg(feature = "community-build")]
+#[cfg(all(feature = "community-build", windows))]
 fn command_search_suffixes(path_ext: Option<&std::ffi::OsStr>) -> Vec<String> {
     const DEFAULT_WINDOWS_PATHEXT: &str =
         ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC;.CPL";
@@ -94,34 +94,57 @@ fn search_path_resolves_shim(
     };
     let install_dir =
         std::fs::canonicalize(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
+
+    #[cfg(windows)]
     let command_suffixes = command_search_suffixes(std::env::var_os("PATHEXT").as_deref());
+    #[cfg(windows)]
     if !command_suffixes
         .iter()
         .any(|suffix| suffix.eq_ignore_ascii_case(".cmd"))
     {
         return false;
     }
-
     for entry in std::env::split_paths(search_path) {
         let normalized_entry = std::fs::canonicalize(&entry).unwrap_or_else(|_| entry.clone());
         if same_search_path_dir(&normalized_entry, &install_dir) {
-            let expected_shim = entry.join(format!("{command}.cmd"));
-            let has_conflicting_candidate = command_suffixes
-                .iter()
-                .filter(|suffix| !suffix.eq_ignore_ascii_case(".cmd"))
-                .any(|suffix| entry.join(format!("{command}{suffix}")).is_file());
-            return expected_shim.is_file() && !has_conflicting_candidate;
+            #[cfg(windows)]
+            {
+                let expected_shim = entry.join(format!("{command}.cmd"));
+                let has_conflicting_candidate = command_suffixes
+                    .iter()
+                    .filter(|suffix| !suffix.eq_ignore_ascii_case(".cmd"))
+                    .any(|suffix| entry.join(format!("{command}{suffix}")).is_file());
+                return expected_shim.is_file() && !has_conflicting_candidate;
+            }
+            #[cfg(unix)]
+            {
+                return entry.join(command).is_file();
+            }
         }
 
+        #[cfg(windows)]
         if command_suffixes
             .iter()
             .any(|suffix| entry.join(format!("{command}{suffix}")).is_file())
         {
             return false;
         }
+        #[cfg(unix)]
+        if entry.join(command).is_file() {
+            return false;
+        }
     }
 
     false
+}
+
+#[cfg(feature = "community-build")]
+fn community_shim_path(install_dir: &std::path::Path, command: &str) -> std::path::PathBuf {
+    if cfg!(windows) {
+        install_dir.join(format!("{command}.cmd"))
+    } else {
+        install_dir.join(command)
+    }
 }
 
 #[cfg(feature = "community-build")]
@@ -148,8 +171,8 @@ fn community_command_names_in(
     let exposes_compatibility_names = marker.product == "grok-build-zh"
         && marker.commands.iter().any(|command| command == "grok")
         && marker.commands.iter().any(|command| command == "agent")
-        && install_dir.join("grok.cmd").is_file()
-        && install_dir.join("agent.cmd").is_file()
+        && community_shim_path(install_dir, "grok").is_file()
+        && community_shim_path(install_dir, "agent").is_file()
         && search_path_resolves_shim(search_path, install_dir, "grok")
         && search_path_resolves_shim(search_path, install_dir, "agent");
     if exposes_compatibility_names {
@@ -169,13 +192,19 @@ fn community_command_names_in(
 /// misleading recommendation.
 #[cfg(feature = "community-build")]
 pub fn community_command_names() -> CommunityCommandNames {
-    std::env::current_exe()
+    #[cfg(windows)]
+    let install_dir = std::env::current_exe()
         .ok()
-        .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
-        .map_or(CommunityCommandNames::COMMUNITY, |install_dir| {
-            let search_path = std::env::var_os("PATH");
-            community_command_names_in(&install_dir, search_path.as_deref())
-        })
+        .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
+    #[cfg(unix)]
+    let install_dir = xai_grok_home::resolve_grok_home().map(|home| home.join("bin"));
+    #[cfg(not(any(windows, unix)))]
+    let install_dir: Option<std::path::PathBuf> = None;
+
+    install_dir.map_or(CommunityCommandNames::COMMUNITY, |install_dir| {
+        let search_path = std::env::var_os("PATH");
+        community_command_names_in(&install_dir, search_path.as_deref())
+    })
 }
 
 /// User-facing reason returned when the selected distribution source is not
@@ -222,7 +251,12 @@ pub const fn community_updates_enabled() -> bool {
             target_os = "windows",
             target_arch = "x86_64",
             target_env = "gnu"
-        )) || cfg!(all(target_os = "macos", target_arch = "aarch64")))
+        )) || cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            || cfg!(all(
+                target_os = "linux",
+                target_arch = "x86_64",
+                target_env = "gnu"
+            )))
 }
 
 pub(crate) fn ensure_updates_enabled() -> anyhow::Result<()> {
@@ -273,7 +307,12 @@ mod community_build_tests {
             target_os = "windows",
             target_arch = "x86_64",
             target_env = "gnu"
-        )) || cfg!(all(target_os = "macos", target_arch = "aarch64"));
+        )) || cfg!(all(target_os = "macos", target_arch = "aarch64"))
+            || cfg!(all(
+                target_os = "linux",
+                target_arch = "x86_64",
+                target_env = "gnu"
+            ));
         assert_eq!(updates_enabled(), supported_target);
         assert!(!default_auto_update_enabled());
         assert_eq!(community_updates_enabled(), supported_target);
@@ -310,13 +349,13 @@ mod community_build_tests {
         );
 
         write_install_marker(temp.path(), &["grok-zh", "agent-zh", "grok", "agent"], true);
-        std::fs::write(temp.path().join("grok.cmd"), b"shim").unwrap();
+        std::fs::write(community_shim_path(temp.path(), "grok"), b"shim").unwrap();
         assert_eq!(
             community_command_names_in(temp.path(), Some(&search_path)),
             CommunityCommandNames::COMMUNITY
         );
 
-        std::fs::write(temp.path().join("agent.cmd"), b"shim").unwrap();
+        std::fs::write(community_shim_path(temp.path(), "agent"), b"shim").unwrap();
         assert_eq!(
             community_command_names_in(temp.path(), None),
             CommunityCommandNames::COMMUNITY
@@ -326,7 +365,7 @@ mod community_build_tests {
             CommunityCommandNames::COMPATIBILITY
         );
 
-        std::fs::remove_file(temp.path().join("grok.cmd")).unwrap();
+        std::fs::remove_file(community_shim_path(temp.path(), "grok")).unwrap();
         assert_eq!(
             community_command_names_in(temp.path(), Some(&search_path)),
             CommunityCommandNames::COMMUNITY
@@ -338,8 +377,8 @@ mod community_build_tests {
         let temp = tempfile::tempdir().unwrap();
         let search_path = std::env::join_paths([temp.path()]).unwrap();
         write_install_marker(temp.path(), &["grok-zh", "agent-zh"], false);
-        std::fs::write(temp.path().join("grok.cmd"), b"shim").unwrap();
-        std::fs::write(temp.path().join("agent.cmd"), b"shim").unwrap();
+        std::fs::write(community_shim_path(temp.path(), "grok"), b"shim").unwrap();
+        std::fs::write(community_shim_path(temp.path(), "agent"), b"shim").unwrap();
         assert_eq!(
             community_command_names_in(temp.path(), Some(&search_path)),
             CommunityCommandNames::COMMUNITY
@@ -361,9 +400,10 @@ mod community_build_tests {
             &["grok-zh", "agent-zh", "grok", "agent"],
             false,
         );
-        std::fs::write(install.path().join("grok.cmd"), b"shim").unwrap();
-        std::fs::write(install.path().join("agent.cmd"), b"shim").unwrap();
-        std::fs::write(shadow.path().join("grok.exe"), b"shadow").unwrap();
+        std::fs::write(community_shim_path(install.path(), "grok"), b"shim").unwrap();
+        std::fs::write(community_shim_path(install.path(), "agent"), b"shim").unwrap();
+        let shadow_name = if cfg!(windows) { "grok.exe" } else { "grok" };
+        std::fs::write(shadow.path().join(shadow_name), b"shadow").unwrap();
         let search_path = std::env::join_paths([shadow.path(), install.path()]).unwrap();
 
         assert_eq!(
@@ -372,6 +412,7 @@ mod community_build_tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn command_search_suffixes_honor_pathext_and_powershell_scripts() {
         let suffixes =

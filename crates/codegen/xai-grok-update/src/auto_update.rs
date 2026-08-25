@@ -671,7 +671,12 @@ fn installer_allows_downgrade(installer: &str) -> bool {
     match installer {
         "internal" | "gh-release" => true,
         #[cfg(feature = "community-build")]
-        crate::community_release::COMMUNITY_INSTALLER => true,
+        // GitHub's latest compatible Release can temporarily be older than a
+        // CI/prerelease build. Do not turn that into an automatic downgrade;
+        // explicit --stable/--alpha switches and --version retain their
+        // intentional rollback paths in run_update. --force only reinstalls
+        // the effective current version when the pointer is older.
+        crate::community_release::COMMUNITY_INSTALLER => false,
         "npm" => false,
         _ => false,
     }
@@ -1234,24 +1239,33 @@ async fn install_community_release(
         return Ok(version);
     }
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    ))]
     {
-        return install_community_macos_release(&version, &asset).await;
+        return install_community_unix_release(&version, &asset).await;
     }
 
-    #[cfg(not(any(windows, all(target_os = "macos", target_arch = "aarch64"))))]
+    #[cfg(not(any(
+        windows,
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )))]
     {
         let _ = asset;
         anyhow::bail!(
-            "community self-update supports only x86_64-pc-windows-gnu and aarch64-apple-darwin"
+            "community self-update supports only x86_64-pc-windows-gnu, aarch64-apple-darwin, and x86_64-unknown-linux-gnu"
         );
     }
 }
 
 #[cfg(all(
     feature = "community-build",
-    target_os = "macos",
-    target_arch = "aarch64"
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
 ))]
 fn ensure_private_community_dir(path: &std::path::Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
@@ -1312,8 +1326,10 @@ fn ensure_private_community_dir(path: &std::path::Path) -> Result<()> {
 
 #[cfg(all(
     feature = "community-build",
-    target_os = "macos",
-    target_arch = "aarch64"
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
 ))]
 fn validate_community_home_path(path: &std::path::Path) -> Result<()> {
     use std::path::Component;
@@ -1376,8 +1392,10 @@ fn validate_community_home_path(path: &std::path::Path) -> Result<()> {
 
 #[cfg(all(
     feature = "community-build",
-    target_os = "macos",
-    target_arch = "aarch64"
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
 ))]
 async fn sync_directory(path: &std::path::Path) -> Result<()> {
     let dir = tokio::fs::File::open(path)
@@ -1390,8 +1408,85 @@ async fn sync_directory(path: &std::path::Path) -> Result<()> {
 
 #[cfg(all(
     feature = "community-build",
-    target_os = "macos",
-    target_arch = "aarch64"
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
+))]
+struct CommunityInstallLock {
+    file: std::fs::File,
+}
+
+#[cfg(all(
+    feature = "community-build",
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
+))]
+impl Drop for CommunityInstallLock {
+    fn drop(&mut self) {
+        use std::os::fd::AsRawFd;
+
+        // SAFETY: `file` remains open for this call and LOCK_UN does not
+        // dereference any process memory.
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+#[cfg(all(
+    feature = "community-build",
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
+))]
+fn acquire_community_install_lock(bin_dir: &std::path::Path) -> Result<CommunityInstallLock> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+
+    let lock_path = bin_dir.join(".grok-zh-install.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW)
+        .open(&lock_path)
+        .with_context(|| format!("opening community install lock {}", lock_path.display()))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("checking community install lock {}", lock_path.display()))?;
+    if !metadata.is_file() || metadata.uid() != unsafe { libc::geteuid() } {
+        anyhow::bail!(
+            "community install lock is not a current-user regular file: {}",
+            lock_path.display()
+        );
+    }
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("protecting community install lock {}", lock_path.display()))?;
+
+    // SAFETY: the descriptor belongs to `file` and remains alive in the
+    // returned guard. Kernel flock locks are released automatically on crash.
+    let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if result != 0 {
+        let error = std::io::Error::last_os_error();
+        anyhow::bail!(
+            "another grok-zh install or automatic update is in progress ({}): {error}",
+            lock_path.display()
+        );
+    }
+    Ok(CommunityInstallLock { file })
+}
+
+#[cfg(all(
+    feature = "community-build",
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
 ))]
 fn reserve_unique_community_target(base: &std::path::Path) -> Result<std::path::PathBuf> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -1418,15 +1513,32 @@ fn reserve_unique_community_target(base: &std::path::Path) -> Result<std::path::
             }
         }
     }
-    anyhow::bail!("unable to reserve a unique community macOS install target")
+    anyhow::bail!("unable to reserve a unique community Unix install target")
 }
 
 #[cfg(all(
     feature = "community-build",
-    target_os = "macos",
-    target_arch = "aarch64"
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
 ))]
-async fn install_community_macos_release(
+fn community_unix_platform_suffix() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "macos-aarch64"
+    } else {
+        "linux-x86_64-gnu"
+    }
+}
+
+#[cfg(all(
+    feature = "community-build",
+    any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )
+))]
+async fn install_community_unix_release(
     version: &str,
     asset: &crate::community_release::VerifiedAsset,
 ) -> Result<String> {
@@ -1441,7 +1553,8 @@ async fn install_community_macos_release(
 
     let archive_base = download_dir.join(&asset.name);
     let archive = unique_temp_sibling(&archive_base, "download");
-    let target_base = download_dir.join(format!("grok-zh-{version}-macos-aarch64"));
+    let platform_suffix = community_unix_platform_suffix();
+    let target_base = download_dir.join(format!("grok-zh-{version}-{platform_suffix}"));
     let candidate = unique_temp_sibling(&target_base, "candidate");
 
     crate::community_release::download_verified(asset, &archive).await?;
@@ -1461,11 +1574,11 @@ async fn install_community_macos_release(
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
             let _ = tokio::fs::remove_file(&candidate).await;
-            return Err(error).context("validating the community macOS release package");
+            return Err(error).context("validating the community Unix release package");
         }
         Err(error) => {
             let _ = tokio::fs::remove_file(&candidate).await;
-            anyhow::bail!("community macOS release verifier failed: {error}");
+            anyhow::bail!("community Unix release verifier failed: {error}");
         }
     }
 
@@ -1473,17 +1586,24 @@ async fn install_community_macos_release(
         Ok(output) => output,
         Err(error) => {
             let _ = tokio::fs::remove_file(&candidate).await;
-            anyhow::bail!("downloaded community macOS binary failed verification: {error}");
+            anyhow::bail!("downloaded community Unix binary failed verification: {error}");
         }
     };
     if !community_version_output_matches(&version_output, version) {
         let _ = tokio::fs::remove_file(&candidate).await;
         anyhow::bail!(
-            "downloaded community macOS binary reported an unexpected version: {}",
+            "downloaded community Unix binary reported an unexpected version: {}",
             truncate_err(&version_output, 200)
         );
     }
 
+    let _install_lock = match acquire_community_install_lock(&bin_dir) {
+        Ok(lock) => lock,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&candidate).await;
+            return Err(error);
+        }
+    };
     let installed = match reserve_unique_community_target(&target_base) {
         Ok(path) => path,
         Err(error) => {
@@ -1504,23 +1624,23 @@ async fn install_community_macos_release(
     if let Err(error) = sync_directory(&download_dir).await {
         tracing::warn!(
             path = %download_dir.display(),
-            "verified community macOS binary is installed but directory sync failed: {error:#}"
+            "verified community Unix binary is installed but directory sync failed: {error:#}"
         );
     }
 
     // Every install gets a fresh immutable target. Atomic link replacement
     // changes only the two canonical entry points and deliberately keeps old
-    // targets so a still-running Mach-O process retains its executable inode.
+    // targets so a still-running process retains its executable inode.
     if let Err(error) = swap_community_bin_links(&installed, &bin_dir).await {
         // Do not delete `installed`: a rollback failure may have left one link
         // pointing at it, and preserving a harmless orphan is safer than a
         // dangling canonical entry point.
-        return Err(error).context("activating the community macOS entry points");
+        return Err(error).context("activating the community Unix entry points");
     }
     if let Err(error) = sync_directory(&bin_dir).await {
         tracing::warn!(
             path = %bin_dir.display(),
-            "community macOS entry points are active but directory sync failed: {error:#}"
+            "community Unix entry points are active but directory sync failed: {error:#}"
         );
     }
 
@@ -2294,7 +2414,7 @@ fn managed_community_target_path(target: &std::path::Path) -> bool {
         && target
             .file_name()
             .and_then(|name| name.to_str())
-            .and_then(crate::version::version_from_community_macos_binary_name)
+            .and_then(crate::version::version_from_current_community_unix_binary_name)
             .is_some()
 }
 
@@ -2953,7 +3073,10 @@ async fn heal_managed_install(installer: &str) {
     {
         #[cfg(feature = "community-build")]
         if installer == crate::community_release::COMMUNITY_INSTALLER {
-            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            #[cfg(any(
+                all(target_os = "macos", target_arch = "aarch64"),
+                all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+            ))]
             let bin_dir = {
                 let Some(home) = xai_grok_home::resolve_grok_home() else {
                     return;
@@ -2975,7 +3098,13 @@ async fn heal_managed_install(installer: &str) {
                 }
                 bin_dir
             };
-            #[cfg(all(unix, not(all(target_os = "macos", target_arch = "aarch64"))))]
+            #[cfg(all(
+                unix,
+                not(any(
+                    all(target_os = "macos", target_arch = "aarch64"),
+                    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+                ))
+            ))]
             let bin_dir = grok_home().join("bin");
             #[cfg(unix)]
             reconcile_secondary_to_fixed_target(&bin_dir, "grok-zh", "agent-zh").await;
@@ -3982,7 +4111,13 @@ mod tests {
         assert!(!installer_manages_bin_entrypoints("unknown"));
     }
 
-    #[cfg(all(unix, feature = "community-build"))]
+    #[cfg(all(
+        feature = "community-build",
+        any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+        )
+    ))]
     #[tokio::test]
     async fn test_community_entrypoints_share_one_immutable_target() {
         let dir = tempfile::tempdir().unwrap();
@@ -3990,7 +4125,10 @@ mod tests {
         let downloads = dir.path().join("grok-zh-downloads");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&downloads).unwrap();
-        let target = downloads.join("grok-zh-1.0.7-macos-aarch64.1-0.installed");
+        let target = downloads.join(format!(
+            "grok-zh-1.0.8-{}.1-0.installed",
+            community_unix_platform_suffix()
+        ));
         std::fs::write(&target, "community").unwrap();
 
         let primary = swap_community_bin_links(&target, &bin).await.unwrap();
@@ -4007,7 +4145,13 @@ mod tests {
         );
     }
 
-    #[cfg(all(unix, feature = "community-build"))]
+    #[cfg(all(
+        feature = "community-build",
+        any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+        )
+    ))]
     #[tokio::test]
     async fn test_community_entrypoints_refuse_unmanaged_existing_paths() {
         let dir = tempfile::tempdir().unwrap();
@@ -4015,7 +4159,10 @@ mod tests {
         let downloads = dir.path().join("grok-zh-downloads");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&downloads).unwrap();
-        let target = downloads.join("grok-zh-1.0.7-macos-aarch64.1-0.installed");
+        let target = downloads.join(format!(
+            "grok-zh-1.0.8-{}.1-0.installed",
+            community_unix_platform_suffix()
+        ));
         std::fs::write(&target, "community").unwrap();
 
         std::os::unix::fs::symlink("/tmp/unmanaged-grok", bin.join("grok-zh")).unwrap();
@@ -5394,10 +5541,14 @@ mod tests {
 
     #[cfg(feature = "community-build")]
     #[test]
-    fn test_installer_allows_downgrade_community_release() {
-        assert!(installer_allows_downgrade(
-            crate::community_release::COMMUNITY_INSTALLER
-        ));
+    fn test_installer_blocks_automatic_community_release_downgrade() {
+        let allow_downgrade =
+            installer_allows_downgrade(crate::community_release::COMMUNITY_INSTALLER);
+        assert!(!allow_downgrade);
+        assert_eq!(
+            needs_update("1.0.8-zh.ci.59", "1.0.5", "stable", allow_downgrade),
+            Some(false)
+        );
     }
 
     #[test]
