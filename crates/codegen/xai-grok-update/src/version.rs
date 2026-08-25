@@ -521,7 +521,7 @@ pub fn installed_on_disk_version() -> Option<String> {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
                 return None;
             }
-            return version_from_community_macos_binary_name(target.file_name()?.to_str()?);
+            return version_from_current_community_unix_binary_name(target.file_name()?.to_str()?);
         }
 
         // metadata() follows the symlink: Err means the target is gone
@@ -570,9 +570,10 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
     Some(version.to_string())
 }
 
-pub(crate) fn version_from_community_macos_binary_name(name: &str) -> Option<String> {
+fn version_from_community_binary_name(name: &str, platform_suffix: &str) -> Option<String> {
     let suffix = name.strip_prefix("grok-zh-")?;
-    let (version, nonce) = suffix.rsplit_once("-macos-aarch64.")?;
+    let separator = format!("-{platform_suffix}.");
+    let (version, nonce) = suffix.rsplit_once(&separator)?;
     let nonce = nonce.strip_suffix(".installed")?;
     if nonce.is_empty()
         || !nonce
@@ -586,6 +587,29 @@ pub(crate) fn version_from_community_macos_binary_name(name: &str) -> Option<Str
         return None;
     }
     Some(version.to_string())
+}
+
+pub(crate) fn version_from_community_macos_binary_name(name: &str) -> Option<String> {
+    version_from_community_binary_name(name, "macos-aarch64")
+}
+
+pub(crate) fn version_from_community_linux_binary_name(name: &str) -> Option<String> {
+    version_from_community_binary_name(name, "linux-x86_64-gnu")
+}
+
+#[cfg(unix)]
+pub(crate) fn version_from_current_community_unix_binary_name(name: &str) -> Option<String> {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        version_from_community_macos_binary_name(name)
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "gnu"
+    )) {
+        version_from_community_linux_binary_name(name)
+    } else {
+        None
+    }
 }
 
 /// Fetch the stable channel pointer for caching alongside the version.
@@ -782,6 +806,20 @@ mod tests {
             .as_deref(),
             Some("1.0.8-linux.macos-alpha.2")
         );
+        assert_eq!(
+            version_from_community_linux_binary_name(
+                "grok-zh-1.0.8-rc.1-linux-x86_64-gnu.42-0.installed"
+            )
+            .as_deref(),
+            Some("1.0.8-rc.1")
+        );
+        assert_eq!(
+            version_from_community_linux_binary_name(
+                "grok-zh-1.0.8-linux.x86-alpha.2-linux-x86_64-gnu.7-3.installed"
+            )
+            .as_deref(),
+            Some("1.0.8-linux.x86-alpha.2")
+        );
         for invalid in [
             "grok-zh-1.0.7",
             "grok-zh-1.0.7-macos-aarch64.installed",
@@ -790,6 +828,14 @@ mod tests {
             "grok-zh-1.0.7+local-macos-aarch64.42-0.installed",
         ] {
             assert_eq!(version_from_community_macos_binary_name(invalid), None);
+        }
+        for invalid in [
+            "grok-zh-1.0.8-linux-x86_64-gnu.installed",
+            "grok-zh-1.0.8-linux-x86_64-gnu.bad/name.installed",
+            "grok-zh-1.0.8+local-linux-x86_64-gnu.42-0.installed",
+            "grok-zh-1.0.8-macos-aarch64.42-0.installed",
+        ] {
+            assert_eq!(version_from_community_linux_binary_name(invalid), None);
         }
     }
 

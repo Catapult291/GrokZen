@@ -23,6 +23,7 @@ jobs:
       zip_name: ${{ steps.release_meta.outputs.zip_name }}
       is_prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
       include_macos: ${{ steps.release_meta.outputs.include_macos }}
+      include_linux: ${{ steps.release_meta.outputs.include_linux }}
       windows_artifact_name: ${{ steps.release_meta.outputs.windows_artifact_name }}
       notes_artifact_name: ${{ steps.release_meta.outputs.notes_artifact_name }}
     env:
@@ -121,6 +122,14 @@ jobs:
             ($major -eq 1 -and $minor -gt 0) -or
             ($major -eq 1 -and $minor -eq 0 -and $patch -ge 7)
           $isPrerelease = $version.Contains('-').ToString().ToLowerInvariant()
+          # v1.0.8 stable is the four-asset bridge consumable by v1.0.5.
+          # Linux first ships in v1.0.8 prereleases; stable Linux assets begin
+          # with v1.0.9 after bridge clients understand the six-asset contract.
+          $includeLinux = $major -gt 1 -or
+            ($major -eq 1 -and $minor -gt 0) -or
+            ($major -eq 1 -and $minor -eq 0 -and $patch -ge 9) -or
+            ($major -eq 1 -and $minor -eq 0 -and $patch -eq 8 -and
+              $isPrerelease -eq 'true')
           $windowsArtifactName = "grok-zh-windows-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $notesArtifactName = "grok-zh-release-notes-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           "RELEASE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
@@ -135,6 +144,7 @@ jobs:
             zip_name = $zipName
             is_prerelease = $isPrerelease
             include_macos = $includeMacos.ToString().ToLowerInvariant()
+            include_linux = $includeLinux.ToString().ToLowerInvariant()
             windows_artifact_name = $windowsArtifactName
             notes_artifact_name = $notesArtifactName
           }.GetEnumerator() | ForEach-Object {
@@ -555,11 +565,45 @@ jobs:
           version: ${{ needs.windows-x64-gnu.outputs.grok_version }}
           release_build: 'true'
 
+  linux-x64-gnu-release:
+    name: Linux x64 GNU 构建
+    needs: windows-x64-gnu
+    if: ${{ needs.windows-x64-gnu.outputs.include_linux == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    outputs:
+      package_name: ${{ steps.build.outputs.package_name }}
+      archive_name: ${{ steps.build.outputs.archive_name }}
+      artifact_name: ${{ steps.build.outputs.artifact_name }}
+    env:
+      CARGO_BUILD_JOBS: "3"
+      CARGO_CACHE_SCHEMA: linux-x64-v1
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "10"
+      CARGO_HTTP_TIMEOUT: "120"
+      DOTSLASH_VERSION: "0.5.9"
+      DOTSLASH_SHA256: 7400dd0dbdf05d3be4e604b62807eb1bcbaa0d1bced010d30746243759e0ac03
+      RUSTUP_TOOLCHAIN: 1.94.0-x86_64-unknown-linux-gnu
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      - name: 检出发布标签
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+
+      - name: 构建并验证 Linux x64 GNU
+        id: build
+        uses: ./.github/actions/build-linux-x64
+        with:
+          version: ${{ needs.windows-x64-gnu.outputs.grok_version }}
+          release_build: 'true'
+
   release-attestations:
     name: 生成 Release 资产构建来源证明
     needs:
       - windows-x64-gnu
       - macos-arm-release
+      - linux-x64-gnu-release
     if: >-
       ${{
         !cancelled() &&
@@ -569,6 +613,13 @@ jobs:
           (
             needs.macos-arm-release.result == 'skipped' &&
             needs.windows-x64-gnu.outputs.include_macos == 'false'
+          )
+        ) &&
+        (
+          needs.linux-x64-gnu-release.result == 'success' ||
+          (
+            needs.linux-x64-gnu-release.result == 'skipped' &&
+            needs.windows-x64-gnu.outputs.include_linux == 'false'
           )
         )
       }}
@@ -581,6 +632,7 @@ jobs:
     env:
       ZIP_NAME: ${{ needs.windows-x64-gnu.outputs.zip_name }}
       MAC_ARCHIVE_NAME: ${{ needs.macos-arm-release.outputs.archive_name }}
+      LINUX_ARCHIVE_NAME: ${{ needs.linux-x64-gnu-release.outputs.archive_name }}
     steps:
       - name: 下载 Windows Release 资产
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -593,6 +645,13 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ${{ needs.macos-arm-release.outputs.artifact_name }}
+          path: dist
+
+      - name: 下载 Linux Release 资产
+        if: ${{ needs.windows-x64-gnu.outputs.include_linux == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.linux-x64-gnu-release.outputs.artifact_name }}
           path: dist
 
       - name: 为 Windows Release 资产生成构建来源证明
@@ -610,11 +669,20 @@ jobs:
             ${{ github.workspace }}/dist/${{ env.MAC_ARCHIVE_NAME }}
             ${{ github.workspace }}/dist/${{ env.MAC_ARCHIVE_NAME }}.sha256
 
+      - name: 为 Linux Release 资产生成构建来源证明
+        if: ${{ needs.windows-x64-gnu.outputs.include_linux == 'true' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ github.workspace }}/dist/${{ env.LINUX_ARCHIVE_NAME }}
+            ${{ github.workspace }}/dist/${{ env.LINUX_ARCHIVE_NAME }}.sha256
+
   release-publisher:
     name: 核验并发布唯一 Release
     needs:
       - windows-x64-gnu
       - macos-arm-release
+      - linux-x64-gnu-release
       - release-attestations
     if: >-
       ${{
@@ -626,6 +694,13 @@ jobs:
           (
             needs.macos-arm-release.result == 'skipped' &&
             needs.windows-x64-gnu.outputs.include_macos == 'false'
+          )
+        ) &&
+        (
+          needs.linux-x64-gnu-release.result == 'success' ||
+          (
+            needs.linux-x64-gnu-release.result == 'skipped' &&
+            needs.windows-x64-gnu.outputs.include_linux == 'false'
           )
         )
       }}
@@ -640,7 +715,9 @@ jobs:
       GROK_VERSION: ${{ needs.windows-x64-gnu.outputs.grok_version }}
       ZIP_NAME: ${{ needs.windows-x64-gnu.outputs.zip_name }}
       MAC_ARCHIVE_NAME: ${{ needs.macos-arm-release.outputs.archive_name }}
+      LINUX_ARCHIVE_NAME: ${{ needs.linux-x64-gnu-release.outputs.archive_name }}
       INCLUDE_MACOS: ${{ needs.windows-x64-gnu.outputs.include_macos }}
+      INCLUDE_LINUX: ${{ needs.windows-x64-gnu.outputs.include_linux }}
       IS_PRERELEASE: ${{ needs.windows-x64-gnu.outputs.is_prerelease }}
       DIST_DIR: ${{ github.workspace }}\dist
       RELEASE_NOTES_PATH: ${{ github.workspace }}\release-notes\release-notes.md
@@ -664,6 +741,13 @@ jobs:
           name: ${{ needs.macos-arm-release.outputs.artifact_name }}
           path: dist
 
+      - name: 下载 Linux Release 资产
+        if: ${{ needs.windows-x64-gnu.outputs.include_linux == 'true' }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.linux-x64-gnu-release.outputs.artifact_name }}
+          path: dist
+
       - name: 创建 Draft、核验资产并发布
         id: publish
         shell: pwsh
@@ -678,6 +762,12 @@ jobs:
             $assets += @(
               (Join-Path $dist $env:MAC_ARCHIVE_NAME),
               (Join-Path $dist "$env:MAC_ARCHIVE_NAME.sha256")
+            )
+          }
+          if ($env:INCLUDE_LINUX -eq 'true') {
+            $assets += @(
+              (Join-Path $dist $env:LINUX_ARCHIVE_NAME),
+              (Join-Path $dist "$env:LINUX_ARCHIVE_NAME.sha256")
             )
           }
           $notes = $env:RELEASE_NOTES_PATH
@@ -706,6 +796,9 @@ jobs:
           Assert-ChecksumSidecar (Join-Path $dist $env:ZIP_NAME)
           if ($env:INCLUDE_MACOS -eq 'true') {
             Assert-ChecksumSidecar (Join-Path $dist $env:MAC_ARCHIVE_NAME)
+          }
+          if ($env:INCLUDE_LINUX -eq 'true') {
+            Assert-ChecksumSidecar (Join-Path $dist $env:LINUX_ARCHIVE_NAME)
           }
           $expectedLocalNames = @($assets | ForEach-Object { Split-Path $_ -Leaf })
           [Array]::Sort($expectedLocalNames, [StringComparer]::Ordinal)

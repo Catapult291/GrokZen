@@ -78,6 +78,17 @@ const MACOS_REQUIRED_PACKAGE_FILES: [&str; 9] = [
     "THIRD-PARTY-NOTICES.txt",
     "THIRD-PARTY-NOTICES-xai-grok-tools.md",
 ];
+const LINUX_REQUIRED_PACKAGE_FILES: [&str; 9] = [
+    "grok-zh",
+    "BUILD-INFO.txt",
+    "INSTALL-LINUX.md",
+    "Install-GrokZh.sh",
+    "LICENSE-grok-build.txt",
+    "NOTICE-third-party.txt",
+    "SOURCE_REV",
+    "THIRD-PARTY-NOTICES.txt",
+    "THIRD-PARTY-NOTICES-xai-grok-tools.md",
+];
 const INNER_MANIFEST: &str = "SHA256SUMS.txt";
 
 fn is_allowed_unicode_package_name(name: &str) -> bool {
@@ -138,12 +149,14 @@ pub(crate) struct VerifiedAsset {
 enum CommunityArchiveKind {
     WindowsZip,
     MacosTarGz,
+    LinuxTarGz,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommunityPlatform {
     WindowsX86_64Gnu,
     MacosAarch64,
+    LinuxX86_64Gnu,
 }
 
 fn current_community_platform() -> Result<CommunityPlatform> {
@@ -155,9 +168,15 @@ fn current_community_platform() -> Result<CommunityPlatform> {
         Ok(CommunityPlatform::WindowsX86_64Gnu)
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Ok(CommunityPlatform::MacosAarch64)
+    } else if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "gnu"
+    )) {
+        Ok(CommunityPlatform::LinuxX86_64Gnu)
     } else {
         anyhow::bail!(
-            "community self-update supports only x86_64-pc-windows-gnu and aarch64-apple-darwin"
+            "community self-update supports only x86_64-pc-windows-gnu, aarch64-apple-darwin, and x86_64-unknown-linux-gnu"
         )
     }
 }
@@ -283,6 +302,9 @@ fn release_asset_name_for(platform: CommunityPlatform, version: &str) -> Result<
             Ok(format!("grok-zh-{version}-windows-x86_64-gnu.zip"))
         }
         CommunityPlatform::MacosAarch64 => Ok(format!("grok-zh-{version}-macos-aarch64.tar.gz")),
+        CommunityPlatform::LinuxX86_64Gnu => {
+            Ok(format!("grok-zh-{version}-linux-x86_64-gnu.tar.gz"))
+        }
     }
 }
 
@@ -294,6 +316,15 @@ fn release_includes_macos_assets(version: &Version) -> bool {
     (version.major, version.minor, version.patch) >= (1, 0, 7)
 }
 
+/// Keep v1.0.8 stable on the four-asset Windows/macOS bridge contract so the
+/// published v1.0.5 updater can consume it. Linux first ships in the v1.0.8
+/// release-candidate line; every stable release from v1.0.9 onward uses the
+/// six-asset contract understood by the bridge client.
+fn release_includes_linux_assets(version: &Version) -> bool {
+    let base = (version.major, version.minor, version.patch);
+    base >= (1, 0, 9) || (base == (1, 0, 8) && !version.pre.is_empty())
+}
+
 fn expected_release_asset_names(version: &str) -> Result<Vec<String>> {
     let parsed = canonical_release_version(version)?;
     let windows = release_asset_name_for(CommunityPlatform::WindowsX86_64Gnu, version)?;
@@ -302,6 +333,11 @@ fn expected_release_asset_names(version: &str) -> Result<Vec<String>> {
         let macos = release_asset_name_for(CommunityPlatform::MacosAarch64, version)?;
         names.push(macos.clone());
         names.push(format!("{macos}.sha256"));
+    }
+    if release_includes_linux_assets(&parsed) {
+        let linux = release_asset_name_for(CommunityPlatform::LinuxX86_64Gnu, version)?;
+        names.push(linux.clone());
+        names.push(format!("{linux}.sha256"));
     }
     names.sort_unstable();
     Ok(names)
@@ -330,6 +366,9 @@ fn select_asset_for_platform(
     let name = release_asset_name_for(platform, version)?;
     if platform == CommunityPlatform::MacosAarch64 && !release_includes_macos_assets(&parsed) {
         anyhow::bail!("release {version} predates macOS community self-update support");
+    }
+    if platform == CommunityPlatform::LinuxX86_64Gnu && !release_includes_linux_assets(&parsed) {
+        anyhow::bail!("release {version} predates Linux community self-update support");
     }
     let sidecar_name = format!("{name}.sha256");
     let mut actual_names: Vec<&str> = release
@@ -413,6 +452,7 @@ fn select_asset_for_platform(
         archive_kind: match platform {
             CommunityPlatform::WindowsX86_64Gnu => CommunityArchiveKind::WindowsZip,
             CommunityPlatform::MacosAarch64 => CommunityArchiveKind::MacosTarGz,
+            CommunityPlatform::LinuxX86_64Gnu => CommunityArchiveKind::LinuxTarGz,
         },
     })
 }
@@ -860,7 +900,7 @@ fn extract_verified_windows_executable(
     result
 }
 
-fn normalized_macos_tar_name(raw: &[u8]) -> Result<Option<&str>> {
+fn normalized_unix_tar_name(raw: &[u8]) -> Result<Option<&str>> {
     if !raw.is_ascii() {
         anyhow::bail!("community release tar path is not ASCII");
     }
@@ -947,7 +987,12 @@ fn hash_tar_entry<R: Read>(
         .collect())
 }
 
-fn extract_verified_macos_executable(archive_path: &Path, destination: &Path) -> Result<()> {
+fn extract_verified_unix_executable(
+    archive_path: &Path,
+    destination: &Path,
+    required_files: &[&str],
+    executable_files: &[&str],
+) -> Result<()> {
     if std::fs::symlink_metadata(destination).is_ok() {
         anyhow::bail!(
             "refusing to overwrite an existing extraction target: {}",
@@ -970,7 +1015,7 @@ fn extract_verified_macos_executable(archive_path: &Path, destination: &Path) ->
             .entries()
             .context("opening the downloaded community release as tar")?
             .raw(true);
-        let expected = expected_archive_names(&MACOS_REQUIRED_PACKAGE_FILES);
+        let expected = expected_archive_names(required_files);
         let mut seen = HashSet::new();
         let mut hashes = HashMap::new();
         let mut manifest = None;
@@ -990,7 +1035,7 @@ fn extract_verified_macos_executable(archive_path: &Path, destination: &Path) ->
                 anyhow::bail!("community release tar must use the USTAR format");
             }
             let raw_path = entry.header().path_bytes();
-            let name = normalized_macos_tar_name(raw_path.as_ref())?;
+            let name = normalized_unix_tar_name(raw_path.as_ref())?;
             let entry_type = entry.header().entry_type();
             if name.is_none() {
                 if root_seen || !entry_type.is_dir() || entry.size() != 0 {
@@ -1016,7 +1061,7 @@ fn extract_verified_macos_executable(archive_path: &Path, destination: &Path) ->
                 .header()
                 .mode()
                 .with_context(|| format!("reading mode for tar entry {name}"))?;
-            let expected_mode = if matches!(name.as_str(), "grok-zh" | "Install-GrokZh.sh") {
+            let expected_mode = if executable_files.contains(&name.as_str()) {
                 0o755
             } else {
                 0o644
@@ -1094,7 +1139,7 @@ fn extract_verified_macos_executable(archive_path: &Path, destination: &Path) ->
             manifest.as_deref().ok_or_else(|| {
                 anyhow::anyhow!("community release tar is missing SHA256SUMS.txt")
             })?,
-            &MACOS_REQUIRED_PACKAGE_FILES,
+            required_files,
         )?;
         for (name, expected_hash) in manifest {
             let actual = hashes
@@ -1122,6 +1167,24 @@ fn extract_verified_macos_executable(archive_path: &Path, destination: &Path) ->
     result
 }
 
+fn extract_verified_macos_executable(archive_path: &Path, destination: &Path) -> Result<()> {
+    extract_verified_unix_executable(
+        archive_path,
+        destination,
+        &MACOS_REQUIRED_PACKAGE_FILES,
+        &["grok-zh", "Install-GrokZh.sh"],
+    )
+}
+
+fn extract_verified_linux_executable(archive_path: &Path, destination: &Path) -> Result<()> {
+    extract_verified_unix_executable(
+        archive_path,
+        destination,
+        &LINUX_REQUIRED_PACKAGE_FILES,
+        &["grok-zh", "Install-GrokZh.sh"],
+    )
+}
+
 pub(crate) fn extract_verified_executable(
     asset: &VerifiedAsset,
     archive_path: &Path,
@@ -1133,6 +1196,9 @@ pub(crate) fn extract_verified_executable(
         }
         CommunityArchiveKind::MacosTarGz => {
             extract_verified_macos_executable(archive_path, destination)
+        }
+        CommunityArchiveKind::LinuxTarGz => {
+            extract_verified_linux_executable(archive_path, destination)
         }
     }
 }
@@ -1387,6 +1453,55 @@ mod tests {
         entries
     }
 
+    fn linux_package_entries() -> Vec<(String, Vec<u8>, u32)> {
+        let mut entries = vec![
+            ("grok-zh".to_string(), b"verified ELF".to_vec(), 0o755),
+            (
+                "BUILD-INFO.txt".to_string(),
+                b"Linux x86_64 GNU build".to_vec(),
+                0o644,
+            ),
+            (
+                "INSTALL-LINUX.md".to_string(),
+                b"installation guide".to_vec(),
+                0o644,
+            ),
+            (
+                "Install-GrokZh.sh".to_string(),
+                b"#!/bin/sh\nexit 0\n".to_vec(),
+                0o755,
+            ),
+            (
+                "LICENSE-grok-build.txt".to_string(),
+                b"license".to_vec(),
+                0o644,
+            ),
+            (
+                "NOTICE-third-party.txt".to_string(),
+                b"notice".to_vec(),
+                0o644,
+            ),
+            ("SOURCE_REV".to_string(), b"deadbeef".to_vec(), 0o644),
+            (
+                "THIRD-PARTY-NOTICES.txt".to_string(),
+                b"third party".to_vec(),
+                0o644,
+            ),
+            (
+                "THIRD-PARTY-NOTICES-xai-grok-tools.md".to_string(),
+                b"tools notices".to_vec(),
+                0o644,
+            ),
+        ];
+        let manifest = entries
+            .iter()
+            .map(|(name, bytes, _)| format!("{}  {name}", sha256_hex(bytes)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        entries.push((INNER_MANIFEST.to_string(), manifest.into_bytes(), 0o644));
+        entries
+    }
+
     fn append_ustar_entry<W: Write>(
         builder: &mut tar::Builder<W>,
         name: &str,
@@ -1406,7 +1521,7 @@ mod tests {
         builder.append_data(&mut header, name, bytes).unwrap();
     }
 
-    fn write_macos_tar(
+    fn write_unix_tar(
         path: &Path,
         entries: &[(String, Vec<u8>, u32)],
         extra: Option<(&str, tar::EntryType, Option<&str>)>,
@@ -1501,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn asset_selection_enforces_the_two_stage_exact_asset_contract() {
+    fn asset_selection_enforces_the_platform_transition_contract() {
         let mut transition = release("v1.0.6", false, true);
         transition.assets = uploaded_package_assets("1.0.6");
         let selected =
@@ -1527,6 +1642,44 @@ mod tests {
             select_asset_for_platform(&candidate, "1.0.7-alpha.1", CommunityPlatform::MacosAarch64)
                 .unwrap();
         assert_eq!(macos.name, "grok-zh-1.0.7-alpha.1-macos-aarch64.tar.gz");
+        assert!(
+            select_asset_for_platform(
+                &candidate,
+                "1.0.7-alpha.1",
+                CommunityPlatform::LinuxX86_64Gnu
+            )
+            .is_err()
+        );
+
+        let mut bridge = release("v1.0.8", false, true);
+        bridge.assets = uploaded_package_assets("1.0.8");
+        assert_eq!(bridge.assets.len(), 4);
+        assert!(
+            select_asset_for_platform(&bridge, "1.0.8", CommunityPlatform::WindowsX86_64Gnu)
+                .is_ok()
+        );
+        assert!(
+            select_asset_for_platform(&bridge, "1.0.8", CommunityPlatform::LinuxX86_64Gnu).is_err()
+        );
+
+        let mut linux_candidate = release("v1.0.8-rc.1", true, true);
+        linux_candidate.assets = uploaded_package_assets("1.0.8-rc.1");
+        assert_eq!(linux_candidate.assets.len(), 6);
+        let linux = select_asset_for_platform(
+            &linux_candidate,
+            "1.0.8-rc.1",
+            CommunityPlatform::LinuxX86_64Gnu,
+        )
+        .unwrap();
+        assert_eq!(linux.name, "grok-zh-1.0.8-rc.1-linux-x86_64-gnu.tar.gz");
+
+        let mut next_stable = release("v1.0.9", false, true);
+        next_stable.assets = uploaded_package_assets("1.0.9");
+        assert_eq!(next_stable.assets.len(), 6);
+        assert!(
+            select_asset_for_platform(&next_stable, "1.0.9", CommunityPlatform::LinuxX86_64Gnu)
+                .is_ok()
+        );
 
         candidate.assets.push(uploaded_asset(
             "1.0.7-alpha.1",
@@ -1838,11 +1991,38 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let archive = temp.path().join("release.tar.gz");
         let candidate = temp.path().join("candidate");
-        write_macos_tar(&archive, &macos_package_entries(), None);
+        write_unix_tar(&archive, &macos_package_entries(), None);
 
         extract_verified_macos_executable(&archive, &candidate).unwrap();
         assert_eq!(std::fs::read(candidate).unwrap(), b"verified Mach-O");
         assert!(!temp.path().join("BUILD-INFO.txt").exists());
+    }
+
+    #[test]
+    fn valid_linux_tar_extracts_only_the_verified_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("release.tar.gz");
+        let candidate = temp.path().join("candidate");
+        write_unix_tar(&archive, &linux_package_entries(), None);
+
+        extract_verified_linux_executable(&archive, &candidate).unwrap();
+        assert_eq!(std::fs::read(candidate).unwrap(), b"verified ELF");
+        assert!(!temp.path().join("BUILD-INFO.txt").exists());
+    }
+
+    #[test]
+    fn linux_tar_rejects_macos_package_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("release.tar.gz");
+        let candidate = temp.path().join("candidate");
+        write_unix_tar(&archive, &macos_package_entries(), None);
+
+        let error = extract_verified_linux_executable(&archive, &candidate).unwrap_err();
+        assert!(
+            error.to_string().contains("extra or duplicate path"),
+            "{error:#}"
+        );
+        assert!(!candidate.exists());
     }
 
     #[test]
@@ -1856,7 +2036,7 @@ mod tests {
             .find(|(name, _, _)| name == "grok-zh")
             .unwrap()
             .1 = b"tampered Mach-O".to_vec();
-        write_macos_tar(&archive, &entries, None);
+        write_unix_tar(&archive, &entries, None);
 
         let error = extract_verified_macos_executable(&archive, &candidate).unwrap_err();
         assert!(error.to_string().contains("inner SHA-256 mismatch"));
@@ -1882,7 +2062,7 @@ mod tests {
             ),
         ] {
             let archive = temp.path().join(format!("{suffix}.tar.gz"));
-            write_macos_tar(&archive, &entries, Some(extra));
+            write_unix_tar(&archive, &entries, Some(extra));
             assert!(
                 extract_verified_macos_executable(&archive, &candidate).is_err(),
                 "{suffix} tar should be rejected"
@@ -1896,7 +2076,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let archive = temp.path().join("release.tar.gz");
         let candidate = temp.path().join("candidate");
-        write_macos_tar(&archive, &macos_package_entries(), None);
+        write_unix_tar(&archive, &macos_package_entries(), None);
 
         let mut trailing_encoder =
             flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -1913,7 +2093,7 @@ mod tests {
 
         for (suffix, trailing_bytes) in [("empty", Vec::new()), ("zeros", vec![0u8; 512])] {
             let archive = temp.path().join(format!("release-{suffix}.tar.gz"));
-            write_macos_tar(&archive, &macos_package_entries(), None);
+            write_unix_tar(&archive, &macos_package_entries(), None);
             let mut encoder =
                 flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             encoder.write_all(&trailing_bytes).unwrap();
@@ -1942,12 +2122,12 @@ mod tests {
             .find(|(name, _, _)| name == "Install-GrokZh.sh")
             .unwrap()
             .2 = 0o644;
-        write_macos_tar(&wrong_mode, &entries, None);
+        write_unix_tar(&wrong_mode, &entries, None);
         assert!(extract_verified_macos_executable(&wrong_mode, &candidate).is_err());
         assert!(!candidate.exists());
 
         let valid = temp.path().join("valid.tar.gz");
-        write_macos_tar(&valid, &macos_package_entries(), None);
+        write_unix_tar(&valid, &macos_package_entries(), None);
         let mut decoder = flate2::read::GzDecoder::new(File::open(&valid).unwrap());
         let mut raw_tar = Vec::new();
         decoder.read_to_end(&mut raw_tar).unwrap();
