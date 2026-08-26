@@ -789,6 +789,9 @@ pub(crate) fn localized_announcement_for_display<'a>(
             "Workflows are here!" => "welcome.announcement.workflows.title",
             "Grok 4.5 is here!" => "welcome.announcement.grok_4_5.title",
             "Grok 4.6 is here!" => "welcome.announcement.grok_4_6.title",
+            "Grok 4.6 is here, try it out for free for a limited time! Upgrade for more usage." => {
+                "welcome.announcement.grok_4_6.free_trial_message"
+            }
             _ => return None,
         };
         Some(locale.named_text(id, title).into_owned())
@@ -798,21 +801,69 @@ pub(crate) fn localized_announcement_for_display<'a>(
             "Try them out using /workflows." => "welcome.announcement.workflows.message",
             "Select 'Grok 4.5' under /model." => "welcome.announcement.grok_4_5.message",
             "Select 'Grok 4.6' under /model." => "welcome.announcement.grok_4_6.message",
+            "Grok 4.6 is here, try it out for free for a limited time! Upgrade for more usage." => {
+                "welcome.announcement.grok_4_6.free_trial_message"
+            }
             _ => return None,
         };
         Some(locale.named_text(id, message).into_owned())
     });
+    let localized_cta = announcement.cta.as_ref().and_then(|cta| {
+        let localized_label = cta.label.as_deref().and_then(|label| {
+            (label == "Click here to Upgrade").then(|| {
+                locale
+                    .named_text("announcement.cta.click_here_to_upgrade", label)
+                    .into_owned()
+            })
+        });
+        let localized_caption = cta.caption.as_deref().and_then(|caption| {
+            (caption == "or use Ctrl+O").then(|| {
+                locale
+                    .named_text("announcement.cta.or_use_ctrl_o", caption)
+                    .into_owned()
+            })
+        });
 
-    if localized_title.is_none() && localized_message.is_none() {
+        if localized_label.is_none() && localized_caption.is_none() {
+            return None;
+        }
+
+        let mut localized = cta.clone();
+        if let Some(label) = localized_label {
+            localized.label = Some(label);
+        }
+        if let Some(caption) = localized_caption {
+            localized.caption = Some(caption);
+        }
+        Some(localized)
+    });
+
+    if localized_title.is_none() && localized_message.is_none() && localized_cta.is_none() {
         return std::borrow::Cow::Borrowed(announcement);
     }
 
     let mut localized = announcement.clone();
+    // Id-less announcements are dismissed by a content-derived key. Once the
+    // title or message is localized, deriving that key from the display clone
+    // would resurrect an item the user already hid. Carry the original key as
+    // the display-only id so selection and rendering preserve remote identity.
+    if announcement
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .is_none()
+    {
+        localized.id = Some(xai_grok_announcements::announcement_hide_key(announcement));
+    }
     if let Some(title) = localized_title {
         localized.title = Some(title);
     }
     if let Some(message) = localized_message {
         localized.message = Some(message);
+    }
+    if let Some(cta) = localized_cta {
+        localized.cta = Some(cta);
     }
     std::borrow::Cow::Owned(localized)
 }
@@ -2246,9 +2297,9 @@ fn render_welcome_done(
         .areas(layout.prompt);
         // Show the user's current tier + clickable refresh button above the gate message.
         let tier_label_raw = p.subscription_tier.unwrap_or("Free");
-        let tier_label = if tier_label_raw == "Free" {
-            p.locale
-                .named_text("welcome.subscription.free", tier_label_raw)
+        let tier_label_trimmed = tier_label_raw.trim();
+        let tier_label = if tier_label_trimmed.eq_ignore_ascii_case("free") {
+            p.locale.named_text("welcome.subscription.free", "Free")
         } else {
             std::borrow::Cow::Borrowed(tier_label_raw)
         };
@@ -3414,6 +3465,16 @@ mod tests {
         assert!(gate.contains("[刷新]"), "{gate}");
         assert!(gate.contains("需要 SuperGrok 订阅"), "{gate}");
 
+        for raw_tier in ["free", " FREE "] {
+            let mut params = render_params(&auth, &trust, None);
+            params.locale = &ZH_TEST_LOCALE;
+            params.has_access = false;
+            params.subscription_tier = Some(raw_tier);
+            let gate = render_done_text(&params);
+            assert!(gate.contains("订阅等级：免费"), "{raw_tier:?}: {gate}");
+            assert!(!gate.contains(raw_tier), "{raw_tier:?}: {gate}");
+        }
+
         let mut params = render_params(&auth, &trust, None);
         params.locale = &ZH_TEST_LOCALE;
         params.has_claude_import = true;
@@ -3526,6 +3587,71 @@ mod tests {
             assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
             assert_eq!(untouched.as_ref(), &near_miss);
         }
+    }
+
+    #[test]
+    fn known_grok_4_6_free_trial_announcement_localizes_message_and_cta() {
+        let announcement = xai_grok_announcements::RemoteAnnouncement {
+            message: Some(
+                "Grok 4.6 is here, try it out for free for a limited time! Upgrade for more usage."
+                    .to_string(),
+            ),
+            severity: Some("promo".to_string()),
+            cta: Some(xai_grok_announcements::AnnouncementCta {
+                label: Some("Click here to Upgrade".to_string()),
+                url: Some("https://x.ai/subscribe".to_string()),
+                caption: Some("or use Ctrl+O".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        let localized = localized_announcement_for_display(&ZH_TEST_LOCALE, &announcement);
+        assert_eq!(
+            xai_grok_announcements::announcement_hide_key(localized.as_ref()),
+            xai_grok_announcements::announcement_hide_key(&announcement),
+            "localization must not change the identity of an id-less announcement"
+        );
+        let hidden =
+            std::collections::BTreeSet::from([xai_grok_announcements::announcement_hide_key(
+                &announcement,
+            )]);
+        assert!(
+            crate::views::announcements::first_session_announcement(
+                std::slice::from_ref(localized.as_ref()),
+                &hidden,
+            )
+            .is_none(),
+            "a localized id-less announcement must remain hidden"
+        );
+        assert_eq!(
+            localized.message.as_deref(),
+            Some("Grok 4.6 现已上线，限时免费体验！升级可获得更多用量。")
+        );
+        let cta = localized.cta.as_ref().expect("localized CTA");
+        assert_eq!(cta.label.as_deref(), Some("点击此处升级"));
+        assert_eq!(cta.caption.as_deref(), Some("或按 Ctrl+O"));
+        assert_eq!(cta.url.as_deref(), Some("https://x.ai/subscribe"));
+
+        let mut blank_id = announcement.clone();
+        blank_id.id = Some("   ".to_string());
+        let localized_blank_id = localized_announcement_for_display(&ZH_TEST_LOCALE, &blank_id);
+        assert_eq!(
+            xai_grok_announcements::announcement_hide_key(localized_blank_id.as_ref()),
+            xai_grok_announcements::announcement_hide_key(&blank_id),
+            "a whitespace-only remote id must retain its content-derived identity"
+        );
+
+        let near_miss = xai_grok_announcements::RemoteAnnouncement {
+            cta: Some(xai_grok_announcements::AnnouncementCta {
+                label: Some("Click here to upgrade".to_string()),
+                url: Some("https://x.ai/subscribe".to_string()),
+                caption: Some("Or use Ctrl+O".to_string()),
+            }),
+            ..Default::default()
+        };
+        let untouched = localized_announcement_for_display(&ZH_TEST_LOCALE, &near_miss);
+        assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(untouched.as_ref(), &near_miss);
     }
 
     #[test]

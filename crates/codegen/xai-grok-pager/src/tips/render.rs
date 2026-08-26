@@ -71,6 +71,9 @@ fn localized_tip_body<'a>(
             Some("tips.dashboard")
         }
         "Try out workflows using /workflows." => Some("tips.workflows"),
+        "Use Ctrl+O or click [Click here to Upgrade] to subscribe." => {
+            Some("tips.upgrade_subscription")
+        }
         _ => None,
     };
     if let Some(catalog_id) = catalog_id {
@@ -426,6 +429,10 @@ mod tests {
             (
                 "Try out workflows using /workflows.",
                 "提示：输入 /workflows 即可体验工作流。",
+            ),
+            (
+                "Use Ctrl+O or click [Click here to Upgrade] to subscribe.",
+                "提示：按 Ctrl+O 或点击[点击此处升级]进行订阅。",
             ),
         ];
         for (english, expected) in cases {

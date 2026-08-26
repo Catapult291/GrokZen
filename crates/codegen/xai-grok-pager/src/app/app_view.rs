@@ -4577,6 +4577,26 @@ impl AppView {
             }
             return;
         }
+        // Remote announcements are stored verbatim for telemetry, persistence,
+        // and click routing. Render from localized clones so every visual
+        // surface shares the same exact-match translation policy while unknown
+        // operational/security notices remain untouched.
+        let localized_announcements =
+            (self.locale.locale() == crate::locale::UiLocale::ZhCn).then(|| {
+                self.active_announcements
+                    .iter()
+                    .map(|announcement| {
+                        crate::views::welcome::localized_announcement_for_display(
+                            &self.locale,
+                            announcement,
+                        )
+                        .into_owned()
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let display_announcements = localized_announcements
+            .as_deref()
+            .unwrap_or(&self.active_announcements);
         if self.welcome_on_auth_url
             && !matches!(
                 (&self.active_view, &self.auth_state),
@@ -4621,7 +4641,7 @@ impl AppView {
         let foreign_resume_hint = self.foreign_resume_hint().cloned();
         let privacy_banner_agent = self.privacy_banner_should_show()
             && !crate::views::announcements::has_critical_session_announcement(
-                &self.active_announcements,
+                display_announcements,
                 &self.hidden_announcement_ids,
             );
         let agent_mouse_pos = self.last_mouse_pos;
@@ -4703,14 +4723,14 @@ impl AppView {
                             self.models.reasoning_effort,
                         );
                         let hero_cta = crate::views::announcements::promo_cta(
-                            &self.active_announcements,
+                            display_announcements,
                             &self.hidden_announcement_ids,
                         );
                         let hero_announcement = hero_cta
                             .map(|(owner, _, _)| owner)
                             .or_else(|| {
                                 crate::views::announcements::first_session_announcement(
-                                    &self.active_announcements,
+                                    display_announcements,
                                     &self.hidden_announcement_ids,
                                 )
                             })
@@ -5012,7 +5032,7 @@ impl AppView {
                         if let Some(agent) = agents.get_mut(&id) {
                             let announcement_banner_h =
                                 crate::views::announcements::session_banner_height(
-                                    &self.active_announcements,
+                                    display_announcements,
                                     &self.hidden_announcement_ids,
                                 );
                             let privacy_banner = privacy_banner_agent;
@@ -5039,7 +5059,7 @@ impl AppView {
                                 overlay_focused,
                                 crate::app::agent_view::BannerSlotParams {
                                     height: banner_height,
-                                    announcements: &self.active_announcements,
+                                    announcements: display_announcements,
                                     hidden_ids: &self.hidden_announcement_ids,
                                     privacy_banner,
                                     mouse_pos: agent_mouse_pos,
@@ -5125,7 +5145,7 @@ impl AppView {
                                     &self.dashboard_local_sessions
                                 };
                             let dash_upgrade_cta = crate::views::announcements::promo_cta(
-                                &self.active_announcements,
+                                display_announcements,
                                 &self.hidden_announcement_ids,
                             )
                             .map(

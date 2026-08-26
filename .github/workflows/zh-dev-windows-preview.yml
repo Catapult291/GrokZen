@@ -13,6 +13,11 @@ on:
         description: 可选的内嵌版本（默认为 CI 构建编号）
         required: false
         type: string
+      macos_account_smoke:
+        description: 使用受保护的临时登录态执行一次 macOS 真账号吐字测试
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -621,6 +626,133 @@ jobs:
         with:
           version: ${{ inputs.version }}
           release_build: 'false'
+
+  macos-consumer-smoke:
+    name: macOS 免费账号真机冒烟
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch'
+          && inputs.macos_account_smoke == true
+          && github.repository == 'JoyElliot/grok-build-Chinese'
+          && github.ref == 'refs/heads/zh-dev' }}
+    needs:
+      - macos-arm-preview
+    environment: macos-consumer-smoke
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: 下载本次 macOS ARM64 构建
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.macos-arm-preview.outputs.artifact_name }}
+          path: ${{ runner.temp }}/grok-consumer-artifact
+
+      - name: 验证免费账号可以返回中文文本
+        shell: bash
+        env:
+          AUTH_B64: ${{ secrets.GROK_CONSUMER_AUTH_B64 }}
+          ARCHIVE_NAME: ${{ needs.macos-arm-preview.outputs.archive_name }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+
+          artifact_root="${RUNNER_TEMP}/grok-consumer-artifact"
+          smoke_root="$(mktemp -d "${RUNNER_TEMP}/grok-consumer-smoke.XXXXXX")"
+          case "${smoke_root}" in
+            "${RUNNER_TEMP}"/grok-consumer-smoke.*) ;;
+            *) echo '::error::拒绝使用非预期的临时目录。'; exit 1 ;;
+          esac
+          cleanup() {
+            chmod -R u+w "${smoke_root}" 2>/dev/null || true
+            rm -rf -- "${smoke_root}"
+          }
+          trap cleanup EXIT HUP INT TERM
+
+          if [[ -z "${AUTH_B64:-}" ]]; then
+            echo '::error::macos-consumer-smoke 环境缺少 GROK_CONSUMER_AUTH_B64。'
+            exit 1
+          fi
+          archive="${artifact_root}/${ARCHIVE_NAME}"
+          checksum="${archive}.sha256"
+          if [[ ! -f "${archive}" || ! -f "${checksum}" ]]; then
+            echo '::error::macOS 构建制品不完整。'
+            exit 1
+          fi
+          (
+            cd "${artifact_root}"
+            shasum -a 256 -c "$(basename "${checksum}")" >/dev/null
+          )
+
+          package_root="${smoke_root}/package"
+          auth_home="${smoke_root}/home"
+          workspace="${smoke_root}/workspace"
+          mkdir -p "${package_root}" "${auth_home}" "${workspace}"
+          COPYFILE_DISABLE=1 tar -xzf "${archive}" -C "${package_root}"
+          grok_bin="${package_root}/grok-zh"
+          if [[ ! -x "${grok_bin}" ]]; then
+            echo '::error::解包后找不到可执行的 grok-zh。'
+            exit 1
+          fi
+
+          auth_file="${auth_home}/auth.json"
+          printf '%s' "${AUTH_B64}" | base64 -D > "${auth_file}"
+          chmod 0600 "${auth_file}"
+          unset AUTH_B64
+          if ! jq -e 'type == "object"' "${auth_file}" >/dev/null 2>&1; then
+            echo '::error::临时认证文件不是有效的 JSON 对象。'
+            exit 1
+          fi
+
+          while IFS='=' read -r env_name _; do
+            case "${env_name}" in
+              GROK_AUTH*|GROK_CODE_XAI_API_KEY|GROK_DEPLOYMENT_KEY|GROK_AUTH_PROVIDER_*|GROK_TELEMETRY_*|GROK_INTERNAL_OTLP_*|GROK_EXTERNAL_OTEL|GROK_CRASH_HANDLER|OTEL_EXPORTER_OTLP_*|XAI_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY)
+                unset "${env_name}"
+                ;;
+            esac
+          done < <(env)
+          export HOME="${auth_home}"
+          export GROK_HOME="${auth_home}"
+          export GROK_AUTH_PATH="${auth_file}"
+          export GROK_DISABLE_AUTOUPDATER=1
+          export GROK_TELEMETRY_ENABLED=0
+          export GROK_TELEMETRY_TRACE_UPLOAD=0
+          export GROK_EXTERNAL_OTEL=0
+          export GROK_CRASH_HANDLER=0
+          export DISABLE_TELEMETRY=1
+          export DISABLE_ERROR_REPORTING=1
+          export RUST_LOG=off
+          export RUST_BACKTRACE=0
+
+          nonce="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(uuidgen | tr -d '-')"
+          marker="中文冒烟通过：${nonce}"
+          result_file="${smoke_root}/result.json"
+          stderr_file="${smoke_root}/stderr.log"
+          prompt="请只回复下面这一行，不要添加解释或标点：${marker}"
+          if ! "${grok_bin}" \
+            --single "${prompt}" \
+            --output-format json \
+            --no-auto-update \
+            --no-wait-for-background \
+            --no-subagents \
+            --no-memory \
+            --disable-web-search \
+            --max-turns 1 \
+            --disallowed-tools 'Agent,run_terminal_cmd,search_replace' \
+            --cwd "${workspace}" \
+            >"${result_file}" 2>"${stderr_file}"; then
+            echo '::error::macOS 真账号请求执行失败；为避免泄露，不回显模型或认证输出。'
+            exit 1
+          fi
+          if ! jq -e --arg marker "${marker}" '
+              (.stopReason == "end_turn")
+              and ((.text // null) | type == "string" and contains($marker))
+              and ((.sessionId // null) | type == "string" and length > 0)
+              and ((.requestId // null) | type == "string" and length > 0)
+            ' "${result_file}" >/dev/null 2>&1; then
+            echo '::error::macOS 真账号响应未通过固定字段与中文验证码校验。'
+            exit 1
+          fi
+          echo 'macOS 免费账号真机冒烟通过：认证、联网请求、中文非空回复与会话字段均正常。'
 
   multiplatform-result:
     name: 三端构建汇总
