@@ -750,6 +750,7 @@ jobs:
             GROK_HOME="${auth_home}" \
             GROK_AUTH_PATH="${auth_file}" \
             GROK_DISABLE_AUTOUPDATER='1' \
+            GROK_MANAGED_CONFIG='0' \
             GROK_TELEMETRY_ENABLED='0' \
             GROK_TELEMETRY_TRACE_UPLOAD='0' \
             GROK_EXTERNAL_OTEL='0' \
