@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - zh-dev
+      - codex/free-account-localization-macos-smoke
   pull_request:
     branches:
       - zh-dev
@@ -13,11 +14,6 @@ on:
         description: 可选的内嵌版本（默认为 CI 构建编号）
         required: false
         type: string
-      macos_account_smoke:
-        description: 使用受保护的临时登录态执行一次 macOS 真账号吐字测试
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -630,10 +626,9 @@ jobs:
   macos-consumer-smoke:
     name: macOS 免费账号真机冒烟
     if: >-
-      ${{ github.event_name == 'workflow_dispatch'
-          && inputs.macos_account_smoke == true
+      ${{ github.event_name == 'push'
           && github.repository == 'JoyElliot/grok-build-Chinese'
-          && github.ref == 'refs/heads/zh-dev' }}
+          && github.ref == 'refs/heads/codex/free-account-localization-macos-smoke' }}
     needs:
       - macos-arm-preview
     environment: macos-consumer-smoke
@@ -656,19 +651,33 @@ jobs:
           umask 077
           ulimit -c 0
 
+          auth_payload="${AUTH_B64:-}"
+          unset AUTH_B64
+          case "${RUNNER_TEMP}" in
+            /*) ;;
+            *) echo '::error::RUNNER_TEMP 不是绝对路径。'; exit 1 ;;
+          esac
+          if [[ "${RUNNER_TEMP}" == '/' ]]; then
+            echo '::error::拒绝使用根目录作为 RUNNER_TEMP。'
+            exit 1
+          fi
           artifact_root="${RUNNER_TEMP}/grok-consumer-artifact"
+          case "${artifact_root}" in
+            "${RUNNER_TEMP}"/grok-consumer-artifact) ;;
+            *) echo '::error::拒绝使用非预期的构建制品目录。'; exit 1 ;;
+          esac
           smoke_root="$(mktemp -d "${RUNNER_TEMP}/grok-consumer-smoke.XXXXXX")"
           case "${smoke_root}" in
             "${RUNNER_TEMP}"/grok-consumer-smoke.*) ;;
             *) echo '::error::拒绝使用非预期的临时目录。'; exit 1 ;;
           esac
           cleanup() {
-            chmod -R u+w "${smoke_root}" 2>/dev/null || true
-            rm -rf -- "${smoke_root}"
+            chmod -R u+w "${smoke_root}" "${artifact_root}" 2>/dev/null || true
+            rm -rf -- "${smoke_root}" "${artifact_root}"
           }
           trap cleanup EXIT HUP INT TERM
 
-          if [[ -z "${AUTH_B64:-}" ]]; then
+          if [[ -z "${auth_payload}" ]]; then
             echo '::error::macos-consumer-smoke 环境缺少 GROK_CONSUMER_AUTH_B64。'
             exit 1
           fi
@@ -687,6 +696,38 @@ jobs:
           auth_home="${smoke_root}/home"
           workspace="${smoke_root}/workspace"
           mkdir -p "${package_root}" "${auth_home}" "${workspace}"
+          : > "${auth_home}/config.toml"
+          git init -q "${workspace}"
+
+          auth_file="${auth_home}/auth.json"
+          printf '%s' "${auth_payload}" | base64 -D > "${auth_file}"
+          unset auth_payload
+          chmod 0600 "${auth_file}"
+          if ! jq -e 'type == "object"' "${auth_file}" >/dev/null 2>&1; then
+            echo '::error::临时认证文件不是有效的 JSON 对象。'
+            exit 1
+          fi
+
+          ambient_home="${HOME:-${smoke_root}/no-ambient-home}"
+          config_sources=(
+            '/etc/grok'
+            '/Library/Application Support/ClaudeCode/managed-settings.json'
+            '/Library/Managed Preferences/ai.x.grok.plist'
+            "${ambient_home}/.grok/config.toml"
+            "${ambient_home}/.claude.json"
+            "${ambient_home}/.cursor/mcp.json"
+          )
+          for config_source in "${config_sources[@]}"; do
+            if [[ -e "${config_source}" ]]; then
+              echo '::error::runner 存在外部 Grok/MCP 配置源，拒绝加载账号执行测试。'
+              exit 1
+            fi
+          done
+          if /usr/bin/defaults read ai.x.grok requirements_toml_base64 >/dev/null 2>&1; then
+            echo '::error::runner 存在 Grok MDM 配置，拒绝加载账号执行测试。'
+            exit 1
+          fi
+
           COPYFILE_DISABLE=1 tar -xzf "${archive}" -C "${package_root}"
           grok_bin="${package_root}/grok-zh"
           if [[ ! -x "${grok_bin}" ]]; then
@@ -694,41 +735,30 @@ jobs:
             exit 1
           fi
 
-          auth_file="${auth_home}/auth.json"
-          printf '%s' "${AUTH_B64}" | base64 -D > "${auth_file}"
-          chmod 0600 "${auth_file}"
-          unset AUTH_B64
-          if ! jq -e 'type == "object"' "${auth_file}" >/dev/null 2>&1; then
-            echo '::error::临时认证文件不是有效的 JSON 对象。'
-            exit 1
-          fi
-
-          while IFS='=' read -r env_name _; do
-            case "${env_name}" in
-              GROK_AUTH*|GROK_CODE_XAI_API_KEY|GROK_DEPLOYMENT_KEY|GROK_AUTH_PROVIDER_*|GROK_TELEMETRY_*|GROK_INTERNAL_OTLP_*|GROK_EXTERNAL_OTEL|GROK_CRASH_HANDLER|OTEL_EXPORTER_OTLP_*|XAI_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY)
-                unset "${env_name}"
-                ;;
-            esac
-          done < <(env)
-          export HOME="${auth_home}"
-          export GROK_HOME="${auth_home}"
-          export GROK_AUTH_PATH="${auth_file}"
-          export GROK_DISABLE_AUTOUPDATER=1
-          export GROK_TELEMETRY_ENABLED=0
-          export GROK_TELEMETRY_TRACE_UPLOAD=0
-          export GROK_EXTERNAL_OTEL=0
-          export GROK_CRASH_HANDLER=0
-          export DISABLE_TELEMETRY=1
-          export DISABLE_ERROR_REPORTING=1
-          export RUST_LOG=off
-          export RUST_BACKTRACE=0
-
           nonce="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-$(uuidgen | tr -d '-')"
           marker="中文冒烟通过：${nonce}"
           result_file="${smoke_root}/result.json"
           stderr_file="${smoke_root}/stderr.log"
           prompt="请只回复下面这一行，不要添加解释或标点：${marker}"
-          if ! "${grok_bin}" \
+          mkdir -p "${smoke_root}/tmp"
+          if ! env -i \
+            HOME="${auth_home}" \
+            PATH='/usr/bin:/bin:/usr/sbin:/sbin' \
+            TMPDIR="${smoke_root}/tmp" \
+            LANG='en_US.UTF-8' \
+            CI='true' \
+            GROK_HOME="${auth_home}" \
+            GROK_AUTH_PATH="${auth_file}" \
+            GROK_DISABLE_AUTOUPDATER='1' \
+            GROK_TELEMETRY_ENABLED='0' \
+            GROK_TELEMETRY_TRACE_UPLOAD='0' \
+            GROK_EXTERNAL_OTEL='0' \
+            GROK_CRASH_HANDLER='0' \
+            DISABLE_TELEMETRY='1' \
+            DISABLE_ERROR_REPORTING='1' \
+            RUST_LOG='off' \
+            RUST_BACKTRACE='0' \
+            "${grok_bin}" \
             --single "${prompt}" \
             --output-format json \
             --no-auto-update \
@@ -737,7 +767,8 @@ jobs:
             --no-memory \
             --disable-web-search \
             --max-turns 1 \
-            --disallowed-tools 'Agent,run_terminal_cmd,search_replace' \
+            --tools 'todo_write' \
+            --disallowed-tools 'Agent,search_tool,use_tool' \
             --cwd "${workspace}" \
             >"${result_file}" 2>"${stderr_file}"; then
             echo '::error::macOS 真账号请求执行失败；为避免泄露，不回显模型或认证输出。'
