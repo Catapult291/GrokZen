@@ -4577,26 +4577,6 @@ impl AppView {
             }
             return;
         }
-        // Remote announcements are stored verbatim for telemetry, persistence,
-        // and click routing. Render from localized clones so every visual
-        // surface shares the same exact-match translation policy while unknown
-        // operational/security notices remain untouched.
-        let localized_announcements =
-            (self.locale.locale() == crate::locale::UiLocale::ZhCn).then(|| {
-                self.active_announcements
-                    .iter()
-                    .map(|announcement| {
-                        crate::views::welcome::localized_announcement_for_display(
-                            &self.locale,
-                            announcement,
-                        )
-                        .into_owned()
-                    })
-                    .collect::<Vec<_>>()
-            });
-        let display_announcements = localized_announcements
-            .as_deref()
-            .unwrap_or(&self.active_announcements);
         if self.welcome_on_auth_url
             && !matches!(
                 (&self.active_view, &self.auth_state),
@@ -4639,6 +4619,27 @@ impl AppView {
         let dev_fps_rows = self.dev_fps_rows();
         let fps_overlay = self.fps_hud.overlay(dev_fps_rows);
         let foreign_resume_hint = self.foreign_resume_hint().cloned();
+        // Remote announcements are stored verbatim for telemetry, persistence,
+        // and click routing. Render from localized clones so every visual
+        // surface shares the same exact-match translation policy while unknown
+        // operational/security notices remain untouched. Build these clones
+        // only after the mutable draw-state updates above have finished.
+        let localized_announcements =
+            (self.locale.locale() == crate::locale::UiLocale::ZhCn).then(|| {
+                self.active_announcements
+                    .iter()
+                    .map(|announcement| {
+                        crate::views::welcome::localized_announcement_for_display(
+                            &self.locale,
+                            announcement,
+                        )
+                        .into_owned()
+                    })
+                    .collect::<Vec<_>>()
+            });
+        let display_announcements = localized_announcements
+            .as_deref()
+            .unwrap_or(&self.active_announcements);
         let privacy_banner_agent = self.privacy_banner_should_show()
             && !crate::views::announcements::has_critical_session_announcement(
                 display_announcements,
