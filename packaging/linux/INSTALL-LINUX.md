@@ -6,17 +6,21 @@
 ## 校验与安装
 
 GitHub Actions Artifact 或 Release 内含 `tar.gz` 和同名 `.sha256` 文件。
-下载并解压外层制品后，在这两个文件所在目录运行：
+归档只含一个与归档同名（去掉 `.tar.gz`）的顶层目录。下载外层制品后，在这两个文件
+所在目录运行（把示例版本替换为实际版本）：
 
 安装器依赖 GNU coreutils、findutils、grep、sed、gawk、util-linux（`flock`）、
 binutils、`file` 与 `sha256sum`；Ubuntu/WSL 可先运行：
 
     sudo apt-get install coreutils findutils grep sed gawk util-linux binutils file
 
-    sha256sum -c grok-zh-*-linux-x86_64-gnu.tar.gz.sha256
-    mkdir grok-zh-linux
-    tar -xzf grok-zh-*-linux-x86_64-gnu.tar.gz -C grok-zh-linux
-    cd grok-zh-linux
+    archive='grok-zh-1.0.8-rc.1-linux-x86_64-gnu.tar.gz'
+    package=${archive%.tar.gz}
+    test -f "$archive" && test -f "$archive.sha256"
+    sha256sum -c "$archive.sha256"
+    test ! -e "$package"
+    tar -xzf "$archive"
+    cd "$package"
     sha256sum -c SHA256SUMS.txt
     ./grok-zh --version
     ./Install-GrokZh.sh

@@ -14,10 +14,15 @@ You can use it interactively as a full-screen TUI, run it headlessly for scripti
 
 ## Installation
 
-Community Windows packages are produced by this repository's Releases and
-documented preview build pipeline. The upstream `install.sh`,
+Community packages are produced by this repository's Releases and documented
+preview build pipeline. The upstream `install.sh`,
 `install.ps1`, and `@xai-official/grok` package are intentionally not valid
 installers for this distribution.
+
+Every `release-v*` archive, including `release-v1.0.8-rc.1`, has one top-level
+directory named after the archive without its `.zip` or `.tar.gz` suffix. Enter
+that directory before running the bundled checksum verification and installer.
+The plain `v1.0.8` bridge is Windows-only and keeps the legacy flat ZIP layout.
 
 Verify the installation:
 
@@ -25,13 +30,13 @@ Verify the installation:
 grok-zh --version
 ```
 
-Updater-enabled builds accept only the exact complete Windows GNU ZIP and its
-checksum sidecar from immutable Releases in this repository. They verify the
+Updater-enabled builds accept only the exact platform archive and checksum
+sidecar metadata from immutable Releases in this repository. They verify the
 GitHub SHA-256, safe archive layout, and the package's inner `SHA256SUMS.txt`,
 and never fall back to official xAI release channels. Background downloads are
 off by default: startup checks metadata and shows a notice, while `Ctrl+U`
-authorizes that one download and install. Existing raw-asset builds require one
-manual ZIP installation to cross the ZIP-only bridge.
+authorizes that one download and install. Existing raw-asset Windows builds
+require one manual ZIP installation to cross the ZIP-only bridge.
 
 ---
 

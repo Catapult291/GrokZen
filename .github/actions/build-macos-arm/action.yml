@@ -170,6 +170,7 @@ runs:
           package="${dist}/${PACKAGE_NAME}"
           built_bin="${CARGO_TARGET_DIR}/${TARGET}/release-dist/grok-zh"
           mkdir -p "${package}"
+          chmod 0755 "${package}"
           if [[ ! -f "${built_bin}" ]]; then
             echo "::error::找不到编译产物：${built_bin}"
             exit 1
@@ -249,13 +250,22 @@ runs:
               shasum -a 256 "${name}"
             ) >> "${package}/SHA256SUMS.txt"
           done
+          chmod 0644 \
+            "${package}/BUILD-INFO.txt" \
+            "${package}/INSTALL-MACOS.md" \
+            "${package}/LICENSE-grok-build.txt" \
+            "${package}/NOTICE-third-party.txt" \
+            "${package}/SHA256SUMS.txt" \
+            "${package}/SOURCE_REV" \
+            "${package}/THIRD-PARTY-NOTICES.txt" \
+            "${package}/THIRD-PARTY-NOTICES-xai-grok-tools.md"
           (
             cd "${package}"
             shasum -a 256 -c SHA256SUMS.txt
           )
 
           archive="${dist}/${ARCHIVE_NAME}"
-          COPYFILE_DISABLE=1 tar --format=ustar -C "${package}" -czf "${archive}" .
+          COPYFILE_DISABLE=1 tar --format=ustar -C "${dist}" -czf "${archive}" "${PACKAGE_NAME}"
           (
             cd "${dist}"
             shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
@@ -269,11 +279,63 @@ runs:
           fi
           mkdir -p "${verify_root}"
           COPYFILE_DISABLE=1 tar -xzf "${archive}" -C "${verify_root}"
+          package_root="${verify_root}/${PACKAGE_NAME}"
+          shopt -s nullglob dotglob
+          top_level_entries=("${verify_root}"/*)
+          shopt -u nullglob dotglob
+          only_top_level="${top_level_entries[0]:-}"
+          if (( ${#top_level_entries[@]} != 1 )) || \
+             [[ "${only_top_level}" != "${package_root}" ]] || \
+             [[ ! -d "${package_root}" || -L "${package_root}" ]]; then
+            echo "::error::macOS 软件包必须只含同名顶层目录：${PACKAGE_NAME}"
+            exit 1
+          fi
+          if [[ "$(stat -f '%Lp' "${package_root}")" != "755" ]]; then
+            echo "::error::macOS 软件包顶层目录权限不是 0755。"
+            exit 1
+          fi
+          expected_names="${verify_root}/expected-names.txt"
+          actual_names="${verify_root}/actual-names.txt"
+          printf '%s\n' \
+            BUILD-INFO.txt \
+            INSTALL-MACOS.md \
+            Install-GrokZh.sh \
+            LICENSE-grok-build.txt \
+            NOTICE-third-party.txt \
+            SHA256SUMS.txt \
+            SOURCE_REV \
+            THIRD-PARTY-NOTICES-xai-grok-tools.md \
+            THIRD-PARTY-NOTICES.txt \
+            grok-zh | LC_ALL=C sort > "${expected_names}"
+          shopt -s nullglob dotglob
+          package_entries=("${package_root}"/*)
+          shopt -u nullglob dotglob
+          printf '%s\n' "${package_entries[@]##*/}" | LC_ALL=C sort > "${actual_names}"
+          diff -u "${expected_names}" "${actual_names}"
+          for entry in "${package_entries[@]}"; do
+            if [[ ! -f "${entry}" || -L "${entry}" ]]; then
+              echo "::error::macOS 软件包根目录含有非普通文件：${entry}"
+              exit 1
+            fi
+          done
+          for name in grok-zh Install-GrokZh.sh; do
+            if [[ "$(stat -f '%Lp' "${package_root}/${name}")" != "755" ]]; then
+              echo "::error::${name} 权限不是 0755。"
+              exit 1
+            fi
+          done
+          for name in "${package_entries[@]##*/}"; do
+            case "${name}" in grok-zh|Install-GrokZh.sh) continue ;; esac
+            if [[ "$(stat -f '%Lp' "${package_root}/${name}")" != "644" ]]; then
+              echo "::error::${name} 权限不是 0644。"
+              exit 1
+            fi
+          done
           (
-            cd "${verify_root}"
+            cd "${package_root}"
             shasum -a 256 -c SHA256SUMS.txt
           )
-          verify_version_output="$("${verify_root}/grok-zh" --version | head -n 1)"
+          verify_version_output="$("${package_root}/grok-zh" --version | head -n 1)"
           if [[ "${verify_version_output}" != "grok-zh ${GROK_VERSION} ("* ]]; then
             echo "::error::解包后的 grok-zh 版本冒烟失败：${verify_version_output}"
             exit 1
@@ -284,7 +346,7 @@ runs:
             echo "::error::安装器验证目录已经存在：${install_home}"
             exit 1
           fi
-          GROK_HOME="${install_home}" "${verify_root}/Install-GrokZh.sh"
+          GROK_HOME="${install_home}" "${package_root}/Install-GrokZh.sh"
           bin_dir="${install_home}/bin"
           first_target="$(readlink "${bin_dir}/grok-zh")"
           [[ "${first_target}" == ../grok-zh-downloads/grok-zh-*-macos-aarch64.*.installed ]]
@@ -294,7 +356,7 @@ runs:
           installed_version="$("${bin_dir}/grok-zh" --version | head -n 1)"
           [[ "${installed_version}" == "grok-zh ${GROK_VERSION} ("* ]]
 
-          GROK_HOME="${install_home}" "${verify_root}/Install-GrokZh.sh" --with-compat-aliases
+          GROK_HOME="${install_home}" "${package_root}/Install-GrokZh.sh" --with-compat-aliases
           second_target="$(readlink "${bin_dir}/grok-zh")"
           [[ "${second_target}" == ../grok-zh-downloads/grok-zh-*-macos-aarch64.*.installed ]]
           [[ "${second_target}" != "${first_target}" ]]

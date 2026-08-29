@@ -15,12 +15,17 @@ Agent Client Protocol（ACP）集成到编辑器中。
 ## 安装
 
 社区 Windows 包由本仓库 Releases 和 `CI` 工作流生成。
-Release ZIP 下载后只需解压一次；后续 `release-v*` 包需先打开唯一的
+Release ZIP 下载后只需解压一次；所有 `release-v*` 包（包括
+`release-v1.0.8-rc.1`）需先打开唯一的
 `grok-zh-<version>-windows-x86_64-gnu` 目录，旧版与 `v1.0.8` 桥接包则直接使用
 解压目录。包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
 `grok-zh`、`agent-zh`，并支持由用户显式接管 `grok`、`agent`。完整说明也会
 作为包内的 `INSTALL-WINDOWS.md` 提供，并可在
 [仓库中在线查看](https://github.com/JoyElliot/grok-build-Chinese/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
+
+macOS ARM64 与 Linux x86_64 GNU 的 `release-v*` 归档同样只含一个与归档同名
+（去掉 `.tar.gz`）的顶层目录；解压后先进入该目录，再执行包内校验与
+`Install-GrokZh.sh`。
 
 上游的 `install.sh`、`install.ps1` 和 `@xai-official/grok` 包不能用于安装此
 发行版。
@@ -31,10 +36,11 @@ Release ZIP 下载后只需解压一次；后续 `release-v*` 包需先打开唯
 grok-zh --version
 ```
 
-带更新器的版本只读取本仓库的 Immutable GitHub Releases，只接受完整 Windows GNU ZIP
-及其 `.sha256` sidecar，并核对 GitHub SHA-256、安全 ZIP 布局和包内 `SHA256SUMS.txt`；
-绝不会回退到 xAI 官方发布渠道。`v1.0.8` 保留旧版所需的扁平 ZIP，后续
-`release-v*` 包才使用单一顶层目录；更早的裸 EXE 更新版本仍需先手工安装 ZIP-only 桥接版。
+带更新器的版本只读取本仓库的 Immutable GitHub Releases，只接受当前平台的完整归档及其
+`.sha256` sidecar 元数据，并核对 GitHub SHA-256、安全归档布局和包内
+`SHA256SUMS.txt`；绝不会回退到 xAI 官方发布渠道。所有 `release-v*` 包均使用单一
+顶层目录；单独的 `v1.0.8` 是 Windows-only 扁平 ZIP 桥接版。更早的裸 EXE 更新版本
+仍需先手工安装该 ZIP-only 桥接版。
 
 社区版默认关闭后台自动更新：程序启动时只检查版本并显示提示，不下载文件。欢迎页按
 `Ctrl+U` 才会退出旧 TUI、下载并安装；显式开启设置中的“自动更新”后才允许后台预下载。

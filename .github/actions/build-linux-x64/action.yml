@@ -165,6 +165,7 @@ runs:
           package="$dist/$PACKAGE_NAME"
           built_bin="$CARGO_TARGET_DIR/$TARGET/release-dist/grok-zh"
           mkdir -p "$package"
+          chmod 0755 "$package"
           if [[ ! -f "$built_bin" ]]; then
             echo "::error::找不到编译产物：$built_bin"
             exit 1
@@ -245,13 +246,22 @@ runs:
               sha256sum "$name"
             ) >> "$package/SHA256SUMS.txt"
           done
+          chmod 0644 \
+            "$package/BUILD-INFO.txt" \
+            "$package/INSTALL-LINUX.md" \
+            "$package/LICENSE-grok-build.txt" \
+            "$package/NOTICE-third-party.txt" \
+            "$package/SHA256SUMS.txt" \
+            "$package/SOURCE_REV" \
+            "$package/THIRD-PARTY-NOTICES.txt" \
+            "$package/THIRD-PARTY-NOTICES-xai-grok-tools.md"
           (
             cd "$package"
             sha256sum -c SHA256SUMS.txt
           )
 
           archive="$dist/$ARCHIVE_NAME"
-          tar --format=ustar -C "$package" -czf "$archive" .
+          tar --format=ustar -C "$dist" -czf "$archive" "$PACKAGE_NAME"
           (
             cd "$dist"
             sha256sum "$ARCHIVE_NAME" > "$ARCHIVE_NAME.sha256"
@@ -264,9 +274,25 @@ runs:
             exit 1
           fi
           mkdir -p "$verify_root"
-          tar -xzf "$archive" -C "$verify_root"
+          tar -xpzf "$archive" -C "$verify_root"
+          package_root="$verify_root/$PACKAGE_NAME"
+          expected_top_level="$RUNNER_TEMP/linux-package-root-expected.txt"
+          actual_top_level="$RUNNER_TEMP/linux-package-root-actual.txt"
+          printf '%s\n' "$PACKAGE_NAME" > "$expected_top_level"
+          find "$verify_root" -mindepth 1 -maxdepth 1 -printf '%f\n' |
+            LC_ALL=C sort > "$actual_top_level"
+          diff -u "$expected_top_level" "$actual_top_level"
+          if [[ ! -d "$package_root" || -L "$package_root" ]] ||
+             find "$verify_root" -mindepth 1 -maxdepth 1 ! -type d -print -quit | grep -q .; then
+            echo "::error::Linux 软件包必须只含同名顶层目录：$PACKAGE_NAME"
+            exit 1
+          fi
+          if [[ "$(stat -c '%a' "$package_root")" != "755" ]]; then
+            echo "::error::Linux 软件包顶层目录权限不是 0755。"
+            exit 1
+          fi
           (
-            cd "$verify_root"
+            cd "$package_root"
             sha256sum -c SHA256SUMS.txt
           )
           expected_names="$RUNNER_TEMP/linux-package-expected.txt"
@@ -282,27 +308,27 @@ runs:
             THIRD-PARTY-NOTICES-xai-grok-tools.md \
             THIRD-PARTY-NOTICES.txt \
             grok-zh | LC_ALL=C sort > "$expected_names"
-          find "$verify_root" -mindepth 1 -maxdepth 1 -printf '%f\n' |
+          find "$package_root" -mindepth 1 -maxdepth 1 -printf '%f\n' |
             LC_ALL=C sort > "$actual_names"
           diff -u "$expected_names" "$actual_names"
-          if find "$verify_root" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
+          if find "$package_root" -mindepth 1 -maxdepth 1 ! -type f -print -quit | grep -q .; then
             echo "::error::Linux 软件包根目录含有非普通文件。"
             exit 1
           fi
           for name in grok-zh Install-GrokZh.sh; do
-            [[ "$(stat -c '%a' "$verify_root/$name")" == "755" ]] || {
+            [[ "$(stat -c '%a' "$package_root/$name")" == "755" ]] || {
               echo "::error::$name 权限不是 0755。"
               exit 1
             }
           done
           while IFS= read -r name; do
             case "$name" in grok-zh|Install-GrokZh.sh) continue ;; esac
-            [[ "$(stat -c '%a' "$verify_root/$name")" == "644" ]] || {
+            [[ "$(stat -c '%a' "$package_root/$name")" == "644" ]] || {
               echo "::error::$name 权限不是 0644。"
               exit 1
             }
           done < "$actual_names"
-          verify_version_output="$("$verify_root/grok-zh" --version | head -n 1)"
+          verify_version_output="$("$package_root/grok-zh" --version | head -n 1)"
           if [[ "$verify_version_output" != "grok-zh $GROK_VERSION ("* ]]; then
             echo "::error::解包后的 grok-zh 版本冒烟失败：$verify_version_output"
             exit 1
@@ -310,9 +336,9 @@ runs:
           install_home="$RUNNER_TEMP/grok-zh-linux-install-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           mkdir -m 0700 "$install_home"
           GROK_HOME="$install_home/.grok" \
-            "$verify_root/Install-GrokZh.sh" --with-compat-aliases
+            "$package_root/Install-GrokZh.sh" --with-compat-aliases
           GROK_HOME="$install_home/.grok" \
-            "$verify_root/Install-GrokZh.sh"
+            "$package_root/Install-GrokZh.sh"
           for command in grok-zh grok; do
             test -L "$install_home/.grok/bin/$command"
             installed_version="$("$install_home/.grok/bin/$command" --version | head -n 1)"
@@ -337,7 +363,7 @@ runs:
             "$install_home/.grok/bin/.grok-zh-install.json"
           exec 9<>"$install_home/.grok/bin/.grok-zh-install.lock"
           flock -n 9
-          if GROK_HOME="$install_home/.grok" "$verify_root/Install-GrokZh.sh"; then
+          if GROK_HOME="$install_home/.grok" "$package_root/Install-GrokZh.sh"; then
             echo "::error::安装器未拒绝已被占用的共享安装锁。"
             exit 1
           fi
@@ -348,7 +374,7 @@ runs:
           mkdir -m 0700 "$coexist_home" "$coexist_home/.grok" "$coexist_home/.grok/bin"
           printf '%s\n' official-grok > "$coexist_home/.grok/bin/grok"
           printf '%s\n' official-agent > "$coexist_home/.grok/bin/agent"
-          GROK_HOME="$coexist_home/.grok" "$verify_root/Install-GrokZh.sh"
+          GROK_HOME="$coexist_home/.grok" "$package_root/Install-GrokZh.sh"
           grep -Fx official-grok "$coexist_home/.grok/bin/grok"
           grep -Fx official-agent "$coexist_home/.grok/bin/agent"
           grep -Fx \

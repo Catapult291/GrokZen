@@ -972,14 +972,11 @@ fn extract_verified_windows_executable(
     result
 }
 
-fn normalized_unix_tar_name(raw: &[u8]) -> Result<Option<&str>> {
+fn normalized_unix_tar_name(raw: &[u8], package_root: &str) -> Result<Option<String>> {
     if !raw.is_ascii() {
         anyhow::bail!("community release tar path is not ASCII");
     }
     let raw = std::str::from_utf8(raw).context("community release tar path is not UTF-8")?;
-    if raw == "." || raw == "./" {
-        return Ok(None);
-    }
     if raw.is_empty()
         || raw.starts_with('/')
         || raw.contains('\\')
@@ -989,11 +986,21 @@ fn normalized_unix_tar_name(raw: &[u8]) -> Result<Option<&str>> {
         anyhow::bail!("community release tar contains an unsafe raw path: {raw}");
     }
     let name = raw.strip_prefix("./").unwrap_or(raw);
-    if name.is_empty() || name.contains('/') || matches!(name, "." | "..") || name.starts_with("./")
+    if name == package_root || name == format!("{package_root}/") {
+        return Ok(None);
+    }
+    let prefix = format!("{package_root}/");
+    let relative = name.strip_prefix(&prefix).ok_or_else(|| {
+        anyhow::anyhow!("community release tar path is outside the approved package root: {raw}")
+    })?;
+    if relative.is_empty()
+        || relative.contains('/')
+        || matches!(relative, "." | "..")
+        || relative.starts_with("./")
     {
         anyhow::bail!("community release tar contains a nested or unsafe path: {raw}");
     }
-    Ok(Some(name))
+    Ok(Some(relative.to_string()))
 }
 
 fn hash_tar_entry<R: Read>(
@@ -1062,9 +1069,20 @@ fn hash_tar_entry<R: Read>(
 fn extract_verified_unix_executable(
     archive_path: &Path,
     destination: &Path,
+    package_root: &str,
     required_files: &[&str],
     executable_files: &[&str],
 ) -> Result<()> {
+    if package_root.is_empty()
+        || !package_root.is_ascii()
+        || package_root
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | ':'))
+        || package_root.bytes().any(|byte| byte.is_ascii_control())
+        || matches!(package_root, "." | "..")
+    {
+        anyhow::bail!("community release contains an invalid package root name");
+    }
     if std::fs::symlink_metadata(destination).is_ok() {
         anyhow::bail!(
             "refusing to overwrite an existing extraction target: {}",
@@ -1107,16 +1125,28 @@ fn extract_verified_unix_executable(
                 anyhow::bail!("community release tar must use the USTAR format");
             }
             let raw_path = entry.header().path_bytes();
-            let name = normalized_unix_tar_name(raw_path.as_ref())?;
+            let name = normalized_unix_tar_name(raw_path.as_ref(), package_root)?;
             let entry_type = entry.header().entry_type();
             if name.is_none() {
-                if root_seen || !entry_type.is_dir() || entry.size() != 0 {
+                let mode = entry
+                    .header()
+                    .mode()
+                    .context("reading mode for community release tar root")?;
+                if root_seen
+                    || !entry_type.is_dir()
+                    || entry.link_name_bytes().is_some()
+                    || entry.size() != 0
+                    || mode & 0o7777 != 0o755
+                {
                     anyhow::bail!("community release tar contains an invalid root entry");
                 }
                 root_seen = true;
                 continue;
             }
-            let name = name.expect("checked above").to_string();
+            if !root_seen {
+                anyhow::bail!("community release tar file appears before its package root");
+            }
+            let name = name.expect("checked above");
             if !entry_type.is_file() || entry.link_name_bytes().is_some() {
                 anyhow::bail!("community release tar contains a non-regular entry: {name}");
             }
@@ -1239,19 +1269,47 @@ fn extract_verified_unix_executable(
     result
 }
 
-fn extract_verified_macos_executable(archive_path: &Path, destination: &Path) -> Result<()> {
+fn expected_unix_package_root(
+    asset: &VerifiedAsset,
+    platform: CommunityPlatform,
+) -> Result<String> {
+    let expected_name = release_asset_name_for(platform, &asset.version)?;
+    if asset.name != expected_name {
+        anyhow::bail!("community release tar asset name does not match its version");
+    }
+    asset
+        .name
+        .strip_suffix(".tar.gz")
+        .filter(|root| !root.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("community release tar asset has an invalid name"))
+}
+
+fn extract_verified_macos_executable(
+    asset: &VerifiedAsset,
+    archive_path: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let package_root = expected_unix_package_root(asset, CommunityPlatform::MacosAarch64)?;
     extract_verified_unix_executable(
         archive_path,
         destination,
+        &package_root,
         &MACOS_REQUIRED_PACKAGE_FILES,
         &["grok-zh", "Install-GrokZh.sh"],
     )
 }
 
-fn extract_verified_linux_executable(archive_path: &Path, destination: &Path) -> Result<()> {
+fn extract_verified_linux_executable(
+    asset: &VerifiedAsset,
+    archive_path: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let package_root = expected_unix_package_root(asset, CommunityPlatform::LinuxX86_64Gnu)?;
     extract_verified_unix_executable(
         archive_path,
         destination,
+        &package_root,
         &LINUX_REQUIRED_PACKAGE_FILES,
         &["grok-zh", "Install-GrokZh.sh"],
     )
@@ -1267,10 +1325,10 @@ pub(crate) fn extract_verified_executable(
             extract_verified_windows_executable(asset, archive_path, destination)
         }
         CommunityArchiveKind::MacosTarGz => {
-            extract_verified_macos_executable(archive_path, destination)
+            extract_verified_macos_executable(asset, archive_path, destination)
         }
         CommunityArchiveKind::LinuxTarGz => {
-            extract_verified_linux_executable(archive_path, destination)
+            extract_verified_linux_executable(asset, archive_path, destination)
         }
     }
 }
@@ -1370,8 +1428,8 @@ mod tests {
             .collect()
     }
 
-    fn verified_windows_asset(version: &str) -> VerifiedAsset {
-        let name = format!("grok-zh-{version}-windows-x86_64-gnu.zip");
+    fn verified_asset(platform: CommunityPlatform, version: &str) -> VerifiedAsset {
+        let name = release_asset_name_for(platform, version).unwrap();
         let tag = release_tag_for_version(&canonical_release_version(version).unwrap());
         VerifiedAsset {
             version: version.to_string(),
@@ -1382,8 +1440,24 @@ mod tests {
             name,
             size: 1,
             sha256: "ab".repeat(32),
-            archive_kind: CommunityArchiveKind::WindowsZip,
+            archive_kind: match platform {
+                CommunityPlatform::WindowsX86_64Gnu => CommunityArchiveKind::WindowsZip,
+                CommunityPlatform::MacosAarch64 => CommunityArchiveKind::MacosTarGz,
+                CommunityPlatform::LinuxX86_64Gnu => CommunityArchiveKind::LinuxTarGz,
+            },
         }
+    }
+
+    fn verified_windows_asset(version: &str) -> VerifiedAsset {
+        verified_asset(CommunityPlatform::WindowsX86_64Gnu, version)
+    }
+
+    fn verified_macos_asset() -> VerifiedAsset {
+        verified_asset(CommunityPlatform::MacosAarch64, "1.0.8-rc.1")
+    }
+
+    fn verified_linux_asset() -> VerifiedAsset {
+        verified_asset(CommunityPlatform::LinuxX86_64Gnu, "1.0.9")
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -1605,24 +1679,42 @@ mod tests {
 
     fn write_unix_tar(
         path: &Path,
+        package_root: &str,
+        entries: &[(String, Vec<u8>, u32)],
+        extra: Option<(&str, tar::EntryType, Option<&str>)>,
+    ) {
+        write_unix_tar_with_root_mode(path, package_root, Some(0o755), entries, extra);
+    }
+
+    fn write_unix_tar_with_root_mode(
+        path: &Path,
+        package_root: &str,
+        root_mode: Option<u32>,
         entries: &[(String, Vec<u8>, u32)],
         extra: Option<(&str, tar::EntryType, Option<&str>)>,
     ) {
         let file = File::create(path).unwrap();
         let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         let mut builder = tar::Builder::new(encoder);
-        append_ustar_entry(
-            &mut builder,
-            ".",
-            &[],
-            0o755,
-            tar::EntryType::Directory,
-            None,
-        );
-        for (name, bytes, mode) in entries {
+        if let Some(root_mode) = root_mode {
             append_ustar_entry(
                 &mut builder,
-                name,
+                package_root,
+                &[],
+                root_mode,
+                tar::EntryType::Directory,
+                None,
+            );
+        }
+        for (name, bytes, mode) in entries {
+            let archive_name = if package_root == "." {
+                name.clone()
+            } else {
+                format!("{package_root}/{name}")
+            };
+            append_ustar_entry(
+                &mut builder,
+                &archive_name,
                 bytes,
                 *mode,
                 tar::EntryType::Regular,
@@ -1630,7 +1722,19 @@ mod tests {
             );
         }
         if let Some((name, entry_type, link_name)) = extra {
-            append_ustar_entry(&mut builder, name, &[], 0o644, entry_type, link_name);
+            let archive_name = if package_root == "." {
+                name.to_string()
+            } else {
+                format!("{package_root}/{name}")
+            };
+            append_ustar_entry(
+                &mut builder,
+                &archive_name,
+                &[],
+                0o644,
+                entry_type,
+                link_name,
+            );
         }
         let encoder = builder.into_inner().unwrap();
         encoder.finish().unwrap();
@@ -2219,9 +2323,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let archive = temp.path().join("release.tar.gz");
         let candidate = temp.path().join("candidate");
-        write_unix_tar(&archive, &macos_package_entries(), None);
+        let asset = verified_macos_asset();
+        let package_root = asset.name.strip_suffix(".tar.gz").unwrap();
+        write_unix_tar(&archive, package_root, &macos_package_entries(), None);
 
-        extract_verified_macos_executable(&archive, &candidate).unwrap();
+        extract_verified_macos_executable(&asset, &archive, &candidate).unwrap();
         assert_eq!(std::fs::read(candidate).unwrap(), b"verified Mach-O");
         assert!(!temp.path().join("BUILD-INFO.txt").exists());
     }
@@ -2231,11 +2337,53 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let archive = temp.path().join("release.tar.gz");
         let candidate = temp.path().join("candidate");
-        write_unix_tar(&archive, &linux_package_entries(), None);
+        let asset = verified_linux_asset();
+        let package_root = asset.name.strip_suffix(".tar.gz").unwrap();
+        write_unix_tar(&archive, package_root, &linux_package_entries(), None);
 
-        extract_verified_linux_executable(&archive, &candidate).unwrap();
+        extract_verified_linux_executable(&asset, &archive, &candidate).unwrap();
         assert_eq!(std::fs::read(candidate).unwrap(), b"verified ELF");
         assert!(!temp.path().join("BUILD-INFO.txt").exists());
+    }
+
+    #[test]
+    fn unix_tars_require_the_exact_asset_named_package_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let cases = [
+            ("macos", verified_macos_asset(), macos_package_entries()),
+            ("linux", verified_linux_asset(), linux_package_entries()),
+        ];
+
+        for (label, asset, entries) in cases {
+            let candidate = temp.path().join(format!("{label}-candidate"));
+            let flat = temp.path().join(format!("{label}-flat.tar.gz"));
+            write_unix_tar(&flat, ".", &entries, None);
+            assert!(extract_verified_executable(&asset, &flat, &candidate).is_err());
+            assert!(!candidate.exists());
+
+            let wrong_root = temp.path().join(format!("{label}-wrong-root.tar.gz"));
+            write_unix_tar(&wrong_root, "grok-zh-wrong-platform-root", &entries, None);
+            assert!(extract_verified_executable(&asset, &wrong_root, &candidate).is_err());
+            assert!(!candidate.exists());
+
+            let expected_root = asset.name.strip_suffix(".tar.gz").unwrap();
+            let missing_root = temp.path().join(format!("{label}-missing-root.tar.gz"));
+            write_unix_tar_with_root_mode(&missing_root, expected_root, None, &entries, None);
+            assert!(extract_verified_executable(&asset, &missing_root, &candidate).is_err());
+            assert!(!candidate.exists());
+
+            let wrong_mode = temp.path().join(format!("{label}-wrong-root-mode.tar.gz"));
+            write_unix_tar_with_root_mode(&wrong_mode, expected_root, Some(0o700), &entries, None);
+            assert!(extract_verified_executable(&asset, &wrong_mode, &candidate).is_err());
+            assert!(!candidate.exists());
+
+            let valid = temp.path().join(format!("{label}-valid-root.tar.gz"));
+            write_unix_tar(&valid, expected_root, &entries, None);
+            let mut wrong_asset = asset.clone();
+            wrong_asset.name = format!("grok-zh-9.9.9-{label}-unknown.tar.gz");
+            assert!(extract_verified_executable(&wrong_asset, &valid, &candidate).is_err());
+            assert!(!candidate.exists());
+        }
     }
 
     #[test]
@@ -2243,9 +2391,11 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let archive = temp.path().join("release.tar.gz");
         let candidate = temp.path().join("candidate");
-        write_unix_tar(&archive, &macos_package_entries(), None);
+        let asset = verified_linux_asset();
+        let package_root = asset.name.strip_suffix(".tar.gz").unwrap();
+        write_unix_tar(&archive, package_root, &macos_package_entries(), None);
 
-        let error = extract_verified_linux_executable(&archive, &candidate).unwrap_err();
+        let error = extract_verified_linux_executable(&asset, &archive, &candidate).unwrap_err();
         assert!(
             error.to_string().contains("extra or duplicate path"),
             "{error:#}"
@@ -2264,9 +2414,11 @@ mod tests {
             .find(|(name, _, _)| name == "grok-zh")
             .unwrap()
             .1 = b"tampered Mach-O".to_vec();
-        write_unix_tar(&archive, &entries, None);
+        let asset = verified_macos_asset();
+        let package_root = asset.name.strip_suffix(".tar.gz").unwrap();
+        write_unix_tar(&archive, package_root, &entries, None);
 
-        let error = extract_verified_macos_executable(&archive, &candidate).unwrap_err();
+        let error = extract_verified_macos_executable(&asset, &archive, &candidate).unwrap_err();
         assert!(error.to_string().contains("inner SHA-256 mismatch"));
         assert!(!candidate.exists());
     }
@@ -2276,10 +2428,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let candidate = temp.path().join("candidate");
         let entries = macos_package_entries();
+        let asset = verified_macos_asset();
+        let package_root = asset.name.strip_suffix(".tar.gz").unwrap();
 
         for (suffix, extra) in [
             ("extra", ("extra.txt", tar::EntryType::Regular, None)),
             ("duplicate", ("GROK-ZH", tar::EntryType::Regular, None)),
+            ("nested", ("nested/file", tar::EntryType::Regular, None)),
+            ("dot-segment", ("./grok-zh", tar::EntryType::Regular, None)),
+            ("duplicate-root", ("", tar::EntryType::Directory, None)),
             (
                 "symlink",
                 ("replacement", tar::EntryType::Symlink, Some("grok-zh")),
@@ -2290,9 +2447,9 @@ mod tests {
             ),
         ] {
             let archive = temp.path().join(format!("{suffix}.tar.gz"));
-            write_unix_tar(&archive, &entries, Some(extra));
+            write_unix_tar(&archive, package_root, &entries, Some(extra));
             assert!(
-                extract_verified_macos_executable(&archive, &candidate).is_err(),
+                extract_verified_macos_executable(&asset, &archive, &candidate).is_err(),
                 "{suffix} tar should be rejected"
             );
             assert!(!candidate.exists());
@@ -2304,7 +2461,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let archive = temp.path().join("release.tar.gz");
         let candidate = temp.path().join("candidate");
-        write_unix_tar(&archive, &macos_package_entries(), None);
+        let asset = verified_macos_asset();
+        let package_root = asset.name.strip_suffix(".tar.gz").unwrap();
+        write_unix_tar(&archive, package_root, &macos_package_entries(), None);
 
         let mut trailing_encoder =
             flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -2316,12 +2475,12 @@ mod tests {
         archive_file.write_all(&trailing).unwrap();
         archive_file.sync_all().unwrap();
 
-        assert!(extract_verified_macos_executable(&archive, &candidate).is_err());
+        assert!(extract_verified_macos_executable(&asset, &archive, &candidate).is_err());
         assert!(!candidate.exists());
 
         for (suffix, trailing_bytes) in [("empty", Vec::new()), ("zeros", vec![0u8; 512])] {
             let archive = temp.path().join(format!("release-{suffix}.tar.gz"));
-            write_unix_tar(&archive, &macos_package_entries(), None);
+            write_unix_tar(&archive, package_root, &macos_package_entries(), None);
             let mut encoder =
                 flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
             encoder.write_all(&trailing_bytes).unwrap();
@@ -2331,7 +2490,7 @@ mod tests {
             archive_file.sync_all().unwrap();
 
             assert!(
-                extract_verified_macos_executable(&archive, &candidate).is_err(),
+                extract_verified_macos_executable(&asset, &archive, &candidate).is_err(),
                 "concatenated {suffix} gzip member must be rejected"
             );
             assert!(!candidate.exists());
@@ -2342,6 +2501,8 @@ mod tests {
     fn macos_tar_requires_root_entry_modes_and_complete_end_marker() {
         let temp = tempfile::tempdir().unwrap();
         let candidate = temp.path().join("candidate");
+        let asset = verified_macos_asset();
+        let package_root = asset.name.strip_suffix(".tar.gz").unwrap();
 
         let wrong_mode = temp.path().join("wrong-mode.tar.gz");
         let mut entries = macos_package_entries();
@@ -2350,12 +2511,12 @@ mod tests {
             .find(|(name, _, _)| name == "Install-GrokZh.sh")
             .unwrap()
             .2 = 0o644;
-        write_unix_tar(&wrong_mode, &entries, None);
-        assert!(extract_verified_macos_executable(&wrong_mode, &candidate).is_err());
+        write_unix_tar(&wrong_mode, package_root, &entries, None);
+        assert!(extract_verified_macos_executable(&asset, &wrong_mode, &candidate).is_err());
         assert!(!candidate.exists());
 
         let valid = temp.path().join("valid.tar.gz");
-        write_unix_tar(&valid, &macos_package_entries(), None);
+        write_unix_tar(&valid, package_root, &macos_package_entries(), None);
         let mut decoder = flate2::read::GzDecoder::new(File::open(&valid).unwrap());
         let mut raw_tar = Vec::new();
         decoder.read_to_end(&mut raw_tar).unwrap();
@@ -2367,7 +2528,7 @@ mod tests {
         let mut encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         encoder.write_all(&raw_tar).unwrap();
         encoder.finish().unwrap();
-        assert!(extract_verified_macos_executable(&truncated, &candidate).is_err());
+        assert!(extract_verified_macos_executable(&asset, &truncated, &candidate).is_err());
         assert!(!candidate.exists());
     }
 }
