@@ -129,6 +129,25 @@ try {
         Pop-Location
     }
 
+    [IO.File]::WriteAllText((Join-Path $fixtureRepo 'fixture.txt'), 'fixture-3', (New-Object Text.UTF8Encoding($false)))
+    & git -C $fixtureRepo add fixture.txt
+    & git -C $fixtureRepo commit --quiet -m '验证后续发布标签'
+    & git -C $fixtureRepo tag 'release-v1.0.9'
+    Push-Location $fixtureRepo
+    try {
+        $modernTagPath = Join-Path $tempRoot 'modern-tag.md'
+        & $generator `
+            -CurrentTag 'release-v1.0.9' `
+            -OutputPath $modernTagPath `
+            -Repository $repository `
+            -TranslationMapPath $emptyMap `
+            -PublishedReleaseTags @('v1.0.1')
+        $modernTag = Get-Content -LiteralPath $modernTagPath -Raw
+        Assert-Contains $modernTag '验证后续发布标签' 'release-v* 后续标签必须可生成更新日志'
+    } finally {
+        Pop-Location
+    }
+
     foreach ($invalidTag in @(
         'V1.0.0.1',
         'v1.0.0.0',

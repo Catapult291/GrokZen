@@ -124,6 +124,52 @@ try {
         (New-Object Text.UTF8Encoding($false))
     )
 
+    $archiveSource = Join-Path $testRoot 'archive-source'
+    $archivePackage = Join-Path $archiveSource 'grok-zh-installer-test-windows-x86_64-gnu'
+    New-Item -ItemType Directory -Path $archiveSource -Force | Out-Null
+    Copy-Item -LiteralPath $package -Destination $archivePackage -Recurse
+    $archivePath = Join-Path $testRoot 'nested-package.zip'
+    Compress-Archive -LiteralPath $archivePackage -DestinationPath $archivePath
+    $archiveExtract = Join-Path $testRoot 'archive-extract'
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $archiveExtract
+    $archiveRootFiles = @(Get-ChildItem -LiteralPath $archiveExtract -File -Force)
+    $archiveRootDirectories = @(Get-ChildItem -LiteralPath $archiveExtract -Directory -Force)
+    Assert-True ($archiveRootFiles.Count -eq 0 -and $archiveRootDirectories.Count -eq 1) `
+        'Release ZIP 解压后必须只有一个顶层目录'
+    $nestedInstall = Join-Path $testRoot 'nested-package-install'
+    & (Join-Path $archiveRootDirectories[0].FullName 'Install-GrokZh.ps1') `
+        -InstallDir $nestedInstall `
+        -GrokHome (Join-Path $testRoot 'unused-nested-home') -NoPathUpdate -Confirm:$false
+    Assert-True (Test-Path -LiteralPath (Join-Path $nestedInstall 'grok-zh.exe')) `
+        '单一顶层目录 Release ZIP 无法手动安装'
+
+    $legacyPackage = Join-Path $testRoot 'legacy-package'
+    Copy-Item -LiteralPath $package -Destination $legacyPackage -Recurse
+    $legacyNames = $names[0..6]
+    $legacyLines = foreach ($name in $legacyNames) {
+        $hash = (Get-FileHash -LiteralPath (Join-Path $legacyPackage $name) -Algorithm SHA256).Hash
+        "$hash  $name"
+    }
+    [IO.File]::WriteAllLines(
+        (Join-Path $legacyPackage 'SHA256SUMS.txt'),
+        [string[]]$legacyLines,
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $legacyInstall = Join-Path $testRoot 'legacy-package-install'
+    & (Join-Path $legacyPackage 'Install-GrokZh.ps1') `
+        -PackageDir $legacyPackage -InstallDir $legacyInstall `
+        -GrokHome (Join-Path $testRoot 'unused-legacy-home') -NoPathUpdate -Confirm:$false
+    Assert-True (Test-Path -LiteralPath (Join-Path $legacyInstall 'grok-zh.exe')) `
+        '7 项桥接清单无法由新版安装器安装'
+    Assert-True (Test-Path -LiteralPath (Join-Path $legacyInstall 'BUILD-INFO.txt')) `
+        '7 项桥接安装丢失构建信息'
+    Assert-True (Test-Path -LiteralPath (Join-Path $legacyInstall 'LICENSE-grok-build.txt')) `
+        '7 项桥接安装丢失主许可证'
+    foreach ($relativeLicense in $licenseFiles.Keys) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $legacyInstall $relativeLicense) -PathType Leaf) `
+            "7 项桥接安装丢失许可证文件：$relativeLicense"
+    }
+
     Assert-Throws {
         & $installer -PackageDir $package -InstallDir $testRoot `
             -GrokHome (Join-Path $testRoot 'unused-home') -NoPathUpdate -Force -Confirm:$false

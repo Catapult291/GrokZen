@@ -15,7 +15,9 @@ Agent Client Protocol（ACP）集成到编辑器中。
 ## 安装
 
 社区 Windows 包由本仓库 Releases 和 `CI` 工作流生成。
-Release ZIP 下载后只需解压一次；包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
+Release ZIP 下载后只需解压一次；后续 `release-v*` 包需先打开唯一的
+`grok-zh-<version>-windows-x86_64-gnu` 目录，旧版与 `v1.0.8` 桥接包则直接使用
+解压目录。包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
 `grok-zh`、`agent-zh`，并支持由用户显式接管 `grok`、`agent`。完整说明也会
 作为包内的 `INSTALL-WINDOWS.md` 提供，并可在
 [仓库中在线查看](https://github.com/JoyElliot/grok-build-Chinese/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
@@ -31,7 +33,8 @@ grok-zh --version
 
 带更新器的版本只读取本仓库的 Immutable GitHub Releases，只接受完整 Windows GNU ZIP
 及其 `.sha256` sidecar，并核对 GitHub SHA-256、安全 ZIP 布局和包内 `SHA256SUMS.txt`；
-绝不会回退到 xAI 官方发布渠道。旧的裸 EXE 更新版本需要先手工安装一次 ZIP-only 桥接版。
+绝不会回退到 xAI 官方发布渠道。`v1.0.8` 保留旧版所需的扁平 ZIP，后续
+`release-v*` 包才使用单一顶层目录；更早的裸 EXE 更新版本仍需先手工安装 ZIP-only 桥接版。
 
 社区版默认关闭后台自动更新：程序启动时只检查版本并显示提示，不下载文件。欢迎页按
 `Ctrl+U` 才会退出旧 TUI、下载并安装；显式开启设置中的“自动更新”后才允许后台预下载。

@@ -22,28 +22,33 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 
-function Test-ReleaseTag([string] $Tag) {
-    if ($Tag -cnotmatch '^v(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$') {
-        return $false
-    }
+function Get-ReleaseTagVersion([string] $Tag) {
+    $pattern = '^(?<namespace>v|release-v)(?<version>(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?)$'
+    if ($Tag -cnotmatch $pattern) { return $null }
+    $version = $matches['version']
+    $prerelease = [string]$matches['prerelease']
     foreach ($number in @($matches['major'], $matches['minor'], $matches['patch'])) {
         [uint64]$parsedNumber = 0
         if ($number -and ![uint64]::TryParse([string]$number, [ref]$parsedNumber)) {
-            return $false
+            return $null
         }
     }
-    if ($matches.ContainsKey('prerelease') -and $matches.prerelease) {
-        foreach ($identifier in ($matches.prerelease -split '\.')) {
+    if ($prerelease) {
+        foreach ($identifier in ($prerelease -split '\.')) {
             if ($identifier -cmatch '^[0-9]+$') {
                 [uint64]$parsedIdentifier = 0
                 if (($identifier.Length -gt 1 -and $identifier.StartsWith('0')) -or
                     ![uint64]::TryParse($identifier, [ref]$parsedIdentifier)) {
-                    return $false
+                    return $null
                 }
             }
         }
     }
-    return $true
+    return $version
+}
+
+function Test-ReleaseTag([string] $Tag) {
+    return $null -ne (Get-ReleaseTagVersion $Tag)
 }
 
 function Test-RepositoryName([string] $Value) {
@@ -60,7 +65,7 @@ function ConvertTo-MarkdownLinkText([string] $Text) {
 }
 
 if (!(Test-ReleaseTag $CurrentTag)) {
-    throw "CurrentTag 必须是严格三段 vA.B.C 或三段预发布格式，且不得含 build metadata、数字前导零：$CurrentTag"
+    throw "CurrentTag 必须是严格三段 vA.B.C、release-vA.B.C 或对应预发布格式，且不得含 build metadata、数字前导零：$CurrentTag"
 }
 if (!(Test-RepositoryName $Repository)) {
     throw "Repository 必须是 owner/name：$Repository"
@@ -195,10 +200,11 @@ function Get-PublishedReleaseTags {
         $releases = @($pageResult)
         foreach ($release in $releases) {
             $tagName = [string]$release.tag_name
-            $tagPrerelease = $tagName.Contains('-')
+            $tagVersion = Get-ReleaseTagVersion $tagName
+            $tagPrerelease = $tagVersion -and $tagVersion.Contains('-')
             if (!$release.draft -and $release.immutable -and
                 ([bool]$release.prerelease -eq $tagPrerelease) -and
-                (Test-ReleaseTag $tagName)) {
+                $tagVersion) {
                 $tags.Add([string]$release.tag_name)
             }
         }
