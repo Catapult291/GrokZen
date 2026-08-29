@@ -8,8 +8,10 @@
 1. 推荐从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
    下载 `grok-zh-<version>-windows-x86_64-gnu.zip`。开发测试也可从
    **Actions → CI** 下载短期 Artifact。
-2. 解压一次；Release ZIP 内直接是安装包内容。
-3. 确认目录中恰好包含以下受管文件和目录（`SHA256SUMS.txt` 是包内清单，不列入它自身的哈希项）：
+2. 解压一次；后续 `release-v*` 版本（含预发布）只会得到一个
+   `grok-zh-<version>-windows-x86_64-gnu` 顶层目录。打开该目录后再运行安装入口。
+   仅用于让 `v1.0.5` 升级的 `v1.0.8` 桥接包因旧更新器兼容要求仍是扁平结构。
+3. 确认包目录中恰好包含以下受管文件和目录（`SHA256SUMS.txt` 是包内清单，不列入它自身的哈希项）：
 
    ```text
    grok-zh.exe
@@ -34,7 +36,11 @@
 文件哈希。Release 只提供 ZIP 的 `.sha256` 旁车文件，GitHub API 也会记录 ZIP 资产 digest；
 不会再额外发布一份版本化裸 EXE。
 
-两个双击入口、安装脚本和本说明只在解压包根目录中使用，不会复制到程序运行目录；
+`v1.0.8` 桥接包的内层清单只列旧更新器认识的 7 个执行与安装入口；ZIP 仍物理包含上述
+许可证和构建信息，完整 ZIP 继续受 GitHub digest 与外层 `.sha256` 保护。从
+`release-v1.0.9` 起，内层清单覆盖全部 15 个受管文件。
+
+两个双击入口、安装脚本和本说明只在上述包目录中使用，不会复制到程序运行目录；
 需要升级或调整安装方式时，请使用新下载并解压后的完整包。
 
 正式 Tag 工作流会为 ZIP 与 `.sha256` 自动生成 GitHub Actions 构建来源证明。下载后可用
@@ -61,7 +67,7 @@ Artifact Attestation 不是 Windows Authenticode；未签名 EXE 仍可能触发
 
 ## 一键安装：与官方版共存
 
-在解压后的目录中，直接双击：
+在上述包目录中，直接双击：
 
 ```text
 一键安装.cmd
@@ -106,7 +112,7 @@ agent-zh
 
 ## 可选：替换原始启动方式
 
-如果希望在终端中直接输入 `grok` 和 `agent` 时使用中文版，请回到解压包根目录，再双击：
+如果希望在终端中直接输入 `grok` 和 `agent` 时使用中文版，请回到上述包目录，再双击：
 
 ```text
 [可选]替换原始启动方式.cmd
@@ -230,8 +236,9 @@ npm uninstall -g @xai-official/grok
 安装带社区更新器的版本后，程序启动时会查询固定仓库
 `JoyElliot/grok-build-Chinese`：
 
-- 默认 `stable` 只接受 immutable、非 Draft、非 prerelease 的严格三段 `vA.B.C`
-  Release，并与上游包版本保持一致；第四段社区修订号不再受支持；
+- 默认 `stable` 只接受 immutable、非 Draft、非 prerelease 的严格三段版本。`v1.0.8`
+  是旧更新器可见的最后一个桥接 Tag；后续版本使用 `release-vA.B.C`，二进制报告的版本仍是
+  `A.B.C`，不会增加第四段社区修订号；
 - `grok-zh update --alpha` 可选择预发布通道，`grok-zh update --stable` 可切回稳定通道；
 - Release 只接受精确命名的完整
   `grok-zh-<version>-windows-x86_64-gnu.zip` 及其 `.sha256` sidecar；更新器验证固定 URL、
@@ -243,6 +250,9 @@ npm uninstall -g @xai-official/grok
   替换当前 `grok-zh.exe`；不会强制结束其他会话；完成后重新运行 `grok-zh`；
 - `v1.0.0-zh.preview.3` 的旧更新器只认识裸 EXE，需要手工下载完整 ZIP 迁移；已撤回的
   `v1.0.0.1` 使用了不兼容代理版本门禁的四段版本号，不应继续安装或分发。
+- 已发布的 `v1.0.5` 会先更新到仅含 Windows 两个资产、扁平 ZIP 和 7 项兼容清单的
+  `v1.0.8`。从 `release-v1.0.9` 起，Windows、macOS、Linux 共用六资产 Release；旧客户端
+  无法识别 `release-v*`，因此不会跳过桥接版本。
 
 自动激活仍沿用原版的单 EXE 替换语义，但传输与验证只使用完整 ZIP；不会在运行中的安装
 目录内逐个改写 `agent-zh.cmd`、`rg.exe`、安装文档、Path 或官方 `grok`/`agent`。若某个版本

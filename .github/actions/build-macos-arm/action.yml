@@ -147,6 +147,8 @@ runs:
           cargo fmt --all -- --check
           cargo fetch --locked --target "${TARGET}"
           cargo test --frozen -j "${CARGO_BUILD_JOBS}" -p xai-grok-locale
+          cargo test --frozen -j "${CARGO_BUILD_JOBS}" \
+            -p xai-grok-update --features community-build --lib
 
       - name: 构建 macOS ARM64
         shell: bash

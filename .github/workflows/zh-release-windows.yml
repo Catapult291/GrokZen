@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - "v*"
+      - "release-v*"
 
 permissions:
   contents: read
@@ -48,8 +49,14 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
           $tag = $env:GITHUB_REF_NAME.Trim()
-          if ($tag -cnotmatch '^v(?<version>(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?)$') {
-            throw "Release Tag 必须是严格三段 vA.B.C 或三段预发布格式，且不得含 build metadata：$tag"
+          $legacyPattern = '^v(?<version>(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?)$'
+          $modernPattern = '^release-v(?<version>(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?)$'
+          if ($tag -cmatch $legacyPattern) {
+            $legacyRelease = $true
+          } elseif ($tag -cmatch $modernPattern) {
+            $legacyRelease = $false
+          } else {
+            throw "Release Tag 必须是 v1.0.8 及之前的桥接格式，或 release-vA.B.C 三段后续格式，且不得含 build metadata：$tag"
           }
           $version = $matches.version
           if ($version.Length -gt 64) {
@@ -76,6 +83,15 @@ jobs:
                 }
               }
             }
+          }
+          $isAfterBridgeBase = $major -gt 1 -or
+            ($major -eq 1 -and $minor -gt 0) -or
+            ($major -eq 1 -and $minor -eq 0 -and $patch -gt 8)
+          if ($legacyRelease -and ($version.Contains('-') -or $isAfterBridgeBase)) {
+            throw "v* 命名空间只允许截至 v1.0.8 的稳定桥接版本；后续版本必须使用 release-v*：$tag"
+          }
+          if (!$legacyRelease -and !$version.Contains('-') -and !$isAfterBridgeBase) {
+            throw "截至 v1.0.8 的稳定版本必须使用旧 v* 命名空间：$tag"
           }
           function Read-PackageVersion([string]$path) {
             $line = Get-Content -LiteralPath $path |
@@ -118,18 +134,12 @@ jobs:
           }
           $packageName = "grok-zh-$version-windows-x86_64-gnu"
           $zipName = "$packageName.zip"
-          $includeMacos = $major -gt 1 -or
-            ($major -eq 1 -and $minor -gt 0) -or
-            ($major -eq 1 -and $minor -eq 0 -and $patch -ge 7)
           $isPrerelease = $version.Contains('-').ToString().ToLowerInvariant()
-          # v1.0.8 stable is the four-asset bridge consumable by v1.0.5.
-          # Linux first ships in v1.0.8 prereleases; stable Linux assets begin
-          # with v1.0.9 after bridge clients understand the six-asset contract.
-          $includeLinux = $major -gt 1 -or
-            ($major -eq 1 -and $minor -gt 0) -or
-            ($major -eq 1 -and $minor -eq 0 -and $patch -ge 9) -or
-            ($major -eq 1 -and $minor -eq 0 -and $patch -eq 8 -and
-              $isPrerelease -eq 'true')
+          # Plain v1.0.8 is the final two-asset Windows bridge consumable by the
+          # published v1.0.5 updater. All release-v* tags use the complete
+          # cross-platform contract and are intentionally invisible to v1.0.5.
+          $includeMacos = !$legacyRelease
+          $includeLinux = !$legacyRelease
           $windowsArtifactName = "grok-zh-windows-release-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           $notesArtifactName = "grok-zh-release-notes-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           "RELEASE_TAG=$tag" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
@@ -137,6 +147,8 @@ jobs:
           "PACKAGE_NAME=$packageName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "ZIP_NAME=$zipName" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           "IS_PRERELEASE=$isPrerelease" |
+            Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "LEGACY_RELEASE=$($legacyRelease.ToString().ToLowerInvariant())" |
             Out-File $env:GITHUB_ENV -Append -Encoding utf8
           @{
             release_tag = $tag
@@ -385,14 +397,17 @@ jobs:
           Default commands after installation: grok-zh, agent-zh
           "@.Trim() | Set-Content (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
 
-          $manifestNames = @(
+          $legacyManifestNames = @(
             'grok-zh.exe',
             'agent-zh.cmd',
             'rg.exe',
             '一键安装.cmd',
             '[可选]替换原始启动方式.cmd',
             'Install-GrokZh.ps1',
-            'INSTALL-WINDOWS.md',
+            'INSTALL-WINDOWS.md'
+          )
+          $completeManifestNames = @(
+            $legacyManifestNames
             'LICENSE-grok-build.txt',
             'BUILD-INFO.txt',
             'licenses/ripgrep/COPYING',
@@ -402,6 +417,11 @@ jobs:
             'licenses/project/THIRD_PARTY_NOTICES.md',
             'licenses/project/NOTICE'
           )
+          $manifestNames = if ($env:LEGACY_RELEASE -eq 'true') {
+            $legacyManifestNames
+          } else {
+            $completeManifestNames
+          }
           $manifest = foreach ($name in $manifestNames) {
             $hash = (Get-FileHash -LiteralPath (Join-Path $package $name) -Algorithm SHA256).Hash
             "$hash  $name"
@@ -414,8 +434,13 @@ jobs:
 
           $zipName = "$env:PACKAGE_NAME.zip"
           $zipPath = Join-Path $dist $zipName
-          Compress-Archive -Path (Join-Path $package '*') `
-            -DestinationPath $zipPath -CompressionLevel Optimal
+          if ($env:LEGACY_RELEASE -eq 'true') {
+            Compress-Archive -Path (Join-Path $package '*') `
+              -DestinationPath $zipPath -CompressionLevel Optimal
+          } else {
+            Compress-Archive -Path $package `
+              -DestinationPath $zipPath -CompressionLevel Optimal
+          }
 
           $verifyRoot = Join-Path $env:RUNNER_TEMP "grok-zh-release-zip-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           if (Test-Path -LiteralPath $verifyRoot) {
@@ -423,6 +448,17 @@ jobs:
           }
           New-Item -ItemType Directory -Path $verifyRoot | Out-Null
           Expand-Archive -LiteralPath $zipPath -DestinationPath $verifyRoot
+          if ($env:LEGACY_RELEASE -eq 'true') {
+            $packageRoot = $verifyRoot
+          } else {
+            $rootFiles = @(Get-ChildItem -LiteralPath $verifyRoot -File -Force)
+            $rootDirectories = @(Get-ChildItem -LiteralPath $verifyRoot -Directory -Force)
+            if ($rootFiles.Count -ne 0 -or $rootDirectories.Count -ne 1 -or
+                $rootDirectories[0].Name -cne $env:PACKAGE_NAME) {
+              throw "后续 Release ZIP 必须只包含一个同名顶层目录：$env:PACKAGE_NAME"
+            }
+            $packageRoot = $rootDirectories[0].FullName
+          }
           $required = @(
             'grok-zh.exe',
             'agent-zh.cmd',
@@ -440,9 +476,14 @@ jobs:
             'licenses/project/THIRD_PARTY_NOTICES.md',
             'licenses/project/NOTICE'
           )
-          $manifestPath = Join-Path $verifyRoot 'SHA256SUMS.txt'
+          $approvedManifestNames = if ($env:LEGACY_RELEASE -eq 'true') {
+            $required[0..6]
+          } else {
+            $required
+          }
+          $manifestPath = Join-Path $packageRoot 'SHA256SUMS.txt'
           if (!(Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
-            throw 'Release ZIP 根目录缺少 SHA256SUMS.txt。'
+            throw 'Release ZIP 包目录缺少 SHA256SUMS.txt。'
           }
           $manifestHashes = [Collections.Generic.Dictionary[string, string]]::new(
             [StringComparer]::Ordinal
@@ -467,7 +508,7 @@ jobs:
                 $name.Contains(':') -or
                 $pathParts.Count -eq 0 -or
                 ($pathParts | Where-Object { $_ -in @('', '.', '..') }).Count -ne 0 -or
-                $required -cnotcontains $name -or
+                $approvedManifestNames -cnotcontains $name -or
                 (!$isAscii -and $allowedUnicodeNames -cnotcontains $name)) {
               throw "SHA256SUMS.txt 包含不安全或未批准的文件名：$name"
             }
@@ -479,7 +520,7 @@ jobs:
             if (!$normalizedNames.Add($normalizedName)) {
               throw "SHA256SUMS.txt 包含重复文件名：$name"
             }
-            $file = Join-Path $verifyRoot $name
+            $file = Join-Path $packageRoot $name
             if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
               throw "Release ZIP 缺少清单文件：$name"
             }
@@ -489,14 +530,14 @@ jobs:
             }
             $manifestHashes.Add($name, $actualHash)
           }
-          foreach ($name in $required) {
+          foreach ($name in $approvedManifestNames) {
             if (!$manifestHashes.ContainsKey($name)) {
               throw "Release ZIP 清单缺少必需文件：$name"
             }
           }
           $expectedFiles = @($required + 'SHA256SUMS.txt')
-          $actualFiles = @(Get-ChildItem -LiteralPath $verifyRoot -Recurse -File | ForEach-Object {
-            [IO.Path]::GetRelativePath($verifyRoot, $_.FullName).Replace(
+          $actualFiles = @(Get-ChildItem -LiteralPath $packageRoot -Recurse -File -Force | ForEach-Object {
+            [IO.Path]::GetRelativePath($packageRoot, $_.FullName).Replace(
               [IO.Path]::DirectorySeparatorChar,
               '/'
             )
@@ -506,7 +547,7 @@ jobs:
           if ($missingFiles.Count -ne 0 -or $extraFiles.Count -ne 0) {
             throw "Release ZIP 文件集合不精确；缺少：$($missingFiles -join ', ')；额外：$($extraFiles -join ', ')"
           }
-          $verifyExe = Join-Path $verifyRoot 'grok-zh.exe'
+          $verifyExe = Join-Path $packageRoot 'grok-zh.exe'
           $versionOutput = (& $verifyExe --version | Select-Object -First 1).Trim()
           if ($LASTEXITCODE -ne 0 -or
               $versionOutput -notmatch "^grok-zh $([regex]::Escape($env:GROK_VERSION)) \(") {

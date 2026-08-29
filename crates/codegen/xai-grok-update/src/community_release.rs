@@ -51,12 +51,12 @@ const WINDOWS_REQUIRED_PACKAGE_FILES: [&str; 15] = [
     "licenses/project/THIRD_PARTY_NOTICES.md",
     "licenses/project/NOTICE",
 ];
-// v1.0.5 was published with the current 15-file ZIP layout, but its inner
-// manifest predates the license/build-metadata expansion and contains only
-// these seven executable/installer files. The outer asset digest still covers
-// the complete ZIP. Keep this compatibility profile pinned to that exact
-// trusted Release version instead of accepting arbitrary partial manifests.
-const WINDOWS_V1_0_5_MANIFEST_FILES: [&str; 7] = [
+// Published legacy packages use the current 15-file physical ZIP layout, but
+// their inner manifest predates the license/build-metadata expansion and lists
+// only these seven executable/installer files. The outer asset digest still
+// covers the complete ZIP. v1.0.8 deliberately keeps this profile as the final
+// bridge consumable by the published v1.0.5 updater.
+const WINDOWS_LEGACY_MANIFEST_FILES: [&str; 7] = [
     "grok-zh.exe",
     "agent-zh.cmd",
     "rg.exe",
@@ -90,6 +90,7 @@ const LINUX_REQUIRED_PACKAGE_FILES: [&str; 9] = [
     "THIRD-PARTY-NOTICES-xai-grok-tools.md",
 ];
 const INNER_MANIFEST: &str = "SHA256SUMS.txt";
+const LEGACY_BRIDGE_VERSION: (u64, u64, u64) = (1, 0, 8);
 
 fn is_allowed_unicode_package_name(name: &str) -> bool {
     name == ONE_CLICK_INSTALLER || name == COMMAND_SETUP_INSTALLER
@@ -106,11 +107,12 @@ fn releases_api(page: usize) -> String {
     )
 }
 
-fn release_by_tag_api(version: &str) -> String {
-    format!(
-        "https://api.github.com/repos/{}/releases/tags/v{version}",
+fn release_by_tag_api(version: &str) -> Result<String> {
+    let tag = release_tag_for_version(&canonical_release_version(version)?);
+    Ok(format!(
+        "https://api.github.com/repos/{}/releases/tags/{tag}",
         release_repo()
-    )
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -222,8 +224,17 @@ fn parse_release_version(release: &ApiRelease) -> Option<Version> {
     if release.draft || !release.immutable {
         return None;
     }
-    let version = Version::parse(release.tag_name.strip_prefix('v')?).ok()?;
+    let (version_text, modern_namespace) =
+        if let Some(version) = release.tag_name.strip_prefix("release-v") {
+            (version, true)
+        } else {
+            (release.tag_name.strip_prefix('v')?, false)
+        };
+    let version = Version::parse(version_text).ok()?;
     if !version.build.is_empty() || release.prerelease != !version.pre.is_empty() {
+        return None;
+    }
+    if modern_namespace == is_legacy_release_version(&version) {
         return None;
     }
     Some(version)
@@ -295,6 +306,18 @@ fn canonical_release_version(version: &str) -> Result<Version> {
     Ok(parsed)
 }
 
+fn is_legacy_release_version(version: &Version) -> bool {
+    version.pre.is_empty() && (version.major, version.minor, version.patch) <= LEGACY_BRIDGE_VERSION
+}
+
+fn release_tag_for_version(version: &Version) -> String {
+    if is_legacy_release_version(version) {
+        format!("v{version}")
+    } else {
+        format!("release-v{version}")
+    }
+}
+
 fn release_asset_name_for(platform: CommunityPlatform, version: &str) -> Result<String> {
     canonical_release_version(version)?;
     match platform {
@@ -313,16 +336,16 @@ fn release_asset_name(version: &str) -> Result<String> {
 }
 
 fn release_includes_macos_assets(version: &Version) -> bool {
-    (version.major, version.minor, version.patch) >= (1, 0, 7)
+    !is_legacy_release_version(version)
 }
 
-/// Keep v1.0.8 stable on the four-asset Windows/macOS bridge contract so the
-/// published v1.0.5 updater can consume it. Linux first ships in the v1.0.8
-/// release-candidate line; every stable release from v1.0.9 onward uses the
-/// six-asset contract understood by the bridge client.
+/// The plain v1.0.8 tag is the last legacy release and contains only the two
+/// Windows assets accepted by the published v1.0.5 updater. All prereleases
+/// and all later stable releases use the release-v namespace and the complete
+/// six-asset cross-platform contract. The legacy updater ignores that namespace,
+/// so a late v1.0.5 installation cannot skip the bridge.
 fn release_includes_linux_assets(version: &Version) -> bool {
-    let base = (version.major, version.minor, version.patch);
-    base >= (1, 0, 9) || (base == (1, 0, 8) && !version.pre.is_empty())
+    !is_legacy_release_version(version)
 }
 
 fn expected_release_asset_names(version: &str) -> Result<Vec<String>> {
@@ -360,7 +383,8 @@ fn select_asset_for_platform(
 ) -> Result<VerifiedAsset> {
     let parsed = parse_release_version(release)
         .ok_or_else(|| anyhow::anyhow!("release is mutable, draft, or has invalid metadata"))?;
-    if parsed.to_string() != version || release.tag_name != format!("v{version}") {
+    let expected_tag = release_tag_for_version(&parsed);
+    if parsed.to_string() != version || release.tag_name != expected_tag {
         anyhow::bail!("release tag and requested version do not match");
     }
     let name = release_asset_name_for(platform, version)?;
@@ -399,8 +423,8 @@ fn select_asset_for_platform(
             anyhow::bail!("release asset size is outside the accepted range: {expected_name}");
         }
         let expected_url = format!(
-            "https://github.com/{}/releases/download/v{version}/{expected_name}",
-            release_repo()
+            "https://github.com/{}/releases/download/{expected_tag}/{expected_name}",
+            release_repo(),
         );
         if expected.browser_download_url != expected_url {
             anyhow::bail!("release asset URL does not match the fixed community repository");
@@ -421,15 +445,15 @@ fn select_asset_for_platform(
         .find(|asset| asset.name == sidecar_name)
         .ok_or_else(|| anyhow::anyhow!("release is missing {sidecar_name}"))?;
     let expected_url = format!(
-        "https://github.com/{}/releases/download/v{version}/{name}",
-        release_repo()
+        "https://github.com/{}/releases/download/{expected_tag}/{name}",
+        release_repo(),
     );
     if asset.browser_download_url != expected_url {
         anyhow::bail!("release asset URL does not match the fixed community repository");
     }
     let expected_sidecar_url = format!(
-        "https://github.com/{}/releases/download/v{version}/{sidecar_name}",
-        release_repo()
+        "https://github.com/{}/releases/download/{expected_tag}/{sidecar_name}",
+        release_repo(),
     );
     if sidecar.browser_download_url != expected_sidecar_url {
         anyhow::bail!("release checksum URL does not match the fixed community repository");
@@ -500,7 +524,7 @@ pub(crate) async fn fetch_asset(version: &str) -> Result<VerifiedAsset> {
     if parsed.to_string() != version {
         anyhow::bail!("community release version is not canonical: {version}");
     }
-    let url = release_by_tag_api(version);
+    let url = release_by_tag_api(version)?;
     let release: ApiRelease = fetch_json(&url).await?;
     select_asset(&release, version)
 }
@@ -637,6 +661,7 @@ fn expected_archive_names(required_files: &[&str]) -> HashSet<String> {
 fn validate_archive_layout(
     archive: &mut zip::ZipArchive<File>,
     required_files: &[&str],
+    package_root: Option<&str>,
 ) -> Result<()> {
     if archive.is_empty() || archive.len() > MAX_ARCHIVE_ENTRIES {
         anyhow::bail!("community release ZIP contains an invalid number of entries");
@@ -650,6 +675,8 @@ fn validate_archive_layout(
         .collect();
     let mut seen_files = HashSet::new();
     let mut seen_dirs = HashSet::new();
+    let normalized_root = package_root.map(normalized_package_name);
+    let mut seen_root_dir = false;
     let mut total_size = 0u64;
     for index in 0..archive.len() {
         let entry = archive
@@ -685,12 +712,33 @@ fn validate_archive_layout(
 
         let enclosed_text = enclosed.to_string_lossy();
         let enclosed_name = enclosed_text.strip_suffix('/').unwrap_or(&enclosed_text);
-        if !enclosed_name.is_ascii() && !is_allowed_unicode_package_name(enclosed_name) {
+        let normalized_full = normalized_package_name(&enclosed_name.replace('\\', "/"));
+        let normalized = if let Some(root) = normalized_root.as_deref() {
+            if normalized_full == root {
+                if !entry.is_dir() || seen_root_dir {
+                    anyhow::bail!(
+                        "community release ZIP contains an invalid package root: {raw_name}"
+                    );
+                }
+                seen_root_dir = true;
+                continue;
+            }
+            normalized_full
+                .strip_prefix(&format!("{root}/"))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "community release ZIP entry is outside the approved package root: {raw_name}"
+                    )
+                })?
+                .to_string()
+        } else {
+            normalized_full
+        };
+        if !normalized.is_ascii() && !is_allowed_unicode_package_name(&normalized) {
             anyhow::bail!(
                 "community release ZIP entry name contains unapproved Unicode: {raw_name}"
             );
         }
-        let normalized = normalized_package_name(&enclosed_name.replace('\\', "/"));
         let seen = if entry.is_dir() {
             if !approved_dirs.contains(&normalized) {
                 anyhow::bail!("community release ZIP contains an extra directory: {raw_name}");
@@ -777,9 +825,13 @@ fn parse_inner_manifest(bytes: &[u8], required_files: &[&str]) -> Result<HashMap
 fn read_inner_manifest(
     archive: &mut zip::ZipArchive<File>,
     required_files: &[&str],
+    package_root: Option<&str>,
 ) -> Result<HashMap<String, String>> {
+    let manifest_name = package_root
+        .map(|root| format!("{root}/{INNER_MANIFEST}"))
+        .unwrap_or_else(|| INNER_MANIFEST.to_string());
     let entry = archive
-        .by_name(INNER_MANIFEST)
+        .by_name(&manifest_name)
         .context("community release ZIP is missing SHA256SUMS.txt")?;
     if entry.is_symlink() || !entry.is_file() || entry.size() > MAX_MANIFEST_BYTES {
         anyhow::bail!("community release SHA256SUMS.txt is not a bounded regular file");
@@ -798,10 +850,14 @@ fn read_inner_manifest(
 fn hash_manifest_entry(
     archive: &mut zip::ZipArchive<File>,
     name: &str,
+    package_root: Option<&str>,
     destination: Option<&Path>,
 ) -> Result<String> {
+    let archive_name = package_root
+        .map(|root| format!("{root}/{name}"))
+        .unwrap_or_else(|| name.to_string());
     let mut entry = archive
-        .by_name(name)
+        .by_name(&archive_name)
         .with_context(|| format!("community release ZIP is missing manifest entry {name}"))?;
     if entry.is_symlink() || !entry.is_file() || entry.size() > MAX_ENTRY_BYTES {
         anyhow::bail!("community release manifest entry is not a bounded regular file: {name}");
@@ -875,16 +931,32 @@ fn extract_verified_windows_executable(
             .with_context(|| format!("opening community release ZIP {}", archive_path.display()))?;
         let mut archive = zip::ZipArchive::new(archive_file)
             .context("opening the downloaded community release as ZIP")?;
-        validate_archive_layout(&mut archive, &WINDOWS_REQUIRED_PACKAGE_FILES)?;
-        let manifest_files: &[&str] = if asset.version == "1.0.5" {
-            &WINDOWS_V1_0_5_MANIFEST_FILES
+        let parsed_version = canonical_release_version(&asset.version)?;
+        let expected_asset_name =
+            release_asset_name_for(CommunityPlatform::WindowsX86_64Gnu, &asset.version)?;
+        if asset.name != expected_asset_name {
+            anyhow::bail!("Windows release asset name does not match its version");
+        }
+        let package_root = if is_legacy_release_version(&parsed_version) {
+            None
+        } else {
+            Some(
+                asset
+                    .name
+                    .strip_suffix(".zip")
+                    .ok_or_else(|| anyhow::anyhow!("Windows release asset is not a ZIP"))?,
+            )
+        };
+        validate_archive_layout(&mut archive, &WINDOWS_REQUIRED_PACKAGE_FILES, package_root)?;
+        let manifest_files: &[&str] = if is_legacy_release_version(&parsed_version) {
+            &WINDOWS_LEGACY_MANIFEST_FILES
         } else {
             &WINDOWS_REQUIRED_PACKAGE_FILES
         };
-        let hashes = read_inner_manifest(&mut archive, manifest_files)?;
+        let hashes = read_inner_manifest(&mut archive, manifest_files, package_root)?;
         for (name, expected) in hashes {
             let extracted = (name == "grok-zh.exe").then_some(destination);
-            let actual = hash_manifest_entry(&mut archive, &name, extracted)?;
+            let actual = hash_manifest_entry(&mut archive, &name, package_root, extracted)?;
             if actual != expected {
                 anyhow::bail!("community release inner SHA-256 mismatch for {name}");
             }
@@ -1274,10 +1346,11 @@ mod tests {
     }
 
     fn uploaded_asset(version: &str, name: String, size: u64) -> ApiAsset {
+        let tag = release_tag_for_version(&canonical_release_version(version).unwrap());
         ApiAsset {
             browser_download_url: format!(
-                "https://github.com/{}/releases/download/v{version}/{name}",
-                release_repo()
+                "https://github.com/{}/releases/download/{tag}/{name}",
+                release_repo(),
             ),
             name,
             size,
@@ -1299,11 +1372,12 @@ mod tests {
 
     fn verified_windows_asset(version: &str) -> VerifiedAsset {
         let name = format!("grok-zh-{version}-windows-x86_64-gnu.zip");
+        let tag = release_tag_for_version(&canonical_release_version(version).unwrap());
         VerifiedAsset {
             version: version.to_string(),
             download_url: format!(
-                "https://github.com/{}/releases/download/v{version}/{name}",
-                release_repo()
+                "https://github.com/{}/releases/download/{tag}/{name}",
+                release_repo(),
             ),
             name,
             size: 1,
@@ -1381,12 +1455,20 @@ mod tests {
     }
 
     fn package_entries() -> Vec<(String, Vec<u8>)> {
-        package_entries_with_manifest(&WINDOWS_REQUIRED_PACKAGE_FILES)
+        nested_package_entries("1.0.9", &WINDOWS_REQUIRED_PACKAGE_FILES)
+    }
+
+    fn nested_package_entries(version: &str, manifest_files: &[&str]) -> Vec<(String, Vec<u8>)> {
+        let root = format!("grok-zh-{version}-windows-x86_64-gnu");
+        package_entries_with_manifest(manifest_files)
+            .into_iter()
+            .map(|(name, bytes)| (format!("{root}/{name}"), bytes))
+            .collect()
     }
 
     fn extract_current_windows_executable(archive_path: &Path, destination: &Path) -> Result<()> {
         extract_verified_windows_executable(
-            &verified_windows_asset("1.0.6"),
+            &verified_windows_asset("1.0.9"),
             archive_path,
             destination,
         )
@@ -1557,11 +1639,11 @@ mod tests {
     #[test]
     fn stable_selects_highest_immutable_non_prerelease() {
         let releases = vec![
-            release("v1.1.0-alpha.2", true, true),
+            release("release-v1.1.0-alpha.2", true, true),
             release("v1.0.1", false, true),
             release("v1.0.3", false, true),
             release("v1.0.2", false, true),
-            release("v1.2.0", false, false),
+            release("release-v1.2.0", false, false),
             release("v1.0.0", false, true),
         ];
         let (_, version) = select_latest_release(&releases, "stable").unwrap();
@@ -1572,7 +1654,7 @@ mod tests {
     fn alpha_uses_semver_not_api_order() {
         let releases = vec![
             release("v1.0.0", false, true),
-            release("v1.1.0-alpha.1", true, true),
+            release("release-v1.1.0-alpha.1", true, true),
             release("v0.9.9", false, true),
         ];
         let (_, version) = select_latest_release(&releases, "alpha").unwrap();
@@ -1582,11 +1664,36 @@ mod tests {
     #[test]
     fn mutable_and_metadata_mismatched_releases_are_rejected() {
         let releases = vec![
-            release("v2.0.0", false, false),
+            release("release-v2.0.0", false, false),
             release("v1.0.0-alpha.1", false, true),
             release("1.0.0", false, true),
         ];
         assert!(select_latest_release(&releases, "stable").is_err());
+    }
+
+    #[test]
+    fn release_namespace_prevents_legacy_clients_from_skipping_the_bridge() {
+        assert_eq!(
+            parse_release_version(&release("v1.0.8", false, true))
+                .unwrap()
+                .to_string(),
+            "1.0.8"
+        );
+        assert_eq!(
+            parse_release_version(&release("release-v1.0.9", false, true))
+                .unwrap()
+                .to_string(),
+            "1.0.9"
+        );
+        assert_eq!(
+            parse_release_version(&release("release-v1.0.8-rc.1", true, true))
+                .unwrap()
+                .to_string(),
+            "1.0.8-rc.1"
+        );
+        assert!(parse_release_version(&release("v1.0.9", false, true)).is_none());
+        assert!(parse_release_version(&release("release-v1.0.8", false, true)).is_none());
+        assert!(parse_release_version(&release("v1.0.8-rc.1", true, true)).is_none());
     }
 
     #[test]
@@ -1629,51 +1736,49 @@ mod tests {
                 .is_err()
         );
 
-        let mut candidate = release("v1.0.7-alpha.1", true, true);
-        candidate.assets = uploaded_package_assets("1.0.7-alpha.1");
+        let mut candidate = release("release-v1.0.8-rc.1", true, true);
+        candidate.assets = uploaded_package_assets("1.0.8-rc.1");
         let windows = select_asset_for_platform(
             &candidate,
-            "1.0.7-alpha.1",
+            "1.0.8-rc.1",
             CommunityPlatform::WindowsX86_64Gnu,
         )
         .unwrap();
-        assert_eq!(windows.name, "grok-zh-1.0.7-alpha.1-windows-x86_64-gnu.zip");
+        assert_eq!(windows.name, "grok-zh-1.0.8-rc.1-windows-x86_64-gnu.zip");
         let macos =
-            select_asset_for_platform(&candidate, "1.0.7-alpha.1", CommunityPlatform::MacosAarch64)
+            select_asset_for_platform(&candidate, "1.0.8-rc.1", CommunityPlatform::MacosAarch64)
                 .unwrap();
-        assert_eq!(macos.name, "grok-zh-1.0.7-alpha.1-macos-aarch64.tar.gz");
+        assert_eq!(macos.name, "grok-zh-1.0.8-rc.1-macos-aarch64.tar.gz");
         assert!(
-            select_asset_for_platform(
-                &candidate,
-                "1.0.7-alpha.1",
-                CommunityPlatform::LinuxX86_64Gnu
-            )
-            .is_err()
+            select_asset_for_platform(&candidate, "1.0.8-rc.1", CommunityPlatform::LinuxX86_64Gnu)
+                .is_ok()
         );
 
         let mut bridge = release("v1.0.8", false, true);
         bridge.assets = uploaded_package_assets("1.0.8");
-        assert_eq!(bridge.assets.len(), 4);
+        assert_eq!(bridge.assets.len(), 2);
         assert!(
             select_asset_for_platform(&bridge, "1.0.8", CommunityPlatform::WindowsX86_64Gnu)
                 .is_ok()
         );
         assert!(
+            select_asset_for_platform(&bridge, "1.0.8", CommunityPlatform::MacosAarch64).is_err()
+        );
+        assert!(
             select_asset_for_platform(&bridge, "1.0.8", CommunityPlatform::LinuxX86_64Gnu).is_err()
         );
+        bridge.assets.push(uploaded_asset(
+            "1.0.8",
+            "grok-zh-1.0.8-macos-aarch64.tar.gz".to_string(),
+            123,
+        ));
+        assert!(
+            select_asset_for_platform(&bridge, "1.0.8", CommunityPlatform::WindowsX86_64Gnu)
+                .is_err()
+        );
+        bridge.assets.pop();
 
-        let mut linux_candidate = release("v1.0.8-rc.1", true, true);
-        linux_candidate.assets = uploaded_package_assets("1.0.8-rc.1");
-        assert_eq!(linux_candidate.assets.len(), 6);
-        let linux = select_asset_for_platform(
-            &linux_candidate,
-            "1.0.8-rc.1",
-            CommunityPlatform::LinuxX86_64Gnu,
-        )
-        .unwrap();
-        assert_eq!(linux.name, "grok-zh-1.0.8-rc.1-linux-x86_64-gnu.tar.gz");
-
-        let mut next_stable = release("v1.0.9", false, true);
+        let mut next_stable = release("release-v1.0.9", false, true);
         next_stable.assets = uploaded_package_assets("1.0.9");
         assert_eq!(next_stable.assets.len(), 6);
         assert!(
@@ -1682,14 +1787,14 @@ mod tests {
         );
 
         candidate.assets.push(uploaded_asset(
-            "1.0.7-alpha.1",
-            "grok-zh-1.0.7-alpha.1-windows-x86_64-gnu.exe".to_string(),
+            "1.0.8-rc.1",
+            "grok-zh-1.0.8-rc.1-windows-x86_64-gnu.exe".to_string(),
             123,
         ));
         assert!(
             select_asset_for_platform(
                 &candidate,
-                "1.0.7-alpha.1",
+                "1.0.8-rc.1",
                 CommunityPlatform::WindowsX86_64Gnu
             )
             .is_err()
@@ -1700,7 +1805,7 @@ mod tests {
         assert!(
             select_asset_for_platform(
                 &candidate,
-                "1.0.7-alpha.1",
+                "1.0.8-rc.1",
                 CommunityPlatform::WindowsX86_64Gnu
             )
             .is_err()
@@ -1711,8 +1816,8 @@ mod tests {
     fn latest_release_selection_skips_platform_incompatible_assets() {
         let mut transition = release("v1.0.6", false, true);
         transition.assets = uploaded_package_assets("1.0.6");
-        let mut cross_platform = release("v1.0.7", false, true);
-        cross_platform.assets = uploaded_package_assets("1.0.7");
+        let mut cross_platform = release("release-v1.0.9", false, true);
+        cross_platform.assets = uploaded_package_assets("1.0.9");
         let releases = vec![cross_platform, transition];
 
         let (_, windows) = select_latest_compatible_release(
@@ -1721,11 +1826,11 @@ mod tests {
             CommunityPlatform::WindowsX86_64Gnu,
         )
         .unwrap();
-        assert_eq!(windows.to_string(), "1.0.7");
+        assert_eq!(windows.to_string(), "1.0.9");
         let (_, macos) =
             select_latest_compatible_release(&releases, "stable", CommunityPlatform::MacosAarch64)
                 .unwrap();
-        assert_eq!(macos.to_string(), "1.0.7");
+        assert_eq!(macos.to_string(), "1.0.9");
 
         let only_transition = &releases[1..];
         assert!(
@@ -1736,6 +1841,61 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn latest_release_selection_preserves_the_bridge_upgrade_order() {
+        let mut published = release("v1.0.5", false, true);
+        published.assets = uploaded_package_assets("1.0.5");
+        let mut bridge = release("v1.0.8", false, true);
+        bridge.assets = uploaded_package_assets("1.0.8");
+        let mut candidate = release("release-v1.0.8-rc.1", true, true);
+        candidate.assets = uploaded_package_assets("1.0.8-rc.1");
+        let bridge_stage = vec![candidate, bridge, published];
+
+        let (_, windows_stable) = select_latest_compatible_release(
+            &bridge_stage,
+            "stable",
+            CommunityPlatform::WindowsX86_64Gnu,
+        )
+        .unwrap();
+        assert_eq!(windows_stable.to_string(), "1.0.8");
+        let (_, windows_alpha) = select_latest_compatible_release(
+            &bridge_stage,
+            "alpha",
+            CommunityPlatform::WindowsX86_64Gnu,
+        )
+        .unwrap();
+        assert_eq!(windows_alpha.to_string(), "1.0.8");
+        assert!(
+            select_latest_compatible_release(
+                &bridge_stage,
+                "stable",
+                CommunityPlatform::MacosAarch64,
+            )
+            .is_err()
+        );
+        for platform in [
+            CommunityPlatform::MacosAarch64,
+            CommunityPlatform::LinuxX86_64Gnu,
+        ] {
+            let (_, candidate_version) =
+                select_latest_compatible_release(&bridge_stage, "alpha", platform).unwrap();
+            assert_eq!(candidate_version.to_string(), "1.0.8-rc.1");
+        }
+
+        let mut next_stable = release("release-v1.0.9", false, true);
+        next_stable.assets = uploaded_package_assets("1.0.9");
+        let post_bridge = vec![next_stable];
+        for platform in [
+            CommunityPlatform::WindowsX86_64Gnu,
+            CommunityPlatform::MacosAarch64,
+            CommunityPlatform::LinuxX86_64Gnu,
+        ] {
+            let (_, version) =
+                select_latest_compatible_release(&post_bridge, "stable", platform).unwrap();
+            assert_eq!(version.to_string(), "1.0.9");
+        }
     }
 
     #[test]
@@ -1799,21 +1959,51 @@ mod tests {
             "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases?per_page=100&page=2"
         );
         assert_eq!(
-            release_by_tag_api("1.0.3"),
+            release_by_tag_api("1.0.3").unwrap(),
             "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases/tags/v1.0.3"
+        );
+        assert_eq!(
+            release_by_tag_api("1.0.9").unwrap(),
+            "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases/tags/release-v1.0.9"
         );
     }
 
     #[test]
-    fn valid_package_zip_extracts_only_the_verified_executable() {
+    fn post_bridge_package_zip_extracts_only_the_verified_executable() {
         let temp = tempfile::tempdir().unwrap();
         let archive = temp.path().join("release.zip");
         let candidate = temp.path().join("candidate.exe");
-        write_zip(&archive, &package_entries());
+        write_zip(
+            &archive,
+            &nested_package_entries("1.0.9", &WINDOWS_REQUIRED_PACKAGE_FILES),
+        );
 
         extract_current_windows_executable(&archive, &candidate).unwrap();
         assert_eq!(std::fs::read(candidate).unwrap(), b"verified executable");
         assert!(!temp.path().join("rg.exe").exists());
+    }
+
+    #[test]
+    fn post_bridge_package_zip_rejects_flat_or_mismatched_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let candidate = temp.path().join("candidate.exe");
+
+        let flat = temp.path().join("flat.zip");
+        write_zip(
+            &flat,
+            &package_entries_with_manifest(&WINDOWS_REQUIRED_PACKAGE_FILES),
+        );
+        assert!(extract_current_windows_executable(&flat, &candidate).is_err());
+        assert!(!candidate.exists());
+
+        let mismatched = temp.path().join("mismatched.zip");
+        let entries = nested_package_entries("1.0.9", &WINDOWS_REQUIRED_PACKAGE_FILES)
+            .into_iter()
+            .map(|(name, bytes)| (name.replacen("grok-zh-1.0.9", "other-package", 1), bytes))
+            .collect::<Vec<_>>();
+        write_zip(&mismatched, &entries);
+        assert!(extract_current_windows_executable(&mismatched, &candidate).is_err());
+        assert!(!candidate.exists());
     }
 
     #[test]
@@ -1823,7 +2013,7 @@ mod tests {
         let candidate = temp.path().join("candidate.exe");
         write_zip(
             &archive,
-            &package_entries_with_manifest(&WINDOWS_V1_0_5_MANIFEST_FILES),
+            &package_entries_with_manifest(&WINDOWS_LEGACY_MANIFEST_FILES),
         );
 
         extract_verified_executable(&verified_windows_asset("1.0.5"), &archive, &candidate)
@@ -1833,17 +2023,49 @@ mod tests {
     }
 
     #[test]
-    fn legacy_manifest_is_rejected_for_other_release_versions() {
+    fn bridge_v1_0_8_legacy_manifest_extracts_verified_executable() {
         let temp = tempfile::tempdir().unwrap();
         let archive = temp.path().join("release.zip");
         let candidate = temp.path().join("candidate.exe");
         write_zip(
             &archive,
-            &package_entries_with_manifest(&WINDOWS_V1_0_5_MANIFEST_FILES),
+            &package_entries_with_manifest(&WINDOWS_LEGACY_MANIFEST_FILES),
+        );
+
+        extract_verified_executable(&verified_windows_asset("1.0.8"), &archive, &candidate)
+            .unwrap();
+        assert_eq!(std::fs::read(candidate).unwrap(), b"verified executable");
+    }
+
+    #[test]
+    fn bridge_v1_0_8_rejects_the_post_bridge_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("release.zip");
+        let candidate = temp.path().join("candidate.exe");
+        write_zip(
+            &archive,
+            &package_entries_with_manifest(&WINDOWS_REQUIRED_PACKAGE_FILES),
+        );
+
+        assert!(
+            extract_verified_executable(&verified_windows_asset("1.0.8"), &archive, &candidate)
+                .is_err()
+        );
+        assert!(!candidate.exists());
+    }
+
+    #[test]
+    fn legacy_manifest_is_rejected_for_post_bridge_release_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("release.zip");
+        let candidate = temp.path().join("candidate.exe");
+        write_zip(
+            &archive,
+            &nested_package_entries("1.0.9", &WINDOWS_LEGACY_MANIFEST_FILES),
         );
 
         let error =
-            extract_verified_executable(&verified_windows_asset("1.0.6"), &archive, &candidate)
+            extract_verified_executable(&verified_windows_asset("1.0.9"), &archive, &candidate)
                 .unwrap_err();
         assert!(
             error
@@ -1859,7 +2081,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let archive = temp.path().join("release.zip");
         let candidate = temp.path().join("candidate.exe");
-        let mut entries = package_entries_with_manifest(&WINDOWS_V1_0_5_MANIFEST_FILES);
+        let mut entries = package_entries_with_manifest(&WINDOWS_LEGACY_MANIFEST_FILES);
         entries
             .iter_mut()
             .find(|(name, _)| name == "grok-zh.exe")
@@ -1882,7 +2104,7 @@ mod tests {
         let mut entries = package_entries();
         entries
             .iter_mut()
-            .find(|(name, _)| name == "grok-zh.exe")
+            .find(|(name, _)| name.ends_with("/grok-zh.exe"))
             .unwrap()
             .1 = b"tampered executable".to_vec();
         write_zip(&archive, &entries);
@@ -1920,7 +2142,10 @@ mod tests {
 
         let duplicate_normalized_entry = temp.path().join("duplicate-normalized-entry.zip");
         let mut entries = package_entries();
-        entries.push(("RG.EXE".to_string(), b"duplicate ripgrep".to_vec()));
+        entries.push((
+            "grok-zh-1.0.9-windows-x86_64-gnu/RG.EXE".to_string(),
+            b"duplicate ripgrep".to_vec(),
+        ));
         write_zip(&duplicate_normalized_entry, &entries);
         let error = extract_current_windows_executable(&duplicate_normalized_entry, &candidate)
             .unwrap_err();
@@ -1929,7 +2154,10 @@ mod tests {
 
         let non_ascii_entry = temp.path().join("non-ascii-entry.zip");
         let mut entries = package_entries();
-        entries.push(("É.txt".to_string(), b"ambiguous on Windows".to_vec()));
+        entries.push((
+            "grok-zh-1.0.9-windows-x86_64-gnu/É.txt".to_string(),
+            b"ambiguous on Windows".to_vec(),
+        ));
         write_zip(&non_ascii_entry, &entries);
         assert!(extract_current_windows_executable(&non_ascii_entry, &candidate).is_err());
         assert!(!candidate.exists());
@@ -1938,7 +2166,7 @@ mod tests {
         let mut entries = package_entries();
         let manifest = entries
             .iter_mut()
-            .find(|(name, _)| name == "SHA256SUMS.txt")
+            .find(|(name, _)| name.ends_with("/SHA256SUMS.txt"))
             .unwrap();
         manifest
             .1
@@ -1951,7 +2179,7 @@ mod tests {
         let mut entries = package_entries();
         let manifest = entries
             .iter_mut()
-            .find(|(name, _)| name == "SHA256SUMS.txt")
+            .find(|(name, _)| name.ends_with("/SHA256SUMS.txt"))
             .unwrap();
         manifest
             .1
@@ -1971,7 +2199,7 @@ mod tests {
             let mut entries = package_entries();
             let manifest = entries
                 .iter_mut()
-                .find(|(name, _)| name == "SHA256SUMS.txt")
+                .find(|(name, _)| name.ends_with("/SHA256SUMS.txt"))
                 .unwrap();
             manifest.1 = String::from_utf8(manifest.1.clone())
                 .unwrap()

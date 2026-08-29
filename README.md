@@ -61,7 +61,9 @@
 
 正式 Tag 工作流会在 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
 中发布完整 Windows ZIP；`CI` 工作流仍会上传短期 Actions Artifact。
-解压完整包后，直接双击包根目录中的：
+解压完整包后，后续 `release-v*` 包会得到唯一的
+`grok-zh-<version>-windows-x86_64-gnu` 目录；进入该目录再双击下列入口。
+旧版与 `v1.0.8` 桥接包仍是兼容所需的扁平结构，可在解压目录直接双击：
 
 ```text
 一键安装.cmd
@@ -113,9 +115,9 @@ Linux 包面向 `x86_64-unknown-linux-gnu`。完成外层和包内 SHA-256 校�
 `${GROK_HOME:-$HOME/.grok}`，不会使用 `sudo`、修改 shell 配置或写入
 `/usr/local/bin`。
 
-Linux 自动更新首先在 `v1.0.8` 的预发布版本（例如 `v1.0.8-rc.1`）中验收，并从 `v1.0.9` 起加入稳定版
-六资产契约；稳定 `v1.0.8` 仍保持旧 `v1.0.5` Windows 客户端可消费的四资产桥接
-结构。更新器会严格校验不可变 Release、GitHub digest、USTAR 结构、权限、包内清单和
+Linux 自动更新首先在 `release-v1.0.8-rc.1` 等发布候选版本中验收，并从
+`release-v1.0.9` 起加入稳定版六资产契约；稳定 `v1.0.8` 是专供旧 `v1.0.5`
+Windows 客户端迁移的两资产桥接版本，不包含 macOS 或 Linux 资产。更新器会严格校验不可变 Release、GitHub digest、USTAR 结构、权限、包内清单和
 候选版本，再把新的不可变目标原子切换到入口。WSL 应安装到发行版 ext4 的 `$HOME`，
 不要把受管目录放到无法落实所有者或 `0700` 权限的 DrvFS 挂载。完整说明见
 [Linux x86_64 GNU 安装说明](packaging/linux/INSTALL-LINUX.md)。
@@ -247,9 +249,9 @@ cargo fmt --all
 
 - `main`：尽量保持官方上游镜像，只用于同步和审查。
 - `zh-dev`：汉化开发、上游合并、构建和测试。
-- 计划中的 `zh-stable`：只有在中文验证通过后才建立；稳定 Release 只由指向已审核提交的
-  严格三段 Tag `vA.B.C` 触发，并与上游包版本保持一致。
-- 仓库 Ruleset 必须限制 `v*` Tag 的创建、更新和删除权限，只允许维护者给已审核分支提交
+- 计划中的 `zh-stable`：只有在中文验证通过后才建立；`v1.0.8` 是最后一个旧通道桥接
+  Tag，后续稳定版使用 `release-vA.B.C`，程序自身仍保持与上游一致的严格三段 SemVer。
+- 仓库 Ruleset 必须同时限制 `v*` 与 `release-v*` Tag 的创建、更新和删除权限，只允许维护者给已审核分支提交
   打 Tag；工作流内的 SHA 复核不能替代 GitHub 服务端的 Tag 保护。
 - 上游 `main` 更新只能触发审查和测试，不能直接进入用户更新源。
 - GitHub 发布页正文统一使用中文；每条提交名称链接到对应的 GitHub 提交页面。若提交标题

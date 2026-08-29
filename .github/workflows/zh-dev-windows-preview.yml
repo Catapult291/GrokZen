@@ -190,6 +190,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cargo fetch 失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-locale
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-locale 测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-update --features community-build --lib
+          if ($LASTEXITCODE -ne 0) { throw "xai-grok-update 测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib session_summary
           if ($LASTEXITCODE -ne 0) { throw "中文会话标题测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib bundled_model_provenance_survives_acp_but_config_override_clears_it

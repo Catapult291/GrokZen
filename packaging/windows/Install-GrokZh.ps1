@@ -468,14 +468,17 @@ function Read-AndVerifyManifest {
     $normalizedNames = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::Ordinal
     )
-    $required = @(
+    $legacyRequired = @(
         'grok-zh.exe',
         'agent-zh.cmd',
         'rg.exe',
         '一键安装.cmd',
         '[可选]替换原始启动方式.cmd',
         'Install-GrokZh.ps1',
-        'INSTALL-WINDOWS.md',
+        'INSTALL-WINDOWS.md'
+    )
+    $completeRequired = @(
+        $legacyRequired
         'LICENSE-grok-build.txt',
         'BUILD-INFO.txt',
         'licenses/ripgrep/COPYING',
@@ -507,7 +510,7 @@ function Read-AndVerifyManifest {
         if ($name -ieq 'SHA256SUMS.txt') {
             throw 'SHA256SUMS.txt 不能包含自身哈希条目。'
         }
-        if ($required -cnotcontains $name) {
+        if ($completeRequired -cnotcontains $name) {
             throw "安装包校验清单包含未批准的文件：$name"
         }
         $isAscii = $name -cmatch '^[\x00-\x7F]+$'
@@ -525,10 +528,16 @@ function Read-AndVerifyManifest {
         $hashes.Add($name, $expected)
     }
 
-    foreach ($name in $required) {
-        if (!$hashes.ContainsKey($name)) {
-            throw "安装包校验清单缺少必需条目：$name"
-        }
+    # A manually extracted package has no trustworthy GitHub Tag metadata, so
+    # this installer selects the compatibility profile by the exact manifest
+    # shape. The Release workflow and Rust updater separately bind that profile
+    # to legacy versions and reject it for release-v* updates.
+    $legacyManifest = $hashes.Count -eq $legacyRequired.Count -and
+        @($legacyRequired | Where-Object { !$hashes.ContainsKey($_) }).Count -eq 0
+    $completeManifest = $hashes.Count -eq $completeRequired.Count -and
+        @($completeRequired | Where-Object { !$hashes.ContainsKey($_) }).Count -eq 0
+    if (!$legacyManifest -and !$completeManifest) {
+        throw '安装包校验清单不是受支持的 7 项桥接格式或 15 项完整格式。'
     }
 
     $totalBytes = [long]0
@@ -861,6 +870,25 @@ try {
         [string[]]$installedManifestLines,
         (New-Object Text.UTF8Encoding($false))
     )
+    if ($manifest.Count -eq 7) {
+        foreach ($name in @('BUILD-INFO.txt', 'LICENSE-grok-build.txt')) {
+            $source = Join-Path $PackageDir $name
+            if (!(Test-Path -LiteralPath $source -PathType Leaf)) {
+                throw "7 项桥接安装包缺少随包文件：$source"
+            }
+            $sourceItem = Get-Item -LiteralPath $source -Force
+            if (($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "桥接安装包随包文件不能是符号链接或重解析点：$source"
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $stage $name)
+        }
+        $licenseSource = Join-Path $PackageDir 'licenses'
+        if (!(Test-Path -LiteralPath $licenseSource -PathType Container)) {
+            throw "7 项桥接安装包缺少许可证目录：$licenseSource"
+        }
+        Assert-NoReparsePointTree -Path $licenseSource -Label '桥接安装包许可证目录'
+        Copy-Item -LiteralPath $licenseSource -Destination (Join-Path $stage 'licenses') -Recurse
+    }
     if ($provideOfficialNames) {
         Write-CommandShim -Path (Join-Path $stage 'grok.cmd') -AgentMode:$false
         Write-CommandShim -Path (Join-Path $stage 'agent.cmd') -AgentMode:$true
