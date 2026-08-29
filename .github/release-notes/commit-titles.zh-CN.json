@@ -36,6 +36,12 @@
       "first_parent": "ab3c753312678069bdfd24078c8bebe18eee7cc3",
       "upstream_tip": "07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8",
       "upstream_base": "19d42e35c07a9c9244f03f6df0c4c353f970d4f9"
+    },
+    {
+      "merge_sha": "ba03fa448966a5ffba5f131fe960cb0441bf03b3",
+      "first_parent": "dfcf92b37854f5b2c0dacc66a9e4195f3881dcae",
+      "upstream_tip": "bc7f02eddd3d84085849dc19ed216f11c23b0571",
+      "upstream_base": "07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8"
     }
   ],
   "local_merges": [
@@ -198,6 +204,26 @@
       "sha": "07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8",
       "source_subject": "Synced from monorepo",
       "title_zh": "新增 MCP 交互表单与工作流管理并提升并发子智能体性能"
+    },
+    {
+      "sha": "c2ad97f87aea4303b6000a2c22128bc91ee76c9b",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "新增工作流预算、交互切换与 Grok Clone 并提升稳定性"
+    },
+    {
+      "sha": "77cd7eb675ba911c225c3aaeeece3a20cbccc426",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "加速 Grok Clone 并完善会话与权限"
+    },
+    {
+      "sha": "9684fa3cdbf2995e30ea8b9b637f1db008f144fc",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "新增无头会话恢复并强化权限与 Linux 沙箱"
+    },
+    {
+      "sha": "bc7f02eddd3d84085849dc19ed216f11c23b0571",
+      "source_subject": "Synced from monorepo",
+      "title_zh": "优化工作树、MCP 重试、上下文统计与后台任务"
     },
     {
       "sha": "a99e7daf7f97f61c805c8b121e11505ad9477e16",
