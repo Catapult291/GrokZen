@@ -694,10 +694,10 @@ jobs:
             shasum -a 256 -c "$(basename "${checksum}")" >/dev/null
           )
 
-          package_root="${smoke_root}/package"
+          extract_root="${smoke_root}/package"
           auth_home="${smoke_root}/home"
           workspace="${smoke_root}/workspace"
-          mkdir -p "${package_root}" "${auth_home}" "${workspace}"
+          mkdir -p "${extract_root}" "${auth_home}" "${workspace}"
           : > "${auth_home}/config.toml"
           git init -q "${workspace}"
 
@@ -730,7 +730,27 @@ jobs:
             exit 1
           fi
 
-          COPYFILE_DISABLE=1 tar -xzf "${archive}" -C "${package_root}"
+          case "${ARCHIVE_NAME}" in
+            grok-zh-*-macos-aarch64.tar.gz) ;;
+            *) echo '::error::macOS 构建制品名称不符合约定。'; exit 1 ;;
+          esac
+          package_name="${ARCHIVE_NAME%.tar.gz}"
+          COPYFILE_DISABLE=1 tar -xpzf "${archive}" -C "${extract_root}"
+          package_root="${extract_root}/${package_name}"
+          shopt -s nullglob dotglob
+          top_level_entries=("${extract_root}"/*)
+          shopt -u nullglob dotglob
+          only_top_level="${top_level_entries[0]:-}"
+          if (( ${#top_level_entries[@]} != 1 )) || \
+             [[ "${only_top_level}" != "${package_root}" ]] || \
+             [[ ! -d "${package_root}" || -L "${package_root}" ]]; then
+            echo '::error::macOS 构建制品必须只含同名顶层目录。'
+            exit 1
+          fi
+          if [[ "$(stat -f '%Lp' "${package_root}")" != "755" ]]; then
+            echo '::error::macOS 构建制品顶层目录权限不是 0755。'
+            exit 1
+          fi
           grok_bin="${package_root}/grok-zh"
           if [[ ! -x "${grok_bin}" ]]; then
             echo '::error::解包后找不到可执行的 grok-zh。'

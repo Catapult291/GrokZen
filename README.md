@@ -61,7 +61,7 @@
 
 正式 Tag 工作流会在 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
 中发布完整 Windows ZIP；`CI` 工作流仍会上传短期 Actions Artifact。
-解压完整包后，后续 `release-v*` 包会得到唯一的
+解压完整包后，所有 `release-v*` 包（包括 `release-v1.0.8-rc.1`）都会得到唯一的
 `grok-zh-<version>-windows-x86_64-gnu` 目录；进入该目录再双击下列入口。
 旧版与 `v1.0.8` 桥接包仍是兼容所需的扁平结构，可在解压目录直接双击：
 
@@ -86,7 +86,9 @@
 
 ## macOS ARM64 安装
 
-macOS 包只支持 Apple Silicon（M1 及后续机型）。解包并完成双层 SHA-256 校验后，运行：
+macOS 包只支持 Apple Silicon（M1 及后续机型）。先在归档旁完成外层 SHA-256 校验；
+`release-v*` 包解压后只会得到唯一的 `grok-zh-<version>-macos-aarch64` 目录，
+进入该目录完成包内 SHA-256 校验后运行：
 
 ```sh
 ./Install-GrokZh.sh
@@ -104,7 +106,9 @@ macOS 包只支持 Apple Silicon（M1 及后续机型）。解包并完成双层
 
 ## Linux x86_64 GNU 安装
 
-Linux 包面向 `x86_64-unknown-linux-gnu`。完成外层和包内 SHA-256 校验后运行：
+Linux 包面向 `x86_64-unknown-linux-gnu`。先在归档旁完成外层 SHA-256 校验；
+`release-v*` 包解压后只会得到唯一的 `grok-zh-<version>-linux-x86_64-gnu` 目录，
+进入该目录完成包内 SHA-256 校验后运行：
 
 ```sh
 ./Install-GrokZh.sh

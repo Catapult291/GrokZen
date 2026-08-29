@@ -15,15 +15,17 @@
 
 ## 校验并安装
 
-把 `.tar.gz` 和同名 `.sha256` 放在同一目录，把下面的版本替换为实际下载版本后再校验并解包：
+把 `.tar.gz` 和同名 `.sha256` 放在同一目录，把下面的版本替换为实际下载版本后再校验并解包。
+`release-v*` 归档只含一个与归档同名（去掉 `.tar.gz`）的顶层目录：
 
 ```sh
-archive='grok-zh-1.0.7-macos-aarch64.tar.gz'
+archive='grok-zh-1.0.8-rc.1-macos-aarch64.tar.gz'
+package=${archive%.tar.gz}
 test -f "$archive" && test -f "$archive.sha256"
 shasum -a 256 -c "$archive.sha256"
-mkdir grok-zh-macos
-tar -xzf "$archive" -C grok-zh-macos
-cd grok-zh-macos
+test ! -e "$package"
+tar -xzf "$archive"
+cd "$package"
 shasum -a 256 -c SHA256SUMS.txt
 ./grok-zh --version
 ./Install-GrokZh.sh
@@ -53,6 +55,9 @@ shasum -a 256 -c SHA256SUMS.txt
 - 后台自动下载默认关闭；用户可在设置中显式开启，或手动确认单次更新。
 - 自动更新不等于 Apple 签名或公证。没有 Apple Developer ID 时仍能构建、校验、安装和
   更新，但 Gatekeeper 的首次运行提示不会因此消失。
+- macOS 首先通过 `release-v1.0.8-rc.1` 等发布候选版本验收；稳定版 `v1.0.8` 是旧
+  Windows 客户端专用的桥接版本，不含 macOS 资产。macOS 稳定更新从
+  `release-v1.0.9` 起进入六资产契约。
 
 Actions Artifact 只用于预览测试，不是正式更新源。正式自动更新只消费本仓库统一发布
 工作流生成的 Immutable GitHub Release。
