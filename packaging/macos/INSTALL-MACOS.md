@@ -19,7 +19,7 @@
 `release-v*` 归档只含一个与归档同名（去掉 `.tar.gz`）的顶层目录：
 
 ```sh
-archive='grok-zh-1.0.8-rc.1-macos-aarch64.tar.gz'
+archive='grok-zh-1.0.12-rc.1-macos-aarch64.tar.gz'
 package=${archive%.tar.gz}
 test -f "$archive" && test -f "$archive.sha256"
 shasum -a 256 -c "$archive.sha256"
@@ -49,15 +49,15 @@ shasum -a 256 -c SHA256SUMS.txt
 
 - `grok-zh update` 和 TUI 更新入口只读取本仓库 Releases；不会访问官方 npm、x.ai、
   GCS 或官方 GitHub Release。
-- macOS 更新不会覆盖当前进程正在使用的 Mach-O 文件。每次安装都会保留新的版本目标，
-  校验并冒烟运行后，再原子切换 `grok-zh` 与 `agent-zh`。旧目标不会自动删除，以免仍在
-  运行的进程丢失可执行文件。
+- macOS 更新不会覆盖当前进程正在使用的 Mach-O 文件。每次安装都会创建新的版本目标，
+  校验并冒烟运行后，再原子切换 `grok-zh` 与 `agent-zh`。更新完成后的清理通常保留当前
+  版本和一个上一版本；刚创建的目标还受保护时间窗约束，不会在切换过程中被提前删除。
 - 后台自动下载默认关闭；用户可在设置中显式开启，或手动确认单次更新。
 - 自动更新不等于 Apple 签名或公证。没有 Apple Developer ID 时仍能构建、校验、安装和
   更新，但 Gatekeeper 的首次运行提示不会因此消失。
-- macOS 首先通过 `release-v1.0.8-rc.1` 等发布候选版本验收；稳定版 `v1.0.8` 是旧
-  Windows 客户端专用的桥接版本，不含 macOS 资产。macOS 稳定更新从
-  `release-v1.0.9` 起进入六资产契约。
+- macOS 首先通过 `release-v1.0.12-rc.1` 等发布候选版本验收；稳定版 `v1.0.8` 是旧
+  Windows 客户端专用的桥接版本，不含 macOS 资产。后续稳定 `release-v*` 继续使用
+  三平台六资产契约。
 
 Actions Artifact 只用于预览测试，不是正式更新源。正式自动更新只消费本仓库统一发布
 工作流生成的 Immutable GitHub Release。

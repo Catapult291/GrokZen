@@ -1,8 +1,7 @@
 //! Queue, cancellation, send-now, interjection, and rewind PTY coverage.
 //!
-//! This is the narrow retry unit for the suite's historically timing-sensitive
-//! cases. All cases are ignored for ordinary Cargo runs; Bazel opts in and caps
-//! the family at four concurrent libtest workers.
+//! This is the narrow retry unit for the suite's historically timing-sensitive cases.
+//! All cases are ignored for ordinary Cargo runs; Bazel opts in and caps the family at four concurrent libtest workers.
 
 // Shared support intentionally serves all PTY family crates.
 #[allow(dead_code, unused_imports)]
@@ -37,8 +36,8 @@ mod empty_enter_sends_top_not_last_of_two;
 mod esc_cancels_running_turn_from_prompt_preserves_draft;
 #[path = "pty_e2e/esc_cancels_running_turn_from_scrollback.rs"]
 mod esc_cancels_running_turn_from_scrollback;
-#[path = "pty_e2e/esc_esc_clears_idle_prompt_and_records_history.rs"]
-mod esc_esc_clears_idle_prompt_and_records_history;
+#[path = "pty_e2e/esc_esc_clears_idle_prompt_into_the_stash.rs"]
+mod esc_esc_clears_idle_prompt_into_the_stash;
 #[path = "pty_e2e/esc_esc_opens_rewind_picker_silent_first_press.rs"]
 mod esc_esc_opens_rewind_picker_silent_first_press;
 #[path = "pty_e2e/esc_idle_empty_no_messages_is_swallowed_noop.rs"]

@@ -1,5 +1,3 @@
-//! SearchToolCallBlock — integration tool discovery results.
-
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span, Text};
 use xai_grok_workspace::permission::mcp_titleize_segment;
@@ -22,14 +20,12 @@ pub struct DiscoveredTool {
     pub score: f64,
 }
 
-/// Search tool call — discovering MCP integration tools by keyword.
+/// A search_tool call: discovers MCP integration tools by keyword.
 #[derive(Debug, Clone)]
 pub struct SearchToolCallBlock {
-    /// The search query.
     pub query: String,
-    /// Limit parameter from the input (None = default 8).
+    /// Limit parameter from the input; `None` means the default of 8.
     pub limit: Option<u8>,
-    /// Number of results found.
     pub result_count: usize,
     /// Discovered tools (parsed from output).
     pub results: Vec<DiscoveredTool>,
@@ -37,7 +33,6 @@ pub struct SearchToolCallBlock {
     pub content: Option<String>,
     /// Error message if the tool call failed.
     pub error: Option<String>,
-    /// When the tool started running.
     pub started_at: Option<std::time::Instant>,
     /// Elapsed time in ms after completion.
     pub elapsed_ms: Option<i64>,
@@ -177,7 +172,7 @@ impl SearchToolCallBlock {
         }
     }
 
-    /// Header line with only the query span selectable (exclude label/suffix).
+    /// Header line with only the query span selectable.
     fn header_block_line(&self, line: Line<'static>) -> BlockLine {
         let query_end = 2.min(line.spans.len()).max(1);
         BlockLine {

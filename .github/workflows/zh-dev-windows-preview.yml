@@ -63,7 +63,8 @@ jobs:
           } else {
             $version = $requested.Trim()
           }
-          if ($version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') {
+          $semverPattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          if ($version.Length -gt 64 -or $version -notmatch $semverPattern) {
             throw "版本无效：$version"
           }
           "GROK_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
@@ -198,6 +199,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "内置模型来源隔离测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
           if ($LASTEXITCODE -ne 0) { throw "中文界面定向测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib free_usage_upsell_shows_three_options_with_exact_labels
+          if ($LASTEXITCODE -ne 0) { throw "免费账户升级选项测试失败：$LASTEXITCODE" }
 
       - name: 构建并监控 Windows 预览版（J${{ env.CARGO_BUILD_JOBS }}）
         id: windows_build

@@ -224,10 +224,9 @@ fn doctor_tmux_fix_kills_term_ignoring_redirected_descendants() {
     std::fs::create_dir_all(&fake_bin).unwrap();
     let tmux = fake_bin.join("tmux");
     let pid_file = temp.path().join("descendant.pid");
-    // Publish the descendant pid from the leader *before* it exits. Writing
-    // `echo $$ > pid` inside the redirected child races doctor teardown:
-    // `>` truncates first, then SIGKILL can land before the digits are written,
-    // leaving an empty file (`ParseIntError { kind: Empty }`).
+    // Publish the descendant pid from the leader *before* it exits
+    // Writing `echo $$ > pid` inside the redirected child races doctor teardown
+    // `>` truncates first, then SIGKILL can land before the digits are written, leaving an empty file (`ParseIntError { kind: Empty }`)
     std::fs::write(
         &tmux,
         format!(
@@ -322,10 +321,9 @@ fn doctor_irrelevant_unsafe_byobu_does_not_break_ssh_or_plain_tmux() {
 #[test]
 #[ignore = "spawns the real pager binary; CI/Bazel provides PAGER_BINARY"]
 fn doctor_hostile_home_and_byobu_create_no_config_files() {
-    let binary = pager_binary()
-        .expect("real pager binary is required when selected")
-        .canonicalize()
-        .unwrap();
+    let binary =
+        dunce::canonicalize(pager_binary().expect("real pager binary is required when selected"))
+            .unwrap();
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     let grok_home = temp.path().join("qhome");

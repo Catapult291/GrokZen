@@ -76,6 +76,170 @@ const MIN_PREVIEW_DISCOVERY_REFRESH_MS: u64 = 100;
 /// Discovery-refresh ceiling: past 10s the preview-state document goes stale
 /// enough to defeat the reporter, so a seconds-for-ms typo is repaired.
 const MAX_PREVIEW_DISCOVERY_REFRESH_MS: u64 = 10_000;
+/// Default fraction of TTL (or remaining lifetime at cold start) at which to
+/// refresh. Must stay in (0, 1).
+const DEFAULT_OIDC_REFRESH_FRACTION: f64 = 0.6;
+/// Default half-width of the jitter window as a fraction of the schedule
+/// scale (TTL or remaining). Must stay in [0, 0.5].
+const DEFAULT_OIDC_REFRESH_JITTER_FRACTION: f64 = 0.2;
+/// Default hard floor before expiry. Must exceed the SDK's 60s reactive
+/// margin so a reconnect never has to refresh synchronously.
+const DEFAULT_OIDC_SAFETY_MARGIN_SECS: u64 = 120;
+/// Default floor between consecutive *successful* refreshes. Must stay below
+/// `safety_margin` so a healthy short-TTL token does not hot-loop the IdP.
+const DEFAULT_OIDC_MIN_REFRESH_INTERVAL_SECS: u64 = 60;
+/// Smallest allowed success-path spacing. Zero would reschedule immediately
+/// when TTL ≤ `safety_margin`.
+const MIN_OIDC_MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// Ceiling on OIDC timing knobs so an env typo cannot overflow date math.
+const MAX_OIDC_DURATION: Duration = Duration::from_secs(24 * 3600);
+
+/// Proactive OIDC refresh knobs. `enabled` defaults off.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProactiveRefreshConfig {
+    /// `GROK_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED`. Default `false`.
+    /// `false` keeps the SDK reactive provider (kill-switch for workspace-owned
+    /// proactive refresh). `true` selects the workspace-owned provider.
+    pub enabled: bool,
+    /// `GROK_WORKSPACE_OIDC_REFRESH_FRACTION`, open interval `(0, 1)`.
+    pub fraction: f64,
+    /// `GROK_WORKSPACE_OIDC_REFRESH_JITTER_FRACTION`, closed `[0, 0.5]`.
+    pub jitter_fraction: f64,
+    /// Hard floor before expiry (`GROK_WORKSPACE_OIDC_REFRESH_SAFETY_MARGIN_SECS`).
+    pub safety_margin: Duration,
+    /// Floor between consecutive *successful* refreshes
+    /// (`GROK_WORKSPACE_OIDC_MIN_REFRESH_INTERVAL_SECS`). Failure retries
+    /// are bounded by expiry, not this floor.
+    pub min_refresh_interval: Duration,
+}
+
+impl Default for ProactiveRefreshConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            fraction: DEFAULT_OIDC_REFRESH_FRACTION,
+            jitter_fraction: DEFAULT_OIDC_REFRESH_JITTER_FRACTION,
+            safety_margin: Duration::from_secs(DEFAULT_OIDC_SAFETY_MARGIN_SECS),
+            min_refresh_interval: Duration::from_secs(DEFAULT_OIDC_MIN_REFRESH_INTERVAL_SECS),
+        }
+    }
+}
+
+impl ProactiveRefreshConfig {
+    /// Populate from `GROK_WORKSPACE_OIDC_*`. Unset or unparseable vars fall
+    /// back to the default with a `warn!`. Never fails.
+    pub fn from_env() -> Self {
+        let defaults = Self::default();
+        let mut cfg = Self {
+            enabled: parse_or(
+                "GROK_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED",
+                defaults.enabled,
+            ),
+            fraction: frac_or(
+                "GROK_WORKSPACE_OIDC_REFRESH_FRACTION",
+                defaults.fraction,
+                |v| v > 0.0 && v < 1.0,
+            ),
+            jitter_fraction: frac_or(
+                "GROK_WORKSPACE_OIDC_REFRESH_JITTER_FRACTION",
+                defaults.jitter_fraction,
+                |v| (0.0..=0.5).contains(&v),
+            ),
+            safety_margin: secs_or(
+                "GROK_WORKSPACE_OIDC_REFRESH_SAFETY_MARGIN_SECS",
+                defaults.safety_margin,
+            ),
+            min_refresh_interval: secs_or(
+                "GROK_WORKSPACE_OIDC_MIN_REFRESH_INTERVAL_SECS",
+                defaults.min_refresh_interval,
+            ),
+        };
+        cfg.validate();
+        cfg
+    }
+
+    /// Repair a raw struct literal: finite in-range fractions, nonzero
+    /// durations capped at 24h, and `min_refresh_interval < safety_margin`.
+    /// The short-TTL success-path floor can still schedule after expiry.
+    pub fn validate(&mut self) {
+        if !(self.fraction.is_finite() && self.fraction > 0.0 && self.fraction < 1.0) {
+            tracing::warn!(
+                fraction = self.fraction,
+                default = DEFAULT_OIDC_REFRESH_FRACTION,
+                "GROK_WORKSPACE OIDC refresh fraction out of range; using default"
+            );
+            self.fraction = DEFAULT_OIDC_REFRESH_FRACTION;
+        }
+        if !(self.jitter_fraction.is_finite() && (0.0..=0.5).contains(&self.jitter_fraction)) {
+            tracing::warn!(
+                jitter_fraction = self.jitter_fraction,
+                default = DEFAULT_OIDC_REFRESH_JITTER_FRACTION,
+                "GROK_WORKSPACE OIDC jitter fraction out of range; using default"
+            );
+            self.jitter_fraction = DEFAULT_OIDC_REFRESH_JITTER_FRACTION;
+        }
+        if self.safety_margin > MAX_OIDC_DURATION {
+            tracing::warn!(
+                safety_margin = ?self.safety_margin,
+                clamped = ?MAX_OIDC_DURATION,
+                "GROK_WORKSPACE OIDC safety margin above cap; clamped"
+            );
+            self.safety_margin = MAX_OIDC_DURATION;
+        }
+        if self.min_refresh_interval > MAX_OIDC_DURATION {
+            tracing::warn!(
+                min_refresh_interval = ?self.min_refresh_interval,
+                clamped = ?MAX_OIDC_DURATION,
+                "GROK_WORKSPACE OIDC min refresh interval above cap; clamped"
+            );
+            self.min_refresh_interval = MAX_OIDC_DURATION;
+        }
+        if self.min_refresh_interval < MIN_OIDC_MIN_REFRESH_INTERVAL {
+            tracing::warn!(
+                min_refresh_interval = ?self.min_refresh_interval,
+                floored_to = ?MIN_OIDC_MIN_REFRESH_INTERVAL,
+                "GROK_WORKSPACE OIDC min refresh interval below floor; floored"
+            );
+            self.min_refresh_interval = MIN_OIDC_MIN_REFRESH_INTERVAL;
+        }
+        if self.min_refresh_interval >= self.safety_margin {
+            let shrunk = self.safety_margin.saturating_sub(Duration::from_secs(1));
+            if shrunk >= MIN_OIDC_MIN_REFRESH_INTERVAL {
+                tracing::warn!(
+                    min_refresh_interval = ?self.min_refresh_interval,
+                    safety_margin = ?self.safety_margin,
+                    repaired_min = ?shrunk,
+                    "GROK_WORKSPACE OIDC min refresh interval must be < safety_margin; reduced"
+                );
+                self.min_refresh_interval = shrunk;
+            } else {
+                let raised = self.min_refresh_interval + Duration::from_secs(1);
+                if raised <= MAX_OIDC_DURATION {
+                    tracing::warn!(
+                        min_refresh_interval = ?self.min_refresh_interval,
+                        safety_margin = ?self.safety_margin,
+                        repaired_safety = ?raised,
+                        "GROK_WORKSPACE OIDC safety_margin too small to sit above min interval; raised"
+                    );
+                    self.safety_margin = raised;
+                } else {
+                    // Raising by 1s would exceed the 24h cap; pin safety at the
+                    // cap and drop min so `min < safety` still holds.
+                    let repaired_min = MAX_OIDC_DURATION - Duration::from_secs(1);
+                    tracing::warn!(
+                        min_refresh_interval = ?self.min_refresh_interval,
+                        safety_margin = ?self.safety_margin,
+                        repaired_min = ?repaired_min,
+                        repaired_safety = ?MAX_OIDC_DURATION,
+                        "GROK_WORKSPACE OIDC safety_margin cannot rise above the 24h cap; pinned and reduced min"
+                    );
+                    self.safety_margin = MAX_OIDC_DURATION;
+                    self.min_refresh_interval = repaired_min;
+                }
+            }
+        }
+    }
+}
 
 /// Tunable timing/threshold constants for the workspace tool server.
 #[derive(Debug, Clone)]
@@ -89,6 +253,12 @@ pub struct StatusConfig {
     /// Reconnect backoff schedule for the server SDK connection. `None` leaves
     /// the SDK's built-in default exponential schedule in place.
     pub ws_reconnect_backoff: Option<Vec<Duration>>,
+    /// Optional WebSocket liveness deadline
+    /// (`GROK_WORKSPACE_WS_LIVENESS_DEADLINE_SECS`). `None` leaves the SDK's
+    /// `min(4× ping, 120s)` default in place.
+    pub ws_liveness_deadline: Option<Duration>,
+    /// Proactive OIDC refresh policy (`GROK_WORKSPACE_OIDC_*`).
+    pub oidc_refresh: ProactiveRefreshConfig,
     /// Number of consecutive server reconnect failures before warning.
     pub hub_warn_threshold: u32,
     /// Base delay for exponential backoff on failed server event-notification sends.
@@ -171,6 +341,8 @@ impl Default for StatusConfig {
             keepalive: Duration::from_secs(DEFAULT_KEEPALIVE_SECS),
             ws_ping: Duration::from_secs(DEFAULT_WS_PING_SECS),
             ws_reconnect_backoff: None,
+            ws_liveness_deadline: None,
+            oidc_refresh: ProactiveRefreshConfig::default(),
             hub_warn_threshold: DEFAULT_HUB_WARN_THRESHOLD,
             hub_backoff_base: Duration::from_millis(DEFAULT_HUB_BACKOFF_BASE_MS),
             session_idle_prune: Duration::from_secs(DEFAULT_SESSION_IDLE_PRUNE_SECS),
@@ -214,6 +386,8 @@ impl StatusConfig {
             ws_reconnect_backoff: backoff_schedule_from_env(
                 "GROK_WORKSPACE_WS_RECONNECT_BACKOFF_MS",
             ),
+            ws_liveness_deadline: optional_secs("GROK_WORKSPACE_WS_LIVENESS_DEADLINE_SECS"),
+            oidc_refresh: ProactiveRefreshConfig::from_env(),
             hub_warn_threshold: parse_or(
                 "GROK_WORKSPACE_HUB_WARN_THRESHOLD",
                 defaults.hub_warn_threshold,
@@ -425,6 +599,7 @@ impl StatusConfig {
                 self.preview_discovery_refresh = refresh;
             }
         }
+        self.oidc_refresh.validate();
     }
 }
 
@@ -446,6 +621,51 @@ fn parse_or<T: FromStr>(var: &str, default: T) -> T {
 /// Parse `var` as a `u64` number of seconds into a [`Duration`].
 fn secs_or(var: &str, default: Duration) -> Duration {
     Duration::from_secs(parse_or(var, default.as_secs()))
+}
+
+/// Parse `var` as an `f64`. Unset → `default`. Unparseable, non-finite, or
+/// outside `in_range` → warn + `default`.
+fn frac_or(var: &str, default: f64, in_range: impl Fn(f64) -> bool) -> f64 {
+    match std::env::var(var) {
+        Err(_) => default,
+        Ok(raw) => match raw.parse::<f64>() {
+            Ok(value) if value.is_finite() && in_range(value) => value,
+            Ok(_) => {
+                tracing::warn!(
+                    var,
+                    value = %raw,
+                    "GROK_WORKSPACE fraction out of range; using default"
+                );
+                default
+            }
+            Err(_) => {
+                tracing::warn!(
+                    var,
+                    value = %raw,
+                    "Unparseable GROK_WORKSPACE value; using default"
+                );
+                default
+            }
+        },
+    }
+}
+
+/// Parse `var` as optional seconds. Unset or unparseable → `None`.
+fn optional_secs(var: &str) -> Option<Duration> {
+    match std::env::var(var) {
+        Err(_) => None,
+        Ok(raw) => match raw.parse::<u64>() {
+            Ok(secs) => Some(Duration::from_secs(secs)),
+            Err(_) => {
+                tracing::warn!(
+                    var,
+                    value = %raw,
+                    "Unparseable GROK_WORKSPACE value; using default"
+                );
+                None
+            }
+        },
+    }
 }
 
 /// Parse `var` as a `u64` number of milliseconds into a [`Duration`].
@@ -508,6 +728,16 @@ mod tests {
         assert_eq!(cfg.keepalive, Duration::from_secs(60));
         assert_eq!(cfg.ws_ping, Duration::from_secs(30));
         assert_eq!(cfg.ws_reconnect_backoff, None);
+        assert_eq!(cfg.ws_liveness_deadline, None);
+        assert_eq!(cfg.oidc_refresh, ProactiveRefreshConfig::default());
+        assert!(!cfg.oidc_refresh.enabled);
+        assert_eq!(cfg.oidc_refresh.fraction, 0.6);
+        assert_eq!(cfg.oidc_refresh.jitter_fraction, 0.2);
+        assert_eq!(cfg.oidc_refresh.safety_margin, Duration::from_secs(120));
+        assert_eq!(
+            cfg.oidc_refresh.min_refresh_interval,
+            Duration::from_secs(60)
+        );
         assert_eq!(cfg.hub_warn_threshold, 5);
         assert_eq!(cfg.hub_backoff_base, Duration::from_millis(100));
         assert_eq!(cfg.session_idle_prune, Duration::from_secs(1800));
@@ -754,6 +984,12 @@ mod tests {
             "GROK_WORKSPACE_KEEPALIVE_SECS",
             "GROK_WORKSPACE_WS_PING_SECS",
             "GROK_WORKSPACE_WS_RECONNECT_BACKOFF_MS",
+            "GROK_WORKSPACE_WS_LIVENESS_DEADLINE_SECS",
+            "GROK_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED",
+            "GROK_WORKSPACE_OIDC_REFRESH_FRACTION",
+            "GROK_WORKSPACE_OIDC_REFRESH_JITTER_FRACTION",
+            "GROK_WORKSPACE_OIDC_REFRESH_SAFETY_MARGIN_SECS",
+            "GROK_WORKSPACE_OIDC_MIN_REFRESH_INTERVAL_SECS",
             "GROK_WORKSPACE_HUB_WARN_THRESHOLD",
             "GROK_WORKSPACE_HUB_BACKOFF_BASE_MS",
             "GROK_WORKSPACE_SESSION_IDLE_PRUNE_SECS",
@@ -781,6 +1017,8 @@ mod tests {
         assert_eq!(cfg.keepalive, default.keepalive);
         assert_eq!(cfg.ws_ping, default.ws_ping);
         assert_eq!(cfg.ws_reconnect_backoff, default.ws_reconnect_backoff);
+        assert_eq!(cfg.ws_liveness_deadline, default.ws_liveness_deadline);
+        assert_eq!(cfg.oidc_refresh, default.oidc_refresh);
         assert_eq!(cfg.hub_warn_threshold, default.hub_warn_threshold);
         assert_eq!(cfg.hub_backoff_base, default.hub_backoff_base);
         assert_eq!(cfg.session_idle_prune, default.session_idle_prune);
@@ -1104,6 +1342,216 @@ mod tests {
                 Duration::from_millis(1000),
             ])
         );
+        unsafe { std::env::remove_var(var) };
+    }
+
+    #[test]
+    fn frac_or_unset_returns_default() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "GROK_WORKSPACE_TEST_FRAC_OR_UNSET";
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(frac_or(var, 0.6, |v| v > 0.0 && v < 1.0), 0.6);
+    }
+
+    #[test]
+    fn frac_or_valid_parses() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "GROK_WORKSPACE_TEST_FRAC_OR_VALID";
+        unsafe { std::env::set_var(var, "0.75") };
+        assert_eq!(frac_or(var, 0.6, |v| v > 0.0 && v < 1.0), 0.75);
+        unsafe { std::env::remove_var(var) };
+    }
+
+    #[test]
+    fn frac_or_garbage_falls_back_to_default() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "GROK_WORKSPACE_TEST_FRAC_OR_GARBAGE";
+        unsafe { std::env::set_var(var, "not-a-fraction") };
+        assert_eq!(frac_or(var, 0.6, |v| v > 0.0 && v < 1.0), 0.6);
+        unsafe { std::env::remove_var(var) };
+    }
+
+    #[test]
+    fn frac_or_out_of_range_falls_back_to_default() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "GROK_WORKSPACE_TEST_FRAC_OR_RANGE";
+        unsafe { std::env::set_var(var, "0") };
+        assert_eq!(frac_or(var, 0.6, |v| v > 0.0 && v < 1.0), 0.6);
+        unsafe { std::env::set_var(var, "1") };
+        assert_eq!(frac_or(var, 0.6, |v| v > 0.0 && v < 1.0), 0.6);
+        unsafe { std::env::set_var(var, "1.5") };
+        assert_eq!(frac_or(var, 0.6, |v| v > 0.0 && v < 1.0), 0.6);
+        unsafe { std::env::set_var(var, "-0.1") };
+        assert_eq!(frac_or(var, 0.2, |v| (0.0..=0.5).contains(&v)), 0.2);
+        unsafe { std::env::set_var(var, "0.6") };
+        assert_eq!(frac_or(var, 0.2, |v| (0.0..=0.5).contains(&v)), 0.2);
+        unsafe { std::env::remove_var(var) };
+    }
+
+    #[test]
+    fn oidc_refresh_env_parses_and_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for var in [
+            "GROK_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED",
+            "GROK_WORKSPACE_OIDC_REFRESH_FRACTION",
+            "GROK_WORKSPACE_OIDC_REFRESH_JITTER_FRACTION",
+            "GROK_WORKSPACE_OIDC_REFRESH_SAFETY_MARGIN_SECS",
+            "GROK_WORKSPACE_OIDC_MIN_REFRESH_INTERVAL_SECS",
+        ] {
+            unsafe { std::env::remove_var(var) };
+        }
+        let cfg = ProactiveRefreshConfig::from_env();
+        assert_eq!(cfg, ProactiveRefreshConfig::default());
+        assert!(!cfg.enabled);
+
+        unsafe { std::env::set_var("GROK_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED", "true") };
+        unsafe { std::env::set_var("GROK_WORKSPACE_OIDC_REFRESH_FRACTION", "0.7") };
+        unsafe { std::env::set_var("GROK_WORKSPACE_OIDC_REFRESH_JITTER_FRACTION", "0.1") };
+        unsafe { std::env::set_var("GROK_WORKSPACE_OIDC_REFRESH_SAFETY_MARGIN_SECS", "90") };
+        unsafe { std::env::set_var("GROK_WORKSPACE_OIDC_MIN_REFRESH_INTERVAL_SECS", "30") };
+        let cfg = ProactiveRefreshConfig::from_env();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.fraction, 0.7);
+        assert_eq!(cfg.jitter_fraction, 0.1);
+        assert_eq!(cfg.safety_margin, Duration::from_secs(90));
+        assert_eq!(cfg.min_refresh_interval, Duration::from_secs(30));
+
+        unsafe { std::env::set_var("GROK_WORKSPACE_OIDC_REFRESH_FRACTION", "nope") };
+        unsafe { std::env::set_var("GROK_WORKSPACE_OIDC_REFRESH_JITTER_FRACTION", "9") };
+        let cfg = ProactiveRefreshConfig::from_env();
+        assert_eq!(cfg.fraction, 0.6);
+        assert_eq!(cfg.jitter_fraction, 0.2);
+
+        for var in [
+            "GROK_WORKSPACE_OIDC_PROACTIVE_REFRESH_ENABLED",
+            "GROK_WORKSPACE_OIDC_REFRESH_FRACTION",
+            "GROK_WORKSPACE_OIDC_REFRESH_JITTER_FRACTION",
+            "GROK_WORKSPACE_OIDC_REFRESH_SAFETY_MARGIN_SECS",
+            "GROK_WORKSPACE_OIDC_MIN_REFRESH_INTERVAL_SECS",
+        ] {
+            unsafe { std::env::remove_var(var) };
+        }
+    }
+
+    #[test]
+    fn oidc_min_refresh_interval_zero_is_floored() {
+        let mut cfg = ProactiveRefreshConfig {
+            min_refresh_interval: Duration::ZERO,
+            ..ProactiveRefreshConfig::default()
+        };
+        cfg.validate();
+        assert_eq!(cfg.min_refresh_interval, MIN_OIDC_MIN_REFRESH_INTERVAL);
+        assert!(cfg.min_refresh_interval < cfg.safety_margin);
+    }
+
+    #[test]
+    fn oidc_min_refresh_interval_at_or_above_safety_is_repaired() {
+        let mut cfg = ProactiveRefreshConfig {
+            safety_margin: Duration::from_secs(30),
+            min_refresh_interval: Duration::from_secs(60),
+            ..ProactiveRefreshConfig::default()
+        };
+        cfg.validate();
+        assert!(cfg.min_refresh_interval < cfg.safety_margin);
+        assert_eq!(cfg.min_refresh_interval, Duration::from_secs(29));
+
+        let mut tiny = ProactiveRefreshConfig {
+            safety_margin: Duration::ZERO,
+            min_refresh_interval: Duration::from_secs(5),
+            ..ProactiveRefreshConfig::default()
+        };
+        tiny.validate();
+        assert!(tiny.min_refresh_interval < tiny.safety_margin);
+        assert_eq!(tiny.min_refresh_interval, Duration::from_secs(5));
+        assert_eq!(tiny.safety_margin, Duration::from_secs(6));
+    }
+
+    #[test]
+    fn oidc_min_at_duration_cap_with_tiny_safety_stays_capped() {
+        let mut cfg = ProactiveRefreshConfig {
+            safety_margin: Duration::from_secs(1),
+            min_refresh_interval: MAX_OIDC_DURATION,
+            ..ProactiveRefreshConfig::default()
+        };
+        cfg.validate();
+        assert!(cfg.min_refresh_interval < cfg.safety_margin);
+        assert_eq!(cfg.safety_margin, MAX_OIDC_DURATION);
+        assert_eq!(
+            cfg.min_refresh_interval,
+            MAX_OIDC_DURATION - Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn oidc_fractions_invalid_direct_construction_falls_back_to_defaults() {
+        for fraction in [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            0.0,
+            1.0,
+            1.5,
+            -0.1,
+        ] {
+            let mut cfg = ProactiveRefreshConfig {
+                fraction,
+                ..ProactiveRefreshConfig::default()
+            };
+            cfg.validate();
+            assert_eq!(
+                cfg.fraction, DEFAULT_OIDC_REFRESH_FRACTION,
+                "fraction={fraction}"
+            );
+        }
+        for jitter in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1, 0.6, 1.0] {
+            let mut cfg = ProactiveRefreshConfig {
+                jitter_fraction: jitter,
+                ..ProactiveRefreshConfig::default()
+            };
+            cfg.validate();
+            assert_eq!(
+                cfg.jitter_fraction, DEFAULT_OIDC_REFRESH_JITTER_FRACTION,
+                "jitter_fraction={jitter}"
+            );
+        }
+
+        let mut ok = ProactiveRefreshConfig {
+            fraction: 0.7,
+            jitter_fraction: 0.1,
+            ..ProactiveRefreshConfig::default()
+        };
+        ok.validate();
+        assert_eq!(ok.fraction, 0.7);
+        assert_eq!(ok.jitter_fraction, 0.1);
+    }
+
+    #[test]
+    fn oidc_min_refresh_interval_zero_env_is_floored() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "GROK_WORKSPACE_OIDC_MIN_REFRESH_INTERVAL_SECS";
+        unsafe { std::env::set_var(var, "0") };
+        let cfg = ProactiveRefreshConfig::from_env();
+        assert_eq!(cfg.min_refresh_interval, MIN_OIDC_MIN_REFRESH_INTERVAL);
+        unsafe { std::env::remove_var(var) };
+    }
+
+    #[test]
+    fn ws_liveness_deadline_env_parses() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "GROK_WORKSPACE_WS_LIVENESS_DEADLINE_SECS";
+
+        unsafe { std::env::remove_var(var) };
+        assert_eq!(StatusConfig::from_env().ws_liveness_deadline, None);
+
+        unsafe { std::env::set_var(var, "90") };
+        assert_eq!(
+            StatusConfig::from_env().ws_liveness_deadline,
+            Some(Duration::from_secs(90))
+        );
+
+        unsafe { std::env::set_var(var, "not-a-number") };
+        assert_eq!(StatusConfig::from_env().ws_liveness_deadline, None);
+
         unsafe { std::env::remove_var(var) };
     }
 

@@ -201,6 +201,7 @@ impl SessionActor {
         &self,
         prompt_id: String,
         result: PromptTurnResult,
+        elapsed_ms: Option<u64>,
     ) -> bool {
         let result = result.map(|mut ok| {
             ok.tool_overrides = self.effective_tool_overrides();
@@ -301,6 +302,27 @@ impl SessionActor {
         if state.running_prompt_id() == Some(prompt_id.as_str()) || owned_completion {
             state.running_task = None;
         }
+        // The turn arms the queue hold at the block verdict (single writer).
+        // Completion handling only announces it, and only while the hold is
+        // still armed: a re-engagement that cleared it in the
+        // verdict-to-completion window must not be overridden here.
+        let mut held_rows_notice: Option<usize> = None;
+        if finalizes_turn
+            && state.hook_block_held()
+            && !state.pending_inputs.is_empty()
+            && matches!(
+                result,
+                Ok(PromptTurnOk {
+                    completion_kind: PromptCompletionKind::Cancelled {
+                        category: Some(crate::session::events::CancellationCategory::HookDenied),
+                        ..
+                    },
+                    ..
+                })
+            )
+        {
+            held_rows_notice = Some(state.pending_inputs.len());
+        }
         if broadcast_queue {
             self.broadcast_queue_changed(&state);
         }
@@ -324,6 +346,16 @@ impl SessionActor {
         // Drop the state guard before the async emit so the persist/broadcast
         // fork doesn't run under the state lock.
         drop(state);
+
+        if let Some(held) = held_rows_notice {
+            self.send_hook_annotation_with_kind(
+                crate::extensions::notification::HookAnnotationKind::QueuedPromptsHeld,
+                &format!(
+                    "\u{26a0} {held} queued prompt(s) on hold after the block. Edit or remove them, or send a prompt to resume."
+                ),
+            )
+            .await;
+        }
 
         // Durable twin of the fire-and-forget `prompt_complete` (emitted from
         // `MvpAgent::prompt`): publish the turn's terminal on the persisted +
@@ -353,12 +385,18 @@ impl SessionActor {
                 .as_ref()
                 .ok()
                 .and_then(|ok| ok.completion_kind.cancellation_category_meta());
+            let cancellation_context = result
+                .as_ref()
+                .ok()
+                .and_then(|ok| ok.completion_kind.cancellation_context_meta());
             self.emit_turn_completed(
                 prompt_id,
                 &mapped,
                 usage,
                 completion_cancel_trigger(&result),
                 cancellation_category.as_deref(),
+                cancellation_context,
+                elapsed_ms,
             )
             .await;
         }
@@ -377,10 +415,19 @@ impl SessionActor {
     /// `"send_now"` marks a cancel-and-send end (marker suppressed).
     /// `cancellation_category` (when `Some`) rides as `cancellationCategory`
     /// (`meta_category_str`, e.g. `"HookDenied"`) so viewer rails pick
-    /// category-aware terminal copy.
+    /// category-aware terminal copy. A failed turn's typed error kind rides
+    /// the variant's own `error_kind` field (same derivation as the
+    /// `prompt_complete` payload's `errorKind`) so replay/wake rails pick
+    /// error-specific copy.
+    ///
+    /// `elapsed_ms` is `None` when no running task supplied a start time.
     ///
     /// Both callers queue the turn-end report before this, but the worker can dispatch first,
     /// so the terminal and the report race. The pager handles either order.
+    ///
+    /// Persisted via the durable append path: the terminal is emitted after
+    /// the turn's last flush barrier, so on the buffered rail a power loss
+    /// could keep the turn's content while dropping its terminal.
     pub(super) async fn emit_turn_completed(
         &self,
         prompt_id: String,
@@ -388,8 +435,11 @@ impl SessionActor {
         usage: Option<crate::extensions::notification::PromptUsage>,
         cancel_trigger: Option<&str>,
         cancellation_category: Option<&str>,
+        cancellation_context: Option<serde_json::Value>,
+        elapsed_ms: Option<u64>,
     ) {
-        let (stop_reason, agent_result) = crate::sampling::error::prompt_complete_fields(mapped);
+        let (stop_reason, agent_result, error_kind) =
+            crate::sampling::error::prompt_complete_fields(mapped);
         let mut extra = serde_json::Map::new();
         if let Some(t) = cancel_trigger {
             extra.insert("cancelTrigger".to_string(), serde_json::json!(t));
@@ -397,15 +447,21 @@ impl SessionActor {
         if let Some(c) = cancellation_category {
             extra.insert("cancellationCategory".to_string(), serde_json::json!(c));
         }
+        if let Some(ctx) = cancellation_context {
+            extra.insert("cancellationContext".to_string(), ctx);
+        }
         let extra_meta = (!extra.is_empty()).then_some(extra);
         self.send_xai_notification_with_extra_meta(
             crate::session::turn_completion::build_turn_completed(
                 prompt_id,
                 stop_reason,
                 agent_result,
+                error_kind,
                 usage,
+                elapsed_ms,
             ),
             extra_meta,
+            crate::session::storage::jsonl::AppendDurability::Durable,
         )
         .await;
 

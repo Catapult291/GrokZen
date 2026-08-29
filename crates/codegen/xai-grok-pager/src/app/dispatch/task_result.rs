@@ -40,6 +40,7 @@ use super::session::load::{
     handle_session_search_debounce_expired, remove_session_from_pickers,
 };
 use super::session::modal::remove_agent_and_cleanup;
+use super::session::picker_routing::PickerRequest;
 use super::settings::ui::apply_setting_rollback;
 use super::status::{
     handle_coding_data_sharing_failed, handle_coding_data_sharing_updated,
@@ -124,14 +125,12 @@ pub(super) fn maybe_show_x11_primary_paste_hint(
         .into_owned();
     show_clipboard_toast(target, &message, app);
 }
-/// Whether a completed clipboard probe should fall through to the `grok wrap`
-/// host-image request. A clean `FullMiss` always qualifies; a remote read
-/// *error* (`AttachmentRead`) also qualifies because inside `grok wrap` the
-/// authoritative pasteboard is the local host's, not the (absent) remote one, so
-/// the error is recoverable over the wrap OSC path. Every other failure
-/// (`TextRead`, `TargetInsertion`, `AlreadyReported`) is a real dead end and
-/// must keep toasting. The request itself still self-gates on
-/// `osc52_sink_active()`, so this is inert outside `grok wrap`.
+/// Whether a completed clipboard probe should fall through to the `grok wrap` host-image request.
+/// A clean `FullMiss` always qualifies; a remote read *error* (`AttachmentRead`) qualifies too.
+/// Inside `grok wrap` the authoritative pasteboard is the local host's, not the (absent) remote one.
+/// That error is therefore recoverable over the wrap OSC path.
+/// Every other failure (`TextRead`, `TargetInsertion`, `AlreadyReported`) is a real dead end and must keep toasting.
+/// The request itself still self-gates on `osc52_sink_active()`, so this is inert outside `grok wrap`.
 pub(super) fn wrap_host_image_request_eligible(completion: ClipboardPasteCompletion) -> bool {
     matches!(
         completion,
@@ -266,11 +265,17 @@ pub(crate) fn deliver_doctor_message(app: &mut AppView, preferred: AgentId, mess
         action: None,
     });
 }
-/// Handle a completed async task result.
 pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec<Effect> {
     let locale = app.locale.clone();
     if result.ends_startup() {
         app.finish_startup(xai_grok_telemetry::startup::StartupOutcome::Ok);
+    }
+    if !matches!(
+        &result,
+        TaskResult::WorkspaceMembersUpserted { .. }
+            | TaskResult::WorkspaceMembersUpsertTaskFailed { .. }
+    ) {
+        crate::app::workspace_sync::request(app);
     }
     match result {
         TaskResult::SessionCreated {
@@ -437,12 +442,25 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             error,
         } => handle_session_load_failed(app, agent_id, session_id, error),
         TaskResult::SessionListLoaded {
+            host,
+            generation,
             sessions,
             partial,
             scope,
             seq,
             query,
-        } => handle_session_list_loaded(app, sessions, partial, scope, seq, query),
+        } => handle_session_list_loaded(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            sessions,
+            partial,
+            scope,
+            query,
+        ),
         TaskResult::ForeignSessionsScanned { entries, seq } => {
             handle_foreign_sessions_scanned(app, entries, seq)
         }
@@ -473,12 +491,36 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.apply_foreign_resume_detection(launch_token, &canonical_cwd, hint);
             vec![]
         }
-        TaskResult::SessionListFailed { error, seq, query } => {
-            handle_session_list_failed(app, error, seq, query)
-        }
-        TaskResult::SessionSearchDebounceExpired { query, seq } => {
-            handle_session_search_debounce_expired(app, query, seq)
-        }
+        TaskResult::SessionListFailed {
+            host,
+            generation,
+            error,
+            seq,
+            query,
+        } => handle_session_list_failed(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            error,
+            query,
+        ),
+        TaskResult::SessionSearchDebounceExpired {
+            host,
+            generation,
+            query,
+            seq,
+        } => handle_session_search_debounce_expired(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            query,
+        ),
         TaskResult::RosterLoaded { sessions } => {
             app.leader_roster = sessions;
             app.dashboard_sessions_loading = false;
@@ -494,12 +536,168 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.dashboard_sessions_loading = false;
             vec![]
         }
+        TaskResult::WorkspaceSnapshotLoaded { store, snapshot } => {
+            app.workspace_writes_disabled = !matches!(
+                store.schema_state(),
+                xai_grok_dashboard_store::SchemaState::Current
+            );
+            app.workspace_store = Some(store);
+            app.workspace_snapshot = Some(snapshot);
+            app.workspace_store_loading = false;
+            app.workspace_write_in_flight = false;
+            app.workspace_retry_metadata.clear();
+            app.workspace_failed_metadata.clear();
+            app.dashboard_sessions_loading = false;
+            vec![]
+        }
+        TaskResult::WorkspaceSnapshotFailed { error } => {
+            tracing::warn!(error = %error, "dashboard workspace load failed");
+            app.workspace_store_loading = false;
+            app.workspace_write_in_flight = false;
+            app.dashboard_sessions_loading = false;
+            let message = localized_template(
+                app.locale.as_ref(),
+                "dashboard.toast.workspace_load_failed",
+                "Could not load dashboard workspace: {error}",
+                &[("{error}", &error)],
+            );
+            app.show_toast(&message);
+            vec![]
+        }
+        TaskResult::WorkspaceMembersUpserted {
+            store,
+            snapshot,
+            failures,
+            attempted,
+        } => {
+            app.workspace_writes_disabled = !matches!(
+                store.schema_state(),
+                xai_grok_dashboard_store::SchemaState::Current
+            );
+            app.workspace_write_in_flight = false;
+            let snapshot = match snapshot {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    let db_path = store.path().to_path_buf();
+                    tracing::warn!(error = %error, "workspace snapshot after write failed");
+                    app.workspace_store = None;
+                    app.workspace_store_loading = true;
+                    app.workspace_sync_requested = true;
+                    let message = localized_template(
+                        app.locale.as_ref(),
+                        "dashboard.toast.workspace_changed_refreshing",
+                        "Dashboard workspace changed; refreshing",
+                        &[],
+                    );
+                    app.show_toast(&message);
+                    return vec![Effect::LoadWorkspaceSnapshot { db_path }];
+                }
+            };
+            app.workspace_store = Some(store);
+            app.workspace_snapshot = Some(snapshot);
+            let failed_ids: std::collections::HashSet<_> = failures
+                .iter()
+                .map(|failure| failure.session_id.clone())
+                .collect();
+            for member in &attempted {
+                if !failed_ids.contains(member.key.session_id.as_ref()) {
+                    app.workspace_retry_metadata.remove(&member.key.session_id);
+                    app.workspace_failed_metadata.remove(&member.key.session_id);
+                }
+            }
+            if !failures.is_empty() {
+                let failure = &failures[0];
+                tracing::warn!(
+                    failed = failures.len(),
+                    session_id = failure.session_id,
+                    error = failure.error,
+                    "dashboard workspace sync partially failed"
+                );
+                let count = failures.len().to_string();
+                let session_word = if failures.len() == 1 {
+                    "session"
+                } else {
+                    "sessions"
+                };
+                let message = localized_template(
+                    app.locale.as_ref(),
+                    "dashboard.toast.workspace_sync_failed",
+                    "Could not sync {count} dashboard {session_word}",
+                    &[("{count}", &count), ("{session_word}", session_word)],
+                );
+                app.show_toast(&message);
+            }
+            if app.workspace_writes_disabled {
+                app.workspace_sync_requested = false;
+                let message = localized_template(
+                    app.locale.as_ref(),
+                    "dashboard.toast.workspace_read_only",
+                    "Dashboard workspace is read-only in this Grok version",
+                    &[],
+                );
+                app.show_toast(&message);
+            } else {
+                let mut request_retry = false;
+                for member in attempted {
+                    let Some(failure) = failures
+                        .iter()
+                        .find(|failure| failure.session_id == member.key.session_id.as_ref())
+                    else {
+                        continue;
+                    };
+                    let already_retried = app
+                        .workspace_retry_metadata
+                        .get(&member.key.session_id)
+                        .is_some_and(|metadata| metadata == &member.metadata);
+                    if failure.retryable && !already_retried {
+                        app.workspace_retry_metadata
+                            .insert(member.key.session_id.clone(), member.metadata.clone());
+                        app.workspace_failed_metadata.remove(&member.key.session_id);
+                        request_retry = true;
+                    } else {
+                        app.workspace_retry_metadata.remove(&member.key.session_id);
+                        app.workspace_failed_metadata
+                            .insert(member.key.session_id, member.metadata);
+                    }
+                }
+                if request_retry {
+                    app.workspace_sync_requested = true;
+                }
+            }
+            vec![]
+        }
+        TaskResult::WorkspaceMembersUpsertTaskFailed { db_path, error } => {
+            tracing::error!(error = %error, "dashboard workspace writer failed");
+            app.workspace_store = None;
+            app.workspace_write_in_flight = false;
+            app.workspace_store_loading = true;
+            let message = localized_template(
+                app.locale.as_ref(),
+                "dashboard.toast.workspace_writer_failed",
+                "Dashboard workspace writer failed; reopening",
+                &[],
+            );
+            app.show_toast(&message);
+            vec![Effect::LoadWorkspaceSnapshot { db_path }]
+        }
         TaskResult::CardDetailLoaded {
+            host,
+            generation,
             source,
             session_id,
-            generation,
+            seq,
             detail,
-        } => handle_card_detail_loaded(app, source, session_id, generation, detail),
+        } => handle_card_detail_loaded(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            source,
+            session_id,
+            detail,
+        ),
         TaskResult::SessionRestored {
             agent_id,
             local_session_id,
@@ -779,10 +977,35 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             use xai_grok_tools::implementations::skills::skill::extract_skill_display_text;
             if let Some(agent) = app.agents.get_mut(&agent_id) {
                 agent.session.prompt_history_loading = false;
-                agent.session.prompt_history = prompts
+                let fetched: Vec<String> = prompts
                     .into_iter()
                     .map(|p| extract_skill_display_text(&p).unwrap_or(p))
                     .collect();
+                let local: std::collections::HashSet<String> = agent
+                    .session
+                    .prompt_history
+                    .iter()
+                    .flat_map(|p| {
+                        let t = p.trim();
+                        [t.to_owned(), t.strip_prefix("! ").unwrap_or(t).to_owned()]
+                    })
+                    .collect();
+                let local_entries = agent.session.prompt_history.len();
+                let fetched_entries = fetched.len();
+                agent
+                    .session
+                    .prompt_history
+                    .extend(fetched.into_iter().filter(|p| !local.contains(p.trim())));
+                agent
+                    .session
+                    .prompt_history
+                    .truncate(crate::app::agent::PROMPT_HISTORY_CAP);
+                tracing::info!(
+                    history.local_entries = local_entries,
+                    history.fetched_entries = fetched_entries,
+                    history.merged_entries = agent.session.prompt_history.len(),
+                    "history.fetch_merged"
+                );
                 if agent.prompt.history_search.is_active() {
                     let history = agent.combined_prompt_history();
                     agent.prompt.history_search.refresh_items(&history);
@@ -847,11 +1070,24 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::PluginsListLoaded { agent_id, result } => {
             handle_plugins_list_loaded(app, agent_id, result)
         }
-        TaskResult::HooksActionResult { agent_id, result }
-        | TaskResult::PluginsActionResult { agent_id, result }
-        | TaskResult::MarketplaceActionResult { agent_id, result } => {
-            dispatch_action_result(app, agent_id, result)
-        }
+        TaskResult::HooksActionResult { agent_id, result } => dispatch_action_result(
+            app,
+            agent_id,
+            result,
+            crate::views::extensions_modal::ActionResultOrigin::Hooks,
+        ),
+        TaskResult::PluginsActionResult { agent_id, result } => dispatch_action_result(
+            app,
+            agent_id,
+            result,
+            crate::views::extensions_modal::ActionResultOrigin::Plugins,
+        ),
+        TaskResult::MarketplaceActionResult { agent_id, result } => dispatch_action_result(
+            app,
+            agent_id,
+            result,
+            crate::views::extensions_modal::ActionResultOrigin::Marketplace,
+        ),
         TaskResult::CtaPluginInstallDone {
             agent_id,
             plugin_name,
@@ -1511,9 +1747,20 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.welcome_prompt_focused = false;
             effects
         }
-        TaskResult::DeepSearchResults { results, seq } => {
-            handle_deep_search_results(app, results, seq)
-        }
+        TaskResult::DeepSearchResults {
+            host,
+            generation,
+            results,
+            seq,
+        } => handle_deep_search_results(
+            app,
+            PickerRequest {
+                host,
+                generation,
+                seq,
+            },
+            results,
+        ),
         TaskResult::RewindPointsLoaded { agent_id, points } => {
             handle_rewind_points_loaded(app, agent_id, points)
         }

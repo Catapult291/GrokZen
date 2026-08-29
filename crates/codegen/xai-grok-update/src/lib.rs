@@ -197,7 +197,7 @@ pub fn community_command_names() -> CommunityCommandNames {
         .ok()
         .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
     #[cfg(unix)]
-    let install_dir = xai_grok_home::resolve_grok_home().map(|home| home.join("bin"));
+    let install_dir = xai_dirs::resolve_grok_home().map(|home| home.join("bin"));
     #[cfg(not(any(windows, unix)))]
     let install_dir: Option<std::path::PathBuf> = None;
 

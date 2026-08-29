@@ -4,6 +4,7 @@ pub mod grok_auth_credentials;
 pub mod hooks;
 pub mod limits;
 pub(crate) mod subprocess;
+pub(crate) mod text_sanitize;
 pub(crate) mod user_identity;
 
 // The foundation utilities live in `xai-grok-shell-base` (upstream of this
@@ -58,11 +59,11 @@ impl Drop for AbortOnDrop {
 /// Expand a leading `~` to the home directory; other paths pass through.
 pub(crate) fn expand_home(s: &str) -> std::path::PathBuf {
     if let Some(stripped) = s.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = xai_dirs::home_dir() {
             return home.join(stripped);
         }
     } else if s == "~"
-        && let Some(home) = dirs::home_dir()
+        && let Some(home) = xai_dirs::home_dir()
     {
         return home;
     }
@@ -91,13 +92,13 @@ mod expand_home_tests {
 
     #[test]
     fn bare_tilde() {
-        let home = dirs::home_dir().expect("home_dir required for this test");
+        let home = xai_dirs::home_dir().expect("home_dir required for this test");
         assert_eq!(expand_home("~"), home);
     }
 
     #[test]
     fn tilde_slash() {
-        let home = dirs::home_dir().expect("home_dir required for this test");
+        let home = xai_dirs::home_dir().expect("home_dir required for this test");
         assert_eq!(expand_home("~/foo/bar"), home.join("foo/bar"));
     }
 

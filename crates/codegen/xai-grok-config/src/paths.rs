@@ -3,7 +3,7 @@
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-pub use xai_grok_home::{default_grok_home, grok_home, user_grok_home};
+pub use xai_dirs::{default_grok_home, grok_home, user_grok_home};
 
 #[cfg(target_os = "macos")]
 const CLAUDE_MANAGED_SETTINGS_PATH: &str =
@@ -199,6 +199,11 @@ pub fn ensure_sessions_cwd_dir_in(
         match std::fs::File::create_new(&cwd_file) {
             Ok(mut f) => {
                 std::io::Write::write_all(&mut f, cwd.as_bytes())?;
+                // Fsync the write-capable create_new handle before drop.
+                // A later parent-dir sync would otherwise freeze a present
+                // but empty/torn marker that path recovery cannot fall back
+                // from. AlreadyExists skips rewrite (O_EXCL).
+                f.sync_all()?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e),

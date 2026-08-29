@@ -1,8 +1,7 @@
 //! Read-only system-block text for `/queue`, `/tasks`, and `/usage`.
 //!
-//! Plain text committed into scrollback — the primary inspection surface in
-//! minimal mode (no interactive panes). Kept out of `dispatch` for easy
-//! unit tests.
+//! Plain text committed into scrollback; minimal mode has no interactive panes, so these blocks are its main way to inspect that state.
+//! The formatting lives outside `dispatch` so it is easy to unit test.
 
 use crate::app::agent::BgTaskStatus;
 use crate::app::agent_view::AgentView;
@@ -380,8 +379,7 @@ fn format_cost(
     }
 }
 
-/// First non-empty, trimmed line of `text` (empty string if none). Collapses a
-/// multi-line prompt/command to a single display line.
+/// First non-empty, trimmed line of `text` (empty string if none). Collapses a multi-line prompt/command to a single display line.
 pub(crate) fn first_nonempty_line(text: &str) -> &str {
     text.lines()
         .map(str::trim)
@@ -413,7 +411,6 @@ fn format_queue_row_with_locale(
     }
 }
 
-/// Join a header line above its rows into a single block string.
 fn join_header_rows(header: String, rows: Vec<String>) -> String {
     std::iter::once(header)
         .chain(rows)
@@ -535,8 +532,7 @@ mod tests {
             ..Default::default()
         };
         let text = session_usage_block_text(&usage);
-        // Snapshot pins content and column alignment together; single-model
-        // sessions must skip the redundant by-model breakdown.
+        // Snapshot pins content and column alignment together; single-model sessions must skip the redundant by-model breakdown
         insta::assert_snapshot!("session_usage_block_full", text);
     }
 

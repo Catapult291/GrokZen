@@ -19,22 +19,6 @@ use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
 
-/// The verbatim wire string for a Messages API stop reason, before it collapses
-/// into the internal [`StopReason`]. Uses the enum's serde `snake_case`
-/// renaming so it cannot drift from the wire contract.
-fn messages_stop_reason_wire(sr: &messages::StopReason) -> String {
-    match serde_json::to_value(sr) {
-        Ok(serde_json::Value::String(s)) => s,
-        other => {
-            debug_assert!(
-                false,
-                "StopReason must serialize to a string, got {other:?}"
-            );
-            "end_turn".to_string()
-        }
-    }
-}
-
 /// Returns whether a Messages API event reflects real model progress
 /// rather than a liveness-only heartbeat (Ping).
 pub(crate) fn messages_event_has_meaningful_content(event: &MessageStreamEvent) -> bool {
@@ -419,8 +403,10 @@ pub fn stream_messages<'a>(
                         final_stop_message = details.explanation;
                     }
                     // Keep the exact wire string so consumers can echo it.
-                    final_raw_stop_reason =
-                        delta.stop_reason.as_ref().map(messages_stop_reason_wire);
+                    final_raw_stop_reason = delta
+                        .stop_reason
+                        .as_ref()
+                        .map(messages::StopReason::wire_str);
                     // The matched stop sequence rides the same terminal delta
                     // (present only on a `stop_sequence` stop); carry it verbatim.
                     if delta.stop_sequence.is_some() {
@@ -444,13 +430,13 @@ pub fn stream_messages<'a>(
                             StopReason::Stop
                         }
                         messages::StopReason::ModelContextWindowExceeded => {
-                            // Output-side overflow on a successful stream: stays in the
-                            // max_tokens truncation class — compact-on-error recovery needs
+                            // Output-side overflow on a successful stream: maps to the
+                            // Length stop class — compact-on-error recovery needs
                             // an Api error carrying model metadata plus a prompt-side
                             // overflow, neither of which exists here.
                             tracing::warn!(
                                 wire_stop_reason = "model_context_window_exceeded",
-                                "context window hit mid-generation; surfacing as max_tokens truncation"
+                                "context window hit mid-generation; mapping to the Length stop class"
                             );
                             StopReason::Length
                         }
@@ -518,13 +504,9 @@ pub fn stream_messages<'a>(
             }
         }
 
-        if final_stop_reason == Some(StopReason::Length) {
-            yield SamplingEvent::Failed {
-                request_id: request_id.clone(),
-                error: SamplingErrorInfo::from(&SamplingError::MaxTokensTruncation),
-            };
-            return;
-        }
+        // A `Length` stop is NOT failed here: the transform completes with
+        // `stop_reason=Length` and `drive_l2` decides fail-vs-salvage per the
+        // request's `LengthPolicy`.
 
         // ── Build the final response ─────────────────────────────────
         let model_id = final_model.unwrap_or_default();
@@ -545,7 +527,13 @@ pub fn stream_messages<'a>(
             None
         };
 
-        let stop_reason = if !assistant_tool_calls.is_empty() {
+        let stop_reason = if final_stop_reason == Some(StopReason::Length) {
+            // Length wins even over completed tool_use blocks: the provider
+            // closes a block it cut mid-stream, so the trailing call's
+            // arguments may be silently truncated — fail-vs-salvage belongs
+            // to the `LengthPolicy` gate.
+            final_stop_reason
+        } else if !assistant_tool_calls.is_empty() {
             // Completed tool_use blocks win even over Refusal: the calls are
             // real model output the agent loop must resolve.
             Some(StopReason::ToolCalls)

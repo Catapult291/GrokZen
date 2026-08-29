@@ -186,7 +186,7 @@ pub struct UiConfig {
     /// `None` inherits remote/default; skipped when untouched.
     #[serde(default, skip_serializing_if = "DisplayRefreshSettings::is_default")]
     pub display_refresh: DisplayRefreshSettings,
-    /// `[ui.status_line]`. Not drawn in minimal mode; disabled by default.
+    /// `[ui.status_line]`. Disabled by default.
     #[serde(default, skip_serializing_if = "status_line_should_not_be_saved")]
     pub status_line: StatusLineConfig,
 }

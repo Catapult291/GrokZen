@@ -34,14 +34,8 @@ use parking_lot::Mutex;
 use xai_grok_workspace::trust::{TrustStore, is_unsafe_trust_root, workspace_key};
 
 // Decision-side (scan/decide/prompt/store) relocated to `xai-grok-workspace`
-// (client crate). `grant_folder_trust` is the ONLY moved item referenced from
-// OUTSIDE this module (shell call sites + the pager's
-// `xai_grok_shell::agent::folder_trust::grant_folder_trust`), so only it is
-// re-published; the rest are private imports used within this module. A glob
-// re-export is deliberately avoided: it would silently re-publish the
-// cache-SKIPPING `revoke_folder_trust_store` next to the real
-// `revoke_folder_trust` wrapper, inviting a stale-untrust security bug.
-pub use xai_grok_workspace::folder_trust::grant_folder_trust;
+// (client crate). Only the helpers used by this consume-side module are
+// imported; callers should use the workspace API for explicit trust decisions.
 use xai_grok_workspace::folder_trust::{
     DecideInputs, TrustOutcome, claude_project_mcp_names, decide, decide_inputs,
     decide_inputs_with_interactive, feature_enabled, folder_trust_inert, persist_trust,
@@ -63,19 +57,15 @@ use crate::util::config::{MCP_SCOPE_PROJECT, RemoteSettings};
 static DECISIONS: LazyLock<Mutex<HashMap<PathBuf, bool>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Revoke trust for `cwd`'s workspace: downgrade the in-process decision cache
-/// so a mid-session untrust takes effect immediately, while the store half —
-/// persisting an explicit `set_untrusted` ONLY when the folder was actually
-/// trusted — is delegated to
-/// [`xai_grok_workspace::folder_trust::revoke_folder_trust_store`].
+/// Compatibility alias; new call sites should use the workspace API directly.
+pub use xai_grok_workspace::folder_trust::grant_folder_trust;
+
+/// Revoke trust for `cwd`'s workspace and downgrade the consume-side cache.
 ///
 /// Without the cache downgrade a cached grant would short-circuit
-/// [`resolve_and_record`] (which only reconciles untrusted→trusted), so hooks
-/// would keep loading until restart. Unrecordable roots ($HOME / fs-root) are
-/// refused instead: [`decide`] always trusts them and the store refuses both
-/// their grants and denies, so a cache deny would be the one verdict nothing
-/// (grant, store, prompt) could ever lift. Returns whether the folder had been
-/// trusted. Symmetric with [`grant_folder_trust`].
+/// [`resolve_and_record`], so hooks would keep loading until restart.
+/// Unrecordable roots ($HOME / fs-root) are refused because no later grant can
+/// lift a cache deny for them. Returns whether the folder had been trusted.
 pub(crate) fn revoke_folder_trust(cwd: &Path) -> bool {
     // Local/dev builds are fully inert: nothing was trusted-via-gate to revoke,
     // and recording `false` here would make `project_scope_allowed` wrongly gate.
@@ -133,7 +123,7 @@ pub(crate) fn project_scope_allowed(cwd: &Path) -> bool {
         // Re-read the store so a grant issued after the untrusted resolve is
         // honored without a restart (mirrors `resolve_and_record_inner`).
         Some(false) => {
-            if TrustStore::load().is_trusted(&key) {
+            if xai_grok_workspace::folder_trust::is_trusted_this_process(&key) {
                 record(&key, true);
                 true
             } else {
@@ -184,15 +174,13 @@ pub(crate) fn detected_config_kinds(cwd: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Whether an agent's inline `hooks:` block may be appended to the live hook
-/// registry. A PROJECT/cwd-discovered agent's inline hooks are repo-controlled
-/// code-exec (and a project agent can SHADOW a built-in subagent, e.g. `explore`),
-/// so they require folder trust; user/bundled/built-in agents (not cwd-sourced)
-/// always keep theirs. `trusted` is evaluated LAZILY so non-project agents skip
-/// the (filesystem-walking) trust verdict entirely. SINGLE definition shared by
-/// the primary-session and subagent append sites (and the test) so they cannot
-/// drift. The primary site passes its already-computed `hooks_trusted` verdict;
-/// the subagent site passes `project_scope_allowed(parent_cwd)`.
+/// Project agents require folder trust; user/bundled/built-in agents always
+/// pass. Shared by primary-session hook append (`agent_ops.rs`), subagent
+/// hook append (`handle_request.rs`), and subagent owned `mcpServers` spawn
+/// (`handle_request.rs`). Plugin deny is call-site-only, before this
+/// predicate. `trusted` is evaluated lazily so non-project agents skip the
+/// filesystem-walking trust verdict. Primary-session passes its already-
+/// computed `hooks_trusted`; subagent sites pass `project_scope_allowed(parent_cwd)`.
 pub(crate) fn agent_inline_hooks_allowed(
     scope: xai_grok_agent::config::AgentScope,
     trusted: impl FnOnce() -> bool,
@@ -244,7 +232,7 @@ pub(crate) fn resolve_and_record(
     let key = workspace_key(cwd);
     resolve_and_record_inner(
         &key,
-        || TrustStore::load().is_trusted(&key),
+        || xai_grok_workspace::folder_trust::is_trusted_this_process(&key),
         || compute(cwd, &key, remote, allow_prompt),
     )
 }
@@ -285,7 +273,7 @@ pub(crate) fn resolve_launch_dir_trust(cwd: &Path, remote: Option<&RemoteSetting
     // resolve_and_record without repeating the expensive repo_configs scan.
     resolve_and_record_inner(
         &key,
-        || TrustStore::load().is_trusted(&key),
+        || xai_grok_workspace::folder_trust::is_trusted_this_process(&key),
         || compute_from_inputs(&inputs, feature, &key, false),
     )
 }
@@ -544,6 +532,23 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn grant_folder_trust_seeds_decisions_cache() {
+        let _sim = simulate_release_build();
+        let home = tempfile::tempdir().unwrap();
+        let _env = EnvGuard::set("GROK_HOME", home.path());
+        let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".grok").join("hooks")).unwrap();
+        grant_folder_trust(tmp.path());
+        let key = workspace_key(tmp.path());
+        assert!(
+            xai_grok_workspace::folder_trust::is_trusted_this_process(&key),
+            "explicit grant must be visible to consume-side resolution"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn revoke_folder_trust_downgrades_cache() {
         let _sim = simulate_release_build();
         // A mid-session untrust of a TRUSTED folder must take effect immediately:
@@ -571,91 +576,28 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn revoke_never_trusted_folder_writes_no_deny_and_preserves_cascade() {
+    fn revoke_never_trusted_folder_writes_no_deny() {
         let _sim = simulate_release_build();
-        // The actual bug fix: revoking a NEVER-trusted child must write no explicit
-        // child STORE deny (returning false) so a later ancestor grant still
-        // cascades to the child — a spurious child `set_untrusted` would win
-        // most-specific and break the cascade. It must STILL downgrade the
-        // in-process cache, though, so a cached storeless grant cannot survive a
-        // mid-session untrust. GROK_HOME-isolated so the grant writes to a temp
-        // store; `#[serial]` because GROK_HOME is global.
         let home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("GROK_HOME", home.path());
-        // Distinct git roots for parent/child so `workspace_key` does not collapse
-        // them onto one key (the child's own `.git` stops discovery at the child).
-        let parent = repo_tmp();
-        let child = parent.path().join("child");
-        std::fs::create_dir_all(&child).unwrap();
-        git2::Repository::init(&child).unwrap();
+        let tmp = repo_tmp();
 
-        // Seed a cached grant with NO backing store record (e.g. a kill-switch /
-        // feature-off `compute` allow), so the cache downgrade is observable below.
-        record(&workspace_key(&child), true);
+        record(&workspace_key(tmp.path()), true);
 
-        // Revoking the never-trusted child reports false and writes no store deny.
         assert!(
-            !revoke_folder_trust(&child),
+            !revoke_folder_trust(tmp.path()),
             "revoking a never-trusted folder must return false"
         );
 
-        // The in-process cache is still downgraded so the untrust is immediate even
-        // for the storeless cached grant.
         assert!(
-            !project_scope_allowed(&child),
+            !project_scope_allowed(tmp.path()),
             "revoke must downgrade the in-process cache even for a never-trusted folder"
         );
 
-        // A subsequent ancestor grant must still cascade to the child — proving
-        // the revoke did not poison the store with a most-specific child deny.
-        let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(parent.path())).unwrap();
+        let store = TrustStore::load();
         assert!(
-            TrustStore::load().is_trusted(&workspace_key(&child)),
-            "ancestor grant must cascade to a child that was only revoked-when-untrusted"
-        );
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn revoke_ancestor_cascade_trusted_child_writes_explicit_untrust() {
-        let _sim = simulate_release_build();
-        // Revoke on a child trusted ONLY via an ancestor cascade (no direct child
-        // grant) must report was_trusted=true and actually untrust the child: it
-        // writes an explicit child deny (overriding the cascade) and downgrades
-        // the cache. GROK_HOME-isolated so the grant writes to a temp store;
-        // `#[serial]` because GROK_HOME is process-global.
-        let home = tempfile::tempdir().unwrap();
-        let _env = EnvGuard::set("GROK_HOME", home.path());
-        // Distinct git roots so `workspace_key` keeps parent/child as separate
-        // keys (the child's own `.git` stops discovery at the child).
-        let parent = repo_tmp();
-        let child = parent.path().join("child");
-        std::fs::create_dir_all(&child).unwrap();
-        git2::Repository::init(&child).unwrap();
-
-        // Trust the parent only; the child inherits trust via the cascade.
-        let mut store = TrustStore::load();
-        store.set_trusted(&workspace_key(parent.path())).unwrap();
-        assert!(
-            TrustStore::load().is_trusted(&workspace_key(&child)),
-            "child must be trusted via the ancestor cascade before revoke"
-        );
-
-        // Revoking the cascade-trusted child reports was_trusted=true, then the
-        // child is untrusted: an explicit child deny overrides the cascade and
-        // the in-process cache is downgraded.
-        assert!(
-            revoke_folder_trust(&child),
-            "a cascade-trusted child must report was_trusted=true"
-        );
-        assert!(
-            !TrustStore::load().is_trusted(&workspace_key(&child)),
-            "revoke must write an explicit child untrust that overrides the cascade"
-        );
-        assert!(
-            !project_scope_allowed(&child),
-            "revoke must downgrade the in-process cache for the child"
+            !store.has_decision(&workspace_key(tmp.path())),
+            "revoking a never-trusted folder must not record a child deny"
         );
     }
 

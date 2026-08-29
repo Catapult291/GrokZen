@@ -279,6 +279,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "内置模型来源隔离测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
           if ($LASTEXITCODE -ne 0) { throw "中文界面定向测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib free_usage_upsell_shows_three_options_with_exact_labels
+          if ($LASTEXITCODE -ne 0) { throw "免费账户升级选项测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib chinese_effort_rows_use_typed_values_for_all_tiers_and_keep_option_ids
           if ($LASTEXITCODE -ne 0) { throw "推理强度汉化测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib localization_regression_grok_announcements_cover_4_5_and_4_6
@@ -794,6 +796,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
           $dist = $env:DIST_DIR
           $assets = @(
             (Join-Path $dist $env:ZIP_NAME),
@@ -1068,11 +1071,23 @@ jobs:
             }
           }
           foreach ($assetPath in $assets) {
-            & gh attestation verify $assetPath `
-              --repo $env:GITHUB_REPOSITORY `
-              --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/zh-release-windows.yml" `
-              --source-ref "refs/tags/$env:RELEASE_TAG"
-            if ($LASTEXITCODE -ne 0) {
+            $verified = $false
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              & gh attestation verify $assetPath `
+                --repo $env:GITHUB_REPOSITORY `
+                --signer-workflow "$env:GITHUB_REPOSITORY/.github/workflows/zh-release-windows.yml" `
+                --source-ref "refs/tags/$env:RELEASE_TAG"
+              if ($LASTEXITCODE -eq 0) {
+                $verified = $true
+                break
+              }
+              if ($attempt -lt 5) {
+                $delay = 5 * [Math]::Pow(2, $attempt - 1)
+                Write-Warning "构建来源证明暂未可用，将在 $delay 秒后重试（$attempt/5）：$assetPath"
+                Start-Sleep -Seconds $delay
+              }
+            }
+            if (-not $verified) {
               throw "Release 资产的构建来源证明验证失败：$assetPath"
             }
           }

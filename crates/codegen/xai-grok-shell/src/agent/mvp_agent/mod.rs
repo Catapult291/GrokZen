@@ -92,7 +92,8 @@ use crate::upload::trace::{
     upload_turn_result, upload_unified_log,
 };
 use crate::upload::turn::{
-    PromptTraceContext, UploadWait, complete_prompt_trace, spawn_upload_task,
+    PromptTraceContext, UploadWait, complete_prompt_trace, spawn_linked_upload_task,
+    spawn_upload_task,
 };
 use crate::upload::turn::{
     apply_yolo_mode_to_matching_sessions, lookup_session_model,
@@ -273,6 +274,8 @@ pub(crate) struct SessionSpawnOptions<'a> {
     pub session_yolo_mode: bool,
     pub session_auto_mode: bool,
     pub prompt_display_cwd: Option<String>,
+    /// Persisted visibility of this Build session for roster snapshots/deltas.
+    pub is_headless: bool,
     /// Sticky chat product kind for ACU / product skills sourcing.
     pub is_chat_kind: bool,
 }
@@ -449,6 +452,7 @@ pub(crate) fn chat_session_spawn_options<'a>(
         session_yolo_mode,
         session_auto_mode: false,
         prompt_display_cwd: None,
+        is_headless: false,
         is_chat_kind: true,
     }
 }
@@ -514,6 +518,10 @@ pub(crate) struct PromptResponseMeta {
     /// completions.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cancellation_category: Option<String>,
+    /// Structured detail of an early end (hook name, reason, trigger) —
+    /// `cancellation_context_meta`. `None` unless the cancel carried one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancellation_context: Option<serde_json::Value>,
     /// What triggered a cancelled turn's cancel (`"send_now"`, `"ctrl_c"`,
     /// `"esc"`); surfaced as `cancelTrigger`. `None` for non-cancel completions.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -540,6 +548,7 @@ pub(crate) struct PromptResponseMetaArgs<'a> {
     pub last_turn_usage: Option<&'a xai_grok_sampling_types::TokenUsage>,
     pub prompt_usage: Option<crate::extensions::notification::PromptUsage>,
     pub cancellation_category: Option<String>,
+    pub cancellation_context: Option<serde_json::Value>,
     pub cancel_trigger: Option<String>,
     pub structured_output: Option<Result<serde_json::Value, String>>,
     pub tool_overrides: Option<xai_grok_sampling_types::ToolOverrides>,
@@ -558,6 +567,7 @@ pub(crate) fn build_prompt_response_meta(
         last_turn_usage,
         prompt_usage,
         cancellation_category,
+        cancellation_context,
         cancel_trigger,
         structured_output,
         tool_overrides,
@@ -579,6 +589,7 @@ pub(crate) fn build_prompt_response_meta(
         reasoning_tokens: last_turn_usage.map(|u| u.reasoning_tokens),
         usage: prompt_usage,
         cancellation_category,
+        cancellation_context,
         cancel_trigger,
         structured_output,
         structured_output_error,
@@ -716,6 +727,7 @@ const IDLE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
 struct ResidentResources {
     /// Strong ref pinning the code-nav index; the manager holds only a `Weak`.
     codebase_index: Option<std::sync::Arc<xai_codebase_graph::IndexManagerHandle>>,
+    is_headless: bool,
     require_gateway: bool,
 }
 /// Per-session state that survives an idle-unload (so the session stays
@@ -879,20 +891,20 @@ pub struct MvpAgent {
     >,
     /// Unified sender for all subagent coordinator events.
     /// LEADER-SAFE(shared): channel is multi-producer, coordinator drains.
-    subagent_event_tx: tokio::sync::mpsc::UnboundedSender<
-        xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
-    >,
+    subagent_event_tx: xai_grok_tools::implementations::grok_build::task::backend::SubagentCoordinatorSender,
     /// Receiver for subagent events. Taken once by `start_subagent_coordinator()`.
     /// `None` after the coordinator drain task has been spawned.
     subagent_event_rx: RefCell<
         Option<
-            tokio::sync::mpsc::UnboundedReceiver<
-                xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
-            >,
+            xai_grok_tools::implementations::grok_build::task::coordinator::SubagentCoordinatorReceiver,
         >,
     >,
     /// Shell-only presentation state; lifecycle lives in the channel actor.
     subagent_presentation: RefCell<crate::agent::subagent::SubagentPresentation>,
+    /// Shared subagent turn-sampling semaphore, cloned into every
+    /// `SubagentSpawnContext`. LEADER-SAFE(shared). See
+    /// [`crate::config::SubagentsConfig::resolve_sampling_limit`].
+    subagent_sampling_semaphore: Arc<tokio::sync::Semaphore>,
     /// Shared buffer for mid-turn monitor event notifications.
     /// Pushed by the `InjectNotification` handler when a turn is active and the
     /// notification has `Next` priority. Drained by the session turn loop
@@ -2349,7 +2361,9 @@ async fn handle_synthetic_turn_trace(
     request: crate::upload::turn::SyntheticTurnTraceRequest,
 ) {
     use crate::session::SessionCommand;
-    use crate::upload::turn::{UploadWait, complete_prompt_trace, spawn_upload_task};
+    use crate::upload::turn::{
+        UploadWait, complete_prompt_trace, spawn_linked_upload_task, spawn_upload_task,
+    };
     let turn_started_at = chrono::Utc::now().to_rfc3339();
     let (info, turn_number, user_id, user_email, client_source, client_version, model) = {
         let this = agent_ref.get();
@@ -2556,8 +2570,10 @@ async fn handle_synthetic_turn_trace(
                 });
             cap
         });
-    spawn_upload_task(
+    spawn_linked_upload_task(
         "synthetic_turn_trace",
+        &request.prompt_id,
+        &request.session_id.0,
         async move {
             match complete_prompt_trace(
                     ctx,
@@ -2572,9 +2588,9 @@ async fn handle_synthetic_turn_trace(
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(
-                    error = %e,
-                    "Synthetic turn trace upload failed (non-fatal)",
-                );
+                        error = %e,
+                        "Synthetic turn trace upload failed (non-fatal)",
+                    );
                 }
             }
         },

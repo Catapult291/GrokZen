@@ -452,6 +452,22 @@ pub enum AutoCompactCancelReason {
     UserCancelled,
 }
 
+/// Provenance for shell-generated hook annotations whose fixed display chrome
+/// can be localized by clients. Arbitrary hook `systemMessage` values leave
+/// this unset and must be rendered verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookAnnotationKind {
+    PromptBlockRequestedNotEnforced,
+    PromptBlocked,
+    QueuedPromptsHeld,
+    InterjectionsJoined,
+    /// Forward-compatible fallback for a shell-generated template introduced
+    /// by a newer peer. Older clients preserve its message verbatim.
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "sessionUpdate")]
 pub enum SessionUpdate {
@@ -552,6 +568,10 @@ pub enum SessionUpdate {
     HookAnnotation {
         /// The hook message to display (e.g., "🪝 Running post_tool_use hooks for `Edit`...")
         message: String,
+        /// Present only for shell-generated templates. Missing on older replays
+        /// and arbitrary hook-provided messages.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<HookAnnotationKind>,
     },
     /// Structured hook execution data attached to tool call blocks.
     HookExecution {
@@ -1058,8 +1078,16 @@ pub enum SessionUpdate {
         /// Final agent result text, when the turn produced one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_result: Option<String>,
+        /// Typed kind of a failed stop (`SamplingErrorKind::as_str()`, e.g.
+        /// `"max_tokens_truncation"`) for error-specific client copy. `None`
+        /// for successes, unkinded errors, and files from older shells.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_kind: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         usage: Option<PromptUsage>,
+        /// Wall-clock turn duration in milliseconds. `None` on old files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        elapsed_ms: Option<u64>,
     },
     /// One model response opened (Messages `message_start`), carrying the real
     /// message id, model, and input-side token counts. Rides the buffered chunk
@@ -1162,6 +1190,12 @@ impl From<&crate::session::image_normalize::ImageCompressionInfo> for ImageCompr
 pub const DISK_FULL_ERROR_TYPE: &str = "disk_full";
 pub const DISK_FULL_USER_MESSAGE: &str = "Out of disk space. Free some space and try again.";
 
+/// `x.ai/session/prompt_complete` payload key of a failed stop's typed error
+/// kind, camelCase like its payload siblings (`stopReason`, `cancelTrigger`).
+/// Value: `SamplingErrorKind::as_str()`. The durable twin carries the same
+/// value in [`SessionUpdate::TurnCompleted`]'s typed `error_kind` field.
+pub const PROMPT_COMPLETE_ERROR_KIND_KEY: &str = "errorKind";
+
 /// State of a retry operation or error for visual feedback in the TUI
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", tag = "type")]
@@ -1211,8 +1245,16 @@ pub fn is_reauthable_failure(error_type: Option<&str>, message: &str) -> bool {
     if matches!(error_type, Some("legacy_auth") | Some("auth_transient")) {
         return false;
     }
-    error_type == Some("auth") || message.contains("Unauthorized (401)")
+    error_type == Some("auth") || message.contains(UNAUTHORIZED_NEEDLE)
 }
+
+/// Text fallback for 401s that arrive without a typed `error_type`; messages
+/// lacking this exact literal rely on the typed `error_type == "auth"` alone.
+pub const UNAUTHORIZED_NEEDLE: &str = "Unauthorized (401)";
+
+/// Broader sub-needle of [`UNAUTHORIZED_NEEDLE`]; with a known-401 status the
+/// pager also matches banner-formatted text.
+pub const HTTP_401_NEEDLE: &str = "(401)";
 
 /// Status updates for relay sync (session sharing) feature.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -1471,6 +1513,12 @@ pub struct RecapRequestFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_401_needle_is_contained_in_unauthorized_needle() {
+        // Pins the sub-needle doc claim.
+        assert!(UNAUTHORIZED_NEEDLE.contains(HTTP_401_NEEDLE));
+    }
 
     #[test]
     fn recap_request_file_roundtrips() {
@@ -2106,6 +2154,34 @@ mod tests {
     }
 
     #[test]
+    fn hook_annotation_kind_is_backward_and_forward_compatible() {
+        let old_json = serde_json::json!({
+            "sessionUpdate": "hook_annotation",
+            "message": "legacy hook text"
+        });
+        assert_eq!(
+            serde_json::from_value::<SessionUpdate>(old_json).unwrap(),
+            SessionUpdate::HookAnnotation {
+                message: "legacy hook text".into(),
+                kind: None,
+            }
+        );
+
+        let future_json = serde_json::json!({
+            "sessionUpdate": "hook_annotation",
+            "message": "future hook text",
+            "kind": "future_shell_template"
+        });
+        assert_eq!(
+            serde_json::from_value::<SessionUpdate>(future_json).unwrap(),
+            SessionUpdate::HookAnnotation {
+                message: "future hook text".into(),
+                kind: Some(HookAnnotationKind::Unknown),
+            }
+        );
+    }
+
+    #[test]
     fn goal_updated_optional_fields_skipped_when_none() {
         let json = serde_json::to_value(make_goal_updated_minimal()).unwrap();
         assert!(json.get("token_budget").is_none());
@@ -2327,13 +2403,16 @@ mod tests {
             prompt_id: "p-1".into(),
             stop_reason: "end_turn".into(),
             agent_result: Some("done".into()),
+            error_kind: Some("max_tokens_truncation".into()),
             usage: None,
+            elapsed_ms: None,
         };
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["sessionUpdate"], "turn_completed");
         assert_eq!(json["prompt_id"], "p-1");
         assert_eq!(json["stop_reason"], "end_turn");
         assert_eq!(json["agent_result"], "done");
+        assert_eq!(json["error_kind"], "max_tokens_truncation");
     }
 
     #[test]
@@ -2342,11 +2421,15 @@ mod tests {
             prompt_id: "p-2".into(),
             stop_reason: "cancelled".into(),
             agent_result: None,
+            error_kind: None,
             usage: None,
+            elapsed_ms: None,
         };
         let json = serde_json::to_value(&update).unwrap();
         assert_eq!(json["sessionUpdate"], "turn_completed");
         assert!(json.get("agent_result").is_none());
+        assert!(json.get("error_kind").is_none());
+        assert!(json.get("elapsed_ms").is_none());
     }
 
     #[test]
@@ -2356,19 +2439,57 @@ mod tests {
                 prompt_id: "p-rt".into(),
                 stop_reason: "end_turn".into(),
                 agent_result: Some("result text".into()),
+                error_kind: Some("max_tokens_truncation".into()),
                 usage: None,
+                elapsed_ms: Some(1234),
             },
             SessionUpdate::TurnCompleted {
                 prompt_id: "p-min".into(),
                 stop_reason: "error".into(),
                 agent_result: None,
+                error_kind: None,
                 usage: None,
+                elapsed_ms: None,
             },
         ] {
             let json_str = serde_json::to_string(&update).unwrap();
             let parsed: SessionUpdate = serde_json::from_str(&json_str).unwrap();
             assert_eq!(update, parsed);
         }
+    }
+
+    #[test]
+    fn turn_completed_old_json_without_elapsed_ms_deserializes_none() {
+        let json =
+            r#"{"sessionUpdate":"turn_completed","prompt_id":"p-old","stop_reason":"end_turn"}"#;
+        let parsed: SessionUpdate = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            parsed,
+            SessionUpdate::TurnCompleted {
+                prompt_id: "p-old".into(),
+                stop_reason: "end_turn".into(),
+                agent_result: None,
+                error_kind: None,
+                usage: None,
+                elapsed_ms: None,
+            }
+        );
+    }
+
+    #[test]
+    fn turn_completed_elapsed_ms_some_roundtrips() {
+        let update = SessionUpdate::TurnCompleted {
+            prompt_id: "p-ms".into(),
+            stop_reason: "end_turn".into(),
+            agent_result: None,
+            error_kind: None,
+            usage: None,
+            elapsed_ms: Some(1234),
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["elapsed_ms"], 1234);
+        let parsed: SessionUpdate = serde_json::from_value(json).unwrap();
+        assert_eq!(update, parsed);
     }
 
     #[test]

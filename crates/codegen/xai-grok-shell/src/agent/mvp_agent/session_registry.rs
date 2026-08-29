@@ -727,6 +727,15 @@ impl SessionRegistry {
             e.resident.get_or_insert_default().codebase_index = Some(index);
         });
     }
+    pub(super) fn mark_headless(&self, id: &acp::SessionId) {
+        self.edit(id, |e| {
+            e.resident.get_or_insert_default().is_headless = true;
+        });
+    }
+    pub(super) fn is_headless(&self, id: &acp::SessionId) -> bool {
+        self.with(id, |e| e.resident.as_ref().is_some_and(|r| r.is_headless))
+            .unwrap_or(false)
+    }
     /// Destructured so a new field has to be counted, or go unmeasured.
     pub(super) fn counts(&self) -> SessionCounts {
         let mut counts = SessionCounts::default();

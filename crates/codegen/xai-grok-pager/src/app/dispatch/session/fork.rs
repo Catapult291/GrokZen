@@ -6,6 +6,7 @@ use crate::app::actions::Effect;
 use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState};
 use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView};
+use crate::app::cancel_latency::TurnEnd;
 use crate::app::dispatch::ctx::{SwitchCause, switch_to_agent};
 use crate::app::dispatch::modes::inherit_auto_mode;
 use crate::app::dispatch::prompt::supersede_open_reload_window;
@@ -36,24 +37,18 @@ fn localized_template(
 /// `Ask` default opens the [`open_fork_question`] modal so the user is
 /// asked.
 ///
-/// When the parent session's working directory is **not** inside a git
-/// repository (indicated by the absence of a `git_head_changed`
-/// notification — `current_branch` is `None`):
+/// When the parent session's cwd is not inside a git repository (no `git_head_changed` notification, so `current_branch` is `None`):
 /// - `--worktree` is rejected with a toast (nothing to create a worktree from).
-/// - No flag (regardless of `fork_worktree_mode`): the worktree question
-///   is skipped and the fork proceeds with `worktree = false`.
+/// - No flag (regardless of `fork_worktree_mode`): the worktree question is skipped and the fork proceeds with `worktree = false`.
 ///
-/// Note: if the notification has not arrived yet (rare — user forks
-/// before the shell sends `git_head_changed`), the fallback to
-/// `worktree = false` is safe and the worktree can be created manually
-/// afterwards.
+/// If the notification has not arrived yet (the user forks before the shell sends `git_head_changed`), the `worktree = false` fallback is safe.
+/// The worktree can be created manually afterwards.
 ///
 /// Two failure surfaces:
 /// - Active view is not an agent: toast and return.
-/// - Active agent has no `session_id` (still being created): toast and
-///   return. Both rejections are deliberate -- queueing the fork until
-///   `SessionLoaded` would require persisting `ForkArgs` across the
-///   `TaskResult` and is deferred to v2.
+/// - Active agent has no `session_id` (still being created): toast and return.
+///
+/// Both rejections are deliberate: queueing the fork until `SessionLoaded` would require persisting `ForkArgs` across the `TaskResult`.
 pub(in crate::app::dispatch) fn dispatch_fork(
     app: &mut AppView,
     args: crate::slash::commands::fork::ForkArgs,
@@ -112,9 +107,7 @@ pub(in crate::app::dispatch) fn dispatch_fork(
         }
     }
 }
-/// If `persist_mode` is `Some`, write `mode` into `*field` and append
-/// a [`Effect::PersistWorktreeMode`] to `effects` with the given
-/// `config_key`.
+/// If `persist_mode` is `Some`, write `mode` into `*field` and append a [`Effect::PersistWorktreeMode`] to `effects` with the given `config_key`.
 pub(in crate::app::dispatch) fn apply_persist_worktree_mode(
     field: &mut crate::app::app_view::WorktreeMode,
     effects: &mut Vec<Effect>,
@@ -161,9 +154,8 @@ pub(super) fn worktree_persist_options(
         },
     ]
 }
-/// Open the local worktree question modal on the active agent. Refuses
-/// if a question (ACP or local) is already on screen, surfacing a toast
-/// instead -- the modal-collision protocol.
+/// Open the local worktree question modal on the active agent.
+/// Refuses with a toast if a question (ACP or local) is already on screen, so two questions never collide.
 fn open_fork_question(app: &mut AppView, directive: Option<String>) -> Vec<Effect> {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
     use xai_grok_tools::implementations::grok_build::ask_user_question::{
@@ -231,14 +223,10 @@ fn open_fork_question(app: &mut AppView, directive: Option<String>) -> Vec<Effec
     agent.prompt.set_text("");
     vec![]
 }
-/// Construct the placeholder agent, push discoverability markers, flip
-/// the discovery gate, switch to the new agent, and emit the appropriate
-/// fork effect (worktree or no-worktree path).
+/// Construct the placeholder agent, push discoverability markers, flip the discovery gate, switch to the new agent, and emit the fork effect.
 ///
-/// `worktree == true` reuses the existing
-/// [`Effect::CreateWorktreeSession`] pipeline (with `load_session_id`
-/// set to the parent session id). `worktree == false` emits the new
-/// [`Effect::ForkSession`] which calls `x.ai/session/fork` directly.
+/// `worktree == true` reuses the [`Effect::CreateWorktreeSession`] pipeline (with `load_session_id` set to the parent session id).
+/// `worktree == false` emits [`Effect::ForkSession`], which calls `x.ai/session/fork` directly.
 pub(in crate::app::dispatch) fn dispatch_fork_resolved(
     app: &mut AppView,
     worktree: bool,
@@ -305,11 +293,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
         agent.chat_kind = parent_chat_kind;
         agent.conversation_entry = parent_conversation_entry;
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
-        agent
-            .prompt
-            .slash_controller
-            .registry_mut()
-            .set_plugins_visible(!app.appearance.disable_plugins);
+        agent.set_plugins_visible_recursive(!app.appearance.disable_plugins);
         agent.pending_fork_banner = Some(crate::app::agent_view::PendingForkBanner {
             parent_sid: parent_session_id.0.to_string(),
             worktree,
@@ -350,9 +334,8 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
         }]
     }
 }
-/// Build the placeholder [`AgentView`] for a fork. Centralises the
-/// `AgentSession`/spinner construction shared by both worktree and
-/// no-worktree branches so the parallel struct literal does not drift.
+/// Build the placeholder [`AgentView`] for a fork.
+/// Centralises the `AgentSession`/spinner construction shared by the worktree and no-worktree branches so the parallel struct literal does not drift.
 fn build_fork_placeholder(
     app: &AppView,
     new_id: AgentId,
@@ -389,6 +372,8 @@ fn build_fork_placeholder(
             available_commands_generation: 1,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: app.deferred_model_switch_from_cli(),
             bg_tasks: std::collections::BTreeMap::new(),
@@ -410,16 +395,12 @@ fn build_fork_placeholder(
     agent.turn_started_at = Some(Instant::now());
     agent
 }
-/// Build the discoverability banner for the child agent. Includes the
-/// child's session id, the full parent session id, and — when
-/// `switch_hint` names a command (the caller's
-/// [`crate::views::dashboard::session_switch_hint_command`]: `/dashboard`
-/// normally, `/resume` in minimal mode where the dashboard is refused) —
-/// a session-switch tip so the user knows how to switch back. No-worktree
-/// case appends the dim continuation `(both agents share cwd)`.
+/// Build the discoverability banner for the child agent: the child's session id, the full parent session id, and optionally a session-switch tip.
+/// The tip appears when `switch_hint` names a command: `/dashboard` normally, `/resume` in minimal mode where the dashboard is refused.
+/// `switch_hint` comes from the caller's [`crate::views::dashboard::session_switch_hint_command`].
+/// The no-worktree case appends the dim continuation `(both agents share cwd)`.
 ///
-/// Called in `TaskResult::SessionLoaded` (not at dispatch time) because
-/// the child's session id is not known until the backend responds.
+/// Called in `TaskResult::SessionLoaded` (not at dispatch time) because the child's session id is not known until the backend responds.
 pub(in crate::app::dispatch) fn build_child_fork_marker(
     session_id: &str,
     parent_sid: &str,
@@ -554,7 +535,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "WorktreeForked");
         agent.session.finish_command();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         agent.bind_session_id(session_id);
         agent.scrollback.begin_batch();
         agent.begin_replay_window();
@@ -644,7 +625,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_ready(
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         supersede_open_reload_window(agent, agent_id, "ForkSessionReady");
         agent.session.finish_command();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         agent.bind_session_id(new_session_id);
         agent.scrollback.begin_batch();
         agent.begin_replay_window();
@@ -677,7 +658,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_failed(
         agent.pending_extensions_fetch = false;
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;
         agent

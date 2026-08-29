@@ -17,10 +17,8 @@ Modes set a baseline. Allow, ask, and deny [rules](#configuring-permissions) sti
 
 | Situation | Mode |
 | --------- | ---- |
-| Interactive TUI | Auto for fewer prompts with background checks, or ask to approve every action yourself |
+| Interactive TUI | Default (ask), or auto for fewer prompts with background checks |
 | Scripts, SDKs, CI, agent servers | Always-approve; add [deny rules](#configuring-permissions) or hooks for hard limits |
-
-If you haven't chosen a mode, new interactive sessions use the current default. Once you pick one (via `Shift+Tab`, `/settings`, a `permission_mode` config entry, or a `--permission-mode` flag), your choice always wins and is remembered. Headless runs (`grok -p`), `agent stdio`, and agent servers always start in **ask**.
 
 ```bash
 grok -p "Run the tests" --always-approve
@@ -99,7 +97,7 @@ Deny always wins over allow and over always-approve’s normal pass-through. See
 
 ### Auto mode
 
-Reduces interactive prompts by checking many tool calls before they run. Routine local work often proceeds; other calls may be blocked or escalated. In non-interactive sessions, a blocked call fails and is reported to the model (for example `Auto mode blocked this action …`). Behavior is the same for `grok -p`, `agent stdio`, and `agent serve`.
+Reduces interactive prompts by checking many tool calls before they run. Routine local work often proceeds. A call the classifier will not auto-allow surfaces a permission prompt so you can allow or reject it. In non-interactive sessions (`grok -p`, unidentified stdio), that same call fails and is reported to the model (for example `Auto mode blocked this action …`).
 
 For automation that must run tools without interactive approval, use always-approve (and deny rules if you need hard blocks) rather than auto alone.
 

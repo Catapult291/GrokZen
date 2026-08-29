@@ -169,6 +169,14 @@ impl SessionActor {
 
         let target_index = request.target_prompt_index;
         let mode = request.mode;
+        let wants_file_revert = matches!(mode, RewindMode::All | RewindMode::FilesOnly);
+        let wants_conversation_rewind =
+            matches!(mode, RewindMode::All | RewindMode::ConversationOnly);
+        let _strip_guard = if request.force && wants_conversation_rewind {
+            Some(self.prepare_image_strips_for_rewind().await)
+        } else {
+            None
+        };
 
         // Validate: target must be less than current prompt_index. FilesOnly
         // reverts the on-disk snapshot index (bounded by `get_rewind_points`,
@@ -197,10 +205,6 @@ impl SessionActor {
         // ── Build file revert preview (for All and FilesOnly modes) ─────
         let mut clean_files = Vec::new();
         let mut conflicts = Vec::new();
-
-        let wants_file_revert = matches!(mode, RewindMode::All | RewindMode::FilesOnly);
-        let wants_conversation_rewind =
-            matches!(mode, RewindMode::All | RewindMode::ConversationOnly);
 
         // Collect files that would be reverted and detect conflicts.
         // This is read-only — no mutations happen here.
@@ -431,8 +435,8 @@ impl SessionActor {
                 conversation.truncate(keep_count);
             }
 
-            // Write the truncated conversation back via the actor
-            // (handles both state update + persistence).
+            self.cancel_active_sampling_requests();
+            self.cancel_pending_image_strips_for_rewind();
             self.chat_state_handle.replace_conversation(conversation);
             // Use a snapshot to set the correct prompt_index and truncated prompt_texts.
             // The actor's TruncateToPromptIndex doesn't apply here because the
@@ -465,6 +469,12 @@ impl SessionActor {
                     std::sync::atomic::Ordering::Relaxed,
                 );
             }
+
+            // The rewind may have dropped failed-server reminders with the
+            // truncated turns; re-arm so still-down servers re-announce
+            // (see rearm_failed_server_announcements for why connected
+            // fingerprints stay latched).
+            self.rearm_failed_server_announcements().await;
 
             // Append a RewindMarker to updates.jsonl so the replay pipeline can
             // handle timeline branching (updates.jsonl is append-only).

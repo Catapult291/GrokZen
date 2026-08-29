@@ -14,7 +14,7 @@ use crate::session::file_state::FileStateTracker;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use xai_computer_hub_mcp_adapter::McpBridgeHandle;
 use xai_grok_mcp::servers::McpState;
 use xai_grok_tools::notification::AcknowledgedToolNotification;
@@ -136,6 +136,11 @@ pub struct WorkspaceSession {
     /// Spawned system-notify producers (forwarder, preview-state watcher).
     /// Sync mutex so the sync teardown path can abort without an await.
     system_notify_producers: std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Guest↔model path mapping. Set once at bind from `session_root`.
+    path_virtualization: OnceLock<crate::path_virtualization::PathVirtualization>,
+    /// Rewritten bind cwd installed on rebind when path virt turns on after
+    /// the session was first created without `session_root`.
+    cwd_override: OnceLock<PathBuf>,
 }
 struct WorkspaceSessionInner {
     effective_tool_config: Arc<ToolServerConfig>,
@@ -145,12 +150,67 @@ impl std::fmt::Debug for WorkspaceSession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WorkspaceSession")
             .field("session_id", &self.session_id)
-            .field("cwd", &self.cwd)
+            .field("cwd", &self.cwd())
             .field("capability_mode", &self.capability_mode)
             .field("depth", &self.depth)
             .field("fork_budget", &self.fork_budget)
             .finish_non_exhaustive()
     }
+}
+/// Copy pre-virt working-tree files into `new` so remounted hunk accept
+/// still sees content written under the old cwd. Skips the dest subtree
+/// and sibling session trees (`/workspace/<other-uuid>`).
+fn relocate_pre_virt_files(old: &Path, new: &Path) {
+    if std::fs::create_dir_all(new).is_err() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(old) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        if src == new {
+            continue;
+        }
+        let Ok(meta) = std::fs::symlink_metadata(&src) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() && uuid::Uuid::parse_str(&entry.file_name().to_string_lossy()).is_ok() {
+            continue;
+        }
+        let dest = new.join(entry.file_name());
+        if dest.symlink_metadata().is_ok() {
+            continue;
+        }
+        if meta.is_dir() {
+            let _ = copy_dir_all(&src, &dest);
+        } else {
+            let _ = std::fs::copy(&src, &dest);
+        }
+    }
+}
+fn copy_dir_all(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&from) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let to = dest.join(entry.file_name());
+        if meta.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 impl WorkspaceSession {
     pub(crate) fn new(
@@ -212,7 +272,48 @@ impl WorkspaceSession {
             #[allow(dead_code)]
             pending_notif_rx: tokio::sync::Mutex::new(pending_notif_rx),
             system_notify_producers: std::sync::Mutex::new(Vec::new()),
+            path_virtualization: OnceLock::new(),
+            cwd_override: OnceLock::new(),
         }
+    }
+    pub(crate) fn set_path_virtualization(
+        &self,
+        mapping: crate::path_virtualization::PathVirtualization,
+    ) {
+        let _ = self.path_virtualization.set(mapping);
+    }
+    /// Install a rewritten bind cwd on a session that already exists.
+    ///
+    /// First-bind `create_session` already constructed `cwd`; rebind only
+    /// fills `OnceLock` path virt and would otherwise leave a stale
+    /// `/workspace` (or `/workspace/artifacts`) cwd against inbound
+    /// `/workspace/<conv>` rewrites. Remounts LocalFs, the checkpoint
+    /// store, the hunk tracker, and the live toolset `Cwd` so relative
+    /// work follows the real session tree.
+    pub(crate) async fn set_cwd_for_virtualization(&self, cwd: PathBuf) -> Result<(), String> {
+        if self.cwd() == cwd.as_path() {
+            return Ok(());
+        }
+        let old = self.cwd().to_path_buf();
+        if old != cwd {
+            let dest = cwd.clone();
+            let _ = tokio::task::spawn_blocking(move || relocate_pre_virt_files(&old, &dest)).await;
+        }
+        if !self.checkpoint_store.remount(&cwd, &self.session_id).await {
+            return Err("checkpoint remount failed".into());
+        }
+        let _ = self.cwd_override.set(cwd.clone());
+        self.async_fs.remount_root(cwd.clone());
+        self.hunk_tracker.set_working_dir(cwd.clone()).await;
+        let toolset = self.toolset();
+        let mut res = toolset.resources.lock().await;
+        res.insert(xai_grok_tools::types::resources::Cwd(cwd));
+        Ok(())
+    }
+    pub(crate) fn path_virtualization(
+        &self,
+    ) -> Option<&crate::path_virtualization::PathVirtualization> {
+        self.path_virtualization.get()
     }
     /// Whether this session opted into `BackgroundTaskCompleted` system
     /// notifications.
@@ -269,7 +370,7 @@ impl WorkspaceSession {
         &self.session_id
     }
     pub fn cwd(&self) -> &Path {
-        &self.cwd
+        self.cwd_override.get().map_or(&self.cwd, PathBuf::as_path)
     }
     pub fn session_env(&self) -> &Arc<HashMap<String, String>> {
         &self.session_env
@@ -584,6 +685,8 @@ pub struct WorkspaceShared {
     /// status publisher — see
     /// [`WorkspaceHandle::spawn_producer`](crate::handle::WorkspaceHandle).
     pub(crate) producer_tasks: tokio_util::task::TaskTracker,
+    /// Bind-time probe-then-mount hook. Default no-op until a command is set.
+    pub(crate) bind_mount_hook: arc_swap::ArcSwap<crate::path_virtualization::BindMountHook>,
     /// `(path, size, mtime_ms) → sha256` memo for the client-facing
     /// `workspace.client_fs_*` ops, so unchanged files hash once per
     /// workspace instead of per stat/read.
@@ -657,30 +760,15 @@ impl WorkspaceShared {
         self.auth_provider.as_ref()
     }
     /// Parse the opaque [`server_metadata`](Self::server_metadata) blob into
-    /// the typed subset the workspace needs (currently `sandbox_id`);
-    /// unknown/missing fields default cleanly. A present-but-malformed blob is
-    /// logged and salvaged field-by-field (a bad sibling field must not
-    /// silently drop `sandbox_id` from every environment artifact).
+    /// the typed subset the workspace needs (currently `sandbox_id`).
+    /// [`WorkspaceServerMetadata::from_metadata`](crate::config::WorkspaceServerMetadata::from_metadata)
+    /// salvages every well-known key independently, so a wrong-typed sibling
+    /// cannot drop `sandbox_id` from the environment artifacts.
     pub(crate) fn server_metadata_typed(&self) -> crate::config::WorkspaceServerMetadata {
-        let Some(v) = self.server_metadata.as_ref() else {
-            return Default::default();
-        };
-        match serde_json::from_value(v.clone()) {
-            Ok(typed) => typed,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "workspace: malformed server_metadata; salvaging sandbox_id field-wise"
-                );
-                crate::config::WorkspaceServerMetadata {
-                    sandbox_id: v
-                        .get("sandbox_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned),
-                    ..Default::default()
-                }
-            }
-        }
+        self.server_metadata
+            .as_ref()
+            .map(crate::config::WorkspaceServerMetadata::from_metadata)
+            .unwrap_or_default()
     }
     pub fn default_tool_config(&self) -> &ToolServerConfig {
         &self.default_tool_config

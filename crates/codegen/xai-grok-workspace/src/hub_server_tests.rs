@@ -3,6 +3,7 @@ use crate::capability::CapabilityMode;
 use crate::handle::tests::{
     background_capable_cfg, make_confining_handle, make_handle, start_background_sleep,
 };
+use std::sync::Arc;
 use xai_grok_tools::implementations::grok_build::scheduler::types::{
     ScheduledTask, SchedulerState,
 };
@@ -108,6 +109,52 @@ async fn dispatch_unknown_method_returns_unknown_method_error() {
         }
         other => panic!("expected UnknownMethod, got {other:?}"),
     }
+}
+#[tokio::test]
+async fn handle_evict_unbind_does_not_unmount() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let handle = make_handle();
+    handle
+        .create_session_with_cwd("evict-conv", None)
+        .expect("create");
+    handle
+        .session("evict-conv")
+        .expect("session")
+        .set_path_virtualization(
+            crate::path_virtualization::PathVirtualization::try_from_session_root(
+                "/workspace/evict-conv",
+            )
+            .expect("valid"),
+        );
+    let mounts = Arc::new(AtomicUsize::new(0));
+    let unbinds = Arc::new(AtomicUsize::new(0));
+    let mounts_c = mounts.clone();
+    let unbinds_c = unbinds.clone();
+    handle.set_bind_mount_hook(
+        crate::path_virtualization::BindMountHook::probe_then_mount(
+            |_| false,
+            move |_| {
+                mounts_c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .with_on_unbind(move |_, _| {
+            unbinds_c.fetch_add(1, Ordering::SeqCst);
+        }),
+    );
+    WorkspaceRpcHandler::new(handle)
+        .handle_evict(ToolServerEvictParams {
+            session_id: SessionId::new("evict-conv").unwrap(),
+            reason: "test".into(),
+            grace_period_ms: 50,
+        })
+        .await;
+    assert_eq!(
+        mounts.load(Ordering::SeqCst),
+        0,
+        "evict/prune must not mount or unmount"
+    );
+    assert_eq!(unbinds.load(Ordering::SeqCst), 1);
 }
 #[tokio::test]
 async fn handle_evict_triggers_two_phase_drain() {

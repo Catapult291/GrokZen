@@ -77,7 +77,7 @@ Config-file hooks live in the same TOML your organization already controls; see 
 
 **Trusting a project**: The first time you open a project with hooks, you must trust it before its project hooks will run; until then they are silently skipped. Grant trust by running `/hooks-trust` (or launching with `--trust`); the decision is recorded in the unified folder-trust store (`~/.grok/trusted_folders.toml`), the same gate that governs repo-local MCP/LSP servers. Global hooks in `~/.grok/hooks/` are always trusted and need no entry. This prevents untrusted repos from running arbitrary code.
 
-Because hooks are unified under folder-trust, a `--trust` / `/hooks-trust` grant trusts the whole folder for **MCP, LSP, and hooks** together, and cascades to subdirectories. Conversely, disabling folder-trust (`GROK_FOLDER_TRUST=0` or `[folder_trust] enabled = false`) ungates project hooks along with MCP/LSP.
+Because hooks are unified under folder-trust, a `--trust` / `/hooks-trust` grant trusts the whole folder for **MCP, LSP, and hooks** together, and covers subdirectories of the same repository. A nested git checkout under that folder is a separate workspace and is not covered. Conversely, disabling folder-trust (`GROK_FOLDER_TRUST=0` or `[folder_trust] enabled = false`) ungates project hooks along with MCP/LSP.
 
 ---
 
@@ -88,7 +88,7 @@ Events fire at three cadences: once per session (`SessionStart`, `SessionEnd`), 
 | Event | When it fires | Blocking? |
 |-------|---------------|-----------|
 | `SessionStart` | A session starts. Does not fire for a subagent's own session. | No |
-| `UserPromptSubmit` | You submit a prompt. | No |
+| `UserPromptSubmit` | You submit a prompt. | Yes: can block the prompt |
 | `PreToolUse` | A tool is about to run. | Yes: can deny |
 | `PostToolUse` | A tool completes successfully. | No |
 | `PostToolUseFailure` | A tool fails. | No |
@@ -103,7 +103,13 @@ Events fire at three cadences: once per session (`SessionStart`, `SessionEnd`), 
 | `PostCompact` | Conversation compaction completes. | No |
 | `SessionEnd` | The session ends. Carries `subagentType` for a child session, so a host can tell a child's teardown from its own. | No |
 
-`SubagentEnd` is accepted as an alias for `SubagentStop`. `PreToolUse` can block a tool call, and `Stop`/`SubagentStop` can block the agent from stopping (see [Stop Decision Control](#stop-decision-control)); every other event is passive.
+`SubagentEnd` is accepted as an alias for `SubagentStop`. `PreToolUse` can block a tool call, `UserPromptSubmit` can block a prompt (see below), and `Stop`/`SubagentStop` can block the agent from stopping (see [Stop Decision Control](#stop-decision-control)); every other event is passive.
+
+### UserPromptSubmit Decision Control
+
+A `UserPromptSubmit` hook can reject a prompt: exit 2 blocks (stderr becomes the message), and so does JSON `{"decision": "block", "reason": "..."}` on stdout, on any exit code. The reason is shown to you and is never added to the model's context. Only a prompt you typed can be blocked: auto-wake turns (task and subagent completions, scheduler fires) and subagent sessions run the hook observe-only. The default timeout for this event is 30 seconds; a timed-out or crashed hook fails open and the prompt proceeds.
+
+After a block, prompts already queued behind the blocked one do not auto-run: the queue holds until you act (send a prompt, or edit / remove / reorder / force-run a queued row). A blocked prompt is not recorded: it never enters the conversation history the model sees on later turns, the on-disk session record, or the session summary. It stays visible in the live scrollback and is held at the front of the queue for you to edit, resend, or discard — but after a session restart the blocked bubble is gone from the scrollback, exactly because nothing was stored. One deliberate exception: your client's local prompt history (the up-arrow recall) keeps the text, recorded at submit time before the hook runs, so a discarded prompt is still recoverable. One current limit: stdout of an allowing hook is discarded (no `additionalContext`).
 
 ### Cursor Hook Compatibility
 
@@ -253,9 +259,28 @@ For `PreToolUse` hooks, write JSON to **stdout**:
 
 - **Allow**: `{"decision": "allow"}`
 - **Deny**: `{"decision": "deny", "reason": "Unsafe command detected"}`
+- **Ask the user**: `{"decision": "ask", "reason": "Confirm this deploy"}`
+- **State no opinion**: `{"decision": "defer"}`
 - **Rewrite the tool input**: `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": {"command": "npm test"}}}`
+- **Tell the model something**: `{"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": "This repo builds with xb, not cargo"}}`
 
-`updatedInput` replaces the tool's input before it runs. The value must be a JSON object; a non-object is ignored. The rewritten input is what the plan-mode gate, the permission prompt, and the tool itself all see, so a hook can normalize or harden a call rather than only allow or deny it. Because hooks run before the plan-mode gate, a hook with side effects fires even when plan mode later rejects the call. If the rewritten input fails the tool's schema, the call is blocked and reported as an invalid-input error rather than falling back to the original. A `deny` decision discards any `updatedInput`; when several hooks return one, the last wins. Omitting `decision` while returning `updatedInput` allows the call and applies the rewrite.
+The decision can be written as top-level `decision` or as `hookSpecificOutput.permissionDecision`. Both take `allow`, `deny`, `ask`, or `defer` (the legacy `approve` and `block` spellings also work), each with its own reason field — `reason` and `permissionDecisionReason`. The canonical `permissionDecision` decides when present; the top-level `decision` applies only when it is absent. The deny or ask message is `permissionDecisionReason` if present, otherwise `reason`. An `allow` means only "not blocked" — it does not auto-approve a call the user would otherwise be asked about. A decision value outside that set is a hook failure, which fails open unless the hook also exits 2, in which case the deny stands and carries the mistake in its reason.
+
+An `ask` makes the call reach the permission prompt: nothing that would otherwise approve it without asking — always-approve mode, auto mode, a saved "always allow" grant, a safe command — applies, and the prompt names your hook and shows your reason. There is never a second prompt: where you would have been asked anyway, the ask only re-labels that one. Approving runs it; rejecting blocks it as an ordinary permission rejection. A client running in full always-approve/YOLO mode (auto-answering every prompt) will still auto-approve the call, matching Claude Code's `bypassPermissions`: the ask overrides the manager's always-approve, auto, saved-grant, and safe-command paths, not a client that blanket-approves every prompt.
+
+An `ask` cannot widen anything, so a permission policy deny, an auto-mode block, or plan mode still decides the call. In auto mode a hook `ask` still runs the classifier before the prompt appears: the classifier may deny the call, but it can never silently approve one the hook asked about. `dontAsk` mode denies whatever it would have to prompt for, so there an ask turns an otherwise-approved call into a denial.
+
+Only hooks configured in a settings file (command and HTTP hooks) can ask, defer, or send `additionalContext`: a `PreToolUse` hook registered through the grok-agent-sdk can allow or deny, and the rest is dropped — an `ask` or a `defer` there leaves the call to the normal permission flow and is logged as an unrecognized decision, and `additionalContext` never reaches the model.
+
+`updatedInput` replaces the tool's input before it runs, silently: the model is not told and nothing is written to the scrollback, so the only sign of a rewrite is the rewritten arguments themselves, which the user sees if the call reaches a permission prompt. The plan-mode gate, the permission prompt, the tool itself, and the later `PostToolUse` payload all see the rewritten input, so a hook can normalize or harden a call rather than only allow or deny it. Hooks run before the plan-mode gate, so a hook with side effects fires even when plan mode later rejects the call.
+
+The value must be a JSON object; a non-object fails the hook. If the rewritten input fails the tool's schema, the call is blocked as a hook denial — the scrollback annotation names the hook — rather than falling back to the original. A rewrite may change a call's arguments but not which tool runs, so one that retargets a `use_tool` call is blocked too. A hook that exits non-zero keeps its `deny` but loses its `updatedInput` and its `additionalContext`.
+
+A `deny` discards any `updatedInput`; when several hooks return one, the last wins. Omitting `decision` while returning `updatedInput` allows the call and applies the rewrite.
+
+A `defer` neither blocks the call nor approves it: the call takes the normal permission flow, exactly as if your hook had not answered, and a warning naming the hook goes to the log. It also acts on nothing else you sent — an `updatedInput` or `additionalContext` next to a `defer` is ignored and named in the log. Across hooks `defer` ranks below `ask`, so where one of your hooks defers and another asks, grok prompts.
+
+`additionalContext` is a note for the model. It arrives after the call has run — never before — with the results of the batch the call belongs to, wrapped in your harness's reminder tag (`<system-reminder>` by default) and naming the hook that wrote it, so the model can tell your text from the user's. Every hook that sends one is delivered, in the order the hooks ran (unlike `updatedInput`, where the last writer wins). A `deny` drops all of it, since the call never runs, and names the drop in the log. Text over 10,000 characters is clipped, the same ceiling `Stop` feedback carries.
 
 ### Exit Codes
 
@@ -388,7 +413,7 @@ Inside a subagent, the gate fires as `SubagentStop` (agent-frontmatter `Stop` ho
 - **Task types**: `backgroundTasks[].type` is only `shell`, `monitor`, or `subagent`; Claude's other labels (`workflow`, `teammate`, …) are not emitted.
 - **StopFailure classes**: grok emits six (`rate_limit`, `authentication_failed`, `invalid_request`, `server_error`, `max_output_tokens`, `unknown`). Capacity errors (503/529) classify as `rate_limit`. A matcher on an error class grok does not emit never fires.
 - **Default timeout**: grok defaults observe hooks to 5 seconds, which is shorter than most. Set `timeout` explicitly on an imported hook that does real work.
-- **`UserPromptSubmit` is observe-only**: grok ignores its exit code and its stdout, so an imported prompt-validation hook silently stops blocking. Use `PreToolUse` to enforce.
+- **`UserPromptSubmit` blocks, with one gap**: exit 2 and `decision: "block"` reject the prompt like Claude, and a blocked prompt never enters the conversation history — but an allowing hook's stdout / `additionalContext` is discarded rather than added as context.
 - **`StopCancelled` is grok-specific**: a config that uses it is not portable to a runtime with no interrupt hook.
 - **`idle_prompt` fires on any turn end**: grok fires it after an interrupted or errored turn too, not only a completed one, because it reports a state rather than an outcome. Its `message` is display text and can change between releases, so match on `notificationType` instead.
 - **Subagent identity is `subagentType`, not `agent_type`**: grok puts it in the payload of the events that can fire inside a subagent, matching its own `SubagentStart`/`SubagentStop`, rather than in the common fields.

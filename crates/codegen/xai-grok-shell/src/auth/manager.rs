@@ -28,6 +28,7 @@ use sleep_gate::SleepGate;
 
 use crate::util::dual_clock::DualClock;
 
+use crate::auth::backend::{ActiveAuthBackend, AuthBackend};
 use crate::auth::config::GrokComConfig;
 use crate::auth::error::AuthError;
 use crate::auth::token_type::TokenType;
@@ -50,8 +51,8 @@ use chrono::DateTime;
 #[cfg(test)]
 use enrichment::apply_user_info_enrichment;
 
-#[cfg(test)]
 use super::model::AuthStore;
+#[cfg(test)]
 use super::model::LEGACY_SCOPE;
 
 /// Why a token refresh is being requested.
@@ -332,7 +333,7 @@ impl ScopeRemoval {
 
 impl AuthManager {
     pub fn new(grok_home: &Path, grok_com_config: GrokComConfig) -> Self {
-        let scope = grok_com_config.auth_scope();
+        let scope = ActiveAuthBackend::default().scope_key(&grok_com_config);
         let proxy_base_url =
             crate::agent::config::EndpointsConfig::from_effective_config().proxy_url();
 
@@ -376,27 +377,7 @@ impl AuthManager {
         let (auth, auth_read_detail, initial_disk_state) = match read_auth_json(&path) {
             Ok(map) => {
                 let found = lookup_auth(&map, &scope);
-                // If lookup_auth skipped a legacy WebLogin token, remove the
-                // stale scope entry from auth.json so it is not re-evaluated
-                // on every launch.
-                if found.is_none()
-                    && map
-                        .get(LEGACY_SCOPE)
-                        .is_some_and(|a| a.auth_mode == AuthMode::WebLogin)
-                {
-                    // Best-effort cleanup under advisory lock (consistent with
-                    // other auth.json writers). Non-blocking: if the lock is
-                    // held by a concurrent process, skip — retried next launch.
-                    if let Some(_lock) = lock::try_lock_auth_file_nonblocking(&path) {
-                        let mut cleaned = map.clone();
-                        cleaned.remove(LEGACY_SCOPE);
-                        let _ = write_auth_json(&path, &cleaned);
-                        tracing::debug!("auth: removed stale WebLogin scope from auth.json");
-                        // lock released on drop
-                    } else {
-                        tracing::debug!("auth: skipped WebLogin cleanup (lock unavailable)");
-                    }
-                }
+                Self::prune_stale_inherited_scopes(&path, &map, found.is_none());
                 let detail = serde_json::json!({
                     "read": "ok",
                     "resolved_path": path.display().to_string(),
@@ -447,6 +428,39 @@ impl AuthManager {
         // so the first launch forces a compliant login.
         manager.enforce_pin_on_loaded_token();
         manager
+    }
+
+    /// Drops inherited `WebLogin` entries that `lookup_auth` skipped, so they are not re-evaluated on
+    /// every launch. Best-effort under the advisory lock: a concurrent holder means retry next launch.
+    fn prune_stale_inherited_scopes(path: &Path, map: &AuthStore, lookup_missed: bool) {
+        if !lookup_missed {
+            return;
+        }
+
+        let stale: Vec<&str> = ActiveAuthBackend::default()
+            .inherited_scopes()
+            .iter()
+            .filter(|scope| {
+                map.get(**scope)
+                    .is_some_and(|a| a.auth_mode == AuthMode::WebLogin)
+            })
+            .copied()
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+
+        let Some(_lock) = lock::try_lock_auth_file_nonblocking(path) else {
+            tracing::debug!("auth: skipped WebLogin cleanup (lock unavailable)");
+            return;
+        };
+
+        let mut cleaned = map.clone();
+        for scope in stale {
+            cleaned.remove(scope);
+        }
+        let _ = write_auth_json(path, &cleaned);
+        tracing::debug!("auth: removed stale WebLogin scope from auth.json");
     }
 
     /// Single field-assembly point for [`Self::new`]'s two construction paths
@@ -739,6 +753,11 @@ impl AuthManager {
                 .api_key_auth_disabled()
                 .then_some(AuthError::ApiKeyAuthDisabled);
         }
+        // The pin reads an xAI-issued claim, and a token minted elsewhere has none.
+        // The failure path clears the scope, so an unguarded check deletes the credential every launch.
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return None;
+        }
         let policy = crate::auth::oidc::login_principal_policy(&self.grok_com_config)?;
         let actual = crate::auth::oidc::peek_access_token_principal_id(&auth.key);
         crate::auth::oidc::enforce_login_principal(Some(&policy), actual.as_deref())
@@ -766,6 +785,20 @@ impl AuthManager {
         }
     }
 
+    /// Every accessor that hands a credential to a caller reads `inner` through here.
+    /// The direct reads left elsewhere compare token keys or look at `expires_at`, and hand out nothing.
+    fn owned_inner(&self) -> Option<GrokAuth> {
+        let auth = self.with_inner_read(|inner| inner.cloned())?;
+        if !crate::auth::backend::AuthBackend::owns(
+            &crate::auth::backend::ActiveAuthBackend::default(),
+            &auth,
+        ) {
+            tracing::debug!("auth: hiding a cached session another authority minted");
+            return None;
+        }
+        Some(auth)
+    }
+
     /// Hide a cached token rejected by the login policy. No clear here (keeps
     /// the sync read path lock-free); `auth()`/recovery/`new()` do the clearing.
     fn vet_cached(&self, auth: GrokAuth) -> Option<GrokAuth> {
@@ -780,12 +813,7 @@ impl AuthManager {
 
     /// Cached in-memory token if outside the early-invalidation buffer.
     pub(crate) fn current(&self) -> Option<GrokAuth> {
-        let auth = self
-            .inner
-            .read()
-            .as_ref()
-            .filter(|a| !self.is_token_expired(a))
-            .cloned()?;
+        let auth = self.owned_inner().filter(|a| !self.is_token_expired(a))?;
         self.vet_cached(auth)
     }
 
@@ -806,10 +834,8 @@ impl AuthManager {
 
     /// Returns true if credentials exist but have expired.
     pub(crate) fn is_expired(&self) -> bool {
-        self.inner
-            .read()
-            .as_ref()
-            .is_some_and(|a| self.is_token_expired(a))
+        self.owned_inner()
+            .is_some_and(|a| self.is_token_expired(&a))
     }
 
     /// In-memory bearer regardless of the early-invalidation buffer.
@@ -823,11 +849,8 @@ impl AuthManager {
     /// refresh and must not demote a still-accepted token.
     pub(crate) fn current_wire_valid(&self) -> Option<GrokAuth> {
         let auth = self
-            .inner
-            .read()
-            .as_ref()
-            .filter(|a| !self.is_token_hard_expired(a))
-            .cloned()?;
+            .owned_inner()
+            .filter(|a| !self.is_token_hard_expired(a))?;
         self.vet_cached(auth)
     }
 
@@ -856,12 +879,7 @@ impl AuthManager {
 
     /// Expired in-memory entry (for its `refresh_token`).
     pub(crate) fn expired_auth(&self) -> Option<GrokAuth> {
-        let auth = self
-            .inner
-            .read()
-            .as_ref()
-            .filter(|a| self.is_token_expired(a))
-            .cloned()?;
+        let auth = self.owned_inner().filter(|a| self.is_token_expired(a))?;
         self.vet_cached(auth)
     }
 
@@ -1017,7 +1035,12 @@ impl AuthManager {
     }
 
     /// Spawn the `/user` enrichment task; body in the `enrichment` submodule.
+    /// `/user` lives on the xAI proxy, so a build pointed elsewhere would send its bearer to the wrong host.
+    /// That would happen on every login and every refresh.
     fn spawn_user_info_enrichment(self: &Arc<Self>, auth: GrokAuth) {
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return;
+        }
         enrichment::spawn(Arc::clone(self), auth);
     }
 
@@ -1204,7 +1227,7 @@ impl AuthManager {
     /// mis-classify an OIDC token. Carries user fields forward into the
     /// binary's freshly-minted token.
     fn inner_auth_or_external_default(&self) -> GrokAuth {
-        self.inner.read().clone().unwrap_or_else(|| GrokAuth {
+        self.owned_inner().unwrap_or_else(|| GrokAuth {
             auth_mode: AuthMode::External,
             ..Default::default()
         })
@@ -1390,6 +1413,7 @@ impl AuthManager {
         }
     }
 
+    #[tracing::instrument(name = "auth.lock_wait", skip_all)]
     pub(crate) async fn try_lock_auth_file_async(
         &self,
         timeout: StdDuration,
@@ -1454,7 +1478,7 @@ impl AuthManager {
     /// `pub(super)` — for refresh dispatch only. External session
     /// classification uses `is_session_based_method`.
     pub(super) fn token_type(&self) -> TokenType {
-        TokenType::from_auth(self.inner.read().as_ref())
+        TokenType::from_auth(self.owned_inner().as_ref())
     }
 
     // ── Pre-request dispatch ──────────────────────────────────────────
@@ -1477,7 +1501,7 @@ impl AuthManager {
     async fn auth_dispatch(self: &Arc<Self>) -> Result<GrokAuth, AuthError> {
         // Snapshot inner ONCE for dispatch atomicity (closes a TOCTOU
         // where a concurrent `clear()` raced `token_type()` + `inner.read()`).
-        let snapshot: Option<GrokAuth> = self.with_inner_read(|inner| inner.cloned());
+        let snapshot: Option<GrokAuth> = self.owned_inner();
         // Kept alongside `snapshot`, which the grace arm below consumes: the
         // devbox arms still need to name the credential they gave up on.
         let snapshot_key: Option<String> = snapshot.as_ref().map(|a| a.key.clone());
@@ -1628,6 +1652,11 @@ impl AuthManager {
         self: &Arc<Self>,
         unusable: Option<&str>,
     ) -> Result<GrokAuth, AuthError> {
+        // Devbox mints an xAI credential and clears auth.json to do it.
+        // Under another authority that evicts the sibling login and hands an xAI refresh token to a foreign host.
+        if !ActiveAuthBackend::default().is_xai_authority() {
+            return Err(AuthError::NotLoggedIn);
+        }
         if self.grok_com_config.blocks_automatic_oidc() {
             tracing::debug!(
                 "auth: devbox recovery skipped (preferred_method=api_key blocks automatic OIDC)"

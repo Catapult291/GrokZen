@@ -20,7 +20,7 @@ use crate::paths::grok_home;
 #[cfg(all(feature = "enforce", unix))]
 use crate::paths::{DEVICE_DIRS, DEVICE_FILES};
 use crate::paths::{essential_writable_paths, essential_writable_paths_minimal};
-use xai_grok_config::GlobalHookSource;
+use xai_grok_config::{GlobalHookSource, SANDBOX_CONFIG_FILENAME};
 
 /// A resolved sandbox profile ready to be converted to a `CapabilitySet`.
 #[derive(Debug, Clone)]
@@ -121,13 +121,13 @@ pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
     let mut config = SandboxConfig::default();
 
     // Global config: ~/.grok/sandbox.toml
-    let global_path = grok_home().join("sandbox.toml");
+    let global_path = grok_home().join(SANDBOX_CONFIG_FILENAME);
     if let Some(global) = load_config_file(&global_path) {
         config = global;
     }
 
     // Project config: <workspace>/.grok/sandbox.toml (additive only)
-    let project_path = workspace.join(".grok").join("sandbox.toml");
+    let project_path = workspace.join(".grok").join(SANDBOX_CONFIG_FILENAME);
     if let Some(project) = load_config_file(&project_path) {
         merge_project_profiles(&mut config, project);
     }
@@ -136,9 +136,9 @@ pub fn load_sandbox_config(workspace: &Path) -> SandboxConfig {
 }
 
 pub fn sandbox_profile_conflicts(workspace: &Path) -> Vec<String> {
-    let global = load_config_file(&grok_home().join("sandbox.toml")).unwrap_or_default();
-    let project =
-        load_config_file(&workspace.join(".grok").join("sandbox.toml")).unwrap_or_default();
+    let global = load_config_file(&grok_home().join(SANDBOX_CONFIG_FILENAME)).unwrap_or_default();
+    let project = load_config_file(&workspace.join(".grok").join(SANDBOX_CONFIG_FILENAME))
+        .unwrap_or_default();
     mismatched_profile_names(&global, &project)
 }
 
@@ -169,6 +169,9 @@ fn merge_project_profiles(config: &mut SandboxConfig, project: SandboxConfig) {
 
 fn load_config_file(path: &Path) -> Option<SandboxConfig> {
     let content = std::fs::read_to_string(path).ok()?;
+    if content.trim().is_empty() {
+        return Some(SandboxConfig::default());
+    }
     match toml::from_str(&content) {
         Ok(config) => Some(config),
         Err(e) => {
@@ -311,10 +314,7 @@ impl ProfileName {
         }
 
         // Kernel deny (read+write): macOS Seatbelt rules; Linux via bwrap bind-over.
-        // The effective deny set is the profile's own `deny` (custom profiles only;
-        // built-ins carry an empty `deny`). An empty set means there is nothing to
-        // enforce. Keying on emptiness rather than profile type avoids enforcing
-        // unintentional denies.
+        // Key on an empty deny set, not profile type, so nothing unintentional is enforced.
         //
         // Split exact paths from globs: exact paths keep the literal/subpath flow;
         // globs become anchored Seatbelt regexes on macOS (a no-op here on Linux,
@@ -337,7 +337,26 @@ impl ProfileName {
         workspace: &Path,
         config: &SandboxConfig,
     ) -> anyhow::Result<SandboxProfile> {
-        self.resolve(workspace, config)
+        let (profile, _) = self.resolve_profile_with_runtime_sockets(workspace, config)?;
+        Ok(profile)
+    }
+
+    /// Resolve the profile plus provenance for automatic runtime-socket entries.
+    pub(crate) fn resolve_profile_with_runtime_sockets(
+        &self,
+        workspace: &Path,
+        config: &SandboxConfig,
+    ) -> anyhow::Result<(SandboxProfile, Vec<PathBuf>)> {
+        let mut profile = self.resolve(workspace, config)?;
+        let mut runtime_socket_denies = Vec::new();
+        if profile.restrict_network {
+            crate::runtime_sockets::append_runtime_socket_denies(
+                &mut profile.deny,
+                &mut runtime_socket_denies,
+            )
+            .map_err(|error| anyhow::anyhow!("runtime-socket deny resolution failed: {error}"))?;
+        }
+        Ok((profile, runtime_socket_denies))
     }
 
     fn resolve(&self, workspace: &Path, config: &SandboxConfig) -> anyhow::Result<SandboxProfile> {
@@ -411,7 +430,7 @@ impl ProfileName {
             }),
 
             Self::Strict => {
-                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
+                let home = xai_dirs::home_dir().unwrap_or_else(|| PathBuf::from("/root"));
                 let system_read: Vec<PathBuf> = [
                     "/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/dev", "/proc", "/sys",
                     "/tmp",
@@ -516,6 +535,7 @@ impl ProfileName {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{network_inheritance_config, skip_if_host_hook_write_deny_unresolvable};
 
     #[test]
     fn parse_profile_names() {
@@ -569,21 +589,6 @@ mod tests {
         assert_eq!(p.to_string(), "my-custom");
     }
 
-    /// Hosts with a retargetable `$GROK_HOME/hooks` symlink (fail-closed under
-    /// write-deny) cannot resolve enforcing profiles against the real home.
-    fn skip_if_host_hook_write_deny_unresolvable() -> bool {
-        if !crate::hook_write_deny::profile_enforces_hook_write_deny(&ProfileName::Workspace) {
-            return false;
-        }
-        match crate::hook_write_deny::resolve_hook_write_deny_snapshot() {
-            Ok(_) => false,
-            Err(e) => {
-                eprintln!("skipping profile resolve test: host hook write-deny unresolvable ({e})");
-                true
-            }
-        }
-    }
-
     #[test]
     fn built_in_network_restriction_values() {
         if skip_if_host_hook_write_deny_unresolvable() {
@@ -600,53 +605,6 @@ mod tests {
         ] {
             let resolved = name.resolve_profile(&workspace, &config).unwrap();
             assert_eq!(resolved.restrict_network, expected, "{name}");
-        }
-    }
-
-    fn network_inheritance_config() -> SandboxConfig {
-        SandboxConfig {
-            profiles: HashMap::from([
-                (
-                    "strict-inherited".to_string(),
-                    ProfileConfig {
-                        extends: Some("strict".to_string()),
-                        restrict_network: None,
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-                (
-                    "read-only-inherited".to_string(),
-                    ProfileConfig {
-                        extends: Some("read-only".to_string()),
-                        restrict_network: None,
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-                (
-                    "strict-unrestricted".to_string(),
-                    ProfileConfig {
-                        extends: Some("strict".to_string()),
-                        restrict_network: Some(false),
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-                (
-                    "workspace-restricted".to_string(),
-                    ProfileConfig {
-                        extends: Some("workspace".to_string()),
-                        restrict_network: Some(true),
-                        read_only: vec![],
-                        read_write: vec![],
-                        deny: vec![],
-                    },
-                ),
-            ]),
         }
     }
 

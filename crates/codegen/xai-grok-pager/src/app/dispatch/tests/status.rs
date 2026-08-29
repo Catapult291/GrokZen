@@ -54,15 +54,13 @@ fn zh_localization_release_notes_title_is_translated_without_touching_doc_titles
 fn send_while_idle_with_nonempty_shared_queue_routes_to_server() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    // Two prompts already queued on the server (as a broadcast would leave
-    // things): populate the authoritative map AND mirror it into the agent.
+    // Two prompts already queued on the server (as a broadcast would leave things): populate the authoritative map and mirror it into the agent
     app.push_optimistic_prompt_echo("test-session", "q1", "a", "prompt");
     app.push_optimistic_prompt_echo("test-session", "q2", "b", "prompt");
     {
         let snapshot = app.shared_prompt_queue("test-session").cloned().unwrap();
         let agent = app.agents.get_mut(&id).unwrap();
-        // Turn-end window: locally Idle with no current prompt, but the
-        // server's queue (mirrored from the last broadcast) still has work.
+        // Turn-end window: locally Idle with no current prompt, but the server's queue (mirrored from the last broadcast) still has work
         agent.session.state = AgentState::Idle;
         agent.session.current_prompt_id = None;
         agent.shared_queue = snapshot;
@@ -81,7 +79,7 @@ fn send_while_idle_with_nonempty_shared_queue_routes_to_server() {
             _ => None,
         })
         .unwrap_or_else(|| panic!("expected immediate SendPrompt for 'c', got {effects:?}"));
-    // Did NOT start a local turn or adopt "c" as the running prompt.
+    // The dispatch did not start a local turn or adopt "c" as the running prompt
     assert!(
         !app.agents[&id].session.state.is_turn_running(),
         "must not promote 'c' to a local running turn"
@@ -90,7 +88,7 @@ fn send_while_idle_with_nonempty_shared_queue_routes_to_server() {
         app.agents[&id].session.current_prompt_id.is_none(),
         "must not set current_prompt_id locally for a server-queued prompt"
     );
-    // Echoed into the shared queue BEHIND the existing entries (position 3).
+    // Echoed into the shared queue behind the existing entries (position 3)
     let q = app
         .shared_prompt_queue("test-session")
         .expect("optimistic echo present");
@@ -101,22 +99,17 @@ fn send_while_idle_with_nonempty_shared_queue_routes_to_server() {
 
 // ── coding_data_sharing dispatch tests ───
 //
-// The dispatcher uses **optimistic + rollback**, matching the
-// `set_yolo_mode` pattern minus its toasts — the surfaces that change this
-// setting show the result themselves. These tests pin the contract:
-//   - Guards (ZDR, non-admin team) toast and short-circuit; they are the
-//     only paths that still speak up, because nothing else on screen would.
+// The dispatcher mutates optimistically and rolls back on failure, matching the `set_yolo_mode` pattern minus its toasts
+// The surfaces that change this setting show the result themselves. These tests pin the contract:
+//   - Guards (ZDR, non-admin team) toast and short-circuit; they are the only paths that still speak up, because nothing else on screen would
 //   - Idle unchanged opt-in skips the ACP write but still acks (rollout on).
-//   - Optimistic mutation flips `app.coding_data_retention_opt_out`
-//     BEFORE the Effect is emitted.
-//   - `Effect::SetCodingDataSharing` carries
-//     `rollback_to_opted_in = previous_value`.
-//   - `TaskResult::CodingDataSharingFailed` reverts the optimistic
-//     mutation; `TaskResult::CodingDataSharingUpdated` re-anchors
-//     to the server-confirmed value.
+//   - Optimistic mutation flips `app.coding_data_retention_opt_out` before the Effect is emitted
+//   - `Effect::SetCodingDataSharing` carries `rollback_to_opted_in = previous_value`
+//   - `TaskResult::CodingDataSharingFailed` reverts the optimistic mutation
+//   - `TaskResult::CodingDataSharingUpdated` re-anchors to the server-confirmed value
 
-/// Idle unchanged opt-in skips ACP and still acks. Already-out is covered
-/// by `settings_opt_out_while_already_out_acks_without_write`.
+/// Idle unchanged opt-in skips ACP and still acks.
+/// Already-out is covered by `settings_opt_out_while_already_out_acks_without_write`.
 #[test]
 fn set_coding_data_sharing_unchanged_opt_in_skips_acp_and_acks() {
     let mut app = test_app_with_agent();
@@ -165,17 +158,15 @@ fn set_coding_data_sharing_blocked_by_zdr() {
         toast.contains('\u{2717}'),
         "blocked toast uses ✗ glyph: {toast}"
     );
-    // State unchanged — the user was blocked, the optimistic
-    // mutation never happened.
+    // State unchanged: the user was blocked, so the optimistic mutation never happened
     assert!(
         !app.coding_data_retention_opt_out,
         "ZDR block must not mutate state",
     );
 }
 
-/// ZDR block fires even when the toggle would be a no-op
-/// (defense-in-depth: don't quietly accept a same-value toggle
-/// from a user the policy says shouldn't be touching this).
+/// ZDR block fires even when the toggle would be a no-op.
+/// Defense-in-depth: don't quietly accept a same-value toggle from a user the policy says shouldn't be touching this.
 #[test]
 fn set_coding_data_sharing_blocked_by_zdr_even_if_idempotent() {
     let mut app = test_app_with_agent();
@@ -188,8 +179,8 @@ fn set_coding_data_sharing_blocked_by_zdr_even_if_idempotent() {
     assert!(read_toast(&app).contains("Zero Data Retention"));
 }
 
-/// Non-admin team members are blocked from toggling (matches
-/// desktop). The blocked path toasts and short-circuits.
+/// Non-admin team members are blocked from toggling (matches desktop).
+/// The blocked path toasts and short-circuits.
 #[test]
 fn set_coding_data_sharing_blocked_non_admin() {
     let mut app = test_app_with_agent();
@@ -207,8 +198,8 @@ fn set_coding_data_sharing_blocked_non_admin() {
     );
 }
 
-/// Admin team members CAN toggle. The admin-allowed path produces
-/// an Effect carrying the rollback value.
+/// Admin team members can toggle.
+/// The admin-allowed path produces an Effect carrying the rollback value.
 #[test]
 fn set_coding_data_sharing_allowed_for_admin() {
     let mut app = test_app_with_agent();
@@ -248,8 +239,7 @@ fn set_coding_data_sharing_allowed_for_admin() {
     assert!(!app.privacy_banner_opt_in_inflight);
 }
 
-/// Non-idempotent dispatch emits one Effect AND mutates state
-/// optimistically.
+/// Non-idempotent dispatch emits one Effect and mutates state optimistically.
 #[test]
 fn set_coding_data_sharing_produces_effect_and_optimistic_mutation() {
     let mut app = test_app_with_agent();
@@ -297,8 +287,7 @@ fn set_coding_data_sharing_produces_effect_and_optimistic_mutation() {
     );
 }
 
-/// `TaskResult::CodingDataSharingUpdated` re-anchors state to the
-/// server-confirmed value (defense-in-depth).
+/// `TaskResult::CodingDataSharingUpdated` re-anchors state to the server-confirmed value (defense-in-depth).
 #[test]
 fn coding_data_sharing_updated_re_anchors_state() {
     let mut app = test_app_with_agent();
@@ -324,14 +313,12 @@ fn coding_data_sharing_updated_re_anchors_state() {
     );
 }
 
-/// `TaskResult::CodingDataSharingUpdated` corrects the in-memory
-/// state if the server reshapes the boolean (e.g. policy
-/// override). Pins the defense-in-depth re-anchor contract.
+/// `TaskResult::CodingDataSharingUpdated` corrects the in-memory state if the server reshapes the boolean (e.g. policy override).
+/// Pins the defense-in-depth re-anchor contract.
 #[test]
 fn coding_data_sharing_updated_corrects_state_if_server_disagrees() {
     let mut app = test_app_with_agent();
-    // Optimistic mutation said "opt-out" — but the server
-    // overrides to "opt-in" (e.g. policy that prevents opt-out).
+    // Optimistic mutation said "opt-out", but the server overrides to "opt-in" (e.g. policy that prevents opt-out).
     app.coding_data_retention_opt_out = true;
     let id = AgentId(0);
     let seq = app.coding_data_write_seq;
@@ -351,18 +338,14 @@ fn coding_data_sharing_updated_corrects_state_if_server_disagrees() {
     );
 }
 
-/// `TaskResult::CodingDataSharingFailed` REVERTS the optimistic
-/// mutation and surfaces a failure toast. Pins the rollback
-/// contract.
-///
-/// Failure toast uses the standardised "coding data sharing"
-/// wording.
+/// `TaskResult::CodingDataSharingFailed` reverts the optimistic mutation and shows a failure toast.
+/// Pins the rollback contract.
+/// The failure toast uses the standardised "coding data sharing" wording.
 #[test]
 fn coding_data_sharing_failed_rolls_back_and_toasts_error() {
     let mut app = test_app_with_agent();
-    // Simulate post-optimistic state: user picked opt-out, state
-    // was flipped, then the ACP call failed. The pre-toggle value
-    // was opt-in (true), so `rollback_to_opted_in = true`.
+    // Simulate post-optimistic state: the user picked opt-out, state was flipped, then the ACP call failed
+    // The pre-toggle value was opt-in (true), so `rollback_to_opted_in = true`
     app.coding_data_retention_opt_out = true;
     let id = AgentId(0);
     let seq = app.coding_data_write_seq;
@@ -392,13 +375,11 @@ fn coding_data_sharing_failed_rolls_back_and_toasts_error() {
     assert!(toast.contains('\u{2717}'), "failure toast uses ✗: {toast}");
 }
 
-/// `TaskResult::CodingDataSharingFailed` reverts in the OTHER
-/// direction too (the pre-toggle state could have been either).
+/// `TaskResult::CodingDataSharingFailed` reverts in the other direction too (the pre-toggle state could have been either).
 #[test]
 fn coding_data_sharing_failed_rolls_back_to_opt_out() {
     let mut app = test_app_with_agent();
-    // Post-optimistic: opted-in (user picked opt-in, server
-    // failed, pre-toggle was opt-out).
+    // Post-optimistic: opted-in (the user picked opt-in, the server failed, pre-toggle was opt-out)
     app.coding_data_retention_opt_out = false;
     let id = AgentId(0);
     let seq = app.coding_data_write_seq;
@@ -420,8 +401,7 @@ fn coding_data_sharing_failed_rolls_back_to_opt_out() {
 }
 
 /// Optimistic mutation refreshes any open settings modal.
-/// Without this refresh, the modal indicator would stay at the
-/// pre-toggle value until manual re-render.
+/// Without this refresh, the modal indicator would stay at the pre-toggle value until a manual re-render.
 #[test]
 fn set_coding_data_sharing_refreshes_open_modal_snapshot() {
     let mut app = test_app_with_agent();
@@ -453,8 +433,7 @@ fn set_coding_data_sharing_refreshes_open_modal_snapshot() {
     );
 }
 
-/// Rollback also refreshes the modal — the user sees the
-/// reverted value, not the stale optimistic one.
+/// Rollback also refreshes the modal: the user sees the reverted value, not the stale optimistic one.
 #[test]
 fn coding_data_sharing_failed_refreshes_open_modal_snapshot() {
     let mut app = test_app_with_agent();
@@ -497,16 +476,14 @@ fn set_coding_data_sharing_is_silent_in_both_directions() {
     }
 }
 
-/// The failure toast
-/// substitutes a generic placeholder when the error string is
-/// too long OR contains control characters / newlines. Pins the
-/// scrub contract.
+/// The failure toast substitutes a generic placeholder when the error string is too long or contains control characters / newlines.
+/// Pins the scrub contract.
 #[test]
 fn coding_data_sharing_failed_scrubs_long_error_messages() {
     let mut app = test_app_with_agent();
     app.coding_data_retention_opt_out = true;
     let id = AgentId(0);
-    // ~500-char error simulating a stack trace / HTML 502 page.
+    // A roughly 500-char error simulating a stack trace / HTML 502 page
     let huge_error = "a".repeat(500);
     let seq = app.coding_data_write_seq;
     let _ = dispatch(
@@ -530,9 +507,8 @@ fn coding_data_sharing_failed_scrubs_long_error_messages() {
     );
 }
 
-/// Control characters (CR/LF/NUL)
-/// in the error trigger the scrub path even on short strings —
-/// preserves the toast's single-line layout.
+/// Control characters (CR/LF/NUL) in the error trigger the scrub path even on short strings.
+/// This preserves the toast's single-line layout.
 #[test]
 fn coding_data_sharing_failed_scrubs_control_chars_in_error() {
     let mut app = test_app_with_agent();
@@ -562,9 +538,8 @@ fn coding_data_sharing_failed_scrubs_control_chars_in_error() {
     );
 }
 
-/// The scrub path preserves short,
-/// sanitised error messages verbatim — the typical happy-path
-/// shell-side error string stays unscrubbed.
+/// The scrub path preserves short, sanitised error messages verbatim.
+/// The typical happy-path shell-side error string stays unscrubbed.
 #[test]
 fn coding_data_sharing_failed_preserves_short_clean_error_message() {
     let mut app = test_app_with_agent();
@@ -592,11 +567,10 @@ fn coding_data_sharing_failed_preserves_short_clean_error_message() {
     );
 }
 
-/// Direct unit test of the `scrub_error_for_toast` helper —
-/// pins the threshold and the fallback string against drift.
+/// Direct unit test of the `scrub_error_for_toast` helper; pins the threshold and the fallback string against drift.
 #[test]
 fn scrub_error_for_toast_unit() {
-    // Empty + short messages pass through.
+    // Empty and short messages pass through
     assert_eq!(scrub_error_for_toast(""), "");
     assert_eq!(scrub_error_for_toast("ok"), "ok");
     assert_eq!(scrub_error_for_toast("network timeout"), "network timeout");
@@ -618,11 +592,8 @@ fn scrub_error_for_toast_unit() {
         scrub_error_for_toast("hi\rthere"),
         "server error (see logs for details)"
     );
-    // Format-category (Cf) chars also trigger scrub — bidi
-    // overrides, zero-width joiner / space, BOM. Prevents
-    // Trojan-Source-style visual spoofing
-    // where a toast READS as one thing but bytes encode
-    // another via embedded RIGHT-TO-LEFT-OVERRIDE.
+    // Format-category (Cf) chars also trigger scrub: bidi overrides, zero-width joiner / space, BOM
+    // This prevents Trojan-Source-style spoofing: a toast that reads as one thing while the bytes encode another via a RIGHT-TO-LEFT OVERRIDE
     assert_eq!(
         scrub_error_for_toast("opt\u{202E}-out"),
         "server error (see logs for details)",
@@ -866,11 +837,10 @@ fn privacy_banner_opt_out_acks_now_without_write() {
     );
 }
 
-/// A superseded reply must not touch state. Settings opt-out is write 1,
-/// the user opts in before it lands, and only then does the stale decline
-/// answer. Applying its success (`opted_in: false`) would flip the pager
-/// to opted-out while the server holds opted-in — claiming data isn't
-/// retained when it is. Its failure must not toast either.
+/// A superseded reply must not touch state.
+/// Settings opt-out is write 1, the user opts in before it lands, and only then does the stale decline answer.
+/// Applying its success (`opted_in: false`) would flip the pager to opted-out while the server holds opted-in.
+/// That claims data isn't retained when it is. Its failure must not toast either.
 #[test]
 fn superseded_coding_data_reply_cannot_clobber_a_newer_write() {
     for stale_failed in [true, false] {
@@ -933,8 +903,7 @@ fn superseded_coding_data_reply_cannot_clobber_a_newer_write() {
     }
 }
 
-/// A double-click (or a stale frame's hit rect) must not send a second
-/// decline.
+/// A double-click (or a stale frame's hit rect) must not send a second decline.
 #[test]
 fn privacy_banner_opt_out_is_idempotent() {
     let mut app = privacy_banner_ready_app();
@@ -974,7 +943,7 @@ fn settings_opt_out_while_already_out_acks_without_write() {
     assert_eq!(app.coding_data_write_seq, 0);
 }
 
-/// Settings Opt out while currently in: acks now + ACP write.
+/// Settings Opt out while currently in: acks now and writes ACP.
 #[test]
 fn settings_opt_out_from_in_acks_now_and_writes() {
     let mut app = privacy_banner_ready_app();
@@ -1067,8 +1036,7 @@ fn settings_opt_in_recommitted_while_inflight_does_not_ack() {
     assert!(app.privacy_banner_should_show());
 }
 
-/// A Settings pick before the notice is rolled out must not stamp an ack
-/// that would hide the banner when the cohort turns on.
+/// A Settings pick before the notice is rolled out must not stamp an ack that would hide the banner when the cohort turns on.
 #[test]
 fn settings_choice_does_not_ack_when_rollout_off() {
     for opted_in in [true, false] {
@@ -1189,7 +1157,7 @@ fn dispatch_rename_session_sticky_chat_local_build_stays_build() {
     let mut app = test_app_with_agent();
     app.chat_mode = true;
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    // Sticky `--chat` UI bit, local-disk history-bypass (not a conversation).
+    // `chat_kind` is the sticky `--chat` UI bit; `conversation_entry = false` marks a local-disk history bypass, not a conversation
     agent.chat_kind = true;
     agent.conversation_entry = false;
     let effects = dispatch_rename_session(&mut app, "local title".into());
@@ -1405,20 +1373,15 @@ fn dispatch_reset_session_title_refuses_chat_kind() {
     );
 }
 
-/// `ConfirmResetSetting { choice: Reset }` on a SHARED Bool
-/// target restores the Settings modal AND fires the typed
-/// `Action::SetCompactMode(default)` via recursive dispatch —
-/// the `Effect::PersistSetting` is the externally-observable
-/// signal. Also asserts the ui_snapshot was
-/// refreshed to the new (post-reset) value (symmetric with the
-/// Cancel test's snapshot assertion).
+/// `ConfirmResetSetting { choice: Reset }` on a shared Bool target restores the Settings modal.
+/// It also fires the typed `Action::SetCompactMode(default)` via recursive dispatch; the `Effect::PersistSetting` is the observable signal.
+/// Also asserts the ui_snapshot was refreshed to the new (post-reset) value (symmetric with the Cancel test's snapshot assertion).
 #[test]
 fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool() {
     use crate::settings::SettingValue;
     use crate::views::modal::{ActiveModal, ResetSettingsResult};
     let mut app = test_app_with_agent();
-    // Flip compact_mode to true so we can observe the reset back
-    // to its default (false).
+    // Flip compact_mode to true so we can observe the reset back to its default (false)
     let _ = dispatch(Action::SetCompactMode(true), &mut app);
     assert!(app.current_ui.compact_mode);
 
@@ -1431,8 +1394,7 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool(
         &mut app,
     );
 
-    // Recursive dispatch into Action::SetCompactMode(false) emits
-    // the persist effect.
+    // Recursive dispatch into Action::SetCompactMode(false) emits the persist effect
     assert_eq!(effects.len(), 1);
     match &effects[0] {
         Effect::PersistSetting { key, value, .. } => {
@@ -1443,8 +1405,7 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool(
     }
     // In-memory state is reset to the default.
     assert!(!app.current_ui.compact_mode);
-    // Modal is restored AND ui_snapshot reflects the new value
-    // (symmetric with the Cancel test).
+    // The modal is restored and ui_snapshot reflects the new value (symmetric with the Cancel test)
     let agent = app.agents.get(&AgentId(0)).expect("agent must exist");
     match &agent.active_modal {
         Some(ActiveModal::Settings { state }) => {
@@ -1457,15 +1418,13 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_bool(
     }
 }
 
-/// `ConfirmResetSetting { choice: Reset }` on a SHARED Enum
-/// target (`theme`) dispatches `Action::SetTheme(default)` via
-/// recursive dispatch — verifies the action_for_reset Enum arm.
+/// `ConfirmResetSetting { choice: Reset }` on a shared Enum target (`theme`) dispatches `Action::SetTheme(default)` via recursive dispatch.
+/// Verifies the action_for_reset Enum arm.
 #[test]
 fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum() {
     use crate::settings::SettingValue;
     use crate::views::modal::ResetSettingsResult;
-    // SetTheme mutates the global theme cache — serialize with the
-    // other theme tests via the theme test lock.
+    // SetTheme mutates the global theme cache, so serialize with the other theme tests via the theme test lock
     with_theme_test_env(|| {
         let mut app = test_app_with_agent();
         // Flip theme to a non-default first.
@@ -1481,7 +1440,7 @@ fn dispatch_confirm_reset_setting_reset_dispatches_typed_setter_for_shared_enum(
             &mut app,
         );
 
-        // Reset → SetTheme("groknight") (the registered default).
+        // Reset dispatches SetTheme("groknight"), the registered default
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             Effect::PersistSetting { key, value, .. } => {
@@ -1657,8 +1616,8 @@ fn minimal_update_notice_no_active_agent_is_noop() {
 
 // ── Tutorial dispatch tests ──────────────────────────────────────────
 
-/// `/tutorial` (and the palette entry) open the overlay; dispatching again
-/// while open toggles it closed. No side effects either way.
+/// `/tutorial` (and the palette entry) open the overlay; dispatching again while open toggles it closed.
+/// No side effects either way.
 #[test]
 fn open_tutorial_toggles_overlay_without_effects() {
     let mut app = test_app();
@@ -1807,7 +1766,7 @@ fn reply_from_previous_modal_open_is_dropped() {
     app.agents.get_mut(&AgentId(0)).unwrap().active_modal = None;
     dispatch(Action::ShowUsage, &mut app);
     assert_ne!(current_usage_nonce(&app), old_nonce);
-    // The first open's reply lands late — it must not populate the modal.
+    // The first open's reply lands late; it must not populate the modal
     dispatch(
         Action::TaskComplete(TaskResult::SessionInfoComplete {
             agent_id: AgentId(0),

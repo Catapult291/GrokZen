@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use url::Url;
 use xai_grok_diag_server::{self as diag_server, DiagHandle, ErrorClass};
-use xai_grok_workspace::config::WorkspaceServerMetadata;
+use xai_grok_workspace::config::merge_session_metadata;
 use xai_grok_workspace::error::WorkspaceError;
 use xai_grok_workspace_daemon::daemonize;
 use xai_grok_workspace_daemon::preview_supervisor::{
@@ -399,7 +399,13 @@ async fn run(
             );
         }
     }
-    let auth_provider = xai_grok_workspace::hub_auth::provider(&url, args.auth_config.as_deref())?;
+    let mut status_config = xai_grok_workspace::StatusConfig::from_env();
+    status_config.preview_control_port = args.preview.preview_control_port;
+    let auth_provider = xai_grok_workspace::hub_auth::provider(
+        &url,
+        args.auth_config.as_deref(),
+        &status_config.oidc_refresh,
+    )?;
     tracing::info!(
         hub_url = %url,
         cwd = %cwd.display(),
@@ -414,7 +420,7 @@ async fn run(
         ),
         None => None,
     };
-    let metadata = WorkspaceServerMetadata::merge_session_metadata(parsed_metadata, session_id);
+    let metadata = merge_session_metadata(parsed_metadata, session_id);
     let launch_id = metadata
         .as_ref()
         .and_then(|v| v.get("launch_id"))
@@ -451,8 +457,6 @@ async fn run(
         "Workspace server starting — sessions created dynamically via server bind"
     );
     let server_id = args.server_id.clone();
-    let mut status_config = xai_grok_workspace::StatusConfig::from_env();
-    status_config.preview_control_port = args.preview.preview_control_port;
     let preview_shutdown = if args.preview.preview_enabled {
         let control_port = args.preview.preview_control_port;
         let cfg = args

@@ -103,6 +103,7 @@ pub(crate) struct AgentRebuildSpec {
     pub app_builder_deployer_config: AppBuilderDeployerConfig,
     pub media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits,
     pub write_file_enabled: bool,
+    pub active_agent_messages_enabled: bool,
     pub subagents_enabled: bool,
     pub subagent_toggle: HashMap<String, bool>,
     pub background_workflows_enabled: bool,
@@ -123,6 +124,9 @@ pub(crate) struct AgentRebuildSpec {
     pub attribution_callback: Option<xai_grok_tools::SharedAttributionCallback>,
     pub tool_params_json: ResolvedToolParamsJson,
     pub subagent_event_tx: Option<UnboundedSender<SubagentEvent>>,
+    pub subagent_coordinator_sender: Option<
+        xai_grok_tools::implementations::grok_build::task::backend::SubagentCoordinatorSender,
+    >,
     pub monitor_event_buffer: Option<MonitorEventBuffer>,
     pub user_question_tx: UnboundedSender<UserQuestionRequest>,
     pub subagent_depth: u32,
@@ -214,6 +218,7 @@ impl AgentRebuildSpec {
             app_builder_deployer_config,
             media_gen_batch_limits: _,
             write_file_enabled,
+            active_agent_messages_enabled,
             subagents_enabled,
             subagent_toggle,
             background_workflows_enabled,
@@ -232,6 +237,7 @@ impl AgentRebuildSpec {
             attribution_callback,
             tool_params_json,
             subagent_event_tx,
+            subagent_coordinator_sender,
             monitor_event_buffer,
             user_question_tx,
             subagent_depth,
@@ -285,6 +291,7 @@ impl AgentRebuildSpec {
         .with_app_builder_deployer_config(app_builder_deployer_config.clone())
         .with_web_fetch_config(web_fetch_config.clone())
         .with_write_file_enabled(*write_file_enabled)
+        .with_active_agent_messages_enabled(*active_agent_messages_enabled)
         .with_fs(fs_backend.clone())
         .with_subagents_enabled(*subagents_enabled)
         .with_subagent_toggle(subagent_toggle.clone())
@@ -368,10 +375,18 @@ impl AgentRebuildSpec {
                         .insert(
                             SubagentBackendResource(
                                 Arc::new(
-                                    ChannelBackend::for_session(
-                                        event_tx.clone(),
-                                        session_id_str.clone(),
-                                    ),
+                                    subagent_coordinator_sender
+                                        .as_ref()
+                                        .map_or_else(
+                                            || ChannelBackend::for_session(
+                                                event_tx.clone(),
+                                                session_id_str.clone(),
+                                            ),
+                                            |sender| ChannelBackend::for_coordinator_session(
+                                                sender.clone(),
+                                                session_id_str.clone(),
+                                            ),
+                                        ),
                                 ),
                             ),
                         );
@@ -453,6 +468,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         app_builder_deployer_config: AppBuilderDeployerConfig::default(),
         media_gen_batch_limits: xai_grok_tools::media_gen_limits::MediaGenBatchLimits::default(),
         write_file_enabled: true,
+        active_agent_messages_enabled: false,
         subagents_enabled: false,
         subagent_toggle: HashMap::new(),
         background_workflows_enabled: false,
@@ -471,6 +487,7 @@ pub(crate) fn test_rebuild_spec_default() -> Arc<AgentRebuildSpec> {
         attribution_callback: None,
         tool_params_json: ResolvedToolParamsJson::default(),
         subagent_event_tx: None,
+        subagent_coordinator_sender: None,
         monitor_event_buffer: None,
         user_question_tx: uq_tx,
         subagent_depth: 0,

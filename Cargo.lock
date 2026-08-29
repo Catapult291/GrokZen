@@ -1141,7 +1141,7 @@ dependencies = [
  "sha1",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite 0.28.0",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -3047,30 +3047,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "enum_delegate"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8ea75f31022cba043afe037940d73684327e915f88f62478e778c3de914cd0a"
-dependencies = [
- "enum_delegate_lib",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "enum_delegate_lib"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e1f6c3800b304a6be0012039e2a45a322a093539c45ab818d9e6895a39c90fe"
-dependencies = [
- "proc-macro2",
- "quote",
- "rand 0.8.5",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -7136,28 +7112,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "onig"
-version = "6.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "336b9c63443aceef14bea841b899035ae3abe89b7c486aaf4c5bd8aafedac3f0"
-dependencies = [
- "bitflags 2.13.0",
- "libc",
- "once_cell",
- "onig_sys",
-]
-
-[[package]]
-name = "onig_sys"
-version = "69.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c7f86c6eef3d6df15f23bcfb6af487cbd2fed4e5581d58d5bf1f5f8b7f6727dc"
-dependencies = [
- "cc",
- "pkg-config",
-]
-
-[[package]]
 name = "oorandom"
 version = "11.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10415,7 +10369,6 @@ dependencies = [
  "flate2",
  "fnv",
  "once_cell",
- "onig",
  "plist",
  "regex-syntax",
  "serde",
@@ -10889,9 +10842,9 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.27.0"
+version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "489a59b6730eda1b0171fcfda8b121f4bee2b35cba8645ca35c5f7ba3eb736c1"
+checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
 dependencies = [
  "futures-util",
  "log",
@@ -10900,20 +10853,8 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite 0.27.0",
+ "tungstenite",
  "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "tokio-tungstenite"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.28.0",
 ]
 
 [[package]]
@@ -11400,25 +11341,6 @@ dependencies = [
 
 [[package]]
 name = "tungstenite"
-version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eadc29d668c91fcc564941132e17b28a7ceb2f3ebf0b9dae3e03fd7a6748eb0d"
-dependencies = [
- "bytes",
- "data-encoding",
- "http 1.4.0",
- "httparse",
- "log",
- "rand 0.9.5",
- "rustls",
- "rustls-pki-types",
- "sha1",
- "thiserror 2.0.18",
- "utf-8",
-]
-
-[[package]]
-name = "tungstenite"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
@@ -11429,6 +11351,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.18",
  "utf-8",
@@ -11450,6 +11374,28 @@ name = "typenum"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "562d481066bde0658276a35467c4af00bdc6ee726305698a55b86e61d7ad82bb"
+
+[[package]]
+name = "typeshare"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "19be0f411120091e76e13e5a0186d8e2bcc3e7e244afdb70152197f1a8486ceb"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "typeshare-annotation",
+]
+
+[[package]]
+name = "typeshare-annotation"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a615d6c2764852a2e88a4f16e9ce1ea49bb776b5872956309e170d63a042a34f"
+dependencies = [
+ "quote",
+ "syn 2.0.117",
+]
 
 [[package]]
 name = "typify"
@@ -13236,11 +13182,12 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.27.0",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "xai-computer-hub-core",
  "xai-tool-protocol",
  "xai-tool-runtime",
@@ -13257,6 +13204,16 @@ dependencies = [
  "tempfile",
  "tokio",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "xai-dirs"
+version = "0.1.0"
+dependencies = [
+ "dunce",
+ "pretty_assertions",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -13281,12 +13238,15 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "url",
+ "uuid",
+ "xai-dirs",
  "xai-gix-status",
- "xai-grok-home",
  "xai-sqlite-journal",
  "xai-test-utils",
  "xai-tty-utils",
@@ -13328,6 +13288,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "xai-circuit-breaker",
+ "xai-dirs",
  "xai-grok-auth",
  "xai-grok-extra-ca",
  "xai-grok-version",
@@ -13400,7 +13361,6 @@ name = "xai-grok-agent"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dirs 6.0.0",
  "dunce",
  "git2",
  "ignore",
@@ -13416,6 +13376,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "xai-dirs",
  "xai-grok-config",
  "xai-grok-hooks",
  "xai-grok-sampling-types",
@@ -13500,7 +13461,7 @@ dependencies = [
  "tracing",
  "urlencoding",
  "which",
- "xai-grok-home",
+ "xai-dirs",
  "xai-grok-product",
  "xai-grok-version",
  "xai-tty-utils",
@@ -13520,6 +13481,19 @@ dependencies = [
  "xai-grok-announcements",
  "xai-grok-config",
  "xai-grok-mcp",
+]
+
+[[package]]
+name = "xai-grok-dashboard-store"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "xai-grok-config",
+ "xai-sqlite-journal",
 ]
 
 [[package]]
@@ -13574,19 +13548,17 @@ dependencies = [
  "serde_json",
  "tempfile",
  "uuid",
+ "xai-dirs",
  "xai-sqlite-journal",
  "zstd",
 ]
 
 [[package]]
-name = "xai-grok-home"
+name = "xai-grok-gboom"
 version = "0.1.0"
 dependencies = [
- "dirs 5.0.1",
- "dunce",
- "pretty_assertions",
- "tempfile",
- "tracing",
+ "crossterm",
+ "image",
 ]
 
 [[package]]
@@ -13608,6 +13580,7 @@ dependencies = [
  "url",
  "xai-grok-config",
  "xai-grok-extra-ca",
+ "xai-grok-sandbox",
  "xai-grok-tools",
 ]
 
@@ -13686,6 +13659,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "serial_test",
  "sse-stream",
  "tempfile",
  "thiserror 2.0.18",
@@ -13698,6 +13672,7 @@ dependencies = [
  "xai-computer-hub-sdk",
  "xai-grok-config",
  "xai-grok-extra-ca",
+ "xai-grok-sandbox",
  "xai-grok-session-events",
  "xai-grok-telemetry",
  "xai-grok-tools",
@@ -13770,7 +13745,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager"
-version = "1.0.8"
+version = "1.0.12"
 dependencies = [
  "agent-client-protocol",
  "ansi-to-tui",
@@ -13784,10 +13759,7 @@ dependencies = [
  "core-foundation",
  "criterion",
  "crossterm",
- "derive_more 2.1.1",
- "dirs 5.0.1",
  "dunce",
- "enum_delegate",
  "flate2",
  "git2",
  "image",
@@ -13811,6 +13783,7 @@ dependencies = [
  "signal-hook 0.3.18",
  "similar",
  "strip-ansi-escapes",
+ "strum 0.27.2",
  "syntect",
  "tar",
  "tempfile",
@@ -13830,14 +13803,18 @@ dependencies = [
  "windows-sys 0.59.0",
  "xai-acp-lib",
  "xai-crash-handler",
+ "xai-dirs",
  "xai-fast-worktree",
  "xai-file-utils",
  "xai-grok-active-sessions",
  "xai-grok-agent",
  "xai-grok-announcements",
  "xai-grok-config",
+ "xai-grok-dashboard-store",
  "xai-grok-extra-ca",
  "xai-grok-foreign-sessions",
+ "xai-grok-gboom",
+ "xai-grok-hooks",
  "xai-grok-locale",
  "xai-grok-markdown",
  "xai-grok-mermaid",
@@ -13866,7 +13843,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-pager-bin"
-version = "1.0.8"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -13967,9 +13944,9 @@ dependencies = [
  "anstyle",
  "anyhow",
  "base64",
+ "chrono",
  "crossterm",
  "dark-light",
- "dirs 5.0.1",
  "documented",
  "dunce",
  "image",
@@ -13981,6 +13958,7 @@ dependencies = [
  "ratatui-core",
  "regex",
  "serde",
+ "serde_json",
  "serial_test",
  "shellexpand",
  "strum 0.27.2",
@@ -14001,7 +13979,9 @@ dependencies = [
  "uuid",
  "vte 0.15.0",
  "windows-sys 0.59.0",
+ "xai-dirs",
  "xai-grok-config",
+ "xai-grok-gboom",
  "xai-grok-markdown",
  "xai-grok-paths",
  "xai-grok-product",
@@ -14029,7 +14009,6 @@ name = "xai-grok-plugin-marketplace"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dirs 5.0.1",
  "dunce",
  "fs2",
  "serde",
@@ -14038,6 +14017,7 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
+ "xai-dirs",
  "xai-grok-agent",
  "xai-grok-config",
  "xai-hooks-plugins-types",
@@ -14098,7 +14078,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
- "dirs 5.0.1",
  "dunce",
  "globset",
  "ignore",
@@ -14110,9 +14089,11 @@ dependencies = [
  "serial_test",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "tokio",
  "toml",
  "tracing",
  "url",
+ "xai-dirs",
  "xai-grok-config",
 ]
 
@@ -14166,7 +14147,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "base64",
- "dirs 6.0.0",
  "dunce",
  "image",
  "libc",
@@ -14182,6 +14162,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "wl-clipboard-rs",
+ "xai-dirs",
  "xai-grok-config-types",
  "xai-grok-models",
  "xai-grok-status-line",
@@ -14191,7 +14172,7 @@ dependencies = [
 
 [[package]]
 name = "xai-grok-shell"
-version = "1.0.8"
+version = "1.0.12"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -14210,7 +14191,6 @@ dependencies = [
  "ctor",
  "dashmap",
  "dhat",
- "dirs 6.0.0",
  "dunce",
  "filetime",
  "flate2",
@@ -14238,9 +14218,7 @@ dependencies = [
  "nucleo",
  "obfstr",
  "parking_lot",
- "portable-pty",
  "pretty_assertions",
- "process-wrap",
  "prod-mc-cli-chat-proxy-types",
  "prost",
  "rand 0.9.5",
@@ -14256,8 +14234,6 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha2 0.10.9",
- "shlex",
- "similar",
  "siphasher",
  "strum 0.27.2",
  "tar",
@@ -14267,8 +14243,7 @@ dependencies = [
  "tokio",
  "tokio-retry",
  "tokio-rustls",
- "tokio-stream",
- "tokio-tungstenite 0.27.0",
+ "tokio-tungstenite",
  "tokio-util",
  "toml",
  "toml_edit 0.22.27",
@@ -14289,6 +14264,7 @@ dependencies = [
  "xai-codebase-graph",
  "xai-compaction-transcript",
  "xai-computer-hub-sdk",
+ "xai-dirs",
  "xai-fast-worktree",
  "xai-file-utils",
  "xai-fsnotify",
@@ -14303,6 +14279,7 @@ dependencies = [
  "xai-grok-foreign-sessions",
  "xai-grok-hooks",
  "xai-grok-http",
+ "xai-grok-locale",
  "xai-grok-mcp",
  "xai-grok-memory",
  "xai-grok-models",
@@ -14316,6 +14293,7 @@ dependencies = [
  "xai-grok-shared",
  "xai-grok-shell-base",
  "xai-grok-shell-session-support",
+ "xai-grok-shell-terminal",
  "xai-grok-status-line",
  "xai-grok-subagent-resolution",
  "xai-grok-telemetry",
@@ -14326,6 +14304,7 @@ dependencies = [
  "xai-hooks-plugins-types",
  "xai-hunk-tracker",
  "xai-interjection-core",
+ "xai-message-delivery-core",
  "xai-prompt-queue",
  "xai-system-power",
  "xai-test-utils",
@@ -14383,6 +14362,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-grok-shell-terminal"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "libc",
+ "portable-pty",
+ "process-wrap",
+ "serde",
+ "serde_json",
+ "shlex",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "windows 0.61.3",
+ "xai-acp-lib",
+ "xai-grok-config",
+ "xai-grok-paths",
+ "xai-grok-sandbox",
+ "xai-grok-tools",
+ "xai-grok-workspace",
+ "xai-tty-utils",
+]
+
+[[package]]
 name = "xai-grok-status-line"
 version = "0.1.0"
 dependencies = [
@@ -14422,7 +14431,6 @@ dependencies = [
  "bytes",
  "chrono",
  "ctor",
- "dirs 5.0.1",
  "filetime",
  "futures-executor",
  "git2",
@@ -14456,6 +14464,7 @@ dependencies = [
  "uuid",
  "webpki-roots 0.26.11",
  "whoami",
+ "xai-dirs",
  "xai-file-utils",
  "xai-grok-auth",
  "xai-grok-config",
@@ -14487,7 +14496,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-tungstenite 0.27.0",
+ "tokio-tungstenite",
  "tokio-util",
  "tracing",
  "tracing-subscriber",
@@ -14512,7 +14521,6 @@ dependencies = [
  "crc32fast",
  "derive_more 2.1.1",
  "dhat",
- "dirs 5.0.1",
  "dunce",
  "educe",
  "encoding_rs",
@@ -14565,6 +14573,7 @@ dependencies = [
  "wiremock",
  "xai-computer-hub-core",
  "xai-computer-hub-sdk",
+ "xai-dirs",
  "xai-file-utils",
  "xai-grok-auth",
  "xai-grok-config",
@@ -14622,19 +14631,20 @@ dependencies = [
  "tracing",
  "url",
  "wiremock",
+ "xai-dirs",
  "xai-grok-extra-ca",
- "xai-grok-home",
  "xai-grok-product",
  "xai-grok-shell",
  "xai-grok-telemetry",
  "xai-grok-tools",
  "xai-grok-version",
  "zip",
+ "zstd",
 ]
 
 [[package]]
 name = "xai-grok-version"
-version = "1.0.8"
+version = "1.0.12"
 dependencies = [
  "semver",
 ]
@@ -14650,11 +14660,12 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.27.0",
+ "tokio-tungstenite",
  "toml",
  "tracing",
  "tracing-subscriber",
  "url",
+ "xai-dirs",
  "xai-grok-config",
  "xai-grok-extra-ca",
  "xai-grok-product",
@@ -14670,12 +14681,12 @@ dependencies = [
  "arc-swap",
  "async-stream",
  "async-trait",
+ "axum",
  "base64",
  "bstr",
  "chrono",
  "clap",
  "dashmap",
- "dirs 6.0.0",
  "dunce",
  "fastrace",
  "flate2",
@@ -14693,6 +14704,7 @@ dependencies = [
  "nohash-hasher",
  "parking_lot",
  "prometheus",
+ "rand 0.9.5",
  "regex",
  "reqwest 0.12.24",
  "rustc-hash 2.1.1",
@@ -14705,7 +14717,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
- "tokio-tungstenite 0.27.0",
+ "tokio-tungstenite",
  "tokio-util",
  "toml",
  "tonic",
@@ -14721,6 +14733,7 @@ dependencies = [
  "xai-codebase-graph",
  "xai-computer-hub-mcp-adapter",
  "xai-computer-hub-sdk",
+ "xai-dirs",
  "xai-fast-worktree",
  "xai-file-utils",
  "xai-fsnotify",
@@ -14840,6 +14853,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "xai-message-delivery-core"
+version = "0.1.0"
+
+[[package]]
 name = "xai-mixpanel"
 version = "0.1.0"
 dependencies = [
@@ -14947,6 +14964,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "typeshare",
  "uuid",
  "xai-tool-types",
 ]

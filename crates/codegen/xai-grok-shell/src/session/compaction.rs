@@ -16,8 +16,8 @@ use crate::session::helpers::CompactionStateContext;
 use crate::session::helpers::compaction_context::CompactionInputs;
 use crate::session::helpers::compaction_context::to_system_reminder;
 use crate::session::helpers::session_compact::{
-    CompactOutput, CompactionOutcome, build_two_pass_compaction_prompt, generate_session_compact,
-    is_context_length_error,
+    COMPACT_FAILED_PREFIX, CompactOutput, CompactionOutcome, build_two_pass_compaction_prompt,
+    generate_session_compact, is_context_length_error,
 };
 use crate::session::persistence::PersistenceMsg;
 use crate::session::two_pass::{
@@ -32,6 +32,9 @@ use xai_chat_state::compaction_utils::{
     validate_compacted_history,
 };
 use xai_grok_sampling_types::{ApiBackend, ConversationItem};
+/// Prefix on the early-guard failure payloads below; the user-facing
+/// normalizer strips it (the renderer prepends its own headline).
+const COMPACTION_FAILED_GUARD_PREFIX: &str = "Compaction failed: ";
 /// Default percentage points below the auto-compact threshold at which prefire
 /// (background pass-1) starts, giving pass-1 runway to finish before the limit.
 /// Override with `GROK_PREFIRE_LEAD_PERCENT`.
@@ -41,17 +44,6 @@ fn prefire_lead_percent() -> u64 {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(DEFAULT_PREFIRE_LEAD_PERCENT)
-}
-fn compaction_mode_label(
-    mode: xai_chat_state::CompactionMode,
-) -> xai_grok_telemetry::events::CompactionModeLabel {
-    use xai_chat_state::CompactionMode;
-    use xai_grok_telemetry::events::CompactionModeLabel;
-    match mode {
-        CompactionMode::Summary => CompactionModeLabel::Summary,
-        CompactionMode::Transcript => CompactionModeLabel::Transcript,
-        CompactionMode::Segments(_) => CompactionModeLabel::Segments,
-    }
 }
 /// Cheap fingerprint of a conversation prefix for prefire NOTE₁ validity. A
 /// mismatch means the prefix changed (edit / rewind / branch) since pass-1, so
@@ -607,7 +599,13 @@ impl SessionActor {
             let span = tracing::Span::current();
             span.record("success", false);
             span.record("error", e.to_string().as_str());
-            return Err(e);
+            let kind = crate::session::helpers::session_compact::compact_error_kind(&e)
+                .unwrap_or(crate::session::helpers::session_compact::CompactErrorKind::Failed);
+            let detail =
+                Self::user_facing_compact_error(&crate::sampling::error::acp_error_message(&e));
+            return Err(e.data(
+                crate::session::helpers::session_compact::compact_error_data(kind, &detail),
+            ));
         }
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
         let tokens_after = self.chat_state_handle.get_total_tokens().await;
@@ -638,9 +636,11 @@ impl SessionActor {
     /// the reason (see [`SuppressReason::suppress_state`]): size/schema sticky,
     /// credit until 200, auth until credentials recover, other clears next turn.
     /// Telemetry + one notification per transition; manual `/compact` exempt.
+    /// Only `Other` surfaces `detail`; the canned reasons are already actionable.
     async fn suppress_auto_compaction(
         &self,
         reason: SuppressReason,
+        detail: &str,
         estimated_tokens: u64,
         context_window: u64,
     ) {
@@ -669,25 +669,40 @@ impl SessionActor {
                     context_window,
                 },
             );
-            let message = match reason {
-                SuppressReason::CreditBlock => {
-                    "out of credits or over your spending limit. Add credits and retry."
-                }
-                SuppressReason::Auth => {
-                    "authentication problem — re-authenticate using /login and retry."
-                }
-                SuppressReason::Size => "this conversation is too large to compact.",
-                SuppressReason::Schema => "this conversation can't be summarized.",
-                SuppressReason::Other => {
-                    "it'll retry on the next turn, or start a new session using /new."
-                }
-            };
             self.send_xai_notification(
                 crate::extensions::notification::SessionUpdate::AutoCompactFailed {
-                    error: message.to_string(),
+                    error: Self::suppress_notification_message(reason, detail),
                 },
             )
             .await;
+        }
+    }
+    /// Suppress notification text, canned per reason; `Other` carries the real
+    /// error. Starts lowercase — the renderer prepends its own headline.
+    fn suppress_notification_message(reason: SuppressReason, detail: &str) -> String {
+        match reason {
+            SuppressReason::CreditBlock => {
+                "out of credits or over your spending limit. Add credits and retry.".to_string()
+            }
+            SuppressReason::Auth => {
+                "authentication problem — re-authenticate using /login and retry.".to_string()
+            }
+            SuppressReason::Size => "this conversation is too large to compact.".to_string(),
+            SuppressReason::Schema => "this conversation can't be summarized.".to_string(),
+            SuppressReason::Other => Self::failure_with_retry_guidance(detail),
+        }
+    }
+    /// Retry/new-session guidance headline, normalized detail on its own
+    /// line. Shared by the `Other` suppress arm and the transient failure —
+    /// both retry on the next turn.
+    fn failure_with_retry_guidance(detail: &str) -> String {
+        const RETRY_GUIDANCE: &str =
+            "it'll retry on the next turn, or start a new session using /new.";
+        let detail = Self::user_facing_compact_error(detail);
+        if detail.is_empty() {
+            RETRY_GUIDANCE.to_string()
+        } else {
+            format!("{RETRY_GUIDANCE}\n{detail}")
         }
     }
     /// Map a deterministic failure's error text to a fixed, content-free
@@ -711,22 +726,33 @@ impl SessionActor {
             SuppressReason::Other
         }
     }
-    /// ACP error payload string (plain string or `{message, ...}`).
-    fn acp_error_message(err: &acp::Error) -> String {
-        match err.data.as_ref() {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            Some(obj) => obj
-                .get("message")
-                .and_then(|v| v.as_str())
-                .map(str::to_owned)
-                .unwrap_or_else(|| obj.to_string()),
-            None => err.message.clone(),
+    /// Strip the known internal prefixes (wrappers nest), then the shared
+    /// normalize sequence ([`normalize_compact_detail`]).
+    fn user_facing_compact_error(raw: &str) -> String {
+        use crate::session::helpers::session_compact::normalize_compact_detail;
+        const INTERNAL_PREFIXES: &[&str] = &[
+            COMPACT_FAILED_PREFIX,
+            COMPACTION_FAILED_GUARD_PREFIX,
+            xai_grok_compaction::sampler::SAMPLER_BUILD_FAILED_PREFIX,
+            xai_grok_compaction::sampler::SAMPLER_START_FAILED_PREFIX,
+        ];
+        let mut rest = raw.trim();
+        loop {
+            let Some(prefix) = INTERNAL_PREFIXES.iter().find(|p| {
+                rest.as_bytes()
+                    .get(..p.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(p.as_bytes()))
+            }) else {
+                break;
+            };
+            rest = rest[prefix.len()..].trim_start();
         }
+        normalize_compact_detail(rest)
     }
     /// Auth/401 compact failure — abort for reauth resubmit; don't sample oversized.
     pub(crate) fn is_auth_compact_error(err: &acp::Error) -> bool {
         matches!(
-            Self::classify_suppress_reason(&Self::acp_error_message(err)),
+            Self::classify_suppress_reason(&crate::sampling::error::acp_error_message(err)),
             SuppressReason::Auth
         )
     }
@@ -734,12 +760,13 @@ impl SessionActor {
     /// Separate from `AutoCompactFailed` (user-facing); this aborts the turn.
     pub(crate) async fn surface_compact_auth_failure(&self, err: acp::Error) -> acp::Error {
         use crate::extensions::notification::SessionUpdate as XaiSessionUpdate;
-        let detailed = Self::acp_error_message(&err);
+        use crate::extensions::notification::UNAUTHORIZED_NEEDLE;
+        let detailed = crate::sampling::error::acp_error_message(&err);
         let message = if detailed.to_ascii_lowercase().contains("unauthorized") {
             detailed
         } else {
             format!(
-                "Unauthorized (401): compaction failed — re-authenticate with /login \
+                "{UNAUTHORIZED_NEEDLE}: compaction failed — re-authenticate with /login \
                  and retry. ({detailed})"
             )
         };
@@ -927,7 +954,17 @@ impl SessionActor {
                 context_window,
                 model_id: model_id.clone(),
                 user_context_provided: user_context.is_some(),
-                compaction_mode: compaction_mode_label(self.compaction.compaction_mode),
+                compaction_mode: match self.compaction.compaction_mode {
+                    xai_chat_state::CompactionMode::Summary => {
+                        xai_grok_telemetry::events::CompactionModeLabel::Summary
+                    }
+                    xai_chat_state::CompactionMode::Transcript => {
+                        xai_grok_telemetry::events::CompactionModeLabel::Transcript
+                    }
+                    xai_chat_state::CompactionMode::Segments(_) => {
+                        xai_grok_telemetry::events::CompactionModeLabel::Segments
+                    }
+                },
                 two_pass_enabled: self.two_pass_active(),
                 is_subagent: self.startup_hints.is_subagent,
             },
@@ -975,9 +1012,9 @@ impl SessionActor {
                 session_id = %self.session_info.id.0,
                 "Compaction failed: conversation is empty (ChatStateActor may have died)"
             );
-            return Err(
-                acp::Error::internal_error().data("Compaction failed: conversation is empty")
-            );
+            return Err(acp::Error::internal_error().data(format!(
+                "{COMPACTION_FAILED_GUARD_PREFIX}conversation is empty"
+            )));
         }
         let system_message = match system_message {
             Some(msg) => msg,
@@ -987,8 +1024,9 @@ impl SessionActor {
                     conversation_len = conv_len,
                     "Compaction failed: no system message in conversation history"
                 );
-                return Err(acp::Error::internal_error()
-                    .data("Compaction failed: no system message in conversation history"));
+                return Err(acp::Error::internal_error().data(format!(
+                    "{COMPACTION_FAILED_GUARD_PREFIX}no system message in conversation history"
+                )));
             }
         };
         if simplified_messages.is_empty() {
@@ -997,8 +1035,9 @@ impl SessionActor {
                 conversation_len = conv_len,
                 "Compaction failed: simplified conversation is empty"
             );
-            return Err(acp::Error::internal_error()
-                .data("Compaction failed: simplified conversation is empty"));
+            return Err(acp::Error::internal_error().data(format!(
+                "{COMPACTION_FAILED_GUARD_PREFIX}simplified conversation is empty"
+            )));
         }
         if !simplified_messages
             .iter()
@@ -1010,8 +1049,9 @@ impl SessionActor {
                 simplified_len = simplified_messages.len(),
                 "Compaction failed: no system message in simplified conversation"
             );
-            return Err(acp::Error::internal_error()
-                .data("Compaction failed: no system message in simplified conversation"));
+            return Err(acp::Error::internal_error().data(format!(
+                "{COMPACTION_FAILED_GUARD_PREFIX}no system message in simplified conversation"
+            )));
         }
         let sampling_config = self.reconstruct_full_config().await;
         let sampling_client = self.prepare_chat_completion(false).await?;
@@ -1127,7 +1167,8 @@ impl SessionActor {
                 }
                 Err(xai_grok_compaction::FullReplaceError::NothingToCompact) => {
                     last_error = Some(
-                        acp::Error::internal_error().data("compact failed: nothing to compact"),
+                        acp::Error::internal_error()
+                            .data(format!("{COMPACT_FAILED_PREFIX}nothing to compact")),
                     );
                     break;
                 }
@@ -1139,7 +1180,7 @@ impl SessionActor {
                     };
                     last_error = Some(acp::Error::internal_error().data(
                         observer.last_error_message().unwrap_or_else(|| {
-                            "compact failed: model returned empty response".to_string()
+                            format!("{COMPACT_FAILED_PREFIX}model returned empty response")
                         }),
                     ));
                     break;
@@ -1216,6 +1257,7 @@ impl SessionActor {
                         if auto_trigger {
                             self.suppress_auto_compaction(
                                 SuppressReason::Size,
+                                &message,
                                 estimated_input_tokens,
                                 context_window,
                             )
@@ -1230,6 +1272,7 @@ impl SessionActor {
                             let reason = Self::classify_suppress_reason(&message);
                             self.suppress_auto_compaction(
                                 reason,
+                                &message,
                                 estimated_input_tokens,
                                 context_window,
                             )
@@ -1670,7 +1713,7 @@ impl SessionActor {
         if cancel.is_cancelled() {
             return self.emit_compact_cancelled(auto_trigger).await;
         }
-        let segments_written = u32::from(
+        let segments_queued = u32::from(
             self.persist_compaction_segment(&segment_messages, &generate_session_compact),
         );
         self.chat_state_handle
@@ -1754,7 +1797,7 @@ impl SessionActor {
             .tool_bridge()
             .on_skill_discovery_compaction()
             .await;
-        self.persist_announcement_state().await;
+        self.rearm_failed_server_announcements().await;
         self.plan_mode.lock().reset_after_compaction();
         self.persist_plan_mode_state();
         self.dispatch_hook(
@@ -1814,7 +1857,7 @@ impl SessionActor {
             xai_grok_telemetry::events::CompactionCompleteStats {
                 tokens_after,
                 two_pass_used,
-                segments_written,
+                segments_queued,
                 degenerate_retries: telemetry.degenerate_rejections,
                 input_overflow_retries: input_overflow_rejections,
             },
@@ -2106,6 +2149,10 @@ impl SessionActor {
                 span.record("success", false);
                 span.record("error", e.to_string().as_str());
                 let cancelled = self.compaction.cancel.is_cancelled()
+                    || matches!(
+                        crate::session::helpers::session_compact::compact_error_kind(&e),
+                        Some(crate::session::helpers::session_compact::CompactErrorKind::Cancelled)
+                    )
                     || e.data.as_ref().and_then(|d| d.as_str()).is_some_and(|s| {
                         s.contains(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)
                     });
@@ -2117,7 +2164,9 @@ impl SessionActor {
                         == SUPPRESS_NONE
                 {
                     self.send_xai_notification(XaiSessionUpdate::AutoCompactFailed {
-                        error: String::new(),
+                        error: Self::failure_with_retry_guidance(
+                            &crate::sampling::error::acp_error_message(&e),
+                        ),
                     })
                     .await;
                 }

@@ -182,6 +182,13 @@ fn hook_event_variants_round_trip() {
 fn connection_kind_and_definition_mode_full_serialise() {
     assert_eq!(roundtrip(&ConnectionKind::Harness), json!("harness"));
     assert_eq!(roundtrip(&ConnectionKind::ToolServer), json!("tool_server"));
+    assert_eq!(roundtrip(&ConnectionKind::BotClient), json!("bot_client"));
+    let hello: HelloMsg = serde_json::from_value(json!({
+        "protocol_version": "1.0.0",
+        "kind": "bot_client",
+    }))
+    .expect("hello with kind=bot_client");
+    assert_eq!(hello.kind, ConnectionKind::BotClient);
     assert_eq!(
         roundtrip(&ToolDefinitionMode::Full),
         json!({"mode": "full"})
@@ -476,6 +483,11 @@ fn method_serialises_with_dot_notation_for_dotted_methods() {
         (Method::Hello, "hello"),
         (Method::HelloAck, "hello_ack"),
         (Method::ToolCallRequest, "tool_call_request"),
+        (Method::BotCommand, "bot.command"),
+        (Method::BotVncDescriptor, "bot.vncDescriptor"),
+        (Method::BotTranscriptOffbox, "bot.transcript.offbox"),
+        (Method::BotBindConversation, "bot.bindConversation"),
+        (Method::BotEvent, "bot.event"),
     ];
     for (m, expected) in cases {
         assert_eq!(roundtrip(&m), json!(expected));
@@ -869,6 +881,15 @@ fn tools_list_and_search_payloads_round_trip() {
     });
     roundtrip(&ToolsListResult {
         tools: vec![ToolDescription::new("a", "b")],
+        workspace_bound: Some(true),
+    });
+    roundtrip(&ToolsListResult {
+        tools: vec![],
+        workspace_bound: Some(false),
+    });
+    roundtrip(&ToolsListResult {
+        tools: vec![ToolDescription::new("a", "b")],
+        workspace_bound: None,
     });
     roundtrip(&ToolsSearchParams {
         session_id: session(),
@@ -887,6 +908,31 @@ fn tools_list_and_search_payloads_round_trip() {
         total_hidden_tools: 7,
         is_ready: true,
     });
+}
+
+#[test]
+fn tools_list_result_workspace_bound_defaults_when_absent() {
+    let parsed: ToolsListResult = serde_json::from_value(json!({
+        "tools": [{"name": "a", "description": "b"}]
+    }))
+    .expect("legacy tools.list payload must decode");
+    assert_eq!(parsed.workspace_bound, None);
+    assert_eq!(parsed.tools.len(), 1);
+    assert_eq!(parsed.tools[0].name, "a");
+}
+
+#[test]
+fn tools_list_result_workspace_bound_parses_handwritten_wire() {
+    for bound in [true, false] {
+        let parsed: ToolsListResult = serde_json::from_value(json!({
+            "tools": [{"name": "a", "description": "b"}],
+            "workspace_bound": bound
+        }))
+        .expect("tools.list payload with workspace_bound must decode");
+        assert_eq!(parsed.workspace_bound, Some(bound));
+        assert_eq!(parsed.tools.len(), 1);
+        assert_eq!(parsed.tools[0].name, "a");
+    }
 }
 
 #[test]

@@ -12,7 +12,7 @@ impl SessionActor {
                     "Not in a git repository. Project hooks require a git worktree root."
                         .to_string()
                 })?;
-        crate::agent::folder_trust::grant_folder_trust(&root);
+        xai_grok_workspace::folder_trust::grant_folder_trust(&root);
         Ok(root)
     }
 
@@ -80,6 +80,22 @@ impl SessionActor {
         } else {
             p.to_path_buf()
         }
+    }
+
+    /// Whether `name` resolves to a managed-policy (non-disableable) hook in
+    /// the live registry, keyed on the spec's typed `layer` — never on the name.
+    /// Fails open on a missing registry/name by design: a disable entry that
+    /// slips through is inert, because the dispatcher re-checks provenance at
+    /// run time — this modal check is UX, not the enforcement boundary.
+    pub(super) fn is_managed_policy_hook(&self, name: &str) -> bool {
+        self.hook_registry
+            .borrow()
+            .as_ref()
+            .is_some_and(|registry| {
+                registry
+                    .find_by_name(name)
+                    .is_some_and(|spec| spec.is_managed_policy())
+            })
     }
 
     // ── Hooks/plugins action handlers (pager modal) ──────────────────
@@ -188,12 +204,20 @@ impl SessionActor {
                     };
                 }
                 match crate::config::remove_hooks_path(&path) {
-                    Ok(()) => ActionOutcome {
+                    Ok(true) => ActionOutcome {
                         status: OutcomeStatus::Success,
                         message: {
                             let reload_msg = self.reload_hooks_impl().await;
                             format!("Removed hook path: {path}.\n{reload_msg}")
                         },
+                        requires_reload: false,
+                        requires_restart: false,
+                    },
+                    // Pathless copy: the selection already identifies
+                    // the source.
+                    Ok(false) => ActionOutcome {
+                        status: OutcomeStatus::NotFound,
+                        message: "Only user-added hook directories can be removed here.".to_owned(),
                         requires_reload: false,
                         requires_restart: false,
                     },
@@ -206,10 +230,20 @@ impl SessionActor {
                 }
             }
             HooksAction::Disable { hook_name } => {
+                // No internal spec names in user-facing copy.
+                if self.is_managed_policy_hook(&hook_name) {
+                    return ActionOutcome {
+                        status: OutcomeStatus::ValidationError,
+                        message: "This hook is enforced by managed policy and cannot be disabled."
+                            .to_owned(),
+                        requires_reload: false,
+                        requires_restart: false,
+                    };
+                }
                 match xai_grok_hooks::trust::disable_hook(&hook_name) {
                     Ok(()) => ActionOutcome {
                         status: OutcomeStatus::Success,
-                        message: format!("Disabled hook: {hook_name}"),
+                        message: "Hook disabled.".to_owned(),
                         requires_reload: false,
                         requires_restart: false,
                     },
@@ -225,13 +259,13 @@ impl SessionActor {
                 match xai_grok_hooks::trust::enable_hook(&hook_name) {
                     Ok(true) => ActionOutcome {
                         status: OutcomeStatus::Success,
-                        message: format!("Enabled hook: {hook_name}"),
+                        message: "Hook enabled.".to_owned(),
                         requires_reload: false,
                         requires_restart: false,
                     },
                     Ok(false) => ActionOutcome {
                         status: OutcomeStatus::NotFound,
-                        message: format!("Hook was not disabled: {hook_name}"),
+                        message: "Hook was not disabled.".to_owned(),
                         requires_reload: false,
                         requires_restart: false,
                     },
@@ -248,20 +282,34 @@ impl SessionActor {
                 disable,
             } => {
                 let mut toggled = 0usize;
+                let mut managed_skipped = 0usize;
                 for name in &hook_names {
+                    // Managed-policy hooks are exempt from bulk disable, same
+                    // rule as the per-hook Disable action.
+                    if disable && self.is_managed_policy_hook(name) {
+                        managed_skipped += 1;
+                        continue;
+                    }
                     let ok = if disable {
                         xai_grok_hooks::trust::disable_hook(name).is_ok()
                     } else {
-                        xai_grok_hooks::trust::enable_hook(name).is_ok()
+                        // Only an actual removal counts (Ok(false) = wasn't disabled).
+                        xai_grok_hooks::trust::enable_hook(name) == Ok(true)
                     };
                     if ok {
                         toggled += 1;
                     }
                 }
                 let action = if disable { "Disabled" } else { "Enabled" };
+                let mut message = format!("{action} {toggled}/{} hooks", hook_names.len());
+                if managed_skipped > 0 {
+                    message.push_str(&format!(
+                        " ({managed_skipped} enforced by managed policy, not disabled)"
+                    ));
+                }
                 ActionOutcome {
                     status: OutcomeStatus::Success,
-                    message: format!("{action} {toggled}/{} hooks", hook_names.len()),
+                    message,
                     requires_reload: false,
                     requires_restart: false,
                 }
@@ -694,14 +742,16 @@ impl SessionActor {
         // Extract all RefCell borrows into locals before the .await so
         // no Ref guard is alive across the suspension point.
         {
-            use crate::extensions::hooks::hook_spec_to_info;
+            use crate::extensions::hooks::hook_spec_to_info_with;
             let hooks = {
+                let disabled = xai_grok_hooks::trust::DisabledHooks::load();
+                let registered = crate::config::registered_hook_paths();
                 let reg = self.hook_registry.borrow();
                 match &*reg {
                     Some(registry) => registry
                         .all_hooks()
                         .iter()
-                        .map(|s| hook_spec_to_info(s))
+                        .map(|s| hook_spec_to_info_with(s, &disabled, &registered))
                         .collect(),
                     None => Vec::new(),
                 }
@@ -995,15 +1045,17 @@ impl SessionActor {
         // Notification hooks that also borrow these RefCells).
         let t_notify = std::time::Instant::now();
         {
-            use crate::extensions::hooks::hook_spec_to_info;
+            use crate::extensions::hooks::hook_spec_to_info_with;
 
             let hooks = {
+                let disabled = xai_grok_hooks::trust::DisabledHooks::load();
+                let registered = crate::config::registered_hook_paths();
                 let reg = self.hook_registry.borrow();
                 match &*reg {
                     Some(registry) => registry
                         .all_hooks()
                         .iter()
-                        .map(|s| hook_spec_to_info(s))
+                        .map(|s| hook_spec_to_info_with(s, &disabled, &registered))
                         .collect(),
                     None => Vec::new(),
                 }

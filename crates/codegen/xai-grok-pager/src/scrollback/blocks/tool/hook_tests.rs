@@ -3,8 +3,8 @@ use std::time::Duration;
 use ratatui::text::Span;
 
 use super::{
-    HookRunEntry, HookRunStatus, ToolCallHookData, render_hooks_inline_suffix,
-    render_stop_hooks_summary,
+    HookRunCounts, HookRunEntry, HookRunStatus, ToolCallHookData,
+    render_group_hook_counts_inline_suffix, render_hooks_inline_suffix, render_stop_hooks_summary,
 };
 
 fn run(status: HookRunStatus) -> HookRunEntry {
@@ -48,4 +48,24 @@ fn compact_suffix_keeps_blocked_and_failure_formatting() {
         text(render_stop_hooks_summary(&stop_groups).expect("stop suffix")),
         "stop  [hooks: 1/1]"
     );
+}
+
+#[test]
+fn zh_localization_group_hook_suffix_translates_fixed_status_labels() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let spans = render_group_hook_counts_inline_suffix(
+        HookRunCounts {
+            success: 2,
+            blocked: 1,
+            failed: 1,
+        },
+        &crate::theme::Theme::current(),
+        Some(&locale),
+    )
+    .expect("hook suffix");
+
+    assert_eq!(text(spans), "  [钩子：2 成功, 1 已阻止, 1 失败]");
 }

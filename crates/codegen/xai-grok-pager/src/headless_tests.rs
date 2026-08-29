@@ -202,7 +202,7 @@ fn drain_records_task_backgrounded_delivered_at_exit() {
     );
 }
 
-/// `begin_session` before the model/effort apply lets a post-open error carry the real context.
+/// `begin_session` runs before the model and effort are applied, so a post-open error carries the real context.
 #[test]
 fn post_open_error_carries_real_session_context() {
     let mut pre = reducer_for(OutputFormat::StreamingMessagesJson).unwrap();
@@ -286,7 +286,6 @@ fn headless_remote_miss_restores_conversation_instead_of_deferring_worktree() {
             RemoteMissPlan::DeferToWorktree { .. }
         ));
     }
-    // when asserting the conversation / in-place-refuse arms.
     let mut conv = headless_materialize_ctx(false, false);
     conv.allow_remote_restore = true;
     assert_eq!(
@@ -534,4 +533,26 @@ fn handler_answers_ext_method_instead_of_dropping() {
     let parsed: AskUserQuestionExtResponse =
         serde_json::from_str(resp.0.get()).expect("typed wire reply");
     assert!(matches!(parsed, AskUserQuestionExtResponse::Cancelled));
+}
+
+#[test]
+fn compact_failure_plain_output_localizes_fixed_chrome_only() {
+    let zh = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let failed = super::reducer::Lifecycle::CompactFailed {
+        error: "api\nfailed".into(),
+    };
+    assert_eq!(
+        failed.plain_message_with_locale(&zh),
+        "自动压缩失败：api failed"
+    );
+    assert_eq!(
+        failed.plain_message_with_locale(&crate::locale::LocaleContext::default()),
+        "Auto-compact failed - api failed"
+    );
+
+    let empty = super::reducer::Lifecycle::CompactFailed { error: "  ".into() };
+    assert_eq!(empty.plain_message_with_locale(&zh), "自动压缩失败。");
 }

@@ -2,6 +2,10 @@
 //! the TodoGate, date reminders, post-cancel interrupt framing, and
 //! between-turn completion reminders.
 use super::*;
+pub(super) fn wrap_in_reminder_tag(content: &str, tag: &str) -> ConversationItem {
+    let content = content.replace(&format!("</{tag}>"), &format!("<\\/{tag}>"));
+    ConversationItem::system_reminder(format!("<{tag}>\n{content}\n</{tag}>"))
+}
 /// Owned snapshot returned by [`SessionActor::collect_todo_gate_input`].
 ///
 /// The borrowed `TodoGateInput<'_>` consumed by [`evaluate_todo_gate`]
@@ -220,8 +224,9 @@ impl SessionActor {
         body.push_str(&format!(
             "\nIt runs in the background: status snapshots and the final result arrive as \
              reminders at turn starts, and the user can watch it in /workflow runs. If it pauses, \
-             it can be resumed by calling the workflow tool with resume_from_run_id: \
-             \"{run_id}\". Keep run ids internal — the user knows runs by display name. No \
+             it can be resumed by calling the workflow tool with source: \
+             {{ type: \"resume\", resume_from_run_id: \"{run_id}\" }}. Keep run ids internal — \
+             the user knows runs by display name. No \
              action needed unless the user asks."
         ));
         self.push_system_reminder(&body);
@@ -320,7 +325,8 @@ fn format_workflow_status_reminder(
                 };
                 let _ = write!(
                     buf,
-                    "\n  Resumable: call the workflow tool with resume_from_run_id: \"{}\"{}.",
+                    "\n  Resumable: call the workflow tool with source: {{ type: \"resume\", \
+                     resume_from_run_id: \"{}\" }}{}.",
                     run.run_id, budget_suffix
                 );
             }
@@ -452,8 +458,9 @@ fn format_workflow_completion_reminder(
             } else {
                 let _ = writeln!(
                     buf,
-                    "  Resumable: call the workflow tool with resume_from_run_id: \"{}\" \
-                     and a raised agent_budget (the resume is rejected while usage is at \
+                    "  Resumable: call the workflow tool with source: {{ type: \"resume\", \
+                     resume_from_run_id: \"{}\" }} and a raised agent_budget (the resume is \
+                     rejected while usage is at \
                      or over the cap).",
                     run.run_id
                 );
@@ -462,8 +469,9 @@ fn format_workflow_completion_reminder(
         if run.status == crate::session::workflow::tracker::WorkflowRunStatus::Failed {
             let _ = writeln!(
                 buf,
-                "  Resumable: call the workflow tool with resume_from_run_id: \"{}\" — \
-                 completed agents replay from the journal and the failed step re-executes.",
+                "  Resumable: call the workflow tool with source: {{ type: \"resume\", \
+                 resume_from_run_id: \"{}\" }} — completed agents replay from the journal and \
+                 the failed step re-executes.",
                 run.run_id
             );
         }
@@ -557,11 +565,22 @@ impl SessionActor {
     pub(super) fn reminder_wrapper_tag(&self) -> &'static str {
         xai_grok_tools::reminders::DEFAULT_REMINDER_TAG
     }
+    pub(super) fn wrap_hook_context(
+        &self,
+        context: &xai_grok_hooks::dispatcher::AdditionalContext,
+    ) -> ConversationItem {
+        wrap_in_reminder_tag(
+            &format!(
+                "Context from PreToolUse hook '{}':\n{}",
+                context.hook_name, context.text
+            ),
+            self.reminder_wrapper_tag(),
+        )
+    }
     /// Push a `<{tag}>`-wrapped user message.
     pub(super) fn push_system_reminder_with_tag(&self, content: &str, tag: &str) {
-        let content = content.replace(&format!("</{tag}>"), &format!("<\\/{tag}>"));
-        let message = ConversationItem::system_reminder(format!("<{tag}>\n{content}\n</{tag}>"));
-        self.chat_state_handle.push_user_message(message);
+        self.chat_state_handle
+            .push_user_message(wrap_in_reminder_tag(content, tag));
     }
     /// Mark completion IDs as reported in the shared
     /// `ReportedTaskCompletions` state so the per-tool-call
@@ -881,7 +900,7 @@ mod workflow_reminder_tests {
             .next()
             .unwrap()
             .trim_end();
-        assert!(reminder.contains("resume_from_run_id: \"wf_1\""));
+        assert!(reminder.contains("source: { type: \"resume\", resume_from_run_id: \"wf_1\" }"));
         assert!(rendered_detail.starts_with("first second "));
         assert!(rendered_detail.ends_with('…'));
         assert!(rendered_detail.len() <= WORKFLOW_RESULT_SUMMARY_REMINDER_CAP);

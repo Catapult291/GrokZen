@@ -1,6 +1,7 @@
 pub(crate) mod api_key_probe;
 pub(crate) mod attribution;
 mod auth_provider;
+pub(crate) mod backend;
 mod config;
 pub mod credential_provider;
 #[path = "devbox_login_stub.rs"]
@@ -13,6 +14,7 @@ mod jwt;
 pub(crate) mod manager;
 mod model;
 pub mod oidc;
+mod pre_tui;
 pub(crate) mod recovery;
 pub(crate) mod refresh;
 pub(crate) mod single_flight;
@@ -47,6 +49,7 @@ pub use flow::{
     run_cli_login, run_cli_logout, try_ensure_fresh_auth,
 };
 pub use jwt::{is_jwt_expired_or_near, parse_jwt_expiration};
+pub use pre_tui::{PreTuiLoginOutcome, maybe_run_pre_tui_external_login};
 mod meta;
 pub use error::{AuthError, RefreshTokenError, RefreshTokenFailedReason};
 pub use manager::{AuthManager, shared_api_key_provider};

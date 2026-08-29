@@ -699,7 +699,7 @@ pub use xai_grok_config::env_bool;
 /// unrecognized values at each source falling through). `remote` sits just
 /// above the default, mirroring `feature_flag` in `resolve_bool_flag`. Pure so
 /// it's unit-testable without mutating process env.
-fn resolve_compaction_mode_from(
+pub(crate) fn resolve_compaction_mode_from(
     env: Option<&str>,
     config: Option<&str>,
     remote: Option<&str>,
@@ -712,7 +712,7 @@ fn resolve_compaction_mode_from(
 }
 /// Compaction-detail precedence (env > config > remote settings > default). Pure.
 /// Controls the per-turn verbatim detail in `segments` mode (default `verbose`).
-fn resolve_compaction_detail_from(
+pub(crate) fn resolve_compaction_detail_from(
     env: Option<&str>,
     config: Option<&str>,
     remote: Option<&str>,
@@ -930,7 +930,7 @@ impl PluginsConfig {
             return;
         }
         let mut paths = Vec::new();
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = xai_dirs::home_dir() {
             paths.push(home.join(".claude").join("settings.json"));
         }
         for path in &paths {
@@ -1066,7 +1066,7 @@ pub struct ModelsConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_description: Option<String>,
     /// Model pin for next-prompt suggestions (tab-autocomplete ghost text).
-    /// Unset = remote pin, then the client hint / built-in `grok-build-0.1`
+    /// Unset = remote pin, then the client hint / built-in `grok-4.6`
     /// default with the catalog guard; see `ModelOverrideConfig::resolve`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_suggestion: Option<String>,
@@ -1155,6 +1155,9 @@ impl HubConfig {
         self.url.as_ref().is_some_and(|u| !u.trim().is_empty())
     }
 }
+/// Deprecated `[worktree_pool]` section. The pre-warmed worktree pool was
+/// deleted (never wired into production); the section is still parsed so
+/// existing user configs don't trip unknown-key warnings.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WorktreePoolConfig {
@@ -1494,6 +1497,10 @@ pub struct Config {
     pub subagents_max_depth: u32,
     #[serde(skip)]
     pub subagents_max_concurrent: usize,
+    /// Resolved concurrent subagent turn-sampling limit feeding the shared
+    /// semaphore. See [`crate::config::SubagentsConfig::resolve_sampling_limit`].
+    #[serde(skip)]
+    pub subagents_sampling_limit: usize,
     #[serde(skip)]
     pub subagents_limit_behavior:
         xai_grok_tools::implementations::grok_build::task::admission::LimitBehavior,
@@ -1589,7 +1596,7 @@ pub struct Config {
     /// (`default_session_summary_model`) when unset; see `ModelOverrideConfig::resolve`.
     #[serde(skip)]
     pub session_summary_model: Option<String>,
-    /// Image describe model (`grok-build` default via `ModelOverrideConfig::resolve`).
+    /// Image describe model (`grok-4.6` default via `ModelOverrideConfig::resolve`).
     #[serde(skip)]
     pub image_description_model: Option<String>,
     /// Next-prompt suggestion model pin (`env > [models] prompt_suggestion >
@@ -1819,6 +1826,8 @@ impl Default for Config {
             subagents_enabled: true,
             subagents_max_depth: crate::config::SubagentsConfig::DEFAULT_MAX_DEPTH,
             subagents_max_concurrent:
+                xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
+            subagents_sampling_limit:
                 xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
             subagents_limit_behavior: Default::default(),
             workflow_max_concurrent_agents:
@@ -2233,6 +2242,12 @@ impl Config {
             env(SubagentsConfig::ENV_MAX_CONCURRENT).as_deref(),
             sa.max_concurrent,
             remote.and_then(|r| r.subagents_max_concurrent),
+        );
+        self.subagents_sampling_limit = SubagentsConfig::resolve_sampling_limit(
+            env(SubagentsConfig::ENV_SAMPLING_LIMIT).as_deref(),
+            sa.sampling_limit,
+            remote.and_then(|r| r.subagents_sampling_limit),
+            self.subagents_max_concurrent,
         );
         self.subagents_limit_behavior = SubagentsConfig::resolve_limit_behavior(
             env(SubagentsConfig::ENV_LIMIT_BEHAVIOR).as_deref(),
@@ -3098,6 +3113,24 @@ pub(crate) fn resolve_mcp_auto_restart(
     feature_flag: Option<bool>,
 ) -> Resolved<bool> {
     BoolFlag::env("GROK_MCP_AUTO_RESTART")
+        .requirement(requirement)
+        .cli(cli)
+        .config(config)
+        .managed(managed)
+        .feature_flag(feature_flag)
+        .default(true)
+        .resolve()
+}
+/// Kill switch for the transient turn-resubmit arm. Standard `BoolFlag`
+/// precedence; env `GROK_TURN_TRANSIENT_RETRY`; default on.
+pub(crate) fn resolve_turn_transient_retry(
+    requirement: Option<bool>,
+    cli: Option<bool>,
+    config: Option<bool>,
+    managed: Option<bool>,
+    feature_flag: Option<bool>,
+) -> Resolved<bool> {
+    BoolFlag::env("GROK_TURN_TRANSIENT_RETRY")
         .requirement(requirement)
         .cli(cli)
         .config(config)
@@ -4701,7 +4734,7 @@ pub struct Features {
     pub image_gen_model_override: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_edit_model_override: Option<String>,
-    /// `summary` (default) | `transcript` | `segments`. `None` = defer to CLI /
+    /// `summary` | `transcript` | `segments` (default). `None` = defer to CLI /
     /// env (`GROK_COMPACTION_MODE`). Parsed via `CompactionMode::parse`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction_mode: Option<String>,
@@ -4744,6 +4777,10 @@ pub struct Features {
     /// does not report it as an unrecognized key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_auto_restart: Option<bool>,
+    /// Transient turn-retry kill switch (`None` = on). The resolver reads
+    /// raw TOML; declared only so `serde_ignored` allows the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_transient_retry: Option<bool>,
     /// Pager-side subscription to the `x.ai/mcp/server_status` push.
     ///
     /// When `true` (default), the pager subscribes to the per-server
@@ -4904,7 +4941,12 @@ pub(crate) fn resolve_credentials(
             info.base_url.clone(),
             xai_chat_state::AuthType::ApiKey,
         )
-    } else if let Some(key) = session_key {
+    } else if let Some(key) = session_key
+        && crate::auth::backend::AuthBackend::may_receive_session(
+            &crate::auth::backend::ActiveAuthBackend::default(),
+            &info.base_url,
+        )
+    {
         (
             Some(key.to_owned()),
             info.base_url.clone(),

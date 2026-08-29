@@ -1,4 +1,7 @@
-//! Modal dialogs and the [`ActiveModal`] enum.
+//! [`ActiveModal`] wraps concrete modal instances for storage on `AgentView`.
+//! Picker variants (`CommandPalette`, `ArgPicker`, `SessionPicker`, `DocPicker`, `DocViewer`) use [`ModalWindow`](super::modal_window) for chrome.
+//! Their entries render through [`render_picker_content`](super::picker::render_picker_content).
+//! `EditConfirm` is a bar-style overlay (not a popup).
 //!
 //! [`ActiveModal`] wraps concrete modal instances for storage on
 //! `AgentView`. Picker-based variants (`CommandPalette`, `ArgPicker`,
@@ -19,10 +22,10 @@ use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 /// A blocking confirmation dialog with typed results.
 ///
-/// `R` is the result type — each dialog use-case defines its own enum.
+/// `R` is the result type; each dialog use-case defines its own enum.
 /// Key-matching is generic; labels are computed per-variant at render time.
 pub struct ModalConfirmation<R> {
-    /// Available options (key → result). Labels are derived from `R` at render time.
+    /// Available options, each mapping a key to a result. Labels are derived from `R` at render time.
     pub options: Vec<ModalOption<R>>,
 }
 /// One option in a modal dialog.
@@ -41,13 +44,13 @@ impl<R> ModalConfirmation<R> {
 /// Result of the edit-confirmation modal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditConfirmResult {
-    /// Save changes (back to queue, or save & send if drain-blocked).
+    /// Save changes (back to queue, or save and send if drain-blocked).
     Save,
     /// Discard changes (revert to original; sends original if drain-blocked).
     Discard,
     /// Delete the prompt entirely from the queue.
     Delete,
-    /// Cancel — dismiss the dialog, stay in editing mode.
+    /// Cancel: dismiss the dialog, stay in editing mode.
     Cancel,
 }
 impl EditConfirmResult {
@@ -88,12 +91,12 @@ impl ModalConfirmation<EditConfirmResult> {
     }
 }
 /// Result of the reset-settings confirmation modal.
-/// `y` → Reset, `n`/`Esc`/`F2`/`Ctrl+,` → Cancel.
+/// `y` chooses Reset; `n`, `Esc`, `F2`, and `Ctrl+,` choose Cancel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResetSettingsResult {
     /// Restore the setting to its registered default.
     Reset,
-    /// Cancel — return to the Settings modal unchanged.
+    /// Cancel: return to the Settings modal unchanged.
     Cancel,
 }
 impl ResetSettingsResult {
@@ -105,8 +108,7 @@ impl ResetSettingsResult {
         }
     }
 }
-/// Shortcut IDs for the reset-confirm footer buttons (1-2, avoiding
-/// the extensions modal's 100+ range).
+/// Shortcut IDs for the reset-confirm footer buttons (1-2, avoiding the extensions modal's 100+ range).
 pub const RESET_CONFIRM_YES_ID: usize = 1;
 pub const RESET_CONFIRM_NO_ID: usize = 2;
 impl ModalConfirmation<ResetSettingsResult> {
@@ -162,9 +164,8 @@ pub struct CancelTurnViewState {
 }
 /// Returns a ready-to-open DocPicker modal for the how-to guides list.
 ///
-/// `previous_palette` is the saved command-palette state; when provided,
-/// pressing Esc in the doc picker restores that palette instead of
-/// closing the modal outright.
+/// `previous_palette` is the saved command-palette state.
+/// When provided, pressing Esc in the doc picker restores that palette instead of closing the modal outright.
 pub fn howto_list_modal(previous_palette: Option<PaletteSnapshot>) -> ActiveModal {
     let locale = crate::locale::UiLocale::parse(xai_grok_product::DEFAULT_UI_LOCALE)
         .unwrap_or(crate::locale::UiLocale::EnUs);
@@ -185,8 +186,7 @@ pub fn howto_list_modal_for(
 }
 /// The currently active modal dialog, if any.
 ///
-/// Each variant wraps a `ModalConfirmation<R>` with its concrete result
-/// type plus any context needed for resolution (e.g., pending focus target).
+/// Each variant wraps a `ModalConfirmation<R>` with its concrete result type plus any context needed for resolution (e.g., pending focus target).
 pub enum ActiveModal {
     /// Confirmation for leaving a dirty queued-prompt edit.
     EditConfirm {
@@ -206,8 +206,8 @@ pub enum ActiveModal {
     ArgPicker {
         /// Command name (e.g., "model", "theme").
         command: String,
-        /// Args query passed to `suggest_args` (empty = first phase; for `/model`,
-        /// a trailing-space query enters the reasoning-effort sub-menu).
+        /// Args query passed to `suggest_args`; empty means the first phase.
+        /// For `/model`, a trailing-space query enters the reasoning-effort sub-menu.
         args_query: String,
         /// Filtered items (re-filtered from original_items on query change).
         items: Vec<crate::slash::command::ArgItem>,
@@ -224,7 +224,7 @@ pub enum ActiveModal {
     SessionPicker {
         /// Unified picker state.
         state: crate::views::picker::PickerState,
-        /// Fetched session entries (None = not yet loaded).
+        /// Fetched session entries (None means not yet loaded).
         entries: Option<Vec<crate::app::app_view::SessionPickerEntry>>,
         /// Whether the session list is being fetched.
         loading: bool,
@@ -240,14 +240,18 @@ pub enum ActiveModal {
         content_loading: bool,
         /// Monotonically increasing sequence number for deep search requests.
         deep_search_seq: u64,
-        /// The search query `entries` were server-fetched with (`None` =
-        /// unfiltered fetch). See
-        /// [`crate::views::session_picker::effective_filter_query`].
+        /// Incarnation identity for fetch routing.
+        /// Constructed as a 0 placeholder; `dispatch_fetch_session_list`, which runs before any fetch exists, allocates the real generation.
+        /// 0 therefore never appears on a production request.
+        generation: u64,
+        /// Invalidates the modal's in-flight card-detail reads when its rows or filters change.
+        detail_seq: u64,
+        /// The search query `entries` were server-fetched with (`None` means an unfiltered fetch).
+        /// See [`crate::views::session_picker::effective_filter_query`].
         entries_query: Option<String>,
         /// Source filter for the modal session picker.
         source_filter: crate::views::session_picker::SourceFilter,
-        /// Session armed for delete via `d` (see
-        /// [`crate::views::session_picker::PendingDelete`]).
+        /// Session armed for delete via `d` (see [`crate::views::session_picker::PendingDelete`]).
         pending_delete: Option<crate::views::session_picker::PendingDelete>,
     },
     /// How-to documentation list modal (wider picker style).
@@ -269,22 +273,19 @@ pub enum ActiveModal {
         scroll: u16,
         /// Shared modal window chrome state.
         window: ModalWindowState,
-        /// Cached pre-rendered markdown lines + the width they were
-        /// rendered at. Invalidated when the content area width changes
-        /// (e.g. terminal resize) so lines are re-parsed at the new width.
+        /// Cached pre-rendered markdown lines and the width they were rendered at.
+        /// Invalidated when the content area width changes (e.g. terminal resize) so lines are re-parsed at the new width.
         cached_lines: Option<(u16, Vec<ratatui::text::Line<'static>>)>,
-        /// Palette snapshot shuttled from DocPicker, passed back when returning
-        /// to the doc list on Esc so the DocPicker can still restore the palette.
+        /// Palette snapshot carried from DocPicker, passed back on Esc so the DocPicker can still restore the palette.
         previous_palette: Option<PaletteSnapshot>,
-        /// When true, Esc closes the modal directly instead of returning
-        /// to the DocPicker list (used for /release-notes).
+        /// When true, Esc closes the modal directly instead of returning to the DocPicker list (used for /release-notes).
         standalone: bool,
     },
     /// All-shortcuts cheatsheet for the current view/state.
     /// Rendered via the unified picker (same look as CommandPalette).
     /// See `crate::views::shortcuts_help` for build/render/input logic.
     ShortcutsHelp {
-        /// Snapshot of the entries (section headers + hints) at open time.
+        /// Snapshot of the entries (section headers and hints) at open time.
         entries: Vec<crate::views::shortcuts_help::ShortcutsHelpEntry>,
         /// Unified picker state (search query, selection, scroll, hit areas).
         state: crate::views::picker::PickerState,
@@ -294,29 +295,28 @@ pub enum ActiveModal {
         filter_active: bool,
         /// Indices into CATEGORY_ORDER that are collapsed. Default: all except 0.
         collapsed_sections: std::collections::HashSet<usize>,
-        /// Rows whose inline help is expanded under the list (pattern A).
+        /// Rows whose inline help is expanded under the list.
         expanded_ids: std::collections::HashSet<crate::views::shortcuts_help::ExpandKey>,
-        /// Browse list vs in-modal detail page (pattern B).
+        /// Browse list vs in-modal detail page.
         mode: crate::views::shortcuts_help::ShortcutsHelpMode,
     },
     /// Memory browser modal (/memory).
     MemoryBrowser {
         state: Box<crate::views::memory_modal::MemoryModalState>,
     },
-    /// Settings modal (F2, /settings, palette). Boxed — large state.
+    /// Settings modal (F2, /settings, palette). Boxed because the state is large.
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
     },
-    /// Tabbed usage / session-info modal (`/usage`, `/session-info`,
-    /// `/context`, context-bar click). Boxed — holds fetched snapshots.
+    /// Tabbed usage / session-info modal (`/usage`, `/session-info`, `/context`, context-bar click).
+    /// Boxed because it holds fetched snapshots.
     UsageInfo {
         state: Box<crate::views::usage_modal::UsageInfoModalState>,
     },
     /// Reset-settings confirmation, stacked above Settings.
     ///
-    /// The underlying `SettingsModalState` is moved in/out so cancel
-    /// preserves the user's filter/scroll position. The setting key
-    /// lives only here (single source of truth for dispatch).
+    /// The underlying `SettingsModalState` is moved in/out so cancel preserves the user's filter/scroll position.
+    /// The setting key lives only here (single source of truth for dispatch).
     ResetSettingsConfirm {
         modal: ModalConfirmation<ResetSettingsResult>,
         /// Setting key being reset.
@@ -324,8 +324,8 @@ pub enum ActiveModal {
         /// Preserved settings state, restored by both choice branches.
         settings_state: Box<crate::views::settings_modal::SettingsModalState>,
     },
-    /// Modal preview for a `#` remember note. Shows the raw text immediately;
-    /// the LLM-enhanced version arrives asynchronously and can be toggled with Tab.
+    /// Modal preview for a `#` remember note.
+    /// Shows the raw text immediately; the LLM-enhanced version arrives asynchronously and can be toggled with Tab.
     RememberNoteReview {
         raw_content: String,
         enhanced_content: Option<String>,
@@ -335,14 +335,12 @@ pub enum ActiveModal {
         cached_lines: Option<(u16, Vec<ratatui::text::Line<'static>>)>,
         cwd: std::path::PathBuf,
         agent_id: crate::app::agent::AgentId,
-        /// Monotonic nonce to correlate async rewrite results with the modal
-        /// that requested them, preventing stale results from populating a
-        /// different note's review modal.
+        /// Monotonic nonce correlating async rewrite results with the modal that requested them.
+        /// It keeps stale results from populating a different note's review modal.
         rewrite_nonce: u64,
     },
 }
-/// Snapshot of the command palette state, saved when opening an arg picker
-/// and restored on Esc.
+/// Snapshot of the command palette state, saved when opening an arg picker and restored on Esc.
 #[derive(Debug, Clone)]
 pub struct PaletteSnapshot {
     pub entries: Vec<PaletteEntry>,
@@ -377,9 +375,8 @@ pub enum PaletteCommand {
     KeyboardShortcuts,
     /// Open the memory browser modal.
     Memory,
-    /// Open the Extensions modal on a specific tab. Used by palette
-    /// entries that don't have a corresponding slash command (e.g.
-    /// "Marketplace", "Skills") and to keep direct entries consistent.
+    /// Open the Extensions modal on a specific tab.
+    /// Used by palette entries with no corresponding slash command (e.g. "Marketplace", "Skills") and to keep direct entries consistent.
     OpenExtensionsTab(crate::views::extensions_modal::ExtensionsTab),
     /// Open the settings modal.
     OpenSettings,
@@ -925,7 +922,7 @@ pub struct ModalRenderResult {
     /// Hit areas for each button (for mouse click/hover).
     pub buttons: Vec<ModalButtonHit>,
 }
-/// Render the modal overlay: dim screen + styled bar at bottom.
+/// Render the modal overlay: dim the screen and draw a styled bar at the bottom.
 ///
 /// Layout of the bar:
 /// ```text
@@ -934,7 +931,7 @@ pub struct ModalRenderResult {
 ///
 /// - Message in `text_primary` bold
 /// - Each button: dark bg pill, lighter on hover
-/// - Screen above the bar is dimmed to `gray_dim` fg + `bg_base` bg
+/// - Screen above the bar is dimmed to `gray_dim` fg and `bg_base` bg
 ///
 /// `bar_area` is the 1-line rect where the bar renders (shortcuts bar slot).
 /// `dim_area` is everything above the bar (to be dimmed).
@@ -1154,8 +1151,8 @@ pub fn render_cancel_turn_panel_with_locale(
         crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
     }
 }
-/// Apply scroll-key dispatch for a DocViewer modal. Returns `true` if the key
-/// was handled (caller should return `InputOutcome::Changed`).
+/// Apply scroll-key dispatch for a DocViewer modal.
+/// Returns `true` if the key was handled (caller should return `InputOutcome::Changed`).
 pub fn apply_doc_scroll(code: crossterm::event::KeyCode, scroll: &mut u16) -> bool {
     use crossterm::event::KeyCode;
     match code {
@@ -1186,7 +1183,7 @@ pub fn apply_doc_scroll(code: crossterm::event::KeyCode, scroll: &mut u16) -> bo
         _ => false,
     }
 }
-/// Apply a signed line delta to a DocViewer scroll offset (positive = down).
+/// Apply a signed line delta to a DocViewer scroll offset (positive scrolls down).
 pub fn apply_doc_scroll_delta(scroll: &mut u16, lines: i32) {
     if lines == 0 {
         return;
@@ -1197,8 +1194,8 @@ pub fn apply_doc_scroll_delta(scroll: &mut u16, lines: i32) {
         *scroll = scroll.saturating_sub(lines.unsigned_abs() as u16);
     }
 }
-/// Apply mouse-wheel events to a DocViewer scroll offset. Returns `true` if
-/// the event was a scroll and the offset was updated.
+/// Apply mouse-wheel events to a DocViewer scroll offset.
+/// Returns `true` if the event was a scroll and the offset was updated.
 pub fn apply_doc_mouse_scroll(kind: crossterm::event::MouseEventKind, scroll: &mut u16) -> bool {
     use crossterm::event::MouseEventKind;
     match kind {
@@ -1406,7 +1403,7 @@ pub fn render_doc_picker_overlay(
         locale,
     );
 }
-/// Render a DocViewer overlay: modal window chrome + cached markdown content.
+/// Render a DocViewer overlay: modal window chrome and cached markdown content.
 #[allow(clippy::too_many_arguments)]
 pub fn render_doc_viewer_overlay(
     buf: &mut ratatui::buffer::Buffer,
@@ -1451,8 +1448,7 @@ pub fn render_doc_viewer_overlay(
         &doc_shortcuts,
     );
 }
-/// [`render_doc_viewer_overlay`] with caller-supplied footer shortcuts (the
-/// tutorial adds a next-topic hint).
+/// [`render_doc_viewer_overlay`] with caller-supplied footer shortcuts (the tutorial adds a next-topic hint).
 #[allow(clippy::too_many_arguments)]
 pub fn render_doc_viewer_overlay_with_shortcuts(
     buf: &mut ratatui::buffer::Buffer,

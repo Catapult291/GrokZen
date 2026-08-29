@@ -715,6 +715,7 @@ mod tests {
             worktree_label: None,
             last_turn_summary: None,
             last_recap: None,
+            session_kind: None,
             card_detail: None,
         }
     }
@@ -731,6 +732,8 @@ mod tests {
             content_results: None,
             content_loading: false,
             deep_search_seq: 0,
+            generation: 0,
+            detail_seq: 0,
             source_filter: xai_grok_pager::views::session_picker::SourceFilter::default(),
             pending_delete: None,
             entries_query: None,

@@ -305,6 +305,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
             x_grok_req_id: req.x_grok_req_id,
             x_grok_session_id: req.x_grok_session_id,
             x_grok_turn_idx: req.x_grok_turn_idx,
+            x_grok_transient_retry: req.x_grok_transient_retry,
             x_grok_agent_id: req.x_grok_agent_id,
             x_grok_deployment_id: req.x_grok_deployment_id,
             x_grok_user_id: req.x_grok_user_id,

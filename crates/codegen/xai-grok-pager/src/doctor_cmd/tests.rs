@@ -241,7 +241,7 @@ fn fake_standalone_facts_compose_through_shared_view() {
         false,
         RuntimeEvidence::Available(ColorLevel::TrueColor),
     );
-    let report = collect_report_with(snapshot);
+    let report = crate::diagnostics::view(snapshot.into());
 
     assert_eq!(report.issue_count(), 1);
     assert!(

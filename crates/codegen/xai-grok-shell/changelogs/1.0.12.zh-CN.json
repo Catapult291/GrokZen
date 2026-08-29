@@ -1,0 +1,57 @@
+[
+  {
+    "category": "performance",
+    "description": "**创建工作树**时会跳过复制过期的 reflog，从而提高速度。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**复制自动换行的表格单元格**时，不再在换行处插入多余空格。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**MCP 服务器连接**遇到临时故障时现在会重试，不再一直保持不可用状态。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "插入消息后**等待子智能体**时，不再被无关的后台工作阻塞。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**提示词块**现在会显示友好的钩子说明，而不是内部 ID。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**截断错误提示**不再建议用户要求更短的回答。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "包含推理内容的会话现在具有更准确的**上下文估算**。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "回退或切换模式后的 **token 用量**现在与服务器实际报告值一致，不再被高估。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "自动压缩开始时，**上下文进度条**现在会立即更新，不必等到压缩完成。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "Linux 上对 .NET 项目的**文件系统监控**不再创建过多监视器。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "后台任务或监控唤醒轮次仍在流式输出时，**自动回顾**不再出现。",
+    "breaking_change": false
+  }
+]

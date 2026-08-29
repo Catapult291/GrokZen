@@ -54,3 +54,4 @@
 | 24 | [使用量监控（外部 OpenTelemetry）](24-monitoring-usage.md) | 客户端 OTEL 导出 |
 | 25 | [状态栏](25-status-line.md) | 底部状态行：内置分段、命令脚本和标准输入 JSON 约定 |
 | 26 | [配置参考](26-config-reference.md) | `config.toml`、`managed_config.toml` 和 `requirements.toml` 的字段列表 |
+| 27 | [grok clone](27-grok-clone.md) | 通过 Grove 快速克隆仓库、浅克隆和完整历史 |

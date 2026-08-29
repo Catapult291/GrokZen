@@ -1,0 +1,87 @@
+[
+  {
+    "category": "features",
+    "description": "**无头会话**现在可以在恢复会话选择器中浏览，且不会混入默认历史记录。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "常见命令链和子命令的**权限请求**现在更加可靠。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "重启后，**被阻止的提示词**不再出现在会话历史记录或回滚区中。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**后台监控**不再具有 10 小时的默认超时。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "在某些终端中，位于右边缘的**鼠标输入**不再把字符输入到提示词中。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "现在可以配置新建交互式会话的**默认权限模式**。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**粘贴以换行结尾的文本**时，某些终端不再意外提交提示词。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "当分类器阻止交互式会话中的操作时，**自动模式**现在会显示权限卡片。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "在 Warp 中使用 Kitty 协议时，**图片预览**不再留下残影。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "展开的 **Execute 工具输出**在实时进度期间不再自动折叠。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "恢复会话后，**轮次耗时**现在会显示在会话历史记录中。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "执行 **/resume** 后，现在会显示轮次页脚（工作耗时、已取消、失败）。",
+    "breaking_change": false
+  },
+  {
+    "category": "performance",
+    "description": "**等待后台命令**现在会在进程退出后立即结束。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**/voice** 现在会在旧版 PipeWire 安装上回退到 `parec` 或 `arecord`。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**mkdir 和 touch** 现在不会在自动模式或安全命令列表中触发权限确认。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "在权限自动模式下，**子智能体消息**现在会被自动允许。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**无头会话**现在可通过启动提示自动允许权限请求。",
+    "breaking_change": false
+  }
+]

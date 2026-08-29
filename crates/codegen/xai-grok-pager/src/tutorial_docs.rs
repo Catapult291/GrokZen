@@ -1,9 +1,7 @@
 //! Onboarding tutorial content (embedded markdown).
 //!
-//! Short, curated topics shown by the `/tutorial` overlay (strictly opt-in —
-//! nothing auto-shows). Deliberately separate from [`crate::docs`] (the full how-to
-//! guides): these pages are bite-size intros that point at the guides for
-//! depth.
+//! Short, curated topics shown by the `/tutorial` overlay (strictly opt-in; nothing auto-shows).
+//! Deliberately separate from [`crate::docs`] (the full how-to guides): these pages are bite-size intros that point at the guides for depth.
 
 /// A compile-time tutorial topic. All fields are `&'static str`.
 #[derive(Debug)]
@@ -207,8 +205,7 @@ mod tests {
 
     #[test]
     fn go_deeper_titles_resolve_to_real_guides() {
-        // `d` on a topic page opens this guide; a typo'd title would turn
-        // the shortcut into a silent no-op.
+        // `d` on a topic page opens this guide; a typo'd title would turn the shortcut into a silent no-op
         for t in TUTORIAL_TOPICS {
             if let Some(id) = t.go_deeper {
                 assert!(
@@ -231,8 +228,8 @@ mod tests {
 
     #[test]
     fn topics_stay_bite_size() {
-        // The tutorial promises quick reads — keep each page short. Bump this
-        // limit only after re-checking a page still reads in under a minute.
+        // The tutorial promises quick reads; keep each page short
+        // Bump this limit only after re-checking a page still reads in under a minute
         for t in TUTORIAL_TOPICS {
             let lines = t.content.lines().count();
             assert!(

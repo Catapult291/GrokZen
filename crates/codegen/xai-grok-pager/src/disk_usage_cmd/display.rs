@@ -1,5 +1,5 @@
-//! Pure renderer over [`DiskUsageReport`]. `xai_grok_config::grok_home()`,
-//! whose first call creates the home, must stay out of this module.
+//! Pure renderer over [`DiskUsageReport`].
+//! `xai_grok_config::grok_home()`, whose first call creates the home, must stay out of this module.
 
 use std::io::Write;
 use std::path::Path;
@@ -258,8 +258,7 @@ pub fn print_report_with_locale(
         }
     }
 
-    // gc's age pass needs `--max-age` and walks registry records, so neither
-    // half of the hint holds for both row kinds.
+    // gc's age pass needs `--max-age` and walks registry records, so neither half of the hint holds for both row kinds
     if report.worktrees_dominate() && !report.worktrees.is_empty() {
         writeln!(out)?;
         if report.worktrees.iter().any(WorktreeUsage::is_tracked) {
@@ -280,7 +279,7 @@ pub fn print_report_with_locale(
                 text(
                     locale,
                     "du.hint.untracked",
-                    "Untracked rows are not in the registry, so gc never visits them. Remove one with `grok worktree rm --dry-run <path>`, then without `--dry-run`."
+                    "Untracked rows are not in the registry, so gc never visits them. Remove one with `grok-zh worktree rm --dry-run <path>`, then without `--dry-run`."
                 )
             )?;
         }

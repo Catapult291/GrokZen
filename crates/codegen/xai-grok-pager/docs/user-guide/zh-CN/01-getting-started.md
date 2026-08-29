@@ -16,7 +16,7 @@ Agent Client Protocol（ACP）集成到编辑器中。
 
 社区 Windows 包由本仓库 Releases 和 `CI` 工作流生成。
 Release ZIP 下载后只需解压一次；所有 `release-v*` 包（包括
-`release-v1.0.8-rc.1`）需先打开唯一的
+`release-v1.0.12-rc.1`）需先打开唯一的
 `grok-zh-<version>-windows-x86_64-gnu` 目录，旧版与 `v1.0.8` 桥接包则直接使用
 解压目录。包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
 `grok-zh`、`agent-zh`，并支持由用户显式接管 `grok`、`agent`。完整说明也会
@@ -48,6 +48,16 @@ grok-zh --version
 自动隐藏。版本严格使用与上游一致的三段 SemVer，不定义第四段社区修订号。
 随后重新运行 `grok-zh`。默认通道为稳定版；`grok-zh update --alpha` 可显式选择预发布版，
 `grok-zh update --stable` 可切回稳定版。
+
+在 Grove 配置中启用 `[clone] enabled = true` 后，可以通过 Grove 提取仓库
+（macOS 使用 NFS，Linux 使用 FUSE）：
+
+```bash
+grok-zh clone <url> [dir]
+```
+
+默认会对所选分支进行深度为 1 的检出。需要完整历史时请传入
+`--full-history`。详情见 [grok clone](27-grok-clone.md)。
 
 ---
 

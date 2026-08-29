@@ -591,6 +591,39 @@ fn subagent_tool_filter_removes_ask_user_question() {
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].name, "read_file");
 }
+#[test]
+fn inherited_child_toolset_cannot_reintroduce_workflow() {
+    let mut tools = vec![
+            xai_grok_sampling_types::ToolSpec {
+                name: "read_file".to_owned(),
+                description: None,
+                parameters: serde_json::json!({}),
+            },
+            xai_grok_sampling_types::ToolSpec {
+                name: "workflow".to_owned(),
+                description: None,
+                parameters: serde_json::json!({}),
+            },
+            xai_grok_sampling_types::ToolSpec {
+                name: "GrokBuild:workflow".to_owned(),
+                description: None,
+                parameters: serde_json::json!({}),
+            },
+            xai_grok_sampling_types::ToolSpec {
+                name: "run_terminal_cmd".to_owned(),
+                description: None,
+                parameters: serde_json::json!({}),
+            },
+        ];
+    strip_workflow_tool(&mut tools);
+    assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["read_file", "run_terminal_cmd"]
+        );
+}
 /// The gate keeping a worktree must leave no resume pointer. A pointer sends
 /// resume down the rehydrate path, which deletes the directory and rebuilds
 /// it from a snapshot that, by construction, lacks whatever kept it.
@@ -3104,14 +3137,6 @@ fn resolve_inherited_pool_missing_parent_returns_none() {
 /// mcpServers, but they do inherit already-connected parent servers.
 #[test]
 fn plugin_agents_inherit_parent_mcp_pool_by_default() {
-    assert!(
-            !super::agent_owned_mcp_servers_allowed(true),
-            "plugin agents must not declare agent-owned mcpServers"
-        );
-    assert!(
-            super::agent_owned_mcp_servers_allowed(false),
-            "non-plugin agents may declare agent-owned mcpServers"
-        );
     let pool = make_pool(&["atlassian", "github"]);
     let inherited = super::resolve_inherited_mcp_pool(
             Some(pool),

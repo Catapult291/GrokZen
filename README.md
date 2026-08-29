@@ -26,12 +26,12 @@
 
 - 官方 Grok Build 的产品介绍与服务说明见 [x.ai/cli](https://x.ai/cli)。
 - 本仓库不是 SpaceXAI 官方发行版，也不代表官方翻译或服务承诺。
-- `SOURCE_REV` 记录本仓库源码所对应的官方 monorepo 提交；发布时还会记录 Fork 的 Git 提交和工作树状态。
+- `SOURCE_REV` 记录本仓库源码所对应的官方 monorepo 提交；发布时还会在构建信息中记录 Fork 的 Git 提交。
 - 模型可用性、账号权限、订阅、远程会话、搜索、语音及其他在线能力依赖官方服务端，社区 Fork 无法保证。
 
 ## 当前状态
 
-当前稳定版为 `v1.0.5`，提供 Windows x86_64 GNU 完整 ZIP。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) 下载。
+当前稳定版为 `v1.0.8` Windows 桥接版，提供 Windows x86_64 GNU 完整 ZIP。已发布的 `v1.0.5` 客户端会先升级到该桥接版；从 `v1.0.8` 起，更新器才能继续识别并升级到后续 `release-v*` 版本。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) 下载。
 
 `zh-dev` 的统一 [CI 工作流](https://github.com/JoyElliot/grok-build-Chinese/actions/workflows/zh-dev-windows-preview.yml)
 同时构建 Windows x64 GNU、Linux x86_64 GNU 与 macOS ARM64 预览 Artifact。预览产物只用于
@@ -61,7 +61,7 @@
 
 正式 Tag 工作流会在 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
 中发布完整 Windows ZIP；`CI` 工作流仍会上传短期 Actions Artifact。
-解压完整包后，所有 `release-v*` 包（包括 `release-v1.0.8-rc.1`）都会得到唯一的
+解压完整包后，所有 `release-v*` 包（包括 `release-v1.0.12-rc.1`）都会得到唯一的
 `grok-zh-<version>-windows-x86_64-gnu` 目录；进入该目录再双击下列入口。
 旧版与 `v1.0.8` 桥接包仍是兼容所需的扁平结构，可在解压目录直接双击：
 
@@ -119,8 +119,8 @@ Linux 包面向 `x86_64-unknown-linux-gnu`。先在归档旁完成外层 SHA-256
 `${GROK_HOME:-$HOME/.grok}`，不会使用 `sudo`、修改 shell 配置或写入
 `/usr/local/bin`。
 
-Linux 自动更新首先在 `release-v1.0.8-rc.1` 等发布候选版本中验收，并从
-`release-v1.0.9` 起加入稳定版六资产契约；稳定 `v1.0.8` 是专供旧 `v1.0.5`
+Linux 自动更新首先在 `release-v1.0.12-rc.1` 等发布候选版本中验收；后续稳定
+`release-v*` 继续使用三平台六资产契约。稳定 `v1.0.8` 是专供旧 `v1.0.5`
 Windows 客户端迁移的两资产桥接版本，不包含 macOS 或 Linux 资产。更新器会严格校验不可变 Release、GitHub digest、USTAR 结构、权限、包内清单和
 候选版本，再把新的不可变目标原子切换到入口。WSL 应安装到发行版 ext4 的 `$HOME`，
 不要把受管目录放到无法落实所有者或 `0700` 权限的 DrvFS 挂载。完整说明见
@@ -182,8 +182,9 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 
 绿色测试包还会在 `grok-zh.exe` 同目录携带 `rg.exe`。社区版搜索入口优先使用该旁载工具，缺失时再回退到系统 `PATH`；这只隔离程序安装文件，不改变两个程序共用 `~/.grok` 数据的约定。
 
-正式 Windows 发布仍需补齐 MSVC 构建、代码签名、安装包和 DLL 闭包验证；社区自动更新链
-只消费本仓库 Releases 中经过平台资产集合、双层哈希、归档布局和候选程序版本校验的完整包。
+当前 Windows 社区包采用 GNU 工具链且未做代码签名，不提供 MSVC 或传统安装器；正式工作流已完成
+完整 ZIP、DLL 闭包、双层哈希、归档布局和候选程序版本校验。社区自动更新链只消费本仓库
+Releases 中通过这些门禁的平台资产。
 
 ## 共享数据与兼容约定
 
@@ -208,6 +209,10 @@ cargo build --frozen --target x86_64-pc-windows-gnu `
 - 英文上游用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/README.md)
 - 贡献说明：[`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)
 - 安全策略：[`SECURITY.zh-CN.md`](SECURITY.zh-CN.md)
+- 1.0.12 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.12.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.12.zh-CN.md)
+- 1.0.11 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.11.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.11.zh-CN.md)
+- 1.0.10 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.10.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.10.zh-CN.md)
+- 1.0.9 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.9.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.9.zh-CN.md)
 - 1.0.8 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.8.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.8.zh-CN.md)
 - 1.0.7 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.7.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.7.zh-CN.md)
 - 1.0.6 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.6.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.6.zh-CN.md)

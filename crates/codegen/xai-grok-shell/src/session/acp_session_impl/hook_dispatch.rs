@@ -34,7 +34,8 @@ pub(super) fn cancellation_category_to_wire_string(
 
 /// Map shell-internal `ToolOutcome` to the hub protocol's `ToolCallOutcome`.
 ///
-/// The shell tracks 9 granular outcome variants; the hub protocol has 3:
+/// The shell's granular `ToolOutcome` variants collapse to the hub protocol's
+/// three:
 /// - `Success` → tool executed and returned a result
 /// - `Error` → tool failed to execute or was invalid
 /// - `Cancelled` → tool never ran (permission, doom-loop, hook, followup)
@@ -110,6 +111,21 @@ impl SessionActor {
     pub(super) async fn send_hook_annotation(&self, message: &str) {
         self.send_xai_notification(XaiSessionUpdate::HookAnnotation {
             message: message.to_string(),
+            kind: None,
+        })
+        .await;
+    }
+
+    /// Send fixed shell-owned hook chrome with provenance so clients may
+    /// localize it without mistaking arbitrary hook output for built-in text.
+    pub(super) async fn send_hook_annotation_with_kind(
+        &self,
+        kind: crate::extensions::notification::HookAnnotationKind,
+        message: &str,
+    ) {
+        self.send_xai_notification(XaiSessionUpdate::HookAnnotation {
+            message: message.to_string(),
+            kind: Some(kind),
         })
         .await;
     }
@@ -192,6 +208,18 @@ impl SessionActor {
             runs,
         })
         .await;
+
+        for r in results {
+            let system_message = match r {
+                HookRunResult::Success { system_message, .. }
+                | HookRunResult::Blocked { system_message, .. }
+                | HookRunResult::Failed { system_message, .. } => system_message.as_deref(),
+                HookRunResult::Skipped { .. } => None,
+            };
+            if let Some(message) = system_message.map(str::trim).filter(|m| !m.is_empty()) {
+                self.send_hook_annotation(message).await;
+            }
+        }
     }
 
     /// Returns the resolved workspace root for hook envelopes.
@@ -245,6 +273,8 @@ impl SessionActor {
             return;
         };
         let ctx = self.hook_run_ctx();
+        // Prompt-gate events go through dispatch_prompt_submit_hook;
+        // dispatch_non_blocking debug-asserts observe-only.
         let results =
             xai_grok_hooks::dispatcher::dispatch_non_blocking(&registry, event, &envelope, &ctx)
                 .await;
@@ -252,6 +282,44 @@ impl SessionActor {
             .await;
         self.emit_hook_executed_telemetry(&event.to_string(), tool_name, &results)
             .await;
+    }
+
+    /// Enforcement scope for a prompt-gate block: only a real user prompt on
+    /// a top-level session. The event fires for every origin, but synthetic
+    /// wakes and subagent sessions run the gate observe-only.
+    pub(super) fn should_enforce_prompt_block(
+        &self,
+        policy: &xai_agent_lifecycle::InputPolicy,
+    ) -> bool {
+        policy.authority.is_human_intent() && !self.startup_hints.is_subagent
+    }
+
+    /// Run the `UserPromptSubmit` prompt gate: observe client hooks, then the
+    /// on-disk registry, with the shared scrollback and telemetry side
+    /// effects. Returns the gate verdict; the caller decides whether to
+    /// enforce it (`Block` rejects the prompt).
+    pub(super) async fn dispatch_prompt_submit_hook(
+        &self,
+        payload: xai_grok_hooks::event::HookPayload,
+        prompt_id: Option<&str>,
+    ) -> xai_grok_hooks::result::PromptDecision {
+        let event = xai_grok_hooks::event::HookEventName::UserPromptSubmit;
+        if !self.may_have_hooks_for(event) {
+            return xai_grok_hooks::result::PromptDecision::Allow;
+        }
+        // Fires observe-only client hooks before (and independent of) the on-disk registry guard below.
+        let envelope = self.fire_hook(event, prompt_id.map(|s| s.to_string()), payload);
+        let Some(registry) = self.hook_registry.borrow().clone() else {
+            return xai_grok_hooks::result::PromptDecision::Allow;
+        };
+        let ctx = self.hook_run_ctx();
+        let gate =
+            xai_grok_hooks::dispatcher::dispatch_prompt_gate(&registry, &envelope, &ctx).await;
+        self.send_hook_execution(&event.to_string(), None, prompt_id, &gate.results)
+            .await;
+        self.emit_hook_executed_telemetry(&event.to_string(), None, &gate.results)
+            .await;
+        gate.decision
     }
 
     pub(super) async fn emit_hook_executed_telemetry(
@@ -320,6 +388,7 @@ mod notification_hook_filter_tests {
 
         let annotation = XaiSessionUpdate::HookAnnotation {
             message: "running hooks".into(),
+            kind: None,
         };
         assert!(notification_hook_for_update(&annotation).is_none());
     }

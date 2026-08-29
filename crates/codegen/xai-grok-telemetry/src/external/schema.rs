@@ -123,6 +123,7 @@ pub enum ExternalKey {
     // Tools
     ToolName,
     Success,
+    HookRewrote,
     FileExtension,
     ToolParameters,
     FilePath,
@@ -204,6 +205,7 @@ impl ExternalKey {
             Self::StatusCode => "status_code",
             Self::ToolName => "tool_name",
             Self::Success => "success",
+            Self::HookRewrote => "hook_rewrote",
             Self::FileExtension => "file_extension",
             Self::ToolParameters => "tool_parameters",
             Self::FilePath => "file_path",
@@ -278,6 +280,7 @@ pub(crate) const ALL_KEYS: &[ExternalKey] = &[
     ExternalKey::StatusCode,
     ExternalKey::ToolName,
     ExternalKey::Success,
+    ExternalKey::HookRewrote,
     ExternalKey::FileExtension,
     ExternalKey::ToolParameters,
     ExternalKey::FilePath,
@@ -611,6 +614,7 @@ pub(crate) const BUILTIN_TOOL_NAMES: &[&str] = &[
     "todo_write",
     "task",
     "spawn_subagent",
+    "send_subagent_message",
     "web_search",
     "web_fetch",
     "lsp",
@@ -678,6 +682,8 @@ pub(crate) fn access_kind_label(k: events::AccessKind) -> &'static str {
         events::AccessKind::Grep => "grep",
         events::AccessKind::Mcp => "mcp",
         events::AccessKind::Web => "web",
+        events::AccessKind::AgentMessage => "agent_message",
+        events::AccessKind::Other => "other",
     }
 }
 
@@ -686,20 +692,6 @@ pub(crate) fn permission_mode_label(m: crate::enums::PermissionMode) -> &'static
         crate::enums::PermissionMode::Ask => "ask",
         crate::enums::PermissionMode::AlwaysApprove => "always_approve",
         crate::enums::PermissionMode::Auto => "auto",
-    }
-}
-
-fn tool_outcome_label(o: &xai_grok_session_events::types::ToolOutcome) -> &'static str {
-    use xai_grok_session_events::types::ToolOutcome;
-    match o {
-        ToolOutcome::Success => "success",
-        ToolOutcome::Error => "error",
-        ToolOutcome::PermissionRejected => "permission_rejected",
-        ToolOutcome::PermissionCancelled => "permission_cancelled",
-        ToolOutcome::Followup => "followup",
-        ToolOutcome::HookDenied => "hook_denied",
-        ToolOutcome::InvalidTool => "invalid_tool",
-        ToolOutcome::Cancelled => "cancelled",
     }
 }
 
@@ -900,16 +892,15 @@ pub fn map_api_error(ev: &events::ApiError) -> Option<ExternalRecord> {
 
 /// `ToolCallCompleted` → `grok_code.tool_result` + `tool.usage`.
 pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord> {
-    use xai_grok_session_events::types::ToolOutcome;
     let sanitized = sanitize_tool_name(&ev.tool_name);
-    let outcome = tool_outcome_label(&ev.outcome);
+    // The snake_case wire label from `strum::IntoStaticStr`, so a new variant
+    // cannot drift from a hand-written arm.
+    let outcome: &'static str = ev.outcome.into();
     let mut rec = ExternalRecord::event(ExternalEventName::ToolResult)
         .attr(ExternalKey::ToolName, sanitized)
         .attr(ExternalKey::Outcome, outcome)
-        .attr(
-            ExternalKey::Success,
-            matches!(ev.outcome, ToolOutcome::Success),
-        )
+        .attr(ExternalKey::Success, ev.outcome.ran_successfully())
+        .attr(ExternalKey::HookRewrote, ev.hook_rewrote)
         .attr(ExternalKey::DurationMs, ev.duration_ms)
         .gated(
             ExternalKey::ToolName,
@@ -1151,8 +1142,8 @@ pub fn map_agent_connect(ev: &events::AgentConnect) -> Option<ExternalRecord> {
     Some(rec)
 }
 
-/// `StartupComplete` → the total histogram (no external log event).
-pub fn map_startup_complete(ev: &events::StartupComplete) -> Option<ExternalRecord> {
+/// `StartupCompleted` → the total histogram (no external log event).
+pub fn map_startup_completed(ev: &events::StartupCompleted) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::default().metric(MetricIncrement::StartupTotal {
             duration_ms: ev.total_ms,
@@ -1172,4 +1163,17 @@ pub fn map_model_switched(ev: &events::ModelSwitched) -> Option<ExternalRecord> 
             .attr(ExternalKey::Success, ev.success)
             .attr_opt(ExternalKey::ErrorCode, ev.error_code.as_deref()),
     )
+}
+
+#[cfg(test)]
+mod access_kind_label_tests {
+    use super::*;
+
+    #[test]
+    fn agent_message_has_dedicated_label() {
+        assert_eq!(
+            access_kind_label(events::AccessKind::AgentMessage),
+            "agent_message"
+        );
+    }
 }

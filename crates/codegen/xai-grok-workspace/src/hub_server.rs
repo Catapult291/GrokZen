@@ -1258,9 +1258,10 @@ impl ToolServerHandler for WorkspaceRpcHandler {
         let sid = params.session_id.as_str();
         self.workspace.teardown_session_mcp(sid).await;
         self.workspace.on_session_ended(sid);
-        let (became_empty, start_drain) = {
+        let (became_empty, start_drain, removed) = {
             let mut sessions = self.workspace.shared.sessions.write();
-            if let Some(session) = sessions.remove(sid) {
+            let removed = sessions.remove(sid);
+            if let Some(session) = &removed {
                 session.abort_system_notify_producers();
                 session.shutdown_terminal_backend();
                 session.shutdown_browser_service();
@@ -1272,8 +1273,11 @@ impl ToolServerHandler for WorkspaceRpcHandler {
             if start {
                 self.workspace.activity_tracker().set_draining();
             }
-            (empty, start)
+            (empty, start, removed)
         };
+        if let Some(session) = removed {
+            self.workspace.invoke_unbind_hook(&session);
+        }
         if !start_drain {
             if became_empty {
                 tracing::info!(

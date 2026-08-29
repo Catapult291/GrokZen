@@ -503,7 +503,7 @@ pub fn installed_on_disk_version() -> Option<String> {
     #[cfg(unix)]
     {
         let app = if cfg!(feature = "community-build") {
-            xai_grok_home::resolve_grok_home()?
+            xai_dirs::resolve_grok_home()?
                 .join("bin")
                 .join(xai_grok_product::CLI_NAME)
         } else {
