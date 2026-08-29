@@ -387,6 +387,56 @@ async fn chat_completions_collect_synthesizes_reasoning_sibling() {
     );
 }
 
+/// Collect-path pin: the default policy never salvages text-only Length —
+/// direct callers rely on `MaxTokensTruncation` over a silently truncated `Ok`.
+#[tokio::test]
+async fn conversation_collect_default_policy_fails_length_finish() {
+    let events = vec![
+        SseEvent::data(
+            json!({
+                "id": "chatcmpl-len",
+                "object": "chat.completion.chunk",
+                "created": 1234567890,
+                "model": "grok-test",
+                "choices": [{
+                    "index": 0,
+                    "delta": { "role": "assistant", "content": "truncated answ" },
+                    "finish_reason": null
+                }]
+            })
+            .to_string(),
+        ),
+        SseEvent::data(
+            json!({
+                "id": "chatcmpl-len",
+                "object": "chat.completion.chunk",
+                "created": 1234567890,
+                "model": "grok-test",
+                "choices": [{
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "length"
+                }]
+            })
+            .to_string(),
+        ),
+        SseEvent::data("[DONE]"),
+    ];
+    let server = MockInferenceServer::start().await.unwrap();
+    server.enqueue_response("/v1/chat/completions", ScriptedResponse::sse(events));
+    let client = create_test_client(&server.url(), ApiBackend::ChatCompletions);
+
+    let request = ConversationRequest::from_items(vec![ConversationItem::user("question")]);
+    let err = client
+        .conversation_collect(request)
+        .await
+        .expect_err("default LengthPolicy must reject a text-only Length stop");
+    assert!(
+        matches!(err, SamplingError::MaxTokensTruncation),
+        "expected MaxTokensTruncation, got {err:?}"
+    );
+}
+
 /// Upgrade path: a legacy chat-completions session on disk —
 /// an assistant carrying inline `reasoning: {text}` — must, when loaded,
 /// reconstruct a sibling Reasoning item, which then folds into
@@ -1179,9 +1229,9 @@ async fn test_responses_api_request_format() {
 }
 
 /// The sampler owns the doom-loop opt-in: setting
-/// `SamplerConfig::doom_loop_recovery` puts `x-grok-doom-loop-check` on the
-/// wire AND arms the collector, and the server's named check event is
-/// absorbed mid-stream without disturbing the typed event flow.
+/// `SamplerConfig::doom_loop_recovery` puts the legacy and exact-repetition
+/// reporting headers on the wire and arms the shared collector. The server's
+/// named check event is absorbed without disturbing the typed event flow.
 #[tokio::test]
 async fn test_doom_loop_check_enabled_sends_header_and_absorbs_check_event() {
     use xai_grok_sampling_types::doom_loop::{DOOM_LOOP_CHECK_EVENT_TYPE, SAMPLE_CHECK_EVENT_DATA};
@@ -1217,6 +1267,7 @@ async fn test_doom_loop_check_enabled_sends_header_and_absorbs_check_event() {
     let logged = server.requests().pop().unwrap();
     assert!(logged.path.contains("/responses"));
     assert_eq!(logged.header("x-grok-doom-loop-check"), Some("1024"));
+    assert_eq!(logged.header("x-grok-exact-repetition-check"), Some("64"));
 }
 
 /// With the check disabled no header goes on the wire, and check frames from
@@ -1258,6 +1309,7 @@ async fn test_doom_loop_check_disabled_sends_no_header_and_drops_check_frames() 
     let logged = server.requests().pop().unwrap();
     assert!(logged.path.contains("/responses"));
     assert_eq!(logged.header("x-grok-doom-loop-check"), None);
+    assert_eq!(logged.header("x-grok-exact-repetition-check"), None);
 }
 
 // ============================================================================

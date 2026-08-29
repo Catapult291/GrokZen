@@ -22,11 +22,11 @@ const SLOW_PHASE_WARN_AFTER: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum StartupPhase {
-    LoadConfig,
+    ConfigLoad,
     ManagedPolicy,
     Bootstrap,
     ModelCatalog,
-    SpawnWorker,
+    WorkerSpawn,
     LeaderConnect,
     AcpInitialize,
     EagerAuth,
@@ -39,6 +39,56 @@ impl StartupPhase {
         self.into()
     }
 }
+
+macro_rules! span_table {
+    ($visibility:vis fn $name:ident, fn $under:ident($enum_name:ident) { $($variant:ident => $label:literal),* $(,)? }) => {
+        $visibility fn $name(value: $enum_name) -> tracing::Span {
+            match value {
+                $($enum_name::$variant => tracing::info_span!($label),)*
+            }
+        }
+        $visibility fn $under(value: $enum_name, parent: &tracing::Span) -> tracing::Span {
+            match value {
+                $($enum_name::$variant => tracing::info_span!(parent: parent, $label),)*
+            }
+        }
+    };
+    ($visibility:vis fn $name:ident($enum_name:ident, parent) { $($variant:ident => $label:literal),* $(,)? }) => {
+        $visibility fn $name(value: $enum_name, parent: &tracing::Span) -> tracing::Span {
+            match value {
+                $($enum_name::$variant => tracing::info_span!(parent: parent, $label),)*
+            }
+        }
+    };
+    ($visibility:vis fn $name:ident($enum_name:ident) { $($variant:ident => $label:literal),* $(,)? }) => {
+        $visibility fn $name(value: $enum_name) -> tracing::Span {
+            match value {
+                $($enum_name::$variant => tracing::info_span!($label),)*
+            }
+        }
+    };
+}
+pub(crate) use span_table;
+
+span_table!(fn phase_span(StartupPhase, parent) {
+    ConfigLoad => "startup.config_load",
+    ManagedPolicy => "startup.managed_policy",
+    Bootstrap => "startup.bootstrap",
+    ModelCatalog => "startup.model_catalog",
+    WorkerSpawn => "startup.worker_spawn",
+    LeaderConnect => "startup.leader_connect",
+    AcpInitialize => "startup.acp_initialize",
+    EagerAuth => "startup.eager_auth",
+    AppInit => "startup.app_init",
+    SessionCreate => "startup.session_create",
+});
+
+span_table!(pub(crate) fn subphase_span(Subphase, parent) {
+    SessionLoad => "startup.session_load",
+    SessionReplay => "startup.session_replay",
+    SessionGitScan => "startup.session_git_scan",
+    SessionSpawn => "startup.session_spawn",
+});
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr, serde::Serialize)]
 #[strum(serialize_all = "snake_case")]
@@ -141,6 +191,8 @@ impl PhaseSnapshot {
 struct Inner {
     completed: Vec<(StartupPhase, Duration)>,
     current: Option<(StartupPhase, Instant)>,
+    current_span: Option<tracing::Span>,
+    root_span: tracing::Span,
     auth_mode: AuthMode,
     owner: Owner,
 }
@@ -157,6 +209,8 @@ impl StartupTimer {
             inner: Mutex::new(Inner {
                 completed: Vec::new(),
                 current: None,
+                current_span: None,
+                root_span: tracing::info_span!("startup", outcome = tracing::field::Empty),
                 auth_mode: AuthMode::Unknown,
                 owner: Owner::Agent,
             }),
@@ -171,6 +225,8 @@ impl StartupTimer {
     /// layers can name the same step and it is measured once.
     pub fn enter(&self, phase: StartupPhase) {
         let now = Instant::now();
+        // Dropped after the lock: closing a span runs subscriber hooks.
+        let finished_span;
         {
             let mut g = self.lock();
             if matches!(g.current, Some((open, _)) if open == phase) {
@@ -180,7 +236,10 @@ impl StartupTimer {
                 g.completed.push((prev, now.saturating_duration_since(t0)));
             }
             g.current = Some((phase, now));
+            let span = phase_span(phase, &g.root_span);
+            finished_span = g.current_span.replace(span);
         }
+        drop(finished_span);
         let elapsed_ms = self.started.elapsed().as_millis() as u64;
         tracing::info!(phase = %phase.label(), elapsed_ms, "startup phase");
         crate::unified_log::info(
@@ -192,10 +251,36 @@ impl StartupTimer {
 
     fn close_open_phase(&self) {
         let now = Instant::now();
-        let mut g = self.lock();
-        if let Some((prev, t0)) = g.current.take() {
-            g.completed.push((prev, now.saturating_duration_since(t0)));
+        let finished_span;
+        {
+            let mut g = self.lock();
+            if let Some((prev, t0)) = g.current.take() {
+                g.completed.push((prev, now.saturating_duration_since(t0)));
+            }
+            finished_span = g.current_span.take();
         }
+        drop(finished_span);
+    }
+
+    fn close_root_span(&self, outcome: &'static str) {
+        // Dropped after the lock: closing a span runs subscriber hooks. The
+        // open phase span closes too: `summary` keeps reporting the stuck
+        // phase from `current`, but its span must not run past the total.
+        let (open_phase, root);
+        {
+            let mut g = self.lock();
+            open_phase = g.current_span.take();
+            g.root_span.record("outcome", outcome);
+            root = std::mem::replace(&mut g.root_span, tracing::Span::none());
+        }
+        drop(open_phase);
+        drop(root);
+    }
+
+    /// A discarded run's spans close at the discard, not at the last `Arc`
+    /// drop, so idle wait after first client is never attributed to a phase.
+    fn discard_spans(&self) {
+        self.close_root_span("discarded");
     }
 
     pub fn set_auth_mode(&self, mode: AuthMode) {
@@ -299,6 +384,65 @@ impl Default for StartupTimer {
 static CURRENT: Mutex<Option<Arc<StartupTimer>>> = Mutex::new(None);
 static DONE: AtomicBool = AtomicBool::new(false);
 static PROCESS_START: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+/// A session startup sub-phase routed to its own `*_ms` field, so a producer
+/// timer's field is chosen at compile time rather than by string match.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Subphase {
+    SessionLoad,
+    SessionReplay,
+    SessionGitScan,
+    SessionSpawn,
+}
+
+#[derive(Clone, Copy, Default)]
+struct SubphaseTimings {
+    prefetch_wait_ms: Option<u64>,
+    session_load_ms: Option<u64>,
+    session_replay_ms: Option<u64>,
+    session_git_scan_ms: Option<u64>,
+    session_spawn_ms: Option<u64>,
+    time_to_first_frame_ms: Option<u64>,
+}
+
+static SUBPHASES: Mutex<SubphaseTimings> = Mutex::new(SubphaseTimings {
+    prefetch_wait_ms: None,
+    session_load_ms: None,
+    session_replay_ms: None,
+    session_git_scan_ms: None,
+    session_spawn_ms: None,
+    time_to_first_frame_ms: None,
+});
+
+fn subphases() -> std::sync::MutexGuard<'static, SubphaseTimings> {
+    SUBPHASES.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+pub fn record_prefetch_wait(elapsed: Duration) {
+    subphases().prefetch_wait_ms = Some(elapsed.as_millis() as u64);
+}
+
+pub fn record_first_frame() {
+    if DONE.load(Ordering::Relaxed) {
+        return;
+    }
+    let elapsed_ms = process_elapsed().as_millis() as u64;
+    let mut sub = subphases();
+    if sub.time_to_first_frame_ms.is_none() {
+        sub.time_to_first_frame_ms = Some(elapsed_ms);
+    }
+}
+
+pub(crate) fn record_subphase(sp: Subphase, elapsed: Duration) {
+    let ms = elapsed.as_millis() as u64;
+    let mut sub = subphases();
+    match sp {
+        Subphase::SessionLoad => sub.session_load_ms = Some(ms),
+        Subphase::SessionReplay => sub.session_replay_ms = Some(ms),
+        Subphase::SessionGitScan => sub.session_git_scan_ms = Some(ms),
+        Subphase::SessionSpawn => sub.session_spawn_ms = Some(ms),
+    }
+}
 
 /// Call first in `main`; the clock otherwise starts at first use and
 /// totals undercount.
@@ -415,7 +559,8 @@ fn clear() {
 /// Stops recording for a standalone agent at its first client, so idle
 /// waiting is not counted; client-owned runs are unaffected.
 pub fn mark_agent_serving() {
-    if agent_owned().is_some() {
+    if let Some(timer) = agent_owned() {
+        timer.discard_spans();
         clear();
     }
 }
@@ -424,6 +569,7 @@ pub fn mark_agent_serving() {
 pub(crate) fn reset_for_tests() {
     DONE.store(false, Ordering::Relaxed);
     *CURRENT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *subphases() = SubphaseTimings::default();
 }
 
 /// Lazily installs an agent-owned timer, covering the standalone leader
@@ -529,26 +675,28 @@ pub(crate) fn report_total(outcome: StartupOutcome) {
             if outcome == StartupOutcome::Ok {
                 p.close_open_phase();
             }
+            p.close_root_span(outcome.label());
             (p.summary(), p.auth_mode())
         }
         None => (String::new(), AuthMode::Unknown),
     };
-    crate::unified_log::info(
-        STARTUP_COMPLETE_MSG,
-        None,
-        Some(serde_json::json!({
-            "total_ms": total_ms,
-            "outcome": outcome,
-            "phases": phases,
-            "auth_mode": auth_mode,
-        })),
-    );
-    crate::session_ctx::log_event(crate::events::StartupComplete {
+    let sub = *subphases();
+    let event = crate::events::StartupCompleted {
         total_ms,
         outcome,
         phases,
         auth_mode,
-    });
+        prefetch_wait_ms: sub.prefetch_wait_ms,
+        session_load_ms: sub.session_load_ms,
+        session_replay_ms: sub.session_replay_ms,
+        session_git_scan_ms: sub.session_git_scan_ms,
+        session_spawn_ms: sub.session_spawn_ms,
+        time_to_first_frame_ms: sub.time_to_first_frame_ms,
+    };
+    if let Ok(record) = serde_json::to_value(&event) {
+        crate::unified_log::info(STARTUP_COMPLETE_MSG, None, Some(record));
+    }
+    crate::session_ctx::log_event(event);
 }
 
 /// A deadline for a readiness-path network step. Naming the phase and
@@ -605,6 +753,182 @@ pub fn format_duration(d: Duration) -> String {
 mod tests {
     use super::*;
 
+    // Serializes the tests that drive the process-wide startup statics
+    // (`CURRENT`/`DONE`/`SUBPHASES` and the redirected unified log); run in
+    // parallel they race. Each holder also calls `reset_for_tests` first.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    mod span_capture {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        use tracing::span::{Attributes, Id};
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::registry::LookupSpan;
+
+        pub(super) struct ClosedSpan {
+            pub(super) name: String,
+            pub(super) parent: Option<String>,
+            pub(super) elapsed: Duration,
+        }
+
+        #[derive(Default)]
+        pub(super) struct SpanLog {
+            open: HashMap<u64, (String, Option<String>, Instant)>,
+            pub(super) closed: Vec<ClosedSpan>,
+        }
+
+        pub(super) struct SpanTimingLayer(pub(super) Arc<Mutex<SpanLog>>);
+
+        impl<S: tracing::Subscriber + for<'a> LookupSpan<'a>> Layer<S> for SpanTimingLayer {
+            fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+                let mut log = self.0.lock().unwrap();
+                let parent = attrs
+                    .parent()
+                    .and_then(|pid| log.open.get(&pid.into_u64()))
+                    .map(|(name, _, _)| name.clone());
+                log.open.insert(
+                    id.into_u64(),
+                    (attrs.metadata().name().to_string(), parent, Instant::now()),
+                );
+            }
+
+            fn on_close(&self, id: Id, _ctx: Context<'_, S>) {
+                let mut log = self.0.lock().unwrap();
+                if let Some((name, parent, opened)) = log.open.remove(&id.into_u64()) {
+                    let elapsed = opened.elapsed();
+                    log.closed.push(ClosedSpan {
+                        name,
+                        parent,
+                        elapsed,
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn startup_phases_emit_spans_with_durations() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_tests();
+        crate::unified_log::redirect_to_temp_for_tests();
+
+        let log = Arc::new(Mutex::new(span_capture::SpanLog::default()));
+        let subscriber =
+            tracing_subscriber::registry().with(span_capture::SpanTimingLayer(Arc::clone(&log)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let _p = begin(Owner::Client);
+        enter(StartupPhase::ConfigLoad);
+        std::thread::sleep(Duration::from_millis(10));
+        // Re-entering the open phase must not open a second span.
+        enter(StartupPhase::ConfigLoad);
+        enter(StartupPhase::Bootstrap);
+        std::thread::sleep(Duration::from_millis(10));
+        {
+            let mut timer = crate::instrumentation::timer("session.git_divergence");
+            timer.with_subphase(Subphase::SessionGitScan);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        report_total(StartupOutcome::Ok);
+
+        let log = log.lock().unwrap_or_else(|e| e.into_inner());
+        let names: Vec<&str> = log.closed.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "startup.config_load",
+                "startup.session_git_scan",
+                "timer",
+                "startup.bootstrap",
+                "startup",
+            ]
+        );
+        for c in &log.closed {
+            assert!(
+                c.elapsed >= Duration::from_millis(10),
+                "{} must cover its region, got {:?}",
+                c.name,
+                c.elapsed
+            );
+        }
+
+        // Held spans never parent contextually: phases are explicit children
+        // of the root; the sub-phase timer has no root handle, and its
+        // subphase span nests under it so the interval counts once.
+        for c in &log.closed {
+            let expected_parent = match c.name.as_str() {
+                "startup" | "timer" => None,
+                "startup.session_git_scan" => Some("timer"),
+                _ => Some("startup"),
+            };
+            assert_eq!(c.parent.as_deref(), expected_parent, "{}", c.name);
+        }
+
+        // The launch-to-interactive bar contains every phase bar.
+        let root = log
+            .closed
+            .iter()
+            .find(|c| c.name == "startup")
+            .expect("the root startup span closes at the ok total");
+        let phase_sum: Duration = log
+            .closed
+            .iter()
+            .filter(|c| c.parent.as_deref() == Some("startup"))
+            .map(|c| c.elapsed)
+            .sum();
+        assert!(
+            root.elapsed >= phase_sum,
+            "root span ({:?}) must cover the phases it parents ({phase_sum:?})",
+            root.elapsed
+        );
+    }
+
+    #[test]
+    fn agent_run_spans_close_at_discard() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_tests();
+        crate::unified_log::redirect_to_temp_for_tests();
+
+        let log = Arc::new(Mutex::new(span_capture::SpanLog::default()));
+        let subscriber =
+            tracing_subscriber::registry().with(span_capture::SpanTimingLayer(Arc::clone(&log)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let _p = begin(Owner::Agent);
+        enter(StartupPhase::ConfigLoad);
+        mark_agent_serving();
+
+        let log = log.lock().unwrap_or_else(|e| e.into_inner());
+        let names: Vec<&str> = log.closed.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["startup.config_load", "startup"],
+            "a discarded run's spans close at the discard, not at timer drop"
+        );
+    }
+
+    // The `phases` string is a frozen format that fleet dashboards parse.
+    #[test]
+    fn summary_is_byte_stable_for_fixed_inputs() {
+        let snap = PhaseSnapshot {
+            completed: vec![
+                (StartupPhase::ConfigLoad, Duration::from_millis(12)),
+                (StartupPhase::Bootstrap, Duration::from_millis(1500)),
+            ],
+            open: Some((StartupPhase::SessionCreate, Duration::from_millis(3))),
+        };
+        assert_eq!(
+            snap.summary(),
+            "config_load=12ms, bootstrap=1.5s, session_create>=3ms"
+        );
+    }
+
     #[test]
     fn slow_phase_warning_fires_once_per_open_phase() {
         // `StartupTimer::new` defaults to the exempt `Owner::Agent`.
@@ -660,25 +984,28 @@ mod tests {
     #[test]
     fn summary_tracks_completed_and_open_phases() {
         let p = StartupTimer::new();
-        p.enter(StartupPhase::LoadConfig);
+        p.enter(StartupPhase::ConfigLoad);
         p.enter(StartupPhase::ManagedPolicy);
         p.enter(StartupPhase::ModelCatalog);
 
         let s = p.summary();
-        assert!(s.contains("load_config="), "{s}");
+        assert!(s.contains("config_load="), "{s}");
         assert!(s.contains("managed_policy="), "{s}");
         assert!(s.contains("model_catalog>="), "{s}");
         assert_eq!(p.phase_snapshot().stuck_in(), "model_catalog");
         let d = p.phase_durations_ms();
         assert!(
-            d.contains_key("load_config") && d.contains_key("model_catalog"),
+            d.contains_key("config_load") && d.contains_key("model_catalog"),
             "{d:?}"
         );
     }
 
-    // Process-wide statics: one test, or interleaved tests race.
+    // Process-wide statics: `SERIAL` serializes this with the other global
+    // tests; interleaved runs race.
     #[test]
     fn global_lifecycle_records_then_ends() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_tests();
         crate::unified_log::redirect_to_temp_for_tests();
 
         let p = begin(Owner::Client);
@@ -698,6 +1025,11 @@ mod tests {
 
         drop(crate::instrumentation::timer("startup.mirror_probe_active"));
 
+        let mut git_scan_timer = crate::instrumentation::timer("session.git_divergence");
+        git_scan_timer.with_subphase(Subphase::SessionGitScan);
+        drop(git_scan_timer);
+        record_first_frame();
+
         enter(StartupPhase::SessionCreate);
         report_total(StartupOutcome::Ok);
 
@@ -709,6 +1041,8 @@ mod tests {
             !log.contains("startup.mirror_probe_done"),
             "done: timers must not mirror, {log}"
         );
+        assert!(log.contains("\"session_git_scan_ms\":"), "{log}");
+        assert!(log.contains("\"time_to_first_frame_ms\":"), "{log}");
 
         report_total(StartupOutcome::Ok);
         enter(StartupPhase::ModelCatalog);
@@ -719,7 +1053,7 @@ mod tests {
         );
         assert!(p2.summary().contains("session_create="), "{}", p2.summary());
         let p3 = begin(Owner::Agent);
-        enter(StartupPhase::LoadConfig);
+        enter(StartupPhase::ConfigLoad);
         assert_eq!(
             p3.phase_snapshot().stuck_in(),
             "unknown",
@@ -737,14 +1071,84 @@ mod tests {
         reset_for_tests();
         let p4 = begin(Owner::Client);
         let token = PendingStartup::new();
-        enter(StartupPhase::LoadConfig);
-        assert_eq!(p4.phase_snapshot().stuck_in(), "load_config");
+        enter(StartupPhase::ConfigLoad);
+        assert_eq!(p4.phase_snapshot().stuck_in(), "config_load");
         drop(token);
         enter(StartupPhase::Bootstrap);
         assert_eq!(
             p4.phase_snapshot().stuck_in(),
-            "load_config",
+            "config_load",
             "dropped token ended startup"
+        );
+
+        record_first_frame();
+        let sub = *subphases();
+        assert!(
+            sub.time_to_first_frame_ms.is_none(),
+            "ended startup: draw stamp records nothing"
+        );
+    }
+
+    // absent≠zero: with no prefetch the caller never stamps, so the record
+    // omits `prefetch_wait_ms` rather than reporting a spurious zero.
+    #[test]
+    fn startup_completed_omits_prefetch_wait_without_a_prefetch() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_for_tests();
+        crate::unified_log::redirect_to_temp_for_tests();
+
+        let _p = begin(Owner::Client);
+        enter(StartupPhase::ConfigLoad);
+        report_total(StartupOutcome::Ok);
+
+        let log = String::from_utf8_lossy(&crate::unified_log::snapshot_log().unwrap_or_default())
+            .into_owned();
+        assert!(!log.contains("prefetch_wait_ms"), "{log}");
+    }
+
+    #[test]
+    fn record_subphase_routes_each_arm_and_first_frame_first_write_wins() {
+        let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+
+        let cases = [
+            (Subphase::SessionLoad, "session_load"),
+            (Subphase::SessionReplay, "session_replay"),
+            (Subphase::SessionGitScan, "session_git_scan"),
+            (Subphase::SessionSpawn, "session_spawn"),
+        ];
+        for (sp, name) in cases {
+            reset_for_tests();
+            record_subphase(sp, Duration::from_millis(7));
+            let sub = *subphases();
+            let routed = match sp {
+                Subphase::SessionLoad => sub.session_load_ms,
+                Subphase::SessionReplay => sub.session_replay_ms,
+                Subphase::SessionGitScan => sub.session_git_scan_ms,
+                Subphase::SessionSpawn => sub.session_spawn_ms,
+            };
+            assert_eq!(routed, Some(7), "{name} routes to its own field");
+            let set = [
+                sub.session_load_ms,
+                sub.session_replay_ms,
+                sub.session_git_scan_ms,
+                sub.session_spawn_ms,
+            ]
+            .iter()
+            .filter(|v| v.is_some())
+            .count();
+            assert_eq!(set, 1, "{name} sets exactly one field");
+        }
+
+        reset_for_tests();
+        record_first_frame();
+        let first = subphases().time_to_first_frame_ms;
+        assert!(first.is_some(), "first frame stamps time_to_first_frame_ms");
+        subphases().time_to_first_frame_ms = Some(1);
+        record_first_frame();
+        assert_eq!(
+            subphases().time_to_first_frame_ms,
+            Some(1),
+            "first write wins"
         );
     }
 }

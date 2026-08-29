@@ -1133,6 +1133,52 @@ fn subagent_limit_counts_resolve_env_over_toml_over_remote_over_default() {
         );
 }
 #[test]
+fn subagent_sampling_limit_applies_precedence_and_clamps() {
+    use crate::agent::subagent::MAX_SUBAGENT_SAMPLING_LIMIT;
+    use xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT;
+    let resolve = |env: Option<&str>, config: Option<i64>, remote: Option<u32>| SubagentsConfig::resolve_sampling_limit(
+        env,
+        config,
+        remote,
+        DEFAULT_MAX_CONCURRENT,
+    );
+    assert_eq!(resolve(None, None, None), DEFAULT_MAX_CONCURRENT);
+    assert_eq!(resolve(Some("24"), Some(8), Some(4)), 24);
+    for bad in ["0", "-1", "garbage"] {
+        assert_eq!(resolve(Some(bad), None, None), DEFAULT_MAX_CONCURRENT);
+    }
+    let huge = (MAX_SUBAGENT_SAMPLING_LIMIT as u64 + 1_000).to_string();
+    assert_eq!(resolve(Some(&huge), None, None), MAX_SUBAGENT_SAMPLING_LIMIT);
+    assert_eq!(
+            resolve(Some("999999999999999999999999999"), None, None),
+            DEFAULT_MAX_CONCURRENT
+        );
+    assert!(resolve(Some("0"), Some(0), Some(0)) > 0);
+}
+#[test]
+fn subagent_sampling_limit_env_override_beats_toml() {
+    let _lock = SUBAGENTS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = crate::env::EnvVarGuard::set(SubagentsConfig::ENV_SAMPLING_LIMIT, "24");
+    let raw: toml::Value = toml::from_str("[subagents]\nsampling_limit = 8\n").unwrap();
+    let mut config = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+    config.resolve_subagents(false, &raw);
+    assert_eq!(config.subagents_sampling_limit, 24);
+}
+#[test]
+fn subagent_sampling_limit_defaults_to_resolved_subagents_max_concurrent() {
+    let _lock = SUBAGENTS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = crate::env::EnvVarGuard::remove(SubagentsConfig::ENV_SAMPLING_LIMIT)
+        .and_set(SubagentsConfig::ENV_MAX_CONCURRENT, "20");
+    let raw: toml::Value = toml::from_str("[subagents]\n").unwrap();
+    let mut config = crate::agent::config::Config::new_from_toml_cfg(&raw).unwrap();
+    config.resolve_subagents(false, &raw);
+    assert_eq!(config.subagents_max_concurrent, 20);
+    assert_eq!(
+            config.subagents_sampling_limit,
+            config.subagents_max_concurrent
+        );
+}
+#[test]
 fn subagent_limit_behavior_resolves_env_over_toml_over_remote_over_queue() {
     use xai_grok_tools::implementations::grok_build::task::admission::LimitBehavior;
     let resolve = SubagentsConfig::resolve_limit_behavior;
@@ -1153,11 +1199,12 @@ fn subagent_limit_behavior_resolves_env_over_toml_over_remote_over_queue() {
 fn subagents_config_parses_limits_from_toml() {
     without_grok_subagents(|| {
         let config: toml::Value = toml::from_str(
-                "[subagents]\nmax_concurrent = 4\nlimit_behavior = \"fail\"\nworkflow_max_concurrent = 8\n",
+                "[subagents]\nmax_concurrent = 4\nsampling_limit = 6\nlimit_behavior = \"fail\"\nworkflow_max_concurrent = 8\n",
             )
             .unwrap();
         let sa = SubagentsConfig::resolve(false, &config);
         assert_eq!(sa.max_concurrent, Some(4));
+        assert_eq!(sa.sampling_limit, Some(6));
         assert_eq!(sa.limit_behavior.as_deref(), Some("fail"));
         assert_eq!(sa.workflow_max_concurrent, Some(8));
     });
@@ -2857,16 +2904,19 @@ fn remove_hooks_path_removes() {
     let tmp = tempfile::tempdir().unwrap();
     let paths_file = tmp.path().join("hooks-paths");
     let _ = add_hooks_path_to_file("/to/remove", &paths_file);
-    let _ = remove_hooks_path_from_file("/to/remove", &paths_file);
+    let removed = remove_hooks_path_from_file("/to/remove", &paths_file).unwrap();
+    assert!(removed);
     let content = std::fs::read_to_string(&paths_file).unwrap_or_default();
     assert!(!content.contains("/to/remove"));
 }
+/// Unregistered paths report `false` so surfaces refuse instead of
+/// claiming a removal that never happened.
 #[test]
-fn remove_hooks_path_is_noop_if_missing() {
+fn remove_hooks_path_reports_missing() {
     let tmp = tempfile::tempdir().unwrap();
     let paths_file = tmp.path().join("hooks-paths");
-    let result = remove_hooks_path_from_file("/nonexistent/path", &paths_file);
-    assert!(result.is_ok());
+    let removed = remove_hooks_path_from_file("/nonexistent/path", &paths_file).unwrap();
+    assert!(!removed);
 }
 #[test]
 fn remove_hooks_path_preserves_others() {
@@ -3171,7 +3221,7 @@ fn project_config_never_sources_feedback_user() {
         )
         .unwrap();
     let cwd = repo.path();
-    crate::agent::folder_trust::grant_folder_trust(cwd);
+    xai_grok_workspace::folder_trust::grant_folder_trust(cwd);
     assert!(
             resolve_effective_plugins_config(cwd)
                 .paths
@@ -3750,7 +3800,7 @@ fn resolve_effective_plugins_config_gates_project_paths_on_folder_trust() {
             untrusted.disabled.contains(&proj_disabled),
             "project [plugins].disabled must merge even when untrusted (fail-safe)"
         );
-    crate::agent::folder_trust::grant_folder_trust(cwd);
+    xai_grok_workspace::folder_trust::grant_folder_trust(cwd);
     let trusted = resolve_effective_plugins_config(cwd);
     assert!(
             trusted.paths.contains(&proj_path),
@@ -3830,7 +3880,7 @@ fn discover_plugins_excludes_untrusted_configpath_plugin_end_to_end() {
             !untrusted_found,
             "untrusted folder must EXCLUDE the ConfigPath plugin from discovery"
         );
-    crate::agent::folder_trust::grant_folder_trust(cwd);
+    xai_grok_workspace::folder_trust::grant_folder_trust(cwd);
     crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let trusted_dc = resolve_effective_plugins_config(cwd).to_discovery_config();
     let trusted_verdict = crate::agent::folder_trust::project_scope_allowed(cwd);
@@ -3911,4 +3961,155 @@ fn from_remote_gated_requires_xai_auth_for_writeback() {
         StorageMode::from_remote_gated(None, true),
         StorageMode::Local
     );
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn required_bwrap_routes_fail_closed() {
+    assert_eq!(
+        route_bwrap_startup(Some(()), false, true),
+        BwrapStartup::ReexecRequired(())
+    );
+    assert_eq!(
+        route_bwrap_startup::<()>(None, false, true),
+        BwrapStartup::Refuse
+    );
+    assert_eq!(
+        route_bwrap_startup::<()>(None, true, true),
+        BwrapStartup::Verify
+    );
+}
+#[test]
+#[cfg(target_os = "linux")]
+fn optional_bwrap_routes_can_degrade() {
+    assert_eq!(
+        route_bwrap_startup(Some(()), false, false),
+        BwrapStartup::ReexecOptional(())
+    );
+    assert_eq!(
+        route_bwrap_startup::<()>(None, false, false),
+        BwrapStartup::Continue
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn required_bwrap_messages_localize_only_fixed_chrome() {
+    let locale = xai_grok_locale::LocaleContext::new(xai_grok_locale::ResolvedLocale {
+        locale: xai_grok_locale::UiLocale::ZhCn,
+        source: xai_grok_locale::LocaleSource::Cli,
+    });
+    assert_eq!(
+        localized_sandbox_message(
+            &locale,
+            "cli.sandbox.bwrap_exec_failed",
+            "bwrap exec failed: {error}. Install bubblewrap with `apt install -y bubblewrap`.",
+            Some(("error", "provider {cause}")),
+        ),
+        "bwrap 执行失败：provider {cause}。请使用 `apt install -y bubblewrap` 安装 bubblewrap。"
+    );
+    assert_eq!(
+        localized_sandbox_message(
+            &locale,
+            "cli.sandbox.bwrap_plan_unavailable",
+            "the required bwrap plan could not be prepared; see the error above for the specific cause.",
+            None,
+        ),
+        "无法准备所需的 bwrap 方案；具体原因请查看上方错误。"
+    );
+    assert_eq!(
+        localized_sandbox_message(
+            &locale,
+            "cli.sandbox.bwrap_optional_fallback",
+            "WARNING: bwrap exec failed: {error}. Falling back to Landlock sandbox. Install bubblewrap: apt install -y bubblewrap",
+            Some(("error", "dynamic failure")),
+        ),
+        "警告：bwrap 执行失败：dynamic failure。正在回退到 Landlock 沙箱。请安装 bubblewrap：apt install -y bubblewrap"
+    );
+    assert_eq!(
+        localized_sandbox_message(
+            &locale,
+            "cli.sandbox.hook_write_deny_unverified",
+            "error: sandbox reports bwrap but required hook write-deny mounts are missing or writable ({error}); refusing to start (possible __GROK_INSIDE_BWRAP spoof)",
+            Some(("error", "probe details")),
+        ),
+        "错误：沙箱报告正在使用 bwrap，但所需的 Hook 禁止写入挂载缺失或仍可写（probe details）；已拒绝启动（可能伪造了 __GROK_INSIDE_BWRAP）"
+    );
+    assert_eq!(
+        localized_sandbox_message(
+            &locale,
+            "cli.sandbox.profile_protections_missing",
+            "error: could not apply the '{profile}' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.",
+            Some(("profile", "workspace-write")),
+        ),
+        "错误：无法应用“workspace-write”沙箱配置；具体原因请查看上方警告。因其保护措施缺失，已拒绝启动。"
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn bwrap_planning_diagnostics_localize_and_preserve_dynamic_details() {
+    use xai_grok_sandbox::BwrapDiagnostic;
+
+    let locale = xai_grok_locale::LocaleContext::new(xai_grok_locale::ResolvedLocale {
+        locale: xai_grok_locale::UiLocale::ZhCn,
+        source: xai_grok_locale::LocaleSource::Cli,
+    });
+    let cases = [
+        (
+            BwrapDiagnostic::CurrentExecutable {
+                error: "os {detail}".into(),
+            },
+            "错误：无法解析用于 bwrap 重新执行的当前可执行文件：os {detail}",
+        ),
+        (
+            BwrapDiagnostic::HookPlanMaterialization {
+                error: "bind failed".into(),
+            },
+            "错误：Hook 禁止写入方案实例化失败：bind failed",
+        ),
+        (
+            BwrapDiagnostic::ReadDenyPlaceholder {
+                path: "/secret/{raw}".into(),
+            },
+            "错误：无法为禁止读取路径 /secret/{raw} 创建 bwrap 占位项；为避免沙箱保护不完整，已拒绝启动",
+        ),
+        (
+            BwrapDiagnostic::SentinelPrepare {
+                error: "permission denied".into(),
+            },
+            "错误：无法准备 bwrap 容器隔离哨兵：permission denied",
+        ),
+        (
+            BwrapDiagnostic::RuntimeSocketHandoff {
+                error: "too large".into(),
+            },
+            "错误：运行时套接字禁止访问信息编码失败：too large",
+        ),
+        (
+            BwrapDiagnostic::ProfileResolve {
+                error: "bad profile".into(),
+            },
+            "错误：沙箱配置解析失败：bad profile",
+        ),
+        (
+            BwrapDiagnostic::HookPlanPrepare {
+                error: "bad hook".into(),
+            },
+            "错误：Hook 禁止写入方案准备失败：bad hook",
+        ),
+        (
+            BwrapDiagnostic::HookPlanMissing,
+            "错误：需要 Hook 禁止写入保护，但未能准备相应方案",
+        ),
+        (
+            BwrapDiagnostic::DenyGlobExpand {
+                error: "too many matches".into(),
+            },
+            "错误：无法在 Linux 上强制执行沙箱禁止访问通配规则：too many matches",
+        ),
+    ];
+
+    for (diagnostic, expected) in cases {
+        assert_eq!(localized_bwrap_diagnostic(&locale, &diagnostic), expected);
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "1.0.8"
+version = "1.0.12"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -19,6 +19,9 @@ xai-prompt-queue = { workspace = true }
 # Presentation-primitives layer (extracted)
 xai-grok-pager-render = { path = "../xai-grok-pager-render" }
 
+# The /gboom easter-egg game (extracted)
+xai-grok-gboom = { path = "../xai-grok-gboom" }
+
 # Diff hunk construction (extracted)
 xai-grok-pager-diff = { path = "../xai-grok-pager-diff" }
 
@@ -31,7 +34,6 @@ regex = { workspace = true }
 unicode-width = { workspace = true }
 unicode-segmentation = { workspace = true }
 strip-ansi-escapes = { workspace = true }
-enum_delegate = { workspace = true }
 
 # Markdown / syntax highlighting
 xai-grok-markdown = { workspace = true }
@@ -47,6 +49,7 @@ indexmap = { workspace = true }
 blake3 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+strum = { workspace = true }
 toml = { workspace = true }
 toml_edit = { workspace = true, features = ["serde"] }
 
@@ -57,7 +60,6 @@ ansi-to-tui = { workspace = true }
 portable-pty = "0.9"
 
 # Utilities
-derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 anyhow = { workspace = true }
 shlex = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
@@ -98,6 +100,8 @@ xai-file-utils = { path = "../xai-file-utils" }
 # Crash-recovery registry of open TUI sessions.
 xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
+xai-dirs = { workspace = true }
+xai-grok-dashboard-store = { workspace = true }
 # Voice dictation. `audio` (mic capture) is enabled on every target. On
 # macOS/Windows it links cpal; on Linux it compiles a subprocess-recorder
 # backend instead, so cpal -> alsa-sys never reaches the static musl binary
@@ -121,6 +125,8 @@ tar = { workspace = true }
 xai-grok-tools = { workspace = true }
 xai-grok-agent = { workspace = true }
 xai-grok-plugin-marketplace = { path = "../xai-grok-plugin-marketplace" }
+# Blocked-card copy: `hook_display_name` lives next to the hook-name grammar.
+xai-grok-hooks = { path = "../xai-grok-hooks" }
 xai-hooks-plugins-types = { path = "../xai-hooks-plugins-types" }
 walkdir = { workspace = true }
 xai-grok-sandbox = { path = "../xai-grok-sandbox", default-features = false }
@@ -135,7 +141,6 @@ image = { workspace = true, features = ["png", "jpeg", "tiff", "gif", "webp"] }
 uuid = { workspace = true, features = ["v4"] }
 
 # Path computation (plan file, etc.)
-dirs = { workspace = true }
 shellexpand = "3.1"
 
 # libgit2 for the startup git-info populator (no fork/exec, runs once on launch
@@ -177,6 +182,7 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 # The fixture that builds a `[ui.status_line]` section field by field.
 xai-grok-status-line = { workspace = true, features = ["test-support"] }
 xai-grok-pager-render = { path = "../xai-grok-pager-render", features = ["test-support"] }
+xai-grok-gboom = { path = "../xai-grok-gboom", features = ["test-support"] }
 xai-grok-shell = { workspace = true, features = ["test-support"] }
 pretty_assertions = { workspace = true }
 insta = { workspace = true }
@@ -269,22 +275,6 @@ path = "tests/scripted_scenarios.rs"
 name = "pty_auto_mode"
 path = "tests/pty_auto_mode.rs"
 
-[[bin]]
-name = "mouse-events-playground"
-path = "src/bin/mouse_events_playground.rs"
-
-[[bin]]
-name = "scrollback-selection-playground"
-path = "src/bin/scrollback_selection_playground.rs"
-
-[[bin]]
-name = "question-view-playground"
-path = "src/bin/question_view_playground.rs"
-
-[[bin]]
-name = "todo-pane-playground"
-path = "src/bin/todo_pane_playground.rs"
-
 # Opt into [workspace.lints.clippy] (too_many_arguments etc.). Without this,
 # `cargo clippy --workspace -- -D warnings` on this package is stricter than
 # the workspace-default clippy allows used in CI.
@@ -311,4 +301,4 @@ release-dist = []
 # Exposes test-only view-model constructors/setters (e.g. `test_agent_view`,
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
 # by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.
-test-support = ["xai-grok-pager-render/test-support"]
+test-support = ["xai-grok-pager-render/test-support", "xai-grok-gboom/test-support"]

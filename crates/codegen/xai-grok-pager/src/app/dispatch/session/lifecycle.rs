@@ -8,6 +8,7 @@ use crate::app::actions::{Action, Effect, SwitchModelError};
 use crate::app::agent::{AgentCommand, AgentId, AgentSession, AgentState, DeferredModelSwitch};
 use crate::app::agent_view::{ActivePane, AgentView, McpInitProgress};
 use crate::app::app_view::{ActiveView, AppView, TrustState};
+use crate::app::cancel_latency::TurnEnd;
 use crate::app::consent::ConsentState;
 use crate::app::dispatch::ctx::{
     SwitchCause, get_active_agent, reseed_tip_for_new_session, show_welcome, switch_to_agent,
@@ -48,9 +49,8 @@ pub(crate) struct DeferredSwitchOutcome {
     pub switch: Option<DeferredModelSwitch>,
     pub effort_error: Option<EffortTokenError>,
 }
-/// Resolve the stashed `-m` switch and/or `cli_effort_token` against the session
-/// catalog via [`ModelState::resolve_effort_for_model`] (same gate-first policy
-/// as `/effort` and headless).
+/// Resolve the stashed `-m` switch and/or `cli_effort_token` against the session catalog via [`ModelState::resolve_effort_for_model`].
+/// This is the same gate-first policy as `/effort` and headless.
 pub(crate) fn take_deferred_model_switch(
     stashed: Option<DeferredModelSwitch>,
     models: &ModelState,
@@ -114,10 +114,8 @@ pub(crate) fn take_deferred_model_switch(
         },
     }
 }
-/// Take the stashed deferred switch, resolve any CLI effort token against the
-/// session catalog, surface effort errors, and return the switch to apply.
-/// `prev_model_id` becomes the session's authoritative model when the
-/// create/load response replaced the catalog, else the stash-time display.
+/// Take the stashed deferred switch, resolve any CLI effort token against the session catalog, report effort errors, and return the switch to apply.
+/// `prev_model_id` becomes the session's authoritative model when the create/load response replaced the catalog, else the stash-time display.
 pub(crate) fn apply_deferred_model_switch(
     agent: &mut AgentView,
     cli_effort_token: Option<&str>,
@@ -139,7 +137,7 @@ pub(crate) fn apply_deferred_model_switch_with_locale(
         switch
     })
 }
-/// Surface effort-token errors and return the model/effort switch (if any).
+/// Report effort-token errors and return the model/effort switch (if any).
 pub(crate) fn apply_deferred_switch_outcome(
     agent: &mut AgentView,
     outcome: DeferredSwitchOutcome,
@@ -171,18 +169,14 @@ pub(crate) fn apply_deferred_switch_outcome_with_locale(
     }
     outcome.switch
 }
-/// Top-level `/new` dispatcher. If the working directory is inside a
-/// git repository, consults the persisted `new_session_worktree_mode`
-/// preference: `Always` skips the popup and creates a worktree, `Never`
-/// skips the popup and stays in-cwd, `Ask` opens the worktree question
-/// modal (mirroring `/fork`'s UX). Otherwise proceeds directly via
-/// [`dispatch_new_session_inner`].
+/// Top-level `/new` dispatcher.
+/// If the working directory is inside a git repository, consults the persisted `new_session_worktree_mode` preference.
+/// `Always` skips the popup and creates a worktree, `Never` stays in-cwd, `Ask` opens the worktree question modal (as `/fork` does).
+/// Otherwise proceeds directly via [`dispatch_new_session_inner`].
 ///
-/// When no active agent exists (e.g. from the welcome screen), the
-/// git-repo check falls back to `app.cwd_has_git_ancestor` so the
-/// persisted `Always` / `Never` modes still take effect. The `Ask`
-/// path falls through to `dispatch_new_session_inner` in that case
-/// because `open_new_session_question` requires an active agent.
+/// When no active agent exists (e.g. from the welcome screen), the git-repo check falls back to `app.cwd_has_git_ancestor`.
+/// The persisted `Always` / `Never` modes therefore still take effect.
+/// The `Ask` path falls through to `dispatch_new_session_inner` in that case because `open_new_session_question` requires an active agent.
 pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<Effect> {
     use crate::app::app_view::WorktreeMode;
     if !app.session_startup_allowed() {
@@ -217,10 +211,9 @@ pub(in crate::app::dispatch) fn dispatch_new_session(app: &mut AppView) -> Vec<E
         dispatch_new_session_inner(app, None)
     }
 }
-/// Open the local worktree question modal for `/new`. Mirrors
-/// [`open_fork_question`] but uses [`LocalQuestionKind::NewSession`] so
-/// the answer routes to [`dispatch_new_session_inner`] or
-/// [`dispatch_new_worktree_session`].
+/// Open the local worktree question modal for `/new`.
+/// Mirrors [`open_fork_question`] but uses [`LocalQuestionKind::NewSession`].
+/// The answer routes to [`dispatch_new_session_inner`] or [`dispatch_new_worktree_session`].
 pub(in crate::app::dispatch) fn open_new_session_question(app: &mut AppView) -> Vec<Effect> {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
     use xai_grok_tools::implementations::grok_build::ask_user_question::{
@@ -292,11 +285,9 @@ pub(in crate::app::dispatch) fn open_new_session_question(app: &mut AppView) -> 
     agent.prompt.set_text("");
     vec![]
 }
-/// Open a local QuestionView asking whether to start a new session for a
-/// model that requires a different agent harness. Mirrors
-/// [`open_new_session_question`] but uses
-/// [`LocalQuestionKind::AgentTypeMismatch`] so the answer routes to
-/// [`dispatch_new_session_inner`] with a deferred model switch.
+/// Open a local QuestionView asking whether to start a new session for a model that requires a different agent harness.
+/// Mirrors [`open_new_session_question`] but uses [`LocalQuestionKind::AgentTypeMismatch`].
+/// The answer routes to [`dispatch_new_session_inner`] with a deferred model switch.
 pub(in crate::app::dispatch) fn open_agent_type_mismatch_question(
     app: &mut AppView,
     model_id: acp::ModelId,
@@ -371,13 +362,12 @@ pub(in crate::app::dispatch) fn open_agent_type_mismatch_question(
     agent.prompt.set_text("");
     vec![]
 }
-/// Core new-session logic: create a placeholder agent, push the
-/// `/dashboard` tip, and return the `CreateSession` effect.
+/// Core new-session logic: create a placeholder agent, push the `/dashboard` tip, and return the `CreateSession` effect.
 ///
 /// Apply welcome workspace selection before creating a session from Welcome.
 ///
-/// Returns `Err(effects)` when session creation should abort (ACK pending or
-/// empty effects). `Ok(())` means continue into the normal new-session path.
+/// Returns `Err(effects)` when session creation should abort (ACK pending or empty effects).
+/// `Ok(())` means continue into the normal new-session path.
 #[cfg(feature = "local-workspace")]
 fn apply_welcome_workspace_on_new_session(app: &mut AppView) -> Result<(), Vec<Effect>> {
     use crate::views::welcome::workspace_mode::{
@@ -407,7 +397,7 @@ fn apply_welcome_workspace_on_new_session(app: &mut AppView) -> Result<(), Vec<E
             app.welcome_local_workspace_ack_pending = true;
             app.session_picker_entries = None;
             app.session_picker_loading = false;
-            app.session_picker_list_seq = app.session_picker_list_seq.saturating_add(1);
+            super::foreign::next_picker_list_generation(app);
             Err(vec![])
         }
         Err(err) => {
@@ -425,8 +415,7 @@ fn apply_welcome_workspace_on_new_session(app: &mut AppView) -> Result<(), Vec<E
         }
     }
 }
-/// Factored out of [`dispatch_new_session`] so the worktree-question
-/// "No" path can call it directly without re-opening the modal.
+/// Factored out of [`dispatch_new_session`] so the worktree-question "No" path can call it directly without re-opening the modal.
 pub(in crate::app::dispatch) fn dispatch_new_session_inner(
     app: &mut AppView,
     model_id: Option<acp::ModelId>,
@@ -434,9 +423,8 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner(
     let (_id, effects) = dispatch_new_session_inner_with_id(app, model_id);
     effects
 }
-/// Sibling that returns the new `AgentId` alongside
-/// the effects. Used by `dispatch_dashboard_dispatch` so it doesn't
-/// rely on the (correct-but-brittle) `app.agents.last()` lookup.
+/// Sibling that returns the new `AgentId` alongside the effects.
+/// Used by `dispatch_dashboard_dispatch` so it doesn't rely on the (correct-but-brittle) `app.agents.last()` lookup.
 pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     app: &mut AppView,
     model_id: Option<acp::ModelId>,
@@ -482,6 +470,8 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             available_commands_generation: 1,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: app.deferred_model_switch_from_cli(),
             bg_tasks: std::collections::BTreeMap::new(),
@@ -515,11 +505,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             &app.tier_restricted_commands,
         );
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
-        agent
-            .prompt
-            .slash_controller
-            .registry_mut()
-            .set_plugins_visible(!app.appearance.disable_plugins);
+        agent.set_plugins_visible_recursive(!app.appearance.disable_plugins);
         agent.active_pane = ActivePane::Prompt;
     }
     switch_to_agent(app, agent_id, SwitchCause::New);
@@ -583,8 +569,7 @@ pub(in crate::app::dispatch) fn dispatch_exit_session(app: &mut AppView) -> Vec<
     app.exit_session_pending = None;
     effects
 }
-/// Aftermath for `/delete` on the active agent: dashboard overlay returns
-/// there; standalone agent sessions go home.
+/// Aftermath for `/delete` on the active agent: dashboard overlay returns there; standalone agent sessions go home.
 fn after_delete_current_session(
     app: &AppView,
     id: AgentId,
@@ -762,11 +747,9 @@ pub(in crate::app::dispatch) fn dispatch_trust_folder(app: &mut AppView) -> Vec<
     }
     finish_trust(app)
 }
-/// Tail of accepting the folder-trust question (via [`dispatch_trust_folder`];
-/// declining quits instead): resolve `trust_state` to `Done`, focus the welcome
-/// prompt, and replay the deferred session startup once auth is also resolved.
-/// Drains iff [`AppView::session_startup_allowed`] -- the same predicate
-/// `AuthComplete` uses, so whichever gate resolves last drains exactly once.
+/// Tail of accepting the folder-trust question (via [`dispatch_trust_folder`]; declining quits instead).
+/// Resolves `trust_state` to `Done`, focuses the welcome prompt, and replays the deferred session startup once auth is also resolved.
+/// Drains only when [`AppView::session_startup_allowed`], the same predicate `AuthComplete` uses, so whichever gate resolves last drains exactly once.
 pub(in crate::app::dispatch) fn finish_trust(app: &mut AppView) -> Vec<Effect> {
     app.trust_state = TrustState::Done;
     app.welcome_prompt_focused = !app.is_access_blocked();
@@ -812,19 +795,16 @@ fn finish_consent(app: &mut AppView) -> Vec<Effect> {
         vec![]
     }
 }
-/// Clear EVERY deferred `startup_*` action without replaying any. Used on the
-/// paths that must not run startup at all — ZDR-blocked login, and mid-session
-/// re-auth (`auth_return_view`) where a session already exists — so a stash
-/// (including an incidental mid-session `Ctrl+N` that the chokepoint deferred)
-/// can never linger and fire later. Atomic counterpart to `drain_startup_actions`.
+/// Clear EVERY deferred `startup_*` action without replaying any.
+/// Used on paths that must not run startup at all: ZDR-blocked login, and mid-session re-auth (`auth_return_view`) where a session already exists.
+/// A stash (including an incidental mid-session `Ctrl+N` that the chokepoint deferred) can therefore never linger and fire later.
+/// Atomic counterpart to `drain_startup_actions`.
 pub(in crate::app::dispatch) fn clear_startup_actions(app: &mut AppView) {
     let _ = app.deferred_startup.take();
 }
-/// Replay the session-startup actions deferred until auth + trust both resolved
-/// (`--resume` / `--worktree` / initial-prompt / `grok dashboard`). Extracted
-/// from the `AuthComplete` handler so the folder-trust answer can run the SAME
-/// machinery; whichever gate resolves last drains it (each call site guards on
-/// the other gate being `Done`, so it runs exactly once).
+/// Replay the session-startup actions deferred until auth and trust both resolved (`--resume` / `--worktree` / initial-prompt / `grok dashboard`).
+/// Extracted from the `AuthComplete` handler so the folder-trust answer can run the same code.
+/// Whichever gate resolves last drains it (each call site guards on the other gate being `Done`, so it runs exactly once).
 pub(in crate::app::dispatch) fn drain_startup_actions(app: &mut AppView) -> Vec<Effect> {
     use crate::app::session_startup::{DeferredSessionStartup, DeferredStartupActions};
     debug_assert!(
@@ -1080,6 +1060,8 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             available_commands_generation: 1,
             available_tools: None,
             model_switch_pending: false,
+            hook_block_hold: false,
+            blocked_prompt: None,
             user_model_preference: None,
             deferred_model_switch: app.deferred_model_switch_from_cli(),
             bg_tasks: std::collections::BTreeMap::new(),
@@ -1147,11 +1129,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             agent.workspace_mode_cli_locked = locked;
         }
         agent.apply_credit_balance(app.credit_balance.clone(), app.auto_topup.clone());
-        agent
-            .prompt
-            .slash_controller
-            .registry_mut()
-            .set_plugins_visible(!app.appearance.disable_plugins);
+        agent.set_plugins_visible_recursive(!app.appearance.disable_plugins);
     }
     if let Some(prompt) = prompt
         && let Some(agent) = app.agents.get_mut(&agent_id)
@@ -1184,8 +1162,8 @@ pub(in crate::app::dispatch) fn dispatch_new_session_with_id(
     let (_agent_id, effects) = dispatch_new_session_inner_with_id(app, None);
     effects
 }
-/// Tear down a placeholder agent that must not proceed under sticky `--chat`
-/// (local Build refuse). Never leave a half-loaded slot with a bound session id.
+/// Tear down a placeholder agent that must not proceed under sticky `--chat` (local Build refuse).
+/// Never leave a half-loaded slot with a bound session id.
 pub(in crate::app::dispatch) fn refuse_chat_mode_build_agent(app: &mut AppView, agent_id: AgentId) {
     let refusal = crate::app::session_startup::chat_mode_local_build_refusal(app.locale.as_ref());
     app.show_toast(&refusal);
@@ -1346,7 +1324,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
     let locale = app.locale.clone();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.session.finish_command();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         let session_id_clone = session_id.clone();
         agent.bind_session_id(session_id);
         agent.scheduler_background_loops = scheduler_background_loops;
@@ -1451,7 +1429,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_created(
     }
     vec![]
 }
-/// Surface a session-creation failure on the welcome screen (no toast sink).
+/// Record a session-creation failure as a startup warning; the welcome screen has no toast.
 fn push_session_create_failure_warning(app: &mut AppView, msg: &str) {
     if !app.startup_warnings.iter().any(|w| w.message == msg) {
         app.startup_warnings.push(crate::startup::StartupWarning {
@@ -1461,9 +1439,8 @@ fn push_session_create_failure_warning(app: &mut AppView, msg: &str) {
         });
     }
 }
-/// After an orphan create fails, New/Fork may already have moved overlay
-/// attach onto the removed placeholder. Re-point to the survivor so
-/// Left/Esc still exit to the dashboard; clear when recovery is Welcome.
+/// After an orphan create fails, New/Fork may already have attached the dashboard overlay to the removed placeholder.
+/// Re-point it to the survivor so Left/Esc still exit to the dashboard; clear it when recovery lands on Welcome.
 fn restore_dashboard_attach_after_orphan_remove(
     app: &mut AppView,
     removed: AgentId,
@@ -1480,9 +1457,8 @@ fn restore_dashboard_attach_after_orphan_remove(
         None => d.close_popup(),
     }
 }
-/// Failed plain `CreateSession`: drop orphan placeholders, clear the
-/// starting-session spinner, and surface the error (toast when an agent
-/// remains; startup warning on the welcome screen, which has no toast).
+/// Failed plain `CreateSession`: drop orphan placeholders, clear the starting-session spinner, and report the error.
+/// The report is a toast when an agent remains; on the welcome screen, which has no toast, it is a startup warning.
 pub(in crate::app::dispatch) fn handle_session_failed(
     app: &mut AppView,
     agent_id: AgentId,
@@ -1530,7 +1506,7 @@ pub(in crate::app::dispatch) fn handle_session_failed(
         agent.mcp_init_progress = None;
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;
         agent.show_toast(&msg);
@@ -1592,7 +1568,7 @@ pub(in crate::app::dispatch) fn handle_worktree_session_failed(
         agent.mcp_init_progress = None;
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
-        agent.mark_turn_finished();
+        agent.mark_turn_finished(TurnEnd::Aborted);
         agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;
         agent

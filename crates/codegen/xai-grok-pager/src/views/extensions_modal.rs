@@ -1,8 +1,6 @@
-//! Extensions modal popup (Hooks, Plugins, Marketplace, Skills, Workflows,
-//! MCP Servers).
+//! Extensions modal popup (Hooks, Plugins, Marketplace, Skills, Workflows, MCP Servers).
 //!
-//! A centered overlay using the shared [`ModalWindow`](super::modal_window)
-//! chrome, opened by the `/hooks` and `/plugins` slash commands.
+//! A centered overlay using the shared [`ModalWindow`](super::modal_window) chrome, opened by the `/hooks` and `/plugins` slash commands.
 //! Blocks all input until closed with `Esc`.
 
 use crossterm::event::{KeyCode, KeyEvent};
@@ -34,6 +32,34 @@ fn extension_text(locale: Option<&LocaleContext>, id: &str, english: &str) -> St
     locale
         .map(|locale| locale.named_text(id, english).into_owned())
         .unwrap_or_else(|| english.to_owned())
+}
+
+/// Expand placeholders from the template without scanning inserted values again.
+///
+/// Extension source labels and marketplace metadata may contain text such as
+/// `{count}` or `{author}` literally. Chained `str::replace` calls would treat
+/// those fragments as placeholders belonging to the localized template.
+fn render_extension_template(template: &str, replacements: &[(&str, &str)]) -> String {
+    let mut output = String::with_capacity(template.len());
+    let mut remaining = template;
+    loop {
+        let Some((index, placeholder, value)) = replacements
+            .iter()
+            .filter_map(|(placeholder, value)| {
+                remaining
+                    .find(placeholder)
+                    .map(|index| (index, *placeholder, *value))
+            })
+            .min_by_key(|(index, _, _)| *index)
+        else {
+            output.push_str(remaining);
+            break;
+        };
+        output.push_str(&remaining[..index]);
+        output.push_str(value);
+        remaining = &remaining[index + placeholder.len()..];
+    }
+    output
 }
 
 mod workflows_picker_rows;
@@ -204,7 +230,7 @@ struct SkillGroup {
     label: String,
 }
 
-/// Project → User → Plugin → Bundled → Server → Config.
+/// Group rank order: Project, User, Plugin, Bundled, Server, Config.
 fn skill_group(skill: &SkillInfo) -> SkillGroup {
     use xai_grok_tools::implementations::skills::types::SkillScope;
     use xai_grok_tools::types::config_source::ConfigSource;
@@ -417,10 +443,9 @@ fn plugin_group_display_label<'a>(
 
 /// Resolve the source group a plugin belongs to on the Plugins tab.
 ///
-/// Uses the plugin's `origin` when present. A missing origin (older shell)
-/// or an unrecognized variant (newer shell) falls back to the scope plus
-/// the legacy `marketplace_source` label so the UI still degrades to
-/// sensible groups.
+/// Uses the plugin's `origin` when present.
+/// A missing origin (older shell) or an unrecognized variant (newer shell) falls back to the scope plus the legacy `marketplace_source` label.
+/// The fallback still yields sensible groups.
 pub fn plugin_group(plugin: &xai_hooks_plugins_types::PluginInfo) -> PluginGroup {
     use xai_hooks_plugins_types::{PluginOrigin, PluginScope};
 
@@ -474,7 +499,7 @@ pub fn plugin_group(plugin: &xai_hooks_plugins_types::PluginInfo) -> PluginGroup
     }
 }
 
-/// Group + order hooks the same way the renderer does.
+/// Group and order hooks the same way the renderer does.
 struct HookGroupView<'a> {
     source_dir: &'a str,
     label: String,
@@ -606,6 +631,24 @@ impl ExtensionsTab {
 // Status filter
 // ---------------------------------------------------------------------------
 
+/// Group toggle direction for a collapsed hooks group.
+/// Pinned (managed-policy) hooks always report enabled, so only unpinned hooks drive the direction.
+/// A group with no unpinned hooks reads enabled (everything in it always runs), never "off".
+pub(crate) fn hook_group_any_enabled<'a>(
+    hooks: impl Iterator<Item = &'a xai_hooks_plugins_types::HookInfo>,
+) -> bool {
+    let unpinned: Vec<_> = hooks.filter(|h| !h.pinned).collect();
+    unpinned.is_empty() || unpinned.iter().any(|h| !h.disabled)
+}
+
+/// Whether removing this hook's source would touch a managed-policy hook (`x` removes the whole `source_dir`, so the gate is source-level).
+pub(crate) fn hook_source_pinned(
+    hooks: &[xai_hooks_plugins_types::HookInfo],
+    source_dir: &str,
+) -> bool {
+    hooks.iter().any(|h| h.source_dir == source_dir && h.pinned)
+}
+
 /// Filter items by enabled/disabled status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StatusFilter {
@@ -694,13 +737,12 @@ pub enum ButtonAction {
     /// Execute a marketplace action via ACP.
     MarketplaceAction(xai_hooks_plugins_types::MarketplaceAction),
 
-    /// Remove the marketplace source under the cursor (unconfigure + uninstall all its plugins).
+    /// Remove the marketplace source under the cursor (unconfigure it and uninstall all its plugins).
     RemoveSelectedMarketplaceSource,
     ToggleExpand,
-    /// Cycle the status filter (All → Enabled → Disabled → All).
+    /// Cycle the status filter: All, Enabled, Disabled, back to All.
     CycleFilter,
-    /// Enter input mode: show an inline form so the user can type arguments,
-    /// then submit the full command on Enter.
+    /// Enter input mode: show an inline form so the user can type arguments, then submit the full command on Enter.
     StartInput {
         /// Command prefix used to build the typed action on submit.
         command_prefix: String,
@@ -725,7 +767,6 @@ pub struct FieldSpec {
 pub struct ModalInput {
     /// Command prefix used to build the typed action on submit.
     pub command_prefix: String,
-    /// Input fields.
     fields: Vec<ModalInputField>,
     /// Index of the currently focused field.
     focused: usize,
@@ -798,7 +839,6 @@ impl ModalInputField {
 }
 
 impl ModalInput {
-    /// Build from a command prefix and field specs.
     pub fn from_specs(command_prefix: String, specs: Vec<FieldSpec>) -> Self {
         debug_assert!(!specs.is_empty(), "ModalInput needs at least one field");
         let fields = specs.into_iter().map(ModalInputField::new).collect();
@@ -844,9 +884,8 @@ impl ModalInput {
             .collect()
     }
 
-    /// Process a key event on the input form. Returns what the caller
-    /// should do (submit, cancel, nothing, etc.) without coupling to
-    /// `AgentView` or `InputOutcome`.
+    /// Process a key event on the input form.
+    /// Returns what the caller should do (submit, cancel, nothing, etc.) without coupling to `AgentView` or `InputOutcome`.
     pub fn handle_key(&mut self, key: &KeyEvent) -> ModalInputOutcome {
         match key {
             KeyEvent {
@@ -1077,8 +1116,7 @@ pub enum McpSetupOutcome {
 pub enum ConfirmationAction {
     /// Replay a hooks action (e.g. remove a hook source directory).
     Hooks(xai_hooks_plugins_types::HooksAction),
-    /// Replay a plugins action (e.g. uninstall; may still be `confirmed: false`
-    /// so multi-plugin repos can return a second server-owned prompt).
+    /// Replay a plugins action (e.g. uninstall; may still be `confirmed: false` so multi-plugin repos can return a second server-owned prompt).
     Plugins(xai_hooks_plugins_types::PluginsAction),
     /// Replay a marketplace action (uninstall plugin or remove source).
     Marketplace(xai_hooks_plugins_types::MarketplaceAction),
@@ -1089,6 +1127,8 @@ pub enum ConfirmationAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalMessage {
     Error(String),
+    /// Same covering overlay and any-key dismissal as [`Self::Error`], but rendered in the secondary text color: a policy notice, not a failure.
+    Info(String),
     Confirmation {
         message: String,
         action: ConfirmationAction,
@@ -1104,26 +1144,34 @@ pub struct ButtonArea {
     pub key: char,
 }
 
-/// Transient, non-covering feedback shown after an extensions action
-/// completes, so the list (the surface that actually changed — a bumped
-/// version, a refreshed list) stays visible. Auto-expires via a per-tick
-/// countdown, mirroring `AgentView::toast`.
+/// Transient, non-covering feedback shown after an extensions action completes.
+/// The list, the thing that actually changed (a bumped version, a refreshed list), stays visible.
+/// Auto-expires via a per-tick countdown, mirroring `AgentView::toast`.
 #[derive(Debug, Clone)]
 pub struct ActionResultNotice {
     /// Full result text (used verbatim for the tab-wide status line).
     pub message: String,
+    /// Identifies the action family so hook-owned fixed strings can be
+    /// localized without rewriting identical plugin/marketplace output.
+    pub origin: ActionResultOrigin,
     /// Row to anchor a badge to; `None` renders a tab-wide status line.
     pub entry_index: Option<usize>,
     /// Remaining animation ticks before auto-dismiss.
     pub ticks_remaining: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionResultOrigin {
+    Hooks,
+    Plugins,
+    Marketplace,
+}
+
 /// How long a result notice stays on screen, in animation ticks (~2.5s at 30fps).
 pub const RESULT_NOTICE_TICKS: u16 = 75;
 
-/// Single source of truth for the McpServers tab action keys. Consumed by
-/// the renderer (hint bar), the picker (`PickerConfig::action_keys`), and
-/// `resolve_key` (must have a matching arm for every entry).
+/// Single source of truth for the McpServers tab action keys.
+/// Consumed by the renderer (hint bar), the picker (`PickerConfig::action_keys`), and `resolve_key` (must have a matching arm for every entry).
 pub const MCP_SERVERS_ACTION_KEYS: &[(char, &str)] = &[
     ('r', "refresh"),
     ('a', "add"),
@@ -1137,8 +1185,7 @@ pub const MCP_SERVERS_OPEN_CONNECTORS_FOOTER: &str = "ctrl-o open";
 
 /// Map an action key character to its display string for shortcut hints.
 ///
-/// Single source of truth shared by [`render_extensions_modal`] (footer
-/// shortcuts) and [`crate::views::picker::render_picker`] (hint bar).
+/// Single source of truth shared by [`render_extensions_modal`] (footer shortcuts) and [`crate::views::picker::render_picker`] (hint bar).
 /// Returns `""` for unmapped characters.
 pub fn action_key_display(ch: char) -> &'static str {
     match ch {
@@ -1158,9 +1205,8 @@ pub fn action_key_display(ch: char) -> &'static str {
 
 /// Per-tab action keys for the extensions modal (footer, picker, telemetry).
 ///
-/// Space stays labeled `"toggle"` on the wire for telemetry / picker identity;
-/// user-facing copy remaps via [`action_key_footer_desc`] /
-/// [`action_key_cheatsheet_desc`].
+/// Space stays labeled `"toggle"` on the wire for telemetry / picker identity.
+/// User-facing copy remaps via [`action_key_footer_desc`] / [`action_key_cheatsheet_desc`].
 pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
     match tab {
         ExtensionsTab::Hooks => vec![
@@ -1190,8 +1236,8 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
     }
 }
 
-/// Footer verb for an action key. Uses the state's published
-/// `entry_data_indices` / `entry_group_keys` (input handling, unit tests).
+/// Footer verb for an action key.
+/// Uses the state's published `entry_data_indices` / `entry_group_keys` (input handling, unit tests).
 pub fn action_key_footer_desc(
     ch: char,
     desc: &'static str,
@@ -1207,9 +1253,8 @@ pub fn action_key_footer_desc(
     )
 }
 
-/// Like [`action_key_footer_desc`], but resolves the Space enable/disable verb
-/// from freshly built entry-mapping slices (render path) so we need not
-/// publish `state.entry_*` before paint.
+/// Like [`action_key_footer_desc`], but resolves the Space enable/disable verb from freshly built entry-mapping slices (render path).
+/// The render path then need not publish `state.entry_*` before paint.
 fn action_key_footer_desc_for_mapping(
     ch: char,
     desc: &'static str,
@@ -1227,6 +1272,58 @@ fn action_key_footer_desc_for_mapping(
     } else {
         desc
     }
+}
+
+/// Whether removal can succeed for the Hooks-tab selection (`HookInfo::removable`): only user-registered directories are.
+/// Headers resolve via group key.
+fn selected_hook_source_removable_at(
+    state: &ExtensionsModalState,
+    entry_data_indices: &[Option<usize>],
+    entry_group_keys: &[Option<String>],
+    selected: usize,
+) -> bool {
+    if !matches!(state.active_tab, ExtensionsTab::Hooks) {
+        // Other tabs manage their own action sets; never suppress here.
+        return true;
+    }
+    let TabDataState::Loaded(ref data) = state.hooks_data else {
+        return true;
+    };
+    if let Some(source_dir) = entry_group_keys.get(selected).and_then(|k| k.as_ref()) {
+        return data
+            .hooks
+            .iter()
+            .any(|h| &h.source_dir == source_dir && h.removable);
+    }
+    let Some(idx) = data_index_at(entry_data_indices, selected) else {
+        return true;
+    };
+    data.hooks.get(idx).is_none_or(|h| h.removable)
+}
+
+/// Hooks-tab selections the dispatcher would refuse to toggle: a pinned hook row, or a group header whose group has no unpinned members.
+/// Headers resolve via group key (they carry no data index).
+fn selected_hook_policy_enforced_at(
+    state: &ExtensionsModalState,
+    entry_data_indices: &[Option<usize>],
+    entry_group_keys: &[Option<String>],
+    selected: usize,
+) -> bool {
+    if !matches!(state.active_tab, ExtensionsTab::Hooks) {
+        return false;
+    }
+    let TabDataState::Loaded(ref data) = state.hooks_data else {
+        return false;
+    };
+    if let Some(source_dir) = entry_group_keys.get(selected).and_then(|k| k.as_ref()) {
+        // Headers: policy-locked only when every member is pinned.
+        let mut members = data.hooks.iter().filter(|h| &h.source_dir == source_dir);
+        return members.all(|h| h.pinned);
+    }
+    let Some(idx) = data_index_at(entry_data_indices, selected) else {
+        return false;
+    };
+    data.hooks.get(idx).is_some_and(|h| h.pinned)
 }
 
 pub fn action_key_cheatsheet_desc(ch: char, desc: &'static str) -> &'static str {
@@ -1331,6 +1428,20 @@ fn localized_pending_text<'a>(
 }
 
 fn localized_modal_message(locale: Option<&LocaleContext>, text: &str) -> String {
+    let fixed = match text {
+        "This hook source is enforced by managed policy and cannot be removed." => Some((
+            "extensions.modal.hook_source_managed_policy",
+            "This hook source is enforced by managed policy and cannot be removed.",
+        )),
+        "Only user-added hook directories can be removed here." => Some((
+            "extensions.modal.hook_source_user_only",
+            "Only user-added hook directories can be removed here.",
+        )),
+        _ => None,
+    };
+    if let Some((id, english)) = fixed {
+        return extension_text(locale, id, english);
+    }
     let dynamic = [
         (
             "Cannot remove managed server '",
@@ -1380,6 +1491,138 @@ fn localized_modal_message(locale: Option<&LocaleContext>, text: &str) -> String
     text.to_owned()
 }
 
+fn localized_action_result_message(
+    locale: Option<&LocaleContext>,
+    origin: ActionResultOrigin,
+    text: &str,
+) -> String {
+    if origin != ActionResultOrigin::Hooks {
+        return text.to_owned();
+    }
+    let (first_line, remainder) = text
+        .split_once('\n')
+        .map_or((text, None), |(line, rest)| (line, Some(rest)));
+    let Some(mut localized) = localized_hook_action_result_line(locale, first_line)
+        .or_else(|| localized_hook_toggle_result(locale, first_line))
+    else {
+        return text.to_owned();
+    };
+    if let Some(remainder) = remainder {
+        localized.push('\n');
+        localized.push_str(remainder);
+    }
+    localized
+}
+
+fn localized_hook_action_result_line(locale: Option<&LocaleContext>, text: &str) -> Option<String> {
+    let fixed = match text {
+        "Only user-added hook directories can be removed here." => Some((
+            "extensions.modal.hook_source_user_only",
+            "Only user-added hook directories can be removed here.",
+        )),
+        "This hook is enforced by managed policy and cannot be disabled." => Some((
+            "extensions.result.hook_managed_policy",
+            "This hook is enforced by managed policy and cannot be disabled.",
+        )),
+        "Hook disabled." => Some(("extensions.result.hook_disabled", "Hook disabled.")),
+        "Hook enabled." => Some(("extensions.result.hook_enabled", "Hook enabled.")),
+        "Hook was not disabled." => Some((
+            "extensions.result.hook_not_disabled",
+            "Hook was not disabled.",
+        )),
+        "Hooks reloaded." => Some(("extensions.result.hooks_reloaded", "Hooks reloaded.")),
+        _ => None,
+    };
+    if let Some((id, english)) = fixed {
+        return Some(extension_text(locale, id, english));
+    }
+    let dynamic = [
+        (
+            "Trusted: ",
+            ".",
+            "extensions.result.project_trusted",
+            "Trusted: {value}.",
+        ),
+        (
+            "Untrusted: ",
+            ".",
+            "extensions.result.project_untrusted",
+            "Untrusted: {value}.",
+        ),
+        (
+            "Added hook path: ",
+            ".",
+            "extensions.result.hook_path_added",
+            "Added hook path: {value}.",
+        ),
+        (
+            "Removed hook path: ",
+            ".",
+            "extensions.result.hook_path_removed",
+            "Removed hook path: {value}.",
+        ),
+    ];
+    for (prefix, suffix, id, english) in dynamic {
+        if let Some(value) = text
+            .strip_prefix(prefix)
+            .and_then(|rest| rest.strip_suffix(suffix))
+        {
+            return Some(extension_text(locale, id, english).replace("{value}", value));
+        }
+    }
+    None
+}
+
+fn localized_hook_toggle_result(locale: Option<&LocaleContext>, text: &str) -> Option<String> {
+    let (action, rest) = text
+        .strip_prefix("Disabled ")
+        .map(|rest| ("disabled", rest))
+        .or_else(|| text.strip_prefix("Enabled ").map(|rest| ("enabled", rest)))?;
+    let (counts, suffix) = rest.split_once(" hooks")?;
+    let (toggled, total) = counts.split_once('/')?;
+    if toggled.is_empty()
+        || total.is_empty()
+        || !toggled.chars().all(|ch| ch.is_ascii_digit())
+        || !total.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return None;
+    }
+
+    let (id, english, skipped) = match (action, suffix) {
+        ("disabled", "") => (
+            "extensions.result.hooks_disabled",
+            "Disabled {toggled}/{total} hooks",
+            None,
+        ),
+        ("enabled", "") => (
+            "extensions.result.hooks_enabled",
+            "Enabled {toggled}/{total} hooks",
+            None,
+        ),
+        ("disabled", suffix) => {
+            let skipped = suffix
+                .strip_prefix(" (")?
+                .strip_suffix(" enforced by managed policy, not disabled)")?;
+            if skipped.is_empty() || !skipped.chars().all(|ch| ch.is_ascii_digit()) {
+                return None;
+            }
+            (
+                "extensions.result.hooks_disabled_managed_skipped",
+                "Disabled {toggled}/{total} hooks ({skipped} enforced by managed policy, not disabled)",
+                Some(skipped),
+            )
+        }
+        _ => return None,
+    };
+    let mut localized = extension_text(locale, id, english)
+        .replace("{toggled}", toggled)
+        .replace("{total}", total);
+    if let Some(skipped) = skipped {
+        localized = localized.replace("{skipped}", skipped);
+    }
+    Some(localized)
+}
+
 fn localized_source_display(locale: Option<&LocaleContext>, source: &str) -> String {
     if locale.is_none() {
         return source.to_string();
@@ -1399,6 +1642,11 @@ fn localized_source_display(locale: Option<&LocaleContext>, source: &str) -> Str
         "Global hooks" => Some(("extensions.source.global_hooks", "Global hooks")),
         "Claude settings" => Some(("extensions.source.claude_settings", "Claude settings")),
         "Project hooks" => Some(("extensions.source.project_hooks", "Project hooks")),
+        "Project" => Some(("extensions.source.project", "Project")),
+        "User" => Some(("extensions.source.user", "User")),
+        "Bundled" => Some(("extensions.source.bundled", "Bundled")),
+        "Server" => Some(("extensions.source.server", "Server")),
+        "Config" => Some(("extensions.source.config", "Config")),
         "user" => Some(("extensions.source.user", "user")),
         "project" => Some(("extensions.source.project", "project")),
         "builtin" => Some(("extensions.source.builtin", "builtin")),
@@ -1457,8 +1705,8 @@ fn data_index_at(entry_data_indices: &[Option<usize>], selected: usize) -> Optio
     entry_data_indices.get(selected).copied().flatten()
 }
 
-/// Resolve picker selection to `(server_index, tool_index)` for an MCP tool row,
-/// using the given entry-mapping slices (not necessarily yet published on `state`).
+/// Resolve picker selection to `(server_index, tool_index)` for an MCP tool row.
+/// Uses the given entry-mapping slices (not necessarily yet published on `state`).
 fn selected_mcp_tool_at(
     entry_data_indices: &[Option<usize>],
     entry_group_keys: &[Option<String>],
@@ -1477,9 +1725,8 @@ fn selected_mcp_tool_at(
     Some((parent_si, selected - parent_pos - 1))
 }
 
-/// Whether the selected row is enabled, using the given entry-mapping slices
-/// so the render path can resolve Space enable/disable without an early
-/// `state.entry_*` publish.
+/// Whether the selected row is enabled, using the given entry-mapping slices.
+/// The render path can then resolve Space enable/disable without an early `state.entry_*` publish.
 fn selected_item_enabled_at(
     state: &ExtensionsModalState,
     entry_data_indices: &[Option<usize>],
@@ -1500,12 +1747,11 @@ fn selected_item_enabled_at(
                 TabDataState::Loaded(data) => {
                     let hook = data.hooks.get(idx)?;
                     if state.hooks_collapsed_groups.contains(&hook.source_dir) {
-                        Some(
+                        Some(hook_group_any_enabled(
                             data.hooks
                                 .iter()
-                                .filter(|h| h.source_dir == hook.source_dir)
-                                .any(|h| !h.disabled),
-                        )
+                                .filter(|h| h.source_dir == hook.source_dir),
+                        ))
                     } else {
                         Some(!hook.disabled)
                     }
@@ -1540,9 +1786,8 @@ fn selected_item_enabled_at(
     }
 }
 
-/// Build the full list of hint items for a given extensions tab (for the
-/// current section to surface all tab action keys, not just the compact
-/// subset shown in the bottom bar).
+/// Build the full list of hint items for a given extensions tab.
+/// The current section lists all tab action keys, not just the compact subset shown in the bottom bar.
 pub fn tab_all_hints(tab: ExtensionsTab) -> Vec<crate::views::shortcuts_bar::HintItem> {
     use crate::input::key::KeyShortcut;
     use crate::views::shortcuts_bar::HintItem;
@@ -1604,7 +1849,7 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
                 placeholder: None,
             }],
         }),
-        // Remove acts on the selected hook — resolved at dispatch time.
+        // Remove acts on the selected hook, resolved at dispatch time
         (ExtensionsTab::Hooks, 'x') => Some(ButtonAction::RemoveSelectedHook),
         // Toggle enable/disable on the selected hook.
         (ExtensionsTab::Hooks, ' ') => Some(ButtonAction::ToggleSelectedHook),
@@ -1632,8 +1877,7 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::Workflows, 'r') => Some(ButtonAction::ReloadSkills),
         (ExtensionsTab::McpServers, 'a') => Some(ButtonAction::StartInput {
             command_prefix: "mcp_add".into(),
-            // URL is required, Name is optional (auto-derived from URL),
-            // so URL goes first to match the natural typing order.
+            // URL is required, Name is optional (auto-derived from URL), so URL goes first to match the natural typing order
             // `build_action_from_input` reads matching indices.
             fields: vec![
                 FieldSpec {
@@ -1661,10 +1905,10 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
 
 /// Tab-complete a partial path by listing directory entries.
 ///
-/// Expands `~` to home directory. If the partial path is a directory,
-/// lists its contents. If it's a partial filename, finds matching entries
-/// in the parent directory. Returns the longest common prefix among matches,
-/// or `None` if no matches or the path doesn't exist.
+/// Expands `~` to home directory.
+/// If the partial path is a directory, lists its contents.
+/// If it's a partial filename, finds matching entries in the parent directory.
+/// Returns the longest common prefix among matches, or `None` if no matches or the path doesn't exist.
 pub fn tab_complete_path(partial: &str) -> Option<String> {
     use std::path::Path;
 
@@ -1674,7 +1918,7 @@ pub fn tab_complete_path(partial: &str) -> Option<String> {
 
     // Expand ~ to home directory.
     let expanded = if let Some(rest) = partial.strip_prefix('~') {
-        let home = dirs::home_dir()?;
+        let home = xai_dirs::home_dir()?;
         if rest.is_empty() || rest == "/" {
             home.to_string_lossy().to_string() + "/"
         } else {
@@ -1772,9 +2016,8 @@ fn longest_common_prefix(strings: &[String]) -> String {
         .map(|(a, _)| a)
         .collect()
 }
-/// Collect characters from `text` until the accumulated display width
-/// reaches `max_w`. Prevents wide characters (CJK, emoji) from
-/// overflowing a fixed-width column.
+/// Collect characters from `text` until the accumulated display width reaches `max_w`.
+/// Prevents wide characters (CJK, emoji) from overflowing a fixed-width column.
 fn take_by_width(text: &str, max_w: usize) -> String {
     let mut w = 0;
     text.chars()
@@ -1792,9 +2035,8 @@ fn take_by_width(text: &str, max_w: usize) -> String {
 /// Build a typed action from a multi-field form submission.
 ///
 /// `field_texts` contains one entry per field in submission order.
-/// Single-field forms pass a 1-element slice; MCP add passes
-/// `[url_or_command, name]` — URL first to match the on-screen field
-/// order (URL is required, Name is optional / auto-derived).
+/// Single-field forms pass a 1-element slice.
+/// MCP add passes `[url_or_command, name]`, URL first to match the on-screen field order (URL is required, Name is optional / auto-derived).
 pub fn build_action_from_input(
     command_prefix: &str,
     field_texts: &[String],
@@ -1841,8 +2083,7 @@ pub fn build_action_from_input(
 
 /// Derive a server name from a URL by extracting a meaningful hostname segment.
 ///
-/// `https://mcp.linear.app/mcp` -> `linear`
-/// `https://example.com/mcp` -> `example`
+/// `https://mcp.linear.app/mcp` becomes `linear`, and `https://example.com/mcp` becomes `example`.
 fn derive_name_from_url(url: &str) -> String {
     url.split("://")
         .nth(1)
@@ -1859,8 +2100,7 @@ fn derive_name_from_url(url: &str) -> String {
 /// Parse MCP add from separate name and url/command fields.
 ///
 /// If `name` is empty, derives a name from the URL hostname.
-/// The `url_or_cmd` field is split on whitespace to extract the command
-/// and any trailing args for stdio transport.
+/// The `url_or_cmd` field is split on whitespace to extract the command and any trailing args for stdio transport.
 fn parse_mcp_add_fields(name: &str, url_or_cmd: &str) -> Option<ButtonAction> {
     use xai_grok_shell::util::config::{McpServerConfig, McpServerTransportConfig};
 
@@ -1918,7 +2158,7 @@ fn parse_mcp_add_fields(name: &str, url_or_cmd: &str) -> Option<ButtonAction> {
 // State
 // ---------------------------------------------------------------------------
 
-/// Per-tab data fetching lifecycle.
+/// Per-tab data fetch state.
 #[derive(Debug)]
 pub enum TabDataState<T> {
     /// Fetch in progress (or not yet started).
@@ -1940,16 +2180,12 @@ pub struct WorkflowInfo {
 
 /// State for the hooks/plugins modal popup.
 pub struct ExtensionsModalState {
-    /// Shared modal window chrome state (close button, tabs, footer
-    /// shortcuts, popup area). Replaces the former `last_popup_area`,
-    /// `tab_areas`, `close_button_area`, `close_hovered` fields.
+    /// Shared modal window chrome state (close button, tabs, footer shortcuts, popup area).
     pub window: ModalWindowState,
     /// Currently active tab (source of truth).
     ///
-    /// `window.active_tab` (a `usize` index) is derived from this in the
-    /// render path via `ExtensionsTab::ALL.position()`. Only this field
-    /// should be mutated by input handlers; the window's copy is a
-    /// rendering hint synced each frame.
+    /// `window.active_tab` (a `usize` index) is derived from this in the render path via `ExtensionsTab::ALL.position()`.
+    /// Only this field should be mutated by input handlers; the window's copy is a rendering hint synced each frame.
     pub active_tab: ExtensionsTab,
     /// Session team principal for managed-connectors deep links in section copy.
     pub session_team_id: Option<String>,
@@ -1960,7 +2196,7 @@ pub struct ExtensionsModalState {
     /// Cached button hit areas from last render (for mouse click).
     pub button_areas: Vec<ButtonArea>,
     /// Active inline input (when the user is typing an argument for a command).
-    /// `None` = normal button mode, `Some` = input mode.
+    /// `None` means normal button mode, `Some` means input mode.
     pub input: Option<ModalInput>,
     pub mcp_setup: Option<McpSetupFormState>,
     /// Modal message state (error, confirmation prompt, etc.).
@@ -1968,18 +2204,16 @@ pub struct ExtensionsModalState {
     /// Description of an in-flight action (blocks buttons while set).
     pub pending_action: Option<String>,
     /// Picker entry index with an in-flight action (shown as inline badge).
-    /// Not invalidated on entry-list changes (filter/refresh/tab-switch);
-    /// out-of-range is skipped at render time, but a stale-but-in-range
-    /// index can decorate the wrong row.
+    /// Not invalidated on entry-list changes (filter/refresh/tab-switch).
+    /// Out-of-range is skipped at render time, but a stale-but-in-range index can decorate the wrong row.
     pub pending_entry_index: Option<usize>,
-    /// Transient result feedback shown after an action succeeds: a right-aligned
-    /// badge on `entry_index`'s row, or a tab-wide footer line when `None`.
+    /// Transient result feedback shown after an action succeeds: a right-aligned badge on `entry_index`'s row, or a tab-wide footer line when `None`.
     pub result_notice: Option<ActionResultNotice>,
     /// Last dispatched plugins action (for confirmation replay).
     pub last_plugins_action: Option<xai_hooks_plugins_types::PluginsAction>,
     /// Selected item index per tab (for j/k navigation).
     /// Maps visible row offset (relative to content top) to hook index.
-    /// Rebuilt every render; used for mouse click → hook selection.
+    /// Rebuilt every render; used to resolve a mouse click to a hook selection.
     pub hooks_visible_map: Vec<Option<usize>>,
     pub hooks_selected: usize,
     pub plugins_selected: usize,
@@ -1988,12 +2222,11 @@ pub struct ExtensionsModalState {
     pub plugins_scroll: usize,
     /// Marketplace tab state.
     pub marketplace_data: TabDataState<xai_hooks_plugins_types::MarketplaceListResponse>,
-    /// A marketplace list fetch is in flight. Overlapping list calls
-    /// serialize on the shell's per-source cache lock and each re-scans
-    /// every git source, so duplicates multiply the slowest source's latency.
+    /// A marketplace list fetch is in flight.
+    /// Overlapping list calls serialize on the shell's per-source cache lock and each re-scans every git source.
+    /// Duplicates therefore multiply the slowest source's latency.
     pub marketplace_fetch_inflight: bool,
-    /// A refetch arrived while one was in flight; it runs when the current
-    /// fetch lands so post-action results stay fresh.
+    /// A refetch arrived while one was in flight; it runs when the current fetch lands so post-action results stay fresh.
     pub marketplace_refetch_queued: bool,
     pub marketplace_selected: usize,
     pub marketplace_scroll: usize,
@@ -2004,19 +2237,21 @@ pub struct ExtensionsModalState {
     pub workflows_data: TabDataState<Vec<WorkflowInfo>>,
     /// MCP servers tab state.
     pub mcps_data: TabDataState<Vec<crate::views::mcps_modal::McpServerInfo>>,
-    /// Last selection that triggered auto-scroll. Prevents mouse scroll
-    /// from being overridden by auto-scroll on every render.
+    /// Last selection that triggered auto-scroll.
+    /// Prevents mouse scroll from being overridden by auto-scroll on every render.
     pub mcps_scroll_pinned_selection: Option<usize>,
     pub mcps_scroll: usize,
     /// Expanded MCP server tool lists (by raw catalog `si`, not picker row index).
     pub mcps_tools_expanded: std::collections::HashSet<usize>,
-    /// Collapsed MCP section headers (`mcp-section:*` keys). Key in set = collapsed.
+    /// Collapsed MCP section headers (`mcp-section:*` keys). A key in the set means collapsed.
     pub mcps_collapsed_sections: std::collections::HashSet<String>,
     /// Whether plugin section collapse defaults have been applied after first load.
     pub mcps_section_collapse_initialized: bool,
     /// Maps visible row offset to skill index (for mouse click).
     pub skills_visible_map: Vec<Option<usize>>,
     pub hooks_collapsed_groups: std::collections::HashSet<String>,
+    /// See [`Self::seed_hook_groups_once`].
+    pub hooks_groups_seeded: bool,
     /// Collapsed plugin source groups (by [`PluginGroup`] key).
     pub plugins_collapsed_groups: std::collections::HashSet<String>,
     /// See [`Self::seed_plugin_groups_once`].
@@ -2038,16 +2273,15 @@ pub struct ExtensionsModalState {
     /// Status filter for the skills tab.
     pub skills_filter: StatusFilter,
     /// Unified picker state for tabs managed by `render_picker_content`.
-    /// Search query and search_active live here (previously duplicated).
+    /// Search query and search_active live here.
     pub picker_state: picker::PickerState,
-    /// Maps picker entry index → original data index (for action dispatch).
+    /// Maps picker entry index to original data index (for action dispatch).
     /// Rebuilt every render. `None` for headers or error entries.
     pub entry_data_indices: Vec<Option<usize>>,
     /// Cached entry labels from last render (for group header identification in input handler).
     pub entry_labels_cache: Vec<String>,
-    /// Maps picker entry index → group key for collapse/expand.
-    /// For hooks: the source_dir string. For plugins: the [`PluginGroup`]
-    /// key. For marketplace: source index as string.
+    /// Maps picker entry index to group key for collapse/expand.
+    /// For hooks: the source_dir string. For plugins: the [`PluginGroup`] key. For marketplace: source index as string.
     /// `None` for non-group entries.
     pub entry_group_keys: Vec<Option<String>>,
     /// Per-entry keyboard/mouse selectability (rebuilt each render).
@@ -2063,7 +2297,6 @@ impl Default for ExtensionsModalState {
 }
 
 impl ExtensionsModalState {
-    /// Create a new modal state with the given initial tab.
     pub fn new(tab: ExtensionsTab) -> Self {
         Self {
             window: ModalWindowState::with_tabs(ExtensionsTab::ALL.len()),
@@ -2097,10 +2330,8 @@ impl ExtensionsModalState {
             mcps_scroll_pinned_selection: None,
             mcps_scroll: 0,
             mcps_tools_expanded: std::collections::HashSet::new(),
-            // Plugin sections are seeded collapsed on first MCP load (Local
-            // stays expanded by default for a less noisy initial view).
-            // Section headers are keyboard-selectable so j/k lands on them
-            // and Enter / l / Right re-expands a collapsed section.
+            // Plugin sections are seeded collapsed on first MCP load (Local stays expanded by default for a less noisy initial view)
+            // Section headers are keyboard-selectable so j/k lands on them and Enter / l / Right re-expands a collapsed section
             mcps_collapsed_sections: std::collections::HashSet::new(),
             mcps_section_collapse_initialized: false,
             skills_visible_map: Vec::new(),
@@ -2108,6 +2339,7 @@ impl ExtensionsModalState {
             skills_collapsed_groups: std::collections::HashSet::new(),
             skills_groups_seeded: false,
             hooks_collapsed_groups: std::collections::HashSet::new(),
+            hooks_groups_seeded: false,
             plugins_collapsed_groups: std::collections::HashSet::new(),
             plugins_groups_seeded: false,
             marketplace_collapsed_sources: std::collections::HashSet::new(),
@@ -2115,7 +2347,7 @@ impl ExtensionsModalState {
             mcps_filter: StatusFilter::default(),
             hooks_filter: StatusFilter::default(),
             skills_filter: StatusFilter::default(),
-            // PickerState mode is vestigial — ModalWindow handles framing.
+            // PickerState mode is vestigial; ModalWindow handles framing
             picker_state: picker::PickerState::default(),
             entry_data_indices: Vec::new(),
             entry_labels_cache: Vec::new(),
@@ -2125,8 +2357,8 @@ impl ExtensionsModalState {
         }
     }
 
-    /// Advance the result-notice countdown by one animation tick. Returns
-    /// `true` if it just expired (a redraw is needed to erase it).
+    /// Advance the result-notice countdown by one animation tick.
+    /// Returns `true` if it just expired (a redraw is needed to erase it).
     pub fn tick_result_notice(&mut self) -> bool {
         if let Some(ref mut n) = self.result_notice {
             if n.ticks_remaining == 0 {
@@ -2140,12 +2372,9 @@ impl ExtensionsModalState {
 
     /// Switch to a different tab and reset the per-tab transient UI state.
     ///
-    /// Anything tied to the previous tab's data indices or modal flow
-    /// (the Add form, an error/confirmation overlay, an in-flight
-    /// `[processing]` badge, the picker selection / scroll / expansion
-    /// state) is cleared so the new tab opens in a clean browse view.
-    /// The user's search query (`picker_state.query()`) is intentionally
-    /// preserved across tabs — current behavior elsewhere in the modal.
+    /// Clears anything tied to the previous tab's data indices or modal flow, so the new tab opens in a clean browse view.
+    /// That covers the Add form, error/confirmation overlays, an in-flight `[processing]` badge, and the picker selection/scroll/expansion state.
+    /// The user's search query (`picker_state.query()`) is intentionally preserved across tabs, matching the rest of the modal.
     pub fn switch_tab(&mut self, tab: ExtensionsTab) {
         self.active_tab = tab;
         // Clear modal flow state from the previous tab.
@@ -2156,9 +2385,8 @@ impl ExtensionsModalState {
         self.pending_entry_index = None;
         self.result_notice = None;
         // Reset picker selection/scroll/expansion for the new tab.
-        // (Note: tabs_focused is *not* cleared here — it is orthogonal focus
-        // state for the tab bar itself. L/R-driven tab switches want to keep
-        // the bar focused so the user can continue cycling with arrows.)
+        // tabs_focused is *not* cleared here: it is orthogonal focus state for the tab bar itself
+        // L/R-driven tab switches want to keep the bar focused so the user can continue cycling with arrows
         self.picker_state.selected = 0;
         self.picker_state.scroll_offset = None;
         self.picker_state.expanded.clear();
@@ -2166,11 +2394,21 @@ impl ExtensionsModalState {
         self.picker_state.hovered = None;
     }
 
+    /// Seed the all-collapsed default for hook source groups exactly once.
+    /// Refetches preserve the user's expand state (re-collapsing shifted rows under the selection and notice anchor).
+    /// Same pattern as [`Self::seed_plugin_groups_once`].
+    pub fn seed_hook_groups_once(&mut self, hooks: &[xai_hooks_plugins_types::HookInfo]) {
+        if self.hooks_groups_seeded {
+            return;
+        }
+        self.hooks_collapsed_groups = hooks.iter().map(|h| h.source_dir.clone()).collect();
+        self.hooks_groups_seeded = true;
+    }
+
     /// Seed the all-collapsed default for plugin source groups exactly once.
     ///
-    /// Called from both plugin-data delivery channels (list fetch and the
-    /// `PluginsChanged` push); the first to deliver seeds, later deliveries
-    /// preserve the user's expand state.
+    /// Called from both plugin-data delivery channels (list fetch and the `PluginsChanged` push).
+    /// The first to deliver seeds; later deliveries preserve the user's expand state.
     pub fn seed_plugin_groups_once(&mut self, plugins: &[xai_hooks_plugins_types::PluginInfo]) {
         if self.plugins_groups_seeded {
             return;
@@ -2181,8 +2419,7 @@ impl ExtensionsModalState {
 
     /// Seed default-collapsed skill source groups exactly once.
     ///
-    /// Unions [`SkillGroup::label`] keys into `skills_collapsed_groups`;
-    /// later reloads leave the set alone so user expand state survives.
+    /// Unions [`SkillGroup::label`] keys into `skills_collapsed_groups`; later reloads leave the set alone so user expand state survives.
     pub fn seed_skills_groups_once(&mut self, skills: &[SkillInfo]) {
         if self.skills_groups_seeded {
             return;
@@ -2194,14 +2431,12 @@ impl ExtensionsModalState {
         self.skills_groups_seeded = true;
     }
 
-    /// Whether a group header at picker index `sel` with the given
-    /// `group_key` is currently expanded (children visible).
+    /// Whether a group header at picker index `sel` with the given `group_key` is currently expanded (children visible).
     pub fn is_group_expanded(&self, sel: usize, group_key: &str) -> bool {
         let searching = !self.picker_state.query().is_empty();
 
         match self.active_tab {
-            // During active search we force all hook groups open so matches
-            // inside previously-collapsed groups are visible.
+            // During active search we force all hook groups open so matches inside previously-collapsed groups are visible
             ExtensionsTab::Hooks => searching || !self.hooks_collapsed_groups.contains(group_key),
             ExtensionsTab::Plugins => {
                 searching || !self.plugins_collapsed_groups.contains(group_key)
@@ -2222,8 +2457,7 @@ impl ExtensionsModalState {
                     })
                     .is_some();
                 if source_has_error {
-                    // Error sources use the shared picker_state.expanded
-                    // (already handled by the general search-expand logic).
+                    // Error sources use the shared picker_state.expanded (already handled by the general search-expand logic)
                     self.picker_state.expanded.contains(&sel)
                 } else {
                     // Normal marketplace sources: force open while searching.
@@ -2277,10 +2511,9 @@ impl ExtensionsModalState {
         )
     }
 
-    /// Resolve the picker selection to `(server_index, tool_index)` when the
-    /// cursor is on an MCP tool row. Returns `None` on server rows, error/
-    /// loading entries, or out-of-range. Caller must be on the McpServers tab
-    /// — the helper relies on no other tab using `"mcp-tools:"` as a group-key prefix.
+    /// Resolve the picker selection to `(server_index, tool_index)` when the cursor is on an MCP tool row.
+    /// Returns `None` on server rows, error/loading entries, or out-of-range.
+    /// Caller must be on the McpServers tab; the helper relies on no other tab using `"mcp-tools:"` as a group-key prefix.
     pub fn selected_mcp_tool(&self) -> Option<(usize, usize)> {
         selected_mcp_tool_at(
             &self.entry_data_indices,
@@ -2289,8 +2522,7 @@ impl ExtensionsModalState {
         )
     }
 
-    /// For the Marketplace tab, resolve the currently selected picker entry to
-    /// the source and (optionally) the plugin within that source.
+    /// For the Marketplace tab, resolve the currently selected picker entry to the source and (optionally) the plugin within that source.
     /// Returns `(source_index, Option<plugin_index_within_source>)`.
     pub fn resolve_marketplace_selection(
         &self,
@@ -2300,10 +2532,10 @@ impl ExtensionsModalState {
         // Source index from entry_data_indices (None for source headers).
         let source_idx =
             if let Some(group_key) = self.entry_group_keys.get(sel).and_then(|k| k.as_ref()) {
-                // Source header — group_key is the source index.
+                // Source header: group_key is the source index
                 group_key.parse::<usize>().ok()?
             } else {
-                // Plugin entry — data index is the source index.
+                // Plugin entry: data index is the source index
                 self.entry_data_indices.get(sel)?.as_ref().copied()?
             };
         let source = sources.get(source_idx)?;
@@ -2322,9 +2554,8 @@ impl ExtensionsModalState {
         Some((source_idx, Some(plugin_idx)))
     }
 
-    /// True when the user is expanding an auth-required server's tool list (OAuth
-    /// should run instead of fold). False when collapsing or when tools are already
-    /// expanded.
+    /// True when the user is expanding an auth-required server's tool list (OAuth should run instead of fold).
+    /// False when collapsing or when tools are already expanded.
     pub fn mcp_auth_intercept_on_expand(&self) -> bool {
         if self.active_tab != ExtensionsTab::McpServers {
             return false;
@@ -2358,9 +2589,8 @@ pub(crate) fn parse_mcp_tools_server_index(group_key: &str) -> Option<usize> {
 
 /// Build the picker non-selectable mask (static headers).
 ///
-/// MCP section labels (`mcp-section:*`) are keyboard-selectable so j/k can
-/// land on them and Enter / l / Right toggles their collapsed state — the
-/// only way to expand a section once it has been collapsed.
+/// MCP section labels (`mcp-section:*`) are keyboard-selectable so j/k can land on them and Enter / l / Right toggles their collapsed state.
+/// That toggle is the only way to expand a section once it has been collapsed.
 pub fn build_entry_non_selectable(
     entry_is_header: &[bool],
     _entry_group_keys: &[Option<String>],
@@ -2368,20 +2598,16 @@ pub fn build_entry_non_selectable(
     entry_is_header.to_vec()
 }
 
-/// MCP section labels are now keyboard-selectable, so no rows need the
-/// "non-selectable but clickable" treatment. Kept as a function so callers
-/// can continue to pass a slice to the picker without per-call allocation
-/// changes; the returned mask is all `false`.
+/// MCP section labels are now keyboard-selectable, so no rows need the "non-selectable but clickable" treatment.
+/// Kept as a function so callers can continue to pass a slice to the picker without per-call allocation changes; the returned mask is all `false`.
 pub fn build_entry_non_selectable_clickable(entry_group_keys: &[Option<String>]) -> Vec<bool> {
     vec![false; entry_group_keys.len()]
 }
 
-/// Picker rows built for the MCP servers tab (labels + mapping only).
+/// Picker rows built for the MCP servers tab (labels and mapping only).
 ///
-/// Used by the full extensions-modal tests and by minimal mode's below-prompt
-/// MCP list (`crate::minimal::panel`), which reuses this exact ordering so the
-/// shared `picker_state.selected` (driven by the unchanged input handler) lines
-/// up with the rendered rows.
+/// Used by the full extensions-modal tests and by minimal mode's below-prompt MCP list (`crate::minimal::panel`).
+/// The panel reuses this ordering so the shared `picker_state.selected` (driven by the unchanged input handler) lines up with the rendered rows.
 #[derive(Debug, Default)]
 pub(crate) struct McpServersPickerRows {
     pub(crate) labels: Vec<String>,
@@ -2494,10 +2720,9 @@ pub(crate) fn init_mcps_section_collapse_on_first_load(
     *initialized = true;
 }
 
-/// Seed the MCP section collapse map for a post-CTA-install handoff: collapse
-/// Managed, Local, and every plugin section EXCEPT `target_plugin`, then mark
-/// the map initialized so the default first-load seeder no-ops. Leaves only the
-/// just-installed plugin's section expanded for the auth step.
+/// Seed the MCP section collapse map after a CTA install: collapse Managed, Local, and every plugin section EXCEPT `target_plugin`.
+/// Marks the map initialized so the default first-load seeder no-ops.
+/// Only the just-installed plugin's section stays expanded, ready for the auth step.
 pub(crate) fn seed_mcps_section_collapse_for_cta(
     collapsed_sections: &mut std::collections::HashSet<String>,
     initialized: &mut bool,
@@ -2529,8 +2754,7 @@ pub(crate) fn mcp_section_children_hidden(
 
 /// Derive a display label and whether the source is a custom (removable) path.
 ///
-/// Returns `(label, is_custom)` where `is_custom` means the source was added
-/// via hooks-paths and can be removed.
+/// Returns `(label, is_custom)` where `is_custom` means the source was added via hooks-paths and can be removed.
 pub fn derive_source_label(source_dir: &str) -> (String, bool) {
     let meta = classify_hook_source(source_dir);
     let is_custom = meta.is_custom();
@@ -2541,9 +2765,8 @@ pub fn derive_source_label(source_dir: &str) -> (String, bool) {
 fn classify_hook_source(source_dir: &str) -> HookSourceMeta {
     let grok = xai_grok_config::grok_home();
     let source_path = std::path::Path::new(source_dir);
-    // Plugin / installed-plugin dirs, under the user grok home (GROK_HOME-aware)
-    // or a project-scoped `{cwd}/.grok/<subdir>/`. Returns the first path
-    // component after the subdir (the plugin's install directory name).
+    // Plugin / installed-plugin dirs, under the user grok home (GROK_HOME-aware) or a project-scoped `{cwd}/.grok/<subdir>/`
+    // Returns the first path component after the subdir (the plugin's install directory name)
     let plugin_name = |subdir: &str| -> Option<String> {
         let first_comp = |p: &std::path::Path| {
             p.components()
@@ -2597,19 +2820,26 @@ fn classify_hook_source(source_dir: &str) -> HookSourceMeta {
             kind: HookSourceKind::Project,
         };
     }
-    // Custom directory — removable
+    // Custom directory (removable)
     let display = {
         if let Ok(rest) = source_path.strip_prefix(&grok) {
             let prefix = crate::util::display_grok_home_prefix();
             let rest_str = rest.to_string_lossy();
             let rest_trimmed = rest_str.strip_prefix('/').unwrap_or(&rest_str);
             format!("Custom: {prefix}/{rest_trimmed}")
-        } else if let Some(home) = dirs::home_dir() {
-            let home_str = home.display().to_string();
-            source_dir
-                .strip_prefix(&home_str)
-                .map(|rest| format!("Custom: ~{rest}"))
-                .unwrap_or_else(|| format!("Custom: {source_dir}"))
+        } else if let Some(home) = xai_dirs::home_dir() {
+            // Path::strip_prefix, not a string prefix: USERPROFILE `C:\Users\foo` must not collapse `C:\Users\foobar`
+            if !home.as_os_str().is_empty()
+                && let Ok(rest) = source_path.strip_prefix(&home)
+            {
+                if rest.as_os_str().is_empty() {
+                    "Custom: ~".into()
+                } else {
+                    format!("Custom: ~/{}", rest.display())
+                }
+            } else {
+                format!("Custom: {source_dir}")
+            }
         } else {
             format!("Custom: {source_dir}")
         }
@@ -2621,10 +2851,10 @@ fn classify_hook_source(source_dir: &str) -> HookSourceMeta {
 }
 
 // ---------------------------------------------------------------------------
-// Entry builders — convert tab data into Vec<PickerEntry> for render_picker
+// Entry builders: convert tab data into Vec<PickerEntry> for render_picker
 // ---------------------------------------------------------------------------
 
-/// One skill row after filter + group-then-A–Z sort.
+/// One skill row after the filter and the group-then-A–Z sort.
 #[derive(Debug, Clone)]
 struct SkillMatch {
     skill_index: usize,
@@ -2687,9 +2917,8 @@ fn filter_and_sort_skills(
             });
         }
     }
-    // Rank → case-insensitive group → exact label (stable when case differs) →
-    // name hits before desc-only → A–Z label. Renderer keys headers on exact
-    // `group_label`, so case-differing names stay separate groups.
+    // Sort key: rank, then case-insensitive group, then exact label (stable when case differs), then name hits before desc-only, then A–Z label
+    // Renderer keys headers on exact `group_label`, so case-differing names stay separate groups
     matches.sort_by_cached_key(|m| {
         (
             m.group_rank,
@@ -2839,8 +3068,7 @@ fn component_categories(
     })
 }
 
-/// Per-category names-only fields for an expanded marketplace entry:
-/// comma-joined component names, capped per category with "+N more".
+/// Per-category names-only fields for an expanded marketplace entry: comma-joined component names, capped per category with "+N more".
 pub(crate) fn render_components_fields(
     components: &xai_hooks_plugins_types::PluginComponents,
 ) -> Vec<(String, String)> {
@@ -2913,10 +3141,8 @@ fn marketplace_components_summary_with_locale(
 
 /// Render the hooks/plugins modal popup as a centered overlay.
 ///
-/// Uses the shared [`ModalWindow`](super::modal_window) for chrome
-/// (border, title, close button, tab bar, footer shortcuts) and
-/// [`render_picker_content`](picker::render_picker_content) for the
-/// scrollable entry list inside.
+/// Uses the shared [`ModalWindow`](super::modal_window) for chrome (border, title, close button, tab bar, footer shortcuts).
+/// [`render_picker_content`](picker::render_picker_content) draws the scrollable entry list inside.
 ///
 /// `full_area` is the total area available (everything above the shortcuts bar).
 /// Show each spinner frame for this many animation ticks.
@@ -2950,10 +3176,8 @@ pub fn render_extensions_modal_with_locale(
         return;
     }
 
-    // When switching into (or rendering) a tab while a search query is active,
-    // force-expand all items of that tab. This ensures search filtering shows
-    // every match explicitly, even inside groups that were collapsed before
-    // the user switched tabs.
+    // When switching into (or rendering) a tab while a search query is active, force-expand all items of that tab
+    // Search then shows every match, even inside groups that were collapsed before the user switched tabs
     if !state.picker_state.query().is_empty() {
         state.picker_state.expand_all_for_search(8192);
     }
@@ -2999,9 +3223,8 @@ pub fn render_extensions_modal_with_locale(
     // Input mode hides the entry list (form overlay owns the content area).
     let in_input_mode = state.input.is_some() || state.mcp_setup.is_some();
 
-    // Rebuild the entry list *before* footer action labels so Space
-    // enable/disable can use this frame's mapping (passed as locals to
-    // `action_key_footer_desc_for_mapping`), not last frame's filter/tab/query.
+    // Rebuild the entry list *before* footer action labels so Space enable/disable can use this frame's mapping, not last frame's filter/tab/query
+    // The mapping is passed as locals to `action_key_footer_desc_for_mapping`
     // ── Build PickerEntry list for current tab ──
     // We build owned data here and reference it for the picker.
     let mut entry_labels: Vec<String> = Vec::new();
@@ -3015,7 +3238,7 @@ pub fn render_extensions_modal_with_locale(
     let mut entry_group_keys: Vec<Option<String>> = Vec::new();
     let mut entry_badge_text: Vec<String> = Vec::new();
     let mut entry_badge_color: Vec<Option<ratatui::style::Color>> = Vec::new();
-    // Maps picker entry index → original data index (for action dispatch).
+    // Maps picker entry index to original data index (for action dispatch)
     let mut entry_data_indices: Vec<Option<usize>> = Vec::new();
 
     // Skip building entries when in input mode (render_input_form handles that).
@@ -3046,20 +3269,26 @@ pub fn render_extensions_modal_with_locale(
                         let count = members.len();
                         let localized_group = localized_source_display(locale, group_label);
                         entry_labels.push(if count == 1 {
-                            extension_text(
-                                locale,
-                                "extensions.skills.group_count.one",
-                                "{source} (1 skill)",
+                            render_extension_template(
+                                &extension_text(
+                                    locale,
+                                    "extensions.skills.group_count.one",
+                                    "{source} (1 skill)",
+                                ),
+                                &[("{source}", &localized_group)],
                             )
-                            .replace("{source}", &localized_group)
                         } else {
-                            extension_text(
-                                locale,
-                                "extensions.skills.group_count.many",
-                                "{source} ({count} skills)",
+                            render_extension_template(
+                                &extension_text(
+                                    locale,
+                                    "extensions.skills.group_count.many",
+                                    "{source} ({count} skills)",
+                                ),
+                                &[
+                                    ("{source}", &localized_group),
+                                    ("{count}", &count.to_string()),
+                                ],
                             )
-                            .replace("{source}", &localized_group)
-                            .replace("{count}", &count.to_string())
                         });
                         entry_right_labels.push(String::new());
                         entry_desc_lines.push(vec![]);
@@ -3193,8 +3422,7 @@ pub fn render_extensions_modal_with_locale(
                     for (group_key, plugins) in &groups {
                         let label = &group_key.label;
                         let group_key = &group_key.key;
-                        // While searching we ignore previous collapse state so
-                        // every plugin inside the group can be seen and matched.
+                        // While searching we ignore previous collapse state so every plugin inside the group can be seen and matched
                         let searching = !state.picker_state.query().is_empty();
                         let collapsed =
                             !searching && state.plugins_collapsed_groups.contains(group_key);
@@ -3289,20 +3517,21 @@ pub fn render_extensions_modal_with_locale(
                         let source_dir = group.source_dir;
                         let label = localized_source_display(locale, &group.label);
                         let indices = &group.indices;
-                        // While searching we ignore previous collapse state so
-                        // every hook inside the group can be seen and matched.
+                        // While searching we ignore previous collapse state so every hook inside the group can be seen and matched
                         let searching = !state.picker_state.query().is_empty();
                         let collapsed =
                             !searching && state.hooks_collapsed_groups.contains(source_dir);
-                        entry_labels.push(
-                            extension_text(
+                        entry_labels.push(render_extension_template(
+                            &extension_text(
                                 locale,
                                 "extensions.hooks.group_count",
                                 "{source} ({count} hooks)",
-                            )
-                            .replace("{source}", &label)
-                            .replace("{count}", &indices.len().to_string()),
-                        );
+                            ),
+                            &[
+                                ("{source}", &label),
+                                ("{count}", &indices.len().to_string()),
+                            ],
+                        ));
                         entry_right_labels.push(String::new());
                         entry_desc_lines.push(vec![]);
                         entry_summary_lines.push(vec![]);
@@ -3348,13 +3577,21 @@ pub fn render_extensions_modal_with_locale(
                             entry_indent.push(1);
                             entry_data_indices.push(Some(hi));
                             entry_group_keys.push(None);
-                            entry_badge_text.push(if hook.disabled {
+                            // Managed-policy hooks show their immutable state before an
+                            // attempted Disable can be refused. A pinned hook never
+                            // displays the disabled badge.
+                            entry_badge_text.push(if hook.pinned {
+                                extension_static(locale, "extensions.badge.policy", "[policy]")
+                                    .into()
+                            } else if hook.disabled {
                                 extension_static(locale, "extensions.badge.disabled", "[disabled]")
                                     .into()
                             } else {
                                 String::new()
                             });
-                            entry_badge_color.push(if hook.disabled {
+                            entry_badge_color.push(if hook.pinned {
+                                Some(theme.warning)
+                            } else if hook.disabled {
                                 Some(theme.accent_error)
                             } else {
                                 None
@@ -3385,8 +3622,7 @@ pub fn render_extensions_modal_with_locale(
                         let si = view.source_index;
                         let plugin_order = &view.plugin_indices;
                         let source = &data.sources[si];
-                        // Force all marketplace sources open while searching so their
-                        // plugins are considered for matching and displayed.
+                        // Force all marketplace sources open while searching so their plugins are considered for matching and displayed
                         let searching = !state.picker_state.query().is_empty();
                         let collapsed =
                             !searching && state.marketplace_collapsed_sources.contains(&si);
@@ -3442,13 +3678,14 @@ pub fn render_extensions_modal_with_locale(
                             entry_labels.push(plugin.name.clone());
                             let right = match (plugin.version.as_deref(), plugin.author.as_deref())
                             {
-                                (Some(v), Some(a)) => extension_text(
-                                    locale,
-                                    "extensions.marketplace.version_author",
-                                    "v{version} by {author}",
-                                )
-                                .replace("{version}", v)
-                                .replace("{author}", a),
+                                (Some(v), Some(a)) => render_extension_template(
+                                    &extension_text(
+                                        locale,
+                                        "extensions.marketplace.version_author",
+                                        "v{version} by {author}",
+                                    ),
+                                    &[("{version}", v), ("{author}", a)],
+                                ),
                                 (Some(v), None) => format!("v{v}"),
                                 (None, Some(a)) => extension_text(
                                     locale,
@@ -3767,15 +4004,14 @@ pub fn render_extensions_modal_with_locale(
             *color = Some(theme.warning);
         }
     }
-    // A completed action marks its row with a checkmark (auto-expiring),
-    // overriding the in-flight pending badge — keeps the list visible, no
-    // overlay. The full result text is shown non-covering in the footer below.
+    // A completed action marks its row with an auto-expiring checkmark
+    // A state badge from the refreshed list (e.g. `[disabled]`) is the feedback and takes precedence; the checkmark only fills badge-less rows.
     if let Some(ref n) = state.result_notice
         && let Some(row) = n.entry_index
+        && let Some(badge) = entry_badge_text.get_mut(row)
+        && badge.is_empty()
     {
-        if let Some(badge) = entry_badge_text.get_mut(row) {
-            *badge = "✓".to_string();
-        }
+        *badge = "✓".to_string();
         if let Some(color) = entry_badge_color.get_mut(row) {
             *color = Some(theme.accent_success);
         }
@@ -3806,74 +4042,80 @@ pub fn render_extensions_modal_with_locale(
     let non_selectable = build_entry_non_selectable(&entry_is_header, &entry_group_keys);
     let non_selectable_clickable = build_entry_non_selectable_clickable(&entry_group_keys);
 
-    // Min-clamp and skip rows marked non-selectable for this frame's footer +
-    // highlight. Do not write to `state` until after `render_modal_window`
-    // succeeds — early return would desync `selected` from entry maps
-    // published only post-paint.
+    // Min-clamp and skip rows marked non-selectable for this frame's footer and highlight
+    // Do not write to `state` until after `render_modal_window` succeeds
+    // An early return would desync `selected` from entry maps published only post-paint
     let entry_count = entry_labels.len();
     let selected =
         picker::first_selectable_index(state.picker_state.selected, entry_count, &non_selectable);
 
     // Build per-tab action keys for the footer shortcuts.
-    // Space enable/disable uses the freshly built entry-mapping locals
-    // (not `state.entry_*`, which are published once after paint below).
+    // Space enable/disable uses the freshly built entry-mapping locals (not `state.entry_*`, which are published once after paint below)
     let action_keys = extensions_action_keys(state.active_tab);
 
-    // Build owned labels for dynamic action-key shortcuts so we can
-    // borrow from them without leaking memory. Each entry is
-    // `(original_index, label)` so the shortcut `id` stays aligned
-    // with `action_keys` even when some keys have no display string.
+    // Build owned labels for dynamic action-key shortcuts so we can borrow from them without leaking memory
+    // Each entry is `(original_index, label)` so the shortcut `id` stays aligned with `action_keys` even when some keys have no display string
     let action_labels: Vec<(usize, String)> = action_keys
         .iter()
         .enumerate()
         .filter_map(|(i, &(ch, desc))| {
             let key_str = action_key_display(ch);
             if key_str.is_empty() {
-                None
-            } else {
-                let verb = action_key_footer_desc_for_mapping(
-                    ch,
-                    desc,
+                return None;
+            }
+            // Don't advertise actions the selection will refuse; the keys still answer with the refusal if pressed
+            let suppressed = match ch {
+                ' ' => selected_hook_policy_enforced_at(
                     state,
                     &entry_data_indices,
                     &entry_group_keys,
                     selected,
-                );
-                Some((
-                    i,
-                    format!("{key_str} {}", localized_action_desc(locale, verb)),
-                ))
+                ),
+                'x' => !selected_hook_source_removable_at(
+                    state,
+                    &entry_data_indices,
+                    &entry_group_keys,
+                    selected,
+                ),
+                _ => false,
+            };
+            if suppressed {
+                return None;
             }
+            let verb = action_key_footer_desc_for_mapping(
+                ch,
+                desc,
+                state,
+                &entry_data_indices,
+                &entry_group_keys,
+                selected,
+            );
+            Some((
+                i,
+                format!("{key_str} {}", localized_action_desc(locale, verb)),
+            ))
         })
         .collect();
 
-    // Build Shortcut list for the modal window footer.
-    // Standard nav/select/close + expandable hints + per-tab action keys.
-    // Build footer shortcuts: per-tab action keys + Esc close.
-    // All shortcuts are clickable so they get hover highlights and
-    // dispatch actions on click.
+    // Build the Shortcut list for the modal window footer: standard nav/select/close, expandable hints, per-tab action keys, and Esc close
+    // All shortcuts are clickable so they get hover highlights and dispatch actions on click
     //
-    // When a modal message overlay (error OR confirmation) is showing,
-    // the standard shortcuts are suppressed and a custom hint is
-    // rendered directly into the footer area below. Custom render is
-    // used because the dismissal keys ("any key") are multi-word and
-    // would not split correctly through the default Shortcut renderer.
+    // When a modal message overlay (error OR confirmation) is showing, the standard shortcuts are suppressed
+    // A custom hint is rendered directly into the footer area below
+    // Custom render is used because the dismissal keys ("any key") are multi-word and would not split correctly in the default Shortcut renderer
     // The overlay above is shortened to leave the footer line visible.
     let modal_msg_kind = state.modal_message.as_ref().map(|m| match m {
-        ModalMessage::Error(_) => ModalMsgKind::Error,
+        ModalMessage::Error(_) | ModalMessage::Info(_) => ModalMsgKind::Error,
         ModalMessage::Confirmation { .. } => ModalMsgKind::Confirm,
     });
     let mut shortcuts: Vec<Shortcut<'_>> = Vec::new();
     if modal_msg_kind.is_some() {
-        // Modal message overlay (error/confirmation) is rendered with
-        // its own dismissal hint in the footer below — leave the
-        // standard shortcuts list empty.
+        // Modal message overlay (error/confirmation) is rendered with its own dismissal hint in the footer below
+        // Leave the standard shortcuts list empty
     } else if state.picker_state.search_active && state.input.is_none() && state.mcp_setup.is_none()
     {
-        // Search bar has focus — hide the shortcuts footer entirely so
-        // it doesn't compete visually with the typing cursor and so
-        // typed letters don't appear to map to advertised actions
-        // (they're going into the query, not triggering shortcuts).
+        // Search bar has focus: hide the shortcuts footer entirely so it doesn't compete visually with the typing cursor
+        // Hiding also stops typed letters appearing to map to advertised actions (they go into the query, not shortcuts)
         // Input-mode is handled below; it owns its own footer.
     } else if state.mcp_setup.is_some() {
         shortcuts.push(Shortcut {
@@ -3896,9 +4138,8 @@ pub fn render_extensions_modal_with_locale(
             id: 0,
         });
     } else if let Some(ref input) = state.input {
-        // "Add"/input mode: surface the keys the input form actually
-        // handles. Tab is either path completion (single-field) or
-        // field navigation (multi-field).
+        // "Add"/input mode: show the keys the input form actually handles
+        // Tab is either path completion (single-field) or field navigation (multi-field)
         shortcuts.push(Shortcut {
             label: extension_static(locale, "extensions.shortcut.submit", "Enter submit"),
             clickable: false,
@@ -3919,12 +4160,10 @@ pub fn render_extensions_modal_with_locale(
             id: 0,
         });
     } else {
-        // Tab/Shift+Tab cycles tabs (handled in picker.rs). Click on
-        // the hint cycles to the next tab only — sentinel id 98,
-        // dispatched in `handle_extensions_modal_mouse`. The hint
-        // label intentionally documents only `Tab` because click
-        // cycles forward; `Shift+Tab` is still listed in the
-        // cheatsheet (`?` shortcut help).
+        // Tab/Shift+Tab cycles tabs (handled in picker.rs)
+        // Click on the hint cycles to the next tab only (sentinel id 98, dispatched in `handle_extensions_modal_mouse`)
+        // The hint label intentionally documents only `Tab` because click cycles forward
+        // `Shift+Tab` is still listed in the cheatsheet (`?` shortcut help)
         shortcuts.push(Shortcut {
             label: extension_static(locale, "extensions.shortcut.tabs", "Tab tabs"),
             clickable: true,
@@ -3948,20 +4187,18 @@ pub fn render_extensions_modal_with_locale(
                 id: 0,
             });
         }
-        // `e` / Shift+e / Enter still expands and collapses (handled by
-        // the picker's built-in expandable branch). The hint is omitted
-        // from the footer to save space — the cheatsheet still lists it.
-        // ID 99 = close action, handled in the mouse handler.
+        // `e` / Shift+e / Enter still expands and collapses (handled by the picker's built-in expandable branch)
+        // The hint is omitted from the footer to save space; the cheatsheet still lists it
+        // ID 99 is the close action, handled in the mouse handler
         shortcuts.push(Shortcut {
             label: extension_static(locale, "extensions.shortcut.close", "Esc close"),
             clickable: true,
             id: 99,
         });
-        // Surface `i search` in the footer when vim nav mode is active — but
-        // only on tabs where `i` is not already an action key (Marketplace
-        // `install`, MCP Servers `auth`). `handle_picker_input` resolves action
-        // keys before vim search entry, so on those tabs `i` never opens search
-        // and the hint would mislabel the key.
+        // Show `i search` in the footer when vim nav mode is active
+        // Skip tabs where `i` is already an action key (Marketplace `install`, MCP Servers `auth`)
+        // `handle_picker_input` resolves action keys before vim search entry
+        // On those tabs `i` never opens search, so the hint would mislabel the key
         let i_is_action_key = extensions_action_keys(state.active_tab)
             .iter()
             .any(|&(ch, _)| ch == 'i');
@@ -3978,7 +4215,7 @@ pub fn render_extensions_modal_with_locale(
 
     // Render modal window chrome.
     let modal_config = ModalWindowConfig {
-        // Empty title — the tab bar identifies the modal contents.
+        // Empty title; the tab bar identifies the modal contents
         title: "",
         tabs: Some(&labels),
         shortcuts: &shortcuts,
@@ -4002,19 +4239,15 @@ pub fn render_extensions_modal_with_locale(
     }) =
         modal_window::render_modal_window(buf, full_area, &mut state.window, &modal_config, &theme)
     else {
-        // Too small to paint: leave selection + entry caches unchanged
-        // together (see clamp comment above).
+        // Too small to paint: leave the selection and entry caches unchanged together (see clamp comment above)
         return;
     };
 
-    // Commit the clamped selection now that paint will continue and
-    // entry maps will be published later this frame.
+    // Commit the clamped selection now that paint will continue and entry maps will be published later this frame
     state.picker_state.selected = selected;
 
-    // In input ("Add") mode the search bar, filter indicator, and divider
-    // are hidden so the bordered input form can own the full content area.
-    // The search affordances are irrelevant while the user is typing into
-    // a form, and the divider would float above the form awkwardly.
+    // In input ("Add") mode the search bar, filter indicator, and divider are hidden so the bordered input form can own the full content area
+    // The search controls are irrelevant while the user is typing into a form, and the divider would float above the form awkwardly
 
     let search_width = content_area.width;
     if !in_input_mode {
@@ -4052,7 +4285,7 @@ pub fn render_extensions_modal_with_locale(
         state.picker_state.filter_area = None;
     }
 
-    // Divider below search — spans full inner width (border to border).
+    // Divider below search; spans full inner width (border to border)
     // Suppressed in input mode (no search bar above to divide from).
     let sep_y = content_area.y + 1;
     if !in_input_mode && sep_y < content_area.y + content_area.height {
@@ -4066,26 +4299,25 @@ pub fn render_extensions_modal_with_locale(
         );
     }
 
-    // In input mode the form takes the full content area (no search/divider
-    // chrome above). Otherwise entries start one row below the divider.
+    // In input mode the form takes the full content area (no search/divider chrome above)
+    // Otherwise entries start one row below the divider
     let entries_start_y = if in_input_mode {
         content_area.y
     } else {
         sep_y + 1
     };
-    // Search-bar hit area: zero-rect in input mode so a click in that
-    // (now empty) row doesn't accidentally activate search underneath.
+    // Search-bar hit area: zero-rect in input mode so a click in that (now empty) row doesn't accidentally activate search underneath
     let search_bar_rect = if in_input_mode {
         Rect::default()
     } else {
         Rect::new(content_area.x, content_area.y, content_area.width, 1)
     };
 
-    // Underline the Managed section's last description line (the connectors URL) as a link affordance.
+    // Underline the Managed section's last description line (the connectors URL) so it reads as a link
     let managed_section_key =
         crate::views::mcps_modal::section_key(&crate::views::mcps_modal::McpSectionId::Managed);
-    // `underline_last_desc` and the recorded click band both assume the URL is the
-    // LAST Managed description line; trip a test if that ever stops holding.
+    // `underline_last_desc` and the recorded click band both assume the URL is the LAST Managed description line
+    // The debug_assert trips if that ever stops holding
     debug_assert!(
         crate::views::mcps_modal::section_description_lines(
             &crate::views::mcps_modal::McpSectionId::Managed,
@@ -4106,10 +4338,8 @@ pub fn render_extensions_modal_with_locale(
             } else {
                 let group_key = entry_group_keys.get(i).and_then(|k| k.as_ref());
                 let is_collapsible = group_key.is_some();
-                // For collapsible group headers, `expanded` reflects
-                // whether the group's children are visible (not in the
-                // collapsed set). For regular items, it reflects the
-                // picker's per-row detail expansion.
+                // For collapsible group headers, `expanded` reflects whether the group's children are visible (not in the collapsed set)
+                // For regular items, it reflects the picker's per-row detail expansion
                 let is_expanded = if is_collapsible {
                     state.is_group_expanded(i, group_key.unwrap())
                 } else {
@@ -4146,12 +4376,10 @@ pub fn render_extensions_modal_with_locale(
             .height
             .saturating_sub(entries_start_y.saturating_sub(content_area.y)),
     };
-    // In input mode the entry list is intentionally empty (we skip the
-    // entry-builder loop above). Calling the picker here would render
-    // its empty-state "No matches" message, which is misleading — there
-    // are no entries because we're showing a form, not because nothing
-    // matched. Skip the picker render and let the input-form overlay
-    // below own the entries area instead.
+    // In input mode the entry list is intentionally empty (we skip the entry-builder loop above)
+    // Calling the picker here would render its empty-state "No matches" message
+    // That message would mislead: there are no entries because we're showing a form, not because nothing matched
+    // Skip the picker render and let the input-form overlay below own the entries area instead
     let (item_rects, entry_indices) = if in_input_mode {
         // No picker render in input mode: clear any stale recorded link band.
         state.picker_state.link_band = None;
@@ -4174,8 +4402,8 @@ pub fn render_extensions_modal_with_locale(
         (content_hit.item_rects, content_hit.entry_indices)
     };
 
-    // Store hit areas for mouse handling. Build a PickerHitAreas so
-    // handle_picker_input (used for content-level events) works.
+    // Store hit areas for mouse handling
+    // Build a PickerHitAreas so handle_picker_input (used for content-level events) works
     let filter_rect = state.picker_state.filter_area;
     state.picker_state.hit_areas = Some(picker::PickerHitAreas {
         close_button: Rect::default(), // handled by ModalWindow
@@ -4208,9 +4436,9 @@ pub fn render_extensions_modal_with_locale(
         }
     }
 
-    // Render full-screen pending overlay when no specific entry is targeted
-    // (e.g., AddSource — the new row doesn't exist yet so there's no entry
-    // badge to show). Covers the picker content with a centered spinner + message.
+    // Render the full-screen pending overlay when no specific entry is targeted
+    // AddSource is one: the new row doesn't exist yet, so there's no entry badge to show
+    // Covers the picker content with a centered spinner and message
     if state.pending_action.is_some()
         && state.pending_entry_index.is_none()
         && let Some(popup_rect) = state.window.popup_area
@@ -4234,8 +4462,7 @@ pub fn render_extensions_modal_with_locale(
                 msg_content_width,
                 msg_content_height,
             );
-            // Buffer::set_string merges styles; Style::reset clears UNDERLINED/BOLD
-            // left by the list underneath (e.g. Managed connectors URL).
+            // Buffer::set_string merges styles; Style::reset clears UNDERLINED/BOLD left by the list underneath (e.g. Managed connectors URL).
             let clear_style = Style::reset().bg(theme.bg_base);
             let text_style = Style::reset().fg(theme.accent_tool).bg(theme.bg_base);
             for y in msg_area.y..msg_area.y + msg_area.height {
@@ -4256,15 +4483,18 @@ pub fn render_extensions_modal_with_locale(
     if let Some(ref msg) = state.modal_message {
         let (text, fg) = match msg {
             ModalMessage::Error(e) => (localized_modal_message(locale, e), theme.accent_error),
+            ModalMessage::Info(message) => (
+                localized_modal_message(locale, message),
+                theme.text_secondary,
+            ),
             ModalMessage::Confirmation { message, .. } => {
                 (localized_modal_message(locale, message), theme.accent_tool)
             }
         };
         if let Some(popup_rect) = state.window.popup_area {
             let msg_content_y = popup_rect.y + 2;
-            // Stop the overlay above the footer so the dismissal hint
-            // we render into the footer below stays visible. Applies to
-            // both errors and confirmations.
+            // Stop the overlay above the footer so the dismissal hint we render into the footer below stays visible
+            // Applies to both errors and confirmations
             let popup_bottom = footer_area.y;
             let msg_content_height = popup_bottom.saturating_sub(msg_content_y);
             let msg_content_x = popup_rect.x + 1;
@@ -4291,21 +4521,21 @@ pub fn render_extensions_modal_with_locale(
                 let wrapped_lines: Vec<&str> = word_wrap(&text, max_w);
                 let msg_height = wrapped_lines.len().min(msg_area.height as usize);
                 let msg_y = msg_area.y + (msg_area.height.saturating_sub(msg_height as u16)) / 2;
+                // Centered: left-aligned overlay text reads poorly.
                 for (i, wline) in wrapped_lines.iter().enumerate().take(msg_height) {
-                    buf.set_string(msg_area.x + pad, msg_y + i as u16, wline, text_style);
+                    let line_w = UnicodeWidthStr::width(*wline) as u16;
+                    let x = msg_area.x + pad + max_w.saturating_sub(line_w as usize) as u16 / 2;
+                    buf.set_string(x, msg_y + i as u16, wline, text_style);
                 }
-                // Dismissal hints (for both errors and confirmations)
-                // are rendered into the footer below, not inline.
+                // Dismissal hints (for both errors and confirmations) are rendered into the footer below, not inline
             }
         }
     }
 
-    // Render the dismissal hint(s) for any modal message into the
-    // footer area we kept clear above. Custom render (not via Shortcut)
-    // is needed because dismissal keys ("any key") are multi-word and
-    // would not split correctly through the default renderer. Colors,
-    // bold modifier, and "  |  " separator all match the standard
-    // footer shortcut style.
+    // Render the dismissal hint(s) for any modal message into the footer area we kept clear above
+    // Custom render (not via Shortcut) is needed because dismissal keys ("any key") are multi-word
+    // They would not split correctly through the default renderer
+    // Colors, bold modifier, and "  |  " separator all match the standard footer shortcut style
     if let Some(kind) = modal_msg_kind {
         let segments: &[(&str, &str)] = match kind {
             ModalMsgKind::Error => &[(
@@ -4331,14 +4561,16 @@ pub fn render_extensions_modal_with_locale(
     } else if let Some(ref n) = state.result_notice
         && footer_area.height > 0
     {
-        // Result status line (per-row and tab-wide): a non-covering success line
-        // in the footer so the list stays visible above it. Auto-expires; the
-        // per-row case also gets a ✓ on its row.
-        let text = n.message.lines().next().unwrap_or(n.message.as_str());
+        // Result status line (per-row and tab-wide): a non-covering success line in the footer so the list stays visible above it
+        // Auto-expires; the per-row case also gets a "✓" on its row
+        let localized_message = localized_action_result_message(locale, n.origin, &n.message);
+        let text = localized_message
+            .lines()
+            .next()
+            .unwrap_or(localized_message.as_str());
         let avail = footer_area.width.saturating_sub(2) as usize;
         let shown: String = if UnicodeWidthStr::width(text) > avail {
-            // Truncate by display width (file convention) so wide chars can't
-            // overflow the footer, then add an ellipsis.
+            // Truncate by display width (file convention) so wide chars can't overflow the footer, then add an ellipsis
             let mut s = String::new();
             let mut w = 0usize;
             for ch in text.chars() {
@@ -4355,19 +4587,24 @@ pub fn render_extensions_modal_with_locale(
             text.to_string()
         };
         let y = footer_area.y + footer_area.height.saturating_sub(1);
-        // The shortcuts bar renders underneath this row and its keys are BOLD;
-        // `set_string` only *merges* style, so `Style::default()` would leave
-        // that bold on any cell the message overwrites (partial-bold bleed).
+        // The shortcuts bar renders underneath this row and its keys are BOLD
+        // `set_string` only *merges* style, so `Style::default()` would leave that bold on any cell the message overwrites (partial-bold bleed)
         // `Style::reset()` clears all existing modifiers first.
         let clear_style = Style::reset().bg(theme.bg_base);
         let text_style = Style::reset().fg(theme.accent_success).bg(theme.bg_base);
+        // Centered like the footer hint segments and the covering overlay.
+        let shown_x = footer_area.x
+            + footer_area
+                .width
+                .saturating_sub(UnicodeWidthStr::width(shown.as_str()) as u16)
+                / 2;
         buf.set_string(
             footer_area.x,
             y,
             " ".repeat(footer_area.width as usize),
             clear_style,
         );
-        buf.set_string(footer_area.x + 1, y, &shown, text_style);
+        buf.set_string(shown_x, y, &shown, text_style);
     }
 }
 
@@ -4456,10 +4693,8 @@ enum ModalMsgKind {
     Confirm,
 }
 
-/// Render a centered list of (key, label) hint segments into the bottom
-/// row of `footer_area`, joined by `  |  ` separators. Mirrors the
-/// styling used by `modal_window::render_modal_shortcuts` so custom
-/// dismissal hints look the same as standard footer shortcuts.
+/// Render a centered list of (key, label) hint segments into the bottom row of `footer_area`, joined by `  |  ` separators.
+/// Mirrors the styling used by `modal_window::render_modal_shortcuts` so custom dismissal hints look the same as standard footer shortcuts.
 fn render_footer_hint_segments(
     buf: &mut Buffer,
     footer_area: Rect,
@@ -4510,9 +4745,8 @@ fn render_footer_hint_segments(
 
 /// Render an inline input form for commands that need arguments.
 ///
-/// Each field gets its own rounded border around the input row,
-/// mirroring the prompt input chrome. Labels sit above the bordered
-/// row so they remain visible.
+/// Each field gets its own rounded border around the input row, mirroring the prompt input chrome.
+/// Labels sit above the bordered row so they remain visible.
 ///
 /// Layout (stacked, one field shown):
 /// ```text
@@ -4536,8 +4770,7 @@ fn render_input_form_with_locale(
         return;
     }
 
-    // Per field: 1 label row + 3 rows for the bordered input
-    // (top border + content + bottom border).
+    // Per field: 1 label row + 3 rows for the bordered input (top border + content + bottom border)
     let field_count = input.fields().len() as u16;
     const ROWS_PER_FIELD: u16 = 4;
     let separators = field_count.saturating_sub(1); // 1 blank row between fields
@@ -4548,8 +4781,7 @@ fn render_input_form_with_locale(
 
     // Center vertically within the available area.
     let form_top = area.y + area.height.saturating_sub(total_rows) / 2;
-    // Horizontal inset so the bordered box doesn't sit flush against
-    // the outer modal border.
+    // Horizontal inset so the bordered box doesn't sit flush against the outer modal border
     let h_inset: u16 = 2;
     let box_x = area.x + h_inset;
     let box_w = area.width.saturating_sub(h_inset * 2);
@@ -4611,7 +4843,7 @@ fn render_input_form_with_locale(
         let inner = block.inner(box_rect);
         ratatui::widgets::Widget::render(block, box_rect, buf);
 
-        // Content row: prompt prefix + input text or placeholder.
+        // Content row: the prompt prefix, then the input text or placeholder
         // Pad 1 cell from the left side of the bordered inner area.
         let content_x = inner.x + 1;
         let content_y = inner.y;
@@ -4622,9 +4854,8 @@ fn render_input_form_with_locale(
         let text_x = content_x + prompt_w;
 
         if field.text().is_empty() {
-            // Placeholder only renders when the field is NOT focused —
-            // matches the prompt widget convention so the cursor isn't
-            // overlapping placeholder text on the active row.
+            // Placeholder only renders when the field is NOT focused
+            // This matches the prompt widget convention so the cursor isn't overlapping placeholder text on the active row
             if !is_focused && let Some(ph) = field.placeholder() {
                 let placeholder = localized_form_placeholder(locale, ph);
                 let display: String = take_by_width(placeholder.as_ref(), max_text_w);
@@ -4679,10 +4910,27 @@ mod tests {
     use crossterm::event::KeyModifiers;
 
     #[test]
+    fn extension_template_does_not_replace_placeholder_text_inside_dynamic_values() {
+        assert_eq!(
+            render_extension_template(
+                "{source} ({count} hooks)",
+                &[("{source}", "Custom: /tmp/{count}"), ("{count}", "7")],
+            ),
+            "Custom: /tmp/{count} (7 hooks)"
+        );
+        assert_eq!(
+            render_extension_template(
+                "v{version} by {author}",
+                &[("{version}", "1.0-{author}"), ("{author}", "alice")],
+            ),
+            "v1.0-{author} by alice"
+        );
+    }
+
+    #[test]
     fn derive_source_label_detects_project_scoped_plugins() {
-        // Regression: project-scoped `{cwd}/.grok/plugins/<name>/` must label as
-        // a (non-removable) plugin, not a removable "Custom" source. The user
-        // grok-home branch is GROK_HOME-aware; this covers the project fallback.
+        // Regression: project-scoped `{cwd}/.grok/plugins/<name>/` must label as a (non-removable) plugin, not a removable "Custom" source
+        // The user grok-home branch is GROK_HOME-aware; this covers the project fallback
         let (label, is_custom) = derive_source_label("/repo/work/.grok/plugins/my-plugin/hooks");
         assert_eq!(label, "Plugin: my-plugin");
         assert!(!is_custom);
@@ -4691,6 +4939,33 @@ mod tests {
             derive_source_label("/repo/work/.grok/installed-plugins/vendor-abc123/skills");
         assert_eq!(label, "Plugin: vendor-abc123");
         assert!(!is_custom);
+    }
+
+    /// String-prefix `strip_prefix($HOME)` would collapse a neighbor profile (`$HOMEbar`) into `Custom: ~bar`.
+    /// Path-component matching must leave it intact while still collapsing a real child of `$HOME`.
+    #[test]
+    fn derive_source_label_does_not_eat_neighbor_profile() {
+        let Some(home) = xai_dirs::home_dir() else {
+            return;
+        };
+        if home.as_os_str().is_empty() {
+            return;
+        }
+        let neighbor = home.as_os_str().to_string_lossy().into_owned() + "bar";
+        let (label, is_custom) = derive_source_label(&neighbor);
+        assert_eq!(label, format!("Custom: {neighbor}"));
+        assert!(is_custom);
+
+        let child = home.join("hooks-extra");
+        let (label, is_custom) = derive_source_label(&child.to_string_lossy());
+        assert_eq!(
+            label,
+            format!(
+                "Custom: ~/{}",
+                std::path::Path::new("hooks-extra").display()
+            )
+        );
+        assert!(is_custom);
     }
 
     #[test]
@@ -4719,9 +4994,8 @@ mod tests {
             Some("mcp-tools:0".into()),
             None,
         ]);
-        // Sections are now keyboard-selectable, so clicks go through the
-        // normal Selected → toggle_fold path; no row needs the
-        // non-selectable-but-clickable treatment.
+        // Sections are now keyboard-selectable, so clicks go through the normal Selected/toggle_fold path
+        // No row needs the non-selectable-but-clickable treatment
         assert_eq!(mask, vec![false, false, false]);
     }
 
@@ -5311,8 +5585,7 @@ mod tests {
         }
     }
 
-    /// Skills search uses substring (not fuzzy), so "pdf" should NOT match
-    /// "product design framework" even though p, d, f appear in order.
+    /// Skills search uses substring (not fuzzy), so "pdf" should NOT match "product design framework" even though p, d, f appear in order.
     #[test]
     fn skills_search_is_substring_not_fuzzy() {
         let skills = [
@@ -5423,7 +5696,7 @@ mod tests {
             make_plugin_skill("lint", "Run lint checks", "linter"),
         ];
         let result = filter_and_sort_skills(&skills, "", StatusFilter::All);
-        // All three skills (native + plugin) should appear.
+        // All three skills (native and plugin) should appear
         assert_eq!(result.matches.len(), 3);
     }
 
@@ -5439,7 +5712,7 @@ mod tests {
             disabled_skill,
         ];
         let result = filter_and_sort_skills(&skills, "", StatusFilter::Enabled);
-        // Only enabled skills: native + hello (lint is disabled).
+        // Only enabled skills: native and hello (lint is disabled)
         assert_eq!(result.matches.len(), 2);
         // Verify the correct skills are returned: native (index 0) and hello (index 1).
         let indices: Vec<usize> = result.matches.iter().map(|m| m.skill_index).collect();
@@ -5699,10 +5972,112 @@ mod tests {
         assert_eq!(action_key_cheatsheet_desc('a', "install"), "install");
     }
 
-    /// Regression: footer Space verb must follow the *current*
-    /// entry-mapping (post filter/query/tab), not a stale one from the previous
-    /// list shape. Render passes freshly built locals into
-    /// `action_key_footer_desc_for_mapping` (state publish is post-paint only).
+    /// The remove gate is source-level: a pinned hook blocks its whole source, and only its own source.
+    #[test]
+    fn hook_source_pinned_is_source_level() {
+        let mut pinned = make_hook("policy/a", "/etc/grok", false);
+        pinned.pinned = true;
+        let sibling = make_hook("user/b", "/etc/grok", false);
+        let elsewhere = make_hook("user/c", "/home/u/.grok", false);
+        let hooks = vec![pinned, sibling, elsewhere];
+
+        assert!(hook_source_pinned(&hooks, "/etc/grok"));
+        assert!(!hook_source_pinned(&hooks, "/home/u/.grok"));
+        assert!(!hook_source_pinned(&hooks, "/nonexistent"));
+    }
+
+    /// The Space hint is suppressed for policy-enforced selections; mixed groups and unpinned rows keep it.
+    #[test]
+    fn policy_enforced_selection_suppresses_space_hint() {
+        let mut pinned = make_hook("policy/a", "/etc/grok", false);
+        pinned.pinned = true;
+        let mut user = make_hook("user/b", "/home/u/.grok", false);
+        user.removable = true;
+
+        // Entry maps as the picker builds them (headers carry a group key, no data index):
+        //   0: header /etc/grok, 1: pinned row, 2: header user, 3: user row
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Hooks);
+        state.hooks_data = TabDataState::Loaded(xai_hooks_plugins_types::HooksListResponse {
+            hooks: vec![pinned, user],
+            project_trusted: true,
+            load_errors: Vec::new(),
+        });
+        let data_indices = vec![None, Some(0), None, Some(1)];
+        let group_keys = vec![
+            Some("/etc/grok".to_string()),
+            None,
+            Some("/home/u/.grok".to_string()),
+            None,
+        ];
+
+        let enforced =
+            |sel| selected_hook_policy_enforced_at(&state, &data_indices, &group_keys, sel);
+        let removable =
+            |sel| selected_hook_source_removable_at(&state, &data_indices, &group_keys, sel);
+        // Policy group header and the pinned row: Space and x suppressed.
+        assert!(enforced(0));
+        assert!(enforced(1));
+        assert!(!removable(0));
+        assert!(!removable(1));
+        // Registered-dir header and row: both hints stay.
+        assert!(!enforced(2));
+        assert!(!enforced(3));
+        assert!(removable(2));
+        assert!(removable(3));
+
+        // Mixed group header: unpinned members keep it toggleable.
+        let mut mixed_pinned = make_hook("policy/c", "/mixed", false);
+        mixed_pinned.pinned = true;
+        let mixed_user = make_hook("user/d", "/mixed", false);
+        let mixed_state = {
+            let mut s = ExtensionsModalState::new(ExtensionsTab::Hooks);
+            s.hooks_data = TabDataState::Loaded(xai_hooks_plugins_types::HooksListResponse {
+                hooks: vec![mixed_pinned, mixed_user],
+                project_trusted: true,
+                load_errors: Vec::new(),
+            });
+            s
+        };
+        let mixed_indices = vec![None, Some(0), Some(1)];
+        let mixed_keys = vec![Some("/mixed".to_string()), None, None];
+        assert!(!selected_hook_policy_enforced_at(
+            &mixed_state,
+            &mixed_indices,
+            &mixed_keys,
+            0
+        ));
+        // ...but a non-registered source is never removable.
+        for sel in 0..3 {
+            assert!(!selected_hook_source_removable_at(
+                &mixed_state,
+                &mixed_indices,
+                &mixed_keys,
+                sel
+            ));
+        }
+    }
+
+    /// Regression: refetches must not re-collapse expanded groups.
+    #[test]
+    fn hook_groups_seed_only_once() {
+        let mut state = ExtensionsModalState::new(ExtensionsTab::Hooks);
+        let hooks = vec![
+            make_hook("a", "/src1", false),
+            make_hook("b", "/src2", false),
+        ];
+        state.seed_hook_groups_once(&hooks);
+        assert!(state.hooks_collapsed_groups.contains("/src1"));
+        assert!(state.hooks_collapsed_groups.contains("/src2"));
+
+        // User expands /src1; the refetch delivery must preserve that.
+        state.hooks_collapsed_groups.remove("/src1");
+        state.seed_hook_groups_once(&hooks);
+        assert!(!state.hooks_collapsed_groups.contains("/src1"));
+        assert!(state.hooks_collapsed_groups.contains("/src2"));
+    }
+
+    /// Regression: footer Space verb must follow the *current* entry-mapping (post filter/query/tab), not a stale one from the previous list shape.
+    /// Render passes freshly built locals into `action_key_footer_desc_for_mapping` (state publish is post-paint only).
     #[test]
     fn space_footer_follows_refreshed_entry_data_indices_after_filter_shape_change() {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Plugins);
@@ -5721,9 +6096,8 @@ mod tests {
             "disable"
         );
 
-        // Filtered to the disabled plugin only — same selected *row* index 0,
-        // but it now maps to data index 1. Stale [Some(0), Some(1)] would still
-        // report "disable"; the refreshed mapping must report "enable".
+        // Filtered to the disabled plugin only: same selected *row* index 0, but it now maps to data index 1
+        // Stale [Some(0), Some(1)] would still report "disable"; the refreshed mapping must report "enable"
         let filtered = vec![Some(1)];
         assert_eq!(
             selected_item_enabled_at(&state, &filtered, &[], 0),
@@ -5734,8 +6108,7 @@ mod tests {
             "enable"
         );
 
-        // Published-state path (input handling / unit tests) still works when
-        // state.entry_data_indices is set explicitly.
+        // Published-state path (input handling / unit tests) still works when state.entry_data_indices is set explicitly
         state.entry_data_indices = filtered;
         assert_eq!(state.selected_item_enabled(), Some(false));
         assert_eq!(action_key_footer_desc(' ', "toggle", &state), "enable");
@@ -6391,7 +6764,30 @@ mod tests {
             timeout_ms: 10_000,
             source_dir: source_dir.to_string(),
             disabled,
+            pinned: false,
+            removable: false,
         }
+    }
+
+    /// Group direction: pinned hooks never drive it; a mixed group follows its unpinned hooks.
+    /// An all-pinned group reads enabled (everything in it always runs).
+    #[test]
+    fn hook_group_direction_ignores_pinned_hooks() {
+        let mut pinned = make_hook("policy", "/etc/grok", false);
+        pinned.pinned = true;
+
+        // Mixed group, all unpinned disabled: direction is "enable" even though the pinned hook always reports enabled
+        let disabled_user = make_hook("user", "/etc/grok", true);
+        assert!(!hook_group_any_enabled(
+            [&pinned, &disabled_user].into_iter()
+        ));
+
+        // Mixed group with an enabled unpinned hook: "disable".
+        let enabled_user = make_hook("user2", "/etc/grok", false);
+        assert!(hook_group_any_enabled([&pinned, &enabled_user].into_iter()));
+
+        // All-pinned group: reads enabled, never "off".
+        assert!(hook_group_any_enabled([&pinned].into_iter()));
     }
 
     #[test]
@@ -6709,6 +7105,7 @@ mod tests {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Plugins);
         state.result_notice = Some(ActionResultNotice {
             message: "x: updated".into(),
+            origin: ActionResultOrigin::Plugins,
             entry_index: Some(0),
             ticks_remaining: 2,
         });
@@ -6754,8 +7151,7 @@ mod tests {
     #[test]
     fn marketplace_fuzzy_matches_across_multiple_plugins() {
         let source = superpowers_source();
-        // "sub" matches "subagent-driven-development" and "superpowers"
-        // (s...u...b in both).
+        // "sub" matches "subagent-driven-development" and "superpowers" (s...u...b in both)
         let matches: Vec<&str> = source
             .plugins
             .iter()
@@ -7284,8 +7680,7 @@ mod tests {
                 None,
             ]
         );
-        // Within the shared marketplace group, children are A–Z by name:
-        // catalog-tool (1) before installed-tool (2).
+        // Within the shared marketplace group, children are A–Z by name: catalog-tool (1) before installed-tool (2)
         assert_eq!(
             state.entry_data_indices,
             vec![None, Some(0), None, Some(1), Some(2)],
@@ -7408,8 +7803,7 @@ mod tests {
     fn confirmation_overlay_suppresses_managed_url_underline() {
         use crate::views::mcps_modal::McpWireSource;
 
-        // Tall list so the Managed connectors URL sits above the centered
-        // confirmation text (not only cells the message string overwrites).
+        // Tall list so the Managed connectors URL sits above the centered confirmation text (not only cells the message string overwrites)
         let mut managed = Vec::new();
         for i in 0..20 {
             managed.push(make_mcp_server_for_rows(
@@ -7786,6 +8180,112 @@ mod tests {
         assert_eq!(
             labels,
             ["on:Notification", "on:Pre-Tool Use /Bash", "on:Stop"]
+        );
+    }
+
+    #[test]
+    fn zh_localization_skill_source_groups_cover_all_builtin_scopes() {
+        let locale = LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let labels = ["Project", "User", "Bundled", "Server", "Config"]
+            .map(|source| localized_source_display(Some(&locale), source));
+        assert_eq!(labels, ["项目", "用户", "随附", "服务器", "配置"]);
+    }
+
+    #[test]
+    fn zh_localization_covers_new_hook_policy_and_result_messages_only() {
+        let locale = LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        assert_eq!(
+            localized_modal_message(
+                Some(&locale),
+                "This hook source is enforced by managed policy and cannot be removed."
+            ),
+            "此钩子源由托管策略强制执行，无法移除。"
+        );
+        assert_eq!(
+            localized_action_result_message(
+                Some(&locale),
+                ActionResultOrigin::Hooks,
+                "Hook disabled."
+            ),
+            "已禁用钩子。"
+        );
+        assert_eq!(
+            localized_action_result_message(
+                Some(&locale),
+                ActionResultOrigin::Hooks,
+                "Disabled 2/3 hooks (1 enforced by managed policy, not disabled)"
+            ),
+            "已禁用 2/3 个钩子（1 个由托管策略强制启用，未禁用）"
+        );
+        assert_eq!(
+            localized_action_result_message(
+                Some(&locale),
+                ActionResultOrigin::Hooks,
+                "Hooks reloaded.\nLoaded 3 hooks."
+            ),
+            "钩子已重新加载。\nLoaded 3 hooks."
+        );
+        assert_eq!(
+            localized_action_result_message(
+                Some(&locale),
+                ActionResultOrigin::Hooks,
+                "Added hook path: /tmp/my-hooks.\nLoaded 3 hooks."
+            ),
+            "已添加钩子路径：/tmp/my-hooks。\nLoaded 3 hooks."
+        );
+        assert_eq!(
+            localized_action_result_message(
+                Some(&locale),
+                ActionResultOrigin::Hooks,
+                "Trusted: /tmp/project.\nLoaded 3 hooks."
+            ),
+            "已信任：/tmp/project。\nLoaded 3 hooks."
+        );
+        assert_eq!(
+            localized_action_result_message(
+                Some(&locale),
+                ActionResultOrigin::Hooks,
+                "Untrusted: /tmp/project.\nLoaded 3 hooks."
+            ),
+            "已取消信任：/tmp/project。\nLoaded 3 hooks."
+        );
+        assert_eq!(
+            localized_action_result_message(
+                Some(&locale),
+                ActionResultOrigin::Hooks,
+                "Removed hook path: /tmp/my-hooks.\nLoaded 3 hooks."
+            ),
+            "已移除钩子路径：/tmp/my-hooks。\nLoaded 3 hooks."
+        );
+        let english = LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::EnUs,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        assert_eq!(
+            localized_action_result_message(
+                Some(&english),
+                ActionResultOrigin::Hooks,
+                "Trusted: /tmp/project.\nLoaded 3 hooks."
+            ),
+            "Trusted: /tmp/project.\nLoaded 3 hooks."
+        );
+        assert_eq!(
+            localized_modal_message(Some(&locale), "opaque extension error"),
+            "opaque extension error"
+        );
+        assert_eq!(
+            localized_action_result_message(
+                Some(&locale),
+                ActionResultOrigin::Plugins,
+                "Hook disabled."
+            ),
+            "Hook disabled."
         );
     }
 }

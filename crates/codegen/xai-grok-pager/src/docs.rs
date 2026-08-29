@@ -1,8 +1,7 @@
 //! In-app how-to documentation data (embedded markdown).
 //!
-//! Single source of truth: two static arrays (`USER_GUIDE`, `REFERENCE_DOCS`)
-//! hold every doc. All lookups are zero-allocation; `DocEntry` exists only for
-//! backward compatibility with the TUI doc picker.
+//! Single source of truth: two static arrays (`USER_GUIDE`, `REFERENCE_DOCS`) hold every doc.
+//! All lookups are zero-allocation; `DocEntry` exists only for backward compatibility with the TUI doc picker.
 
 /// Stable document identity, independent from its localized display title.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -44,6 +43,7 @@ pub const DASHBOARD: DocId = DocId::new("user-guide.dashboard");
 pub const MONITORING_USAGE: DocId = DocId::new("user-guide.monitoring-usage");
 pub const STATUS_LINE: DocId = DocId::new("user-guide.status-line");
 pub const CONFIG_REFERENCE: DocId = DocId::new("user-guide.config-reference");
+pub const GROK_CLONE: DocId = DocId::new("user-guide.grok-clone");
 pub const HOOKS_AND_PLUGINS: DocId = DocId::new("reference.hooks-and-plugins");
 pub const CUSTOM_HOOKS: DocId = DocId::new("reference.custom-hooks");
 
@@ -249,12 +249,21 @@ pub static USER_GUIDE: &[Doc] = &[
         "Configuration Reference",
         "Field list for config.toml, managed_config.toml, and requirements.toml"
     ),
+    // Direct include_str! so gazelle can put this file in compile_data.
+    // `guide!` hides the path inside concat!($file) and gazelle cannot see it.
+    Doc {
+        id: GROK_CLONE,
+        filename: "27-grok-clone.md",
+        title: "grok clone",
+        description: "Depth-1 Grove clone, --full-history, and safe deepen/switch commands",
+        content: include_str!("../docs/user-guide/27-grok-clone.md"),
+    },
 ];
 
-/// Non-user-guide reference docs. Separate from USER_GUIDE because they
-/// live under `docs/` (not `docs/user-guide/`), are not extracted to disk,
-/// and do not follow the NN-*.md managed naming pattern. Bundled via
-/// `include_str!` so they are available at runtime without a docs path.
+/// Non-user-guide reference docs.
+/// Separate from USER_GUIDE: they live under `docs/` (not `docs/user-guide/`) and are not extracted to disk.
+/// They also skip the NN-*.md managed naming pattern.
+/// Bundled via `include_str!` so they are available at runtime without a docs path.
 static REFERENCE_DOCS: &[Doc] = &[
     Doc {
         id: HOOKS_AND_PLUGINS,
@@ -458,6 +467,12 @@ static ZH_CN_DOCS: &[DocTranslation] = &[
         "配置参考",
         "config.toml、managed_config.toml 和 requirements.toml 的字段列表",
         "26-config-reference.md"
+    ),
+    zh_doc!(
+        GROK_CLONE,
+        "grok clone",
+        "浅层克隆 Grove 工作区、获取完整历史并安全加深或切换分支",
+        "27-grok-clone.md"
     ),
     zh_reference_doc!(
         HOOKS_AND_PLUGINS,

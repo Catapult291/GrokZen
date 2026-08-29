@@ -5,8 +5,7 @@ use super::{
     localized_source_display,
 };
 
-/// Placeholder row when the catalog comes back empty (also what a disabled
-/// workflows feature looks like on the wire, hence the hedged phrasing).
+/// Placeholder row when the catalog comes back empty (also what a disabled workflows feature looks like on the wire, hence the hedged phrasing).
 pub(super) const WORKFLOWS_EMPTY_PLACEHOLDER: &str =
     "No workflows available. Ask Grok to help make you one!";
 
@@ -33,9 +32,8 @@ impl WorkflowRow {
     }
 }
 
-/// Build the Workflows-tab rows, A–Z by name, fuzzy-filtered on
-/// name+description like the Hooks/Plugins tabs. An empty catalog yields a
-/// single dimmed placeholder row; an error yields a dimmed error row.
+/// Build the Workflows-tab rows, A-Z by name, fuzzy-filtered on name and description like the Hooks/Plugins tabs.
+/// An empty catalog yields a single dimmed placeholder row; an error yields a dimmed error row.
 pub(super) fn build_workflows_picker_rows(
     data: &TabDataState<Vec<WorkflowInfo>>,
     query: &str,

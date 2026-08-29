@@ -1,13 +1,10 @@
 //! Onboarding tutorial overlay (`/tutorial`).
 //!
-//! A top-level modal (works over both the welcome screen and an agent
-//! session) with two screens:
+//! A top-level modal (works over both the welcome screen and an agent session) with two screens:
 //!
-//! - **List** — the tutorial topics from [`crate::tutorial_docs`] with ✓
-//!   marks for explored topics. Enter opens a topic; Esc closes.
-//! - **Topic** — a scrollable markdown page (same chrome as the release-notes
-//!   viewer); `→`/`←` flow through the topics in order, Esc returns to the
-//!   list.
+//! - **List**: the tutorial topics from [`crate::tutorial_docs`] with ✓ marks for explored topics. Enter opens a topic; Esc closes.
+//! - **Topic**: a scrollable markdown page (same chrome as the release-notes viewer).
+//!   `→`/`←` flow through the topics in order; Esc returns to the list.
 //!
 //! Opened on demand via `/tutorial` (also listed in the command palette).
 //! Never auto-shows.
@@ -40,12 +37,10 @@ pub enum TutorialScreen {
     List,
     /// A single topic page (index into [`TUTORIAL_TOPICS`]).
     Topic { index: usize },
-    /// The full how-to guide a topic's "Go deeper" points at (`d` from the
-    /// topic page); Esc returns to that topic.
+    /// The full how-to guide a topic's "Go deeper" points at (`d` from the topic page); Esc returns to that topic.
     Guide { topic: usize },
 }
 
-/// State for the tutorial overlay.
 pub struct TutorialState {
     /// Locale captured when the overlay opens.
     pub locale: std::sync::Arc<crate::locale::LocaleContext>,
@@ -58,8 +53,7 @@ pub struct TutorialState {
     pub window: ModalWindowState,
     /// Topic-screen scroll offset.
     pub scroll: u16,
-    /// Cached pre-rendered markdown lines for the topic screen, keyed by
-    /// the width they were rendered at (invalidated on resize).
+    /// Cached pre-rendered markdown lines for the topic screen, keyed by the width they were rendered at (invalidated on resize).
     pub cached_lines: Option<(u16, Vec<Line<'static>>)>,
 }
 
@@ -127,12 +121,11 @@ impl Default for TutorialState {
 pub enum TutorialOutcome {
     /// The overlay consumed the event (it owns all input while open).
     Consumed,
-    /// The user closed the tutorial — the host should drop the state.
+    /// The user closed the tutorial; the host should drop the state.
     Closed,
 }
 
-/// List-screen picker config. Search is disabled: six fixed topics don't
-/// need filtering, and letter keys would otherwise start a query.
+/// Search is disabled: six fixed topics don't need filtering, and letter keys would otherwise start a query.
 fn list_picker_config() -> PickerConfig<'static> {
     PickerConfig {
         title: None,
@@ -158,8 +151,8 @@ fn list_picker_config() -> PickerConfig<'static> {
     }
 }
 
-/// Route an input event to the tutorial overlay. The overlay consumes all
-/// key and mouse input while open (top-level modal semantics).
+/// Route an input event to the tutorial overlay.
+/// The overlay consumes all key and mouse input while open (it is a top-level modal).
 pub fn handle_tutorial_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     match st.screen {
         TutorialScreen::Topic { .. } => handle_topic_input(ev, st),
@@ -168,8 +161,7 @@ pub fn handle_tutorial_input(ev: &Event, st: &mut TutorialState) -> TutorialOutc
     }
 }
 
-/// Guide screen: scroll like a topic page; Esc (or the close button)
-/// returns to the topic it came from.
+/// Guide screen: scroll like a topic page; Esc (or the close button) returns to the topic it came from.
 fn handle_guide_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     let TutorialScreen::Guide { topic } = st.screen else {
         return TutorialOutcome::Consumed;
@@ -234,9 +226,7 @@ fn handle_topic_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
                 mw::ModalWindowOutcome::Handled => return TutorialOutcome::Consumed,
                 _ => {}
             }
-            // Linear flow: `→` reads on to the next topic (the list, once
-            // the tour is done); `←` steps back; `d` opens the "Go deeper"
-            // guide.
+            // Linear flow: `→` reads on to the next topic (the list, once the tour is done); `←` steps back; `d` opens the "Go deeper" guide
             if let TutorialScreen::Topic { index } = st.screen {
                 match key.code {
                     crossterm::event::KeyCode::Right => {
@@ -280,8 +270,8 @@ fn handle_topic_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
 }
 
 fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
-    // Chrome first: close button clicks and Esc. `handle_picker_input` also
-    // maps Esc to `Closed`, but the close button lives on the ModalWindow.
+    // Chrome first: close button clicks and Esc
+    // `handle_picker_input` also maps Esc to `Closed`, but the close button lives on the ModalWindow
     if let Event::Mouse(mouse) = ev
         && matches!(
             mw::handle_modal_mouse(&mut st.window, mouse.kind, mouse.column, mouse.row),
@@ -295,9 +285,8 @@ fn handle_list_input(ev: &Event, st: &mut TutorialState) -> TutorialOutcome {
     {
         return TutorialOutcome::Consumed;
     }
-    // Search is disabled on the fixed topic list, but the picker's paste
-    // path fills the query regardless of `disable_search` — swallow paste
-    // here so it can't start an invisible filter.
+    // Search is disabled on the fixed topic list, but the picker's paste path fills the query regardless of `disable_search`
+    // Swallow paste here so it can't start an invisible filter
     if matches!(ev, Event::Paste(_)) {
         return TutorialOutcome::Consumed;
     }
@@ -503,7 +492,7 @@ fn render_list(
         return;
     }
 
-    // Narrow modals can't fit title + blurb on one row; stack the blurb below.
+    // Narrow modals can't fit title and blurb on one row; stack the blurb below
     const NARROW_THRESHOLD: u16 = 64;
     let narrow = entries_area.width < NARROW_THRESHOLD;
     let blurb_slices: Vec<[&str; 1]> = topics.iter().map(|t| [t.blurb]).collect();
@@ -627,8 +616,7 @@ mod tests {
 
     #[test]
     fn topic_body_strips_the_duplicated_h1() {
-        // The window title already names the topic; the H1 must not render
-        // a second time inside the page.
+        // The window title already names the topic; the H1 must not render a second time inside the page
         assert_eq!(topic_body("# Title\n\nBody text.\n"), "Body text.\n");
         // Every real topic starts with an H1, so every body drops it.
         for t in TUTORIAL_TOPICS {
@@ -644,7 +632,7 @@ mod tests {
         handle_tutorial_input(&key(KeyCode::Enter), &mut st);
         assert_eq!(st.screen, TutorialScreen::Topic { index: 0 });
 
-        // → walks the whole tour, marking each topic viewed…
+        // `→` walks the whole tour, marking each topic viewed…
         for expected in 1..TUTORIAL_TOPICS.len() {
             handle_tutorial_input(&key(KeyCode::Right), &mut st);
             assert_eq!(st.screen, TutorialScreen::Topic { index: expected });
@@ -663,7 +651,7 @@ mod tests {
         st.open_topic(1);
         handle_tutorial_input(&key(KeyCode::Left), &mut st);
         assert_eq!(st.screen, TutorialScreen::Topic { index: 0 });
-        // At the first topic, ← is a no-op (Esc returns to the list).
+        // At the first topic, `←` is a no-op (Esc returns to the list)
         handle_tutorial_input(&key(KeyCode::Left), &mut st);
         assert_eq!(st.screen, TutorialScreen::Topic { index: 0 });
     }
@@ -693,8 +681,7 @@ mod tests {
 
     #[test]
     fn list_paste_does_not_start_a_query() {
-        // The picker's paste path ignores `disable_search`; the list screen
-        // must swallow paste so it can't start an invisible filter.
+        // The picker's paste path ignores `disable_search`; the list screen must swallow paste so it can't start an invisible filter
         let mut st = TutorialState::new();
         let outcome = handle_tutorial_input(&Event::Paste("worktrees".to_owned()), &mut st);
         assert_eq!(outcome, TutorialOutcome::Consumed);

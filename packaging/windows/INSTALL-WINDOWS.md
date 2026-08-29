@@ -33,24 +33,25 @@
    ```
 
 `Install-GrokZh.ps1` 会在写入任何安装目录前，自动核对 `SHA256SUMS.txt` 中的
-文件哈希。Release 只提供 ZIP 的 `.sha256` 旁车文件，GitHub API 也会记录 ZIP 资产 digest；
+文件哈希。Release 只提供 ZIP 的 `.sha256` 侧车文件，GitHub API 也会记录 ZIP 资产 digest；
 不会再额外发布一份版本化裸 EXE。
 
 `v1.0.8` 桥接包的内层清单只列旧更新器认识的 7 个执行与安装入口；ZIP 仍物理包含上述
 许可证和构建信息，完整 ZIP 继续受 GitHub digest 与外层 `.sha256` 保护。从
-`release-v1.0.9` 起，内层清单覆盖全部 15 个受管文件。
+首个 `release-v*` 版本起，内层清单覆盖全部 15 个受管文件。
 
 两个双击入口、安装脚本和本说明只在上述包目录中使用，不会复制到程序运行目录；
 需要升级或调整安装方式时，请使用新下载并解压后的完整包。
 
 正式 Tag 工作流会为 ZIP 与 `.sha256` 自动生成 GitHub Actions 构建来源证明。下载后可用
 GitHub CLI 核对不可变 Release、资产和构建工作流；以下命令已使用当前仓库
-`JoyElliot/grok-build-Chinese`；以下命令以 `1.0.5` 为例，发布后执行：
+`JoyElliot/grok-build-Chinese`；以下命令以后续现代预发布 `1.0.12-rc.1` 为例，发布后执行。
+旧桥接版 `1.0.8` 使用 `v1.0.8` Tag，其余命令结构相同：
 
 ```powershell
 $repo = 'JoyElliot/grok-build-Chinese'
-$version = '1.0.5'
-$tag = "v$version"
+$version = '1.0.12-rc.1'
+$tag = "release-v$version"
 $zip = ".\grok-zh-$version-windows-x86_64-gnu.zip"
 $assets = @($zip, "$zip.sha256")
 
@@ -251,7 +252,7 @@ npm uninstall -g @xai-official/grok
 - `v1.0.0-zh.preview.3` 的旧更新器只认识裸 EXE，需要手工下载完整 ZIP 迁移；已撤回的
   `v1.0.0.1` 使用了不兼容代理版本门禁的四段版本号，不应继续安装或分发。
 - 已发布的 `v1.0.5` 会先更新到仅含 Windows 两个资产、扁平 ZIP 和 7 项兼容清单的
-  `v1.0.8`。从 `release-v1.0.9` 起，Windows、macOS、Linux 共用六资产 Release；旧客户端
+  `v1.0.8`。从首个 `release-v*` 版本起，Windows、macOS、Linux 共用六资产 Release；旧客户端
   无法识别 `release-v*`，因此不会跳过桥接版本。
 
 自动激活仍沿用原版的单 EXE 替换语义，但传输与验证只使用完整 ZIP；不会在运行中的安装

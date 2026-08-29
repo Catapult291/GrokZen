@@ -1,0 +1,182 @@
+[
+  {
+    "category": "fixes",
+    "description": "**子智能体任务**在遇到临时限流时更加稳定，会重试而不是立即失败。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Bash 命令的精细允许规则**现在可以正确放行文件写入，不再额外弹出权限确认。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**交互式 TUI 中的新会话**现默认以自动模式启动，减少权限确认提示。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**/feedback 现支持附加图片**（例如截图）。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**“/”斜杠菜单**现按最近使用顺序排列，并将技能归组到命令下方，浏览更加方便。",
+    "breaking_change": false
+  },
+  {
+    "category": "performance",
+    "description": "**并发子智能体**在突发请求期间不再轻易触发限流错误。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**/workflow** 现接受 `--agent-budget N` 或 `agent_budget` JSON 字段，用于设置子智能体数量限制。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**/workflow** 现接受 `--effort LEVEL` 或 `effort` JSON 字段，用于设置子智能体的推理强度。",
+    "breaking_change": false
+  },
+  {
+    "category": "performance",
+    "description": "配置大量 **MCP 服务器**时，服务器连接不再拖慢会话启动。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**MCP 服务器**现会收到 `grok-cli` User-Agent 请求头，便于服务提供方识别流量来源。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**仪表板**现支持通过 Shift+Tab 以自动模式启动新智能体。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**包含 Markdown 标题的规则**现在能够在提示词中正确渲染。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**工作流**现会与技能一起出现在模型提示词中，智能体可以按名称启动它们。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**/new** 与 **/clear** 现在会保留上次选择的推理强度，不再重置为模型默认值。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**提示词下拉菜单**（斜杠命令、历史记录、文件搜索）现在与输入框保持一致的左对齐。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**历史记录**现在会按输入顺序显示每条命令、斜杠命令和记忆备注。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**折叠的工具调用行**不再在状态菱形旁显示竖直强调线。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "提示词上方的**提示文字**现在会与输入文字正确对齐。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "从仪表板预览会话时按 **Esc**，现在会关闭已打开的弹窗，而不是让弹窗残留在视图中。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**`/edit-prompt`** 现在也能从完整 TUI 打开外部编辑器，不再只限于最小模式。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**`/copy`** 现在会保留标题、代码围栏等 Markdown 格式。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "Shell 命令运行期间**发送新消息**时，该命令现在会转入后台，而不是被取消。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**在空提示词中按上箭头**现在会先选择排队中的后续消息，而不是打开历史记录。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**/plugin** 现在可在 TUI 中作为 **/plugins** 的别名使用。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**插件提供的智能体**现在会显示在 **/agents** 弹窗中，并可启用或停用。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**grok mcp add** 现在会将裸 `http(s)://` URL 正确识别为 HTTP 服务器，而不是 stdio 命令。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**/minimal** 与 **/fullscreen** 现在可以在运行中的会话内即时切换，无需重启，也不会丢失当前轮次。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "计划模式不再把子智能体创建误判为 `plan.md` 之外的文件编辑并加以阻止。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "URL 相同但名称不同的 MCP 服务器现在会作为独立条目保留，不再被错误合并。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "子智能体和由工作流创建的智能体不再接收仅顶层会话可用的工作流工具。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "可配置的状态行现在也会显示在最小模式底部，与全屏模式保持一致。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "记忆结果现在会明确作为历史上下文呈现，并提示在使用前通过实时来源核验。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**grok clone** 现在默认只获取所选分支的最新提交；如需旧版完整克隆，可使用 `--full-history`。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**grok clone** 现在可以复用匹配的本地检出目录并创建链接工作树，不必总是从网络获取。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**交互式 Grok 会话**现再次默认以询问模式启动，而不是自动模式。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**最小模式**不再把子智能体唤醒轮次的回复截断到第一个 token。",
+    "breaking_change": false
+  }
+]

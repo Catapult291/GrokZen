@@ -72,6 +72,8 @@ pub async fn run(
                 xai_grok_shell::session::merge::CwdScope::WithSiblings,
                 None,
                 limit,
+                // The CLI listing is an inventory, not the resume picker.
+                xai_grok_shell::session::visibility::HeadlessPolicy::Include,
             )
             .await;
             print_sessions_grouped(&sessions, locale);
@@ -83,7 +85,7 @@ pub async fn run(
                 IndexDecision, SessionSearchRequest, execute_search,
             };
 
-            // The only subcommand that reads the index, so the only one to start one.
+            // Search is the only subcommand that reads the index, so it is the only one to start one
             let search = xai_grok_shell::session::storage::search::start_if_enabled(agent_config);
 
             let req = SessionSearchRequest {
@@ -239,11 +241,9 @@ pub async fn run(
             // ZDR teams never upload, so there is nothing remote to delete.
             let needs_remote = auth.as_ref().is_some_and(|a| !a.is_zdr_team());
 
-            // Pass `cwd = None` so the session is found by id regardless of
-            // which workspace it was created in; the local delete still uses
-            // the resolved per-session cwd.
-            // No handle: the eviction inside prunes the row from another
-            // process's index, so a delete never needs one of its own.
+            // Pass `cwd = None` so the session is found by id regardless of which workspace it was created in
+            // The local delete still uses the resolved per-session cwd
+            // No search handle: the eviction inside prunes the row from another process's index, so a delete never needs one of its own
             let deletion = xai_grok_shell::session::persistence::delete_session_history(
                 &id,
                 None,

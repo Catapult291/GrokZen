@@ -2416,7 +2416,7 @@ impl MvpAgent {
                 "trace_upload_status"
             );
         }
-        let (subagent_event_tx, subagent_event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (subagent_event_tx, subagent_event_rx) = crate::agent::subagent::subagent_coordinator_channel();
         let activity = crate::agent::activity::AgentActivity::default();
         let instance = Self {
             activity,
@@ -2484,6 +2484,9 @@ impl MvpAgent {
             subagent_event_rx: RefCell::new(Some(subagent_event_rx)),
             subagent_presentation: RefCell::new(
                 crate::agent::subagent::SubagentPresentation::new(),
+            ),
+            subagent_sampling_semaphore: Arc::new(
+                tokio::sync::Semaphore::new(cfg.subagents_sampling_limit),
             ),
             monitor_event_buffer: xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer::default(),
             bundle_sync_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -2894,7 +2897,7 @@ impl MvpAgent {
         subagent_id: &str,
     ) -> xai_grok_tools::implementations::grok_build::task::types::SubagentCancelOutcome {
         xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
+                self.subagent_event_tx.event_sender().0,
             )
             .cancel(subagent_id)
             .await
@@ -2906,7 +2909,7 @@ impl MvpAgent {
         xai_grok_tools::implementations::grok_build::task::types::SubagentInspection,
     > {
         let backend = xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
-            self.subagent_event_tx.clone(),
+            self.subagent_event_tx.event_sender().0,
         );
         let sid = acp::SessionId::new(parent_session_id);
         if let Some(handle) = self.get_session_handle(&sid) {
@@ -2930,7 +2933,7 @@ impl MvpAgent {
         xai_grok_tools::implementations::grok_build::task::types::SubagentInspection,
     > {
         xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
+                self.subagent_event_tx.event_sender().0,
             )
             .inspect(subagent_id)
             .await
@@ -2944,7 +2947,7 @@ impl MvpAgent {
         xai_grok_tools::implementations::grok_build::task::types::SubagentSnapshot,
     > {
         xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
+                self.subagent_event_tx.event_sender().0,
             )
             .query(subagent_id, block, timeout_ms)
             .await
@@ -2955,7 +2958,7 @@ impl MvpAgent {
         prompt_id: &str,
     ) -> Vec<crate::upload::trace::SubagentSpawnedRef> {
         xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend::new(
-                self.subagent_event_tx.clone(),
+                self.subagent_event_tx.event_sender().0,
             )
             .spawned_refs_for_prompt(parent_session_id, prompt_id)
             .await
@@ -4105,6 +4108,7 @@ impl MvpAgent {
             session_yolo_mode,
             session_auto_mode,
             prompt_display_cwd,
+            is_headless,
             is_chat_kind,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
@@ -4303,7 +4307,8 @@ impl MvpAgent {
                  Check that a Tokio runtime is available.",
                     )
             })?;
-        tool_ctx.subagent_event_tx = Some(self.subagent_event_tx.clone());
+        tool_ctx.subagent_event_tx = Some(self.subagent_event_tx.event_sender().0);
+        tool_ctx.subagent_coordinator_sender = Some(self.subagent_event_tx.clone());
         tool_ctx.synthetic_trace_tx = self
             .subagent_presentation
             .borrow()
@@ -4359,13 +4364,11 @@ impl MvpAgent {
                 model.map(|e| &e.info),
             )
         };
-        let compaction_mode = self.cfg.borrow().resolve_compaction_mode();
         let compaction_verbatim_input = self
             .cfg
             .borrow()
             .is_feature_enabled(crate::agent::config::Feature::CompactionVerbatimInput);
         let compaction_tool_choice = self.cfg.borrow().resolve_compaction_tool_choice();
-        let two_pass_enabled = self.cfg.borrow().is_two_pass_compaction_enabled();
         let auto_update = self.cfg.borrow().cli.auto_update;
         let client_type = *self.client_type.borrow();
         let buffering_settings = self.buffering_settings.borrow().clone();
@@ -4445,6 +4448,15 @@ impl MvpAgent {
             );
             agent_definition.user_message_template = template;
         }
+        let pins = crate::session::cursor_compaction_pins(
+            self.cfg.borrow().resolve_compaction_mode(),
+            self.cfg.borrow().is_two_pass_compaction_enabled(),
+            crate::session::is_cursor_user_template(
+                &agent_definition.user_message_template,
+            ),
+        );
+        let compaction_mode = pins.mode;
+        let two_pass_enabled = pins.two_pass;
         let (session_model_id, mut sampling_config) = self
             .apply_agent_model_override(
                 pinned_model.as_ref(),
@@ -4582,6 +4594,10 @@ impl MvpAgent {
             .cfg
             .borrow()
             .is_feature_enabled(crate::agent::config::Feature::WriteFile);
+        let active_agent_messages_enabled = self
+            .cfg
+            .borrow()
+            .is_feature_enabled(crate::agent::config::Feature::ActiveAgentMessages);
         let goal_enabled = self.cfg.borrow().resolve_goal().value;
         let background_workflows_enabled = self.cfg.borrow().resolve_workflows().value;
         let subagents_enabled = self.cfg.borrow().subagents_enabled;
@@ -4712,15 +4728,19 @@ impl MvpAgent {
                     }
                     let cwd = std::path::Path::new(&session_info.cwd);
                     let hooks_trusted = folder_trust::project_scope_allowed(cwd);
-                    let git_root = xai_grok_workspace::session::git::find_git_root_from_path(
-                            cwd,
+                    let git_root = {
+                        let _timer = crate::instrumentation_timer!("session.spawn_git_root");
+                        xai_grok_workspace::session::git::find_git_root_from_path(cwd)
+                            .ok()
+                    };
+                    let (disk_registry, disk_errors) = {
+                        let _timer = crate::instrumentation_timer!("session.spawn_hook_discovery");
+                        crate::util::hooks::discover_hooks(
+                            git_root.as_deref(),
+                            &compat,
+                            hooks_trusted,
                         )
-                        .ok();
-                    let (disk_registry, disk_errors) = crate::util::hooks::discover_hooks(
-                        git_root.as_deref(),
-                        &compat,
-                        hooks_trusted,
-                    );
+                    };
                     for e in &disk_errors {
                         tracing::warn!(error = ?e, "hook loading error");
                     }
@@ -4767,6 +4787,7 @@ impl MvpAgent {
             tool_ctx.live_orphan_heal_lock = self
                 .session_registry
                 .live_orphan_heal_lock(&session_info.id);
+            let _spawn_on_thread_timer = crate::instrumentation_timer!("session.spawn_on_thread");
             spawn_session_on_thread(
                     session_info.clone(),
                     self.gateway.clone(),
@@ -4839,6 +4860,7 @@ impl MvpAgent {
                     video_gen_config,
                     app_builder_deployer_config,
                     write_file_enabled,
+                    active_agent_messages_enabled,
                     goal_enabled,
                     background_workflows_enabled,
                     subagents_enabled,
@@ -4897,6 +4919,7 @@ impl MvpAgent {
                     max_turns,
                     None,
                     is_chat_kind,
+                    None,
                     None,
                 )
                 .await?
@@ -4978,6 +5001,9 @@ impl MvpAgent {
             && let Some(scope) = &old.tool_context.process_scope
         {
             scope.kill_all();
+        }
+        if is_headless {
+            self.session_registry.mark_headless(&session_info.id);
         }
         self.spawn_managed_gateway_tool_catalog_fetch();
         let cwd_for_maintenance = session_info.cwd.clone();

@@ -603,7 +603,7 @@ Grok 将数据存储在 `~/.grok`（使用 `GROK_HOME` 覆盖；见[无头模式
 | ------------------------ | ------------------------------------- |
 | `config.toml`            | 用户配置 |
 | `auth.json`              | 缓存的 OAuth2/API 凭据 |
-| `version.json`           | 更新检查的版本缓存 |
+| `version.grok-build-zh.json` | 社区版更新检查的版本缓存（`version.json` 为上游/旧版回退） |
 | `sessions/`              | 会话记录（SQLite） |
 | `memory/`                | 跨会话记忆存储 |
 | `logs/`                  | 内部日志文件（例如 `unified.jsonl`） |

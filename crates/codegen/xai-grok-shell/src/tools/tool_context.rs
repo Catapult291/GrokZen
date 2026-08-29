@@ -77,6 +77,11 @@ pub struct BlockingWaitState(std::sync::Mutex<BlockingWaitInner>);
 struct BlockingWaitInner {
     depth: usize,
     generation: u64,
+    /// Union of waits aborted by a mid-turn interjection.
+    /// Concurrent aborts merge so a side-work wait cannot replace the
+    /// implement set. Extras drop only when the next interruptible wait
+    /// contains every remembered id plus at least one new one.
+    interrupted_wait_ids: Option<Vec<String>>,
 }
 impl BlockingWaitState {
     pub(crate) fn new() -> Self {
@@ -95,10 +100,57 @@ impl BlockingWaitState {
             .expect("blocking wait state mutex poisoned")
             .depth = depth;
     }
+    pub(crate) fn generation(&self) -> u64 {
+        self.0
+            .lock()
+            .expect("blocking wait state mutex poisoned")
+            .generation
+    }
+    /// Hold the wait-memory lock for one read-and-maybe-write so a
+    /// parallel abort cannot land between a check and a clear.
+    /// No-op if `generation` does not match (cancel already reset).
+    pub(crate) fn update_interrupted_wait<R>(
+        &self,
+        generation: u64,
+        f: impl FnOnce(&mut Option<Vec<String>>) -> R,
+    ) -> Option<R> {
+        let mut inner = self.0.lock().expect("blocking wait state mutex poisoned");
+        if inner.generation != generation {
+            return None;
+        }
+        Some(f(&mut inner.interrupted_wait_ids))
+    }
+    #[cfg(test)]
+    pub(crate) fn note_interrupted_wait(&self, ids: Vec<String>) {
+        self.update_interrupted_wait(self.generation(), |remembered| {
+            if ids.is_empty() {
+                return;
+            }
+            match remembered {
+                Some(existing) => {
+                    for id in ids {
+                        if !existing.contains(&id) {
+                            existing.push(id);
+                        }
+                    }
+                }
+                None => *remembered = Some(ids),
+            }
+        });
+    }
+    #[cfg(test)]
+    pub(crate) fn interrupted_wait_ids(&self) -> Option<Vec<String>> {
+        self.0
+            .lock()
+            .expect("blocking wait state mutex poisoned")
+            .interrupted_wait_ids
+            .clone()
+    }
     pub(crate) fn reset(&self) {
         let mut state = self.0.lock().expect("blocking wait state mutex poisoned");
         state.generation = state.generation.wrapping_add(1);
         state.depth = 0;
+        state.interrupted_wait_ids = None;
     }
 }
 pub(crate) struct BlockingWaitGuard {
@@ -106,6 +158,9 @@ pub(crate) struct BlockingWaitGuard {
     generation: u64,
 }
 impl BlockingWaitGuard {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
     pub(crate) fn enter(state: Arc<BlockingWaitState>) -> Self {
         let generation = {
             let mut inner = state.0.lock().expect("blocking wait state mutex poisoned");
@@ -151,6 +206,8 @@ pub struct ToolContext {
     /// `noop()` and the fs-notify loop skips forwarding to avoid per-event cost.
     pub hunk_tracking_enabled: bool,
     pub prompt_index: Arc<tokio::sync::Mutex<usize>>,
+    /// Lock-free mirror used only for synchronous active-message parent attribution.
+    pub(crate) active_message_parent_prompt_index: Arc<std::sync::atomic::AtomicUsize>,
     /// Current subagent nesting depth for this session.
     /// Top-level sessions start at 0; child sessions are parent_depth + 1.
     pub subagent_depth: u32,
@@ -161,6 +218,9 @@ pub struct ToolContext {
         tokio::sync::mpsc::UnboundedSender<
             xai_grok_tools::implementations::grok_build::task::types::SubagentEvent,
         >,
+    >,
+    pub subagent_coordinator_sender: Option<
+        xai_grok_tools::implementations::grok_build::task::backend::SubagentCoordinatorSender,
     >,
     /// Shared LSP runtime — cloned cheaply (Arc) from parent to child.
     /// Same pattern as `fs` and `terminal`.
@@ -201,6 +261,8 @@ pub struct ToolContext {
     /// Resolved name of the `BackgroundTaskAction` tool in the current toolset.
     /// Used by auto-wake to format completion messages with the correct tool name.
     pub task_output_tool_name: String,
+    /// Resolved scheduled-task deletion tool name, when available.
+    pub scheduler_delete_tool_name: Option<String>,
     /// Whether auto-wake is enabled. When `false`, background task and subagent
     /// completions fall back to the idle-gated notification drain.
     pub auto_wake_enabled: bool,
@@ -286,8 +348,10 @@ impl ToolContext {
             hunk_tracker_handle,
             hunk_tracking_enabled: true,
             prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
+            active_message_parent_prompt_index: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             subagent_depth: 0,
             subagent_event_tx: None,
+            subagent_coordinator_sender: None,
             lsp: None,
             lsp_server_names: Vec::new(),
             is_turn_active: None,
@@ -299,6 +363,7 @@ impl ToolContext {
             synthetic_trace_tx_shared: None,
             task_output_tool_name:
                 xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string(),
+            scheduler_delete_tool_name: None,
             auto_wake_enabled: true,
             goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             blocking_wait_depth: Arc::new(BlockingWaitState::new()),
@@ -377,8 +442,12 @@ mod tests {
                 hunk_tracker_handle: HunkTrackerHandle::noop(),
                 hunk_tracking_enabled: true,
                 prompt_index: Arc::new(tokio::sync::Mutex::new(0)),
+                active_message_parent_prompt_index: Arc::new(std::sync::atomic::AtomicUsize::new(
+                    0,
+                )),
                 subagent_depth: 0,
                 subagent_event_tx: None,
+                subagent_coordinator_sender: None,
                 lsp: None,
                 lsp_server_names: Vec::new(),
                 is_turn_active: None,
@@ -390,6 +459,7 @@ mod tests {
                 synthetic_trace_tx_shared: None,
                 task_output_tool_name:
                     xai_grok_tools::reminders::task_completion::DEFAULT_TASK_OUTPUT_TOOL.to_string(),
+                scheduler_delete_tool_name: None,
                 auto_wake_enabled: true,
                 goal_loop_active_gate: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 blocking_wait_depth: Arc::new(BlockingWaitState::new()),

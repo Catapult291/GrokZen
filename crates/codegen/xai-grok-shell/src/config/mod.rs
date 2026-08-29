@@ -27,6 +27,9 @@ pub struct SubagentsConfig {
     pub max_depth: Option<i64>,
     #[serde(default)]
     pub max_concurrent: Option<i64>,
+    /// Concurrent subagent turn-sampling limit. See [`Self::resolve_sampling_limit`].
+    #[serde(default)]
+    pub sampling_limit: Option<i64>,
     /// `"queue"` or `"fail"`.
     #[serde(default)]
     pub limit_behavior: Option<String>,
@@ -291,6 +294,7 @@ impl SubagentsConfig {
         Self::DEFAULT_MAX_DEPTH
     }
     pub const ENV_MAX_CONCURRENT: &'static str = "GROK_MAX_CONCURRENT_SUBAGENTS";
+    pub const ENV_SAMPLING_LIMIT: &'static str = "GROK_SUBAGENT_SAMPLING_LIMIT";
     pub const ENV_LIMIT_BEHAVIOR: &'static str = "GROK_SUBAGENT_LIMIT_BEHAVIOR";
     pub const ENV_WORKFLOW_MAX_CONCURRENT: &'static str = "GROK_WORKFLOW_MAX_CONCURRENT_AGENTS";
     pub(crate) fn resolve_max_concurrent(
@@ -305,6 +309,30 @@ impl SubagentsConfig {
             remote,
             xai_grok_tools::implementations::grok_build::task::admission::DEFAULT_MAX_CONCURRENT,
         )
+    }
+    /// Resolve the subagent turn-sampling limit, clamped to
+    /// [`crate::agent::subagent::MAX_SUBAGENT_SAMPLING_LIMIT`]. `default` is the
+    /// resolved concurrent-subagent bound (`GROK_MAX_CONCURRENT_SUBAGENTS`); a
+    /// lower `GROK_SUBAGENT_SAMPLING_LIMIT`, `[subagents] sampling_limit`, or
+    /// remote value caps sampling further.
+    pub(crate) fn resolve_sampling_limit(
+        env: Option<&str>,
+        config: Option<i64>,
+        remote: Option<u32>,
+        default: usize,
+    ) -> usize {
+        let max = crate::agent::subagent::MAX_SUBAGENT_SAMPLING_LIMIT;
+        let resolved =
+            resolve_positive_count(Self::ENV_SAMPLING_LIMIT, env, config, remote, default);
+        if resolved > max {
+            tracing::warn!(
+                name = Self::ENV_SAMPLING_LIMIT,
+                resolved,
+                max,
+                "subagent sampling limit exceeds the ceiling; clamping"
+            );
+        }
+        resolved.min(max)
     }
     pub(crate) fn resolve_workflow_max_concurrent(
         env: Option<&str>,
@@ -479,7 +507,7 @@ pub(crate) struct ModelOverrideConfig {
     pub web_search: String,
     /// `None` = current model.
     pub session_summary: Option<String>,
-    /// Compiled default (`grok-build`) when unset locally, remotely, and via env.
+    /// Compiled default (`grok-4.6`) when unset locally, remotely, and via env.
     pub image_description: Option<String>,
     /// Next-prompt suggestion model pin. Unlike the other overrides this does
     /// NOT fill a compiled default — see [`PromptSuggestModelPin`].
@@ -503,14 +531,13 @@ impl Default for ModelOverrideConfig {
 /// Unlike the other auxiliary overrides this does not collapse to a plain
 /// model string: the consumer (`handle_suggest_prompt`) must distinguish
 /// an explicit pin from "unpinned" (where the client hint and the built-in
-/// `grok-build-0.1` default apply), and whether the pin came from the env
+/// `grok-4.6` default apply), and whether the pin came from the env
 /// escape hatch. Every effective model except an env pin is catalog-guarded —
-/// when the model is not in the shell's catalog (e.g. `grok-build-0.1` for
-/// OAuth users, whose catalogs exclude it) the per-turn suggestion request is
-/// skipped entirely rather than fired doomed. The env pin is deliberately
-/// exempt so `GROK_PROMPT_SUGGESTIONS_MODEL` keeps working for models a
-/// catalog does not list (mirrors the pager, which forwards the env value
-/// without checking its catalog).
+/// when the model is not in the shell's catalog the per-turn suggestion
+/// request is skipped entirely rather than fired doomed. The env pin is
+/// deliberately exempt so `GROK_PROMPT_SUGGESTIONS_MODEL` keeps working for
+/// models a catalog does not list (mirrors the pager, which forwards the
+/// env value without checking its catalog).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum PromptSuggestModelPin {
     /// `GROK_PROMPT_SUGGESTIONS_MODEL` — used verbatim, bypasses the
@@ -538,7 +565,7 @@ fn non_empty_model_override(value: Option<&str>) -> Option<String> {
 impl ModelOverrideConfig {
     /// CLI flag > env var > config.toml > remote settings > compiled default.
     /// `image_description` and `session_summary` always resolve to `Some(_)`
-    /// (default `grok-build`), never the session model.
+    /// (default `grok-4.6`), never the session model.
     /// `prompt_suggestion` resolves to a [`PromptSuggestModelPin`] instead of
     /// a model string (no CLI flag; the default and the catalog guard live at
     /// the consumer, `handle_suggest_prompt`).
@@ -1386,6 +1413,105 @@ fn apply_requirements_inner(
     }
     enforced
 }
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+enum BwrapStartup<T> {
+    ReexecRequired(T),
+    ReexecOptional(T),
+    Verify,
+    Refuse,
+    Continue,
+}
+#[cfg(target_os = "linux")]
+fn route_bwrap_startup<T>(
+    command: Option<T>,
+    is_inside_bwrap: bool,
+    requires_bwrap: bool,
+) -> BwrapStartup<T> {
+    match command {
+        Some(command) if requires_bwrap => BwrapStartup::ReexecRequired(command),
+        Some(command) => BwrapStartup::ReexecOptional(command),
+        None if requires_bwrap && is_inside_bwrap => BwrapStartup::Verify,
+        None if requires_bwrap => BwrapStartup::Refuse,
+        None => BwrapStartup::Continue,
+    }
+}
+fn localized_sandbox_message(
+    locale: &xai_grok_locale::LocaleContext,
+    id: &str,
+    english: &str,
+    replacement: Option<(&str, &str)>,
+) -> String {
+    let message = locale.named_text(id, english).into_owned();
+    match replacement {
+        Some((name, value)) => message.replacen(&format!("{{{name}}}"), value, 1),
+        None => message,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn localized_bwrap_diagnostic(
+    locale: &xai_grok_locale::LocaleContext,
+    diagnostic: &xai_grok_sandbox::BwrapDiagnostic,
+) -> String {
+    use xai_grok_sandbox::BwrapDiagnostic;
+    match diagnostic {
+        BwrapDiagnostic::CurrentExecutable { error } => localized_sandbox_message(
+            locale,
+            "cli.sandbox.bwrap.current_exe_failed",
+            "error: could not resolve the current executable for the bwrap re-exec: {error}",
+            Some(("error", error)),
+        ),
+        BwrapDiagnostic::HookPlanMaterialization { error } => localized_sandbox_message(
+            locale,
+            "cli.sandbox.bwrap.hook_plan_materialization_failed",
+            "error: hook write-deny plan materialization failed: {error}",
+            Some(("error", error)),
+        ),
+        BwrapDiagnostic::ReadDenyPlaceholder { path } => localized_sandbox_message(
+            locale,
+            "cli.sandbox.bwrap.read_placeholder_failed",
+            "error: could not create bwrap placeholder for read-deny path {path}; refusing to start with a partial sandbox",
+            Some(("path", path)),
+        ),
+        BwrapDiagnostic::SentinelPrepare { error } => localized_sandbox_message(
+            locale,
+            "cli.sandbox.bwrap.sentinel_prepare_failed",
+            "error: could not prepare the bwrap containment sentinel: {error}",
+            Some(("error", error)),
+        ),
+        BwrapDiagnostic::RuntimeSocketHandoff { error } => localized_sandbox_message(
+            locale,
+            "cli.sandbox.bwrap.runtime_socket_handoff_failed",
+            "error: runtime-socket deny handoff encoding failed: {error}",
+            Some(("error", error)),
+        ),
+        BwrapDiagnostic::ProfileResolve { error } => localized_sandbox_message(
+            locale,
+            "cli.sandbox.bwrap.profile_resolve_failed",
+            "error: sandbox profile resolve failed: {error}",
+            Some(("error", error)),
+        ),
+        BwrapDiagnostic::HookPlanPrepare { error } => localized_sandbox_message(
+            locale,
+            "cli.sandbox.bwrap.hook_plan_failed",
+            "error: hook write-deny plan failed: {error}",
+            Some(("error", error)),
+        ),
+        BwrapDiagnostic::HookPlanMissing => localized_sandbox_message(
+            locale,
+            "cli.sandbox.bwrap.hook_plan_missing",
+            "error: hook write-deny is required but no plan was prepared",
+            None,
+        ),
+        BwrapDiagnostic::DenyGlobExpand { error } => localized_sandbox_message(
+            locale,
+            "cli.sandbox.bwrap.deny_glob_expand_failed",
+            "error: sandbox deny glob could not be enforced on Linux: {error}",
+            Some(("error", error)),
+        ),
+    }
+}
 /// Resolve sandbox profile and apply OS-level enforcement. Called once at startup.
 ///
 /// `cli_profile` is the resumed/forced base profile (a resumed session's saved
@@ -1394,6 +1520,21 @@ pub fn apply_sandbox(
     sandbox_config: Option<&crate::agent::config::SandboxSettingsConfig>,
     cli_profile: Option<&str>,
     cwd: Option<&std::path::Path>,
+) {
+    apply_sandbox_with_locale(
+        sandbox_config,
+        cli_profile,
+        cwd,
+        &xai_grok_locale::LocaleContext::default(),
+    );
+}
+
+/// Locale-aware startup sandbox enforcement used by the community pager.
+pub fn apply_sandbox_with_locale(
+    sandbox_config: Option<&crate::agent::config::SandboxSettingsConfig>,
+    cli_profile: Option<&str>,
+    cwd: Option<&std::path::Path>,
+    locale: &xai_grok_locale::LocaleContext,
 ) {
     let owned;
     let config = match sandbox_config {
@@ -1412,9 +1553,20 @@ pub fn apply_sandbox(
         .and_then(|v| v.get("sandbox")?.get("auto_allow_bash")?.as_bool());
     let resolved = config.resolve_profile(cli_profile, profile_req);
     xai_grok_sandbox::set_auto_allow_bash(config.resolve_auto_allow_bash(auto_allow_req).value);
-    let sandbox_profile: xai_grok_sandbox::ProfileName =
-        resolved.value.parse().unwrap_or_else(|e| {
-            eprintln!("warning: {e}, defaulting to no sandbox");
+    let sandbox_profile: xai_grok_sandbox::ProfileName = resolved
+        .value
+        .parse::<xai_grok_sandbox::ProfileName>()
+        .unwrap_or_else(|e| {
+            let error = e.to_string();
+            eprintln!(
+                "{}",
+                localized_sandbox_message(
+                    locale,
+                    "cli.sandbox.invalid_profile",
+                    "warning: {error}, defaulting to no sandbox",
+                    Some(("error", &error)),
+                )
+            );
             xai_grok_sandbox::ProfileName::Off
         });
     xai_grok_sandbox::set_configured_profile(&resolved.value);
@@ -1428,52 +1580,118 @@ pub fn apply_sandbox(
     let requires_hook_write_deny =
         xai_grok_sandbox::requires_hook_write_deny(&sandbox_profile, &workspace);
     #[cfg(target_os = "linux")]
-    let requires_bwrap = requires_read_deny || requires_hook_write_deny;
+    let requires_data_write_deny =
+        xai_grok_sandbox::requires_data_write_deny(&sandbox_profile, &workspace);
+    #[cfg(target_os = "linux")]
+    let requires_bwrap = requires_read_deny || requires_hook_write_deny || requires_data_write_deny;
     #[cfg(target_os = "linux")]
     {
         let refuse_unprotected = |cause: &str| {
             eprintln!(
-                "error: this sandbox could not enforce its deny list on Linux: \
-                 {cause} Refusing to start with denied paths unprotected."
+                "{}",
+                localized_sandbox_message(
+                    locale,
+                    "cli.sandbox.deny_list_unprotected",
+                    "error: this sandbox could not enforce its deny list on Linux: {cause} Refusing to start with denied paths unprotected.",
+                    Some(("cause", cause)),
+                )
             );
         };
-        match xai_grok_sandbox::bwrap_reexec_for_profile(&sandbox_profile, &workspace) {
-            Some(mut cmd) => {
+        let command = xai_grok_sandbox::bwrap_reexec_for_profile_with_report(
+            &sandbox_profile,
+            &workspace,
+            |diagnostic| eprintln!("{}", localized_bwrap_diagnostic(locale, &diagnostic)),
+        );
+        match route_bwrap_startup(command, xai_grok_sandbox::is_inside_bwrap(), requires_bwrap) {
+            BwrapStartup::ReexecRequired(mut cmd) => {
                 use std::os::unix::process::CommandExt;
                 let err = cmd.exec();
-                if requires_bwrap {
-                    refuse_unprotected(&format!(
-                        "bwrap exec failed: {err}. Install bubblewrap with \
-                         `apt install -y bubblewrap`."
-                    ));
-                    std::process::exit(1);
-                }
+                let error = err.to_string();
+                let cause = localized_sandbox_message(
+                    locale,
+                    "cli.sandbox.bwrap_exec_failed",
+                    "bwrap exec failed: {error}. Install bubblewrap with `apt install -y bubblewrap`.",
+                    Some(("error", &error)),
+                );
+                refuse_unprotected(&cause);
+                std::process::exit(1);
+            }
+            BwrapStartup::ReexecOptional(mut cmd) => {
+                use std::os::unix::process::CommandExt;
+                let err = cmd.exec();
+                let error = err.to_string();
                 eprintln!(
-                    "WARNING: bwrap exec failed: {err}. \
-                     Falling back to Landlock sandbox. \
-                     Install bubblewrap: apt install -y bubblewrap"
+                    "{}",
+                    localized_sandbox_message(
+                        locale,
+                        "cli.sandbox.bwrap_optional_fallback",
+                        "WARNING: bwrap exec failed: {error}. Falling back to Landlock sandbox. Install bubblewrap: apt install -y bubblewrap",
+                        Some(("error", &error)),
+                    )
                 );
             }
-            None if requires_bwrap && xai_grok_sandbox::is_inside_bwrap() => {
+            BwrapStartup::Verify => {
                 if requires_hook_write_deny
                     && let Err(e) = xai_grok_sandbox::verify_hook_write_deny_enforced()
                 {
+                    let error = e.to_string();
                     eprintln!(
-                        "error: sandbox reports bwrap but required hook write-deny \
-                         mounts are missing or writable ({e}); refusing to start \
-                         (possible __GROK_INSIDE_BWRAP spoof)"
+                        "{}",
+                        localized_sandbox_message(
+                            locale,
+                            "cli.sandbox.hook_write_deny_unverified",
+                            "error: sandbox reports bwrap but required hook write-deny mounts are missing or writable ({error}); refusing to start (possible __GROK_INSIDE_BWRAP spoof)",
+                            Some(("error", &error)),
+                        )
+                    );
+                    std::process::exit(1);
+                }
+                if requires_read_deny
+                    && let Err(e) =
+                        xai_grok_sandbox::verify_read_deny_enforced(&sandbox_profile, &workspace)
+                {
+                    let error = e.to_string();
+                    eprintln!(
+                        "{}",
+                        localized_sandbox_message(
+                            locale,
+                            "cli.sandbox.read_deny_unverified",
+                            "error: sandbox reports bwrap but required read-deny mounts are not in effect ({error}); refusing to start (possible __GROK_INSIDE_BWRAP spoof)",
+                            Some(("error", &error)),
+                        )
+                    );
+                    std::process::exit(1);
+                }
+                if requires_data_write_deny
+                    && let Err(e) = xai_grok_sandbox::verify_data_write_deny_enforced(
+                        &sandbox_profile,
+                        &workspace,
+                    )
+                {
+                    let error = e.to_string();
+                    eprintln!(
+                        "{}",
+                        localized_sandbox_message(
+                            locale,
+                            "cli.sandbox.data_write_deny_unverified",
+                            "error: sandbox reports bwrap but the required /data write-deny mount is not in effect ({error}); refusing to start (possible __GROK_INSIDE_BWRAP spoof)",
+                            Some(("error", &error)),
+                        )
                     );
                     std::process::exit(1);
                 }
             }
-            None if requires_bwrap => {
-                refuse_unprotected(
-                    "the deny list could not be prepared; see the error above \
-                     for the specific cause.",
+            BwrapStartup::Refuse => {
+                let cause = localized_sandbox_message(
+                    locale,
+                    "cli.sandbox.bwrap_plan_unavailable",
+                    "the required bwrap plan could not be prepared; see the error above for the specific cause.",
+                    None,
                 );
+                refuse_unprotected(&cause);
                 std::process::exit(1);
             }
-            None => {}
+            BwrapStartup::Continue => {}
         }
     }
     if sandbox_profile != xai_grok_sandbox::ProfileName::Off {
@@ -1486,22 +1704,30 @@ pub fn apply_sandbox(
         };
         let mut sandbox = xai_grok_sandbox::SandboxManager::new(sandbox_profile, &workspace);
         if let Err(e) = sandbox.apply(&workspace) {
-            eprintln!("warning: sandbox could not be applied: {e}");
+            let error = e.to_string();
+            eprintln!(
+                "{}",
+                localized_sandbox_message(
+                    locale,
+                    "cli.sandbox.apply_failed",
+                    "warning: sandbox could not be applied: {error}",
+                    Some(("error", &error)),
+                )
+            );
         }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            #[cfg(target_os = "macos")]
             let unappliable = requires_protection && !sandbox.is_applied();
-            #[cfg(target_os = "linux")]
-            let unappliable = requires_protection
-                && !sandbox.is_applied()
-                && !xai_grok_sandbox::is_inside_bwrap();
             if unappliable {
+                let profile = sandbox.profile().to_string();
                 eprintln!(
-                    "error: could not apply the '{}' sandbox profile; see the \
-                     warning above for the cause. Refusing to start with its \
-                     protections missing.",
-                    sandbox.profile()
+                    "{}",
+                    localized_sandbox_message(
+                        locale,
+                        "cli.sandbox.profile_protections_missing",
+                        "error: could not apply the '{profile}' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.",
+                        Some(("profile", &profile)),
+                    )
                 );
                 std::process::exit(1);
             }
@@ -1510,9 +1736,15 @@ pub fn apply_sandbox(
                 && xai_grok_sandbox::is_inside_bwrap()
                 && let Err(e) = xai_grok_sandbox::verify_hook_write_deny_enforced()
             {
+                let error = e.to_string();
                 eprintln!(
-                    "error: required hook write-deny mounts not verified after apply ({e}); \
-                     refusing to start"
+                    "{}",
+                    localized_sandbox_message(
+                        locale,
+                        "cli.sandbox.post_apply_hook_write_deny_unverified",
+                        "error: required hook write-deny mounts not verified after apply ({error}); refusing to start",
+                        Some(("error", &error)),
+                    )
                 );
                 std::process::exit(1);
             }
@@ -1932,11 +2164,26 @@ pub(crate) fn add_hooks_path_to_file(
     writeln!(file, "{}", path)?;
     Ok(())
 }
+/// The user-registered hook directories (`~/.grok/hooks-paths` lines) —
+/// exactly what `remove_hooks_path` can remove (same exact-string match).
+pub(crate) fn registered_hook_paths() -> std::collections::HashSet<String> {
+    let path = crate::util::grok_home::grok_home().join("hooks-paths");
+    match std::fs::read_to_string(&path) {
+        Ok(content) => content
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        Err(_) => std::collections::HashSet::new(),
+    }
+}
 /// Remove a hook path from `~/.grok/hooks-paths`.
 ///
-/// If the path is not found (exact string match), this is a no-op.
-/// Matches the same exact-string behavior as `add_hooks_path`.
-pub(crate) fn remove_hooks_path(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Returns whether the path was present (exact string match, like
+/// `add_hooks_path`); on `false` nothing was removed and callers must not
+/// claim success.
+pub(crate) fn remove_hooks_path(path: &str) -> Result<bool, Box<dyn std::error::Error>> {
     remove_hooks_path_from_file(
         path,
         &crate::util::grok_home::grok_home().join("hooks-paths"),
@@ -1946,10 +2193,10 @@ pub(crate) fn remove_hooks_path(path: &str) -> Result<(), Box<dyn std::error::Er
 pub(crate) fn remove_hooks_path_from_file(
     path: &str,
     paths_file: &std::path::Path,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<bool, Box<dyn std::error::Error>> {
     let content = match std::fs::read_to_string(paths_file) {
         Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.into()),
     };
     let mut found = false;
@@ -1965,7 +2212,7 @@ pub(crate) fn remove_hooks_path_from_file(
         })
         .collect();
     if !found {
-        return Ok(());
+        return Ok(false);
     }
     if let Some(parent) = paths_file.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1974,7 +2221,7 @@ pub(crate) fn remove_hooks_path_from_file(
         paths_file,
         new_lines.join("\n") + (if new_lines.is_empty() { "" } else { "\n" }),
     )?;
-    Ok(())
+    Ok(true)
 }
 #[cfg(test)]
 mod tests;

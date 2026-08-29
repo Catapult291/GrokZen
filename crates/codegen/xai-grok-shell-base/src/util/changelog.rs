@@ -1,13 +1,11 @@
 //! Changelog fetching from CDN with local disk cache.
 //!
-//! Both markdown (`*.external.md`) and JSON (`*.external.json`) changelogs
-//! are published per-version to the CDN at `x.ai/cli/changelogs/`.
+//! Both markdown (`*.external.md`) and JSON (`*.external.json`) changelogs are published per-version to the CDN at `x.ai/cli/changelogs/`.
 //!
-//! `ChangelogManager::fetch()` retrieves both formats in parallel and
-//! returns a `Changelog` with optional markdown + structured entries.
+//! `ChangelogManager::fetch()` retrieves both formats in parallel and returns a `Changelog` with optional markdown and structured entries.
 //! Consumers pick the format they need:
 //! - `/release-notes` uses `changelog.markdown` for rich scrollback display
-//! - Welcome screen uses `changelog.entries` for bullet rendering
+//! - The welcome screen uses `changelog.entries` for bullet rendering
 
 use std::path::PathBuf;
 
@@ -33,9 +31,8 @@ fn changelog_cache_names() -> (&'static str, &'static str) {
 ///   `{category, description, breaking_change}`
 /// If you change fields here, update `changelog.sh:render_external_json` too.
 ///
-/// All fields use `#[serde(default)]` so a single malformed entry doesn't
-/// kill the entire array parse. Entries with an empty description are
-/// filtered out by `bullets_from_entries`.
+/// All fields use `#[serde(default)]` so a single malformed entry doesn't kill the entire array parse.
+/// Entries with an empty description are filtered out by `bullets_from_entries`.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ChangelogEntry {
     /// Category label (e.g. "features", "fixes", "breaking", "performance").
@@ -59,9 +56,8 @@ pub struct Changelog {
 
 /// Manages changelog retrieval from CDN with local disk caching.
 ///
-/// Single entry point: `fetch()` returns both markdown and JSON in one
-/// `Changelog` struct. Each format is fetched independently with its own
-/// cache file, so a failure in one doesn't block the other.
+/// Single entry point: `fetch()` returns both markdown and JSON in one `Changelog` struct.
+/// Each format is fetched independently with its own cache file, so a failure in one doesn't block the other.
 pub struct ChangelogManager {
     md_cache: PathBuf,
     json_cache: PathBuf,
@@ -109,16 +105,12 @@ impl ChangelogManager {
         Self::from_product_home().fetch_with(offline, CHANGELOG_BASE)
     }
 
-    /// Fetch using this manager's already-resolved cache paths, an explicit
-    /// offline flag, and an explicit CDN base.
+    /// Fetch using this manager's already-resolved cache paths, an explicit offline flag, and an explicit CDN base.
     ///
-    /// Split out of [`fetch`] so unit tests can drive it against a temp home
-    /// without mutating process-global env (`GROK_HOME` /
-    /// `GROK_CHANGELOG_OFFLINE`), which races across the parallel test
-    /// harness. Passing an unreachable `base` lets a test force a
-    /// deterministic CDN miss instead of depending on whether the sandbox
-    /// happens to block network. Production callers always go through
-    /// [`fetch`], so behaviour is unchanged.
+    /// Split out of [`fetch`] so unit tests can drive it against a temp home without touching process-global env.
+    /// Mutating `GROK_HOME` / `GROK_CHANGELOG_OFFLINE` races across the parallel test harness.
+    /// Passing an unreachable `base` forces a deterministic CDN miss instead of depending on whether the sandbox happens to block network.
+    /// Production callers always go through [`fetch`].
     fn fetch_with(&self, offline: bool, base: &str) -> Changelog {
         if offline {
             return Changelog {
@@ -130,7 +122,7 @@ impl ChangelogManager {
         let version = xai_grok_version::VERSION;
         let md_url = format!("{}/{}.external.md", base, version);
 
-        // Fetch both formats in parallel (3s timeout each → 3s total, not 6s).
+        // Fetch both formats in parallel: 3s timeout each means 3s total, not 6s
         let mut markdown = None;
         let mut entries = None;
         std::thread::scope(|s| {
@@ -140,9 +132,8 @@ impl ChangelogManager {
             entries = json_handle.join().ok().flatten();
         });
 
-        // If CDN is unreachable (CI sandboxes, airplane mode), fall back to
-        // any on-disk seed under `$GROK_HOME` even when offline mode was not
-        // explicitly requested — keeps PTY/integration tests deterministic.
+        // If the CDN is unreachable (CI sandboxes, airplane mode), fall back to any on-disk seed under `$GROK_HOME`
+        // This applies even when offline mode was not requested, keeping PTY/integration tests deterministic
         if markdown.is_none() {
             markdown = read_cache(&self.md_cache);
         }
@@ -157,7 +148,7 @@ impl ChangelogManager {
     fn fetch_json(&self, base: &str, version: &str) -> Option<Vec<ChangelogEntry>> {
         let url = format!("{}/{}.external.json", base, version);
 
-        // Try remote first — only cache after successful parse.
+        // Try remote first; only cache after successful parse
         if let Ok(raw) = fetch_blocking(&url)
             && !raw.trim().is_empty()
         {
@@ -188,8 +179,7 @@ impl ChangelogManager {
         }
     }
 
-    /// Shared fetch-and-cache: try remote (3 s timeout), cache on success,
-    /// fall back to disk cache on failure.
+    /// Try remote (3 s timeout), cache on success, fall back to disk cache on failure.
     fn fetch_and_cache(&self, url: &str, cache_path: &std::path::Path) -> Option<String> {
         if let Ok(content) = fetch_blocking(url)
             && !content.trim().is_empty()
@@ -222,9 +212,8 @@ fn strip_markdown_inline(s: &str) -> String {
 
 /// Convert changelog entries to plain-text bullet strings.
 ///
-/// Strips `**bold**` and backtick formatting from each description,
-/// skips entries with empty descriptions (from tolerant deserialization),
-/// and returns at most `max` entries.
+/// Strips `**bold**` and backtick formatting from each description and returns at most `max` entries.
+/// Entries with an empty description (from tolerant deserialization) are skipped.
 pub fn bullets_from_entries(entries: &[ChangelogEntry], max: usize) -> Vec<String> {
     entries
         .iter()
@@ -234,8 +223,8 @@ pub fn bullets_from_entries(entries: &[ChangelogEntry], max: usize) -> Vec<Strin
         .collect()
 }
 
-/// Blocking HTTP fetch. Callers (`std::thread::scope` threads) are already
-/// off the tokio runtime, so no extra thread spawn is needed.
+/// Blocking HTTP fetch.
+/// Callers (`std::thread::scope` threads) are already off the tokio runtime, so no extra thread spawn is needed.
 fn fetch_blocking(url: &str) -> anyhow::Result<String> {
     let client =
         xai_grok_extra_ca::build_blocking_reqwest_client(|builder| builder.timeout(FETCH_TIMEOUT))?;
@@ -250,8 +239,7 @@ fn fetch_blocking(url: &str) -> anyhow::Result<String> {
 mod tests {
     use super::*;
 
-    /// Build a manager pointing at `home` directly, bypassing the global
-    /// `$GROK_HOME` env so tests never race the parallel harness.
+    /// Build a manager pointing at `home` directly, bypassing the global `$GROK_HOME` env so tests never race the parallel harness.
     fn manager_for(home: &std::path::Path) -> ChangelogManager {
         ChangelogManager {
             md_cache: home.join("CHANGELOG.md"),
@@ -299,9 +287,8 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("CHANGELOG.md"), "# fallback md\n").unwrap();
 
-        // Non-offline path with an unreachable CDN base: the remote fetch
-        // fails deterministically (no dependency on the sandbox blocking
-        // network), so the on-disk cache must win.
+        // Non-offline path with an unreachable CDN base: the remote fetch fails deterministically, so the on-disk cache must win
+        // The failure does not depend on whether the sandbox blocks network
         let changelog = manager_for(&home).fetch_with(false, "http://127.0.0.1:1");
         assert_eq!(
             changelog.markdown.as_deref(),
@@ -346,7 +333,7 @@ mod tests {
             },
             ChangelogEntry {
                 category: String::new(),
-                description: String::new(), // bad entry from tolerant deser
+                description: String::new(), // bad entry from tolerant deserialization
                 breaking_change: false,
             },
             ChangelogEntry {
@@ -361,7 +348,7 @@ mod tests {
 
     #[test]
     fn tolerant_deserialization_partial_entry() {
-        // Missing description field → defaults to empty string, not a parse error
+        // A missing description field defaults to an empty string, not a parse error
         let json = r#"[{"category":"features"},{"description":"ok"}]"#;
         let entries: Vec<ChangelogEntry> = serde_json::from_str(json).unwrap();
         assert_eq!(entries.len(), 2);

@@ -1,12 +1,12 @@
 //! ACP (Agent Communication Protocol) connection management.
 //!
-//! Handles spawning the agent process, initializing the protocol,
-//! authenticating, and providing the channel for communication.
+//! This module spawns the agent process, initializes the protocol, authenticates, and provides the channel for communication.
 
 pub mod leader_bridge;
 pub mod meta;
 pub mod model_state;
 pub mod spawn;
+mod subagent_message;
 pub mod tracker;
 mod version_mismatch;
 
@@ -15,8 +15,8 @@ pub(crate) use version_mismatch::{
 };
 
 /// Ext methods that carry a session-scoped update and may stamp `isReplay`.
-/// Shared by TUI/headless dispatch and the session-load ACP barrier so a new
-/// method cannot be handled in one path and classified `Unrelated` in the other.
+/// TUI dispatch, headless dispatch, and the session-load ACP barrier all share this list.
+/// A new method thus cannot be handled in one path and classified `Unrelated` in another.
 pub(crate) fn is_session_update_ext_method(method: &str) -> bool {
     matches!(method, "x.ai/session_notification" | "x.ai/session/update")
 }
@@ -43,9 +43,8 @@ pub use model_state::ModelState;
 
 /// Construct a `METHOD_NOT_FOUND` error for `WaitForTerminalExit`.
 ///
-/// Both the interactive pager and headless mode reject this ACP method
-/// (the adapter falls back to polling). Centralised here so the error
-/// code and message format stay in sync.
+/// Both the interactive pager and headless mode reject this ACP method (the adapter falls back to polling).
+/// Centralised here so the error code and message format stay in sync.
 pub(crate) fn wait_for_exit_not_supported(context: &str) -> acp::Error {
     acp::Error::new(
         acp::ErrorCode::MethodNotFound.into(),
@@ -56,13 +55,12 @@ pub(crate) fn wait_for_exit_not_supported(context: &str) -> acp::Error {
 /// Initial auth mode hint from the agent's auth method metadata.
 ///
 /// Determined at startup from `AuthMethod.meta.external_provider`.
-/// Used by the welcome screen to decide whether to show a browser-opening
-/// message or a manual token paste input.
+/// Used by the welcome screen to decide whether to show a browser-opening message or a manual token paste input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthStartMode {
     /// Mode not yet known (will be resolved after AuthenticateRequest).
     Pending,
-    /// External provider (meta.external_provider == true) — browser opens automatically.
+    /// External provider (meta.external_provider == true); the browser opens automatically.
     Command,
 }
 
@@ -80,15 +78,14 @@ pub struct AcpConnection {
     pub auth_methods: Vec<acp::AuthMethod>,
     /// Cancellation token to stop the agent.
     pub cancel: CancellationToken,
-    /// In-process agent worker thread (`connect` only). Join after cancel so
-    /// session actors can flush SessionEnd hooks. `None` in leader mode.
+    /// In-process agent worker thread (`connect` only). Join after cancel so session actors can flush SessionEnd hooks.
+    /// `None` in leader mode.
     pub agent_thread: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
     /// ACP-advertised slash commands parsed from `InitializeResponse.meta.availableCommands`.
-    /// Seeded into every new `AgentSession` so autocomplete has shell builtins
-    /// and skills immediately, before any `AvailableCommandsUpdate` arrives.
+    /// Seeded into every new `AgentSession` so autocomplete has shell builtins and skills immediately, before any `AvailableCommandsUpdate` arrives.
     pub available_commands: Vec<acp::AvailableCommand>,
     // NOTE: Startup announcements from InitializeResponse.meta are not yet supported.
-    // Requires shell to include announcements in initialize metadata.
+    // Requires the shell to include announcements in initialize metadata
     // When available, add field: startup_announcements: Option<Vec<xai_grok_announcements::RemoteAnnouncement>>
     /// Whether interactive login is required (deferred auth for `grok.com`).
     pub needs_login: bool,
@@ -98,27 +95,24 @@ pub struct AcpConnection {
     pub login_method_id: Option<acp::AuthMethodId>,
     /// Initial auth mode hint (Command vs Pending) from method metadata.
     pub auth_start_mode: AuthStartMode,
-    /// Auth response metadata from eager authentication (cached token / API key).
+    /// Auth response metadata from eager authentication (cached token or API key).
     /// Contains `team_name`, etc. `None` when interactive login is required.
     pub auth_meta: Option<serde_json::Value>,
     /// Leader connection status. `Some` only when connected via leader.
     pub leader_status_rx: Option<tokio::sync::watch::Receiver<leader_bridge::ConnectionStatus>>,
     /// Whether cancel-rewind is enabled (resolved by shell from config layers).
     pub cancel_rewind_enabled: bool,
-    /// Whether the session-recap feature is rolled out for this connection,
-    /// resolved by the shell (remote settings / config / env; default OFF) and
-    /// advertised in `InitializeResponse.meta.sessionRecap`. The client gates
-    /// its automatic away-recap poll and the manual `/recap` on this so a
-    /// disabled feature produces zero `x.ai/recap` traffic. Defaults to `false`
-    /// when absent (e.g. an older shell that predates the feature).
+    /// Whether the session-recap feature is rolled out for this connection.
+    /// The shell resolves it (remote settings, config, env; default OFF) and advertises it in `InitializeResponse.meta.sessionRecap`.
+    /// The client gates its automatic away-recap poll and the manual `/recap` on this so a disabled feature produces zero `x.ai/recap` traffic.
+    /// Defaults to `false` when absent (e.g. an older shell that predates the feature).
     pub session_recap_available: bool,
     /// Shell-side feedback trace-offer eligibility (see `feedbackTraceOffer`).
     pub feedback_trace_offer: bool,
-    /// `AuthManager` for pager-side authenticated channels (voice STT/TTS).
+    /// `AuthManager` for pager-side authenticated channels (voice STT and TTS).
     ///
-    /// In-process mode shares the agent's instance (single token cache); leader
-    /// mode builds a dedicated one off the same local `auth.json`. Either way it
-    /// resolves a fresh bearer per request via the refresh chain.
+    /// In-process mode shares the agent's instance (single token cache); leader mode builds a dedicated one off the same local `auth.json`.
+    /// Either way it resolves a fresh bearer per request via the refresh chain.
     pub auth_manager: std::sync::Arc<xai_grok_shell::auth::AuthManager>,
 }
 
@@ -131,19 +125,16 @@ pub struct ConnectFlags {
     /// Original compatibility flag spelling for leader-mode warnings.
     pub memory_override_flag: Option<&'static str>,
     pub disable_web_search: bool,
-    /// Session-scoped `--todo-gate` override. Forces
-    /// `ReminderPolicy.todo_gate.enabled = true` for this session.
+    /// Session-scoped `--todo-gate` override. Forces `ReminderPolicy.todo_gate.enabled = true` for this session.
     pub todo_gate: bool,
-    /// Session-scoped `--laziness-debug-log <path>` override. When set,
-    /// the Layer-3 classifier fires after every turn regardless of the
-    /// per-model enable gate, and the full outcome is appended to the
-    /// given JSONL file. Observation-only (no nudges). Prototype/eval
-    /// use only; not persisted to config.toml.
+    /// Session-scoped `--laziness-debug-log <path>` override.
+    /// When set, the Layer-3 classifier fires after every turn regardless of the per-model enable gate.
+    /// The full outcome is appended to the given JSONL file.
+    /// Observation-only (no nudges). Prototype and eval use only; not persisted to config.toml.
     pub laziness_debug_log: Option<std::path::PathBuf>,
     /// Storage mode override.
     pub storage_mode: Option<String>,
-    /// Whether this client will draw a status row, advertised as
-    /// `x.ai/statusLine` so the agent can skip an unpainted payload.
+    /// Whether this client will draw a status row, advertised as `x.ai/statusLine` so the agent can skip an unpainted payload.
     pub status_line: bool,
     /// Client identifier for ACP Initialize metadata.
     pub client_identifier: Option<String>,
@@ -165,7 +156,7 @@ pub struct ConnectFlags {
     pub rules: Option<String>,
     /// Override reasoning effort for all models.
     pub reasoning_effort_override: Option<ReasoningEffort>,
-    /// CLI permission rules from --allow / --deny flags.
+    /// CLI permission rules from the --allow and --deny flags.
     /// Not supported in leader mode (agent config is set at leader startup).
     pub permission_rules: Vec<xai_grok_workspace::permission::types::PermissionRule>,
     /// Seed agent sessions with always-approve (YOLO) permission mode.
@@ -177,7 +168,7 @@ pub struct ConnectFlags {
 
 /// Connect to an agent: spawn, initialize, authenticate.
 pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<AcpConnection> {
-    startup::enter(StartupPhase::LoadConfig);
+    startup::enter(StartupPhase::ConfigLoad);
     let raw_config = xai_grok_shell::config::load_effective_config()
         .map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))?;
     let mut agent_config = AgentConfig::new_from_toml_cfg(&raw_config)
@@ -197,15 +188,14 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         storage_mode: flags.storage_mode.as_deref(),
     });
 
-    // Permission mode seeds for every session this agent creates (CLI / config).
+    // Permission mode seeds for every session this agent creates (CLI or config)
     agent_config.default_yolo_mode = flags.default_yolo_mode;
     agent_config.default_auto_mode = flags.default_auto_mode && !flags.default_yolo_mode;
 
     if let Some(effort) = flags.reasoning_effort_override {
         agent_config.reasoning_effort_override = Some(effort);
     }
-    // Agent connect intentionally leaves hub URL unset; provider hub is
-    // WorkspaceStartArgs only.
+    // Agent connect intentionally leaves hub URL unset; provider hub is WorkspaceStartArgs only
 
     if !flags.permission_rules.is_empty() {
         agent_config.cli_agent_overrides.permission_rules = flags.permission_rules.clone();
@@ -213,8 +203,7 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
 
     apply_config_writes(&flags);
 
-    // Stamped before the spawn/handshake can fail: a failed connect still
-    // reports under this identity.
+    // Stamped before the spawn or handshake can fail: a failed connect still reports under this identity
     set_identity(ProcessIdentity {
         entrypoint: Entrypoint::Embedded,
         leader: LeaderMode::Standalone,
@@ -238,7 +227,6 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
         feedback_trace_offer,
     ) = initialize(&tx, &flags).await?;
 
-    // Determine whether interactive login is needed.
     let (needs_login, login_label, login_method_id, auth_start_mode) =
         startup_auth_metadata(&auth_methods);
 
@@ -279,10 +267,9 @@ pub async fn connect(cancel: &CancellationToken, flags: ConnectFlags) -> Result<
 
 /// Connect to a leader process and return an `AcpConnection`.
 ///
-/// The leader provides the ACP transport via IPC (raw JSON strings over a
-/// Unix socket). This function bridges that transport into the same typed
-/// `(AcpAgentTx, AcpClientRx)` pair that `connect()` produces, then runs
-/// the standard initialize + authenticate sequence.
+/// The leader provides the ACP transport via IPC (raw JSON strings over a Unix socket).
+/// This function bridges that transport into the same typed `(AcpAgentTx, AcpClientRx)` pair that `connect()` produces.
+/// It then runs the standard initialize and authenticate sequence.
 pub async fn connect_via_leader(
     cancel: &CancellationToken,
     flags: ConnectFlags,
@@ -292,13 +279,13 @@ pub async fn connect_via_leader(
         ClientCapabilities, ClientMode, LeaderReconnector, ReconnectPolicy, connect_or_spawn,
     };
 
-    // These flags are baked into the agent at startup.  In leader mode the
-    // agent is already running, so per-client overrides cannot be applied.
+    // These flags are baked into the agent at startup
+    // In leader mode the agent is already running, so per-client overrides cannot be applied
     warn_unsupported_leader_flags(&flags);
 
     apply_config_writes(&flags);
 
-    startup::enter(StartupPhase::LoadConfig);
+    startup::enter(StartupPhase::ConfigLoad);
     // The leader path never runs the managed-policy sync in this process.
     startup::set_auth_mode(xai_grok_shell::managed_config::classify_auth_mode());
     let mut agent_config = AgentConfig::new_from_toml_cfg(raw_config)
@@ -312,7 +299,7 @@ pub async fn connect_via_leader(
         .unwrap_or(HEADLESS_CLIENT_TYPE);
     let env_urls = xai_grok_shell::leader::LeaderEnvUrls::from(&agent_config.grok_com_config);
     let capabilities = ClientCapabilities {
-        // Leader agent is pre-running; seed modes via capabilities → session meta.
+        // Leader agent is pre-running; capabilities carry the mode seeds into session meta
         yolo_mode: flags.default_yolo_mode,
         auto_mode: flags.default_auto_mode && !flags.default_yolo_mode,
         default_model: agent_config.models.default.clone(),
@@ -377,12 +364,10 @@ pub async fn connect_via_leader(
         )
         .await;
 
-    // Leader mode runs the agent in a separate process, so there's no shared
-    // in-process `AuthManager`. Build a dedicated *non-refreshing* one over the
-    // same `auth.json`: skip `configure_refresher` so only the agent rotates the
-    // token. A second refresher would race rotation and could clear credentials
-    // on failure. This one just reads the valid token, and on expiry adopts the
-    // agent's disk-rotated token under the file lock (`try_adopt_disk_token`).
+    // Leader mode runs the agent in a separate process, so there's no shared in-process `AuthManager`
+    // Build a dedicated *non-refreshing* one over the same `auth.json`: skip `configure_refresher` so only the agent rotates the token
+    // A second refresher would race rotation and could clear credentials on failure
+    // This one just reads the valid token, and on expiry adopts the agent's disk-rotated token under the file lock (`try_adopt_disk_token`)
     let auth_manager = std::sync::Arc::new(xai_grok_shell::auth::AuthManager::new(
         &xai_grok_shell::util::grok_home::grok_home(),
         agent_config.grok_com_config.clone(),
@@ -420,11 +405,9 @@ pub async fn connect_via_leader(
 
 /// Warn about flags that only take effect in direct-spawn mode.
 ///
-/// In leader mode the agent is already running; these per-agent settings
-/// cannot be changed after the fact.
+/// In leader mode the agent is already running; these per-agent settings cannot be changed after the fact.
 fn warn_unsupported_leader_flags(flags: &ConnectFlags) {
-    // eprintln rather than tracing::warn because this runs before pager
-    // TUI tracing is initialised — tracing output would be silently dropped.
+    // eprintln rather than tracing::warn: this runs before pager TUI tracing is initialised, so tracing output would be silently dropped
     for flag in unsupported_leader_flags(flags) {
         eprintln!(
             "warning: {flag} has no effect in leader mode \
@@ -456,7 +439,8 @@ fn unsupported_leader_flags(flags: &ConnectFlags) -> Vec<&'static str> {
 /// Write config.toml fields based on CLI flags.
 fn apply_config_writes(flags: &ConnectFlags) {
     // Use toml_edit to preserve existing config structure
-    let config_path = xai_grok_shell::util::grok_home::grok_home().join("config.toml");
+    let config_path =
+        xai_grok_shell::util::grok_home::grok_home().join(xai_grok_config::USER_CONFIG_FILENAME);
     let content = std::fs::read_to_string(&config_path).unwrap_or_default();
     let mut doc = content
         .parse::<toml_edit::DocumentMut>()
@@ -503,8 +487,8 @@ fn build_initialize_meta(flags: &ConnectFlags) -> serde_json::Value {
     meta
 }
 
-/// Build `client_capabilities.meta`. The hunk-tracker mode is canonicalized at
-/// this connect read so the agent runs exactly what the settings modal displays.
+/// Build `client_capabilities.meta`.
+/// The hunk-tracker mode is canonicalized at this connect read so the agent runs exactly what the settings modal displays.
 fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
     let hunk_mode =
         crate::settings::canonical_hunk_tracker_mode(flags.hunk_tracker_mode.as_deref());
@@ -520,8 +504,8 @@ fn client_capabilities_meta(flags: &ConnectFlags) -> serde_json::Value {
 
 /// Parse `defaultAuthMethodId` from `InitializeResponse.meta`.
 ///
-/// The agent is the source of truth for preferred-method selection (including
-/// `[auth] preferred_method`); clients must not re-derive api_key vs session.
+/// The agent is the source of truth for preferred-method selection (including `[auth] preferred_method`).
+/// Clients must not re-derive api_key vs session.
 pub fn parse_default_auth_method_id(meta: Option<&acp::Meta>) -> Option<acp::AuthMethodId> {
     meta.and_then(|m| m.get("defaultAuthMethodId"))
         .and_then(|v| v.as_str())
@@ -553,9 +537,11 @@ async fn initialize(
         )
         .meta(build_initialize_meta(flags).as_object().cloned());
 
-    let resp: acp::InitializeResponse = acp_send(req, tx).await?;
+    let resp: acp::InitializeResponse = {
+        let _timer = xai_grok_telemetry::instrumentation::timer("acp_init.initialize_roundtrip");
+        acp_send(req, tx).await?
+    };
 
-    // Check if this is a grok-shell agent
     let is_grok_shell = resp
         .meta
         .as_ref()
@@ -563,7 +549,6 @@ async fn initialize(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // Parse model state from response meta
     let models: ModelState = resp
         .meta
         .as_ref()
@@ -571,8 +556,7 @@ async fn initialize(
         .and_then(|v| serde_json::from_value::<acp::SessionModelState>(v.clone()).ok())
         .into();
 
-    // Parse available commands from response meta (shell builtins + skills).
-    // These seed the slash command registry so autocomplete works immediately.
+    // The available commands (shell builtins and skills) seed the slash command registry so autocomplete works immediately
     let available_commands = parse_available_commands(resp.meta.as_ref());
 
     let cancel_rewind_enabled = resp
@@ -600,8 +584,7 @@ async fn initialize(
 
 /// Parse `availableCommands` from an `InitializeResponse.meta` value.
 ///
-/// Extracted as a standalone function for testability (the full `initialize()`
-/// function requires an ACP connection).
+/// Extracted as a standalone function for testability (the full `initialize()` function requires an ACP connection).
 pub fn parse_available_commands(meta: Option<&acp::Meta>) -> Vec<acp::AvailableCommand> {
     meta.and_then(|m| m.get("availableCommands"))
         .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -610,8 +593,7 @@ pub fn parse_available_commands(meta: Option<&acp::Meta>) -> Vec<acp::AvailableC
 
 /// Parse `sessionRecap` from `InitializeResponse.meta` (shell rollout gate).
 ///
-/// Default `false` when missing or non-bool so older agents and dark-launch
-/// defaults produce zero automatic recap traffic.
+/// Default `false` when missing or non-bool so older agents and dark-launch defaults produce zero automatic recap traffic.
 pub fn parse_session_recap_available(meta: Option<&acp::Meta>) -> bool {
     meta.and_then(|m| m.get("sessionRecap"))
         .and_then(|v| v.as_bool())
@@ -626,8 +608,8 @@ pub fn parse_feedback_trace_offer(meta: Option<&acp::Meta>) -> bool {
 
 /// Determine whether interactive login is needed based on the advertised auth methods.
 ///
-/// Matches TUI startup behavior: if the first method is `grok.com`, defer auth
-/// and show the login-aware welcome flow. Otherwise, authenticate eagerly.
+/// Matches TUI startup behavior: if the first method is `grok.com`, defer auth and show the login-aware welcome flow.
+/// Otherwise, authenticate eagerly.
 ///
 /// Returns `(needs_login, login_label, login_method_id, auth_start_mode)`.
 pub fn startup_auth_metadata(
@@ -668,10 +650,8 @@ pub fn startup_auth_metadata(
 
 /// Find an interactive login method from the auth methods list.
 ///
-/// Used when eager auth (cached_token / API key) fails and we need to fall
-/// back to the welcome screen with a working login button. Scans the list
-/// for a `grok.com` or `oidc` method — these are the ones that can trigger
-/// a browser-based re-auth flow.
+/// Used when eager auth (cached_token or API key) fails and we need to fall back to the welcome screen with a working login button.
+/// Scans the list for a `grok.com` or `oidc` method; these are the ones that can trigger a browser-based re-auth flow.
 pub fn find_interactive_login_method(
     auth_methods: &[acp::AuthMethod],
 ) -> (Option<String>, Option<acp::AuthMethodId>, AuthStartMode) {
@@ -705,13 +685,11 @@ pub fn find_interactive_login_method(
 /// Attempt eager auth; on failure fall back to the interactive login screen.
 ///
 /// Errors from `authenticate` are caught so the connection still succeeds.
-/// When `xai.api_key` was advertised, non-interactive credentials were
-/// available — do not promote to interactive auto-Login (shell owns
-/// unpinned fallthrough; a failed api_key must not open a browser). Otherwise
-/// hand the interactive method for the login screen.
+/// When `xai.api_key` was advertised, non-interactive credentials were available: do not promote to interactive auto-Login.
+/// The shell owns unpinned fallthrough, and a failed api_key must not open a browser.
+/// Otherwise hand the interactive method for the login screen.
 ///
-/// Empty `auth_methods` (e.g. `preferred_method=api_key` with no key) is
-/// fail-closed: needs_login without an interactive method.
+/// Empty `auth_methods` (e.g. `preferred_method=api_key` with no key) is fail-closed: needs_login without an interactive method.
 ///
 /// Returns `(needs_login, login_label, login_method_id, auth_start_mode, auth_meta)`.
 async fn eager_auth_or_login_fallback(
@@ -730,7 +708,7 @@ async fn eager_auth_or_login_fallback(
     Option<serde_json::Value>,
 ) {
     if auth_methods.is_empty() {
-        // preferred_method pin unavailable — fail closed, no invented method.
+        // preferred_method pin unavailable: fail closed, no invented method
         return (true, None, None, AuthStartMode::Pending, None);
     }
     if needs_login {
@@ -751,8 +729,7 @@ async fn eager_auth_or_login_fallback(
             meta,
         ),
         Err(_) => {
-            // Non-interactive credentials were advertised; shell fallthrough
-            // already preferred them — do not auto-open browser login.
+            // Non-interactive credentials were advertised; shell fallthrough already preferred them, so do not auto-open browser login
             let has_api_key = auth_methods
                 .iter()
                 .any(|m| AuthMethodKind::from_id(m.id()) == AuthMethodKind::XaiApiKey);
@@ -765,9 +742,8 @@ async fn eager_auth_or_login_fallback(
     }
 }
 
-/// [`eager_auth_or_login_fallback`] bounded by `STARTUP_AUTH_REFRESH_TIMEOUT`,
-/// so a hung agent cannot gate the first draw. On timeout the inputs pass
-/// through unchanged and the agent finishes authentication in the background.
+/// [`eager_auth_or_login_fallback`] bounded by `STARTUP_AUTH_REFRESH_TIMEOUT`, so a hung agent cannot gate the first draw.
+/// On timeout the inputs pass through unchanged and the agent finishes authentication in the background.
 async fn bounded_eager_auth(
     tx: &AcpAgentTx,
     auth_methods: &[acp::AuthMethod],
@@ -811,11 +787,10 @@ async fn bounded_eager_auth(
 /// Authenticate with the agent using the agent's chosen default method.
 ///
 /// Prefer `defaultAuthMethodId` from initialize meta when present and listed.
-/// Do not re-derive api_key vs session ordering client-side (that has regressed
-/// OIDC refresh before). Legacy fallback: `cached_token` then first method.
+/// Do not re-derive api_key vs session ordering client-side (that has regressed OIDC refresh before).
+/// Legacy fallback: `cached_token` then first method.
 ///
-/// Returns the response `meta` (contains `team_name`, etc.) so callers can
-/// propagate it to the UI.
+/// Returns the response `meta` (contains `team_name`, etc.) so callers can propagate it to the UI.
 async fn authenticate(
     tx: &AcpAgentTx,
     auth_methods: &[acp::AuthMethod],
@@ -1000,30 +975,23 @@ mod tests {
     /// `[model.*]` table containing `env_key = "ANTHROPIC_AUTH_TOKEN"`) MUST
     /// NOT send the user to the login screen at startup.
     ///
-    /// This test exercises the SHELL-PAGER JOIN, not just the pager half:
-    /// it calls the shell-side `build_auth_methods()` with the exact inputs
-    /// `MvpAgent::initialize()` would compute for an enterprise user, then feeds
-    /// the result into the pager's `startup_auth_metadata()`. If a future
-    /// change re-orders `build_auth_methods()` to put `xai.api_key` anywhere
-    /// other than first (the shape of a past regression), this test fails
-    /// because `startup_auth_metadata()` returns `needs_login = true`.
+    /// This test exercises the SHELL-PAGER JOIN, not just the pager half.
+    /// It calls the shell-side `build_auth_methods()` with the exact inputs `MvpAgent::initialize()` would compute for an enterprise user.
+    /// The result then feeds into the pager's `startup_auth_metadata()`.
+    /// If a change re-orders `build_auth_methods()` to put `xai.api_key` anywhere other than first (the shape of a past regression), this test fails.
+    /// It fails because `startup_auth_metadata()` returns `needs_login = true`.
     ///
-    /// Counterpart shell-side tests
-    /// (`agent::auth_method::tests::enterprise_byok_first_method_is_xai_api_key`
-    /// and `enterprise_byok_config_does_not_require_login`) pin the same
-    /// invariant from the shell side; this test pins the cross-crate
-    /// contract that the pager actually consumes the shell's output as
-    /// expected.
+    /// Counterpart tests in `agent::auth_method::tests` pin the same invariant from the shell side:
+    /// `enterprise_byok_first_method_is_xai_api_key` and `enterprise_byok_config_does_not_require_login`.
+    /// This test pins the cross-crate contract that the pager actually consumes the shell's output as expected.
     #[test]
     fn shell_built_auth_methods_for_byok_user_skip_login_screen() {
         use xai_grok_shell::agent::auth_method::{AuthMethodsBuildInputs, build_auth_methods};
 
         let built = build_auth_methods(AuthMethodsBuildInputs {
-            // enterprise-style: model has `env_key` set and the env var resolves,
-            // so the shell-side predicate returns true.
+            // Enterprise-style: model has `env_key` set and the env var resolves, so the shell-side predicate returns true
             has_external_api_key: true,
-            // Realistic enterprise user: no cached session token, default `grok.com`
-            // login (no enterprise OIDC).
+            // Realistic enterprise user: no cached session token, default `grok.com` login (no enterprise OIDC)
             has_cached_token: false,
             has_enterprise_oidc: false,
             enterprise_oidc_issuer: None,
@@ -1045,15 +1013,12 @@ mod tests {
         assert_eq!(mode, AuthStartMode::Pending);
     }
 
-    /// Inverse direction: when `xai.api_key` is NOT in the list, the pager
-    /// MUST show the login screen. We assert this with `xai.api_key` present
-    /// LATER in the list (the shape of a past regression) and confirm the
-    /// pager still requires login -- because the pager only inspects
-    /// `auth_methods.first()`. This locks the failure mode of the regression:
-    /// if a future refactor makes the pager scan past `.first()`, this test
-    /// stops being equivalent to
-    /// `startup_auth_grok_com_no_provider_needs_login_pending` above and
-    /// either passes or fails on a meaningful new code path.
+    /// Inverse direction: when `xai.api_key` is NOT in the list, the pager MUST show the login screen.
+    /// We assert this with `xai.api_key` present LATER in the list (the shape of a past regression) and confirm the pager still requires login.
+    /// The pager only inspects `auth_methods.first()`.
+    /// This locks the failure mode of the regression.
+    /// If a refactor makes the pager scan past `.first()`, this test diverges from `startup_auth_grok_com_no_provider_needs_login_pending` above.
+    /// It then either passes or fails on a meaningful new code path.
     #[test]
     fn startup_auth_xai_api_key_not_first_still_requires_login() {
         use xai_grok_shell::agent::auth_method::{GROK_COM_METHOD_ID, XAI_API_KEY_METHOD_ID};
@@ -1074,7 +1039,6 @@ mod tests {
     fn startup_auth_method_id_is_copied_not_synthesized() {
         let methods = vec![make_auth_method("grok.com", "My Login", None)];
         let (_, _, method_id, _) = startup_auth_metadata(&methods);
-        // Verify it's the exact same ID from the method, not hardcoded
         assert_eq!(&method_id.unwrap(), methods[0].id());
     }
 
@@ -1175,8 +1139,7 @@ mod tests {
 
     #[test]
     fn client_capabilities_meta_defaults_absent_or_blank_mode_to_off() {
-        // Rows 1 & 2 of the truth table: nothing set, and a set-but-blank value,
-        // both advertise the `off` default (never `""` → AllDirty).
+        // Nothing set and a set-but-blank value both advertise the `off` default (never `""`, which maps to AllDirty)
         let absent = client_capabilities_meta(&ConnectFlags::default());
         assert_eq!(absent["x.ai/hunkTracker"]["mode"], "off");
         let blank = client_capabilities_meta(&ConnectFlags {
@@ -1186,8 +1149,7 @@ mod tests {
         assert_eq!(blank["x.ai/hunkTracker"]["mode"], "off");
     }
 
-    /// The agent gates the whole payload on this key, so a misspelling on
-    /// either side switches the feature off with nothing to show for it.
+    /// The agent gates the whole payload on this key, so a misspelling on either side switches the feature off with nothing to show for it.
     #[test]
     fn client_capabilities_meta_advertises_the_status_line_the_config_asked_for() {
         let key = xai_grok_status_line::STATUS_LINE_CAPABILITY;
@@ -1202,8 +1164,7 @@ mod tests {
 
     #[test]
     fn client_capabilities_meta_canonicalizes_off_and_mixed_case() {
-        // Mixed-case / alias values are canonicalized so the agent runtime
-        // matches the modal display.
+        // Mixed-case and alias values are canonicalized so the agent runtime matches the modal display
         for raw in ["off", "OFF", "Disabled"] {
             let meta = client_capabilities_meta(&ConnectFlags {
                 hunk_tracker_mode: Some(raw.into()),

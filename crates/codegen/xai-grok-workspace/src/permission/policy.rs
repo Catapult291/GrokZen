@@ -262,6 +262,7 @@ impl CompiledPolicy {
                         ToolFilter::Mcp => "mcp",
                         ToolFilter::WebFetch => "web_fetch",
                         ToolFilter::WebSearch => "web_search",
+                        ToolFilter::AgentMessage => "agent_message",
                     };
                     let reason = match &rule.pattern {
                         Some(pattern) => format!(
@@ -572,6 +573,7 @@ fn tool_filter_matches(access: &AccessKind, filter: &ToolFilter) -> bool {
         ToolFilter::Mcp => matches!(access, AccessKind::MCPTool { .. }),
         ToolFilter::WebFetch => matches!(access, AccessKind::WebFetch(_)),
         ToolFilter::WebSearch => matches!(access, AccessKind::WebSearch(_)),
+        ToolFilter::AgentMessage => matches!(access, AccessKind::AgentMessage { .. }),
     }
 }
 
@@ -623,12 +625,22 @@ const EXEC_VEHICLE_HEAD_FAMILIES: &[&str] = &["python", "node", "ruby", "perl", 
 /// [`EXEC_VEHICLE_HEADS`] or a versioned [`EXEC_VEHICLE_HEAD_FAMILIES`]
 /// spelling. `pub(crate)` so [`minimum_always_allow_scope`] floors these to
 /// the full command like dangerous verbs.
+/// Normalized command basename for name matching: leading path stripped,
+/// lowercased, trailing `.exe` removed — so `/usr/bin/GH.EXE` reads as `gh`.
+pub(crate) fn normalized_command_head(words: &[String]) -> Option<String> {
+    let head = words
+        .first()?
+        .rsplit(['/', '\\'])
+        .next()?
+        .to_ascii_lowercase();
+    Some(head.strip_suffix(".exe").unwrap_or(&head).to_owned())
+}
+
 pub(crate) fn head_is_exec_vehicle(words: &[String]) -> bool {
-    let Some(head) = words.first().and_then(|w| w.rsplit(['/', '\\']).next()) else {
+    let Some(head) = normalized_command_head(words) else {
         return false;
     };
-    let head = head.to_ascii_lowercase();
-    let head = head.strip_suffix(".exe").unwrap_or(&head);
+    let head = head.as_str();
     if EXEC_VEHICLE_HEADS.contains(&head) {
         return true;
     }
@@ -755,6 +767,10 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
         },
         AccessKind::WebSearch(query) => {
             glob_matches(query, MatchContext::Freeform, cr.matcher) || query.starts_with(pattern)
+        }
+        AccessKind::AgentMessage { subagent_id } => {
+            glob_matches(subagent_id, MatchContext::Freeform, cr.matcher)
+                || subagent_id.starts_with(pattern)
         }
     }
 }
@@ -893,11 +909,19 @@ fn webfetch_probes() -> Vec<AccessKind> {
     .map(|u| AccessKind::WebFetch((*u).to_string()))
     .collect()
 }
+fn agent_message_probes() -> Vec<AccessKind> {
+    ["sub-1", "agent-alpha", "019ffeed", "worker_4"]
+        .iter()
+        .map(|subagent_id| AccessKind::AgentMessage {
+            subagent_id: (*subagent_id).to_owned(),
+        })
+        .collect()
+}
 /// Whether an Allow rule fully opens a `--yolo`-substitute dimension (a blanket
 /// grant, not a scoped one). Probes run through the real evaluator
 /// [`pattern_matches`] so detection can't drift: `*://*` and `*__*` are judged as
-/// enforced. `Any` counts when it opens ANY of Bash/MCP/WebFetch (catching
-/// `?*`-class and `*://*` globs); Read/Edit/Grep are file-access only, return `false`.
+/// enforced. `Any` counts when it opens any of Bash/MCP/WebFetch/AgentMessage
+/// (catching `?*`-class and `*://*` globs); Read/Edit/Grep are file-access only.
 pub(crate) fn rule_is_catchall(rule: &PermissionRule) -> bool {
     // Compile the matcher as `CompiledPolicy::new` does, so probing == enforcement.
     let matcher = rule
@@ -914,8 +938,12 @@ pub(crate) fn rule_is_catchall(rule: &PermissionRule) -> bool {
         ToolFilter::Bash => opens_all(bash_probes()),
         ToolFilter::Mcp => opens_all(mcp_probes()),
         ToolFilter::WebFetch => opens_all(webfetch_probes()),
+        ToolFilter::AgentMessage => opens_all(agent_message_probes()),
         ToolFilter::Any => {
-            opens_all(bash_probes()) || opens_all(mcp_probes()) || opens_all(webfetch_probes())
+            opens_all(bash_probes())
+                || opens_all(mcp_probes())
+                || opens_all(webfetch_probes())
+                || opens_all(agent_message_probes())
         }
         ToolFilter::Read | ToolFilter::Edit | ToolFilter::Grep | ToolFilter::WebSearch => false,
     }
@@ -1233,6 +1261,57 @@ mod tests {
         assert!(!tool_filter_matches(
             &AccessKind::Edit("x".into()),
             &ToolFilter::Bash
+        ));
+    }
+
+    #[test]
+    fn legacy_agent_message_policy_alias_preserves_deny_and_ask_semantics() {
+        use crate::permission::rules::parse_permission_rule;
+
+        let access = AccessKind::AgentMessage {
+            subagent_id: "sub-1".into(),
+        };
+        for spelling in ["SendAgentMessage", "SendAgentMessage(*)"] {
+            let deny = PermissionConfig::new(vec![
+                parse_permission_rule(spelling, RuleAction::Deny)
+                    .expect("legacy deny rule must parse"),
+            ]);
+            assert!(matches!(
+                evaluate_policy(&access, &deny),
+                Some(Decision::Reject(_))
+            ));
+
+            let ask = PermissionConfig::new(vec![
+                parse_permission_rule(spelling, RuleAction::Ask)
+                    .expect("legacy ask rule must parse"),
+            ]);
+            assert!(matches!(
+                evaluate_policy(&access, &ask),
+                Some(Decision::Ask)
+            ));
+        }
+    }
+
+    #[test]
+    fn agent_message_filter_is_dedicated_and_any_still_matches() {
+        let access = AccessKind::AgentMessage {
+            subagent_id: "sub-1".into(),
+        };
+        assert!(tool_filter_matches(&access, &ToolFilter::AgentMessage));
+        assert!(tool_filter_matches(&access, &ToolFilter::Any));
+        assert!(!tool_filter_matches(&access, &ToolFilter::Edit));
+        assert!(!tool_filter_matches(&access, &ToolFilter::Read));
+
+        let edit_allow = PermissionConfig::new(vec![PermissionRule {
+            action: RuleAction::Allow,
+            tool: ToolFilter::Edit,
+            pattern: None,
+            pattern_mode: PatternMode::Glob,
+        }]);
+        assert!(evaluate_policy(&access, &edit_allow).is_none());
+        assert!(matches!(
+            evaluate_policy(&AccessKind::Edit("src/main.rs".into()), &edit_allow,),
+            Some(Decision::Allow)
         ));
     }
 

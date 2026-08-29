@@ -764,6 +764,10 @@ fn validate_archive_layout(
     if seen_files != expected_files {
         anyhow::bail!("community release ZIP does not contain the exact approved package files");
     }
+    // Windows Compress-Archive preserves the single root path prefix but does
+    // not emit a separate central-directory entry for that root. Extraction
+    // still creates exactly one top-level directory, so an explicit root entry
+    // is accepted when present but is not required.
     Ok(())
 }
 

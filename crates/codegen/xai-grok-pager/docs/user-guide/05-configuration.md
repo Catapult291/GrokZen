@@ -89,7 +89,7 @@ telemetry = false                      # anonymous usage telemetry
 feedback = true                        # feedback system (default: true)
 lsp_tools = false                      # expose the lsp tool
 codebase_indexing = true               # code graph indexing (default: true)
-two_pass_compaction = false            # prefire two-pass compaction (default: false, opt-in)
+two_pass_compaction = true             # prefire two-pass compaction (default: true)
 remote_fetch = true                    # allow optional online model-catalog fetches (default: true;
                                        # set false for firewalled/air-gapped deployments; background
                                        # managed-config sync has its own switch: managed_config)
@@ -272,7 +272,7 @@ Credential resolution: `api_key` > `env_key` > signed-in session token > `XAI_AP
 To override a built-in model, use its name as the section key and set only the fields you need:
 
 ```toml
-[model.grok-build]
+[model.grok-4.6]
 api_key = "my-api-key"
 ```
 
@@ -339,13 +339,14 @@ dimensions = 1024                     # vector dimensions
 ```toml
 [subagents]
 enabled = true
+sampling_limit = 12                   # concurrent in-flight subagent sampling calls per process; defaults to max_concurrent (32) when unset (GROK_SUBAGENT_SAMPLING_LIMIT)
 
 [subagents.toggle]
 explore = true                        # enable/disable specific types
 plan = false
 
 [subagents.models]
-explore = "grok-build"               # route to different models
+explore = "grok-4.6"               # route to different models
 ```
 
 To pin the model a subagent uses, set its entry under `[subagents.models]`.
@@ -628,9 +629,9 @@ auth_token_ttl = 3600
 default = "company-grok"
 
 [model.company-grok]
-model = "grok-build"
+model = "grok-4.6"
 base_url = "https://grok-proxy.acme.com/"
-name = "Grok Build Latest (Proxy)"
+name = "Grok 4.6 (Proxy)"
 context_window = 128000
 
 [features]

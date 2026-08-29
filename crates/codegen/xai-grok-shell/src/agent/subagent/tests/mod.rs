@@ -1,5 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+use crate::session::SessionThread;
 use super::spawn::{
     inject_subagent_completed_prompt, join_worker_task, present_child_completion,
     should_auto_wake_subagent, will_wake_for, AutoWakeInputs, InjectParams,
@@ -300,7 +301,8 @@ fn auto_wake_test_request(id: &str) -> SubagentRequest {
 fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
     let reservations = xai_grok_tools::reminders::task_completion::TaskCompletionReservations::default();
-    let request = auto_wake_test_request("sa-1");
+    let mut request = auto_wake_test_request("sa-1");
+    request.runtime_overrides.loop_task_id = Some("loop-123".into());
     let result = SubagentResult {
         success: true,
         subagent_id: "sa-1".into(),
@@ -315,17 +317,64 @@ fn inject_subagent_completed_prompt_sends_prompt_and_marks_delivered() {
         task_completion_reservations: &Some(reservations.clone()),
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
+        scheduler_delete_tool_name: Some("renamed_scheduler_delete"),
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
     match cmd_rx.try_recv().expect("expected synthetic Prompt") {
-        SessionCommand::Prompt { prompt_id, verbatim, .. } => {
+        SessionCommand::Prompt { prompt_id, prompt_blocks, verbatim, .. } => {
             assert!(prompt_id.starts_with("subagent-completed-"));
             assert!(verbatim);
+            let prompt = prompt_blocks
+                .iter()
+                .filter_map(|block| match block {
+                    acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>();
+            assert!(prompt.contains("renamed_scheduler_delete"));
+            assert!(prompt.contains("loop-123"));
+            assert!(prompt.contains("to stop the monitor"));
         }
         _ => panic!("expected SessionCommand::Prompt"),
     }
     assert_eq!(reservations.snapshot(), vec!["sa-1".to_string()]);
+}
+#[test]
+fn inject_subagent_completed_prompt_omits_cleanup_without_loop_task() {
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<SessionCommand>();
+    let request = auto_wake_test_request("sa-no-loop");
+    let result = SubagentResult {
+        success: true,
+        subagent_id: "sa-no-loop".into(),
+        child_session_id: "sa-no-loop".into(),
+        ..Default::default()
+    };
+    inject_subagent_completed_prompt(InjectParams {
+        subagent_id: "sa-no-loop",
+        result: &result,
+        request: &request,
+        task_completion_reservations: &None,
+        parent_cmd_tx: Some(&cmd_tx),
+        task_output_tool_name: "get_command_or_subagent_output",
+        scheduler_delete_tool_name: Some("scheduler_delete"),
+        synthetic_trace_tx: &None,
+        goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
+    });
+    let SessionCommand::Prompt { prompt_blocks, .. } = cmd_rx
+        .try_recv()
+        .expect("expected synthetic Prompt") else {
+        panic!("expected SessionCommand::Prompt");
+    };
+    let prompt = prompt_blocks
+        .iter()
+        .filter_map(|block| match block {
+            acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(!prompt.contains("scheduler_delete"));
+    assert!(!prompt.contains("to stop the monitor"));
 }
 #[test]
 fn inject_subagent_completed_prompt_bails_when_goal_loop_activates_in_gap() {
@@ -344,6 +393,7 @@ fn inject_subagent_completed_prompt_bails_when_goal_loop_activates_in_gap() {
         task_completion_reservations: &Some(reservations.clone()),
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
+        scheduler_delete_tool_name: None,
         synthetic_trace_tx: &None,
         goal_loop_active: &std::sync::atomic::AtomicBool::new(true),
     });
@@ -370,6 +420,7 @@ fn inject_subagent_completed_prompt_releases_reservation_when_parent_closed() {
         task_completion_reservations: &Some(reservations.clone()),
         parent_cmd_tx: Some(&cmd_tx),
         task_output_tool_name: "get_command_or_subagent_output",
+        scheduler_delete_tool_name: None,
         synthetic_trace_tx: &Some(trace_tx),
         goal_loop_active: &std::sync::atomic::AtomicBool::new(false),
     });
@@ -1482,6 +1533,8 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
     let meta_dir = tempfile::tempdir().expect("meta dir");
     let result = cancel_pending_shell_child(
             &child_cmd_tx,
+            SessionThread::from_handle(std::thread::spawn(|| {})),
+            &ctx.workspace_ops,
             &request.id,
             &acp::SessionId::new(request.id.clone()),
             meta_dir.path(),
@@ -1489,8 +1542,11 @@ async fn cancel_pending_shell_child_presents_one_cancelled_finish() {
             false,
             42,
             &test_gcs_context(&ctx),
+            UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT,
+            UnpromotedChildDisposition::Cancelled,
         )
         .await;
+    assert!(matches!(child_cmd_rx.try_recv(), Ok(SessionCommand::Cancel(_))));
     assert!(matches!(
             child_cmd_rx.try_recv(),
             Ok(SessionCommand::Shutdown(_))
@@ -1549,6 +1605,8 @@ async fn run_promote_cancel_with_worktree(
     let meta_dir = tempfile::tempdir().expect("meta dir");
     let result = cancel_pending_shell_child(
             &child_cmd_tx,
+            SessionThread::from_handle(std::thread::spawn(|| {})),
+            &ctx.workspace_ops,
             "worktree-cancel",
             &acp::SessionId::new("worktree-cancel"),
             meta_dir.path(),
@@ -1556,8 +1614,11 @@ async fn run_promote_cancel_with_worktree(
             worktree_freshly_created,
             42,
             &test_gcs_context(&ctx),
+            UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT,
+            UnpromotedChildDisposition::Cancelled,
         )
         .await;
+    assert!(matches!(child_cmd_rx.try_recv(), Ok(SessionCommand::Cancel(_))));
     assert!(matches!(
             child_cmd_rx.try_recv(),
             Ok(SessionCommand::Shutdown(_))
@@ -1604,6 +1665,156 @@ async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
             "source edit",
             "the source's working state must be left untouched"
         );
+}
+fn running_meta_json(id: &str) -> String {
+    format!(
+            r#"{{
+                "subagent_id": "{id}",
+                "parent_session_id": "test-parent",
+                "child_session_id": "{id}",
+                "subagent_type": "explore",
+                "description": "",
+                "prompt": "",
+                "status": "running",
+                "started_at": "2026-01-01T00:00:00Z"
+            }}"#
+        )
+}
+#[tokio::test]
+async fn unproven_thread_exit_preserves_fresh_worktree() {
+    let ctx = ctx_with_toggle(HashMap::new());
+    let (child_cmd_tx, mut child_cmd_rx) = mpsc::unbounded_channel();
+    let meta_dir = tempfile::tempdir().expect("meta dir");
+    std::fs::write(meta_dir.path().join("meta.json"), running_meta_json("unproven-exit"))
+        .expect("write running meta");
+    let worktree = tempfile::tempdir().expect("worktree");
+    let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+    let thread = SessionThread::from_handle(
+        std::thread::spawn(move || {
+            let _ = hold_rx.recv();
+        }),
+    );
+    let result = cancel_pending_shell_child(
+            &child_cmd_tx,
+            thread,
+            &ctx.workspace_ops,
+            "unproven-exit",
+            &acp::SessionId::new("unproven-exit"),
+            meta_dir.path(),
+            Some(worktree.path()),
+            true,
+            42,
+            &test_gcs_context(&ctx),
+            std::time::Duration::ZERO,
+            UnpromotedChildDisposition::Cancelled,
+        )
+        .await;
+    assert!(matches!(child_cmd_rx.try_recv(), Ok(SessionCommand::Cancel(_))));
+    assert!(matches!(
+            child_cmd_rx.try_recv(),
+            Ok(SessionCommand::Shutdown(_))
+        ));
+    assert!(result.cancelled);
+    assert!(
+            worktree.path().exists(),
+            "worktree must stay when actor exit is not proven"
+        );
+    let meta: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(meta_dir.path().join("meta.json"))
+                .expect("read meta"),
+        )
+        .expect("parse meta");
+    assert_eq!(meta.status, "cancelled");
+    assert!(meta.completed_at.is_some());
+    assert_eq!(meta.error.as_deref(), Some("Subagent was cancelled"));
+    drop(hold_tx);
+}
+#[tokio::test]
+async fn startup_admission_timeout_is_failed_not_cancelled() {
+    let mut ctx = ctx_with_toggle(HashMap::new());
+    let (parent_cmd_tx, mut parent_cmd_rx) = mpsc::unbounded_channel();
+    ctx.parent_cmd_tx = Some(parent_cmd_tx);
+    let (child_cmd_tx, mut child_cmd_rx) = mpsc::unbounded_channel();
+    let (gateway, mut gateway_rx) = test_gateway_with_receiver();
+    let request = auto_wake_test_request("promote-timeout");
+    let meta_dir = tempfile::tempdir().expect("meta dir");
+    std::fs::write(meta_dir.path().join("meta.json"), running_meta_json(&request.id))
+        .expect("write running meta");
+    let result = cancel_pending_shell_child(
+            &child_cmd_tx,
+            SessionThread::from_handle(std::thread::spawn(|| {})),
+            &ctx.workspace_ops,
+            &request.id,
+            &acp::SessionId::new(request.id.clone()),
+            meta_dir.path(),
+            None,
+            false,
+            42,
+            &test_gcs_context(&ctx),
+            UNPROMOTED_SESSION_THREAD_EXIT_TIMEOUT,
+            UnpromotedChildDisposition::AdmissionTimedOut,
+        )
+        .await;
+    assert!(matches!(child_cmd_rx.try_recv(), Ok(SessionCommand::Cancel(_))));
+    assert!(matches!(
+            child_cmd_rx.try_recv(),
+            Ok(SessionCommand::Shutdown(_))
+        ));
+    assert!(!result.cancelled);
+    assert!(!result.success);
+    assert_eq!(result.status(), "failed");
+    assert_eq!(
+            result.error.as_deref(),
+            Some("Subagent initial prompt was not admitted before the deadline")
+        );
+    let meta: SubagentMeta = serde_json::from_str(
+            &std::fs::read_to_string(meta_dir.path().join("meta.json"))
+                .expect("read meta"),
+        )
+        .expect("parse meta");
+    assert_eq!(meta.status, "failed");
+    let mut completion_data = ShellCompletionData::from_context(&ctx);
+    completion_data.spawned_notification_emitted = true;
+    let completion = ChildCompletion {
+        request,
+        result,
+        completion_data,
+        disposition: CompletionDisposition {
+            foreground_delivered: false,
+            backgrounded: false,
+            waiter_delivered: false,
+            explicitly_killed: false,
+            should_surface: false,
+        },
+    };
+    let will_wake = will_wake_for(&completion);
+    present_child_completion(completion, &gateway, will_wake);
+    let mut persisted = 0;
+    while let Ok(command) = parent_cmd_rx.try_recv() {
+        if matches!(
+                command,
+                SessionCommand::XaiSessionNotification {
+                    notification: SessionNotification {
+                        update: SessionUpdate::SubagentFinished { status, .. },
+                        ..
+                    }
+                } if status == "failed"
+            ) {
+            persisted += 1;
+        }
+    }
+    assert_eq!(persisted, 1);
+    let mut live = 0;
+    while let Ok(message) = gateway_rx.try_recv() {
+        if matches!(
+                message,
+                xai_acp_lib::AcpClientMessage::ExtNotification(args)
+                    if args.request.params.get().contains("\"status\":\"failed\"")
+            ) {
+            live += 1;
+        }
+    }
+    assert_eq!(live, 1);
 }
 fn test_model_entry(model_id: &str) -> crate::agent::config::ModelEntry {
     crate::agent::config::ModelEntry {

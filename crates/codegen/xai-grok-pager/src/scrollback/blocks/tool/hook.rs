@@ -1,8 +1,5 @@
-//! Hook data types and rendering helpers for tool call blocks.
-//!
-//! Hook runs are displayed as part of tool call blocks rather than
-//! as standalone scrollback entries. The tool header comes first,
-//! then pre_tool_use hooks, then post_tool_use hooks.
+//! Hook runs are displayed as part of tool call blocks rather than as standalone scrollback entries.
+//! The tool header comes first, then pre_tool_use hooks, then post_tool_use hooks.
 
 use std::time::Duration;
 
@@ -20,7 +17,7 @@ pub enum HookRunStatus {
         elapsed: Duration,
     },
     Skipped,
-    /// The hook ran and blocked (a stop-gate decision, not a failure).
+    /// The hook ran and chose to block the tool (a decision, not a failure).
     Blocked {
         detail: String,
         elapsed: Duration,
@@ -47,12 +44,11 @@ pub enum HookPhase {
     Post,
 }
 
-/// Hook data attached to a tool call block.
 #[derive(Debug, Clone, Default)]
 pub struct ToolCallHookData {
     pub pre_hooks: Vec<HookRunEntry>,
     pub post_hooks: Vec<HookRunEntry>,
-    /// Lifecycle hooks (session_start, session_end, stop) — rendered with their own event name.
+    /// Lifecycle hooks (session_start, session_end, stop), rendered with their own event name.
     pub lifecycle: Vec<(String, Vec<HookRunEntry>)>,
 }
 
@@ -140,12 +136,16 @@ fn render_hook_counts_inline_suffix(
     counts: HookRunCounts,
     shape: HookCountShape,
     theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> Option<Vec<Span<'static>>> {
     if counts.total() == 0 {
         return None;
     }
     let dimmed = ratatui::style::Modifier::DIM;
-    let mut spans = vec![Span::styled("  [hooks: ", theme.muted())];
+    let prefix = locale
+        .map(|locale| locale.named_static_text("scrollback.hooks.prefix", "  [hooks: "))
+        .unwrap_or("  [hooks: ");
+    let mut spans = vec![Span::styled(prefix, theme.muted())];
     match shape {
         HookCountShape::Compact => {
             let completed = counts.compact_completed();
@@ -173,10 +173,25 @@ fn render_hook_counts_inline_suffix(
         }
         HookCountShape::Labeled => {
             let mut is_first = true;
-            for (count, label, color) in [
-                (counts.success, "ok", theme.accent_success),
-                (counts.blocked, "blocked", theme.accent_running),
-                (counts.failed, "failed", theme.accent_error),
+            for (count, id, label, color) in [
+                (
+                    counts.success,
+                    "scrollback.hooks.status.ok",
+                    "ok",
+                    theme.accent_success,
+                ),
+                (
+                    counts.blocked,
+                    "scrollback.hooks.status.blocked",
+                    "blocked",
+                    theme.accent_running,
+                ),
+                (
+                    counts.failed,
+                    "scrollback.hooks.status.failed",
+                    "failed",
+                    theme.accent_error,
+                ),
             ] {
                 if count == 0 {
                     continue;
@@ -185,6 +200,9 @@ fn render_hook_counts_inline_suffix(
                     spans.push(Span::styled(", ", theme.muted()));
                 }
                 is_first = false;
+                let label = locale
+                    .map(|locale| locale.named_static_text(id, label))
+                    .unwrap_or(label);
                 spans.push(Span::styled(
                     format!("{count} {label}"),
                     theme.fg(color).add_modifier(dimmed),
@@ -241,8 +259,9 @@ fn hooks_count_spans_with_locale(
 pub(crate) fn render_group_hook_counts_inline_suffix(
     counts: HookRunCounts,
     theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
 ) -> Option<Vec<Span<'static>>> {
-    render_hook_counts_inline_suffix(counts, HookCountShape::Labeled, theme)
+    render_hook_counts_inline_suffix(counts, HookCountShape::Labeled, theme, locale)
 }
 
 pub fn render_hooks_inline_suffix(data: &ToolCallHookData) -> Option<Vec<Span<'static>>> {
@@ -261,9 +280,9 @@ pub fn render_hooks_inline_suffix_with_locale(
     hooks_count_spans_with_locale(success, failed, locale)
 }
 
-/// Right-side summary for stop hooks merged onto a turn-terminal marker line:
-/// `stop  [hooks: 2]` per group (bold muted event name + colored counts),
-/// groups joined by two spaces. Returns `None` when nothing ran.
+/// Right-side summary for stop hooks merged onto the marker line that ends a turn.
+/// Each group renders as `stop  [hooks: 2]` (bold muted event name and colored counts); groups are joined by two spaces.
+/// Returns `None` when nothing ran.
 pub fn render_stop_hooks_summary(
     groups: &[(String, Vec<HookRunEntry>)],
 ) -> Option<Vec<Span<'static>>> {
@@ -303,8 +322,6 @@ fn render_separator() -> BlockLine {
     .into()
 }
 
-/// Render hook details as expanded lines.
-///
 /// Format:
 ///   **pre_tool_use**
 ///     \u2713 hook-name (12ms)
@@ -426,7 +443,7 @@ fn render_hooks_expanded_inner_with_locale(
                     ])
                     .into(),
                 );
-                // Error text — strip redundant hook name prefix if present
+                // Strip the redundant hook name prefix from the error text if present
                 let cleaned = error
                     .strip_prefix(&format!("hook '{}' ", run.name))
                     .unwrap_or(error);
@@ -461,7 +478,6 @@ fn render_hooks_expanded_inner_with_locale(
     lines
 }
 
-/// Render hook lines for a given display mode.
 pub fn render_hooks_for_mode(
     event: &str,
     runs: &[HookRunEntry],
@@ -488,9 +504,7 @@ pub fn render_hooks_for_mode_with_locale(
 }
 
 /// Render hook detail lines (no section header) for expanded/truncated modes.
-///
-/// Used by lifecycle blocks where the block header already shows the event name,
-/// so repeating it as a section header would be redundant.
+/// Used by lifecycle blocks where the block header already shows the event name, so repeating it as a section header would be redundant.
 pub fn render_hooks_detail(runs: &[HookRunEntry], mode: DisplayMode) -> Vec<BlockLine> {
     render_hooks_detail_with_locale(runs, mode, None)
 }

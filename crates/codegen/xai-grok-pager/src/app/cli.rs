@@ -1,4 +1,3 @@
-//! CLI argument parsing for the pager.
 pub use crate::headless::OutputFormat;
 use clap::{ArgAction, Parser, Subcommand, ValueHint};
 use clap_complete::Shell;
@@ -107,12 +106,10 @@ Terminal）时，这会让复制功能正常工作。包装命令的终端也会
         /// Switch to the enterprise release channel.
         #[arg(long, conflicts_with_all = ["alpha", "stable"], hide = true)]
         enterprise: bool,
-        /// Internal: what spawned this `grok update` (`user_command`,
-        /// `auto_background`, `leader_converge`). Hidden.
+        /// Internal: what spawned this `grok update` (`user_command`, `auto_background`, `leader_converge`). Hidden.
         #[arg(long, hide = true)]
         trigger: Option<String>,
-        /// Internal compat alias for `--trigger=auto_background` (older
-        /// parents still spawn children with it).
+        /// Internal compat alias for `--trigger=auto_background` (older parents still spawn children with it).
         #[arg(long, hide = true)]
         auto: bool,
     },
@@ -306,9 +303,8 @@ pub struct AgentArgs {
     pub mode: Option<AgentCmd>,
 }
 impl AgentArgs {
-    /// Canonicalized `--plugin-dir` paths, warning to stderr and skipping
-    /// anything that isn't an existing directory (stderr is safe: JSON-RPC
-    /// rides stdout).
+    /// Canonicalized `--plugin-dir` paths, warning to stderr and skipping anything that isn't an existing directory.
+    /// stderr is safe: JSON-RPC uses stdout.
     pub fn canonical_plugin_dirs(&self) -> Vec<PathBuf> {
         self.plugin_dirs
             .iter()
@@ -529,14 +525,13 @@ pub struct PagerArgs {
     /// 追加到系统提示的额外规则。
     #[clap(long = "rules", alias = "append-system-prompt")]
     pub rules: Option<String>,
-    /// Compaction mode [summary|transcript|segments]: `summary` (default) adds
-    /// no pointer; `transcript` points at the raw transcript; `segments`
-    /// persists per-segment markdown to grep. Sets `GROK_COMPACTION_MODE`.
+    /// Compaction mode [summary|transcript|segments].
+    /// `summary` adds no pointer; `transcript` points at the raw transcript; `segments` (default) persists per-segment markdown to grep.
+    /// Sets `GROK_COMPACTION_MODE`.
     #[clap(long = "compaction-mode", value_name = "MODE", hide = true)]
     pub compaction_mode: Option<String>,
-    /// Segments verbatim detail [none|minimal|balanced|verbose] (default
-    /// `verbose`). Only affects `--compaction-mode segments`. Sets
-    /// `GROK_COMPACTION_DETAIL`.
+    /// Segments verbatim detail [none|minimal|balanced|verbose] (default `verbose`).
+    /// Only affects `--compaction-mode segments`. Sets `GROK_COMPACTION_DETAIL`.
     #[clap(long = "compaction-detail", value_name = "DETAIL", hide = true)]
     pub compaction_detail: Option<String>,
     /// 覆盖 agent 的系统提示（兼容别名：--system-prompt）。
@@ -566,15 +561,12 @@ pub struct PagerArgs {
         conflicts_with_all = ["continue_last_session"]
     )]
     pub load_session: Option<String>,
-    /// Set by [`Self::pin_local_resume_target`]: the resume target was
-    /// resolved (or definitively missed) before the OS sandbox, so
-    /// materialization must not re-run local title selection.
+    /// Set by [`Self::pin_local_resume_target`]: the resume target was resolved (or definitively missed) before the OS sandbox.
+    /// Materialization must therefore not re-run local title selection.
     #[clap(skip)]
     pub resume_target_pinned: bool,
-    /// Sandbox profile of the title-pinned session, captured at pin time from
-    /// the selected summary (outer `None` = no title pin happened). The
-    /// id-based peek cannot re-derive it: a legacy id duplicated across cwd
-    /// dirs makes that lookup ambiguous.
+    /// Sandbox profile of the title-pinned session, captured at pin time from the selected summary (outer `None` means no title pin happened).
+    /// The id-based peek cannot re-derive it: a legacy id duplicated across cwd dirs makes that lookup ambiguous.
     #[clap(skip)]
     pub(crate) pinned_resume_profile: Option<Option<String>>,
     /// 恢复当前工作目录最近的会话。
@@ -688,20 +680,16 @@ pub struct PagerArgs {
     /// 禁用 web search 和 web fetch 工具。
     #[arg(long = "disable-web-search")]
     pub disable_web_search: bool,
-    /// Exit as soon as the first agent turn ends, without waiting for pending
-    /// background bash/monitor tasks or background subagents (headless only).
-    /// Default for all `grok -p` runs is to wait (up to `--background-wait-timeout`)
-    /// so eval harnesses see full task completion. Use this for fast scripts that
-    /// only need the first turn's text. Does not wait for server-side auto-wake
-    /// output or persistent monitors (those hit the timeout).
+    /// Exit as soon as the first agent turn ends, without waiting for pending background bash/monitor tasks or background subagents (headless only).
+    /// Default for all `grok -p` runs is to wait (up to `--background-wait-timeout`) so eval harnesses see full task completion.
+    /// Use this for fast scripts that only need the first turn's text.
+    /// Does not wait for server-side auto-wake output or persistent monitors (those hit the timeout).
     #[arg(long = "no-wait-for-background", hide = true)]
     pub no_wait_for_background: bool,
-    /// Max seconds to wait for background work after the first turn ends
-    /// (headless only). Applies to bash/monitor `task_completed`, background
-    /// subagents (`SubagentFinished`), and any still-running non-persistent
-    /// work. Persistent `monitor(persistent:true)` never completes and always
-    /// waits the full timeout — use `--no-wait-for-background` or a lower
-    /// timeout for throughput. Conflicts with `--no-wait-for-background`.
+    /// Max seconds to wait for background work after the first turn ends (headless only).
+    /// Applies to bash/monitor `task_completed`, background subagents (`SubagentFinished`), and any still-running non-persistent work.
+    /// Persistent `monitor(persistent:true)` never completes and always waits the full timeout.
+    /// Use `--no-wait-for-background` or a lower timeout for throughput. Conflicts with `--no-wait-for-background`.
     #[arg(
         long = "background-wait-timeout",
         value_name = "SECS",
@@ -720,8 +708,7 @@ pub struct PagerArgs {
     /// Override the client identifier sent to the agent.
     #[arg(long = "client-identifier", value_name = "ID", hide = true)]
     pub client_identifier: Option<String>,
-    /// Hunk tracker mode: agent_only, all_dirty, or off ("disabled" is an
-    /// alias for off, which turns the hunk tracker off entirely).
+    /// Hunk tracker mode: agent_only, all_dirty, or off ("disabled" is an alias for off, which turns the hunk tracker off entirely).
     #[arg(long = "hunk-tracker-mode", value_name = "MODE", hide = true)]
     pub hunk_tracker_mode: Option<String>,
     /// Enable terminal support for the agent.
@@ -738,9 +725,8 @@ pub struct PagerArgs {
     pub no_auto_update: bool,
     /// Enable the runtime turn-end TodoGate for this session.
     ///
-    /// Session-scoped (not persisted). Highest precedence —
-    /// overrides remote `todo_gate_enabled` and the built-in
-    /// default (which is `false`).
+    /// Session-scoped (not persisted).
+    /// Highest precedence: overrides remote `todo_gate_enabled` and the built-in default (which is `false`).
     #[arg(long = "todo-gate", hide = true)]
     pub todo_gate: bool,
     /// Set the installer field in config.toml.
@@ -788,14 +774,13 @@ pub struct PagerArgs {
     #[command(subcommand, next_display_order = 0)]
     pub command: Option<Command>,
 }
-/// Outcome of resolving the startup sandbox profile for a (possibly resumed)
-/// session. See [`PagerArgs::startup_sandbox_profile`].
+/// Outcome of resolving the startup sandbox profile for a (possibly resumed) session. See [`PagerArgs::startup_sandbox_profile`].
 #[derive(Debug, PartialEq, Eq)]
 pub enum SandboxStartup {
     /// Apply this profile. `None` means fall through to config/`off`.
     Apply(Option<String>),
-    /// Resume requested a profile that differs from the one the session was
-    /// created with. Refused so resuming can't silently change the sandbox.
+    /// Resume requested a profile that differs from the one the session was created with.
+    /// Refused so resuming can't silently change the sandbox.
     Conflict { requested: String, saved: String },
 }
 /// How resume-selection flags resolve for sandbox profile lookup.
@@ -884,8 +869,7 @@ impl PagerArgs {
             .chain(args);
         Self::parse_from(normalized)
     }
-    /// Apply launch-directory path anchoring and `--cwd` after early commands
-    /// have been dispatched without filesystem or process initialization.
+    /// Apply launch-directory path anchoring and `--cwd` after early commands have been dispatched without filesystem or process initialization.
     pub fn apply_cwd(self) -> anyhow::Result<Self> {
         let launch_dir = std::env::current_dir().ok();
         self.apply_cwd_from(launch_dir.as_deref())
@@ -904,8 +888,7 @@ impl PagerArgs {
         }
         Ok(self)
     }
-    /// Optional-flag accessor; always `false` in builds without the optional
-    /// feature, so call sites need no `cfg` of their own.
+    /// Optional-flag accessor; always `false` in builds without the optional feature, so call sites need no `cfg` of their own.
     pub fn chat(&self) -> bool {
         false
     }
@@ -926,8 +909,8 @@ impl PagerArgs {
     }
     /// Get the session ID to resume, from either --resume or --load (hidden alias).
     ///
-    /// Returns `None` when `--resume` was used without a value (the empty-string
-    /// sentinel). Use [`resume_most_recent`] to detect that case.
+    /// Returns `None` when `--resume` was used without a value (the empty-string sentinel).
+    /// Use [`resume_most_recent`] to detect that case.
     pub fn session_to_resume(&self) -> Option<&str> {
         self.resume_session
             .as_deref()
@@ -938,10 +921,21 @@ impl PagerArgs {
     pub fn resume_most_recent(&self) -> bool {
         self.resume_session.as_deref() == Some("")
     }
+    pub(crate) fn local_resume_selection(
+        &self,
+    ) -> xai_grok_shell::session::persistence::RecentSessionSelection {
+        use xai_grok_shell::session::unified_list::HeadlessPolicy;
+        let policy =
+            if self.single.is_some() || self.prompt_json.is_some() || self.prompt_file.is_some() {
+                HeadlessPolicy::Include
+            } else {
+                HeadlessPolicy::Exclude
+            };
+        xai_grok_shell::session::persistence::RecentSessionSelection::from_headless_policy(policy)
+    }
     /// Classify flags for sandbox profile lookup on an existing session.
     ///
-    /// Uses [`Self::session_startup_intent`]; invalid combos fall through to
-    /// `None` (caller should have rejected intent errors earlier at startup).
+    /// Uses [`Self::session_startup_intent`]; invalid combos fall through to `None` (caller should have rejected intent errors earlier at startup).
     pub fn resume_target(&self) -> ResumeTarget {
         use crate::app::session_startup::SessionStartupIntent;
         match self.session_startup_intent() {
@@ -964,35 +958,29 @@ impl PagerArgs {
             _ => ResumeTarget::None,
         }
     }
-    /// Resolve the sandbox profile to apply at startup, accounting for the
-    /// profile the resumed session was created with. `saved` is the resumed
-    /// session's persisted profile (read once via [`Self::saved_resume_profile`]).
+    /// Resolve the sandbox profile to apply at startup, accounting for the profile the resumed session was created with.
+    /// `saved` is the resumed session's persisted profile (read once via [`Self::saved_resume_profile`]).
     ///
-    /// A session's profile is fixed at creation. Resuming restores it; passing an
-    /// explicit `--sandbox`/`GROK_SANDBOX` that differs from the saved profile is
-    /// refused (changing a session's sandbox on resume is a safety footgun). A
-    /// matching flag, or no flag, resumes with the saved profile.
+    /// A session's profile is fixed at creation. Resuming restores it.
+    /// An explicit `--sandbox`/`GROK_SANDBOX` that differs from the saved profile is refused: changing a session's sandbox on resume would be unsafe.
+    /// A matching flag, or no flag, resumes with the saved profile.
     pub fn startup_sandbox_profile(&self, saved: Option<&str>) -> SandboxStartup {
         let explicit = self.sandbox.as_deref().filter(|s| !s.is_empty());
         Self::resolve_startup_sandbox(explicit, saved.map(String::from))
     }
-    /// Pin an explicit non-UUID, non-chat resume/load target to its canonical
-    /// local session id, before the (irreversible) OS sandbox is applied.
+    /// Pin an explicit non-UUID, non-chat resume/load target to its canonical local session id, before the (irreversible) OS sandbox is applied.
     ///
-    /// Resolving once — recorded via `resume_target_pinned` so materialization
-    /// never re-runs local title selection — makes the saved-profile peek and
-    /// materialization consume the same immutable target; re-selecting after
-    /// the sandbox would race a concurrent rename/create. Listing failures
-    /// and ambiguity are hard errors here (fail closed / surfaced before the
-    /// sandbox); a definitive no-match keeps the raw arg for the legacy
-    /// remote/worktree id path.
+    /// Resolving once makes the saved-profile peek and materialization consume the same immutable target.
+    /// `resume_target_pinned` records the pin so materialization never re-runs local title selection.
+    /// Re-selecting after the sandbox would race a concurrent rename/create.
+    /// Listing failures and ambiguity are hard errors here, reported before the sandbox (fail closed).
+    /// A definitive no-match keeps the raw arg for the legacy remote/worktree id path.
     pub fn pin_local_resume_target(&mut self) -> anyhow::Result<()> {
         let cwd_buf = std::env::current_dir().ok();
         let cwd_str = cwd_buf.as_deref().map(|p| p.to_string_lossy());
         self.pin_local_resume_target_for_cwd(cwd_str.as_deref())
     }
-    /// Same as [`Self::pin_local_resume_target`] with an explicit cwd, so
-    /// tests never mutate the process cwd.
+    /// Same as [`Self::pin_local_resume_target`] with an explicit cwd, so tests never mutate the process cwd.
     pub fn pin_local_resume_target_for_cwd(&mut self, cwd: Option<&str>) -> anyhow::Result<()> {
         if self.chat() {
             return Ok(());
@@ -1001,7 +989,7 @@ impl PagerArgs {
             return Ok(());
         };
         use crate::app::session_title_resolve::{PinnedResumeTarget, presandbox_resume_target};
-        let pinned = presandbox_resume_target(&target, cwd)?;
+        let pinned = presandbox_resume_target(&target, cwd, self.local_resume_selection())?;
         self.resume_target_pinned = true;
         if let PinnedResumeTarget::Title {
             ref id,
@@ -1026,15 +1014,14 @@ impl PagerArgs {
         Ok(())
     }
     /// The sandbox profile persisted with the session being resumed, if any.
-    /// Local, best-effort; `None` when not resuming or nothing is found. Read once
-    /// for the profile resume resolution.
+    /// Local, best-effort; `None` when not resuming or nothing is found.
+    /// Read once for the profile resume resolution.
     pub fn saved_resume_profile(&self) -> Option<String> {
         let cwd_buf = std::env::current_dir().ok();
         let cwd_str = cwd_buf.as_deref().map(|p| p.to_string_lossy());
         self.saved_resume_profile_for_cwd(cwd_str.as_deref())
     }
-    /// Same as [`Self::saved_resume_profile`] with an explicit cwd, so tests
-    /// never mutate the process cwd.
+    /// Same as [`Self::saved_resume_profile`] with an explicit cwd, so tests never mutate the process cwd.
     pub fn saved_resume_profile_for_cwd(&self, cwd: Option<&str>) -> Option<String> {
         if let Some(pinned) = &self.pinned_resume_profile {
             return pinned.clone();
@@ -1047,13 +1034,16 @@ impl PagerArgs {
                 )
             }
             ResumeTarget::MostRecentForCwd => {
-                xai_grok_shell::session::persistence::resumed_session_sandbox_profile(None, cwd)
+                xai_grok_shell::session::persistence::resolve_recent_session_sandbox_profile(
+                    cwd,
+                    self.local_resume_selection(),
+                )
             }
             ResumeTarget::None => None,
         }
     }
-    /// Pure resolution of the explicit flag against the resumed session's saved
-    /// profile. Separated from disk access so it can be unit-tested.
+    /// Pure resolution of the explicit flag against the resumed session's saved profile.
+    /// Separated from disk access so it can be unit-tested.
     fn resolve_startup_sandbox(explicit: Option<&str>, saved: Option<String>) -> SandboxStartup {
         match (explicit, saved) {
             (Some(x), Some(s))
@@ -1070,10 +1060,8 @@ impl PagerArgs {
         }
     }
     /// The initial interactive prompt from the positional argument, trimmed.
-    ///
-    /// Returns `None` when no positional prompt was given or it is only
-    /// whitespace. This is the `grok "<prompt>"` launch form; the headless
-    /// `-p`/`--single` path is handled separately.
+    /// Returns `None` when no positional prompt was given or it is only whitespace.
+    /// This is the `grok "<prompt>"` launch form; the headless `-p`/`--single` path is handled separately.
     pub fn initial_prompt(&self) -> Option<&str> {
         self.prompt
             .as_deref()
@@ -1238,9 +1226,8 @@ mod tests {
             ResumeTarget::SessionId("old".to_string())
         );
     }
-    /// The screen-mode flags are mutually exclusive: the pair exists so one
-    /// can override the other's sticky config value, so accepting both in one
-    /// invocation would be ambiguous.
+    /// The screen-mode flags are mutually exclusive.
+    /// The pair exists so one can override the other's sticky config value; accepting both in one invocation would be ambiguous.
     #[test]
     fn minimal_and_fullscreen_flags_conflict() {
         let args = PagerArgs::try_parse_from(["grok", "--minimal"]).unwrap();

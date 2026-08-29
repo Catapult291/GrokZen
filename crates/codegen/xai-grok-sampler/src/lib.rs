@@ -34,6 +34,7 @@ pub mod types;
 
 // Public re-exports — the API surface consumers see.
 pub use actor::SamplerActor;
+pub use actor::request_task::CompletionResult;
 pub use attribution::{
     Auth401AttributionCallback, BEARER_SUFFIX_LEN, SamplingConsumer, SharedAttributionCallback,
 };
@@ -46,7 +47,7 @@ pub use doom_loop::DoomLoopSignalCollector;
 pub use events::{
     SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent, StripReason,
 };
-pub use handle::SamplerHandle;
+pub use handle::{CollectedSamplingResult, DoomLoopRecoveryAttempt, SamplerHandle};
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use retry::{
     DEFAULT_MAX_RETRIES, MAX_RETRY_BACKOFF, RATE_LIMIT_RETRY_DISABLED, RATE_LIMIT_RETRY_THRESHOLD,

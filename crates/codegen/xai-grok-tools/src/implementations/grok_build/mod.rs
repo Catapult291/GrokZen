@@ -28,6 +28,7 @@ pub mod monitor;
 pub mod read_file;
 pub mod scheduler;
 pub mod search_replace;
+pub mod send_subagent_message;
 pub(crate) mod storage;
 pub mod task;
 pub mod task_output;
@@ -62,6 +63,9 @@ pub use scheduler::create::{
 pub use scheduler::delete::{SCHEDULER_DELETE_TOOL_NAME, SchedulerDeleteTool};
 pub use scheduler::list::SchedulerListTool;
 pub use search_replace::SearchReplaceTool;
+pub use send_subagent_message::{
+    SEND_SUBAGENT_MESSAGE_TOOL_NAME, SendSubagentMessageDisposition, SendSubagentMessageTool,
+};
 pub use task::{TaskTool, is_task_tool_id};
 pub use task_output::{GetTerminalCommandOutputTool, TaskOutputTool, WaitTasksTool};
 pub use todo::TodoWriteTool;
@@ -73,4 +77,7 @@ pub use video_gen::{
 };
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use web_search::WebSearchTool;
-pub use workflow::{WORKFLOW_TOOL_NAME, WorkflowTool};
+pub use workflow::{
+    WORKFLOW_TOOL_NAME, WorkflowTool, is_workflow_tool, is_workflow_tool_id,
+    workflow_tool_short_name,
+};

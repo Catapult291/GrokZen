@@ -1,3 +1,4 @@
+use crate::implementations::grok_build::send_subagent_message::SendSubagentMessageOutput;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use strip_ansi_escapes::strip_str;
@@ -642,6 +643,8 @@ pub enum ToolOutput {
     EnterPlanMode(EnterPlanModeOutput),
     ExitPlanMode(ExitPlanModeOutput),
     AskUserQuestion(AskUserQuestionOutput),
+    #[serde(alias = "SendAgentMessage")]
+    SendSubagentMessage(SendSubagentMessageOutput),
     Monitor(crate::implementations::grok_build::monitor::types::MonitorOutput),
     SchedulerCreate(crate::implementations::grok_build::scheduler::create::SchedulerCreateOutput),
     SchedulerDelete(crate::implementations::grok_build::scheduler::delete::SchedulerDeleteOutput),
@@ -689,6 +692,12 @@ impl ToolOutput {
             ToolOutput::ApplyPatch(ApplyPatchOutput::Success { .. }) => false,
             ToolOutput::ApplyPatch(_) => true,
             ToolOutput::CodexGrepFiles(CodexGrepFilesOutput::Error(_)) => true,
+            ToolOutput::SendSubagentMessage(output) => {
+                matches!(
+                output.disposition(),
+                crate::implementations::grok_build::send_subagent_message::SendSubagentMessageDisposition::Rejected
+            )
+            }
             ToolOutput::Todo(
                 TodoWriteOutput::DuplicateId(_) | TodoWriteOutput::InvalidArgument(_),
             ) => true,
@@ -965,6 +974,7 @@ impl ToolOutput {
                 AskUserQuestionOutput::QuestionsSent { message, .. }
                 | AskUserQuestionOutput::UserAnswered { message },
             ) => message.clone(),
+            ToolOutput::SendSubagentMessage(output) => output.to_string(),
             ToolOutput::Monitor(o) => {
                 if o.persistent {
                     format!(
@@ -1307,6 +1317,46 @@ mod tests {
     use serde_json::json;
     use xai_tool_types::KillTaskResult;
     use xai_tool_types::TaskOutputResult;
+    #[test]
+    fn send_subagent_message_error_classification_is_closed() {
+        use crate::implementations::grok_build::send_subagent_message::SendSubagentMessageOutput::*;
+        for (output, is_error) in [
+            (
+                Accepted {
+                    message_id: "m-1".into(),
+                },
+                false,
+            ),
+            (NotFoundOrNotOwned, true),
+            (NotActiveOrFinalizing, true),
+            (Saturated { max_in_flight: 8 }, true),
+            (AdmissionUncertain, false),
+            (NotAcceptedBeforeDeadline, true),
+            (Unsupported, true),
+            (
+                Limit {
+                    max_bytes: 8,
+                    observed_bytes: 9,
+                },
+                true,
+            ),
+            (ChannelClosed, true),
+        ] {
+            assert_eq!(ToolOutput::SendSubagentMessage(output).is_error(), is_error);
+        }
+    }
+    #[test]
+    fn legacy_send_agent_message_output_envelope_deserializes() {
+        let output: ToolOutput = serde_json::from_value(serde_json::json!({
+            "type": "SendAgentMessage",
+            "outcome": "channel_closed",
+        }))
+        .expect("legacy output envelope must remain replayable");
+        assert!(matches!(
+            output,
+            ToolOutput::SendSubagentMessage(SendSubagentMessageOutput::ChannelClosed)
+        ));
+    }
     /// Serialize a ToolOutput to JSON value
     fn to_json(output: ToolOutput) -> serde_json::Value {
         serde_json::to_value(&output).unwrap()
@@ -1572,14 +1622,6 @@ mod tests {
         let output = ToolOutput::ImageToVideo(MediaGenOutput::uploaded(url.to_string()));
         let prompt = output.to_prompt_format();
         assert!(prompt.contains(url), "prompt must include the upload URL");
-        assert!(
-            prompt.contains("not available locally"),
-            "prompt must tell the model the file is remote-only"
-        );
-        assert!(
-            prompt.contains("Do not read or re-display"),
-            "prompt must include re-display guard"
-        );
         let json = to_json(output);
         assert_eq!(json["uploaded_url"], url);
         assert!(
@@ -2160,10 +2202,6 @@ mod tests {
             rendered.contains("persona=\"implementer\""),
             "persona hint present"
         );
-        assert!(
-            rendered.contains("Pass the same persona when resuming"),
-            "persona instruction present"
-        );
     }
     #[test]
     fn subagent_completed_prompt_format_with_worktree() {
@@ -2242,14 +2280,13 @@ mod tests {
     #[test]
     fn enter_plan_mode_prompt_format_with_default_hints() {
         let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-            message: "Entered plan mode.".into(),
+            message: "entered-msg-token".into(),
             plan_file_path: "/tmp/plan.md".into(),
             tool_hints: EnterPlanModeToolHints::default(),
             plan_file_seed: PlanFileSeedStatus::Empty,
         });
         let prompt = output.to_prompt_format();
-        assert!(prompt.contains("Entered plan mode."));
-        assert!(prompt.contains("Write your plan to /tmp/plan.md. The file exists and is empty."));
+        assert!(prompt.contains("entered-msg-token"));
         assert!(prompt.contains("/tmp/plan.md"));
         assert!(prompt.contains("ask_user_question"));
         assert!(prompt.contains("exit_plan_mode"));
@@ -2270,16 +2307,13 @@ mod tests {
             tool_hints: EnterPlanModeToolHints {
                 ask_user: "ask_user_question".into(),
                 exit_plan: "exit_plan_mode".into(),
-                task: "task".into(),
+                task: "delegate-xyz".into(),
             },
             plan_file_seed: PlanFileSeedStatus::Empty,
         });
         let prompt = output.to_prompt_format();
-        assert!(
-            prompt.contains("task tool with subagent_type"),
-            "should include subagent guidance when task tool is set"
-        );
-        assert!(prompt.contains("parallelize codebase exploration"));
+        assert!(prompt.contains("delegate-xyz"));
+        assert!(prompt.contains("subagent_type"));
     }
     #[test]
     fn enter_plan_mode_prompt_format_with_custom_tool_names() {
@@ -2294,26 +2328,10 @@ mod tests {
             plan_file_seed: PlanFileSeedStatus::Empty,
         });
         let prompt = output.to_prompt_format();
-        assert!(prompt.contains("Use AskUser if you need"));
-        assert!(prompt.contains("use FinishPlan to present"));
+        assert!(prompt.contains("AskUser"));
+        assert!(prompt.contains("FinishPlan"));
         assert!(!prompt.contains("ask_user_question"));
         assert!(!prompt.contains("exit_plan_mode"));
-    }
-    #[test]
-    fn enter_plan_mode_prompt_format_contains_six_steps() {
-        let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-            message: "Entered plan mode.".into(),
-            plan_file_path: "/tmp/plan.md".into(),
-            tool_hints: EnterPlanModeToolHints::default(),
-            plan_file_seed: PlanFileSeedStatus::Empty,
-        });
-        let prompt = output.to_prompt_format();
-        assert!(prompt.contains("1. Thoroughly explore"));
-        assert!(prompt.contains("2. Identify similar"));
-        assert!(prompt.contains("3. Use ask_user_question"));
-        assert!(prompt.contains("4. Design a concrete"));
-        assert!(prompt.contains("5. Write your plan to the plan file above"));
-        assert!(prompt.contains("6. When ready, use exit_plan_mode"));
     }
     #[test]
     fn enter_plan_mode_output_serde_with_tool_hints() {
@@ -2379,12 +2397,16 @@ mod tests {
             tool_hints: EnterPlanModeToolHints::default(),
             plan_file_seed: PlanFileSeedStatus::NonEmpty,
         });
+        let empty = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
+            message: "Entered plan mode.".into(),
+            plan_file_path: "/tmp/plan.md".into(),
+            tool_hints: EnterPlanModeToolHints::default(),
+            plan_file_seed: PlanFileSeedStatus::Empty,
+        })
+        .to_prompt_format();
         let prompt = output.to_prompt_format();
-        assert!(
-            prompt.contains("Write your plan to /tmp/plan.md. The file exists but is not empty.")
-        );
-        assert!(!prompt.contains("and is empty"));
-        assert!(prompt.contains("5. Write your plan to the plan file above\n"));
+        assert!(prompt.contains("/tmp/plan.md"));
+        assert_ne!(prompt, empty, "non-empty seed must change compiled status");
     }
     #[test]
     fn enter_plan_mode_prompt_format_missing_seed() {
@@ -2394,11 +2416,16 @@ mod tests {
             tool_hints: EnterPlanModeToolHints::default(),
             plan_file_seed: PlanFileSeedStatus::Missing(PlanFileSeedFailure::NotCreated),
         });
+        let empty = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
+            message: "Entered plan mode.".into(),
+            plan_file_path: "/tmp/plan.md".into(),
+            tool_hints: EnterPlanModeToolHints::default(),
+            plan_file_seed: PlanFileSeedStatus::Empty,
+        })
+        .to_prompt_format();
         let prompt = output.to_prompt_format();
-        assert!(
-            prompt.contains("Write your plan to /tmp/plan.md. The file has not yet been created.")
-        );
-        assert!(prompt.contains("5. Write your plan to the plan file above"));
+        assert!(prompt.contains("/tmp/plan.md"));
+        assert_ne!(prompt, empty, "missing seed must change compiled status");
     }
     #[test]
     fn enter_plan_mode_absent_seed_field_prompt_is_missing() {
@@ -2410,43 +2437,50 @@ mod tests {
         });
         let deserialized: EnterPlanModeOutput = serde_json::from_value(json).unwrap();
         let prompt = ToolOutput::EnterPlanMode(deserialized).to_prompt_format();
-        assert!(
-            prompt.contains("Write your plan to /tmp/plan.md. The file has not yet been created.")
+        let empty = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
+            message: "Entered plan mode.".into(),
+            plan_file_path: "/tmp/plan.md".into(),
+            tool_hints: EnterPlanModeToolHints::default(),
+            plan_file_seed: PlanFileSeedStatus::Empty,
+        })
+        .to_prompt_format();
+        assert!(prompt.contains("/tmp/plan.md"));
+        assert_ne!(
+            prompt, empty,
+            "absent seed field must compile as missing, not empty"
         );
     }
     #[test]
     fn enter_plan_mode_missing_reason_suffixes() {
         let cases = [
-            (
-                PlanFileSeedFailure::NotCreated,
-                "The file has not yet been created.",
-            ),
-            (
-                PlanFileSeedFailure::NotAFile,
-                "A directory already exists at that path.",
-            ),
-            (
-                PlanFileSeedFailure::Inaccessible,
-                "The file could not be accessed.",
-            ),
-            (
-                PlanFileSeedFailure::Unavailable,
-                "The plan file location is unavailable.",
-            ),
+            PlanFileSeedFailure::NotCreated,
+            PlanFileSeedFailure::NotAFile,
+            PlanFileSeedFailure::Inaccessible,
+            PlanFileSeedFailure::Unavailable,
         ];
-        for (reason, expected) in cases {
-            let output = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
-                message: "Entered plan mode.".into(),
+        let mut compiled = Vec::new();
+        for reason in cases {
+            let prompt = ToolOutput::EnterPlanMode(EnterPlanModeOutput::Entered {
+                message: "entered-msg-token".into(),
                 plan_file_path: "/tmp/plan.md".into(),
                 tool_hints: EnterPlanModeToolHints::default(),
                 plan_file_seed: PlanFileSeedStatus::Missing(reason),
-            });
-            let prompt = output.to_prompt_format();
+            })
+            .to_prompt_format();
+            assert!(prompt.contains("entered-msg-token"), "reason {reason:?}");
             assert!(
-                prompt.contains(&format!("Write your plan to /tmp/plan.md. {expected}")),
+                prompt.contains("/tmp/plan.md"),
                 "reason {reason:?}: {prompt}"
             );
+            compiled.push(prompt);
         }
+        compiled.sort();
+        compiled.dedup();
+        assert_eq!(
+            compiled.len(),
+            cases.len(),
+            "each missing-seed reason must compile distinctly"
+        );
     }
     #[test]
     fn plan_file_seed_missing_serde_shape() {

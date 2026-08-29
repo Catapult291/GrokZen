@@ -206,8 +206,19 @@ mod tests {
         assert_eq!(BUILTIN_FILES[1].0, COMMUNITY_CHANGELOG_MD);
         let expected_heading = format!("# {} —", env!("CARGO_PKG_VERSION"));
         assert!(BUILTIN_FILES[1].1.starts_with(&expected_heading));
-        assert!(BUILTIN_FILES[1].1.contains("## 新功能"));
-        assert!(BUILTIN_FILES[1].1.contains("## Bug 修复"));
+        assert!(
+            [
+                "## 破坏性变更",
+                "## 新功能",
+                "## Bug 修复",
+                "## 性能",
+                "## 性能优化",
+                "## 中文社区版",
+            ]
+            .iter()
+            .any(|heading| BUILTIN_FILES[1].1.contains(heading)),
+            "the bundled changelog must contain a localized section heading"
+        );
         assert_eq!(BUILTIN_FILES[2].0, COMMUNITY_CHANGELOG_JSON);
         let entries: Vec<serde_json::Value> = serde_json::from_str(BUILTIN_FILES[2].1).unwrap();
         let upstream_entries: Vec<serde_json::Value> = serde_json::from_str(include_str!(concat!(

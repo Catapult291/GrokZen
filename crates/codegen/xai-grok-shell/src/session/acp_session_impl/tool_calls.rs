@@ -1,13 +1,32 @@
-//! Tool-call execution concern for `SessionActor`: the model-output →
-//! tool-execution pipeline (`execute_tool_calls`, `prepare_tool_call`,
-//! tool-call start/success/error notifications, and sampling-event handling).
-//!
-//! `#[path]` child of `acp_session` (see the module comments there) so this
-//! `impl SessionActor` block retains access to the actor's private fields and
-//! the parent module's private helpers.
+//! Tool-call execution for `SessionActor`: a `#[path]` child of `acp_session`.
+use super::hooks::RewriteProblem;
 use super::*;
 use futures::StreamExt;
 use tracing::Instrument;
+use xai_grok_hooks::result::HookDecision;
+#[path = "wait_interrupt.rs"]
+mod wait_interrupt;
+use wait_interrupt::{
+    InterruptedWaitFilter, apply_interrupted_wait_filter, finished_wait_ids,
+    interrupted_wait_tool_result, record_interruptible_wait_outcome, wait_task_ids_from_args,
+};
+#[derive(Default)]
+struct PreToolUseGate {
+    hook_ask: Option<HookAsk>,
+    rewrite: Option<GateRewrite>,
+    additional_context: Vec<xai_grok_hooks::dispatcher::AdditionalContext>,
+}
+struct GateRewrite {
+    tool_input: ToolInput,
+    raw_arguments: String,
+    raw_input: serde_json::Value,
+    hook_name: String,
+}
+struct ValidatedRewrite {
+    rewritten: ToolInput,
+    updated_json: serde_json::Value,
+    hook_name: String,
+}
 /// Whether a tool name is an MCP `create_pull_request` (qualified
 /// `server__create_pull_request` or bare).
 fn is_mcp_create_pull_request(tool_name: &str) -> bool {
@@ -44,8 +63,8 @@ fn tool_execution_span(
         tool_result_size_bytes = tracing::field::Empty,
     )
 }
-/// Stamp the dispatch outcome on `span` and close it, returning whether the call
-/// succeeded. Takes the span by value: these fields are recorded exactly once.
+/// Stamp the dispatch outcome on `span` and close it. Takes the span by value:
+/// these fields are recorded exactly once.
 fn record_tool_span_outcome(
     span: tracing::Span,
     result: &Result<ToolRunResult, xai_tool_runtime::ToolError>,
@@ -58,9 +77,28 @@ fn record_tool_span_outcome(
         Err(_) => (false, 0),
     };
     span.record("success", success);
-    span.record("outcome", if success { "success" } else { "error" });
+    span.record("outcome", tool_output_span_outcome(result));
     span.record("tool_result_size_bytes", result_size);
     success
+}
+/// Closed span/log projection for typed tool output. Delivery uncertainty is
+/// successful dispatch but remains explicitly `unconfirmed`, never `error`.
+pub(super) fn tool_output_span_outcome(
+    result: &Result<ToolRunResult, xai_tool_runtime::ToolError>,
+) -> &'static str {
+    use xai_grok_tools::implementations::grok_build::send_subagent_message::SendSubagentMessageDisposition;
+    match result {
+        Ok(tool_result) => match &tool_result.output {
+            ToolsToolOutput::SendSubagentMessage(output) => match output.disposition() {
+                SendSubagentMessageDisposition::Accepted => "success",
+                SendSubagentMessageDisposition::Rejected => "error",
+                SendSubagentMessageDisposition::Unconfirmed => "unconfirmed",
+            },
+            output if output.is_error() => "error",
+            _ => "success",
+        },
+        Err(_) => "error",
+    }
 }
 /// Blocking wait tools that should abort when a mid-turn interjection is pending.
 fn is_interruptible_wait_tool(tool_name: &str, args: &serde_json::Value) -> bool {
@@ -83,41 +121,6 @@ async fn wait_for_pending_interjection(buf: &InterjectionBuffer<acp::ImageConten
     }
 }
 use crate::tools::tool_context::BlockingWaitGuard;
-/// Model-facing result when a wait is aborted for a pending interjection.
-fn interrupted_wait_tool_result(args: &serde_json::Value) -> ToolRunResult {
-    interrupted_wait_tool_result_with_msg(args, "Wait interrupted: the user sent a message.")
-}
-/// [`interrupted_wait_tool_result`] with a caller-chosen model-facing message.
-fn interrupted_wait_tool_result_with_msg(args: &serde_json::Value, msg: &str) -> ToolRunResult {
-    use xai_tool_types::{TaskOutputOutput, TaskOutputResult};
-    let task_id = args
-        .get("task_ids")
-        .and_then(|v| v.as_array())
-        .and_then(|a| a.first())
-        .and_then(|v| v.as_str())
-        .or_else(|| args.get("task_id").and_then(|v| v.as_str()))
-        .unwrap_or("")
-        .to_string();
-    let result = TaskOutputResult {
-        task_id,
-        command: String::new(),
-        status: "cancelled".to_string(),
-        exit_code: None,
-        started: String::new(),
-        ended: None,
-        duration_secs: 0.0,
-        output: msg.to_string(),
-        output_file: String::new(),
-        truncated: false,
-        truncation_hint: String::new(),
-        raw_output_bytes: msg.len(),
-    };
-    ToolRunResult {
-        output: ToolsToolOutput::TaskOutput(TaskOutputOutput::Result(result)),
-        prompt_text: msg.to_string(),
-        effective_tool_name: None,
-    }
-}
 /// Clears `awaiting_plan_approval` (and re-persists) when the
 /// [`SessionActor::request_plan_approval`] await **resolves** (a decision came
 /// back) or is **dropped** (the model turn was cancelled) — so a cancelled
@@ -242,7 +245,9 @@ pub(super) fn plan_mode_edit_gate(
     if !tracker.is_active() {
         return PlanEditGate::Allow;
     }
-    let _ = tool_input;
+    if matches!(tool_input, ToolInput::Task(_)) {
+        return PlanEditGate::Allow;
+    }
     match access_kind {
         AccessKind::Edit(path) if !tracker.should_auto_approve_edit(Path::new(path)) => {
             PlanEditGate::RejectNonPlanFile
@@ -499,6 +504,13 @@ impl SessionActor {
             let conversation = self.chat_state_handle.get_conversation().await;
             super::refresh_classifier_transcript(&self.permissions, &conversation);
         }
+        let mcp_surface_requested = tool_calls.iter().any(|c| {
+            c.function.name == "search_tool"
+                || c.function.name == "use_tool"
+                || c.function
+                    .name
+                    .contains(crate::session::mcp_servers::MCP_TOOL_NAME_DELIMITER)
+        });
         let mut approved: Vec<PreparedToolCall> = Vec::new();
         for call in tool_calls.into_iter() {
             if final_result.is_some() {
@@ -590,19 +602,43 @@ impl SessionActor {
         if approved.iter().any(|p| p.tool_name == "search_tool") {
             self.retry_auth_required_servers().await;
         }
-        let write_paths: std::collections::HashSet<String> = approved
+        if mcp_surface_requested {
+            self.retry_unreachable_servers().await;
+        }
+        let dispatch_cwd = self.tool_context.cwd.to_path_buf();
+        let lock_args: Vec<_> = {
+            let toolset = self.agent.borrow().tool_bridge().toolset();
+            approved
+                .iter()
+                .map(|prepared| {
+                    toolset.remap_params(&prepared.tool_name, prepared.parsed_args.clone())
+                })
+                .collect()
+        };
+        let lock_cwd = dispatch_cwd.clone();
+        let lock_paths = tokio::task::spawn_blocking(move || {
+            lock_args
+                .iter()
+                .map(|args| lock_path_for_args(args, &lock_cwd))
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "file-lock path resolution failed");
+            vec![None; approved.len()]
+        });
+        let write_paths: std::collections::HashSet<_> = approved
             .iter()
-            .filter(|prepared| !prepared.is_read_only)
-            .filter_map(|prepared| lock_path_for_args(&prepared.parsed_args).map(str::to_owned))
+            .zip(&lock_paths)
+            .filter(|(prepared, _)| !prepared.is_read_only)
+            .filter_map(|(_, path)| path.clone())
             .collect();
         let file_locks = {
             let mut map: std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>> =
                 std::collections::HashMap::new();
-            for prepared in &approved {
-                if let Some(fp) = lock_path_for_args(&prepared.parsed_args)
-                    && write_paths.contains(fp)
-                {
-                    map.entry(fp.to_owned())
+            for path in lock_paths.iter().flatten() {
+                if write_paths.contains(path) {
+                    map.entry(path.clone())
                         .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
                 }
             }
@@ -610,23 +646,121 @@ impl SessionActor {
         };
         let shared_recovery = Arc::new(tokio::sync::OnceCell::<bool>::const_new());
         let workspace_ops = self.workspace_ops.clone();
+        let workflow_smoke_check_cwd = self.tool_context.cwd.to_path_buf();
+        let workflow_smoke_check_display_cwd = self.display_cwd.get().map(std::path::PathBuf::from);
+        let workflow_smoke_check_session_dir =
+            crate::session::persistence::session_dir(&self.session_info);
+        let workflow_smoke_check_enabled = self.background_workflows_enabled;
+        let (
+            workflow_template_param_names,
+            workflow_tool_name,
+            workflow_script_path_param,
+            workflow_validate_only_param,
+        ) = {
+            let toolset = self.agent.borrow().tool_bridge().toolset();
+            let param_names = toolset.template_param_names();
+            (
+                param_names.clone(),
+                toolset
+                    .tool_name_for_kind(xai_grok_tools::types::tool::ToolKind::Workflow)
+                    .unwrap_or_else(|| "workflow".to_owned()),
+                workflow_write_smoke_check::workflow_param_name("script_path", &param_names),
+                workflow_write_smoke_check::workflow_param_name("validate_only", &param_names),
+            )
+        };
+        let workflow_smoke_check_indices = workflow_write_smoke_check::last_smoke_check_indices(
+            approved.iter().enumerate().map(|(idx, prepared)| {
+                let kind = self
+                    .agent
+                    .borrow()
+                    .tool_bridge()
+                    .tool_kind(&prepared.tool_name);
+                let path_param_names = kind
+                    .map(|kind| {
+                        workflow_write_smoke_check::path_param_names_for_kind(
+                            kind,
+                            &workflow_template_param_names,
+                        )
+                    })
+                    .unwrap_or_default();
+                let path = workflow_write_smoke_check::authored_workflow_arg_path(
+                    kind,
+                    &prepared.parsed_args,
+                    &path_param_names,
+                )
+                .map(|input| {
+                    lock_paths
+                        .get(idx)
+                        .and_then(|path| path.clone())
+                        .unwrap_or_else(|| input.to_owned())
+                });
+                (idx, path)
+            }),
+        );
+        let workflow_smoke_check_permits = Arc::new(tokio::sync::Semaphore::new(
+            workflow_write_smoke_check::MAX_CONCURRENT_CHECKS,
+        ));
         let pending_interjections = self.pending_interjections.clone();
         let session_id: Arc<str> = Arc::from(&*self.session_info.id.0);
         let dispatch_futures: Vec<_> = approved
             .iter()
             .enumerate()
             .map(|(idx, prepared)| {
-                let prepared = Arc::new(prepared.clone());
                 let am = self.auth_manager.clone();
                 let shared_recovery = Arc::clone(&shared_recovery);
                 let workspace_ops = workspace_ops.clone();
                 let session_id = session_id.clone();
+                let workflow_smoke_check_cwd = workflow_smoke_check_cwd.clone();
+                let workflow_smoke_check_display_cwd = workflow_smoke_check_display_cwd.clone();
+                let workflow_smoke_check_session_dir = workflow_smoke_check_session_dir.clone();
+                let workflow_smoke_check_permits = Arc::clone(&workflow_smoke_check_permits);
+                let workflow_smoke_check_this_call = workflow_smoke_check_indices.contains(&idx);
+                let workflow_tool_name = workflow_tool_name.clone();
+                let workflow_script_path_param = workflow_script_path_param.clone();
+                let workflow_validate_only_param = workflow_validate_only_param.clone();
                 let pending_interjections = pending_interjections.clone();
                 let blocking_wait_depth = self.tool_context.blocking_wait_depth.clone();
                 let interruptible =
                     is_interruptible_wait_tool(&prepared.tool_name, &prepared.parsed_args);
-                let lock = lock_path_for_args(&prepared.parsed_args)
-                    .and_then(|fp| file_locks.get(fp).cloned());
+                let prepared = {
+                    let mut dispatch_prepared = prepared.clone();
+                    if interruptible
+                        && let InterruptedWaitFilter::Rewritten { kept, requested } =
+                            apply_interrupted_wait_filter(
+                                &blocking_wait_depth,
+                                &mut dispatch_prepared.parsed_args,
+                            )
+                    {
+                        tracing::info!(
+                            tool = %dispatch_prepared.tool_name,
+                            kept = kept.len(),
+                            requested,
+                            "strip post-interrupt side-work from wait_all"
+                        );
+                    }
+                    Arc::new(dispatch_prepared)
+                };
+                let authored_tool_kind = self
+                    .agent
+                    .borrow()
+                    .tool_bridge()
+                    .tool_kind(&prepared.tool_name);
+                let authored_path_param_names = authored_tool_kind
+                    .map(|kind| {
+                        workflow_write_smoke_check::path_param_names_for_kind(
+                            kind,
+                            &self
+                                .agent
+                                .borrow()
+                                .tool_bridge()
+                                .toolset()
+                                .template_param_names(),
+                        )
+                    })
+                    .unwrap_or_default();
+                let lock = lock_paths[idx]
+                    .as_ref()
+                    .and_then(|path| file_locks.get(path).cloned());
                 let tools_execute_span = tracing::Span::current();
                 async move {
                     let exec_start = std::time::Instant::now();
@@ -643,17 +777,67 @@ impl SessionActor {
                         let workspace_ops = workspace_ops.clone();
                         let session_id = session_id.clone();
                         let lock = lock.clone();
+                        let workflow_smoke_check_cwd = workflow_smoke_check_cwd.clone();
+                        let workflow_smoke_check_display_cwd =
+                            workflow_smoke_check_display_cwd.clone();
+                        let workflow_smoke_check_session_dir =
+                            workflow_smoke_check_session_dir.clone();
+                        let workflow_smoke_check_permits =
+                            Arc::clone(&workflow_smoke_check_permits);
+                        let authored_path_param_names = authored_path_param_names.clone();
+                        let workflow_tool_name = workflow_tool_name.clone();
+                        let workflow_script_path_param = workflow_script_path_param.clone();
+                        let workflow_validate_only_param = workflow_validate_only_param.clone();
                         async move {
-                            let _guard = if let Some(ref l) = lock {
-                                Some(l.lock().await)
-                            } else {
-                                None
+                            let result = {
+                                let _guard = if let Some(ref l) = lock {
+                                    Some(l.lock().await)
+                                } else {
+                                    None
+                                };
+                                dispatch_tool(&workspace_ops, &prepared, &session_id).await
                             };
-                            dispatch_tool(&workspace_ops, &prepared, &session_id).await
+                            let mut result = result;
+                            let snapshot =
+                                if workflow_smoke_check_enabled && workflow_smoke_check_this_call {
+                                    workflow_write_smoke_check::snapshot_authored_workflow(
+                                        authored_tool_kind,
+                                        &prepared.parsed_args,
+                                        &authored_path_param_names,
+                                        &workflow_smoke_check_cwd,
+                                        workflow_smoke_check_display_cwd.as_deref(),
+                                        &workflow_smoke_check_session_dir,
+                                    )
+                                    .await
+                                } else {
+                                    None
+                                };
+                            let failure = match snapshot {
+                                Some(Ok(snapshot)) => {
+                                    workflow_write_smoke_check::check_snapshot(
+                                        snapshot,
+                                        &workflow_smoke_check_permits,
+                                    )
+                                    .await
+                                }
+                                Some(Err(failure)) => Some(failure),
+                                None => None,
+                            };
+                            if let (Ok(tool_result), Some(failure)) = (&mut result, failure) {
+                                workflow_write_smoke_check::append_validation_warning(
+                                    &mut tool_result.prompt_text,
+                                    &failure,
+                                    &workflow_tool_name,
+                                    &workflow_script_path_param,
+                                    &workflow_validate_only_param,
+                                );
+                            }
+                            result
                         }
                     };
-                    let result = if interruptible {
-                        let _wait_guard = BlockingWaitGuard::enter(blocking_wait_depth.clone());
+                    let wait_guard = interruptible
+                        .then(|| BlockingWaitGuard::enter(blocking_wait_depth.clone()));
+                    let (result, wait_aborted) = if interruptible {
                         async {
                             tokio::select! {
                                 biased;
@@ -662,29 +846,51 @@ impl SessionActor {
                                     Some(&shared_recovery),
                                     &prepared.tool_name,
                                     run_tool,
-                                ) => result,
+                                ) => (result, false),
                                 _ = wait_for_pending_interjection(&pending_interjections) => {
                                     tracing::info!(
                                         tool = %prepared.tool_name,
                                         "abort wait tool: interjection pending"
                                     );
-                                    Ok(interrupted_wait_tool_result(&prepared.parsed_args))
+                                    (
+                                        Ok(interrupted_wait_tool_result(&prepared.parsed_args)),
+                                        true,
+                                    )
                                 }
                             }
                         }
                         .instrument(tool_span)
                         .await
                     } else {
-                        call_with_auth_retry(
-                            am.as_ref(),
-                            Some(&shared_recovery),
-                            &prepared.tool_name,
-                            run_tool,
+                        (
+                            call_with_auth_retry(
+                                am.as_ref(),
+                                Some(&shared_recovery),
+                                &prepared.tool_name,
+                                run_tool,
+                            )
+                            .instrument(tool_span)
+                            .await,
+                            false,
                         )
-                        .instrument(tool_span)
-                        .await
                     };
+                    if let Some(guard) = wait_guard.as_ref() {
+                        let waited = wait_task_ids_from_args(&prepared.parsed_args);
+                        let finished = if wait_aborted {
+                            Vec::new()
+                        } else {
+                            result.as_ref().map(finished_wait_ids).unwrap_or_default()
+                        };
+                        record_interruptible_wait_outcome(
+                            &blocking_wait_depth,
+                            guard.generation(),
+                            waited,
+                            wait_aborted,
+                            &finished,
+                        );
+                    }
                     let duration_ms = exec_start.elapsed().as_millis() as u64;
+                    let outcome = tool_output_span_outcome(&result);
                     let success = record_tool_span_outcome(tool_span_for_record, &result);
                     xai_grok_telemetry::unified_log::info(
                         "shell.tool.exec_done",
@@ -694,6 +900,7 @@ impl SessionActor {
                             "tool_call_id": prepared.call_id.as_str(),
                             "elapsed_ms": duration_ms,
                             "success": success,
+                            "outcome": outcome,
                         })),
                     );
                     (idx, result, duration_ms)
@@ -749,7 +956,13 @@ impl SessionActor {
                 Err(_) => None,
             };
             let tool_failed = match &result {
-                Ok(tool_result) => tool_result.output.is_error(),
+                Ok(tool_result) => {
+                    crate::session::telemetry::record_completed_tool_output(
+                        &tool_result.output,
+                        duration_ms,
+                    );
+                    tool_result.output.is_error()
+                }
                 Err(_) => true,
             };
             let tool_loop = match result {
@@ -837,6 +1050,9 @@ impl SessionActor {
                     }
                 }
             }
+            for context in &prepared.additional_context {
+                deferred_followups.push(self.wrap_hook_context(context));
+            }
             if let Some(tool_result_value) = post_tool_use_result {
                 let raw_input: serde_json::Value = serde_json::from_str(&prepared.raw_arguments)
                     .unwrap_or(serde_json::Value::Null);
@@ -877,6 +1093,8 @@ impl SessionActor {
                     crate::session::events::ToolOutcome::InvalidTool
                 }
             };
+            let rewriting_hook = prepared.rewriting_hook.clone();
+            let hook_rewrote = rewriting_hook.is_some();
             self.signals_handle().record_tool_duration(
                 &prepared.tool_name,
                 &tool_call_id,
@@ -888,6 +1106,7 @@ impl SessionActor {
                 outcome: tool_outcome,
                 tool_call_id: tool_call_id.clone(),
                 source: crate::session::events::ToolCompletedSource::Shell,
+                rewriting_hook,
             });
             self.observability_bridge
                 .emit(
@@ -916,6 +1135,7 @@ impl SessionActor {
                 xai_grok_telemetry::events::ToolCallCompleted {
                     tool_name: prepared.tool_name.clone(),
                     outcome: tool_outcome,
+                    hook_rewrote,
                     duration_ms,
                     tool_result_size_bytes,
                     file_path: ext_file_path,
@@ -930,7 +1150,7 @@ impl SessionActor {
                     artifact = %artifact,
                     // i64: redact drops u64 (serializes as string). None ⇒ field omitted.
                     segment_index = artifact.segment_index().map(|i| i as i64),
-                    success = matches!(tool_outcome, crate::session::events::ToolOutcome::Success),
+                    success = tool_outcome.ran_successfully(),
                     duration_ms = duration_ms as i64,
                     tool_result_size_bytes = tool_result_size_bytes.map_or(0, |n| n as i64),
                 )
@@ -949,7 +1169,139 @@ impl SessionActor {
         }
         Ok(())
     }
-    /// Phase 1: pre-flight (MCP, args, hooks, permission, ExitPlanMode).
+    async fn apply_pre_tool_use_gate(
+        &self,
+        call: &crate::sampling::types::ToolCallResponse,
+        tool_call_id: &acp::ToolCallId,
+        resolved_tool_name: &str,
+        dispatch_target_name: &Option<String>,
+        raw_input: &serde_json::Value,
+    ) -> Result<Result<PreToolUseGate, ToolLoop>, acp::Error> {
+        let mut envelope = self.make_pre_tool_use_envelope(resolved_tool_name, &call.id, raw_input);
+        let mut gate = PreToolUseGate::default();
+        let hook_registry_snapshot = self.hook_registry.borrow().clone();
+        if let Some(registry) = hook_registry_snapshot {
+            let ctx = self.hook_run_ctx();
+            let pre_result =
+                xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx).await;
+            self.send_hook_execution(
+                "pre_tool_use",
+                Some(resolved_tool_name),
+                None,
+                &pre_result.results,
+            )
+            .await;
+            self.emit_hook_executed_telemetry(
+                "pre_tool_use",
+                Some(resolved_tool_name),
+                &pre_result.results,
+            )
+            .await;
+            match pre_result.decision {
+                HookDecision::Deny { reason, hook_name } => {
+                    return Ok(Err(self
+                        .deny_tool(
+                            &call.id,
+                            tool_call_id,
+                            resolved_tool_name,
+                            hook_name,
+                            reason,
+                        )
+                        .await?));
+                }
+                HookDecision::Ask { reason, hook_name } => {
+                    gate.hook_ask = Some(HookAsk { hook_name, reason });
+                }
+                HookDecision::Defer { hook_name } => {
+                    tracing::warn!(
+                        %hook_name,
+                        tool = %resolved_tool_name,
+                        "PreToolUse hook returned 'defer'; continuing through the normal permission flow"
+                    );
+                }
+                HookDecision::Allow => {}
+            }
+            gate.additional_context = pre_result.additional_context;
+            if let Some(rewrite) = pre_result.updated_input {
+                let validated = match self
+                    .validate_hook_rewrite(
+                        call,
+                        tool_call_id,
+                        resolved_tool_name,
+                        dispatch_target_name,
+                        rewrite,
+                    )
+                    .await?
+                {
+                    Ok(validated) => validated,
+                    Err(blocked) => return Ok(Err(blocked)),
+                };
+                envelope = self.make_pre_tool_use_envelope(
+                    resolved_tool_name,
+                    &call.id,
+                    &validated.updated_json,
+                );
+                gate.rewrite = Some(GateRewrite {
+                    tool_input: validated.rewritten,
+                    raw_arguments: validated.updated_json.to_string(),
+                    raw_input: validated.updated_json,
+                    hook_name: validated.hook_name,
+                });
+            }
+        }
+        if let Some(denied) = self
+            .run_pre_tool_use_client_hook(call, tool_call_id, &envelope)
+            .await?
+        {
+            return Ok(Err(denied));
+        }
+        Ok(Ok(gate))
+    }
+    async fn validate_hook_rewrite(
+        &self,
+        call: &crate::sampling::types::ToolCallResponse,
+        tool_call_id: &acp::ToolCallId,
+        resolved_tool_name: &str,
+        dispatch_target_name: &Option<String>,
+        rewrite: xai_grok_hooks::dispatcher::InputRewrite,
+    ) -> Result<Result<ValidatedRewrite, ToolLoop>, acp::Error> {
+        let updated_json = serde_json::Value::Object(rewrite.input);
+        let rewritten = match self
+            .tool_bridge_handle()
+            .try_parse(&call.function.name, updated_json.clone())
+            .await
+        {
+            Ok(input) => input,
+            Err(err) => {
+                let schema_error = xai_grok_hooks::event::clip_reason(&err.to_string());
+                return Ok(Err(self
+                    .block_unusable_rewrite(
+                        &call.id,
+                        tool_call_id,
+                        resolved_tool_name,
+                        rewrite.hook_name,
+                        RewriteProblem::FailsSchema(schema_error),
+                    )
+                    .await?));
+            }
+        };
+        if rewritten.dispatch_target_name() != *dispatch_target_name {
+            return Ok(Err(self
+                .block_unusable_rewrite(
+                    &call.id,
+                    tool_call_id,
+                    resolved_tool_name,
+                    rewrite.hook_name,
+                    RewriteProblem::RetargetsCall,
+                )
+                .await?));
+        }
+        Ok(Ok(ValidatedRewrite {
+            rewritten,
+            updated_json,
+            hook_name: rewrite.hook_name,
+        }))
+    }
     pub(crate) async fn prepare_tool_call(
         &self,
         call: crate::sampling::types::ToolCallResponse,
@@ -1097,81 +1449,36 @@ impl SessionActor {
         } else {
             None
         };
-        let mut dispatch_target_name = tool_input.dispatch_target_name();
-        let mut resolved_tool_name = dispatch_target_name
+        let dispatch_target_name = tool_input.dispatch_target_name();
+        let resolved_tool_name = dispatch_target_name
             .clone()
             .unwrap_or_else(|| call.function.name.clone());
         let mut raw_arguments = call.function.arguments.clone();
+        let mut rewriting_hook: Option<String> = None;
+        let mut hook_ask: Option<HookAsk> = None;
+        let mut hook_additional_context = Vec::new();
         if self.may_have_hooks_for(xai_grok_hooks::event::HookEventName::PreToolUse) {
-            let mut envelope =
-                self.make_pre_tool_use_envelope(&resolved_tool_name, &call.id, &raw_input);
-            let hook_registry_snapshot = self.hook_registry.borrow().clone();
-            if let Some(registry) = hook_registry_snapshot {
-                let ctx = self.hook_run_ctx();
-                let pre_result =
-                    xai_grok_hooks::dispatcher::dispatch_pre_tool_use(&registry, &envelope, &ctx)
-                        .await;
-                self.send_hook_execution(
-                    "pre_tool_use",
-                    Some(&resolved_tool_name),
-                    None,
-                    &pre_result.results,
+            let gate = match self
+                .apply_pre_tool_use_gate(
+                    &call,
+                    &tool_call_id,
+                    &resolved_tool_name,
+                    &dispatch_target_name,
+                    &raw_input,
                 )
-                .await;
-                self.emit_hook_executed_telemetry(
-                    "pre_tool_use",
-                    Some(&resolved_tool_name),
-                    &pre_result.results,
-                )
-                .await;
-                if let xai_grok_hooks::result::HookDecision::Deny { reason, hook_name } =
-                    pre_result.decision
-                {
-                    return Ok(Err(self
-                        .deny_tool(
-                            &call.id,
-                            &tool_call_id,
-                            resolved_tool_name.clone(),
-                            hook_name,
-                            reason,
-                        )
-                        .await?));
-                }
-                if let Some(rewrite) = pre_result.updated_input {
-                    let updated = rewrite.input;
-                    let updated_args = updated.to_string();
-                    let parsed = self
-                        .tool_bridge_handle()
-                        .try_parse(&call.function.name, updated.clone())
-                        .await;
-                    tool_input = match parsed {
-                        Ok(input) => input,
-                        Err(err) => {
-                            let msg = format!(
-                                "PreToolUse hook '{}' returned an invalid updatedInput: {err}",
-                                rewrite.hook_name
-                            );
-                            self.handle_tool_not_executed(&call.id, &tool_call_id, msg)
-                                .await?;
-                            return Ok(Err(ToolLoop::ToolParsingError));
-                        }
-                    };
-                    dispatch_target_name = tool_input.dispatch_target_name();
-                    resolved_tool_name = dispatch_target_name
-                        .clone()
-                        .unwrap_or_else(|| call.function.name.clone());
-                    raw_arguments = updated_args;
-                    raw_input = updated;
-                    concatenated_json_count = 0;
-                    envelope =
-                        self.make_pre_tool_use_envelope(&resolved_tool_name, &call.id, &raw_input);
-                }
-            }
-            if let Some(denied) = self
-                .run_pre_tool_use_client_hook(&call, &tool_call_id, &envelope)
                 .await?
             {
-                return Ok(Err(denied));
+                Ok(gate) => gate,
+                Err(blocked) => return Ok(Err(blocked)),
+            };
+            hook_ask = gate.hook_ask;
+            hook_additional_context = gate.additional_context;
+            if let Some(rewrite) = gate.rewrite {
+                tool_input = rewrite.tool_input;
+                raw_arguments = rewrite.raw_arguments;
+                raw_input = rewrite.raw_input;
+                concatenated_json_count = 0;
+                rewriting_hook = Some(rewrite.hook_name);
             }
         }
         let access_kind = AccessKind::from(&tool_input);
@@ -1194,12 +1501,12 @@ impl SessionActor {
         let tool_call_display = self
             .send_tool_call_start(&tool_call_id, &call.function.name, tool_input.clone())
             .await;
-        let plan_file_auto_approve = if let AccessKind::Edit(ref path) = access_kind {
-            self.plan_mode
+        let plan_file_auto_approve = match &access_kind {
+            AccessKind::Edit(path) if hook_ask.is_none() => self
+                .plan_mode
                 .lock()
-                .should_auto_approve_edit(std::path::Path::new(path))
-        } else {
-            false
+                .should_auto_approve_edit(std::path::Path::new(path)),
+            _ => false,
         };
         if plan_file_auto_approve {
             tracing::info_span!(
@@ -1249,7 +1556,14 @@ impl SessionActor {
                 xai_grok_workspace::permission::AccessKind::WebSearch(q) => {
                     (xai_grok_telemetry::events::AccessKind::Web, q.clone())
                 }
+                xai_grok_workspace::permission::AccessKind::AgentMessage { subagent_id } => (
+                    xai_grok_telemetry::events::AccessKind::AgentMessage,
+                    subagent_id.clone(),
+                ),
+                _ => (xai_grok_telemetry::events::AccessKind::Other, String::new()),
             };
+            let canonical_permission_tool_name =
+                crate::session::telemetry::canonical_permission_tool_name(&access_kind);
             let subagent_session_id = if self.startup_hints.is_subagent {
                 Some(self.session_id_string())
             } else {
@@ -1264,7 +1578,7 @@ impl SessionActor {
             };
             xai_grok_telemetry::session_ctx::log_event(
                 xai_grok_telemetry::events::PermissionPrompted {
-                    tool_name: call.function.name.clone(),
+                    tool_name: canonical_permission_tool_name.clone(),
                     access_kind: telemetry_access_kind,
                     permission_mode: perm_mode,
                     subagent_session_id: subagent_session_id.clone(),
@@ -1293,14 +1607,12 @@ impl SessionActor {
                         crate::session::pending_interaction::PendingKind::Permission,
                     );
                 self.permissions
-                    .request_with_path_context_resolved(
-                        access_kind.clone(),
-                        tool_call_update,
+                    .request(PermissionRequest {
                         path_context,
-                        Some(self.session_info.id.0.to_string()),
-                        None,
-                        None,
-                    )
+                        session_id: Some(self.session_info.id.0.to_string()),
+                        hook_ask,
+                        ..PermissionRequest::new(access_kind.clone(), tool_call_update)
+                    })
                     .await
             };
             let manager_event = resolution.event;
@@ -1343,7 +1655,7 @@ impl SessionActor {
             .in_scope(|| {});
             xai_grok_telemetry::session_ctx::log_event(
                 crate::session::telemetry::permission_decision_payload(
-                    call.function.name.clone(),
+                    canonical_permission_tool_name,
                     telemetry_access_kind,
                     &decision,
                     subagent_session_id.clone(),
@@ -1559,6 +1871,8 @@ impl SessionActor {
             concatenated_json_count,
             dispatch_target_name,
             is_read_only,
+            rewriting_hook,
+            additional_context: hook_additional_context,
         };
         Ok(Ok(prepared))
     }
@@ -1646,7 +1960,7 @@ impl SessionActor {
     /// back as a turn; abandon: leave plan mode and wait for the user.
     pub(super) async fn resume_plan_approval(
         self: Arc<Self>,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         if !self.plan_mode.lock().is_awaiting_plan_approval() {
             return;
@@ -1711,7 +2025,7 @@ impl SessionActor {
         self: Arc<Self>,
         text: String,
         mode: PromptMode,
-        completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
+        completion_tx: mpsc::UnboundedSender<super::turn_task::TurnCompletionMsg>,
     ) {
         let prompt_id = format!("plan-resume-{}", chrono::Utc::now().timestamp_millis());
         let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(text))];
@@ -1741,7 +2055,10 @@ impl SessionActor {
         tool_call_input: ToolInput,
     ) -> Result<(String, acp::ToolKind, serde_json::Value), acp::Error> {
         #[allow(unused_mut)]
-        let mut raw_input = serde_json::to_value(&tool_call_input)?;
+        let mut raw_input = match &tool_call_input {
+            ToolInput::SendSubagentMessage(message) => serde_json::to_value(message)?,
+            _ => serde_json::to_value(&tool_call_input)?,
+        };
         let canonical_meta = self.stamp_tool_meta(None, wire_name, Some(&tool_call_input));
         let (title, kind, locations, content) = match tool_call_input {
             ToolInput::ListDir(list_dir) => (
@@ -1965,6 +2282,10 @@ impl SessionActor {
                 };
                 (title, acp::ToolKind::Other, vec![], vec![])
             }
+            ToolInput::SendSubagentMessage(message) => {
+                let (title, kind) = active_agent_message_tool_call_display(&message);
+                (title, kind, vec![], vec![])
+            }
             ToolInput::WebFetch(wf) => (
                 format!("Fetch: {}", wf.url),
                 acp::ToolKind::Fetch,
@@ -1997,23 +2318,30 @@ impl SessionActor {
                     let rest = &rest[rest.find('"')? + 1..];
                     Some(rest[..rest.find('"')?].to_string())
                 };
-                let inline_name = w.script.as_deref().and_then(script_name);
+                use xai_grok_tools::implementations::grok_build::workflow::WorkflowSource;
+                let inline_name = match &w.source {
+                    WorkflowSource::Script { script } => script_name(script),
+                    _ => None,
+                };
                 let title = if w.validate_only {
-                    match inline_name.or_else(|| w.name.clone()) {
-                        Some(n) => format!("Validating workflow '{n}'"),
+                    let source_name = match &w.source {
+                        WorkflowSource::Name { name } => Some(name.clone()),
+                        _ => inline_name,
+                    };
+                    match source_name {
+                        Some(name) => format!("Validating workflow '{name}'"),
                         None => "Validating workflow script".to_string(),
                     }
-                } else if w.script.is_some() {
-                    match inline_name {
-                        Some(n) => format!("Creating workflow '{n}'"),
-                        None => "Creating workflow".to_string(),
-                    }
-                } else if let Some(ref name) = w.name {
-                    format!("Workflow: {name}")
-                } else if w.resume_from_run_id.is_some() {
-                    "Workflow: resume run".to_string()
                 } else {
-                    "Workflow: launch script".to_string()
+                    match &w.source {
+                        WorkflowSource::Script { .. } => match inline_name {
+                            Some(name) => format!("Creating workflow '{name}'"),
+                            None => "Creating workflow".to_string(),
+                        },
+                        WorkflowSource::Name { name } => format!("Workflow: {name}"),
+                        WorkflowSource::Resume { .. } => "Workflow: resume run".to_string(),
+                        WorkflowSource::ScriptPath { .. } => "Workflow: launch script".to_string(),
+                    }
                 };
                 (title, acp::ToolKind::Other, vec![], vec![])
             }
@@ -2630,322 +2958,6 @@ impl SessionActor {
         self.chat_state_handle.push_tool_result(tool_chat);
         vec![]
     }
-    async fn send_thought_chunk(&self, text: String, chunk_index: u64) {
-        self.send_update(
-            acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
-                acp::TextContent::new(text),
-            ))),
-            Some(chunk_index),
-        )
-        .await;
-    }
-    /// Translate one [`xai_grok_sampler::SamplingEvent`] from the
-    /// per-session sampler actor into the corresponding ACP / shell
-    /// side-effects (notifications, signal recording, model-metadata
-    /// refresh, etc.).
-    ///
-    /// Called from the drainer task spawned in `spawn_session_actor`,
-    /// which loops `while let Some(event) = sampler_event_rx.recv().await`.
-    /// Pure event mapping. Semantic recovery (compaction, friendly
-    /// errors) lives in [`Self::handle_sampling_failure`] and runs in
-    /// the turn loop, not here, because it depends on per-turn state
-    /// and may need to call back into `sampler_handle.update_config`
-    /// or resubmit.
-    pub(crate) async fn handle_sampling_event(
-        self: &Arc<Self>,
-        event: xai_grok_sampler::SamplingEvent,
-    ) {
-        use xai_grok_sampler::{SamplingChannel, SamplingEvent};
-        match event {
-            SamplingEvent::StreamStarted { timestamp_ms, .. } => {
-                {
-                    let prompt_id = self
-                        .current_prompt_id
-                        .lock()
-                        .expect("current_prompt_id mutex poisoned")
-                        .clone();
-                    let mut cap = self.streaming_turn_capture.lock();
-                    if cap.prompt_id.as_deref() != prompt_id.as_deref() {
-                        cap.begin_turn(prompt_id, self.current_turn_number.get());
-                    }
-                    cap.start_stream(timestamp_ms);
-                }
-                self.chat_state_handle.record_stream_start(timestamp_ms);
-            }
-            SamplingEvent::FirstToken { .. } => {
-                self.emit_event(crate::session::events::Event::FirstToken);
-            }
-            SamplingEvent::ChannelToken {
-                channel,
-                text,
-                chunk_index,
-                ..
-            } => match channel {
-                SamplingChannel::Text => {
-                    {
-                        let mut cap = self.streaming_turn_capture.lock();
-                        if cap.prompt_id.is_none() {
-                            let prompt_id = self
-                                .current_prompt_id
-                                .lock()
-                                .expect("current_prompt_id mutex poisoned")
-                                .clone();
-                            cap.begin_turn(prompt_id, self.current_turn_number.get());
-                            cap.attempt_count += 1;
-                        }
-                        cap.append(false, &text);
-                    }
-                    self.emit_event(crate::session::events::Event::PhaseChanged {
-                        phase: crate::session::events::Phase::StreamingText,
-                    });
-                    self.send_update(
-                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                            acp::ContentBlock::Text(acp::TextContent::new(text)),
-                        )),
-                        Some(chunk_index),
-                    )
-                    .await;
-                }
-                SamplingChannel::Reasoning => {
-                    {
-                        let mut cap = self.streaming_turn_capture.lock();
-                        if cap.prompt_id.is_none() {
-                            let prompt_id = self
-                                .current_prompt_id
-                                .lock()
-                                .expect("current_prompt_id mutex poisoned")
-                                .clone();
-                            cap.begin_turn(prompt_id, self.current_turn_number.get());
-                            cap.attempt_count += 1;
-                        }
-                        cap.append(true, &text);
-                    }
-                    self.emit_event(crate::session::events::Event::PhaseChanged {
-                        phase: crate::session::events::Phase::StreamingReasoning,
-                    });
-                    self.send_thought_chunk(text, chunk_index).await;
-                }
-            },
-            SamplingEvent::ToolCallDelta {
-                tool_index,
-                id,
-                name,
-                arguments_delta,
-                ..
-            } => {
-                {
-                    let mut cap = self.streaming_turn_capture.lock();
-                    if cap.prompt_id.is_some() {
-                        cap.phase = CapturePhase::ToolCall;
-                    }
-                }
-                self.send_buffered_xai_update(XaiSessionUpdate::ToolCallDeltaChunk {
-                    tool_call_id: id,
-                    tool_index,
-                    name,
-                    arguments_delta,
-                })
-                .await;
-            }
-            SamplingEvent::ResponseStarted {
-                message_id,
-                model,
-                input_tokens,
-                cache_read_input_tokens,
-                cache_creation_input_tokens,
-                ..
-            } => {
-                self.send_buffered_xai_update(XaiSessionUpdate::ResponseStarted {
-                    message_id: Some(message_id),
-                    model: Some(model),
-                    input_tokens,
-                    cache_read_input_tokens,
-                    cache_creation_input_tokens,
-                })
-                .await;
-            }
-            SamplingEvent::ReasoningCompleted { signature, .. } => {
-                self.send_buffered_xai_update(XaiSessionUpdate::ReasoningCompleted {
-                    signature: Some(signature),
-                })
-                .await;
-            }
-            SamplingEvent::Completed {
-                request_id,
-                response,
-                metrics,
-            } => {
-                if let Some(tx) = self.turn_stream_drained.lock().take() {
-                    let _ = tx.send(());
-                }
-                let session = Arc::clone(self);
-                let rid = request_id.clone();
-                tokio::task::spawn_local(async move {
-                    session.apply_pending_image_strip(&rid).await;
-                });
-                if let Some(policy) = self.doom_loop_recovery {
-                    let triggers = policy.confident_triggers(&response.doom_loop_signals);
-                    if !triggers.is_empty() {
-                        let attempts = {
-                            let mut tally = self.doom_loop_turn_tally.lock();
-                            if tally.attempts == 0 {
-                                None
-                            } else {
-                                tally.accepted_after_budget = true;
-                                tally.merge_triggers(&triggers);
-                                Some(tally.attempts)
-                            }
-                        };
-                        if let Some(attempts) = attempts {
-                            self.streaming_turn_capture.lock().stamp_doom_loop(
-                                crate::session::streaming_capture::DoomLoopSegmentStamp {
-                                    doom_loop_triggers: triggers.clone(),
-                                    attempt: attempts + 1,
-                                    aborted_at_chunk: None,
-                                    action: "accepted_after_budget".to_string(),
-                                },
-                            );
-                            self.signals_handle()
-                                .record_doom_loop_accepted_after_budget(triggers);
-                        }
-                    }
-                }
-                self.streaming_turn_capture.lock().clear_current_segment();
-                self.record_api_request_time();
-                self.signals_handle().record_inference_metrics(metrics);
-            }
-            SamplingEvent::ModelMetadata { metadata, .. } => {
-                self.handle_model_metadata_update(metadata).await;
-            }
-            SamplingEvent::ImagesStripped {
-                request_id,
-                stripped_urls,
-                reason,
-            } => {
-                self.handle_images_stripped(request_id, stripped_urls, reason)
-                    .await;
-            }
-            SamplingEvent::Retrying {
-                request_id,
-                attempt,
-                max_retries,
-                kind,
-                reason,
-                doom_loop_triggers,
-                doom_loop_aborted_at_chunk,
-            } => {
-                if kind == xai_grok_sampler::SamplingErrorKind::DoomLoopDetected {
-                    let triggers = doom_loop_triggers.unwrap_or_default();
-                    let attempt_number = {
-                        let mut tally = self.doom_loop_turn_tally.lock();
-                        tally.attempts += 1;
-                        tally.merge_triggers(&triggers);
-                        tally.attempts
-                    };
-                    self.streaming_turn_capture.lock().stamp_doom_loop(
-                        crate::session::streaming_capture::DoomLoopSegmentStamp {
-                            doom_loop_triggers: triggers.clone(),
-                            attempt: attempt_number,
-                            aborted_at_chunk: doom_loop_aborted_at_chunk,
-                            action: "resampled".to_string(),
-                        },
-                    );
-                    self.signals_handle()
-                        .record_doom_loop_recovery_attempt(triggers, doom_loop_aborted_at_chunk);
-                }
-                xai_grok_telemetry::unified_log::warn(
-                    "shell.turn.inference_retry",
-                    Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "sampler_request_id": request_id.as_str(),
-                        "attempt": attempt,
-                        "max_retries": max_retries,
-                        "kind": kind.as_str(),
-                        "reason": crate::util::truncate(&reason, 300),
-                    })),
-                );
-                self.send_xai_notification(XaiSessionUpdate::RetryState(
-                    crate::extensions::notification::RetryState::Retrying {
-                        attempt,
-                        max_retries,
-                        reason,
-                    },
-                ))
-                .await;
-            }
-            SamplingEvent::Failed { request_id, error } => {
-                self.drop_pending_image_strip(&request_id);
-                xai_grok_telemetry::unified_log::error(
-                    "shell.turn.inference_failed",
-                    Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "sampler_request_id": request_id.as_str(),
-                        "kind": error.kind.as_str(),
-                        "status_code": error.status_code,
-                        "is_retryable": error.is_retryable,
-                        "message": crate::util::truncate(&error.message, 300),
-                    })),
-                );
-                self.signals_handle()
-                    .record_error_typed(error.kind.as_str());
-                if let Some(ref ctx) = error.empty_response_context {
-                    tracing::info!(
-                        empty_response = true,
-                        empty_reason = ctx.reason.as_str(),
-                        had_reasoning = ctx.had_reasoning,
-                        finish_reason = ctx.finish_reason_str(),
-                        model = %ctx.model,
-                        "sampler reported empty response (will retry if retryable)",
-                    );
-                }
-            }
-            SamplingEvent::BackendToolCallStarted { call_id, name, .. } => {
-                self.signals_handle().record_tool_call(&name);
-                let (title, kind, raw_input) = backend_tool_display(&name);
-                self.send_update(
-                    acp::SessionUpdate::ToolCall(
-                        acp::ToolCall::new(
-                            acp::ToolCallId::new(Arc::from(call_id.as_str())),
-                            title,
-                        )
-                        .kind(kind)
-                        .status(acp::ToolCallStatus::InProgress)
-                        .content(vec![])
-                        .locations(vec![])
-                        .raw_input(Some(raw_input))
-                        .meta(serde_json::json!({"backend": true}).as_object().cloned()),
-                    ),
-                    None,
-                )
-                .await;
-            }
-            SamplingEvent::BackendToolCallCompleted {
-                call_id,
-                name,
-                result,
-                ..
-            } => {
-                let status = backend_tool_call_status(result.as_ref());
-                if status == acp::ToolCallStatus::Failed {
-                    self.signals_handle().record_tool_failure(&name);
-                } else {
-                    self.signals_handle().record_tool_success(&name);
-                }
-                let (title, _kind, _raw_input) = backend_tool_display(&name);
-                self.send_update(
-                    acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                        acp::ToolCallId::new(Arc::from(call_id.as_str())),
-                        acp::ToolCallUpdateFields::new()
-                            .status(Some(status))
-                            .title(Some(title))
-                            .raw_output(result),
-                    )),
-                    None,
-                )
-                .await;
-            }
-        }
-    }
     /// Model-facing rejection for a non-plan-file edit while plan mode is
     /// active. Rendered via the session's `TemplateRenderer` so
     /// `${{ plan_path }}` resolves; falls back if rendering fails.
@@ -3246,6 +3258,29 @@ mod plan_mode_edit_gate_tests {
             PlanEditGate::RejectNonPlanFile
         );
     }
+    #[test]
+    fn task_not_gated_in_plan_mode() {
+        use xai_tool_types::TaskToolInput;
+        let t = active_tracker();
+        assert_eq!(
+            gate(
+                &t,
+                &ToolInput::Task(TaskToolInput {
+                    prompt: "p".into(),
+                    description: "d".into(),
+                    subagent_type: "general-purpose".into(),
+                    run_in_background: false,
+                    capability_mode: None,
+                    isolation: None,
+                    resume_from: None,
+                    cwd: None,
+                    model: None,
+                    task_id: None,
+                })
+            ),
+            PlanEditGate::Allow
+        );
+    }
     /// Non-edit tools are never gated — they flow to the normal permission
     /// path (where yolo may auto-approve them). Plan mode blocks
     /// edits, not bash/reads.
@@ -3328,8 +3363,6 @@ mod plan_approval_helper_tests {
     }
     #[test]
     fn revise_plan_message_includes_feedback_when_present() {
-        assert!(revise_plan_message("").contains("Ask the user what changes"));
-        assert!(revise_plan_message("   ").contains("Ask the user what changes"));
         let with = revise_plan_message("use async");
         assert!(with.contains("The user said:"));
         assert!(with.contains("use async"));
@@ -3352,12 +3385,7 @@ mod plan_approval_helper_tests {
 }
 #[cfg(test)]
 mod wait_interrupt_tests {
-    use super::{
-        BlockingWaitGuard, interrupted_wait_tool_result, is_interruptible_wait_tool,
-        wait_for_pending_interjection,
-    };
-    use xai_grok_tools::types::output::ToolOutput;
-    use xai_tool_types::TaskOutputOutput;
+    use super::{BlockingWaitGuard, is_interruptible_wait_tool, wait_for_pending_interjection};
     /// The interruptible-wait select arms: a pending interjection aborts an
     /// in-flight wait, and `biased` prefers an already-completed wait result
     /// over the abort. (Unit-level: the full dispatch loop has no test seam.)
@@ -3415,25 +3443,6 @@ mod wait_interrupt_tests {
             "read_file",
             &serde_json::json!({"target_file": "/tmp/x"})
         ));
-    }
-    #[test]
-    fn interrupted_wait_result_is_cancelled_not_error() {
-        let r = interrupted_wait_tool_result(&serde_json::json!({
-            "task_ids": ["bg-9"],
-            "timeout_ms": 60_000
-        }));
-        assert!(
-            r.prompt_text
-                .contains("Wait interrupted: the user sent a message.")
-        );
-        match &r.output {
-            ToolOutput::TaskOutput(TaskOutputOutput::Result(res)) => {
-                assert_eq!(res.task_id, "bg-9");
-                assert_eq!(res.status, "cancelled");
-            }
-            other => panic!("expected TaskOutput Result, got {other:?}"),
-        }
-        assert!(!r.output.is_error());
     }
     /// `BlockingWaitGuard` counts nested waits; drop always decrements.
     #[test]

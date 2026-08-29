@@ -1,6 +1,5 @@
-//! Coding-data sharing upsell banner (Figma "Data Sharing Upsell",
-//! node 8698:3690). Shared by the welcome tip slot and the agent-view
-//! banner slot; visibility is gated by `AppView::privacy_banner_should_show`.
+//! Coding-data sharing upsell banner (the Figma "Data Sharing Upsell" design).
+//! Shared by the welcome tip slot and the agent-view banner slot; visibility is gated by `AppView::privacy_banner_should_show`.
 
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
@@ -23,9 +22,8 @@ pub(crate) const PRIVACY_BANNER_POLICY_URL: &str = "https://x.ai/legal/privacy-p
 /// `(text, url_when_link)`.
 type LegalSegment = (&'static str, Option<&'static str>);
 
-/// Widest first; the first that fits *whole* wins. A clipped line would
-/// leave hit rects over unreadable link text, and every variant keeps both
-/// links so neither document becomes unreachable.
+/// Widest first; the first that fits *whole* wins.
+/// A clipped line would leave hit rects over unreadable link text, and every variant keeps both links so neither document becomes unreachable.
 const PRIVACY_BANNER_LEGAL_VARIANTS: [&[LegalSegment]; 3] = [
     &[
         ("Read ", None),
@@ -143,12 +141,10 @@ const CHROME_ROWS: u16 = 2;
 
 pub(crate) const MIN_HEIGHT: u16 = CHROME_ROWS + 1;
 
-/// Caps banner growth on narrow terminals; overflow is elided with `…` so
-/// the disclosure never looks complete when it isn't.
+/// Caps banner growth on narrow terminals; overflow is elided with `…` so the disclosure never looks complete when it isn't.
 const MAX_BODY_ROWS: usize = 4;
 
-/// Past this, the body abandons the button column for the full slot width:
-/// a shorter banner beats a tidy right edge.
+/// Past this, the body abandons the button column for the full slot width: a shorter banner beats a tidy right edge.
 const PREFERRED_BODY_ROWS: usize = 3;
 
 pub(crate) struct PrivacyBannerRects {
@@ -232,8 +228,7 @@ fn body_lines(
     lines
 }
 
-/// Rows needed at `width` — the body wraps, so both slot owners must size
-/// from this rather than a constant.
+/// Rows needed at `width`; the body wraps, so both slot owners must size from this rather than a constant.
 pub(crate) fn height(width: u16) -> u16 {
     height_with_locale(width, None)
 }
@@ -242,8 +237,7 @@ pub(crate) fn height_with_locale(width: u16, locale: Option<&crate::locale::Loca
     CHROME_ROWS + (body_lines(width, locale).len() as u16).max(1)
 }
 
-/// Needs `area.height >= MIN_HEIGHT`; give it [`height`] rows for the full
-/// body.
+/// Needs `area.height >= MIN_HEIGHT`; give it [`height`] rows for the full body.
 pub(crate) fn render(
     area: Rect,
     buf: &mut Buffer,
@@ -268,7 +262,6 @@ pub(crate) fn render_with_locale(
         mouse_pos.is_some_and(|(mx, my)| r.contains(ratatui::layout::Position::new(mx, my)))
     };
 
-    // Figma node 8698:3806.
     buf.set_stringn(
         area.x,
         area.y,
@@ -294,7 +287,7 @@ pub(crate) fn render_with_locale(
         buf,
     );
 
-    // Last row, so it gets the full width — no buttons to dodge.
+    // Last row, so it gets the full width; no buttons to dodge
     let gray = Style::default().fg(theme.gray);
     let legal_y = area.y + area.height - 1;
     let mut terms_rect = Rect::default();
@@ -402,8 +395,7 @@ pub(crate) fn render_with_locale(
 mod tests {
     use super::*;
 
-    /// Render at `width` into a buffer sized by [`height`], returning the
-    /// rows (trailing blanks trimmed) and the hit rects.
+    /// Render at `width` into a buffer sized by [`height`], returning the rows (trailing blanks trimmed) and the hit rects.
     fn draw(width: u16) -> (Vec<String>, PrivacyBannerRects) {
         let h = height(width);
         let area = Rect::new(0, 0, width, h);
@@ -439,8 +431,7 @@ mod tests {
             .collect()
     }
 
-    /// Slot owners reserve [`height`] rows, so the last one it promises must
-    /// be the legal line — not a body row pushed off the end.
+    /// Slot owners reserve [`height`] rows, so the last one it promises must be the legal line, not a body row pushed off the end.
     #[test]
     fn height_reserves_every_row_the_banner_paints() {
         for width in [200, 117, 110, 100, 80, 72, 60, 45, 40, 36, 30, 24, 18] {
@@ -465,7 +456,7 @@ mod tests {
         }
     }
 
-    /// The row cap's elision is a narrow-terminal fallback, not the norm.
+    /// The elision at the row cap is a fallback for narrow terminals.
     #[test]
     fn body_copy_is_complete_at_common_widths() {
         for width in [200, 117, 100, 80, 60] {
@@ -514,8 +505,7 @@ mod tests {
         assert_eq!(rects.policy, Rect::default());
     }
 
-    /// The two links open different documents, so an off-by-one rect sends
-    /// the user to the wrong page.
+    /// The two links open different documents, so an off-by-one rect sends the user to the wrong page.
     #[test]
     fn each_legal_link_hits_its_own_words() {
         for width in [200, 117, 80, 60, 40, 30, 24, 18] {

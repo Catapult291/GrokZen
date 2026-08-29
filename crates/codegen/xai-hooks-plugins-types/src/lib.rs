@@ -244,6 +244,16 @@ pub struct HookInfo {
     /// Whether this hook is disabled via ~/.grok/disabled-hooks.
     #[serde(default)]
     pub disabled: bool,
+    /// Enforced by root-owned managed policy: disable actions are refused
+    /// and disable state is ignored, so surfaces should show the pinned
+    /// state up front rather than let a refusal be the first signal.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Whether `HooksAction::Remove` can succeed for this hook's source:
+    /// true only for user-registered hook directories, so surfaces don't
+    /// offer removal elsewhere.
+    #[serde(default)]
+    pub removable: bool,
 }
 
 /// Response for `x.ai/hooks/list`.
@@ -748,6 +758,8 @@ mod tests {
             timeout_ms: 5000,
             source_dir: "/home/user/.grok/hooks".into(),
             disabled: false,
+            pinned: false,
+            removable: true,
         };
         let json = serde_json::to_string(&hook).unwrap();
         assert!(json.contains("handlerType"));

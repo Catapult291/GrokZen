@@ -15,8 +15,6 @@ mod mcp;
 pub use mcp::*;
 mod permission;
 pub use permission::*;
-mod pool;
-pub use pool::*;
 use serde::{Deserialize, Serialize};
 use xai_grok_announcements::RemoteAnnouncement;
 /// A remote `campaigns[]` entry: an `id` gate plus a full-power
@@ -278,6 +276,23 @@ fn de_opt_bool_tolerant<'de, D: serde::Deserializer<'de>>(
         fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self::Value, E> {
             Ok(None)
         }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            while map
+                .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                .is_some()
+            {}
+            Ok(None)
+        }
     }
     deserializer.deserialize_any(V)
 }
@@ -463,6 +478,10 @@ pub struct RemoteSettings {
     /// turns instead of background subagents.
     #[serde(default)]
     pub scheduler_background_loops: Option<bool>,
+    /// Fleet kill switch for turn-level transient retries; applies at next
+    /// spawn, local config/env win. Malformed values must not fail the parse.
+    #[serde(default, deserialize_with = "de_opt_bool_tolerant")]
+    pub turn_transient_retry: Option<bool>,
     /// Release channel: `"stable"` or `"alpha"`.
     /// Fallback when no local `[cli] channel` or `--alpha`/`--stable` flag is set.
     #[serde(default)]
@@ -551,6 +570,8 @@ pub struct RemoteSettings {
     pub folder_trust_enabled: Option<bool>,
     #[serde(default)]
     pub write_file_enabled: Option<bool>,
+    #[serde(default)]
+    pub active_agent_messages_enabled: Option<bool>,
     /// File toolset: `"standard"` or `"hashline"`.
     /// Server-side default; local `[toolset] file_toolset` in config.toml
     /// takes precedence when set.
@@ -740,9 +761,8 @@ pub struct RemoteSettings {
     /// threshold the shell speculatively summarizes the history prefix in the
     /// background (pass 1 → NOTE₁); at compaction it summarizes NOTE₁ + the
     /// recent tail (pass 2 → final summary), keeping summarizer latency off the
-    /// critical path. `Some(true)` enables (remote rollout), `Some(false)` forces
-    /// off, `None` falls back to `[features] two_pass_compaction` /
-    /// `GROK_TWO_PASS_COMPACTION` / default (off).
+    /// critical path. `Some(false)` forces off, `None` falls through env /
+    /// `[features]` / default (on).
     #[serde(default)]
     pub two_pass_compaction_enabled: Option<bool>,
     /// Dynamic tip list from remote settings. When present with non-empty entries,
@@ -786,7 +806,7 @@ pub struct RemoteSettings {
     /// ghost text), from the `grok_build_settings` remote settings flag. Sits below
     /// env (`GROK_PROMPT_SUGGESTIONS_MODEL`) and `[models] prompt_suggestion`
     /// in config.toml, above the client hint and the built-in
-    /// `grok-build-0.1` default. The effective model is catalog-guarded: when
+    /// `grok-4.6` default. The effective model is catalog-guarded: when
     /// it is not in the shell's model catalog the suggestion request is
     /// skipped entirely (never the session model). See
     /// `ModelOverrideConfig::resolve` and `handle_suggest_prompt`.
@@ -1038,6 +1058,8 @@ pub struct RemoteSettings {
     pub subagents_max_depth: Option<u32>,
     #[serde(default)]
     pub subagents_max_concurrent: Option<u32>,
+    #[serde(default)]
+    pub subagents_sampling_limit: Option<u32>,
     /// `"queue"` or `"fail"`.
     #[serde(default)]
     pub subagents_limit_behavior: Option<String>,
@@ -1253,6 +1275,9 @@ pub struct GoalRoleModel {
     pub agent_type: String,
 }
 #[cfg(test)]
+#[path = "remote_settings_tests.rs"]
+mod remote_settings_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -1346,6 +1371,38 @@ mod tests {
         assert_eq!(s.worktree_auto_gc, None);
     }
     #[test]
+    fn remote_settings_turn_transient_retry_malformed_value_does_not_poison_siblings() {
+        let s: RemoteSettings =
+            serde_json::from_str(r#"{"turn_transient_retry": "false", "leader_mode": true}"#)
+                .unwrap();
+        assert_eq!(
+            s.turn_transient_retry, None,
+            "malformed value drops to None"
+        );
+        assert_eq!(s.leader_mode, Some(true), "siblings survive");
+    }
+    #[test]
+    fn tolerant_bool_swallows_array_and_object_shapes() {
+        for bad in [
+            r#"{"turn_transient_retry": [1,2], "leader_mode": true}"#,
+            r#"{"turn_transient_retry": {"a": 1}, "leader_mode": true}"#,
+        ] {
+            let s: RemoteSettings = serde_json::from_str(bad).unwrap();
+            assert_eq!(s.turn_transient_retry, None);
+            assert_eq!(s.leader_mode, Some(true), "siblings survive: {bad}");
+        }
+    }
+    #[test]
+    fn remote_settings_turn_transient_retry_round_trip_and_default_absent() {
+        let s: RemoteSettings = serde_json::from_str(r#"{"turn_transient_retry": false}"#).unwrap();
+        assert_eq!(s.turn_transient_retry, Some(false));
+        let round_trip: RemoteSettings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(round_trip.turn_transient_retry, Some(false));
+        let absent: RemoteSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.turn_transient_retry, None);
+    }
+    #[test]
     fn remote_settings_vendor_sessions_round_trip_and_default_absent() {
         let session_flags = |settings: &RemoteSettings| {
             (
@@ -1375,18 +1432,18 @@ mod tests {
     }
     #[test]
     fn remote_settings_image_description_model_round_trip() {
-        let json = r#"{"image_description_model": "grok-build"}"#;
+        let json = r#"{"image_description_model": "grok-4.6"}"#;
         let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.image_description_model.as_deref(), Some("grok-build"));
+        assert_eq!(s.image_description_model.as_deref(), Some("grok-4.6"));
         let out = serde_json::to_string(&s).unwrap();
         let s2: RemoteSettings = serde_json::from_str(&out).unwrap();
         assert_eq!(s2.image_description_model, s.image_description_model);
     }
     #[test]
     fn remote_settings_prompt_suggestion_model_round_trip() {
-        let json = r#"{"prompt_suggestion_model": "grok-build-0.1"}"#;
+        let json = r#"{"prompt_suggestion_model": "grok-4.6"}"#;
         let s: RemoteSettings = serde_json::from_str(json).unwrap();
-        assert_eq!(s.prompt_suggestion_model.as_deref(), Some("grok-build-0.1"));
+        assert_eq!(s.prompt_suggestion_model.as_deref(), Some("grok-4.6"));
         let out = serde_json::to_string(&s).unwrap();
         let s2: RemoteSettings = serde_json::from_str(&out).unwrap();
         assert_eq!(s2.prompt_suggestion_model, s.prompt_suggestion_model);

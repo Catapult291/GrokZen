@@ -2,6 +2,7 @@
 //! memory tool registration, and note rewriting.
 
 use super::*;
+use xai_grok_telemetry::session_end::{self, Phase};
 
 #[derive(Debug)]
 pub(super) struct MemoryFlushSnapshot {
@@ -100,68 +101,75 @@ impl SessionActor {
     ///
     /// `log_suffix` is appended to the `MEMORY_SESSION_END:` log line so each
     /// arm keeps a distinct reason string in logs.
-    pub(super) async fn run_session_end_memory_pipeline(&self, log_suffix: &str) {
-        let mut session_end_result = "disabled";
-        let mut total_chunks_at_end = 0usize;
-        // Dream consolidates *prior* logs. Run after Written/Failed, or when
-        // save was Skipped for config (`save_on_end=false`) but the session
-        // still meets the size threshold. Empty/brief sessions stay off.
-        let mut run_exit_dream = false;
-        if !self.startup_hints.is_subagent {
-            if let Some(storage) = self.memory.storage() {
-                let conversation = self.chat_state_handle.get_conversation().await;
-                let result = crate::session::memory::hooks::on_session_end(
-                    &storage,
-                    &conversation,
-                    &self.session_info.id.0,
-                    self.memory.save_on_end,
-                );
-                match &result {
-                    crate::session::memory::hooks::SessionEndResult::Written(path_str) => {
-                        session_end_result = "written";
-                        run_exit_dream = true;
-                        self.reindex_and_embed(std::path::Path::new(path_str), "session")
-                            .await;
-                        self.send_xai_notification(XaiSessionUpdate::MemorySessionSaved {
-                            path: path_str.clone(),
-                        })
-                        .await;
-                    }
-                    crate::session::memory::hooks::SessionEndResult::Skipped => {
-                        session_end_result = "skipped";
-                        // `Skipped` also means save_on_end=false — still dream
-                        // when the conversation is substantial.
-                        run_exit_dream =
-                            crate::session::memory::hooks::queries_meeting_session_end_threshold(
-                                &conversation,
-                            )
-                            .is_some();
-                    }
-                    crate::session::memory::hooks::SessionEndResult::Failed(_) => {
-                        session_end_result = "failed";
-                        run_exit_dream = true;
-                    }
-                }
-                total_chunks_at_end = storage.total_chunk_count();
-                let telem = self.memory.telemetry_snapshot();
-                let msg = format!("MEMORY_SESSION_END: {log_suffix}");
-                tracing::info!(
-                    target: xai_grok_telemetry::memory_log::TARGET,
-                    result = ?result,
-                    tool_searches = telem.tool_search_count,
-                    injection_searches = telem.injection_count,
-                    recovery_searches = telem.compaction_recovery_count,
-                    "{msg}"
-                );
-            }
-        } else {
+    pub(super) async fn run_session_end_memory_pipeline(
+        &self,
+        log_suffix: &str,
+        timer: &xai_grok_telemetry::session_end::SharedSessionEndTimer,
+    ) {
+        let span = session_end::span(Phase::Memory);
+        if self.startup_hints.is_subagent {
             tracing::debug!(
                 target: xai_grok_telemetry::memory_log::TARGET,
                 "MEMORY_SUBAGENT_SKIP: skipping on_session_end for subagent session"
             );
             return;
         }
+        let mut session_end_result = "disabled";
+        let mut total_chunks_at_end = 0usize;
+        // Dream consolidates *prior* logs. Run after Written/Failed, or when
+        // save was Skipped for config (`save_on_end=false`) but the session
+        // still meets the size threshold. Empty/brief sessions stay off.
+        let mut run_exit_dream = false;
+        if let Some(storage) = self.memory.storage() {
+            let _save = session_end::timed_child(timer, Phase::MemorySave, span.span());
+            let conversation = self.chat_state_handle.get_conversation().await;
+            let result = crate::session::memory::hooks::on_session_end(
+                &storage,
+                &conversation,
+                &self.session_info.id.0,
+                self.memory.save_on_end,
+            );
+            match &result {
+                crate::session::memory::hooks::SessionEndResult::Written(path_str) => {
+                    session_end_result = "written";
+                    run_exit_dream = true;
+                    self.reindex_and_embed(std::path::Path::new(path_str), "session")
+                        .await;
+                    self.send_xai_notification(XaiSessionUpdate::MemorySessionSaved {
+                        path: path_str.clone(),
+                    })
+                    .await;
+                }
+                crate::session::memory::hooks::SessionEndResult::Skipped => {
+                    session_end_result = "skipped";
+                    // `Skipped` also means save_on_end=false — still dream
+                    // when the conversation is substantial.
+                    run_exit_dream =
+                        crate::session::memory::hooks::queries_meeting_session_end_threshold(
+                            &conversation,
+                        )
+                        .is_some();
+                }
+                crate::session::memory::hooks::SessionEndResult::Failed(_) => {
+                    session_end_result = "failed";
+                    run_exit_dream = true;
+                }
+            }
+            total_chunks_at_end = storage.total_chunk_count();
+            let telem = self.memory.telemetry_snapshot();
+            let msg = format!("MEMORY_SESSION_END: {log_suffix}");
+            tracing::info!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                result = ?result,
+                tool_searches = telem.tool_search_count,
+                injection_searches = telem.injection_count,
+                recovery_searches = telem.compaction_recovery_count,
+                "{msg}"
+            );
+        }
         if run_exit_dream {
+            let _consolidate =
+                session_end::timed_child(timer, Phase::MemoryConsolidate, span.span());
             self.maybe_run_dream().await;
         }
         let telem = self.memory.telemetry_snapshot();
@@ -729,11 +737,11 @@ impl SessionActor {
     }
 
     /// Rewrite a raw memory note into well-structured markdown via a one-shot
-    /// LLM call using the `grok-build` model.
+    /// LLM call using the `grok-4.6` model.
     ///
-    /// Follows the same streaming pattern as [`handle_ai_suggest`]: prepares
-    /// a sampling client, builds a system+user prompt, streams the response,
-    /// and returns the collected text.
+    /// Follows the same pattern as [`handle_ai_suggest`]: prepares a
+    /// sampling client, builds a system+user prompt, collects the response
+    /// with a short idle timeout, and returns the text.
     pub(super) async fn handle_rewrite_memory_note(
         &self,
         raw_text: &str,
@@ -776,51 +784,19 @@ impl SessionActor {
         let request = ConversationRequest {
             items,
             tools: vec![],
-            model: Some("grok-build".to_owned()),
+            model: Some("grok-4.6".to_owned()),
             temperature: Some(0.3),
             max_output_tokens: Some(1024),
             ..Default::default()
         };
 
-        let request_id = xai_grok_sampler::RequestId::random();
-        let idle_timeout = std::time::Duration::from_secs(15);
-
-        let result = match sampling_client.api_backend() {
-            crate::sampling::ApiBackend::ChatCompletions => {
-                let (raw, meta) = sampling_client
-                    .conversation_stream(request)
-                    .await
-                    .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events =
-                    xai_grok_sampler::stream_chat_completions(raw, meta, request_id, idle_timeout);
-                xai_grok_sampler::collect_response(events).await
-            }
-            crate::sampling::ApiBackend::Responses => {
-                let (raw, meta, doom_loop) = sampling_client
-                    .conversation_stream_responses(request)
-                    .await
-                    .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events = xai_grok_sampler::stream_responses(
-                    raw,
-                    meta,
-                    request_id,
-                    idle_timeout,
-                    doom_loop,
-                );
-                xai_grok_sampler::collect_response(events).await
-            }
-            crate::sampling::ApiBackend::Messages => {
-                let (raw, meta) = sampling_client
-                    .conversation_stream_messages(request)
-                    .await
-                    .map_err(|e| format!("rewrite stream failed: {e}"))?;
-                let events = xai_grok_sampler::stream_messages(raw, meta, request_id, idle_timeout);
-                xai_grok_sampler::collect_response(events).await
-            }
-        };
-
-        match result {
-            Ok((response, _metrics)) => {
+        // Collect via the client so the LengthPolicy gate applies: a note
+        // truncated at the 1024-token cap must not persist to MEMORY.md.
+        match sampling_client
+            .conversation_collect_with_idle_timeout(request, std::time::Duration::from_secs(15))
+            .await
+        {
+            Ok(response) => {
                 let text = response.assistant_text();
                 if text.is_empty() {
                     Err("LLM returned empty response".to_string())
@@ -829,8 +805,8 @@ impl SessionActor {
                 }
             }
             Err(e) => {
-                tracing::debug!(error = %e.message, "memory note rewrite inference failed");
-                Err(format!("rewrite inference failed: {}", e.message))
+                tracing::debug!(error = %e, "memory note rewrite inference failed");
+                Err(format!("rewrite inference failed: {e}"))
             }
         }
     }

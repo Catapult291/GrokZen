@@ -493,8 +493,7 @@ mod tests {
         assert_eq!(report.expired_removed, 1);
         assert_eq!(report.remove_failed, 0);
     }
-    /// A worktree the gate kept is not one in use, and a path that was never a
-    /// repository is not a worktree that was removed.
+    /// The GC report prints kept (not reclaimable) worktrees apart from guarded (in use) ones, and non-repository paths apart from removals.
     #[test]
     fn kept_worktree_prints_apart_from_a_busy_one_and_from_a_removal() {
         let json = r#"{"result": {"dead_removed": 0, "expired_removed": 3, "skipped_alive": 0,

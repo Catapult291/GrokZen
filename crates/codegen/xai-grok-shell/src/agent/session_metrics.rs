@@ -5,6 +5,7 @@
 //! the existing import path so nothing else in shell needs to change.
 
 pub(crate) use xai_grok_telemetry::session_metrics::{
-    DoomLoopRecovery, SessionStarted, TraceUploadAttempted, TraceUploadFailed, TraceUploadSkipped,
-    TraceUploadSucceeded, Turn, TurnCompletedLifecycle,
+    DoomLoopDetected, DoomLoopRecovery, SessionContextSnapshot, SessionStartKind, SessionStarted,
+    TraceUploadAttempted, TraceUploadFailed, TraceUploadSkipped, TraceUploadSucceeded, Turn,
+    TurnCompletedLifecycle,
 };

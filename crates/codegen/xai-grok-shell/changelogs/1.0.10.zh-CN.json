@@ -1,0 +1,7 @@
+[
+  {
+    "category": "performance",
+    "description": "**grok clone** 现在会复用匹配的本地检出目录并创建链接工作树，从而更快地创建会话。",
+    "breaking_change": false
+  }
+]
