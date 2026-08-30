@@ -9,6 +9,37 @@ use super::{
 pub(super) const WORKFLOWS_EMPTY_PLACEHOLDER: &str =
     "No workflows available. Ask Grok to help make you one!";
 
+const DEEP_RESEARCH_DESCRIPTION: &str =
+    "Research a query with bounded parallelism, cross-check the evidence, and write a cited report";
+const DEEP_RESEARCH_WHEN_TO_USE: &str = "Compare, investigate, or research a question that needs sourced claims. /deep-research, research this, write a cited report.";
+
+/// Localize only the complete, product-owned workflow tuple.  The workflow
+/// name, path, source, raw filtering, and model-facing listing stay canonical.
+fn localized_workflow_metadata(
+    workflow: &WorkflowInfo,
+    locale: Option<&LocaleContext>,
+) -> (String, Option<String>) {
+    if workflow.source == "builtin"
+        && workflow.name == "deep-research"
+        && workflow.description == DEEP_RESEARCH_DESCRIPTION
+        && workflow.when_to_use.as_deref() == Some(DEEP_RESEARCH_WHEN_TO_USE)
+    {
+        return (
+            extension_text(
+                locale,
+                "extensions.workflows.deep_research.description",
+                DEEP_RESEARCH_DESCRIPTION,
+            ),
+            Some(extension_text(
+                locale,
+                "extensions.workflows.deep_research.when_to_use",
+                DEEP_RESEARCH_WHEN_TO_USE,
+            )),
+        );
+    }
+    (workflow.description.clone(), workflow.when_to_use.clone())
+}
+
 /// One picker row for the Workflows tab (flat, browse-only catalog).
 #[derive(Debug)]
 pub(super) struct WorkflowRow {
@@ -72,20 +103,21 @@ pub(super) fn build_workflows_picker_rows_with_locale(
     visible
         .into_iter()
         .map(|wf| {
+            let (description, when_to_use) = localized_workflow_metadata(wf, locale);
             let mut fields = Vec::new();
             if let Some(ref p) = wf.path {
                 fields.push(("path".to_string(), p.clone()));
             }
-            if let Some(ref w) = wf.when_to_use {
-                fields.push(("when to use".to_string(), w.clone()));
+            if let Some(w) = when_to_use {
+                fields.push(("when to use".to_string(), w));
             }
             WorkflowRow {
                 label: wf.name.clone(),
                 right_label: format!("({})", localized_source_display(locale, &wf.source)),
-                desc_lines: if wf.description.is_empty() {
+                desc_lines: if description.is_empty() {
                     Vec::new()
                 } else {
-                    vec![wf.description.clone()]
+                    vec![description]
                 },
                 fields,
                 dimmed: false,
@@ -97,6 +129,13 @@ pub(super) fn build_workflows_picker_rows_with_locale(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zh() -> LocaleContext {
+        LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        })
+    }
 
     fn labels(rows: &[WorkflowRow]) -> Vec<&str> {
         rows.iter().map(|row| row.label.as_str()).collect()
@@ -151,5 +190,63 @@ mod tests {
         let empty = build_workflows_picker_rows(&TabDataState::Loaded(vec![]), "");
         assert_eq!(labels(&empty), [WORKFLOWS_EMPTY_PLACEHOLDER]);
         assert!(empty[0].dimmed);
+    }
+
+    #[test]
+    fn zh_localization_workflow_overlay_requires_complete_builtin_tuple() {
+        let locale = zh();
+        let raw_path = "/opt/grok/src/session/workflows/deep_research.rhai";
+        let exact = WorkflowInfo {
+            name: "deep-research".into(),
+            description: DEEP_RESEARCH_DESCRIPTION.into(),
+            when_to_use: Some(DEEP_RESEARCH_WHEN_TO_USE.into()),
+            source: "builtin".into(),
+            path: Some(raw_path.into()),
+        };
+        let data = TabDataState::Loaded(vec![exact.clone()]);
+        let rows = build_workflows_picker_rows_with_locale(&data, "Research", Some(&locale));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].label, "deep-research");
+        assert_eq!(rows[0].right_label, "(内置)");
+        assert_eq!(
+            rows[0].desc_lines,
+            ["在受限并行下研究问题，交叉核验证据并撰写带引用的报告"]
+        );
+        assert_eq!(
+            rows[0].fields,
+            [
+                ("path".into(), raw_path.into()),
+                (
+                    "when to use".into(),
+                    "适用于比较、调查或研究需要有来源论据的问题。可使用 /deep-research、“研究这个”或“撰写带引用的报告”。".into()
+                )
+            ]
+        );
+        assert!(
+            build_workflows_picker_rows_with_locale(&data, "受限并行", Some(&locale)).is_empty(),
+            "localized display copy must not become search identity"
+        );
+
+        for source in ["bundled", "project", "user"] {
+            let mut dynamic = exact.clone();
+            dynamic.source = source.into();
+            let rows = build_workflows_picker_rows_with_locale(
+                &TabDataState::Loaded(vec![dynamic]),
+                "",
+                Some(&locale),
+            );
+            assert_eq!(rows[0].desc_lines, [DEEP_RESEARCH_DESCRIPTION]);
+            assert_eq!(rows[0].fields[1].1, DEEP_RESEARCH_WHEN_TO_USE);
+        }
+
+        let mut drifted = exact;
+        drifted.when_to_use = Some("Updated upstream metadata".into());
+        let rows = build_workflows_picker_rows_with_locale(
+            &TabDataState::Loaded(vec![drifted]),
+            "",
+            Some(&locale),
+        );
+        assert_eq!(rows[0].desc_lines, [DEEP_RESEARCH_DESCRIPTION]);
+        assert_eq!(rows[0].fields[1].1, "Updated upstream metadata");
     }
 }
