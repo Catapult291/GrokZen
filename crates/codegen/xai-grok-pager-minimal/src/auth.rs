@@ -310,7 +310,11 @@ pub(super) fn render_auth(
                 area,
                 y,
                 bottom,
-                Line::from(Span::styled(err.clone(), gray)),
+                Line::from(Span::styled(
+                    xai_grok_pager::views::welcome::localized_auth_error_for_display(locale, err)
+                        .into_owned(),
+                    gray,
+                )),
             );
         }
         MinimalAuthHint::TrustFolder { workspace } => {
@@ -420,6 +424,13 @@ mod tests {
 
     static TEST_LOCALE: std::sync::LazyLock<xai_grok_pager::locale::LocaleContext> =
         std::sync::LazyLock::new(xai_grok_pager::locale::LocaleContext::default);
+    static ZH_TEST_LOCALE: std::sync::LazyLock<xai_grok_pager::locale::LocaleContext> =
+        std::sync::LazyLock::new(|| {
+            xai_grok_pager::locale::LocaleContext::new(xai_grok_pager::locale::ResolvedLocale {
+                locale: xai_grok_pager::locale::UiLocale::ZhCn,
+                source: xai_grok_pager::locale::LocaleSource::Cli,
+            })
+        });
 
     #[test]
     fn device_user_code_parses_verification_url() {
@@ -537,6 +548,33 @@ mod tests {
         assert!(
             text.contains("Waiting for approval"),
             "waiting line: {text:?}"
+        );
+    }
+
+    #[test]
+    fn zh_localization_render_auth_localizes_reqwest_wrapper_without_rewriting_url() {
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 120, 6);
+        let mut buf = Buffer::empty(area);
+        let hint = MinimalAuthHint::Failed(
+            "error sending request for url (https://auth.x.ai/.well-known/openid-configuration)"
+                .into(),
+        );
+        render_auth(&mut buf, area, &theme, &hint, &ZH_TEST_LOCALE);
+        let text = buffer_text(&buf, area);
+        let compact = text.replace(' ', "");
+        assert!(compact.contains("登录失败"), "heading: {text:?}");
+        assert!(
+            compact.contains("无法向登录服务发送请求"),
+            "localized wrapper: {text:?}"
+        );
+        assert!(
+            compact.contains("https://auth.x.ai/.well-known/openid-configuration"),
+            "provider URL must stay unchanged: {text:?}"
+        );
+        assert!(
+            !text.contains("error sending request for url"),
+            "raw reqwest wrapper leaked: {text:?}"
         );
     }
 

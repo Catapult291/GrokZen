@@ -66,6 +66,9 @@ pub struct CommandTrigger {
     pub bundled_skill: bool,
     /// ACP metadata proved this is a first-party product-chat skill.
     pub product_chat_skill: bool,
+    /// ACP metadata has the plain shell-command shape required by exact
+    /// presentation-localization allowlists.
+    pub trusted_shell_metadata: bool,
     pub provenance: CommandProvenance,
 }
 
@@ -91,6 +94,7 @@ impl CommandTrigger {
             source,
             bundled_skill: command.is_bundled_skill(),
             product_chat_skill: command.is_product_chat_skill(),
+            trusted_shell_metadata: command.has_trusted_shell_metadata(),
             provenance: command.provenance(),
         }
     }

@@ -278,12 +278,26 @@ fn localized_usage_category(
                 localized_existing_count_detail(locale, value, "context.detail.skills")
             }),
         ),
+        "Workflows" => (
+            locale
+                .named_text("context.workflows", "Workflows")
+                .into_owned(),
+            detail.map(|value| {
+                localized_existing_count_detail(locale, value, "context.detail.workflows")
+            }),
+        ),
         "MCP servers" => (
             locale
                 .named_text("context.mcp_servers", "MCP servers")
                 .into_owned(),
             detail.map(|value| {
                 localized_existing_count_detail(locale, value, "context.detail.servers")
+            }),
+        ),
+        "AGENTS.md" => (
+            label.to_string(),
+            detail.map(|value| {
+                localized_existing_count_detail(locale, value, "context.detail.files")
             }),
         ),
         _ => (label.to_string(), detail.map(str::to_string)),
@@ -764,12 +778,14 @@ mod tests {
     }
 
     #[test]
-    fn localization_regression_context_chrome_preserves_dynamic_values() {
+    fn zh_localization_regression_context_chrome_preserves_dynamic_values() {
         let mut data = snapshot();
         data.usage_pct = 82;
         data.usage_categories = vec![
             TokenUsageCategory::skills_listing("skill body", 21),
+            TokenUsageCategory::workflows_listing("workflow body", 1),
             TokenUsageCategory::mcp_servers("server body", 2),
+            TokenUsageCategory::agents_md("agents body", 2),
             TokenUsageCategory {
                 label: "Provider cache".to_string(),
                 tokens: 42,
@@ -788,9 +804,13 @@ mod tests {
             "可用",
             "工具定义",
             "技能",
+            "工作流",
             "MCP 服务器",
             "21 个技能",
+            "1 个工作流",
             "2 个服务器",
+            "AGENTS.md",
+            "2 个文件",
             "在 85% 时自动压缩",
             "轮次：5",
             "工具调用：12",
