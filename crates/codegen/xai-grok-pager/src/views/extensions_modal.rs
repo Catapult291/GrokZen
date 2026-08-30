@@ -62,7 +62,13 @@ fn render_extension_template(template: &str, replacements: &[(&str, &str)]) -> S
     output
 }
 
+mod metadata_localization;
 mod workflows_picker_rows;
+use metadata_localization::{
+    localized_bundled_skill_description, localized_marketplace_category,
+    localized_marketplace_description, localized_marketplace_source_label,
+    localized_mcp_server_label, localized_mcp_tool_description, localized_mcp_tool_label,
+};
 use workflows_picker_rows::build_workflows_picker_rows_with_locale;
 
 /// Check if a name fuzzy-matches the search query.
@@ -172,8 +178,8 @@ fn hook_group_sort_key<'a>(source_dir: &'a str, meta: &HookSourceMeta) -> HookGr
 }
 
 fn is_official_marketplace_source(source: &xai_hooks_plugins_types::MarketplaceScanResult) -> bool {
-    source.source_name == xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME
-        || xai_grok_plugin_marketplace::is_official_source_url(&source.source_url_or_path)
+    source.source_kind == "git"
+        && xai_grok_plugin_marketplace::is_official_source_url(&source.source_url_or_path)
 }
 
 /// One marketplace source in display order with plugins sorted A–Z.
@@ -2680,19 +2686,12 @@ pub(crate) fn build_mcp_servers_picker_rows_with_locale(
             continue;
         }
         for &(si, server) in section_servers {
-            out.labels.push(
-                server
-                    .display_name
-                    .as_deref()
-                    .unwrap_or(&server.name)
-                    .to_string(),
-            );
+            out.labels.push(localized_mcp_server_label(server, locale));
             out.data_indices.push(Some(si));
             out.group_keys.push(Some(format!("mcp-tools:{si}")));
             if tools_expanded.contains(&si) {
                 for t in &server.tools {
-                    out.labels
-                        .push(t.display_name.clone().unwrap_or_else(|| t.name.clone()));
+                    out.labels.push(localized_mcp_tool_label(server, t, locale));
                     out.data_indices.push(Some(si));
                     out.group_keys.push(None);
                 }
@@ -3315,14 +3314,11 @@ pub fn render_extensions_modal_with_locale(
                                 _ => format!("({})", source),
                             };
                             entry_right_labels.push(right);
-                            let desc = skill
-                                .short_description
-                                .as_deref()
-                                .unwrap_or(&skill.description);
+                            let desc = localized_bundled_skill_description(skill, locale);
                             if desc.is_empty() {
                                 entry_desc_lines.push(vec![]);
                             } else {
-                                entry_desc_lines.push(vec![desc.to_string()]);
+                                entry_desc_lines.push(vec![desc]);
                             }
                             entry_summary_lines.push(vec![]);
                             let mut fields = vec![("path".to_string(), skill.path.clone())];
@@ -3628,7 +3624,7 @@ pub fn render_extensions_modal_with_locale(
                             !searching && state.marketplace_collapsed_sources.contains(&si);
                         entry_labels.push(format!(
                             "{} ({})",
-                            source.source_name,
+                            localized_marketplace_source_label(source, locale),
                             plugin_count_label_with_locale(source.plugins.len(), locale)
                         ));
                         entry_right_labels.push(String::new());
@@ -3696,11 +3692,11 @@ pub fn render_extensions_modal_with_locale(
                                 (None, None) => String::new(),
                             };
                             entry_right_labels.push(right);
-                            let desc = plugin.description.as_deref().unwrap_or("");
+                            let desc = localized_marketplace_description(source, plugin, locale);
                             if desc.is_empty() {
                                 entry_desc_lines.push(vec![]);
                             } else {
-                                entry_desc_lines.push(vec![desc.to_string()]);
+                                entry_desc_lines.push(vec![desc]);
                             }
                             match marketplace_components_summary_with_locale(plugin, locale) {
                                 Some(summary) => entry_summary_lines.push(vec![summary]),
@@ -3714,8 +3710,10 @@ pub fn render_extensions_modal_with_locale(
                             if let Some(ref author) = plugin.author {
                                 fields.push(("author".to_string(), author.clone()));
                             }
-                            if let Some(ref category) = plugin.category {
-                                fields.push(("category".to_string(), category.clone()));
+                            if let Some(category) =
+                                localized_marketplace_category(source, plugin, locale)
+                            {
+                                fields.push(("category".to_string(), category));
                             }
                             if !plugin.tags.is_empty() {
                                 fields.push(("tags".to_string(), plugin.tags.join(", ")));
@@ -3855,12 +3853,7 @@ pub fn render_extensions_modal_with_locale(
                             continue;
                         }
                         for &(si, server) in section_servers {
-                            entry_labels.push(
-                                server
-                                    .display_name
-                                    .clone()
-                                    .unwrap_or_else(|| server.name.clone()),
-                            );
+                            entry_labels.push(localized_mcp_server_label(server, locale));
                             entry_right_labels.push(format!(
                                 "({})",
                                 localized_source_display(locale, &server.source)
@@ -3927,15 +3920,13 @@ pub fn render_extensions_modal_with_locale(
                             entry_badge_color.push(badge_col);
                             if state.mcps_tools_expanded.contains(&si) {
                                 for t in &server.tools {
-                                    entry_labels.push(
-                                        t.display_name.clone().unwrap_or_else(|| t.name.clone()),
-                                    );
+                                    entry_labels.push(localized_mcp_tool_label(server, t, locale));
                                     entry_right_labels.push(String::new());
-                                    let desc = t.description.as_deref().unwrap_or("");
+                                    let desc = localized_mcp_tool_description(server, t, locale);
                                     if desc.is_empty() {
                                         entry_desc_lines.push(vec![]);
                                     } else {
-                                        entry_desc_lines.push(vec![desc.to_string()]);
+                                        entry_desc_lines.push(vec![desc]);
                                     }
                                     entry_summary_lines.push(vec![]);
                                     entry_fields.push(vec![]);
@@ -8040,6 +8031,34 @@ mod tests {
             .map(|&pi| sources[view[0].source_index].plugins[pi].name.as_str())
             .collect();
         assert_eq!(plugin_names, ["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn zh_localization_marketplace_official_ordering_rejects_name_only_spoof() {
+        let source = |name: &str, url: &str| xai_hooks_plugins_types::MarketplaceScanResult {
+            source_name: name.into(),
+            source_kind: "git".into(),
+            source_url_or_path: url.into(),
+            plugins: vec![],
+            error: None,
+        };
+        let sources = vec![
+            source("xAI Official", "https://example.invalid/marketplace.git"),
+            source("alpha", "https://example.invalid/alpha.git"),
+            source(
+                "zeta official URL variant",
+                "git@github.com:xai-org/plugin-marketplace.git",
+            ),
+        ];
+        let view = ordered_marketplace_view(&sources);
+        let names: Vec<_> = view
+            .iter()
+            .map(|entry| sources[entry.source_index].source_name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            ["zeta official URL variant", "alpha", "xAI Official"]
+        );
     }
 
     #[test]
