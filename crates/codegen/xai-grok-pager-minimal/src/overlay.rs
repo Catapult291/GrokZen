@@ -1187,6 +1187,7 @@ mod tests {
             &layout_cfg,
             false,
             &theme,
+            None,
         );
         assert!(band_painted(&buf), "fixture must reach into the band");
 
@@ -1204,6 +1205,7 @@ mod tests {
             &layout_cfg,
             false,
             &theme,
+            None,
         );
         assert!(!band_painted(&buf), "the status-line band must stay clean");
     }

@@ -367,6 +367,16 @@ pub trait SlashCommand: Send + Sync {
         false
     }
 
+    /// Whether this ACP command has the plain shell-command metadata shape.
+    ///
+    /// This is a presentation-only trust gate for exact shell-owned
+    /// localization allowlists. Unknown or malformed skill metadata must not
+    /// gain shell localization merely because its provenance badge falls back
+    /// to `Shell`.
+    fn has_trusted_shell_metadata(&self) -> bool {
+        false
+    }
+
     /// Whether this ACP skill came from the trusted bundled-skill scope.
     /// Used only to gate exact display-translation allowlists; command
     /// identity and execution are unaffected.

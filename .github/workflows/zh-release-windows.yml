@@ -279,6 +279,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "内置模型来源隔离测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
           if ($LASTEXITCODE -ne 0) { throw "中文界面定向测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager-minimal --lib zh_localization_
+          if ($LASTEXITCODE -ne 0) { throw "精简界面中文定向测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib free_usage_upsell_shows_three_options_with_exact_labels
           if ($LASTEXITCODE -ne 0) { throw "免费账户升级选项测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib chinese_effort_rows_use_typed_values_for_all_tiers_and_keep_option_ids

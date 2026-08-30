@@ -46,6 +46,66 @@ fn welcome_in_vscode_family() -> bool {
     crate::terminal::terminal_context().brand.is_vscode_family()
 }
 
+fn has_balanced_raw_parentheses(value: &str) -> bool {
+    let mut depth = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                let Some(next_depth) = depth.checked_sub(1) else {
+                    return false;
+                };
+                depth = next_depth;
+            }
+            _ => {}
+        }
+    }
+    depth == 0
+}
+
+/// Localize stable client-owned framing in an authentication error while
+/// preserving the provider URL verbatim.
+///
+/// Authentication errors cross ACP as opaque strings. Most must remain
+/// untouched; reqwest's fixed outer transport wrapper is the one safe display
+/// fragment we recognize here. Only the exact wrapper is accepted; variants
+/// with extra diagnostic text stay opaque. The shell/logging path retains the
+/// raw error.
+pub fn localized_auth_error_for_display<'a>(
+    locale: &crate::locale::LocaleContext,
+    error: &'a str,
+) -> std::borrow::Cow<'a, str> {
+    if locale.locale() != crate::locale::UiLocale::ZhCn {
+        return std::borrow::Cow::Borrowed(error);
+    }
+
+    const PREFIX: &str = "error sending request for url (";
+    let Some(url) = error
+        .strip_prefix(PREFIX)
+        .and_then(|rest| rest.strip_suffix(')'))
+        .filter(|url| !url.is_empty())
+    else {
+        return std::borrow::Cow::Borrowed(error);
+    };
+    let Ok(parsed_url) = url::Url::parse(url) else {
+        return std::borrow::Cow::Borrowed(error);
+    };
+    if !has_balanced_raw_parentheses(url)
+        || !matches!(parsed_url.scheme(), "http" | "https")
+        || parsed_url.as_str() != url
+    {
+        return std::borrow::Cow::Borrowed(error);
+    }
+    std::borrow::Cow::Owned(
+        locale
+            .named_text(
+                "auth.error.request_url",
+                "error sending request for url ({url})",
+            )
+            .replace("{url}", url),
+    )
+}
+
 /// Build the quit hint spans used in Authenticating sub-screens.
 fn quit_hint_spans(theme: &Theme, locale: &crate::locale::LocaleContext) -> Vec<Span<'static>> {
     let key = if welcome_in_vscode_family() {
@@ -909,7 +969,12 @@ pub fn render_welcome(
                 ("l", login_text.as_str()),
                 ("q", params.locale.text(crate::locale::TextKey::WelcomeQuit)),
             ];
-            let msg = error.as_deref().map(|e| (e, theme.accent_error));
+            let localized_error = error
+                .as_deref()
+                .map(|error| localized_auth_error_for_display(params.locale, error));
+            let msg = localized_error
+                .as_deref()
+                .map(|error| (error, theme.accent_error));
             let info = PromptInfo {
                 model_name: params.model_name,
                 flags: params.flags,
@@ -3087,6 +3152,74 @@ mod tests {
     use crate::app::app_view::SessionPickerEntry;
     use crate::views::picker::PickerState;
     use crate::views::session_picker::{build_grouped_picker_entries, build_session_entry_data};
+
+    #[test]
+    fn zh_localization_auth_error_translates_only_reqwest_wrapper() {
+        let raw =
+            "error sending request for url (https://auth.x.ai/.well-known/openid-configuration)";
+        assert_eq!(
+            localized_auth_error_for_display(&ZH_TEST_LOCALE, raw),
+            "无法向登录服务发送请求（https://auth.x.ai/.well-known/openid-configuration）"
+        );
+        assert_eq!(
+            localized_auth_error_for_display(
+                &ZH_TEST_LOCALE,
+                "error sending request for url (https://auth.x.ai/oidc): connection reset",
+            ),
+            "error sending request for url (https://auth.x.ai/oidc): connection reset",
+            "variants with unknown diagnostic suffixes must stay opaque"
+        );
+        assert_eq!(
+            localized_auth_error_for_display(
+                &ZH_TEST_LOCALE,
+                "error sending request for url (https://auth.x.ai/oidc): cause (dns)",
+            ),
+            "error sending request for url (https://auth.x.ai/oidc): cause (dns)",
+            "a suffix ending in a right parenthesis must not masquerade as the URL"
+        );
+        assert_eq!(
+            localized_auth_error_for_display(
+                &ZH_TEST_LOCALE,
+                "error sending request for url (https://auth.x.ai/oidc):cause)",
+            ),
+            "error sending request for url (https://auth.x.ai/oidc):cause)",
+            "a URL-valid suffix ending in a right parenthesis must stay opaque"
+        );
+        assert_eq!(
+            localized_auth_error_for_display(
+                &ZH_TEST_LOCALE,
+                "error sending request for url (https://example.com/a(b)c)",
+            ),
+            "无法向登录服务发送请求（https://example.com/a(b)c）",
+            "right parentheses inside the URL must stay byte-for-byte intact"
+        );
+        assert_eq!(
+            localized_auth_error_for_display(
+                &ZH_TEST_LOCALE,
+                "error sending request for url (https://example.com/a(b(c))?q=(x))",
+            ),
+            "无法向登录服务发送请求（https://example.com/a(b(c))?q=(x)）",
+            "balanced nested parentheses remain part of the URL"
+        );
+        assert_eq!(
+            localized_auth_error_for_display(
+                &ZH_TEST_LOCALE,
+                "error sending request for url (https://example.com/a)b)",
+            ),
+            "error sending request for url (https://example.com/a)b)",
+            "ambiguous unbalanced URL punctuation must fail closed"
+        );
+        assert_eq!(
+            localized_auth_error_for_display(&TEST_LOCALE, raw),
+            raw,
+            "English UI keeps the transport error byte-for-byte"
+        );
+        assert_eq!(
+            localized_auth_error_for_display(&ZH_TEST_LOCALE, "provider-specific failure"),
+            "provider-specific failure",
+            "unknown provider text must remain opaque"
+        );
+    }
 
     fn badge_text(mode: VersionBadgeMode<'_>, team: Option<&str>) -> String {
         let area = Rect::new(0, 0, 80, 1);

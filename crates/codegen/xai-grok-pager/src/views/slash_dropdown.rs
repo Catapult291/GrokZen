@@ -34,17 +34,11 @@ pub fn localized_snapshot(
         return snap;
     }
 
-    if let Some(placeholder) = snap.args_placeholder.as_mut() {
-        let key = match placeholder.as_str() {
-            "<name> [--agent-budget N] [--effort LEVEL] [args] | runs | pause|resume|stop|save [name]" => {
-                Some("slash.command.workflow.arg_placeholder")
-            }
-            "[feedback text]" => Some("slash.command.feedback.arg_placeholder"),
-            _ => None,
-        };
-        if let Some(key) = key {
-            *placeholder = locale.named_text(key, placeholder).into_owned();
-        }
+    if let (Some(placeholder), Some(key)) = (
+        snap.args_placeholder.as_mut(),
+        snap.args_placeholder_catalog_id,
+    ) {
+        *placeholder = locale.named_text(key, placeholder).into_owned();
     }
 
     for row in &mut snap.matches {
@@ -1309,6 +1303,80 @@ mod tests {
             "在 SpaceXAI 上构建 AI 应用（XAI_API_KEY + api.x.ai）"
         );
         assert_eq!(localized.matches[9].insert_text, raw.matches[9].insert_text);
+    }
+
+    #[test]
+    fn zh_localization_translates_only_trusted_argument_placeholder_metadata() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let cases = [
+            (
+                "<what you're building>",
+                "slash.command.build-with-ai.arg_placeholder",
+                "<要构建的内容>",
+            ),
+            (
+                "<description of what to design>",
+                "slash.command.design.arg_placeholder",
+                "<要设计的内容描述>",
+            ),
+            (
+                "[words describing the session | session id]",
+                "slash.command.resume-cursor.arg_placeholder",
+                "[描述会话的关键词 | 会话 ID]",
+            ),
+            (
+                "list | reload | trust <path> | add <path> | remove <path>",
+                "slash.command.plugins.arg_placeholder",
+                "list | reload | trust <路径> | add <路径> | remove <路径>",
+            ),
+            (
+                "<objective> [--budget <tokens>] | status | pause | resume | clear",
+                "slash.command.goal.arg_placeholder",
+                "<目标> [--budget <Token 数>] | status | pause | resume | clear",
+            ),
+        ];
+
+        for (raw_placeholder, key, expected) in cases {
+            let raw = SlashSnapshot {
+                args_placeholder: Some(raw_placeholder.to_string()),
+                args_placeholder_catalog_id: Some(key),
+                args_query_is_empty: true,
+                ..Default::default()
+            };
+            let localized = localized_snapshot(raw, Some(&locale));
+            assert_eq!(localized.args_placeholder.as_deref(), Some(expected));
+        }
+
+        let dynamic = SlashSnapshot {
+            args_placeholder: Some("<what you're building>".to_string()),
+            args_placeholder_catalog_id: None,
+            args_query_is_empty: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            localized_snapshot(dynamic, Some(&locale))
+                .args_placeholder
+                .as_deref(),
+            Some("<what you're building>"),
+            "dynamic ACP/user/plugin hints must stay opaque even on an exact text collision"
+        );
+
+        let english = crate::locale::LocaleContext::default();
+        let raw = SlashSnapshot {
+            args_placeholder: Some("<what you're building>".to_string()),
+            args_placeholder_catalog_id: Some("slash.command.build-with-ai.arg_placeholder"),
+            args_query_is_empty: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            localized_snapshot(raw, Some(&english))
+                .args_placeholder
+                .as_deref(),
+            Some("<what you're building>")
+        );
     }
 
     #[test]
