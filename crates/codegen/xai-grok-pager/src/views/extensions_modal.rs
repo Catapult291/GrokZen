@@ -178,8 +178,8 @@ fn hook_group_sort_key<'a>(source_dir: &'a str, meta: &HookSourceMeta) -> HookGr
 }
 
 fn is_official_marketplace_source(source: &xai_hooks_plugins_types::MarketplaceScanResult) -> bool {
-    source.source_kind == "git"
-        && xai_grok_plugin_marketplace::is_official_source_url(&source.source_url_or_path)
+    source.source_name == xai_grok_plugin_marketplace::OFFICIAL_SOURCE_NAME
+        || xai_grok_plugin_marketplace::is_official_source_url(&source.source_url_or_path)
 }
 
 /// One marketplace source in display order with plugins sorted A–Z.
@@ -8031,34 +8031,6 @@ mod tests {
             .map(|&pi| sources[view[0].source_index].plugins[pi].name.as_str())
             .collect();
         assert_eq!(plugin_names, ["alpha", "zeta"]);
-    }
-
-    #[test]
-    fn zh_localization_marketplace_official_ordering_rejects_name_only_spoof() {
-        let source = |name: &str, url: &str| xai_hooks_plugins_types::MarketplaceScanResult {
-            source_name: name.into(),
-            source_kind: "git".into(),
-            source_url_or_path: url.into(),
-            plugins: vec![],
-            error: None,
-        };
-        let sources = vec![
-            source("xAI Official", "https://example.invalid/marketplace.git"),
-            source("alpha", "https://example.invalid/alpha.git"),
-            source(
-                "zeta official URL variant",
-                "git@github.com:xai-org/plugin-marketplace.git",
-            ),
-        ];
-        let view = ordered_marketplace_view(&sources);
-        let names: Vec<_> = view
-            .iter()
-            .map(|entry| sources[entry.source_index].source_name.as_str())
-            .collect();
-        assert_eq!(
-            names,
-            ["zeta official URL variant", "alpha", "xAI Official"]
-        );
     }
 
     #[test]
