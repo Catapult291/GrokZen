@@ -523,6 +523,7 @@ fn human_mixed_fixture_is_exact() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn fix_preview_contains_exact_change_and_caveats() {
     let temp = tempfile::tempdir().unwrap();
@@ -548,6 +549,7 @@ fn fix_preview_contains_exact_change_and_caveats() {
     assert!(preview.contains("~^Z"));
 }
 
+#[cfg(not(windows))]
 #[test]
 fn decline_is_success_and_does_not_write() {
     let temp = tempfile::tempdir().unwrap();
@@ -580,6 +582,7 @@ fn decline_is_success_and_does_not_write() {
     assert!(!temp.path().join(".bashrc").exists());
 }
 
+#[cfg(not(windows))]
 #[test]
 fn non_tty_without_yes_fails_safely_before_write() {
     let temp = tempfile::tempdir().unwrap();

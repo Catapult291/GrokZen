@@ -128,7 +128,14 @@ impl ParentPlan {
 pub(super) struct ParentAnchor {
     path: PathBuf,
     identity: FileIdentity,
+    /// Directory handle for the unix fsync path. Windows has no directory
+    /// fsync here (`sync()` is a no-op below), and `File::open` on a
+    /// directory is unreliable there (NotFound/PermissionDenied depending on
+    /// the directory), so non-unix keeps this `None`.
+    #[cfg(unix)]
     directory: fs::File,
+    #[cfg(not(unix))]
+    directory: Option<fs::File>,
 }
 
 impl ParentAnchor {
@@ -140,10 +147,13 @@ impl ParentAnchor {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ManagedConfigError::ParentChanged(path.to_path_buf()));
         }
+        #[cfg(unix)]
         let directory = fs::File::open(path).map_err(|source| ManagedConfigError::Read {
             path: path.to_path_buf(),
             source,
         })?;
+        #[cfg(not(unix))]
+        let directory = None;
         Ok(Self {
             path: path.to_path_buf(),
             identity: FileIdentity::from_metadata(&metadata),
@@ -191,6 +201,8 @@ pub(super) struct FileIdentity {
     #[cfg(not(unix))]
     len: u64,
     #[cfg(not(unix))]
+    is_dir: bool,
+    #[cfg(not(unix))]
     modified: Option<std::time::SystemTime>,
 }
 
@@ -206,9 +218,15 @@ impl FileIdentity {
         }
         #[cfg(not(unix))]
         {
+            // Directory mtimes are volatile on Windows (tempdir churn in
+            // particular flips `modified` between captures), so directory
+            // identity drops `modified` — `len` is stable for dirs. Files
+            // keep `modified` so an mtime-only change is still detected.
+            let is_dir = metadata.is_dir();
             Self {
                 len: metadata.len(),
-                modified: metadata.modified().ok(),
+                is_dir,
+                modified: (!is_dir).then(|| metadata.modified().ok()).flatten(),
             }
         }
     }

@@ -1849,8 +1849,16 @@ mod tests {
         use crate::scrollback::types::{DisplayMode, derive_selection_text};
         use ratatui::buffer::Buffer;
 
-        let parent_cwd = std::path::PathBuf::from("/parent/worktree");
-        let child_cwd = std::path::PathBuf::from("/child/worktree");
+        let parent_cwd = if cfg!(windows) {
+            std::path::PathBuf::from("C:\\parent\\worktree")
+        } else {
+            std::path::PathBuf::from("/parent/worktree")
+        };
+        let child_cwd = if cfg!(windows) {
+            std::path::PathBuf::from("C:\\child\\worktree")
+        } else {
+            std::path::PathBuf::from("/child/worktree")
+        };
         let mut child = make_agent();
         child.session.cwd = child_cwd.clone();
         child.scrollback.set_cwd(Some(child_cwd.clone()));

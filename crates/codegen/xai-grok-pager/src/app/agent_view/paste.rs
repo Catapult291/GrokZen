@@ -547,7 +547,7 @@ pub(super) mod paste_key_tests {
                 models: ModelState::default(),
                 state: AgentState::Idle,
                 tracker: crate::acp::tracker::AcpUpdateTracker::new(),
-                cwd: std::path::PathBuf::from("/tmp"),
+                cwd: std::env::temp_dir(),
                 is_worktree: false,
                 forked_from: None,
                 pending_prompts: std::collections::VecDeque::new(),

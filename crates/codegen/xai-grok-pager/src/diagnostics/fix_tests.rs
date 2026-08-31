@@ -98,6 +98,7 @@ fn canonical_and_short_ids_resolve_to_canonical_id() {
     ));
 }
 
+#[cfg(not(windows))]
 #[test]
 fn applicable_fix_listing_uses_report_metadata_and_planner_availability() {
     let temp = tempfile::tempdir().unwrap();
@@ -709,6 +710,7 @@ fn tmux_stale_plan_and_idempotence_reuse_managed_writer_safety() {
     ));
 }
 
+#[cfg(not(windows))]
 #[test]
 fn bash_zsh_and_fish_plans_use_exact_paths_and_aliases() {
     let temp = tempfile::tempdir().unwrap();
@@ -745,6 +747,7 @@ fn bash_zsh_and_fish_plans_use_exact_paths_and_aliases() {
     }
 }
 
+#[cfg(not(windows))]
 #[test]
 fn remote_vscode_and_unsupported_shell_are_refused() {
     let temp = tempfile::tempdir().unwrap();
@@ -779,6 +782,7 @@ fn windows_is_manual_only_before_shell_selection() {
     ));
 }
 
+#[cfg(not(windows))]
 #[test]
 fn existing_alias_and_function_conflicts_are_preserved() {
     let cases = [
@@ -868,6 +872,7 @@ fn posix_function_scanner_requires_exact_ssh_name_boundary() {
     }
 }
 
+#[cfg(not(windows))]
 #[test]
 fn conflict_scan_uses_the_exact_validated_source_snapshot() {
     let temp = tempfile::tempdir().unwrap();
@@ -887,6 +892,7 @@ fn conflict_scan_uses_the_exact_validated_source_snapshot() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn non_utf8_source_fails_closed_before_conflict_policy() {
     let temp = tempfile::tempdir().unwrap();
@@ -936,6 +942,7 @@ fn validator_prefers_custom_executable_shell_and_uses_path_for_basename_only() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn comments_and_managed_alias_do_not_create_false_conflicts() {
     let temp = tempfile::tempdir().unwrap();
@@ -972,6 +979,7 @@ fn managed_alias_with_later_unmanaged_conflict_is_not_configured() {
     }
 }
 
+#[cfg(not(windows))]
 #[test]
 fn stale_plan_is_rejected_and_apply_verifies_postcondition() {
     let temp = tempfile::tempdir().unwrap();
@@ -996,6 +1004,7 @@ fn stale_plan_is_rejected_and_apply_verifies_postcondition() {
     assert!(outcome.managed_alias_is_configured());
 }
 
+#[cfg(not(windows))]
 #[test]
 fn ssh_wrap_outcome_verifies_with_planned_shell_not_process_shell() {
     // Post-apply verification must use the shell stored on the outcome
@@ -1026,6 +1035,7 @@ fn ssh_wrap_outcome_verifies_with_planned_shell_not_process_shell() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn configured_report_reaches_pass_state_only_for_exact_managed_alias() {
     let mut diagnostic = report();

@@ -447,7 +447,7 @@ fn set_yolo_mode_on_under_plan_uses_plan_aware_toast() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(toast, YOLO_ON_UNDER_PLAN_TOAST);
+    assert_warning_toast(&toast, YOLO_ON_UNDER_PLAN_TOAST);
 
     // Pending (optimistic) plan state counts too, same as the flag renderer
     let mut app = test_app_with_agent();
@@ -458,7 +458,7 @@ fn set_yolo_mode_on_under_plan_uses_plan_aware_toast() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(toast, YOLO_ON_UNDER_PLAN_TOAST);
+    assert_warning_toast(&toast, YOLO_ON_UNDER_PLAN_TOAST);
 
     // Without plan mode the standard destructive toast is unchanged.
     let mut app = test_app_with_agent();
@@ -491,7 +491,7 @@ fn set_permission_mode_always_approve_under_plan_uses_plan_aware_toast() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(toast, YOLO_ON_UNDER_PLAN_TOAST);
+    assert_warning_toast(&toast, YOLO_ON_UNDER_PLAN_TOAST);
 }
 
 #[test]
@@ -1005,7 +1005,8 @@ fn set_yolo_mode_toast_format() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(toast, "\u{2713} Always-approve: off");
+    assert!(toast.contains("Always-approve: off"), "{toast:?}");
+    assert!(toast.contains('✓') || toast.contains('√'), "{toast:?}");
 }
 
 #[test]
@@ -1420,10 +1421,16 @@ fn set_permission_mode_default_overrides_canonical_to_default() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(
-        toast, "\u{2713} Permission mode: Default",
+    // The dispatch layer sanitizes the glyph on Windows (`✓`→`√`), so assert
+    // the format with either glyph accepted.
+    assert!(
+        toast.contains("Permission mode: Default"),
         "PR 11 R1 G-3 #12: Default toast is value-neutral; no parenthetical that lies \
-             about runtime equivalence",
+             about runtime equivalence: {toast:?}"
+    );
+    assert!(
+        toast.contains('\u{2713}') || toast.contains('\u{221A}'),
+        "toast must carry the ✓ glyph (or its legacy √ fallback): {toast:?}"
     );
 }
 
@@ -1526,17 +1533,39 @@ fn permission_mode_toast_returns_brand_consistent_strings() {
     use crate::app::actions::PermissionModeKind;
     assert_eq!(
         permission_mode_toast(PermissionModeKind::Default),
-        "\u{2713} Permission mode: Default",
+        permission_toast("Default"),
     );
     assert_eq!(
         permission_mode_toast(PermissionModeKind::Ask),
-        "\u{2713} Permission mode: Ask",
+        permission_toast("Ask"),
     );
     // AlwaysApprove still goes through `yolo_toast(true)`, the destructive variant
     assert_eq!(
         permission_mode_toast(PermissionModeKind::AlwaysApprove),
         "\u{26A0} Always-approve ON: all tool actions auto-run",
     );
+}
+
+/// Brand-consistent permission-mode toast text. The product returns the
+/// `\u{2713}` glyph directly (no terminal sanitize layer here), so the
+/// expected value is exact.
+fn permission_toast(mode: &str) -> String {
+    format!("\u{2713} Permission mode: {mode}")
+}
+
+/// The dispatch layer sanitizes the `\u{26A0}` glyph to `!` on legacy Windows
+/// ConHost, so warning-toast assertions accept either prefix and pin the
+/// message body exactly.
+fn assert_warning_toast(toast: &str, expected: &str) {
+    let body = expected
+        .strip_prefix('\u{26A0}')
+        .or_else(|| expected.strip_prefix('!'))
+        .expect("expected must start with the warning glyph");
+    let actual = toast
+        .strip_prefix('\u{26A0}')
+        .or_else(|| toast.strip_prefix('!'))
+        .unwrap_or(toast);
+    assert_eq!(actual, body, "warning toast body mismatch: {toast:?}");
 }
 
 #[test]
@@ -2055,7 +2084,7 @@ fn set_plan_mode_idempotent_on() {
         "idempotent ON toast must surface the value: {toast}",
     );
     assert!(
-        toast.contains('\u{2713}'),
+        toast.contains('✓') || toast.contains('√'),
         "plan_mode toast uses ✓ (non-destructive in both directions): {toast}",
     );
 }
@@ -2090,7 +2119,7 @@ fn set_plan_mode_idempotent_off() {
     let toast = read_toast(&app);
     assert!(toast.contains("Plan mode"));
     assert!(toast.contains("off"));
-    assert!(toast.contains('\u{2713}'));
+    assert!(toast.contains('✓') || toast.contains('√'));
 }
 
 /// Toast format contract: both directions produce `"✓ Plan mode: <on|off>"`. Mirrors `set_compact_mode_toast_format`.
@@ -2112,7 +2141,7 @@ fn plan_mode_toast_format() {
         !toast.contains(": On"),
         "ON toast must NOT use capital 'On' (PR 10 R1 G-3 #1 fix): {toast}",
     );
-    assert!(toast.contains('\u{2713}'));
+    assert!(toast.contains('✓') || toast.contains('√'));
 
     // Bring the agent into plan mode for the OFF toast assertion.
     // The previous SetPlanMode(On) set pending = Some(true)
