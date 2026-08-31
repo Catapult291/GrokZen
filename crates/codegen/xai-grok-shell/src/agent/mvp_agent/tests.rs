@@ -454,7 +454,7 @@ async fn upload_harness_trace_turns_numbers_siblings_and_persists_counter() {
     let sid = acp::SessionId::new("harness-upload-sess");
     let info = crate::session::info::Info {
         id: sid.clone(),
-        cwd: "/tmp".to_string(),
+        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
     };
     let mut handle = make_test_handle("test-model", false, None);
     handle.info = info.clone();
@@ -491,12 +491,43 @@ async fn upload_harness_trace_turns_numbers_siblings_and_persists_counter() {
             vec![harness_pair("a"), harness_pair("b")],
         )
         .await;
-    let numbers: Vec<u64> = built.iter().map(|(_, m, _)| m.turn_number).collect();
-    assert_eq!(numbers, vec![3, 4], "siblings take base, base+1");
-    assert!(
-        built.iter().all(|(_, m, _)| m.model == "test-model"),
-        "harness metadata carries the requested model alias",
-    );
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: trace upload is hard-off, so no harness trace
+        // uploads may be built; the counter-advance half is asserted below.
+        assert!(built.is_empty(), "privacy build: no harness trace uploads");
+    } else {
+        let numbers: Vec<u64> = built.iter().map(|(_, m, _)| m.turn_number).collect();
+        assert_eq!(numbers, vec![3, 4], "siblings take base, base+1");
+        assert!(
+            built.iter().all(|(_, m, _)| m.model == "test-model"),
+            "harness metadata carries the requested model alias",
+        );
+    }
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: uploads are hard-off, so the drain is a no-op that
+        // neither advances the counter nor persists a SetNextTraceTurn.
+        let (cmd_tx, mut cmd_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::session::SessionCommand>();
+        agent
+            .upload_harness_trace_turns(
+                &sid,
+                &info,
+                &cmd_tx,
+                "test-model",
+                vec![harness_pair("a"), harness_pair("b")],
+            )
+            .await;
+        assert_eq!(
+            agent.session_turn_number(&sid),
+            Some(3),
+            "privacy build: no uploads means no counter advance",
+        );
+        assert!(
+            cmd_rx.try_recv().is_err(),
+            "privacy build: no SetNextTraceTurn may be persisted",
+        );
+        return;
+    }
     let (cmd_tx, mut cmd_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::session::SessionCommand>();
     agent
@@ -538,7 +569,7 @@ async fn upload_harness_trace_turns_uploads_disabled_does_not_burn_counter() {
     let sid = acp::SessionId::new("harness-disabled-sess");
     let info = crate::session::info::Info {
         id: sid.clone(),
-        cwd: "/tmp".to_string(),
+        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
     };
     let (cmd_tx, mut cmd_rx) =
         tokio::sync::mpsc::unbounded_channel::<crate::session::SessionCommand>();
@@ -575,7 +606,7 @@ async fn upload_harness_trace_turns_build_per_turn_manifest() {
     let sid = acp::SessionId::new("harness-manifest-sess");
     let info = crate::session::info::Info {
         id: sid.clone(),
-        cwd: "/tmp".to_string(),
+        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
     };
     let mut handle = make_test_handle("test-model", false, None);
     handle.info = info.clone();
@@ -608,6 +639,13 @@ async fn upload_harness_trace_turns_build_per_turn_manifest() {
             vec![harness_pair("a"), harness_pair("b")],
         )
         .await;
+    if xai_grok_version::research_data_collection_forbidden() {
+        assert!(
+            built.is_empty(),
+            "privacy build: trace context is never obtained (hard-off)"
+        );
+        return;
+    }
     assert_eq!(
         built.len(),
         2,
@@ -1178,7 +1216,7 @@ fn make_test_handle(
     let hunk_cancel = tokio_util::sync::CancellationToken::new();
     let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
         "test".to_string(),
-        std::path::PathBuf::from("/tmp"),
+        std::env::temp_dir(),
         hunk_event_tx,
         xai_hunk_tracker::TrackingMode::AllDirty,
         hunk_cancel,
@@ -1192,7 +1230,7 @@ fn make_test_handle(
         )),
         info: crate::session::info::Info {
             id: acp::SessionId::new("test"),
-            cwd: "/tmp".to_string(),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         },
         max_turns: None,
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -1210,9 +1248,9 @@ fn make_test_handle(
         upload_queue: Arc::new(OnceLock::new()),
         upload_failures_since_success: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         tool_context: crate::tools::ToolContext::new_local_context(
-            xai_grok_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap(),
+            xai_grok_paths::AbsPathBuf::new(std::env::temp_dir()).unwrap(),
             std::sync::Arc::new(xai_grok_workspace::file_system::LocalFs::new(
-                std::path::PathBuf::from("/tmp"),
+                std::env::temp_dir(),
             )),
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
@@ -1228,7 +1266,7 @@ fn make_test_handle(
         ask_user_question_enabled: true,
         non_interactive: false,
         plan_mode: std::sync::Arc::new(parking_lot::Mutex::new(
-            crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from("/tmp")),
+            crate::session::plan_mode::PlanModeTracker::new(std::env::temp_dir()),
         )),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         permission_handle: xai_grok_workspace::permission::PermissionHandle::allow_all(),
@@ -1449,7 +1487,7 @@ async fn new_session_meta_effort_seeds_spawn_for_supported_model_and_drops_for_u
         REASONING_EFFORT_META_KEY.to_string(),
         reasoning_effort_meta_value(ReasoningEffort::High),
     );
-    let request = acp::NewSessionRequest::new("/tmp").meta(Some(meta));
+    let request = acp::NewSessionRequest::new(std::env::temp_dir()).meta(Some(meta));
     let route = split_new_session_effort(None, parse_reasoning_effort_meta(request.meta.as_ref()));
     assert_eq!(route, NewSessionEffort::Spawn(ReasoningEffort::High));
     let spawn_effort = match route {
@@ -1546,7 +1584,7 @@ async fn restore_effort_via_load(
     agent.insert_resident(&sid, handle);
     let info = crate::session::info::Info {
         id: sid.clone(),
-        cwd: "/tmp".to_string(),
+        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
     };
     let mut summary =
         crate::session::persistence::Summary::new(&info, acp::ModelId::new("effort-model"))
@@ -2134,7 +2172,7 @@ async fn session_meta_publishes_the_sessions_pinned_scheduler_background_loops()
     agent.insert_resident(&sid, handle);
     let model_state = agent.model_state(Some(&sid));
     let mut meta = serde_json::Map::new();
-    agent.insert_session_config_meta(&mut meta, &sid, "/tmp".to_string(), None, &model_state);
+    agent.insert_session_config_meta(&mut meta, &sid, std::env::temp_dir().to_string_lossy().into_owned(), None, &model_state);
     assert_eq!(
         meta.get(crate::session::SCHEDULER_BACKGROUND_LOOPS_META_KEY),
         Some(&serde_json::json!(false)),
@@ -2177,6 +2215,22 @@ async fn feedback_trace_offer_asks_personal_oauth_accounts() {
     let _e3 = EnvGuard::unset("GROK_FEEDBACK_TRACE_CARD");
     let agent = build_agent_with_auth(personal_xai_oauth_auth());
     make_trace_card_eligible(&agent);
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: the trace-consent card and its one-shot upload path
+        // are hard-off (telemetry posture never allows the offer).
+        assert!(
+            !agent.feedback_trace_offer(),
+            "privacy build: the trace card must never be offered"
+        );
+        assert!(
+            agent
+                .one_shot_feedback_gcs_config("sid".into())
+                .await
+                .is_none(),
+            "privacy build: the one-shot upload path must be closed"
+        );
+        return;
+    }
     assert!(agent.feedback_trace_offer(), "every gate is open");
     assert!(
         agent
@@ -3244,10 +3298,17 @@ async fn auth_info_returns_profile_when_token_expired() {
 #[tokio::test]
 async fn data_collection_enabled_for_normal_user() {
     let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
-    assert!(
-        !agent.is_data_collection_disabled(),
-        "normal user must have data collection enabled"
-    );
+    if xai_grok_version::research_data_collection_forbidden() {
+        assert!(
+            agent.is_data_collection_disabled(),
+            "privacy build: research collection is always disabled"
+        );
+    } else {
+        assert!(
+            !agent.is_data_collection_disabled(),
+            "normal user must have data collection enabled"
+        );
+    }
 }
 #[tokio::test]
 async fn data_collection_disabled_for_zdr_team() {
@@ -3311,10 +3372,17 @@ async fn data_collection_enabled_for_non_zdr_team_with_unrelated_blocks() {
         ],
         ..crate::auth::GrokAuth::test_default()
     });
-    assert!(
-        !agent.is_data_collection_disabled(),
-        "non-ZDR blocked reasons must not disable data collection"
-    );
+    if xai_grok_version::research_data_collection_forbidden() {
+        assert!(
+            agent.is_data_collection_disabled(),
+            "privacy build: research collection is always disabled"
+        );
+    } else {
+        assert!(
+            !agent.is_data_collection_disabled(),
+            "non-ZDR blocked reasons must not disable data collection"
+        );
+    }
 }
 fn enable_product_telemetry(agent: &MvpAgent) {
     agent.cfg.borrow_mut().features.telemetry = Some(crate::agent::config::TelemetryMode::Enabled);
@@ -3330,7 +3398,14 @@ fn enable_trace_upload_config(agent: &MvpAgent) {
 async fn product_analytics_enabled_for_normal_user_with_telemetry_on() {
     let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
     enable_product_telemetry(&agent);
-    assert!(agent.product_analytics_enabled());
+    if xai_grok_version::research_data_collection_forbidden() {
+        assert!(
+            !agent.product_analytics_enabled(),
+            "privacy build: product analytics is always off"
+        );
+    } else {
+        assert!(agent.product_analytics_enabled());
+    }
 }
 #[tokio::test]
 async fn product_analytics_enabled_despite_coding_retention_opt_out() {
@@ -3340,7 +3415,14 @@ async fn product_analytics_enabled_despite_coding_retention_opt_out() {
     });
     enable_product_telemetry(&agent);
     assert!(agent.is_data_collection_disabled());
-    assert!(agent.product_analytics_enabled());
+    if xai_grok_version::research_data_collection_forbidden() {
+        assert!(
+            !agent.product_analytics_enabled(),
+            "privacy build: product analytics is always off"
+        );
+    } else {
+        assert!(agent.product_analytics_enabled());
+    }
 }
 #[tokio::test]
 async fn product_analytics_disabled_for_zdr_team() {
@@ -3389,6 +3471,14 @@ async fn diagnostic_upload_skipped_for_opted_out_user() {
     });
     enable_trace_upload_config(&agent);
     agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(stub_url);
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: trace upload is hard-off, so no uploader is wired.
+        assert!(
+            agent.diagnostic_upload_config().is_none(),
+            "privacy build: diagnostics upload must never be wired"
+        );
+        return;
+    }
     let uploader = agent
         .diagnostic_upload_config()
         .expect("uploader is wired whenever trace upload config is on");
@@ -3405,6 +3495,14 @@ async fn diagnostic_upload_sent_for_normal_user() {
     let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
     enable_trace_upload_config(&agent);
     agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(stub_url);
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: trace upload is hard-off, so no uploader is wired.
+        assert!(
+            agent.diagnostic_upload_config().is_none(),
+            "privacy build: diagnostics upload must never be wired"
+        );
+        return;
+    }
     let uploader = agent
         .diagnostic_upload_config()
         .expect("uploader is wired whenever trace upload config is on");
@@ -3424,6 +3522,14 @@ async fn diagnostic_upload_skipped_without_credentials() {
     let agent = build_minimal_agent_for_tests();
     enable_trace_upload_config(&agent);
     agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(stub_url);
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: trace upload is hard-off, so no uploader is wired.
+        assert!(
+            agent.diagnostic_upload_config().is_none(),
+            "privacy build: diagnostics upload must never be wired"
+        );
+        return;
+    }
     let uploader = agent
         .diagnostic_upload_config()
         .expect("uploader is wired whenever trace upload config is on");
@@ -3444,6 +3550,14 @@ async fn diagnostic_upload_skipped_after_mid_session_trace_upload_kill_switch() 
     enable_trace_upload_config(&agent);
     agent.cfg.borrow_mut().endpoints.trace_upload_url = Some(stub_url);
     agent.sync_collection_config_gate();
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: trace upload is hard-off, so no uploader is wired.
+        assert!(
+            agent.diagnostic_upload_config().is_none(),
+            "privacy build: diagnostics upload must never be wired"
+        );
+        return;
+    }
     let uploader = agent
         .diagnostic_upload_config()
         .expect("uploader is wired whenever trace upload config is on");
@@ -3675,6 +3789,29 @@ async fn collection_config_gate_mirror_follows_trace_upload_flip() {
     let agent = build_agent_with_auth(crate::auth::GrokAuth::test_default());
     enable_trace_upload_config(&agent);
     agent.sync_collection_config_gate();
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: trace upload is hard-off, so the mirror starts off
+        // and a flip cannot turn it on.
+        assert!(
+            !agent
+                .trace_upload_live
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "privacy build: mirror must start off"
+        );
+        {
+            let mut cfg = agent.cfg.borrow_mut();
+            cfg.features.telemetry = Some(crate::agent::config::TelemetryMode::Disabled);
+            cfg.telemetry.trace_upload = Some(false);
+        }
+        agent.sync_collection_config_gate();
+        assert!(
+            !agent
+                .trace_upload_live
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "mirror must stay off under the privacy build"
+        );
+        return;
+    }
     assert!(
         agent
             .trace_upload_live
@@ -4381,7 +4518,7 @@ fn make_live_session_handle(
     handle.cmd_tx = cmd_tx.clone();
     handle.info = crate::session::info::Info {
         id: sid.clone(),
-        cwd: "/tmp".to_string(),
+        cwd: std::env::temp_dir().to_string_lossy().into_owned(),
     };
     if let Some(pid) = running_prompt {
         *handle.current_prompt_id.lock().unwrap() = Some(pid.to_string());

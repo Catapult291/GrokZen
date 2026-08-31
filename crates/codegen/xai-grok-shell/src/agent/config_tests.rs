@@ -3764,12 +3764,14 @@ fn e2e_config_models_parsed_directly_not_via_deep_merge() {
 /// under another name still gets through.
 #[test]
 fn no_registered_feature_is_mirrored_by_a_config_field() {
-    const SRC: &str = include_str!("config.rs");
-    const AGENT: &str = include_str!("mvp_agent/mod.rs");
+    // `include_str!` preserves the working-tree line endings; on Windows the
+    // sources check out as CRLF, so normalize before anchoring on `\n}`.
+    let src = include_str!("config.rs").replace("\r\n", "\n");
+    let agent = include_str!("mvp_agent/mod.rs").replace("\r\n", "\n");
     for (src, decl) in [
-        (SRC, "pub struct Config {"),
-        (SRC, "pub struct Features {"),
-        (AGENT, "pub struct MvpAgent {"),
+        (src.as_str(), "pub struct Config {"),
+        (src.as_str(), "pub struct Features {"),
+        (agent.as_str(), "pub struct MvpAgent {"),
     ] {
         let body = src
             .split_once(decl)
@@ -3805,6 +3807,19 @@ fn requirement_pin_outranks_a_hostile_environment() {
         cfg.requirements
             .pin_feature(spec.id, pinned, crate::config::RequirementSource::Unknown);
         let r = cfg.feature(spec.id);
+        if xai_grok_version::research_data_collection_forbidden()
+            && spec.id == crate::agent::config::Feature::Feedback
+        {
+            // Privacy build: feedback ignores the requirement pin — the env
+            // tier alone decides (config.rs::feature short-circuits to env).
+            assert_eq!(
+                r.value, !pinned,
+                "{} must follow its env under the privacy build, not the pin",
+                spec.key
+            );
+            assert_eq!(r.source, ConfigSource::Env, "{}", spec.key);
+            continue;
+        }
         assert_eq!(r.value, pinned, "{} lost to {}", spec.key, spec.env);
         assert_eq!(r.source, ConfigSource::Requirement, "{}", spec.key);
     }
@@ -3819,6 +3834,24 @@ fn every_registered_key_parses_out_of_the_features_table() {
         let raw: toml::Value =
             toml::from_str(&format!("[features]\n{} = {configured}\n", spec.key)).unwrap();
         let cfg = Config::new_from_toml_cfg(&raw).unwrap();
+        if xai_grok_version::research_data_collection_forbidden()
+            && spec.id == crate::agent::config::Feature::Feedback
+        {
+            // Privacy build: the `[features]` tier cannot enable feedback;
+            // only GROK_FEEDBACK_ENABLED env can. Assert the hard-off and
+            // the env-only escape hatch.
+            let _env = EnvGuard::unset(spec.env);
+            assert!(
+                !cfg.feature(spec.id).value,
+                "{} must stay off under the privacy build",
+                spec.key
+            );
+            let _env = EnvGuard::set(spec.env, if configured { "0" } else { "1" });
+            let r = cfg.feature(spec.id);
+            assert_eq!(r.value, !configured, "{} must follow its env", spec.key);
+            assert_eq!(r.source, ConfigSource::Env, "{}", spec.key);
+            continue;
+        }
         {
             let _env = EnvGuard::unset(spec.env);
             let r = cfg.feature(spec.id);
@@ -3840,7 +3873,10 @@ fn every_registered_key_parses_out_of_the_features_table() {
 /// egress gate open.
 #[test]
 fn non_boolean_value_fails_the_load_for_a_key_with_no_field() {
-    let features = include_str!("config.rs")
+    // `include_str!` preserves CRLF on Windows checkouts; normalize so the
+    // `\n}` anchor matches the struct body terminator.
+    let config_src = include_str!("config.rs").replace("\r\n", "\n");
+    let features = config_src
         .split_once("pub struct Features {")
         .and_then(|(_, rest)| rest.split_once("\n}\n"))
         .map(|(body, _)| body)
