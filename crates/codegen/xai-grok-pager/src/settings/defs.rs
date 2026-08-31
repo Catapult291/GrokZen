@@ -121,19 +121,16 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
 // `supports_preview: false` because toggling fires an async ACP call that can fail. Commit on Enter only.
 // ---------------------------------------------------------------------------
 
-// The setting's own description carries the full explanation, so the choices are bare labels; an empty description collapses each to a single line
-const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[
-    EnumChoice {
-        canonical: "opt-in",
-        display: "Opt in",
-        description: "",
-    },
-    EnumChoice {
-        canonical: "opt-out",
-        display: "Opt out",
-        description: "",
-    },
-];
+// The setting's own description carries the full explanation, so the choices are bare labels; an empty description collapses each to a single line.
+// Privacy build: retention is LOCKED to opt-out. A single canonical choice remains so
+// persisted values, pickers, and the shell wire format keep working; opt-in is refused
+// at dispatch time (`set_coding_data_sharing_tracked` Guard 0) and the UI renders the
+// row as locked (`CodingDataSharingLock::PrivacyBuild`).
+const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[EnumChoice {
+    canonical: "opt-out",
+    display: "Opt out",
+    description: "Coding data retention is locked to opt-out in this privacy build. Opt-in is not available.",
+}];
 
 // ---------------------------------------------------------------------------
 // Plan-mode catalog.
@@ -1169,19 +1166,18 @@ pub fn default_settings() -> Vec<SettingMeta> {
         },
         // SHELL-owned. Persisted in auth metadata (not config.toml).
         // Reads from `PagerLocalSnapshot.coding_data_sharing_opt_out`.
-        // The default "opt-out" matches `AuthEntry::coding_data_retention_opt_out = true`
-        // That is the safer consumer default; server enrichment may still opt the user in
-        // ZDR / non-admin guards are enforced at dispatch time.
+        // Privacy build: locked to opt-out — `coding_data_retention_locked_opt_out()`
+        // forces the value to true everywhere (enrichment, dispatch Guard 0, banner).
+        // ZDR / non-admin guards are still enforced at dispatch time.
         // Do not put "telemetry" in keywords: that word is the config-file analytics toggle (Monitoring / Configuration docs)
         SettingMeta {
             key: "coding_data_sharing",
             category: SettingCategory::Privacy,
             owner: SettingOwner::Shell,
-            label: "Coding data, retention, and training",
-            description: "Opt-in to provide SpaceXAI the ability to retain and train on \
-                          coding data, e.g., prompts, traces, & metrics, for training and \
-                          debugging purposes. We may still collect simple user metrics, \
-                          e.g. how many times you use the product or a feature.",
+            label: "Coding data retention",
+            description: "Coding data retention is locked to opt-out in this privacy build. \
+                          SpaceXAI does not retain or train on your coding data. \
+                          Simple usage metrics (e.g. feature usage counts) are unaffected.",
             keywords: &[
                 "privacy",
                 "data",
@@ -1189,7 +1185,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "coding",
                 "retention",
                 "training",
-                "opt-in",
                 "opt-out",
             ],
             kind: SettingKind::Enum {

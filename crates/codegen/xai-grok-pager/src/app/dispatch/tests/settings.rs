@@ -675,7 +675,7 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
     ));
     let _ = dispatch(
         Action::OpenSettingsFocus {
-            key: "coding_data_sharing",
+            key: "theme",
         },
         &mut app,
     );
@@ -685,7 +685,7 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
     };
     assert_eq!(
         state.focused_setting().map(|(k, _)| k),
-        Some("coding_data_sharing"),
+        Some("theme"),
         "focused re-entry must land on the requested row"
     );
     assert!(
@@ -704,11 +704,9 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
 fn dispatch_open_settings_focus_skips_the_chooser_only_when_locked() {
     use crate::views::modal::ActiveModal;
     use crate::views::settings_modal::SettingsModalMode;
-    let open_focused = |app: &mut AppView| -> SettingsModalMode {
+    let open_focused = |app: &mut AppView, key: &'static str| -> SettingsModalMode {
         let _ = dispatch(
-            Action::OpenSettingsFocus {
-                key: "coding_data_sharing",
-            },
+            Action::OpenSettingsFocus { key },
             app,
         );
         let agent = app.agents.get(&AgentId(0)).unwrap();
@@ -717,15 +715,17 @@ fn dispatch_open_settings_focus_skips_the_chooser_only_when_locked() {
         };
         assert_eq!(
             state.focused_setting().map(|(k, _)| k),
-            Some("coding_data_sharing"),
+            Some(key),
             "every landing focuses the row"
         );
         state.mode()
     };
+    // Editable example: `theme` is never locked (privacy builds lock
+    // coding_data_sharing instead), so it always opens the chooser.
     let mut app = test_app_with_agent();
     assert!(
         matches!(
-            open_focused(&mut app),
+            open_focused(&mut app, "theme"),
             SettingsModalMode::PickingEnum { .. }
         ),
         "an editable setting opens its chooser"
@@ -733,14 +733,14 @@ fn dispatch_open_settings_focus_skips_the_chooser_only_when_locked() {
     let mut app = test_app_with_agent();
     app.is_zdr = true;
     assert!(
-        matches!(open_focused(&mut app), SettingsModalMode::Browse),
+        matches!(open_focused(&mut app, "coding_data_sharing"), SettingsModalMode::Browse),
         "ZDR must stop at the row that says so"
     );
     let mut app = test_app_with_agent();
     app.team_name = Some("acme".to_string());
     app.team_role = Some("member".to_string());
     assert!(
-        matches!(open_focused(&mut app), SettingsModalMode::Browse),
+        matches!(open_focused(&mut app, "coding_data_sharing"), SettingsModalMode::Browse),
         "a team-managed lock must stop at the row that says so"
     );
     let mut app = test_app_with_agent();
@@ -748,7 +748,7 @@ fn dispatch_open_settings_focus_skips_the_chooser_only_when_locked() {
     app.team_role = Some("admin".to_string());
     assert!(
         matches!(
-            open_focused(&mut app),
+            open_focused(&mut app, "theme"),
             SettingsModalMode::PickingEnum { .. }
         ),
         "a team admin is not locked"
@@ -763,7 +763,7 @@ fn dispatch_open_settings_focus_sets_close_on_picker_exit_when_chooser_opens() {
     let mut app = test_app_with_agent();
     let _ = dispatch(
         Action::OpenSettingsFocus {
-            key: "coding_data_sharing",
+            key: "theme",
         },
         &mut app,
     );
@@ -819,7 +819,7 @@ fn open_settings_focus_esc_closes_settings_modal() {
     let id = AgentId(0);
     let _ = dispatch(
         Action::OpenSettingsFocus {
-            key: "coding_data_sharing",
+            key: "theme",
         },
         &mut app,
     );
@@ -852,7 +852,7 @@ fn open_settings_focus_enter_closes_settings_modal() {
     let id = AgentId(0);
     let _ = dispatch(
         Action::OpenSettingsFocus {
-            key: "coding_data_sharing",
+            key: "theme",
         },
         &mut app,
     );
@@ -874,11 +874,8 @@ fn open_settings_focus_enter_closes_settings_modal() {
         "deep-link Enter must dismiss the settings modal"
     );
     assert!(
-        matches!(
-            outcome,
-            InputOutcome::Action(Action::SetCodingDataSharing { .. })
-        ),
-        "deep-link Enter must commit SetCodingDataSharing, got {outcome:?}"
+        matches!(outcome, InputOutcome::Action(Action::SetTheme(_))),
+        "deep-link Enter must commit SetTheme, got {outcome:?}"
     );
 }
 /// Browse path: OpenSettings, enter the picker, then Esc keeps the modal open in Browse.
@@ -895,7 +892,7 @@ fn open_settings_enter_picker_esc_stays_open_in_browse() {
         let Some(ActiveModal::Settings { state }) = &mut agent.active_modal else {
             panic!("settings modal must be open")
         };
-        assert!(state.focus_key("coding_data_sharing"));
+        assert!(state.focus_key("theme"));
         assert!(state.try_enter_picking_enum());
         assert!(!state.close_on_picker_exit);
     }
@@ -1678,7 +1675,7 @@ fn set_compact_mode_toast_format() {
     let toast = read_toast(&app);
     assert!(toast.contains("Compact mode"));
     assert!(toast.contains("on"));
-    assert!(toast.contains('\u{2713}'));
+    assert_toast_glyph(&toast, '\u{2713}');
     let _ = dispatch(Action::SetCompactMode(false), &mut app);
     let toast = read_toast(&app);
     assert!(toast.contains("Compact mode"));
@@ -1882,14 +1879,26 @@ fn set_multiline_mode_toast_format() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(toast, "\u{2713} Multiline: on");
+    assert_toast_glyph(&toast, '\u{2713}');
     let _ = dispatch(Action::SetMultilineMode(false), &mut app);
     let toast = app.agents[&AgentId(0)]
         .toast
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(toast, "\u{2713} Multiline: off");
+    // Keep the exact `{glyph} Multiline: {value}` format check while letting
+    // the leading glyph be either the fancy `✓` or its legacy `√` fallback.
+    let glyph_pos = toast
+        .find(['\u{2713}', '\u{221A}'])
+        .expect("toast must carry a check glyph");
+    // `glyph_pos` is a byte offset; the glyph is multi-byte UTF-8, so slice
+    // from the END of the matched glyph, not `glyph_pos + 1`.
+    let glyph_end = glyph_pos + toast[glyph_pos..].chars().next().unwrap().len_utf8();
+    assert_eq!(
+        &toast[glyph_end..],
+        " Multiline: off",
+        "toast must keep the exact `{{glyph}} Multiline: {{value}}` format: {toast:?}",
+    );
 }
 /// No active agent means no-op (no panic, no effect, no mutation).
 /// Differs from `set_simple_mode_no_op_when_no_active_agent`: SHARED settings persist globally even without an agent.
@@ -2898,10 +2907,11 @@ fn rollback_permission_mode_reverts_state_no_effect() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("failure toast must be set");
-    assert_eq!(
-        toast, "\u{2717} Could not save permission_mode: permission denied",
-        "rollback toast must follow the exact `✗ Could not save {{key}}: {{error}}` format \
-             — drift here would diverge from other rollback toasts",
+    assert_toast_glyph(&toast, '\u{2717}');
+    assert!(
+        toast.contains(" Could not save permission_mode: permission denied"),
+        "rollback toast must keep the exact `{{glyph}} Could not save {{key}}: {{error}}` \
+             format — drift here would diverge from other rollback toasts: {toast:?}",
     );
 }
 /// The reset path dispatches `Action::SetPermissionMode(Ask)` (the registered default) rather than `Action::SetYoloMode(false)`.
@@ -3279,7 +3289,7 @@ fn set_theme_toast_format_uses_display_name() {
             toast.contains("Grok Day"),
             "toast must use display name `Grok Day`, not canonical `grokday`, got: {toast:?}",
         );
-        assert!(toast.contains('\u{2713}'), "toast must contain the ✓ glyph");
+        assert_toast_glyph(&toast, '\u{2713}');
     });
 }
 #[test]
@@ -3290,7 +3300,7 @@ fn set_auto_dark_theme_toast_format_uses_display_name() {
         let toast = read_toast(&app);
         assert!(toast.contains("Auto dark theme"));
         assert!(toast.contains("Grok Day"));
-        assert!(toast.contains('\u{2713}'));
+        assert_toast_glyph(&toast, '\u{2713}');
     });
 }
 #[test]
