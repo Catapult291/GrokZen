@@ -129,6 +129,18 @@ mod tests {
         }
     }
 
+    /// Render a filesystem path for interpolation into a `sh -c` command string.
+    ///
+    /// Tests spawn the hook through `sh -c`, which treats `\` as an escape
+    /// character. On Windows, `tempfile::tempdir()` yields backslash paths
+    /// (e.g. `C:\Users\...\AppData\Local\Temp\.tmpXXXX`); interpolating them
+    /// verbatim silently strips the separators and the shell writes artifacts
+    /// into the current directory under a mangled name. Normalize to forward
+    /// slashes and quote, so the path survives a POSIX shell on any platform.
+    fn sh_display(path: &std::path::Path) -> String {
+        format!("\"{}\"", path.display().to_string().replace('\\', "/"))
+    }
+
     #[test]
     fn sets_environment_variables() {
         let dir = tempfile::tempdir().unwrap();
@@ -136,7 +148,7 @@ mod tests {
         let command = format!(
             "printf 'GROK_EVENT=%s\\nGROK_MESSAGE=%s\\nGROK_SESSION_ID=%s\\n' \
              \"$GROK_EVENT\" \"$GROK_MESSAGE\" \"$GROK_SESSION_ID\" > {}",
-            out.display()
+            sh_display(&out)
         );
 
         execute_hook(
@@ -166,7 +178,7 @@ mod tests {
     fn omits_session_id_when_none() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("env.txt");
-        let command = format!("env > {}", out.display());
+        let command = format!("env > {}", sh_display(&out));
 
         execute_hook(
             &command,
@@ -187,7 +199,7 @@ mod tests {
     fn kills_descendants_on_timeout() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("descendant-finished");
-        let command = format!("(sleep 2; touch {}) & wait", marker.display());
+        let command = format!("(sleep 2; touch {}) & wait", sh_display(&marker));
         execute_hook(
             &command,
             "Turn complete",
@@ -228,7 +240,7 @@ mod tests {
     fn successful_command_completes_without_error() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("done");
-        let command = format!("touch {}", marker.display());
+        let command = format!("touch {}", sh_display(&marker));
 
         execute_hook(
             &command,
@@ -258,7 +270,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("done");
         let hook = NotificationHook {
-            command: format!("sleep 100; touch {}", marker.display()),
+            command: format!("sleep 100; touch {}", sh_display(&marker)),
             events: vec![],
             only_unfocused: false,
             timeout_secs: 0, // Exercises the .max(1) clamp inside run_hook
@@ -287,7 +299,7 @@ mod tests {
             command: format!(
                 "printf 'GROK_EVENT=%s\\nGROK_MESSAGE=%s\\nGROK_SESSION_ID=%s\\n' \
                  \"$GROK_EVENT\" \"$GROK_MESSAGE\" \"$GROK_SESSION_ID\" > {}",
-                out.display()
+                sh_display(&out)
             ),
             events: vec![],
             only_unfocused: false,
