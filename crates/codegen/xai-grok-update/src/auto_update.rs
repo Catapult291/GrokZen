@@ -41,6 +41,32 @@ const MSG_RUN_UPDATE_MANUAL: &str = "运行 `grok-zh update` 获取最新版本�
 #[cfg(not(feature = "community-build"))]
 const MSG_RUN_UPDATE_MANUAL: &str = "Run `grok update` to get the latest version.";
 
+/// Privacy-build chokepoint: the vendor (x.ai) updater must stay unreachable.
+///
+/// Under `PRIVACY_BUILD` every vendor update entry point short-circuits and
+/// every installer path that would replace this binary with official Grok
+/// Build refuses. Community builds already gate their backend through
+/// [`crate::ensure_selected_updates_enabled`]; this bit additionally makes the
+/// no-community-build configuration fail closed instead of silently running
+/// the upstream official updater.
+#[inline]
+pub fn vendor_auto_update_forbidden() -> bool {
+    xai_grok_version::PRIVACY_BUILD || xai_grok_version::research_data_collection_forbidden()
+}
+
+/// User-facing explanation when a vendor update/install is blocked.
+pub fn vendor_update_blocked_message() -> String {
+    format!(
+        "隐私构建从不从官方（x.ai）更新渠道安装二进制——那会把本版本替换成官方 Grok Build。\n\n请从社区发布页安装：\n  {}",
+        xai_grok_product::COMMUNITY_RELEASES_URL
+    )
+}
+
+fn vendor_update_blocked_err() -> anyhow::Error {
+    anyhow::anyhow!("{}", vendor_update_blocked_message())
+}
+
+
 fn human_channel_label(channel: &str) -> String {
     if cfg!(feature = "community-build") {
         let translated = match channel {
@@ -83,6 +109,14 @@ fn announce_update_failed(error: &dyn std::fmt::Display) {
 }
 /// Manual-install command or distribution-owned download page.
 fn manual_install_cmd(channel: &str) -> String {
+
+    // Privacy builds must never point a reinstall hint at vendor installers:
+    // running the official install.sh/install.ps1 would replace this binary
+    // with official Grok Build. Always route to the community release page.
+    if vendor_auto_update_forbidden() {
+        return xai_grok_product::COMMUNITY_RELEASES_URL.to_string();
+    }
+
     if cfg!(feature = "community-build") {
         return xai_grok_product::COMMUNITY_RELEASES_URL.to_string();
     }
@@ -114,6 +148,15 @@ fn manual_install_cmd(channel: &str) -> String {
 
 /// Build a reinstall hint for a known installer type.
 fn reinstall_hint(installer: &str, channel: &str) -> String {
+    // Privacy build must never point a reinstall hint at vendor installers
+    // (npm/@xai-official, xai-org-shared GH releases, install.sh/ps1): every
+    // official path would replace this binary with official Grok Build.
+    if vendor_auto_update_forbidden() {
+        return format!(
+            "请从本项目 Releases 页面下载最新 grok-zh 安装包：\n  {}",
+            manual_install_cmd(channel)
+        );
+    }
     if cfg!(feature = "community-build") {
         return format!(
             "请从本项目 Releases 页面下载最新 grok-zh 安装包：\n  {}",
@@ -316,6 +359,21 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
     let channel = update_config.channel.clone();
 
     if crate::ensure_selected_updates_enabled().is_err() {
+
+    // Privacy build: never advertise vendor updates (official Grok Build
+    // replacement is the one thing this distribution refuses).
+    if vendor_auto_update_forbidden() {
+        return UpdateStatus {
+            current_version,
+            latest_version: None,
+            update_available: false,
+            installer: None,
+            channel,
+            auto_update: Some(false),
+            error: None,
+        };
+    }
+
         return UpdateStatus {
             current_version,
             latest_version: None,
@@ -466,6 +524,11 @@ async fn fetch_update_plan(
 /// on the installer (via `installer_allows_downgrade`) so npm is never
 /// downgraded — the decision depends on the installer, never the caller.
 pub async fn auto_update_target(update_config: &UpdateConfig) -> Option<(&'static str, String)> {
+
+    if vendor_auto_update_forbidden() {
+        return None;
+    }
+
     let installer = get_installer().await?;
     let current = get_installed_grok_version();
     let policy = config::VersionPolicy::resolve();
@@ -514,6 +577,14 @@ pub struct EnsureLatestOutcome {
 /// re-download is NOT fixed there; only the symlink layout can prove the
 /// disk is current without exec'ing the binary.
 pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<EnsureLatestOutcome> {
+
+    if vendor_auto_update_forbidden() {
+        return Ok(EnsureLatestOutcome {
+            installed: None,
+            relaunch_needed: false,
+        });
+    }
+
     let mut outcome = EnsureLatestOutcome {
         installed: None,
         relaunch_needed: false,
@@ -732,6 +803,11 @@ fn should_start_background_download(auto_update: bool, disk_needs_download: bool
 /// TUI, the leader's hourly checker) already put the target version on disk,
 /// no download is started — only the restart hint is surfaced.
 pub async fn check_update_background(update_config: &UpdateConfig) -> BackgroundUpdateCheck {
+
+    if vendor_auto_update_forbidden() {
+        return BackgroundUpdateCheck::none();
+    }
+
     let Some(installer) = get_installer().await else {
         return BackgroundUpdateCheck::none();
     };
@@ -836,6 +912,11 @@ pub async fn run_update_if_available(
     update_config: &UpdateConfig,
 ) -> Result<bool> {
     let Some(inst) = get_installer().await else {
+
+    if vendor_auto_update_forbidden() {
+        return Ok(false);
+    }
+
         // Skip update check if no known installer.
         return Ok(false);
     };
@@ -1071,7 +1152,17 @@ pub async fn run_install_script(
     update_config: &UpdateConfig,
     trigger: CliUpdateTrigger,
 ) -> Result<()> {
+    if vendor_auto_update_forbidden() {
+        return Err(vendor_update_blocked_err());
+    }
+
     crate::ensure_selected_updates_enabled()?;
+
+
+    if vendor_auto_update_forbidden() {
+        return Err(vendor_update_blocked_err());
+    }
+
     let from_version =
         disk_version_for_installer(installer).unwrap_or_else(get_installed_grok_version);
     let started = Instant::now();
@@ -2108,6 +2199,11 @@ async fn download_cli_artifact_from_gcs(
 
 /// Returns the version that was actually activated.
 async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) -> Result<String> {
+
+    if vendor_auto_update_forbidden() {
+        return Err(vendor_update_blocked_err());
+    }
+
     let bases = crate::version::cli_base_urls();
     let base_refs: Vec<&str> = bases.iter().map(String::as_str).collect();
     install_internal_from_bases(target, update_config, &base_refs).await
@@ -3632,6 +3728,10 @@ pub async fn run_update(
     update_config: &mut UpdateConfig,
     trigger: CliUpdateTrigger,
 ) -> Result<Option<String>> {
+    if vendor_auto_update_forbidden() {
+        return Err(vendor_update_blocked_err());
+    }
+
     crate::ensure_selected_updates_enabled()?;
     apply_channel_switch(channel_switch, update_config).await;
     let installer = match get_installer().await {
@@ -5048,6 +5148,11 @@ mod tests {
     #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_npm_mentions_npm_command() {
+        // Under privacy build the hint is hard-routed to the community
+        // releases page, so the vendor npm suggestion never applies.
+        if xai_grok_version::PRIVACY_BUILD {
+            return;
+        }
         let hint = reinstall_hint("npm", "stable");
         assert!(hint.contains("npm i -g"), "should suggest npm i -g: {hint}");
         assert!(
@@ -5059,6 +5164,11 @@ mod tests {
     #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_gh_release_mentions_gh_command() {
+        // Under privacy build the hint is hard-routed to the community
+        // releases page, so the vendor gh-release suggestion never applies.
+        if xai_grok_version::PRIVACY_BUILD {
+            return;
+        }
         let hint = reinstall_hint("gh-release", "stable");
         assert!(
             hint.contains("gh release download"),
@@ -5073,6 +5183,11 @@ mod tests {
     #[cfg(not(feature = "community-build"))]
     #[test]
     fn test_reinstall_hint_internal_mentions_platform_installer() {
+        // Under privacy build the hint is hard-routed to the community
+        // releases page, so the vendor install.sh/ps1 suggestion never applies.
+        if xai_grok_version::PRIVACY_BUILD {
+            return;
+        }
         let hint = reinstall_hint("internal", "stable");
         if cfg!(windows) {
             assert!(hint.contains("irm"), "should suggest irm install: {hint}");
@@ -6596,5 +6711,108 @@ mod tests {
             agent_old.exists(),
             "other executables' leftovers must be untouched"
         );
+    }
+
+    // ── Privacy build: vendor update hard-off ───────────────────────────
+    // Mirrors gork 0040 vendor-updater-hard-off semantics: under PRIVACY_BUILD
+    // the official x.ai update/install path must be unreachable, while the
+    // community Releases backend keeps working (D3).
+
+    #[test]
+    fn privacy_build_forbids_vendor_auto_update() {
+        assert!(
+            vendor_auto_update_forbidden(),
+            "PRIVACY_BUILD must forbid vendor auto-update"
+        );
+        let msg = vendor_update_blocked_message();
+        assert!(
+            msg.contains("隐私构建") || msg.contains("x.ai") || msg.contains("社区"),
+            "blocked message must explain the refusal: {msg}"
+        );
+        assert!(
+            !msg.contains("curl -fsSL https://x.ai/cli") && !msg.contains("irm https://x.ai/cli"),
+            "must not recommend vendor installers: {msg}"
+        );
+    }
+
+    #[test]
+    fn privacy_build_reinstall_hint_never_names_official_sources() {
+        for installer in ["internal", "npm", "gh-release", "homebrew"] {
+            let hint = reinstall_hint(installer, "stable");
+            for forbidden in ["x.ai/cli", "@xai-official", "xai-org-shared"] {
+                assert!(
+                    !hint.contains(forbidden),
+                    "installer={installer} must not recommend official source: {hint}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn privacy_build_manual_install_routes_to_community_page() {
+        let cmd = manual_install_cmd("stable");
+        assert!(cmd.contains("releases"), "must point at community releases: {cmd}");
+        assert!(!cmd.contains("x.ai/cli"), "must not name vendor installer: {cmd}");
+    }
+
+    #[tokio::test]
+    async fn run_install_script_fail_closed_under_privacy() {
+        let cfg = UpdateConfig {
+            proxy_base_url: "http://test.invalid/v1".to_string(),
+            auth_scope: "test".to_string(),
+            deployment_key: None,
+            alpha_test_key: None,
+            channel: "stable".to_string(),
+            npm_registry: None,
+        };
+        let err = run_install_script(
+            "internal",
+            Some("1.0.0"),
+            &cfg,
+            CliUpdateTrigger::UserCommand,
+        )
+        .await
+        .expect_err("run_install_script must refuse under privacy");
+        let s = format!("{err:#}");
+        assert!(
+            s.contains("x.ai") || s.contains("隐私构建") || s.contains("never"),
+            "{s}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_latest_on_disk_no_install_under_privacy() {
+        let cfg = UpdateConfig {
+            proxy_base_url: "http://test.invalid/v1".to_string(),
+            auth_scope: "test".to_string(),
+            deployment_key: None,
+            alpha_test_key: None,
+            channel: "stable".to_string(),
+            npm_registry: None,
+        };
+        let out = ensure_latest_on_disk(&cfg)
+            .await
+            .expect("privacy path is Ok(no-op), not network error");
+        assert!(
+            out.installed.is_none(),
+            "leader hourly path must not install under privacy"
+        );
+        assert!(
+            !out.relaunch_needed,
+            "must not claim relaunch after a privacy no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_update_target_none_under_privacy() {
+        let cfg = UpdateConfig {
+            proxy_base_url: "http://test.invalid/v1".to_string(),
+            auth_scope: "test".to_string(),
+            deployment_key: None,
+            alpha_test_key: None,
+            channel: "stable".to_string(),
+            npm_registry: None,
+        };
+        assert!(auto_update_target(&cfg).await.is_none());
     }
 }

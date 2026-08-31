@@ -28,7 +28,7 @@ xai-dirs = { workspace = true }
 xai-grok-shell = { workspace = true }
 xai-grok-telemetry = { workspace = true }
 xai-grok-tools = { workspace = true }
-xai-grok-version = { workspace = true }
+xai-grok-version = { workspace = true, features = ["privacy"] }
 xai-grok-product = { path = "../xai-grok-product" }
 zip = { version = "3", default-features = false, features = ["deflate-flate2"], optional = true }
 zstd = { workspace = true }

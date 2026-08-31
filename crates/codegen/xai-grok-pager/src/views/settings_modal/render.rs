@@ -444,6 +444,7 @@ fn localized_lock_reason<'a>(
     let id = match english {
         "Your team has Zero Data Retention." => "settings.ui.lock.zdr",
         "Managed by your team admin." => "settings.ui.lock.team",
+        "Locked to opt-out by this privacy build." => "settings.ui.lock.privacy_build",
         _ => return std::borrow::Cow::Borrowed(english),
     };
     localized_named_text(locale, id, english)
@@ -2499,6 +2500,9 @@ fn value_display_with_locale(
 ) -> String {
     if lock == Some(CodingDataSharingLock::Zdr) {
         return ROW_ZDR_VALUE.to_string();
+    }
+    if lock == Some(CodingDataSharingLock::PrivacyBuild) {
+        return localized_named_text(locale, "settings.ui.value.privacy_locked", "Privacy Build").into_owned();
     }
     let mut display = match value {
         SettingValue::Bool(b) => {

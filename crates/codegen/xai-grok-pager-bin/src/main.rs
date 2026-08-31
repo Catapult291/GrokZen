@@ -2206,13 +2206,21 @@ fn install_heap_profile_hooks() {
     });
 }
 fn version_text(channel_label: &str) -> String {
+    // Privacy build advertises its hardened posture in `--version` (D2/0080).
+    let privacy_suffix = if xai_grok_product::PRIVACY_BUILD {
+        "（隐私构建）"
+    } else {
+        ""
+    };
     format!(
-        "{} {}\n",
+        "{} {}{}
+",
         xai_grok_product::CLI_NAME,
         xai_grok_version::display_version_with_commit(
             xai_grok_version::full_version(),
             channel_label,
-        )
+        ),
+        privacy_suffix
     )
 }
 fn write_version(writer: &mut impl std::io::Write, channel_label: &str) -> std::io::Result<()> {

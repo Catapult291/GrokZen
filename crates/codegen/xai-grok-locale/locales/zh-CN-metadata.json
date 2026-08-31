@@ -799,7 +799,6 @@
   "settings.setting.contextual_hints.ssh_wrap.description": "SSH 会话未使用 grok-zh wrap 时显示 /doctor 提示。",
   "settings.setting.fork_secondary_model.label": "分叉辅助模型",
   "settings.setting.fork_secondary_model.description": "分叉时辅助智能体使用的模型。选择“（不覆盖）”可清除设置。",
-
   "settings.setting.theme.choice.auto.label": "自动",
   "settings.setting.theme.choice.auto.description": "跟随系统的深色／浅色外观。",
   "settings.setting.theme.choice.groknight.label": "Grok 夜间",
@@ -895,7 +894,6 @@
   "settings.setting.voice_stt_language.choice.vi.label": "越南语",
   "settings.setting.default_model.choice._none.label": "（不覆盖）",
   "settings.setting.default_model.choice._none.description": "继承默认模型（不设置用户级覆盖）。",
-
   "settings.ui.value.on": "开启",
   "settings.ui.value.off": "关闭",
   "settings.ui.value.no_override": "（不覆盖）",
@@ -1067,7 +1065,6 @@
   "settings.ui.validation.whitespace": "值不能包含空白字符",
   "settings.ui.validation.model_loading": "模型目录仍在加载，请稍后重试",
   "settings.ui.validation.unknown_model": "未知模型：“{model}”",
-
   "welcome.announcement.workflows.title": "工作流功能现已上线！",
   "welcome.announcement.workflows.message": "输入 /workflows 即可体验。",
   "welcome.announcement.grok_4_5.title": "Grok 4.5 现已上线！",
@@ -2755,5 +2752,8 @@
   "status_line.config.builtin_needs_items": "[ui.status_line] 使用 type = \"builtin\" 时至少需要一个 item",
   "status_line.config.refresh_needs_command": "[ui.status_line] refresh_interval 需要 type = \"command\"",
   "status_line.config.retired_refresh_interval_ms": "[ui.status_line] refresh_interval_ms 已弃用：更新会自动防抖；refresh_interval 会每 N 秒重新运行一次命令状态栏；不应频繁访问外部服务的脚本可在 state 运行时读取缓存",
-  "tasks.status.paused_prefix": "暂停"
+  "tasks.status.paused_prefix": "暂停",
+  "privacy.privacy_build_locked": "✗ 无法更改：此隐私构建已锁定编码数据保留为不参与",
+  "settings.ui.lock.privacy_build": "此隐私构建锁定编码数据保留为不参与。",
+  "settings.ui.value.privacy_locked": "隐私构建锁定"
 }

@@ -6,10 +6,24 @@
 
 #![forbid(unsafe_code)]
 
+/// Compile-time privacy switch, mirrored from `xai-grok-version`'s `privacy`
+/// feature (default-on in this fork). Every privacy-policy constant below and
+/// the display name follow it, so a single feature bit drives the whole
+/// distribution: telemetry hard-off, research-upload forbiddance, retention
+/// lock, and vendor-update refusal.
+pub const PRIVACY_BUILD: bool = xai_grok_version::PRIVACY_BUILD;
+
 /// Stable machine-readable identity used by packaging and release metadata.
 pub const PRODUCT_ID: &str = "grok-build-zh";
 /// Human-readable product name for client-owned UI chrome.
-pub const DISPLAY_NAME: &str = "Grok Build 中文社区版";
+/// The privacy-build suffix mirrors `PRIVACY_BUILD` so the shipped binary
+/// surfaces its hardened posture in `--version`, welcome copy, and the
+/// settings UI.
+pub const DISPLAY_NAME: &str = if PRIVACY_BUILD {
+    "Grok Build 中文社区版（隐私构建）"
+} else {
+    "Grok Build 中文社区版"
+};
 /// Command and executable stem for the community distribution.
 pub const CLI_NAME: &str = "grok-zh";
 /// Shared per-user data directory, relative to the user's home directory.
@@ -56,6 +70,27 @@ pub const fn executable_name() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn privacy_build_suffixes_display_name() {
+        assert_eq!(
+            PRIVACY_BUILD,
+            xai_grok_version::PRIVACY_BUILD,
+            "product policy must mirror the compile-time privacy switch"
+        );
+        assert_eq!(
+            DISPLAY_NAME,
+            if PRIVACY_BUILD {
+                "Grok Build 中文社区版（隐私构建）"
+            } else {
+                "Grok Build 中文社区版"
+            }
+        );
+        assert!(
+            !PRIVACY_BUILD || DISPLAY_NAME.contains("隐私构建"),
+            "privacy builds must advertise the hardened posture"
+        );
+    }
 
     #[test]
     fn community_ui_identity_uses_the_shared_official_data_home() {

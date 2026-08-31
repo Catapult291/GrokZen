@@ -9,7 +9,7 @@ authors = ["xAI"]
 # TTY safety — detach subprocesses from the controlling terminal
 dunce = { workspace = true }
 xai-tty-utils = { workspace = true }
-xai-grok-version = { workspace = true }
+xai-grok-version = { workspace = true, features = ["privacy"] }
 xai-grok-locale = { path = "../xai-grok-locale" }
 xai-grok-product = { path = "../xai-grok-product" }
 

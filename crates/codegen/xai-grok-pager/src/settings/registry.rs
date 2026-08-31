@@ -225,6 +225,8 @@ pub enum SettingValue {
 pub enum CodingDataSharingLock {
     Zdr,
     TeamManaged,
+    /// Privacy build: retention is locked to opt-out for every account.
+    PrivacyBuild,
 }
 
 impl CodingDataSharingLock {
@@ -232,6 +234,7 @@ impl CodingDataSharingLock {
         match self {
             Self::Zdr => "Your team has Zero Data Retention.",
             Self::TeamManaged => "Managed by your team admin.",
+            Self::PrivacyBuild => "Locked to opt-out by this privacy build.",
         }
     }
 }
