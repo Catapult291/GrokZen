@@ -3,7 +3,7 @@ license = "Apache-2.0"
 name = "xai-grok-telemetry"
 version = "0.1.0"
 edition.workspace = true
-description = "Telemetry engine: product events + Mixpanel emission + Sentry error reporting for Grok Build sessions"
+description = "Telemetry engine (privacy build): product analytics hard-off; optional user Sentry via SENTRY_DSN"
 authors = ["xAI"]
 
 [features]
@@ -58,7 +58,7 @@ xai-grok-session-events = { workspace = true }
 # mapping lives next to the trace-upload lifecycle events it labels.
 xai-file-utils = { path = "../xai-file-utils" }
 xai-tty-utils = { workspace = true }
-xai-grok-version = { workspace = true }
+xai-grok-version = { workspace = true, features = ["privacy"] }
 whoami = { workspace = true }
 uuid = { workspace = true, features = ["v5", "v7"] }
 obfstr = { workspace = true, optional = true }

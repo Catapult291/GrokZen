@@ -36,10 +36,13 @@ pub fn init(config: Config) -> ClientInitGuard {
         return sentry::init(ClientOptions::default());
     }
 
-    let dsn = std::env::var("SENTRY_DSN")
-        .ok()
-        .or_else(|| option_env!("SENTRY_DSN").map(|s| s.to_string()))
-        .unwrap_or_default();
+    // Privacy build: Sentry is off unless the user explicitly sets SENTRY_DSN
+    // at runtime. Built-in / compile-time DSNs are ignored so vendor crash
+    // reporting cannot ship by default.
+    let dsn = std::env::var("SENTRY_DSN").unwrap_or_default();
+    if dsn.is_empty() {
+        return sentry::init(ClientOptions::default());
+    }
 
     let scrubber = Scrubber::from_env();
 

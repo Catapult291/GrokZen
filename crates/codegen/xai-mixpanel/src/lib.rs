@@ -3,9 +3,10 @@
 //! This is a minimal replacement for `mixpanel-rs` that uses `reqwest 0.12`
 //! instead of `reqwest 0.11`, avoiding a duplicate HTTP stack in the binary.
 //!
-//! Only the `track` API is implemented since that's all we use.
+//! Privacy build: `track` / `engage` are hard no-ops — product analytics
+//! never leave the host. The client API surface is kept so construction
+//! sites compile, but nothing is transmitted.
 
-use base64::Engine;
 use std::collections::HashMap;
 
 /// Mixpanel client for sending track events.
@@ -24,6 +25,8 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
+/// Retained for a future re-enable; the privacy no-op path never transmits.
+#[allow(dead_code)]
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl Mixpanel {
@@ -47,6 +50,11 @@ impl Mixpanel {
     /// Scrub property string values in place, then inject the project
     /// token. Split out from [`Self::track`] so the scrub-then-inject
     /// ordering is testable.
+    ///
+    /// Not called by [`Self::track`] in the privacy build (track is a hard
+    /// no-op), but kept + unit-tested so a future re-enable cannot drop
+    /// scrub order.
+    #[allow(dead_code)] // intentionally unused by privacy no-op track path
     fn prepare_properties(
         &self,
         mut properties: HashMap<String, serde_json::Value>,
@@ -60,60 +68,29 @@ impl Mixpanel {
 
     /// Track an event. Properties should include `distinct_id`. The
     /// project `token` is injected after scrubbing, so it isn't redacted.
+    ///
+    /// **Privacy build:** always a no-op — product analytics never leave
+    /// the host.
     pub async fn track(
         &self,
-        event: &str,
-        properties: Option<HashMap<String, serde_json::Value>>,
+        _event: &str,
+        _properties: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<(), Error> {
-        let props = self.prepare_properties(properties.unwrap_or_default());
-
-        let payload = serde_json::json!([{
-            "event": event,
-            "properties": props,
-        }]);
-
-        let json_bytes = serde_json::to_vec(&payload)?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&json_bytes);
-
-        self.client
-            .post("https://api.mixpanel.com/track")
-            .timeout(REQUEST_TIMEOUT)
-            .form(&[("data", &encoded)])
-            .send()
-            .await?;
-
+        let _ = (&self.token, &self.client);
         Ok(())
     }
 
     /// Create or update a user profile via Mixpanel's Engage API.
     /// String values in `set` are scrubbed for secrets before sending.
     /// The project `token` is injected automatically.
+    ///
+    /// **Privacy build:** always a no-op.
     pub async fn engage(
         &self,
-        distinct_id: &str,
-        set: HashMap<String, serde_json::Value>,
+        _distinct_id: &str,
+        _set: HashMap<String, serde_json::Value>,
     ) -> Result<(), Error> {
-        let mut scrubbed = set;
-        for v in scrubbed.values_mut() {
-            xai_grok_secrets::redact_json_string_values(v);
-        }
-
-        let payload = serde_json::json!([{
-            "$token": self.token,
-            "$distinct_id": distinct_id,
-            "$set": scrubbed,
-        }]);
-
-        let json_bytes = serde_json::to_vec(&payload)?;
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&json_bytes);
-
-        self.client
-            .post("https://api.mixpanel.com/engage")
-            .timeout(REQUEST_TIMEOUT)
-            .form(&[("data", &encoded)])
-            .send()
-            .await?;
-
+        let _ = (&self.token, &self.client);
         Ok(())
     }
 }

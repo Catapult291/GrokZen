@@ -1729,6 +1729,8 @@ pub struct SessionConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RepoChangesDedupConfig {
+    /// Privacy build ships with this off — whole-repo / change-archive
+    /// research packaging is not used.
     pub enabled: bool,
     /// Include inline content even when references exist.
     pub include_inline_fallback: bool,
@@ -1747,7 +1749,8 @@ impl RepoChangesDedupConfig {}
 impl Default for RepoChangesDedupConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            // Privacy build: do not package/dedup repo changes for upload.
+            enabled: false,
             include_inline_fallback: false,
             max_inline_bytes: 0,
             dedup_untracked: true,
@@ -2475,7 +2478,13 @@ impl Config {
     pub(crate) fn is_two_pass_compaction_enabled(&self) -> bool {
         self.is_feature_enabled(Feature::TwoPassCompaction)
     }
-    pub(crate) fn resolve_telemetry_mode(&self) -> Resolved<TelemetryMode> {
+    /// Resolve effective product telemetry mode (privacy build: always Disabled).
+    pub fn resolve_telemetry_mode(&self) -> Resolved<TelemetryMode> {
+        // Privacy build: product telemetry is permanently off (remote/env cannot
+        // re-enable Mixpanel / events / research metrics).
+        if xai_grok_version::research_data_collection_forbidden() {
+            return Resolved::new(TelemetryMode::Disabled, ConfigSource::Default);
+        }
         if let Some(mode) = self.requirements.telemetry.pinned() {
             return Resolved::new(mode, ConfigSource::Requirement);
         }
@@ -2497,7 +2506,13 @@ impl Config {
         }
         Resolved::new(TelemetryMode::Disabled, ConfigSource::Default)
     }
-    pub(crate) fn resolve_trace_upload(&self) -> Resolved<bool> {
+    /// Resolve whether session/repo research trace upload is enabled
+    /// (privacy build: always false).
+    pub fn resolve_trace_upload(&self) -> Resolved<bool> {
+        // Privacy build: never upload session/repo traces to GCS (or anywhere).
+        if xai_grok_version::research_data_collection_forbidden() {
+            return Resolved::new(false, ConfigSource::Default);
+        }
         let mode = self.resolve_telemetry_mode();
         let ff = if mode.value.is_disabled() {
             None
@@ -2652,6 +2667,17 @@ impl Config {
         }
     }
     pub fn feature(&self, feature: Feature) -> Resolved<bool> {
+        if xai_grok_version::research_data_collection_forbidden()
+            && feature == Feature::Feedback
+        {
+            // Privacy build: feedback is off unless explicitly enabled via
+            // GROK_FEEDBACK_ENABLED env; config/remote cannot enable it.
+            let env = FeatureSources::from_process_env(feature).env;
+            if let Some(v) = env {
+                return Resolved::new(v, ConfigSource::Env);
+            }
+            return Resolved::new(false, ConfigSource::Default);
+        }
         feature.resolve(self.feature_sources(feature))
     }
     pub fn feature_off_reason(&self, feature: Feature) -> Option<String> {

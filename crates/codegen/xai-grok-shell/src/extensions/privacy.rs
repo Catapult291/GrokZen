@@ -26,6 +26,19 @@ async fn handle_set(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     let params: Params = parse_params(args)?;
 
+    // Privacy build: coding-data retention is locked to opt-out.
+    if xai_grok_version::coding_data_retention_locked_opt_out()
+        && !params.coding_data_retention_opt_out
+    {
+        return Err(acp::Error::invalid_params()
+            .data("隐私构建把编码数据保留锁定为 opt-out；不提供 opt-in 选项。"));
+    }
+    let opt_out = if xai_grok_version::coding_data_retention_locked_opt_out() {
+        true
+    } else {
+        params.coding_data_retention_opt_out
+    };
+
     let auth = agent.auth_manager.auth().await.map_err(|e| {
         tracing::warn!(error = %e, "privacy: auth resolution failed");
         acp::Error::auth_required()
@@ -37,7 +50,7 @@ async fn handle_set(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let token_header = agent.auth_manager.grok_com_config().token_header.clone();
 
     let body = serde_json::json!({
-        "codingDataRetentionOptOut": params.coding_data_retention_opt_out,
+        "codingDataRetentionOptOut": opt_out,
     });
 
     let provider: std::sync::Arc<dyn xai_grok_auth::AuthCredentialProvider> = std::sync::Arc::new(
@@ -82,10 +95,10 @@ async fn handle_set(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // background GET /user enrichment that may read stale ACL state
     // and overwrite the opt-out flag back to its previous value.
     let mut updated = auth.clone();
-    updated.coding_data_retention_opt_out = params.coding_data_retention_opt_out;
+    updated.coding_data_retention_opt_out = opt_out;
     let _ = agent.auth_manager.save_without_enrichment(updated).await;
 
     to_raw_response(&serde_json::json!({
-        "codingDataRetentionOptOut": params.coding_data_retention_opt_out,
+        "codingDataRetentionOptOut": opt_out,
     }))
 }

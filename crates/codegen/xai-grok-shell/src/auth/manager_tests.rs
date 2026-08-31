@@ -415,34 +415,27 @@ fn clear_does_not_remove_legacy_scope() {
 }
 #[test]
 fn is_data_collection_disabled_matrix() {
-    let cases: &[(&[&str], bool, bool)] = &[
-        (&["BLOCKED_REASON_NO_LOGS"], false, true),
-        (&["BLOCKED_REASON_NO_LOGS_MODERATED"], false, true),
-        (&[], true, true),
-        (&["BLOCKED_REASON_NO_LOGS"], true, true),
-        (&[], false, false),
-        (
-            &["BLOCKED_REASON_BILLING", "BLOCKED_REASON_SUSPENDED"],
-            false,
-            false,
-        ),
-        (&["BLOCKED_REASON_BILLING"], true, true),
-        (
-            &["BLOCKED_REASON_BILLING", "BLOCKED_REASON_NO_LOGS"],
-            false,
-            true,
-        ),
+    // Privacy build: research collection is always disabled, independent of
+    // ZDR / opt-out flags (those still matter for server-side retention).
+    let cases: &[(&[&str], bool)] = &[
+        (&["BLOCKED_REASON_NO_LOGS"], false),
+        (&["BLOCKED_REASON_NO_LOGS_MODERATED"], false),
+        (&[], true),
+        (&["BLOCKED_REASON_NO_LOGS"], true),
+        (&[], false),
+        (&["BLOCKED_REASON_BILLING", "BLOCKED_REASON_SUSPENDED"], false),
+        (&["BLOCKED_REASON_BILLING"], true),
+        (&["BLOCKED_REASON_BILLING", "BLOCKED_REASON_NO_LOGS"], false),
     ];
-    for (reasons, opt_out, expected) in cases {
+    for (reasons, opt_out) in cases {
         let auth = GrokAuth {
             team_blocked_reasons: reasons.iter().map(|s| (*s).into()).collect(),
             coding_data_retention_opt_out: *opt_out,
             ..GrokAuth::test_default()
         };
-        assert_eq!(
+        assert!(
             auth.is_data_collection_disabled(),
-            *expected,
-            "reasons={reasons:?} opt_out={opt_out} expected={expected}",
+            "privacy build: reasons={reasons:?} opt_out={opt_out} must disable collection",
         );
     }
 }
@@ -455,27 +448,50 @@ fn is_data_collection_disabled_matrix() {
 fn manager_collection_predicates_fail_directions() {
     let dir = tempfile::tempdir().unwrap();
     let mgr = Arc::new(AuthManager::new(dir.path(), GrokComConfig::default()));
-    assert!(!mgr.is_data_collection_disabled());
-    assert!(
-        !mgr.allows_data_collection(),
-        "missing credential must fail closed for collection"
-    );
-    mgr.hot_swap(GrokAuth::test_default());
-    assert!(!mgr.is_data_collection_disabled());
-    assert!(mgr.allows_data_collection());
-    mgr.hot_swap(GrokAuth {
-        coding_data_retention_opt_out: true,
-        ..GrokAuth::test_default()
-    });
-    assert!(mgr.is_data_collection_disabled());
-    assert!(!mgr.allows_data_collection());
-    mgr.hot_swap(GrokAuth::test_default());
-    assert!(mgr.allows_data_collection(), "precondition");
-    mgr.clear_in_memory();
-    assert!(
-        !mgr.allows_data_collection(),
-        "cleared credentials must close the collection gate"
-    );
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: both collection predicates permanently suppress
+        // research uploads.
+        assert!(mgr.is_data_collection_disabled());
+        assert!(!mgr.allows_data_collection());
+        mgr.hot_swap(GrokAuth::test_default());
+        assert!(mgr.is_data_collection_disabled());
+        assert!(
+            !mgr.allows_data_collection(),
+            "privacy build: normal user must not allow research collection"
+        );
+        mgr.hot_swap(GrokAuth {
+            coding_data_retention_opt_out: true,
+            ..GrokAuth::test_default()
+        });
+        assert!(mgr.is_data_collection_disabled());
+        assert!(!mgr.allows_data_collection());
+        mgr.hot_swap(GrokAuth::test_default());
+        mgr.clear_in_memory();
+        assert!(!mgr.allows_data_collection());
+        assert!(mgr.is_data_collection_disabled());
+    } else {
+        assert!(!mgr.is_data_collection_disabled());
+        assert!(
+            !mgr.allows_data_collection(),
+            "missing credential must fail closed for collection"
+        );
+        mgr.hot_swap(GrokAuth::test_default());
+        assert!(!mgr.is_data_collection_disabled());
+        assert!(mgr.allows_data_collection());
+        mgr.hot_swap(GrokAuth {
+            coding_data_retention_opt_out: true,
+            ..GrokAuth::test_default()
+        });
+        assert!(mgr.is_data_collection_disabled());
+        assert!(!mgr.allows_data_collection());
+        mgr.hot_swap(GrokAuth::test_default());
+        assert!(mgr.allows_data_collection(), "precondition");
+        mgr.clear_in_memory();
+        assert!(
+            !mgr.allows_data_collection(),
+            "cleared credentials must close the collection gate"
+        );
+    }
 }
 #[test]
 fn token_suffix_matrix() {
@@ -3186,7 +3202,9 @@ async fn enrich_auth_inline_populates_zdr_flags() {
         key: "tok".into(),
         ..GrokAuth::test_default()
     };
-    assert!(!auth.is_data_collection_disabled(), "precondition");
+    if !xai_grok_version::research_data_collection_forbidden() {
+        assert!(!auth.is_data_collection_disabled(), "precondition");
+    }
     mgr.enrich_auth_inline(&mut auth).await;
     assert!(auth.is_zdr_team(), "team_blocked_reasons must be merged");
     assert!(auth.coding_data_retention_opt_out);
@@ -3230,7 +3248,10 @@ async fn enrich_auth_inline_unreachable_server_leaves_auth_unchanged() {
     let before = auth.clone();
     mgr.enrich_auth_inline(&mut auth).await;
     assert_eq!(auth.user_id, before.user_id);
-    assert!(!auth.is_data_collection_disabled());
+    assert!(
+        auth.is_data_collection_disabled(),
+        "privacy build: unreachable server must not enable research collection"
+    );
 }
 /// `jsonwebtoken` needs a process-level CryptoProvider; tests that encode
 /// JWTs can't rely on another test having installed it first.
