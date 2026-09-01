@@ -659,6 +659,13 @@ jobs:
             grok-zh-test-cargo-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-
             grok-zh-test-cargo-${{ env.CARGO_CACHE_SCHEMA }}-
 
+      - name: 预热 Cargo 依赖（冷启动缓存 miss 时拉取 git 依赖）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cargo fetch --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { throw "cargo fetch 失败：$LASTEXITCODE" }
+
       - name: 隐私构建全量测试（privacy 默认开启）
         if: matrix.mode == 'privacy'
         shell: pwsh
