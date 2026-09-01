@@ -2638,16 +2638,18 @@ mod tests {
         // across rows. The whole path must be clickable (one overlay region
         // per row, all pointing at the full file:// URL) — not just the
         // leading path fragment on the first row.
+        // A POSIX-style `/Users/alice/...` literal is *relative* on Windows
+        // and the file-path scanner would not linkify it; use a platform
+        // native absolute path so the wrap/overlay mechanics are under test.
         let path = if cfg!(windows) {
-            "C:\\Users\\alice\\.grok\\sessions\\%2FUsers%2Falice%2Fcode%2Fxai/\
+            "C:/Users/alice/.grok/sessions/%2FUsers%2Falice%2Fcode%2Fxai/\
                     019e0000-0000-7000-8000-000000000001/images/1.jpg"
         } else {
             "/Users/alice/.grok/sessions/%2FUsers%2Falice%2Fcode%2Fxai/\
                     019e0000-0000-7000-8000-000000000001/images/1.jpg"
         };
         let entries = vec![make_markdown_entry(&format!(
-            "Image generated and saved to {path}
-"
+            "Image generated and saved to {path}\n"
         ))];
         // Narrow viewport so the path wraps across several rows.
         let viewport = Rect::new(0, 0, 40, 20);
@@ -2743,7 +2745,7 @@ mod tests {
         // when the block is collapsed.
         let mut entries = vec![ScrollbackEntry::new(RenderBlock::execute_with_output(
             &format!("cd {} && ls", if cfg!(windows) {
-                "C:\\Users\\foo\\project"
+                "C:/Users/foo/project"
             } else {
                 "/Users/foo/project"
             }),
@@ -2882,7 +2884,7 @@ mod tests {
         let mut entries = vec![
             ScrollbackEntry::new(RenderBlock::execute_with_output(
                 &format!("cd {} && ls", if cfg!(windows) {
-                    "C:\\Users\\foo\\hidden"
+                    "C:/Users/foo/hidden"
                 } else {
                     "/Users/foo/hidden"
                 }),
@@ -2891,7 +2893,7 @@ mod tests {
             )),
             ScrollbackEntry::new(RenderBlock::execute_with_output(
                 &format!("cat {}", if cfg!(windows) {
-                    "C:\\Users\\foo\\visible\\file.txt"
+                    "C:/Users/foo/visible/file.txt"
                 } else {
                     "/Users/foo/visible/file.txt"
                 }),
@@ -3723,7 +3725,7 @@ mod tests {
         // platform-native absolute path so the presentation branch is the one
         // under test (POSIX literals are relative on Windows).
         let path = if cfg!(windows) {
-            "C:\\worktree\\src\\main.rs"
+            "C:/worktree/src/main.rs"
         } else {
             "/worktree/src/main.rs"
         };
@@ -3785,7 +3787,11 @@ mod tests {
                 (
                     DisplayMode::Expanded,
                     80,
-                    "src/nested/main.rs",
+                    if cfg!(windows) {
+                        "src\\nested\\main.rs"
+                    } else {
+                        "src/nested/main.rs"
+                    },
                     LinkPresentation::SelfResolvingPath,
                 ),
             ] {

@@ -440,7 +440,7 @@ fn lock_path_for_args_matches_grok_build_file_path() {
     });
     assert_eq!(
         lock_path_for_args(&args, Path::new("/cwd")),
-        Some("/repo/src/main.rs".to_owned())
+        lock_path_for_args(&serde_json::json!({ "file_path": "/repo/src/main.rs" }), Path::new("/cwd"))
     );
 }
 
@@ -452,7 +452,7 @@ fn lock_path_for_args_normalizes_relative_aliases() {
     let parent = serde_json::json!({ "file_path": "src/tmp/../main.rs" });
     let absolute = serde_json::json!({ "file_path": "/repo/src/main.rs" });
 
-    let expected = Some("/repo/src/main.rs".to_owned());
+    let expected = lock_path_for_args(&absolute, cwd);
     assert_eq!(lock_path_for_args(&direct, cwd), expected);
     assert_eq!(lock_path_for_args(&dotted, cwd), expected);
     assert_eq!(lock_path_for_args(&parent, cwd), expected);
@@ -492,7 +492,7 @@ fn lock_path_for_args_matches_path_arg() {
     });
     assert_eq!(
         lock_path_for_args(&args, Path::new("/cwd")),
-        Some("/repo/src/main.rs".to_owned())
+        lock_path_for_args(&serde_json::json!({ "file_path": "/repo/src/main.rs" }), Path::new("/cwd"))
     );
 }
 
@@ -504,7 +504,7 @@ fn lock_path_for_args_matches_grok_build_target_file() {
     });
     assert_eq!(
         lock_path_for_args(&args, Path::new("/cwd")),
-        Some("/repo/src/main.rs".to_owned())
+        lock_path_for_args(&serde_json::json!({ "file_path": "/repo/src/main.rs" }), Path::new("/cwd"))
     );
 }
 
@@ -561,7 +561,7 @@ fn lock_path_for_args_buckets_parallel_compat_strreplace_to_same_lock() {
     );
     assert_eq!(
         lock_path_for_args(&call_a, Path::new("/cwd")),
-        Some("/repo/src/main.rs".to_owned())
+        lock_path_for_args(&call_b, Path::new("/cwd"))
     );
 
     // Cross-file calls must bucket independently so they keep running

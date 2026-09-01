@@ -94,7 +94,21 @@ fn resolve_tool_path_with_home(
         .unwrap_or_else(|| PathBuf::from(path));
     let relative_to_cwd = target.as_ref().and_then(|_| {
         let cwd = xai_grok_paths::normalize_lexically(cwd?);
-        display_path.strip_prefix(cwd).ok().and_then(non_empty_rel)
+        let mut rel = display_path.strip_prefix(&cwd).ok().map(|r| r.to_path_buf());
+        // A drive-letter mismatch (C: vs c:) defeats strip_prefix on
+        // Windows even though the paths are the same filesystem location;
+        // compare case-insensitively as a fallback.
+        if rel.is_none() && cfg!(windows) {
+            let a = display_path.to_string_lossy();
+            let b = cwd.to_string_lossy();
+            if a.len() > b.len()
+                && a[..b.len()].eq_ignore_ascii_case(&b)
+                && a.as_bytes().get(b.len()) == Some(&b'/')
+            {
+                rel = Some(std::path::PathBuf::from(&a[b.len() + 1..]));
+            }
+        }
+        rel.as_deref().and_then(non_empty_rel)
     });
     ResolvedToolPath {
         display_path,

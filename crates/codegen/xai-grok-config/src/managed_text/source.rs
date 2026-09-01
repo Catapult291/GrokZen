@@ -7,6 +7,27 @@ use super::{ManagedConfigError, ManagedConfigPlan};
 pub(super) const MAX_SYMLINKS: usize = 40;
 pub(super) const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
+/// How many existing ancestor directories are captured per parent chain.
+/// Bounded so an adversarial deep tree cannot force unbounded storage.
+const MAX_EXISTING_CHAIN: usize = 64;
+
+/// Directory identity on Windows is (len, is_dir) only — mtimes are
+/// volatile there (tempdir churn flips them between captures). Files keep
+/// mtime so a same-length content rewrite is still detected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct FileIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(not(unix))]
+    len: u64,
+    #[cfg(not(unix))]
+    is_dir: bool,
+    #[cfg(not(unix))]
+    modified: Option<std::time::SystemTime>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct SourceState {
     pub bytes: Option<Vec<u8>>,
@@ -190,20 +211,6 @@ impl ParentAnchor {
 struct PathIdentity {
     path: PathBuf,
     identity: FileIdentity,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct FileIdentity {
-    #[cfg(unix)]
-    dev: u64,
-    #[cfg(unix)]
-    ino: u64,
-    #[cfg(not(unix))]
-    len: u64,
-    #[cfg(not(unix))]
-    is_dir: bool,
-    #[cfg(not(unix))]
-    modified: Option<std::time::SystemTime>,
 }
 
 impl FileIdentity {

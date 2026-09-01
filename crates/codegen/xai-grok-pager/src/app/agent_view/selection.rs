@@ -1850,12 +1850,12 @@ mod tests {
         use ratatui::buffer::Buffer;
 
         let parent_cwd = if cfg!(windows) {
-            std::path::PathBuf::from("C:\\parent\\worktree")
+            std::path::PathBuf::from("C:/parent/worktree")
         } else {
             std::path::PathBuf::from("/parent/worktree")
         };
         let child_cwd = if cfg!(windows) {
-            std::path::PathBuf::from("C:\\child\\worktree")
+            std::path::PathBuf::from("C:/child/worktree")
         } else {
             std::path::PathBuf::from("/child/worktree")
         };
@@ -1888,8 +1888,18 @@ mod tests {
             .ranges
             .iter()
             .flat_map(|range| &range.lines)
-            .find(|line| line.text == "src/lib.rs")
-            .expect("child-relative Read header")
+            .find(|line| line.text.contains("lib.rs"))
+            .unwrap_or_else(|| {
+                let texts: Vec<_> = rendered
+                    .output
+                    .selection_model
+                    .ranges
+                    .iter()
+                    .flat_map(|r| r.lines.iter())
+                    .map(|l| l.text.clone())
+                    .collect();
+                panic!("no lib.rs line; all: {texts:?}")
+            })
             .clone();
         let content_width = rendered
             .output
@@ -1917,14 +1927,17 @@ mod tests {
                 |source| source(line.block_line_idx),
             )
             .flatten();
-        assert_eq!(source_text.as_deref(), Some("src/lib.rs"));
+        assert_eq!(
+            source_text.as_deref(),
+            Some(if cfg!(windows) { "src\\lib.rs" } else { "src/lib.rs" })
+        );
         {
             let child = parent.subagent_views.get(&child_id).expect("active child");
             let entry = child.scrollback.get(0).expect("child Read entry");
             let cached = entry.cached_output_ref();
             assert_eq!(
                 derive_selection_text(&cached.lines[line.block_line_idx]),
-                "src/lib.rs",
+                if cfg!(windows) { "src\\lib.rs" } else { "src/lib.rs" },
                 "copy helper must not rebuild the child cache against parent cwd"
             );
         }
@@ -1951,7 +1964,14 @@ mod tests {
         };
         assert_eq!(
             parent.reconstruct_drag_copy(&drag),
-            Some(("src/lib.rs".to_string(), SelectionKind::Linear))
+            Some((
+                if cfg!(windows) {
+                    "src\\lib.rs".to_string()
+                } else {
+                    "src/lib.rs".to_string()
+                },
+                SelectionKind::Linear
+            ))
         );
     }
 

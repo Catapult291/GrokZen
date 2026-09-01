@@ -468,10 +468,8 @@ fn set_yolo_mode_on_under_plan_uses_plan_aware_toast() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(
-        toast,
-        "\u{26A0} Always-approve ON: all tool actions auto-run"
-    );
+    assert_warning_toast(&toast, "\u{26A0} Always-approve ON: all tool actions auto-run");
+    let _ = toast;
 }
 
 /// The settings-modal path (`SetPermissionMode(AlwaysApprove)`) gets the same plan-aware toast as the Ctrl+O path.
@@ -994,10 +992,7 @@ fn set_yolo_mode_toast_format() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(
-        toast,
-        "\u{26A0} Always-approve ON: all tool actions auto-run"
-    );
+    assert_warning_toast(&toast, "\u{26A0} Always-approve ON: all tool actions auto-run");
 
     let _ = dispatch(Action::SetYoloMode(false), &mut app);
     let toast = app.agents[&AgentId(0)]
@@ -1487,8 +1482,9 @@ fn set_permission_mode_always_approve_from_default_captures_prev_canonical() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(
-        toast, "\u{26A0} Always-approve ON: all tool actions auto-run",
+    assert_warning_toast_with(
+        &toast,
+        "\u{26A0} Always-approve ON: all tool actions auto-run",
         "AlwaysApprove arm preserves the destructive yolo_toast(true) — the warning \
              weight is correct for the YOLO transition",
     );
@@ -1540,6 +1536,7 @@ fn permission_mode_toast_returns_brand_consistent_strings() {
         permission_toast("Ask"),
     );
     // AlwaysApprove still goes through `yolo_toast(true)`, the destructive variant
+    // (`permission_mode_toast` returns the raw string, no sanitize layer).
     assert_eq!(
         permission_mode_toast(PermissionModeKind::AlwaysApprove),
         "\u{26A0} Always-approve ON: all tool actions auto-run",
@@ -1557,6 +1554,10 @@ fn permission_toast(mode: &str) -> String {
 /// ConHost, so warning-toast assertions accept either prefix and pin the
 /// message body exactly.
 fn assert_warning_toast(toast: &str, expected: &str) {
+    assert_warning_toast_with(toast, expected, "");
+}
+
+fn assert_warning_toast_with(toast: &str, expected: &str, message: &str) {
     let body = expected
         .strip_prefix('\u{26A0}')
         .or_else(|| expected.strip_prefix('!'))
@@ -1565,7 +1566,10 @@ fn assert_warning_toast(toast: &str, expected: &str) {
         .strip_prefix('\u{26A0}')
         .or_else(|| toast.strip_prefix('!'))
         .unwrap_or(toast);
-    assert_eq!(actual, body, "warning toast body mismatch: {toast:?}");
+    assert_eq!(
+        actual, body,
+        "warning toast body mismatch: {toast:?} {message}"
+    );
 }
 
 #[test]

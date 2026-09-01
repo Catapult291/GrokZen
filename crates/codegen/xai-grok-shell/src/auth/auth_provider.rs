@@ -619,16 +619,32 @@ pub(crate) fn test_backdate_provider_mint(name: &str, age: std::time::Duration) 
 }
 
 /// A counting provider that prints "tok-1", "tok-2", ... on successive runs.
+///
+/// The command is POSIX (written for `sh -c`), but on Windows
+/// [`crate::util::subprocess::shell_c`] runs the script under `cmd /C`, where
+/// `;` separators and `$()` substitution do not exist. Keep the script
+/// `cmd`-compatible so the provider still mints under the Windows test
+/// runner: append a line with `echo run>>`, count lines through `type … |
+/// wc -l` (Git's `wc` is on `PATH` for tests), and emit the token with Git's
+/// `printf`.
 #[cfg(test)]
 pub(crate) fn test_counting_provider(name: &str, dir: &std::path::Path) -> AuthProviderRef {
     let counter = dir.join("count");
+    let command = if cfg!(windows) {
+        format!(
+            "@echo run>> {c} & @for /f %i in ('type {c} ^| wc -l') do @printf tok-%s %i",
+            c = counter.display()
+        )
+    } else {
+        format!(
+            "echo run >> {c}; printf 'tok-%s' \"$(wc -l < {c} | tr -d ' ')\"",
+            c = counter.display()
+        )
+    };
     AuthProviderRef::new(
         name.to_owned(),
         AuthProviderConfig {
-            command: format!(
-                "echo run >> {c}; printf 'tok-%s' \"$(wc -l < {c} | tr -d ' ')\"",
-                c = counter.display()
-            ),
+            command,
             args: None,
             token_ttl_secs: Some(3600),
             timeout_secs: None,

@@ -4,6 +4,18 @@ use crate::session::storage::StorageAdapter;
 use crate::terminal::AsyncTerminalRunner;
 use crate::terminal::runner::{TerminalError, TerminalRunRequest, TerminalRunResult};
 use xai_grok_paths::AbsPathBuf;
+
+/// The real turn-loop future needs a session-sized stack (spawn.rs spawns the
+/// actor thread with 8 MiB); the tokio test-thread default overflows on
+/// Windows, so turn-loop tests run on a dedicated 8 MiB thread.
+fn on_session_stack(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(test)
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked");
+}
 #[derive(Debug)]
 struct DummyTerminal;
 #[async_trait::async_trait]
@@ -12,14 +24,17 @@ impl AsyncTerminalRunner for DummyTerminal {
         Err(TerminalError::Other("dummy terminal".into()))
     }
 }
-#[tokio::test(flavor = "current_thread")]
-async fn persist_ack_waits_for_disk_flush_before_success() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+fn persist_ack_waits_for_disk_flush_before_success() {
+    on_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
             let tmp = tempfile::TempDir::new().unwrap();
             let session_dir = tmp.path().join("session");
-            let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
             let fs = Arc::new(xai_grok_workspace::file_system::MockFs::new(
                 cwd.to_path_buf(),
             ));
@@ -363,8 +378,8 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 "loaded chat history should contain the just-persisted prompt"
             );
             let _ = prompt_task.await.expect("prompt task should complete");
-        })
-        .await;
+        }));
+    });
 }
 #[tokio::test(flavor = "current_thread")]
 async fn plain_user_prompt_without_persist_ack_still_sends_flush_barrier_behind_its_echo() {
@@ -562,11 +577,15 @@ async fn first_turn_memory_injection_persists_to_chat_history() {
         })
         .await;
 }
-#[tokio::test(flavor = "current_thread")]
-async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history() {
+    on_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
             let session_dir = tempfile::tempdir().expect("tempdir");
             let session_info = crate::session::info::Info {
                 id: acp::SessionId::new("persist-memory-disabled"),
@@ -927,8 +946,8 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
                     .injection_count
                     .load(std::sync::atomic::Ordering::Relaxed)
             );
-        })
-        .await;
+        }));
+    });
 }
 /// Hard teardown (`kill_background_tasks = true`, the subagent-shutdown path)
 /// aborts the running turn AND drains every queued prompt, responding
@@ -945,7 +964,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<
                 PersistenceMsg,
             >();
-            let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
             let fs = Arc::new(
                 xai_grok_workspace::file_system::MockFs::new(cwd.to_path_buf()),
             );
@@ -1119,7 +1138,7 @@ async fn cancel_running_task_teardown_clears_running_and_pending_work() {
                 plan_mode: Arc::new(
                     parking_lot::Mutex::new(
                         crate::session::plan_mode::PlanModeTracker::new(
-                            std::path::PathBuf::from("/tmp/test-session"),
+                            std::env::temp_dir().join("test-session"),
                         ),
                     ),
                 ),
@@ -1602,11 +1621,14 @@ async fn maybe_apply_interrupt_envelope_skips_verbatim() {
 /// preceding `<system-reminder>`. Synchronizes on the persist-ack (fires
 /// after the user item is pushed, before the model call), then aborts the
 /// turn so the dead-URL model call can't hang.
-#[tokio::test(flavor = "current_thread")]
-async fn handle_prompt_frames_interrupt_on_user_message() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+fn handle_prompt_frames_interrupt_on_user_message() {
+    on_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
             let actor = actor_with_persistence_drain().await;
             actor.events.set_pending_interrupt_reminder();
             let query = "follow-up after interrupt";
@@ -1647,16 +1669,19 @@ async fn handle_prompt_frames_interrupt_on_user_message() {
             assert_eq!(text, frame_user_turn(INTERRUPT_NOTE, &expected_assembled));
             assert!(!actor.events.take_pending_interrupt_reminder());
             prompt_task.abort();
-        })
-        .await;
+        }));
+    });
 }
 /// Integration: a verbatim user turn must stay byte-identical to the caller
 /// text even when the interrupt one-shot is armed.
-#[tokio::test(flavor = "current_thread")]
-async fn handle_prompt_verbatim_skips_interrupt_envelope() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+fn handle_prompt_verbatim_skips_interrupt_envelope() {
+    on_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
             let actor = actor_with_persistence_drain().await;
             actor.events.set_pending_interrupt_reminder();
             let query = "caller-owned follow-up";
@@ -1696,16 +1721,19 @@ async fn handle_prompt_verbatim_skips_interrupt_envelope() {
             assert!(!user.text_content().contains(INTERRUPT_NOTE));
             assert!(!actor.events.take_pending_interrupt_reminder());
             prompt_task.abort();
-        })
-        .await;
+        }));
+    });
 }
 /// Send-now must use the full interjection envelope (prefix + already-wrapped
 /// `<user_query>` + unfinished-task trailer), not the note prefix alone.
-#[tokio::test(flavor = "current_thread")]
-async fn handle_prompt_send_now_frames_interjection_envelope() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+fn handle_prompt_send_now_frames_interjection_envelope() {
+    on_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
             let actor = actor_with_persistence_drain().await;
             let query = "create /tmp/A";
             let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
@@ -1749,18 +1777,21 @@ async fn handle_prompt_send_now_frames_interjection_envelope() {
                 )
             );
             prompt_task.abort();
-        })
-        .await;
+        }));
+    });
 }
 /// Integration: a synthetic-origin turn (here `scheduler-fired-*`) driven
 /// between the abort and the user's resend must NOT consume the one-shot or
 /// inject the reminder — it has to survive to the next *genuine* user turn.
 /// Guards the `PromptOrigin::User` gate on the injection call.
-#[tokio::test(flavor = "current_thread")]
-async fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
+    on_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
             let actor = actor_with_persistence_drain().await;
             actor.events.set_pending_interrupt_reminder();
             let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
@@ -1799,8 +1830,8 @@ async fn handle_prompt_synthetic_origin_preserves_interrupt_reminder() {
                 "a synthetic-origin turn must not inject the interrupt envelope"
             );
             prompt_task.abort();
-        })
-        .await;
+        }));
+    });
 }
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_running_task_interactive_preserves_queued_work() {
@@ -2548,7 +2579,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel::<
                 PersistenceMsg,
             >();
-            let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
             let fs = Arc::new(
                 xai_grok_workspace::file_system::MockFs::new(cwd.to_path_buf()),
             );
@@ -2722,7 +2753,7 @@ async fn cancel_propagates_to_sampler_handle_so_no_further_emission() {
                 plan_mode: Arc::new(
                     parking_lot::Mutex::new(
                         crate::session::plan_mode::PlanModeTracker::new(
-                            std::path::PathBuf::from("/tmp/test-session"),
+                            std::env::temp_dir().join("test-session"),
                         ),
                     ),
                 ),

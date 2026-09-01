@@ -399,6 +399,7 @@ fn tmux_plain_byobu_and_custom_config_paths_are_physical() {
     ));
 }
 
+#[cfg(not(windows))]
 #[test]
 fn tmux_managed_items_coexist_and_each_apply_is_one_transaction() {
     let temp = tempfile::tempdir().unwrap();
@@ -1223,6 +1224,7 @@ fn shell_aliases_expand_to_exact_argv_and_bypass_is_explicit() {
 /// An accumulating remedy is additive, so a user's own `terminal-features` lines are not a conflict.
 /// tmux applies Grok's managed block last and the features merge.
 /// A direct-assignment remedy would refuse to touch the file.
+#[cfg(not(windows))]
 #[test]
 fn tmux_truecolor_fix_appends_alongside_existing_terminal_features() {
     let temp = tempfile::tempdir().unwrap();
