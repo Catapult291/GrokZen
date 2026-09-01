@@ -14,7 +14,7 @@
 
 本项目在尽量保持原有功能、命令行参数、配置格式和协议兼容性的前提下，为 Grok Build 的 CLI、TUI、设置、提示信息和用户文档提供简体中文支持。它以独立程序名 `grok-zh` 与官方版并行使用，但有意共用 `~/.grok` 数据目录：会话、登录状态、配置、第三方 API、插件与本地状态在两个入口之间保持一致。
 
-[项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [macOS-arm64-安装](#macos-arm64-安装) · [Linux-x86_64-GNU-安装](#linux-x86_64-gnu-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [开发](#开发) · [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
+[项目定位](#项目定位) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [macOS-arm64-安装](#macos-arm64-安装) · [Linux-x86_64-GNU-安装](#linux-x86_64-gnu-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [开发](#开发) · [Releases](https://github.com/Catapult291/grok-zh/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
 
 ![grok-zh 中文 TUI 工具链体检](docs/screenshots/grok-zh-toolchain-check.png)
 
@@ -31,9 +31,9 @@
 
 ## 当前状态
 
-当前稳定版为 `v1.0.8` Windows 桥接版，提供 Windows x86_64 GNU 完整 ZIP。已发布的 `v1.0.5` 客户端会先升级到该桥接版；从 `v1.0.8` 起，更新器才能继续识别并升级到后续 `release-v*` 版本。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) 下载。
+当前稳定版为 `v1.0.8` Windows 桥接版，提供 Windows x86_64 GNU 完整 ZIP。已发布的 `v1.0.5` 客户端会先升级到该桥接版；从 `v1.0.8` 起，更新器才能继续识别并升级到后续 `release-v*` 版本。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库 [Releases](https://github.com/Catapult291/grok-zh/releases) 下载。
 
-`zh-dev` 的统一 [CI 工作流](https://github.com/JoyElliot/grok-build-Chinese/actions/workflows/zh-dev-windows-preview.yml)
+`zh-dev` 的统一 [CI 工作流](https://github.com/Catapult291/grok-zh/actions/workflows/zh-dev-windows-preview.yml)
 同时构建 Windows x64 GNU、Linux x86_64 GNU 与 macOS ARM64 预览 Artifact。预览产物只用于
 构建和设备验收，不会独立创建 Release；正式 Tag 由统一发布工作流按版本契约汇总、核验并
 证明各平台资产。macOS 产物尚未使用 Apple Developer ID 签名或公证。安装与安全边界见
@@ -59,7 +59,7 @@
 
 ## Windows 安装
 
-正式 Tag 工作流会在 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
+正式 Tag 工作流会在 [Releases](https://github.com/Catapult291/grok-zh/releases)
 中发布完整 Windows ZIP；`CI` 工作流仍会上传短期 Actions Artifact。
 解压完整包后，所有 `release-v*` 包（包括 `release-v1.0.12-rc.1`）都会得到唯一的
 `grok-zh-<version>-windows-x86_64-gnu` 目录；进入该目录再双击下列入口。
@@ -128,7 +128,7 @@ Windows 客户端迁移的两资产桥接版本，不包含 macOS 或 Linux 资�
 
 ### 反馈
 
-- 当遇到汉化不全等任何问题时，欢迎提出 [issue](https://github.com/JoyElliot/grok-build-Chinese/issues)
+- 当遇到汉化不全等任何问题时，欢迎提出 [issue](https://github.com/Catapult291/grok-zh/issues)
 - Linux Do 社区讨论地址：[点此进入](https://linux.do/t/topic/2770188)
 
 ## 从源码构建
@@ -218,7 +218,7 @@ Releases 中通过这些门禁的平台资产。
 - 1.0.6 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.6.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.6.zh-CN.md)
 - 1.0.5 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.5.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.5.zh-CN.md)
 - 1.0.3 简体中文发行说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.3.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.3.zh-CN.md)
-- 版本发布：[`Releases`](https://github.com/JoyElliot/grok-build-Chinese/releases)
+- 版本发布：[`Releases`](https://github.com/Catapult291/grok-zh/releases)
 - 官方在线文档：[docs.x.ai/build/overview](https://docs.x.ai/build/overview)
 
 中文文档将使用稳定文档 ID 和 `zh-CN` 平行目录，不直接改变英文标题所承担的查找身份，以降低合并上游更新时的冲突。
