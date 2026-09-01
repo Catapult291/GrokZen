@@ -365,9 +365,10 @@ fn set_permission_mode_ask_emits_brand_consistent_toast() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_eq!(
-        toast, "\u{2713} Permission mode: Ask",
-        "PR 11 R1 G-3 #11: Ask toast must brand as 'Permission mode' not 'Always-approve'",
+    assert_toast_glyph(&toast, '\u{2713}');
+    assert!(
+        toast.contains("Permission mode: Ask"),
+        "PR 11 R1 G-3 #11: Ask toast must brand as 'Permission mode' not 'Always-approve': {toast:?}",
     );
 
     // Effect carries the new canonical and the prior canonical (was "always-approve" from the test-setup pre-set)

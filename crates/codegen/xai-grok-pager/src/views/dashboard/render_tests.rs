@@ -491,9 +491,15 @@ fn render_dashboard_session_overlay_paints_bordered_frame_chrome() {
         content.contains("Add responsiveness to /context"),
         "title must render, got: {content:?}",
     );
-    for chip in ["[‹]", "[›]", "[Dashboard]"] {
+    let prev = crate::glyphs::chevron_left(); // "‹" normally, "<" on legacy ConHost
+    let next = crate::glyphs::chevron(); // "›" normally, ">" on legacy ConHost
+    for chip in [
+        format!("[{prev}]"),
+        format!("[{next}]"),
+        "[Dashboard]".to_string(),
+    ] {
         assert!(
-            content.contains(chip),
+            content.contains(&chip),
             "overlay must paint `{chip}`, got: {content:?}",
         );
     }
@@ -535,8 +541,8 @@ fn render_dashboard_session_overlay_paints_bordered_frame_chrome() {
         next.x,
     );
     assert!(
-        content.contains("[‹][›]"),
-        "row must contain `[‹][›]` as a single adjacent group, got: {content:?}",
+        content.contains(&format!("[{prev}][{next}]")),
+        "row must contain `[{prev}][{next}]` as a single adjacent group, got: {content:?}",
     );
     let close = chrome.close_rect.unwrap();
     let close_cell = &buf[(close.x, close.y)];
@@ -565,9 +571,11 @@ fn render_dashboard_session_overlay_omits_cycle_chips_when_position_is_none() {
     )
     .expect("overlay must paint");
     let content = buf_to_text(&buf);
+    let prev = crate::glyphs::chevron_left();
+    let next = crate::glyphs::chevron();
     assert!(content.contains("[Dashboard]"));
-    assert!(!content.contains("[‹]"));
-    assert!(!content.contains("[›]"));
+    assert!(!content.contains(&format!("[{prev}]")));
+    assert!(!content.contains(&format!("[{next}]")));
     assert!(chrome.prev_rect.is_none());
     assert!(chrome.next_rect.is_none());
     assert!(chrome.close_rect.is_some());
@@ -591,8 +599,10 @@ fn render_dashboard_session_overlay_omits_cycle_chips_when_total_is_one() {
     )
     .expect("overlay must paint");
     let content = buf_to_text(&buf);
-    assert!(!content.contains("[‹]"));
-    assert!(!content.contains("[›]"));
+    let prev = crate::glyphs::chevron_left();
+    let next = crate::glyphs::chevron();
+    assert!(!content.contains(&format!("[{prev}]")));
+    assert!(!content.contains(&format!("[{next}]")));
     // The position indicator is also suppressed; a `1/1` chip would be visual noise
     assert!(
         !content.contains("1/1"),
@@ -866,9 +876,15 @@ fn render_dashboard_session_header_paints_padded_top_bar_without_border() {
         content.contains("Add responsiveness to /context"),
         "title must render, got: {content:?}",
     );
-    for chip in ["[‹]", "[›]", "[Dashboard]"] {
+    let prev = crate::glyphs::chevron_left(); // "‹" normally, "<" on legacy ConHost
+    let next = crate::glyphs::chevron(); // "›" normally, ">" on legacy ConHost
+    for chip in [
+        format!("[{prev}]"),
+        format!("[{next}]"),
+        "[Dashboard]".to_string(),
+    ] {
         assert!(
-            content.contains(chip),
+            content.contains(&chip),
             "header must paint `{chip}`, got: {content:?}",
         );
     }
@@ -1245,9 +1261,10 @@ fn render_popup_overlay_registers_close_hit_rect() {
         |_inner, _buf| (None, None),
     );
     let content = buf_to_text(&buf);
+    let ballot = crate::glyphs::ballot_x(); // "✗" normally, "x" on legacy ConHost
     assert!(
-        content.contains('\u{2717}'),
-        "close affordance [✗] missing, got: {content:?}",
+        content.contains(ballot),
+        "close affordance [{ballot}] missing, got: {content:?}",
     );
     let close_rect = state
         .popup_close_rect
@@ -1903,7 +1920,7 @@ fn feedback_badge_renders_verbatim_in_neutral_color() {
     // Neutral colour: accent_user, never the error red
     let cx = (0..80)
         .find(|&x| buf[(x, 0)].symbol() == check)
-        .expect("the ✓ glyph must be painted");
+        .expect("the ✓/√ glyph must be painted");
     assert_eq!(
         buf[(cx, 0)].fg,
         theme.accent_user,
@@ -2491,8 +2508,8 @@ fn render_row_two_line_layout_paints_title_and_secondary() {
     );
     assert_eq!(
         buf[(2, 0)].symbol(),
-        "\u{2e2c}",
-        "row 0 col 2 must be the spinner glyph `⸬` at tick=8",
+        crate::glyphs::dot_spinner_frames()[2],
+        "row 0 col 2 must be the spinner glyph `⸬` (or its legacy fallback) at tick=8",
     );
     assert_eq!(
         buf[(3, 0)].symbol(),

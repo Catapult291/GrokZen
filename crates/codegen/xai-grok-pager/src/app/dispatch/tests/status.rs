@@ -175,10 +175,7 @@ fn set_coding_data_sharing_blocked_by_zdr() {
         toast.contains("Zero Data Retention"),
         "ZDR toast must surface the policy: {toast}",
     );
-    assert!(
-        toast.contains('\u{2717}'),
-        "blocked toast uses ✗ glyph: {toast}"
-    );
+    assert_toast_glyph(&toast, '\u{2717}');
     // State unchanged: the user was blocked, so the optimistic mutation never happened
     assert!(
         !app.coding_data_retention_opt_out,
@@ -435,7 +432,7 @@ fn coding_data_sharing_failed_rolls_back_and_toasts_error() {
              (G2 Issue 2): {toast}",
     );
     assert!(toast.contains("server error"), "error in toast: {toast}");
-    assert!(toast.contains('\u{2717}'), "failure toast uses ✗: {toast}");
+    assert_toast_glyph(&toast, '\u{2717}');
 }
 
 /// `TaskResult::CodingDataSharingFailed` reverts in the other direction too (the pre-toggle state could have been either).

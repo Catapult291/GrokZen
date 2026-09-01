@@ -136,7 +136,8 @@ mod tests {
         let mut buf = Buffer::empty(area);
         // 12.5% of 4 cells = 0.125*4*8 = 4 eighths = a half block on cell 0
         render_progress_bar(&mut buf, 0, 0, 4, 0.125, Color::White, Color::Black);
-        assert_eq!(buf[(0, 0)].symbol(), "▌"); // 4/8 = half
+        let half = partial_blocks()[4]; // "▌" normally, "▒" on legacy ConHost
+        assert_eq!(buf[(0, 0)].symbol(), half);
         assert_eq!(buf[(1, 0)].symbol(), " ");
     }
 
