@@ -479,9 +479,7 @@ pub fn init(
 ) {
     let lock = TELEMETRY_CLIENT.get_or_init(|| Mutex::new(None));
     let mut guard = lock.lock().unwrap_or_else(|err| err.into_inner());
-    *guard = if mode.is_disabled()
-        || xai_grok_version::research_data_collection_forbidden()
-    {
+    *guard = if mode.is_disabled() || xai_grok_version::research_data_collection_forbidden() {
         None
     } else {
         Some(TelemetryClient::from_config(

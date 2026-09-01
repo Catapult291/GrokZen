@@ -423,7 +423,10 @@ fn is_data_collection_disabled_matrix() {
         (&[], true),
         (&["BLOCKED_REASON_NO_LOGS"], true),
         (&[], false),
-        (&["BLOCKED_REASON_BILLING", "BLOCKED_REASON_SUSPENDED"], false),
+        (
+            &["BLOCKED_REASON_BILLING", "BLOCKED_REASON_SUSPENDED"],
+            false,
+        ),
         (&["BLOCKED_REASON_BILLING"], true),
         (&["BLOCKED_REASON_BILLING", "BLOCKED_REASON_NO_LOGS"], false),
     ];

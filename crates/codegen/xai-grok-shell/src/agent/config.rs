@@ -2667,9 +2667,7 @@ impl Config {
         }
     }
     pub fn feature(&self, feature: Feature) -> Resolved<bool> {
-        if xai_grok_version::research_data_collection_forbidden()
-            && feature == Feature::Feedback
-        {
+        if xai_grok_version::research_data_collection_forbidden() && feature == Feature::Feedback {
             // Privacy build: feedback is off unless explicitly enabled via
             // GROK_FEEDBACK_ENABLED env; config/remote cannot enable it.
             let env = FeatureSources::from_process_env(feature).env;

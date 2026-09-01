@@ -440,7 +440,10 @@ fn lock_path_for_args_matches_grok_build_file_path() {
     });
     assert_eq!(
         lock_path_for_args(&args, Path::new("/cwd")),
-        lock_path_for_args(&serde_json::json!({ "file_path": "/repo/src/main.rs" }), Path::new("/cwd"))
+        lock_path_for_args(
+            &serde_json::json!({ "file_path": "/repo/src/main.rs" }),
+            Path::new("/cwd")
+        )
     );
 }
 
@@ -492,7 +495,10 @@ fn lock_path_for_args_matches_path_arg() {
     });
     assert_eq!(
         lock_path_for_args(&args, Path::new("/cwd")),
-        lock_path_for_args(&serde_json::json!({ "file_path": "/repo/src/main.rs" }), Path::new("/cwd"))
+        lock_path_for_args(
+            &serde_json::json!({ "file_path": "/repo/src/main.rs" }),
+            Path::new("/cwd")
+        )
     );
 }
 
@@ -504,7 +510,10 @@ fn lock_path_for_args_matches_grok_build_target_file() {
     });
     assert_eq!(
         lock_path_for_args(&args, Path::new("/cwd")),
-        lock_path_for_args(&serde_json::json!({ "file_path": "/repo/src/main.rs" }), Path::new("/cwd"))
+        lock_path_for_args(
+            &serde_json::json!({ "file_path": "/repo/src/main.rs" }),
+            Path::new("/cwd")
+        )
     );
 }
 

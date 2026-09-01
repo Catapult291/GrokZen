@@ -66,7 +66,6 @@ fn vendor_update_blocked_err() -> anyhow::Error {
     anyhow::anyhow!("{}", vendor_update_blocked_message())
 }
 
-
 fn human_channel_label(channel: &str) -> String {
     if cfg!(feature = "community-build") {
         let translated = match channel {
@@ -109,7 +108,6 @@ fn announce_update_failed(error: &dyn std::fmt::Display) {
 }
 /// Manual-install command or distribution-owned download page.
 fn manual_install_cmd(channel: &str) -> String {
-
     // Privacy builds must never point a reinstall hint at vendor installers:
     // running the official install.sh/install.ps1 would replace this binary
     // with official Grok Build. Always route to the community release page.
@@ -359,20 +357,19 @@ pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
     let channel = update_config.channel.clone();
 
     if crate::ensure_selected_updates_enabled().is_err() {
-
-    // Privacy build: never advertise vendor updates (official Grok Build
-    // replacement is the one thing this distribution refuses).
-    if vendor_auto_update_forbidden() {
-        return UpdateStatus {
-            current_version,
-            latest_version: None,
-            update_available: false,
-            installer: None,
-            channel,
-            auto_update: Some(false),
-            error: None,
-        };
-    }
+        // Privacy build: never advertise vendor updates (official Grok Build
+        // replacement is the one thing this distribution refuses).
+        if vendor_auto_update_forbidden() {
+            return UpdateStatus {
+                current_version,
+                latest_version: None,
+                update_available: false,
+                installer: None,
+                channel,
+                auto_update: Some(false),
+                error: None,
+            };
+        }
 
         return UpdateStatus {
             current_version,
@@ -524,7 +521,6 @@ async fn fetch_update_plan(
 /// on the installer (via `installer_allows_downgrade`) so npm is never
 /// downgraded — the decision depends on the installer, never the caller.
 pub async fn auto_update_target(update_config: &UpdateConfig) -> Option<(&'static str, String)> {
-
     if vendor_auto_update_forbidden() {
         return None;
     }
@@ -577,7 +573,6 @@ pub struct EnsureLatestOutcome {
 /// re-download is NOT fixed there; only the symlink layout can prove the
 /// disk is current without exec'ing the binary.
 pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<EnsureLatestOutcome> {
-
     if vendor_auto_update_forbidden() {
         return Ok(EnsureLatestOutcome {
             installed: None,
@@ -803,7 +798,6 @@ fn should_start_background_download(auto_update: bool, disk_needs_download: bool
 /// TUI, the leader's hourly checker) already put the target version on disk,
 /// no download is started — only the restart hint is surfaced.
 pub async fn check_update_background(update_config: &UpdateConfig) -> BackgroundUpdateCheck {
-
     if vendor_auto_update_forbidden() {
         return BackgroundUpdateCheck::none();
     }
@@ -912,10 +906,9 @@ pub async fn run_update_if_available(
     update_config: &UpdateConfig,
 ) -> Result<bool> {
     let Some(inst) = get_installer().await else {
-
-    if vendor_auto_update_forbidden() {
-        return Ok(false);
-    }
+        if vendor_auto_update_forbidden() {
+            return Ok(false);
+        }
 
         // Skip update check if no known installer.
         return Ok(false);
@@ -1157,7 +1150,6 @@ pub async fn run_install_script(
     }
 
     crate::ensure_selected_updates_enabled()?;
-
 
     if vendor_auto_update_forbidden() {
         return Err(vendor_update_blocked_err());
@@ -2199,7 +2191,6 @@ async fn download_cli_artifact_from_gcs(
 
 /// Returns the version that was actually activated.
 async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) -> Result<String> {
-
     if vendor_auto_update_forbidden() {
         return Err(vendor_update_blocked_err());
     }
@@ -6751,8 +6742,14 @@ mod tests {
     #[test]
     fn privacy_build_manual_install_routes_to_community_page() {
         let cmd = manual_install_cmd("stable");
-        assert!(cmd.contains("releases"), "must point at community releases: {cmd}");
-        assert!(!cmd.contains("x.ai/cli"), "must not name vendor installer: {cmd}");
+        assert!(
+            cmd.contains("releases"),
+            "must point at community releases: {cmd}"
+        );
+        assert!(
+            !cmd.contains("x.ai/cli"),
+            "must not name vendor installer: {cmd}"
+        );
     }
 
     #[tokio::test]

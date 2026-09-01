@@ -73,7 +73,9 @@ async fn plan_mode_allows_plan_file_edit() {
                 &actor,
                 search_replace_call_at(
                     "call_plan_file",
-                    &std::env::temp_dir().join("test-session/plan.md").to_string_lossy(),
+                    &std::env::temp_dir()
+                        .join("test-session/plan.md")
+                        .to_string_lossy(),
                 ),
             )
             .await;

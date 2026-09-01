@@ -1929,7 +1929,11 @@ mod tests {
             .flatten();
         assert_eq!(
             source_text.as_deref(),
-            Some(if cfg!(windows) { "src\\lib.rs" } else { "src/lib.rs" })
+            Some(if cfg!(windows) {
+                "src\\lib.rs"
+            } else {
+                "src/lib.rs"
+            })
         );
         {
             let child = parent.subagent_views.get(&child_id).expect("active child");
@@ -1937,7 +1941,11 @@ mod tests {
             let cached = entry.cached_output_ref();
             assert_eq!(
                 derive_selection_text(&cached.lines[line.block_line_idx]),
-                if cfg!(windows) { "src\\lib.rs" } else { "src/lib.rs" },
+                if cfg!(windows) {
+                    "src\\lib.rs"
+                } else {
+                    "src/lib.rs"
+                },
                 "copy helper must not rebuild the child cache against parent cwd"
             );
         }

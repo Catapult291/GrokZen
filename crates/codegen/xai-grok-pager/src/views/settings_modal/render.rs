@@ -2502,7 +2502,8 @@ fn value_display_with_locale(
         return ROW_ZDR_VALUE.to_string();
     }
     if lock == Some(CodingDataSharingLock::PrivacyBuild) {
-        return localized_named_text(locale, "settings.ui.value.privacy_locked", "Privacy Build").into_owned();
+        return localized_named_text(locale, "settings.ui.value.privacy_locked", "Privacy Build")
+            .into_owned();
     }
     let mut display = match value {
         SettingValue::Bool(b) => {

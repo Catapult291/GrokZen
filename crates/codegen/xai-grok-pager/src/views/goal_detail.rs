@@ -2191,12 +2191,20 @@ mod tests {
         render_goal_detail(&mut buf, area, &goal, &todos, 0, None, 0, false);
 
         let text = buffer_text(&buf);
-        // Completed = ✓, InProgress = ▶, Pending = □, Cancelled = ✗
-        // Match icon and content to disambiguate from the close button [✗]
-        assert!(text.contains("\u{2713} done"), "missing ✓ for Completed");
+        // Completed = ✓/√, InProgress = ▶, Pending = □, Cancelled = ✗/x
+        // Match icon and content to disambiguate from the close button [✗]/[x]
+        let check = crate::glyphs::check_mark();
+        let ballot = crate::glyphs::ballot_x();
+        assert!(
+            text.contains(&format!("{check} done")),
+            "missing ✓ for Completed: {text:?}"
+        );
         assert!(text.contains("\u{25b6} wip"), "missing ▶ for InProgress");
         assert!(text.contains("\u{25a1} todo"), "missing □ for Pending");
-        assert!(text.contains("\u{2717} skip"), "missing ✗ for Cancelled");
+        assert!(
+            text.contains(&format!("{ballot} skip")),
+            "missing ✗ for Cancelled: {text:?}"
+        );
     }
 
     #[test]
