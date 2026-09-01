@@ -217,20 +217,27 @@ fn relative_file_path_regex() -> &'static regex::Regex {
 fn file_path_regex() -> &'static regex::Regex {
     static RE: OnceLock<regex::Regex> = OnceLock::new();
     RE.get_or_init(|| {
-        // Absolute (`/Users/me/x.md`) or home-relative (`~/Desktop/x.md`) paths.
-        // Leading `~` is expanded to $HOME when building the `file://` URL.
+        // POSIX absolute (`/Users/me/x.md`) or home-relative (`~/Desktop/x.md`)
+        // paths, plus Windows drive-absolute forms (`C:/Users/me/x.md`) —
+        // the drive path is matched with forward slashes because that is how
+        // the `url` crate's `from_file_path` round-trips it and how tool
+        // paths are normally rendered here.
         //
         // The *final* segment may include internal spaces when it looks like a
         // filename with an extension (tutor report: `…/Demo App.app`
         // only linkified up to the space). Intermediate segments stay
         // space-free so `…/bar here.` does not eat the word `here`.
-        // Alternation prefers the spaced form first so it wins over the shorter
-        // no-space prefix at the same start position.
-        let pat = format!(
+        let drive = format!(
+            r"[a-zA-Z]:(?:/{seg})+(?:/{spaced}|/{seg})",
+            seg = PATH_SEGMENT,
+            spaced = PATH_SEGMENT_SPACED,
+        );
+        let posix = format!(
             r"~?/(?:{seg}/)+(?:{spaced}|{seg})",
             seg = PATH_SEGMENT,
             spaced = PATH_SEGMENT_SPACED,
         );
+        let pat = format!(r"(?:{drive}|{posix})");
         regex::Regex::new(&pat).expect("file path regex")
     })
 }

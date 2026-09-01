@@ -3151,10 +3151,16 @@ fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
 fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
     let child_sid = "child-dash-defer".to_string();
     let home = tempfile::tempdir().unwrap();
+    // The replay fast path resolves hints against the parent session cwd
+    // (`make_test_agent_session` uses `std::env::temp_dir()`), so the fixture
+    // must live under that same cwd's encoded dirname. A hardcoded `/tmp`
+    // only matches on Unix, where temp_dir() == "/tmp".
     let session_dir = home
         .path()
         .join("sessions")
-        .join(urlencoding::encode("/tmp").as_ref())
+        .join(xai_grok_config::encode_cwd_dirname(
+            &std::env::temp_dir().to_string_lossy(),
+        ))
         .join(&child_sid);
     std::fs::create_dir_all(&session_dir).unwrap();
     std::fs::write(session_dir.join("summary.json"), "{}").unwrap();

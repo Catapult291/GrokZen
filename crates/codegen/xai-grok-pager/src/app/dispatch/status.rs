@@ -236,6 +236,15 @@ pub(super) fn set_coding_data_sharing_tracked(
     opted_in: bool,
     source: xai_grok_telemetry::events::CodingDataConsentSource,
 ) -> (Vec<Effect>, SharingWriteOutcome) {
+    // ── Guard 0: Privacy build lock ───────────────────────────────────
+    if xai_grok_version::coding_data_retention_locked_opt_out() && opted_in {
+        let message = app.locale.named_static_text(
+            "privacy.privacy_build_locked",
+            "✗ Cannot change: this privacy build locks coding data retention to opt-out",
+        );
+        app.show_toast(message);
+        return (vec![], SharingWriteOutcome::Refused);
+    }
     // ── Guard 1: Enterprise ZDR ──────────────────────────────────────
     if app.is_zdr {
         let message = app.locale.named_static_text(
@@ -597,6 +606,12 @@ pub(super) fn handle_coding_data_sharing_updated(
     }
     // Re-anchor mirror to server-confirmed value (defense-in-depth against server reshaping the boolean)
     // `agent_id` discarded; privacy is app-level, not per-agent
+    // Privacy build: the server cannot opt the account back into retention.
+    if xai_grok_version::coding_data_retention_locked_opt_out() && opted_in {
+        app.coding_data_retention_opt_out = true;
+        app.privacy_banner_opt_in_inflight = false;
+        return vec![];
+    }
     set_coding_data_sharing_inner(app, opted_in);
     refresh_open_settings_modals(app);
     tracing::info!(

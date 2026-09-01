@@ -7658,6 +7658,7 @@ fn locked_coding_data_sharing_row_does_not_open_picker() {
     for lock in [
         CodingDataSharingLock::Zdr,
         CodingDataSharingLock::TeamManaged,
+        CodingDataSharingLock::PrivacyBuild,
     ] {
         let mut s = make_locked_state(lock);
         s.selected = coding_data_sharing_row_idx(&s);
@@ -7692,6 +7693,7 @@ fn locked_coding_data_sharing_row_refuses_reset() {
     for lock in [
         CodingDataSharingLock::Zdr,
         CodingDataSharingLock::TeamManaged,
+        CodingDataSharingLock::PrivacyBuild,
     ] {
         let mut s = make_locked_state(lock);
         s.selected = coding_data_sharing_row_idx(&s);
@@ -7859,6 +7861,9 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
         "expanded locked row must show the lock reason: {text:?}"
     );
     // Token from the live description so this survives copy edits.
+    // Skip the leading words that mirror the setting label ("Coding data
+    // retention") — the label legitimately appears in the locked row, so
+    // probe a description-unique fragment instead.
     let desc = s
         .registry
         .find("coding_data_sharing")
@@ -7866,6 +7871,7 @@ fn locked_coding_data_sharing_expanded_description_replaces_with_reason() {
         .description;
     let desc_head: String = desc
         .split_whitespace()
+        .skip(3)
         .take(3)
         .collect::<Vec<_>>()
         .join(" ");

@@ -2638,8 +2638,16 @@ mod tests {
         // across rows. The whole path must be clickable (one overlay region
         // per row, all pointing at the full file:// URL) — not just the
         // leading path fragment on the first row.
-        let path = "/Users/alice/.grok/sessions/%2FUsers%2Falice%2Fcode%2Fxai/\
-                    019e0000-0000-7000-8000-000000000001/images/1.jpg";
+        // A POSIX-style `/Users/alice/...` literal is *relative* on Windows
+        // and the file-path scanner would not linkify it; use a platform
+        // native absolute path so the wrap/overlay mechanics are under test.
+        let path = if cfg!(windows) {
+            "C:/Users/alice/.grok/sessions/%2FUsers%2Falice%2Fcode%2Fxai/\
+                    019e0000-0000-7000-8000-000000000001/images/1.jpg"
+        } else {
+            "/Users/alice/.grok/sessions/%2FUsers%2Falice%2Fcode%2Fxai/\
+                    019e0000-0000-7000-8000-000000000001/images/1.jpg"
+        };
         let entries = vec![make_markdown_entry(&format!(
             "Image generated and saved to {path}\n"
         ))];
@@ -2736,7 +2744,11 @@ mod tests {
         // File paths in the command header line should be linkified even
         // when the block is collapsed.
         let mut entries = vec![ScrollbackEntry::new(RenderBlock::execute_with_output(
-            "cd /Users/foo/project && ls",
+            &format!("cd {} && ls", if cfg!(windows) {
+                "C:/Users/foo/project"
+            } else {
+                "/Users/foo/project"
+            }),
             "file1\nfile2",
             None::<String>,
         ))];
@@ -2755,9 +2767,13 @@ mod tests {
                     .expect("url")
             })
             .collect();
+        let prefix = if cfg!(windows) {
+            "file:///C:/Users/foo/project"
+        } else {
+            "file:///Users/foo/project"
+        };
         assert!(
-            urls.iter()
-                .any(|u| u.starts_with("file:///Users/foo/project")),
+            urls.iter().any(|u| u.starts_with(prefix)),
             "file path in collapsed header should be linkified, got: {urls:?}"
         );
     }
@@ -2867,12 +2883,20 @@ mod tests {
         // group: 3 entries, header count = group_len - 1 = 2.
         let mut entries = vec![
             ScrollbackEntry::new(RenderBlock::execute_with_output(
-                "cd /Users/foo/hidden && ls",
+                &format!("cd {} && ls", if cfg!(windows) {
+                    "C:/Users/foo/hidden"
+                } else {
+                    "/Users/foo/hidden"
+                }),
                 "out",
                 None::<String>,
             )),
             ScrollbackEntry::new(RenderBlock::execute_with_output(
-                "cat /Users/foo/visible/file.txt",
+                &format!("cat {}", if cfg!(windows) {
+                    "C:/Users/foo/visible/file.txt"
+                } else {
+                    "/Users/foo/visible/file.txt"
+                }),
                 "out",
                 None::<String>,
             )),
@@ -2948,16 +2972,26 @@ mod tests {
                 )
             })
             .collect();
+        let hidden_marker = if cfg!(windows) {
+            "Users/foo/hidden"
+        } else {
+            "/Users/foo/hidden"
+        };
+        let visible_marker = if cfg!(windows) {
+            "Users/foo/visible/file.txt"
+        } else {
+            "/Users/foo/visible/file.txt"
+        };
         assert!(
             links
                 .iter()
-                .all(|(_, url)| !url.contains("/Users/foo/hidden")),
+                .all(|(_, url)| !url.contains(hidden_marker)),
             "collapse-header entry's hidden line must not be linkified, got: {links:?}"
         );
         assert!(
             links
                 .iter()
-                .any(|(row, url)| *row == 1 && url.contains("/Users/foo/visible/file.txt")),
+                .any(|(row, url)| *row == 1 && url.contains(visible_marker)),
             "visible group entry below the collapse header must still be linkified, got: {links:?}"
         );
     }
@@ -3561,8 +3595,16 @@ mod tests {
         use crate::scrollback::types::{BlockContext, selectable_cols};
         use unicode_width::UnicodeWidthStr;
 
-        let abs = "/Users/me/project/src/foo.rs";
-        let cwd = std::path::PathBuf::from("/Users/me/project");
+        let abs = if cfg!(windows) {
+            "C:\\Users\\me\\project\\src\\foo.rs"
+        } else {
+            "/Users/me/project/src/foo.rs"
+        };
+        let cwd = if cfg!(windows) {
+            std::path::PathBuf::from("C:\\Users\\me\\project")
+        } else {
+            std::path::PathBuf::from("/Users/me/project")
+        };
         let mut entry = ScrollbackEntry::new(RenderBlock::edit(abs, None));
         entry.display_mode = DisplayMode::Collapsed;
 
@@ -3679,7 +3721,14 @@ mod tests {
 
     #[test]
     fn official_vscode_remote_delegates_scanned_absolute_path() {
-        let path = "/worktree/src/main.rs";
+        // The scanner only treats host-absolute paths as SelfResolving; use a
+        // platform-native absolute path so the presentation branch is the one
+        // under test (POSIX literals are relative on Windows).
+        let path = if cfg!(windows) {
+            "C:/worktree/src/main.rs"
+        } else {
+            "/worktree/src/main.rs"
+        };
         let entry = make_markdown_entry(path);
         let viewport = Rect::new(0, 0, 80, 5);
         let (result, buf) =
@@ -3704,8 +3753,18 @@ mod tests {
 
     #[test]
     fn official_vscode_remote_tool_headers_delegate_only_self_resolving_paint() {
-        let cwd = std::path::PathBuf::from("/worktree");
-        let target = "/worktree/src/nested/main.rs";
+        // Platform-native absolute paths so the SelfResolving/Opaque branches
+        // are the ones under test (POSIX literals are relative on Windows).
+        let cwd = if cfg!(windows) {
+            std::path::PathBuf::from("C:\\worktree")
+        } else {
+            std::path::PathBuf::from("/worktree")
+        };
+        let target = if cfg!(windows) {
+            "C:\\worktree\\src\\nested\\main.rs"
+        } else {
+            "/worktree/src/nested/main.rs"
+        };
         let terminal = official_vscode_remote_context();
 
         for (name, block) in [
@@ -3728,7 +3787,11 @@ mod tests {
                 (
                     DisplayMode::Expanded,
                     80,
-                    "src/nested/main.rs",
+                    if cfg!(windows) {
+                        "src\\nested\\main.rs"
+                    } else {
+                        "src/nested/main.rs"
+                    },
                     LinkPresentation::SelfResolvingPath,
                 ),
             ] {
@@ -3809,13 +3872,25 @@ mod tests {
 
     #[test]
     fn basename_headers_stay_grok_owned_for_duplicate_and_outside_targets() {
-        let cwd = std::path::PathBuf::from("/worktree");
+        let cwd = if cfg!(windows) {
+            std::path::PathBuf::from("C:\\worktree")
+        } else {
+            std::path::PathBuf::from("/worktree")
+        };
         let terminal = official_vscode_remote_context();
-        let cases = [
-            ("duplicate-a", "/worktree/src/a/main.rs"),
-            ("duplicate-b", "/worktree/src/b/main.rs"),
-            ("outside", "/opt/service/main.rs"),
-        ];
+        let cases = if cfg!(windows) {
+            [
+                ("duplicate-a", "C:\\worktree\\src\\a\\main.rs"),
+                ("duplicate-b", "C:\\worktree\\src\\b\\main.rs"),
+                ("outside", "C:\\opt\\service\\main.rs"),
+            ]
+        } else {
+            [
+                ("duplicate-a", "/worktree/src/a/main.rs"),
+                ("duplicate-b", "/worktree/src/b/main.rs"),
+                ("outside", "/opt/service/main.rs"),
+            ]
+        };
 
         for (name, target) in cases {
             for (tool, block) in [
@@ -3858,7 +3933,11 @@ mod tests {
 
     #[test]
     fn long_read_header_link_is_clipped_to_offset_content_area() {
-        let path = "/outside/a/very/long/path/that/is/clipped/main.rs";
+        let path = if cfg!(windows) {
+            "C:\\outside\\a\\very\\long\\path\\that\\is\\clipped\\main.rs"
+        } else {
+            "/outside/a/very/long/path/that/is/clipped/main.rs"
+        };
         let mut entry = ScrollbackEntry::new(RenderBlock::read(path, None));
         entry.display_mode = DisplayMode::Expanded;
         let viewport = Rect::new(11, 0, 24, 5);
@@ -3882,7 +3961,11 @@ mod tests {
 
     #[test]
     fn explicit_tool_link_clips_before_u16_conversion() {
-        let path = format!("/outside/{}.rs", "x".repeat(70_000));
+        let path = if cfg!(windows) {
+            format!("C:\\outside\\{}.rs", "x".repeat(70_000))
+        } else {
+            format!("/outside/{}.rs", "x".repeat(70_000))
+        };
         let mut entry = ScrollbackEntry::new(RenderBlock::read(path, None));
         entry.display_mode = DisplayMode::Expanded;
         let viewport = Rect::new(9, 0, 40, 5);

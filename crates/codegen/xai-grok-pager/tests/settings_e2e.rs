@@ -4618,6 +4618,10 @@ fn pr9_coding_data_sharing_does_not_support_preview() {
 
 /// Reads from pager snapshot; inverts `_opt_out` bool.
 #[test]
+/// In a privacy build the value is locked to opt-out, so the snapshot's
+/// `_opt_out` bool cannot surface an opt-in canonical that no longer
+/// exists in the catalog. Non-privacy builds keep the upstream inversion.
+#[test]
 fn pr9_current_value_for_reads_pager_snapshot_inverts_opt_out() {
     use xai_grok_pager::settings::current_value_for;
 
@@ -4632,15 +4636,20 @@ fn pr9_current_value_for_reads_pager_snapshot_inverts_opt_out() {
         ..PagerLocalSnapshot::default()
     };
 
+    let expected_for_false = if xai_grok_version::coding_data_retention_locked_opt_out() {
+        "opt-out"
+    } else {
+        "opt-in"
+    };
     assert_eq!(
         current_value_for("coding_data_sharing", &ui, &opted_in_snap),
-        Some(SettingValue::Enum("opt-in")),
-        "opt_out=false → canonical 'opt-in' (user IS sharing data)",
+        Some(SettingValue::Enum(expected_for_false)),
+        "opt_out=false -> canonical (opt-out when privacy-locked, else opt-in)",
     );
     assert_eq!(
         current_value_for("coding_data_sharing", &ui, &opted_out_snap),
         Some(SettingValue::Enum("opt-out")),
-        "opt_out=true → canonical 'opt-out' (user opted OUT of sharing)",
+        "opt_out=true -> canonical 'opt-out' (user opted OUT of sharing)",
     );
 }
 
@@ -4673,6 +4682,10 @@ fn pr9_enter_on_coding_data_sharing_row_enters_picking_enum() {
 
 /// Nav in picker must NOT dispatch preview (async ACP).
 #[test]
+/// Nav in picker must NOT dispatch preview (async ACP). With a single
+/// locked opt-out choice, every nav key is clamped at the boundary and
+/// returns Unchanged — never an Action.
+#[test]
 fn pr9_coding_data_sharing_picker_nav_does_not_dispatch_preview() {
     for nav_key in &[
         KeyCode::Down,
@@ -4685,75 +4698,35 @@ fn pr9_coding_data_sharing_picker_nav_does_not_dispatch_preview() {
         let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
         assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
 
-        // Pre-position so the nav key under test has room to move no matter which choice the registry default opens the picker on
-        // (Up needs idx > 0, Down needs idx < last.)
-        if matches!(nav_key, KeyCode::Up | KeyCode::Char('k')) {
-            let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
-        } else {
-            let _ = handle_settings_key(&mut s, &press(KeyCode::Up));
-        }
-
         let outcome = handle_settings_key(&mut s, &press(*nav_key));
         assert!(
-            matches!(outcome, SettingsKeyOutcome::Changed),
-            "Nav key {nav_key:?} in coding_data_sharing picker MUST NOT dispatch a preview \
-             Action — that would fire a network round-trip per keystroke. Got {outcome:?}",
+            !matches!(outcome, SettingsKeyOutcome::Action(_)),
+            "Nav key {nav_key:?} in coding_data_sharing picker MUST NOT dispatch a preview              Action — that would fire a network round-trip per keystroke. Got {outcome:?}",
         );
-        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+        assert!(
+            matches!(s.mode(), SettingsModalMode::PickingEnum { .. }),
+            "nav must stay inside the picker, got {:?}",
+            s.mode(),
+        );
     }
 }
 
-/// Enter commits `SetCodingDataSharing { opted_in }` (opt-in maps to true).
+/// Privacy build: the single opt-out choice commits `SetCodingDataSharing { opted_in: false }`.
 #[test]
 fn pr9_coding_data_sharing_picker_enter_dispatches_set_commit() {
-    let reg = SettingsRegistry::defaults();
-    let meta = reg.find("coding_data_sharing").unwrap();
-    let (default_canonical, choices) = match &meta.kind {
-        SettingKind::Enum {
-            default, choices, ..
-        } => (*default, *choices),
-        _ => panic!("coding_data_sharing must be Enum"),
-    };
-    // Resolve "the other" canonical from the registry rather than hardcoding; robust against future catalog additions
-    let other_canonical = choices
-        .iter()
-        .map(|c| c.canonical)
-        .find(|c| *c != default_canonical)
-        .expect("coding_data_sharing must have ≥2 choices");
-    let expected_opted_in = match other_canonical {
-        "opt-in" => true,
-        "opt-out" => false,
-        _ => panic!("unexpected canonical: {other_canonical:?}"),
-    };
-
     let mut s = make_state();
     navigate_to(&mut s, "coding_data_sharing");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
-    // Nav to the OTHER choice; direction depends on where the registry default opened the picker, so derive it instead of hardcoding Down
-    let default_idx = choices
-        .iter()
-        .position(|c| c.canonical == default_canonical)
-        .expect("default must be a registry choice");
-    let other_idx = choices
-        .iter()
-        .position(|c| c.canonical == other_canonical)
-        .expect("other choice must be in the registry");
-    let nav = if other_idx > default_idx {
-        KeyCode::Down
-    } else {
-        KeyCode::Up
-    };
-    let _ = handle_settings_key(&mut s, &press(nav));
-    // Enter commits
+    // Enter commits the sole choice (opt-out).
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     match outcome {
         SettingsKeyOutcome::Action(Action::SetCodingDataSharing { opted_in }) => {
-            assert_eq!(
-                opted_in, expected_opted_in,
-                "Enter must commit `{other_canonical}` → SetCodingDataSharing(opted_in={expected_opted_in})"
+            assert!(
+                !opted_in,
+                "privacy build commit must be opted_out=false (opt-out)",
             );
         }
-        other => panic!("expected Action::SetCodingDataSharing commit, got {other:?}"),
+        other => panic!("expected Action::SetCodingDataSharing(opted_in=false), got {other:?}"),
     }
     assert!(
         matches!(s.mode(), SettingsModalMode::Browse),
@@ -4823,7 +4796,7 @@ fn pr9_picker_seeds_choices_idx_from_pager_snapshot_opt_out_true() {
     }
 }
 
-/// Exactly 2 canonical choices: {opt-in, opt-out}.
+/// Privacy build: exactly 1 canonical choice: {opt-out} — retention is locked.
 #[test]
 fn pr9_coding_data_sharing_choices_use_canonical_strings() {
     let reg = SettingsRegistry::defaults();
@@ -4833,19 +4806,9 @@ fn pr9_coding_data_sharing_choices_use_canonical_strings() {
         _ => panic!("coding_data_sharing must be Enum"),
     };
     assert_eq!(
-        canonicals.len(),
-        2,
-        "coding_data_sharing catalog must be exactly {{opt-in, opt-out}} — adding a \
-         choice requires updating the action_for_enum_commit arm in \
-         views/settings_modal.rs AND the action_for_reset arm in dispatch.rs",
-    );
-    assert!(
-        canonicals.contains(&"opt-in"),
-        "coding_data_sharing must include 'opt-in' canonical"
-    );
-    assert!(
-        canonicals.contains(&"opt-out"),
-        "coding_data_sharing must include 'opt-out' canonical"
+        canonicals,
+        vec!["opt-out"],
+        "privacy build locks coding_data_sharing to a single opt-out choice",
     );
 }
 

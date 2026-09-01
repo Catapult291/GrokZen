@@ -500,6 +500,21 @@ fn feedback_enter_offers_trace_question_when_eligible() {
         .get_mut(&AgentId(0))
         .unwrap()
         .submit_question_answers_for_test(false);
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        // Privacy build: the trace card is never offered, so Enter sends directly.
+        assert!(
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::SendFeedback { trace: None, .. })
+            ),
+            "privacy build: Enter must send directly with no trace offer: {outcome:?}"
+        );
+        assert!(
+            app.agents[&AgentId(0)].question_view.is_none(),
+            "privacy build: pane closes on send"
+        );
+        return;
+    }
     assert!(
         matches!(outcome, InputOutcome::Changed),
         "Enter must advance to the trace question, not send yet: {outcome:?}"
@@ -549,6 +564,9 @@ fn feedback_trace_enter_turns_on_trace_upload() {
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        return; // privacy build: the trace-consent card does not exist
+    }
     let mut app = app_with_feedback_trace_question("clipboard is broken over ssh");
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let outcome =
@@ -676,6 +694,9 @@ fn feedback_trace_third_option_maps_to_never_ask() {
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        return; // privacy build: the trace-consent card does not exist
+    }
     let mut app = app_with_feedback_trace_question("clipboard is broken over ssh");
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -701,6 +722,9 @@ fn feedback_trace_no_upload_sends_report_alone() {
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        return; // privacy build: the trace-consent card does not exist
+    }
     let mut app = app_with_feedback_trace_question("clipboard is broken over ssh");
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.handle_question_key_for_test(&KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
@@ -736,6 +760,9 @@ fn feedback_trace_esc_skips_upload_but_sends() {
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        return; // privacy build: the trace-consent card does not exist
+    }
     let mut app = app_with_feedback_trace_question("clipboard is broken over ssh");
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     let outcome =
@@ -843,6 +870,31 @@ fn feedback_opted_out_still_gets_trace_offer() {
         &mut app,
     );
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        // Privacy build: retention is locked to opt-out, so no self-serve
+        // re-enable card exists — the pane offers no trace stage.
+        assert!(
+            !agent
+                .question_view
+                .as_ref()
+                .expect("pane")
+                .feedback_offer_trace,
+            "privacy build: the trace card must not be offered"
+        );
+        agent.prompt.set_text("clipboard is broken over ssh");
+        let outcome = agent.submit_question_answers_for_test(false);
+        assert!(
+            matches!(
+                outcome,
+                crate::app::app_view::InputOutcome::Action(Action::SendFeedback {
+                    trace: None,
+                    ..
+                })
+            ),
+            "privacy build: Enter must send directly: {outcome:?}"
+        );
+        return;
+    }
     assert!(
         agent
             .question_view
@@ -907,6 +959,31 @@ fn feedback_turn_on_while_opted_out_reenables_sharing_then_uploads() {
         },
         &mut app,
     );
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        // Privacy build: retention is locked to opt-out, so the sharing
+        // write is refused — the report sends alone, nothing flips.
+        assert!(
+            app.coding_data_retention_opt_out,
+            "privacy build: opt-out must stay locked"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::SetCodingDataSharing { .. })),
+            "privacy build: no sharing write may be issued: {effects:?}"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::UploadFeedbackTrace { .. })),
+            "privacy build: no trace upload may leave the machine: {effects:?}"
+        );
+        assert!(
+            app.feedback_trace_upload_pending.is_none(),
+            "privacy build: no upload may be parked"
+        );
+        return;
+    }
     assert!(
         !app.coding_data_retention_opt_out,
         "turn-on must flip sharing back on (optimistic)"
@@ -989,6 +1066,15 @@ fn feedback_turn_on_unlatches_when_the_confirm_keeps_sharing_off() {
         },
         &mut app,
     );
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        // Privacy build: the sharing write is refused, so nothing is parked —
+        // there is no confirm to sequence.
+        assert!(
+            app.feedback_trace_upload_pending.is_none(),
+            "privacy build: no upload may be parked"
+        );
+        return;
+    }
     let seq = app
         .feedback_trace_upload_pending
         .as_ref()
@@ -1037,6 +1123,19 @@ fn feedback_turn_on_upload_is_dropped_when_the_opt_in_write_fails() {
         },
         &mut app,
     );
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        // Privacy build: the sharing write is refused, so nothing is parked —
+        // there is no failure to sequence.
+        assert!(
+            app.feedback_trace_upload_pending.is_none(),
+            "privacy build: no upload may be parked"
+        );
+        assert!(
+            app.coding_data_retention_opt_out,
+            "privacy build: opt-out must stay locked"
+        );
+        return;
+    }
     let seq = app
         .feedback_trace_upload_pending
         .as_ref()
@@ -1087,6 +1186,9 @@ fn feedback_turn_on_upload_is_dropped_when_the_opt_in_write_fails() {
 /// It sends without a trace, like Esc/skip.
 #[test]
 fn acp_question_displacing_trace_card_still_sends_report() {
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        return; // privacy build: the trace-consent card does not exist
+    }
     let mut app = app_with_feedback_trace_question("clipboard is broken over ssh");
     let (args, _rx) = make_ask_user_question_args("acp-driven-question");
     assert!(crate::app::acp_handler::handle_ask_user_question(
@@ -1125,6 +1227,9 @@ fn dismissing_the_trace_card_still_sends_the_report() {
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        return; // privacy build: the trace-consent card does not exist
+    }
     let mut app = app_with_feedback_trace_question("clipboard is broken over ssh");
     let ctrl_y = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL);
     let outcome = app
@@ -1158,6 +1263,33 @@ fn auth_meta_refreshes_feedback_trace_offer() {
         ..Default::default()
     };
     app.apply_auth_meta(&meta);
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        // Privacy build: retention is locked to opt-out, so an auth-meta
+        // refresh cannot surface an offer the shell never made — the
+        // privacy lock always blocks the trace card.
+        assert!(
+            app.coding_data_sharing_lock().is_some(),
+            "privacy build: retention lock must be active"
+        );
+        app.agents.get_mut(&AgentId(0)).unwrap().active_pane =
+            crate::app::agent_view::AgentPane::Prompt;
+        let _ = dispatch(
+            Action::OpenFeedbackPane {
+                prefill: None,
+                images: Default::default(),
+            },
+            &mut app,
+        );
+        assert!(
+            !app.agents[&AgentId(0)]
+                .question_view
+                .as_ref()
+                .expect("pane")
+                .feedback_offer_trace,
+            "privacy build: post-login /feedback must not offer the trace question"
+        );
+        return;
+    }
     assert!(app.feedback_trace_offer(), "login must refresh the offer");
 
     app.agents.get_mut(&AgentId(0)).unwrap().active_pane =
@@ -1767,6 +1899,9 @@ fn feedback_trace_stage_carries_report_images() {
     use crate::app::app_view::InputOutcome;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        return; // privacy build: the trace-consent card does not exist
+    }
     let mut app = test_app_with_agent();
     app.shell_feedback_trace_offer = true;
     app.agents.get_mut(&AgentId(0)).unwrap().active_pane =
@@ -1818,6 +1953,9 @@ fn feedback_trace_stage_carries_report_images() {
 fn feedback_trace_card_dropped_with_view_cleans_staged_temp_files() {
     use crate::app::app_view::InputOutcome;
 
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        return; // privacy build: the trace-consent card does not exist
+    }
     let mut app = test_app_with_agent();
     app.shell_feedback_trace_offer = true;
     app.agents.get_mut(&AgentId(0)).unwrap().active_pane =

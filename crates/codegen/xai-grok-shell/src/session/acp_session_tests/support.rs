@@ -360,9 +360,9 @@ pub(crate) async fn create_test_actor_with_terminal(
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
         turn_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         plan_mode: Arc::new(parking_lot::Mutex::new(
-            crate::session::plan_mode::PlanModeTracker::new(std::path::PathBuf::from(
-                "/tmp/test-session",
-            )),
+            crate::session::plan_mode::PlanModeTracker::new(
+                std::env::temp_dir().join("test-session"),
+            ),
         )),
         goal_enabled: false,
         background_workflows_enabled: false,

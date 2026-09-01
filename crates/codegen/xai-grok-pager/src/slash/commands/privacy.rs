@@ -1,4 +1,4 @@
-//! `/privacy`: open the "Coding data, retention, and training" setting.
+//! `/privacy`: open the coding-data retention setting (locked to opt-out in this build).
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
@@ -11,8 +11,8 @@ pub struct PrivacyCommand;
 impl SlashCommand for PrivacyCommand {
     slash_meta! {
         name: "privacy",
-        // Reads as the row it opens: "Coding data, retention, and training".
-        description: "Open coding data, retention, and training settings",
+        // Reads as the row it opens: retention is locked to opt-out in this build.
+        description: "显示编码数据保留状态（已锁定为选择退出）",
         usage: "/privacy",
     }
 

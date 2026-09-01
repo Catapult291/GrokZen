@@ -547,7 +547,7 @@ pub(super) mod paste_key_tests {
                 models: ModelState::default(),
                 state: AgentState::Idle,
                 tracker: crate::acp::tracker::AcpUpdateTracker::new(),
-                cwd: std::path::PathBuf::from("/tmp"),
+                cwd: std::env::temp_dir(),
                 is_worktree: false,
                 forked_from: None,
                 pending_prompts: std::collections::VecDeque::new(),
@@ -2666,10 +2666,18 @@ pub(super) mod paste_key_tests {
         let mut agent = make_agent();
         agent.set_active_pane(ActivePane::Prompt, true);
         let ctx = agent_completion_ctx(&agent, None);
+        // `file:///definitely/...` decodes to a local path only on POSIX
+        // (`url::Url::to_file_path` refuses non-`/X:/` paths on Windows), so
+        // the drop classifier accepts a platform-native URL on Windows too.
+        let url = if cfg!(windows) {
+            "file:///C:/definitely/missing/xai-primary-paste.png".to_owned()
+        } else {
+            "file:///definitely/missing/xai-primary-paste.png".to_owned()
+        };
         let completion = agent.complete_clipboard_attachment_paste(
             ctx,
             crate::app::actions::ProbedAttachment::NoRaster,
-            Some("file:///definitely/missing/xai-primary-paste.png".to_owned()),
+            Some(url),
         );
         assert_eq!(
             completion,
@@ -2677,7 +2685,11 @@ pub(super) mod paste_key_tests {
         );
         assert_eq!(
             agent.prompt.text(),
-            "/definitely/missing/xai-primary-paste.png "
+            if cfg!(windows) {
+                "C:\\definitely\\missing\\xai-primary-paste.png "
+            } else {
+                "/definitely/missing/xai-primary-paste.png "
+            }
         );
         assert!(agent.prompt.images.is_empty());
     }

@@ -1275,6 +1275,10 @@ impl AppView {
     /// Why `coding_data_sharing` is locked for this user (`None` means editable).
     /// Mirrors the dispatch guards in `set_coding_data_sharing`.
     pub fn coding_data_sharing_lock(&self) -> Option<crate::settings::CodingDataSharingLock> {
+        // Privacy build: retention is locked to opt-out for every account.
+        if xai_grok_version::coding_data_retention_locked_opt_out() {
+            return Some(crate::settings::CodingDataSharingLock::PrivacyBuild);
+        }
         if self.is_zdr {
             Some(crate::settings::CodingDataSharingLock::Zdr)
         } else if self.is_team_non_admin() {
@@ -1285,6 +1289,12 @@ impl AppView {
     }
     /// Welcome privacy banner visibility gates.
     pub fn privacy_banner_should_show(&self) -> bool {
+        // Privacy build: the banner exists upstream to advertise the
+        // coding-data-retention opt-in, which this build locks to opt-out —
+        // a remote `privacy_notice_rollout` flag must not surface a dead opt-in.
+        if xai_grok_version::coding_data_retention_locked_opt_out() {
+            return false;
+        }
         if self.screen_mode.is_minimal() {
             return false;
         }

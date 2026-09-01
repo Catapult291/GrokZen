@@ -113,6 +113,16 @@ fn send_while_idle_with_nonempty_shared_queue_routes_to_server() {
 #[test]
 fn set_coding_data_sharing_unchanged_opt_in_skips_acp_and_acks() {
     let mut app = test_app_with_agent();
+    // Privacy build: opt-in is locked, so there is no ack.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert!(
+            effects.is_empty(),
+            "privacy build must refuse unchanged opt-in: {effects:?}"
+        );
+        assert!(app.privacy_banner_acked.is_none());
+        return;
+    }
     app.privacy_notice_rollout = true;
     app.coding_data_retention_opt_out = false;
     let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
@@ -140,6 +150,17 @@ fn set_coding_data_sharing_unchanged_opt_in_skips_acp_and_acks() {
 #[test]
 fn set_coding_data_sharing_blocked_by_zdr() {
     let mut app = test_app_with_agent();
+    // Privacy build: the privacy lock fires before the ZDR guard.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert!(effects.is_empty(), "opt-in must be refused: {effects:?}");
+        assert!(
+            read_toast(&app).contains("privacy build"),
+            "privacy lock toast expected: {:?}",
+            read_toast(&app)
+        );
+        return;
+    }
     app.is_zdr = true;
     app.coding_data_retention_opt_out = false;
     let effects = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
@@ -154,10 +175,7 @@ fn set_coding_data_sharing_blocked_by_zdr() {
         toast.contains("Zero Data Retention"),
         "ZDR toast must surface the policy: {toast}",
     );
-    assert!(
-        toast.contains('\u{2717}'),
-        "blocked toast uses ✗ glyph: {toast}"
-    );
+    assert_toast_glyph(&toast, '\u{2717}');
     // State unchanged: the user was blocked, so the optimistic mutation never happened
     assert!(
         !app.coding_data_retention_opt_out,
@@ -170,6 +188,17 @@ fn set_coding_data_sharing_blocked_by_zdr() {
 #[test]
 fn set_coding_data_sharing_blocked_by_zdr_even_if_idempotent() {
     let mut app = test_app_with_agent();
+    // Privacy build: the privacy lock fires before the ZDR guard.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert!(effects.is_empty(), "opt-in must be refused: {effects:?}");
+        assert!(
+            read_toast(&app).contains("privacy build"),
+            "privacy lock toast expected: {:?}",
+            read_toast(&app)
+        );
+        return;
+    }
     app.is_zdr = true;
     app.coding_data_retention_opt_out = false;
     let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
@@ -318,6 +347,23 @@ fn coding_data_sharing_updated_re_anchors_state() {
 #[test]
 fn coding_data_sharing_updated_corrects_state_if_server_disagrees() {
     let mut app = test_app_with_agent();
+    // Privacy build: server enrichment cannot override the locked opt-out.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        app.coding_data_retention_opt_out = true;
+        let id = AgentId(0);
+        let seq = app.coding_data_write_seq;
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::CodingDataSharingUpdated {
+                agent_id: id,
+                opted_in: true,
+                seq,
+            }),
+            &mut app,
+        );
+        assert!(app.coding_data_retention_opt_out, "server opt-in must be ignored");
+        let _ = effects;
+        return;
+    }
     // Optimistic mutation said "opt-out", but the server overrides to "opt-in" (e.g. policy that prevents opt-out).
     app.coding_data_retention_opt_out = true;
     let id = AgentId(0);
@@ -344,6 +390,20 @@ fn coding_data_sharing_updated_corrects_state_if_server_disagrees() {
 #[test]
 fn coding_data_sharing_failed_rolls_back_and_toasts_error() {
     let mut app = test_app_with_agent();
+    // Privacy build: opt-in is locked; the write is refused with a privacy toast.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert!(
+            effects.is_empty(),
+            "privacy build must block opt-in: {effects:?}"
+        );
+        assert!(
+            !read_toast(&app).is_empty(),
+            "privacy lock toast expected, got {:?}",
+            read_toast(&app)
+        );
+        return;
+    }
     // Simulate post-optimistic state: the user picked opt-out, state was flipped, then the ACP call failed
     // The pre-toggle value was opt-in (true), so `rollback_to_opted_in = true`
     app.coding_data_retention_opt_out = true;
@@ -372,7 +432,7 @@ fn coding_data_sharing_failed_rolls_back_and_toasts_error() {
              (G2 Issue 2): {toast}",
     );
     assert!(toast.contains("server error"), "error in toast: {toast}");
-    assert!(toast.contains('\u{2717}'), "failure toast uses ✗: {toast}");
+    assert_toast_glyph(&toast, '\u{2717}');
 }
 
 /// `TaskResult::CodingDataSharingFailed` reverts in the other direction too (the pre-toggle state could have been either).
@@ -466,6 +526,20 @@ fn coding_data_sharing_failed_refreshes_open_modal_snapshot() {
 fn set_coding_data_sharing_is_silent_in_both_directions() {
     for opted_in in [true, false] {
         let mut app = test_app_with_agent();
+    // Privacy build: opt-in toasts the privacy lock; opt-out stays silent.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(
+            !read_toast(&app).is_empty(),
+            "opt-in must toast the privacy lock under privacy build"
+        );
+        app.welcome_toast = None;
+        // Opt-out is the locked target state: it may still write through ACP.
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in: false }, &mut app);
+        assert!(!effects.is_empty(), "opt-out must still dispatch: {effects:?}");
+        return;
+    }
         app.coding_data_retention_opt_out = opted_in; // a real change either way
         let _ = dispatch(Action::SetCodingDataSharing { opted_in }, &mut app);
         assert!(
@@ -620,6 +694,21 @@ fn scrub_error_for_toast_unit() {
 #[test]
 fn set_coding_data_sharing_no_agents_still_emits_effect() {
     let mut app = test_app_with_agent();
+    // Privacy build: opt-in is locked; opt-out confirmation still works without agents.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert!(
+            effects.is_empty(),
+            "privacy build must block opt-in even with no agents: {effects:?}"
+        );
+        assert!(
+            !app.coding_data_retention_opt_out,
+            "opt-in must not apply under privacy lock (state unchanged)"
+        );
+        assert!(!app.privacy_banner_opt_in_inflight);
+        assert!(app.privacy_banner_acked.is_none());
+        return;
+    }
     app.agents.clear();
     app.active_view = ActiveView::Welcome;
     app.coding_data_retention_opt_out = true;
@@ -658,6 +747,11 @@ fn privacy_banner_ready_app() -> AppView {
 #[test]
 fn privacy_banner_should_show_respects_gates() {
     let mut app = privacy_banner_ready_app();
+    // Privacy build: the retention opt-in banner never shows.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        assert!(!app.privacy_banner_should_show());
+        return;
+    }
     assert!(app.privacy_banner_should_show());
 
     app.coding_data_retention_opt_out = false;
@@ -689,6 +783,15 @@ fn privacy_banner_should_show_respects_gates() {
 #[test]
 fn privacy_banner_opt_in_success_acks() {
     let mut app = privacy_banner_ready_app();
+    // Privacy build: opt-in banner actions are inert.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::PrivacyBannerOptIn, &mut app);
+        assert!(effects.is_empty(), "OptIn must emit nothing: {effects:?}");
+        assert!(!app.privacy_banner_opt_in_inflight);
+        assert!(app.coding_data_retention_opt_out);
+        assert!(app.privacy_banner_acked.is_none());
+        return;
+    }
     let effects = dispatch(Action::PrivacyBannerOptIn, &mut app);
     assert_eq!(effects.len(), 1);
     assert!(matches!(
@@ -723,6 +826,15 @@ fn privacy_banner_opt_in_success_acks() {
 #[test]
 fn privacy_banner_opt_in_failure_no_ack_sets_welcome_toast() {
     let mut app = privacy_banner_ready_app();
+    // Privacy build: opt-in banner actions are inert.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::PrivacyBannerOptIn, &mut app);
+        assert!(effects.is_empty(), "OptIn must emit nothing: {effects:?}");
+        assert!(!app.privacy_banner_opt_in_inflight);
+        assert!(app.coding_data_retention_opt_out);
+        assert!(app.privacy_banner_acked.is_none());
+        return;
+    }
     let effects = dispatch(Action::PrivacyBannerOptIn, &mut app);
     assert_eq!(effects.len(), 1);
     assert!(app.privacy_banner_opt_in_inflight);
@@ -766,6 +878,12 @@ fn privacy_banner_opt_in_failure_no_ack_sets_welcome_toast() {
 #[test]
 fn privacy_banner_opt_out_noop_while_opt_in_inflight() {
     let mut app = privacy_banner_ready_app();
+    // Privacy build: no retention opt-in banner; opt-out is already the locked state.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::PrivacyBannerOptOut, &mut app);
+        assert!(effects.is_empty(), "{effects:?}");
+        return;
+    }
     let _ = dispatch(Action::PrivacyBannerOptIn, &mut app);
     assert!(app.privacy_banner_opt_in_inflight);
 
@@ -797,6 +915,12 @@ fn privacy_banner_opt_out_noop_while_opt_in_inflight() {
 fn privacy_banner_opt_out_acks_now_without_write() {
     use crate::views::modal::ActiveModal;
     let mut app = privacy_banner_ready_app();
+    // Privacy build: no retention opt-in banner; opt-out is already the locked state.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::PrivacyBannerOptOut, &mut app);
+        assert!(effects.is_empty(), "{effects:?}");
+        return;
+    }
 
     let effects = dispatch(Action::PrivacyBannerOptOut, &mut app);
 
@@ -845,6 +969,13 @@ fn privacy_banner_opt_out_acks_now_without_write() {
 fn superseded_coding_data_reply_cannot_clobber_a_newer_write() {
     for stale_failed in [true, false] {
         let mut app = privacy_banner_ready_app();
+    // Privacy build: opt-in writes are refused, so no seq generation.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(app.coding_data_write_seq, 0);
+        return;
+    }
         app.coding_data_retention_opt_out = false;
 
         // Write 1: Settings opt-out from currently in.
@@ -919,6 +1050,12 @@ fn privacy_banner_opt_out_is_idempotent() {
 #[test]
 fn settings_opt_out_while_already_out_acks_without_write() {
     let mut app = privacy_banner_ready_app();
+    // Privacy build: no retention opt-in banner; opt-out is already the locked state.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::PrivacyBannerOptOut, &mut app);
+        assert!(effects.is_empty(), "{effects:?}");
+        return;
+    }
     assert!(app.privacy_banner_should_show());
     assert!(app.coding_data_retention_opt_out);
 
@@ -985,6 +1122,16 @@ fn settings_opt_out_from_in_acks_now_and_writes() {
 #[test]
 fn settings_opt_in_recommitted_while_inflight_does_not_ack() {
     let mut app = privacy_banner_ready_app();
+    // Privacy build: opt-in is locked, so there is no ack.
+    if xai_grok_version::coding_data_retention_locked_opt_out() {
+        let effects = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
+        assert!(
+            effects.is_empty(),
+            "privacy build must refuse unchanged opt-in: {effects:?}"
+        );
+        assert!(app.privacy_banner_acked.is_none());
+        return;
+    }
     let first = dispatch(Action::SetCodingDataSharing { opted_in: true }, &mut app);
     assert!(
         first

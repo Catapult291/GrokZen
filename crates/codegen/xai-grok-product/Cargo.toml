@@ -5,5 +5,11 @@ edition.workspace = true
 license = "Apache-2.0"
 description = "Community distribution identity for Grok Build Chinese"
 
+[dependencies]
+# Feature-unification: `privacy` is default-on in xai-grok-version; pinning it
+# here guarantees PRIVACY_BUILD policy bits stay true in every product binary
+# even if an unrelated crate flips --no-default-features.
+xai-grok-version = { workspace = true, features = ["privacy"] }
+
 [lints]
 workspace = true

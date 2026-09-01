@@ -214,10 +214,18 @@ pub(crate) mod test_support {
     use super::*;
     use tracing_subscriber::layer::SubscriberExt as _;
 
+    /// A per-crate temp dir that lives for the process; each test uses a
+    /// sub-path so concurrent runs don't collide. On Windows, `tempdir()`
+    /// yields a real `C:\...\Temp` path — the `/tmp` literal used upstream is
+    /// POSIX-only and doesn't exist under Git Bash.
+    pub(crate) fn temp_output_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("tempdir for span profile output")
+    }
+
     /// Run `f` under a fresh profile layer and return its folded output.
     pub(crate) fn folded_with_layer(f: impl FnOnce()) -> String {
         let profile: &'static SpanProfile = Box::leak(Box::new(SpanProfile {
-            output: std::path::PathBuf::from("/tmp"),
+            output: temp_output_dir().keep(),
             label: "test",
             started_at: 0,
             folded: Mutex::new(HashMap::new()),
@@ -239,11 +247,14 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::span_profile::test_support::temp_output_dir;
 
     fn test_profile() -> SpanProfile {
+        // Use a label with no dot so the artifact filename stays `<label>-<pid>-<started_at>.folded`
+        // and `artifact_path` classifies the output as a directory, not a file.
         SpanProfile {
-            output: PathBuf::from("/tmp"),
-            label: "test",
+            output: temp_output_dir().keep(),
+            label: "test-profile",
             started_at: 0,
             folded: Mutex::new(HashMap::new()),
             dropped_paths: AtomicU64::new(0),
@@ -285,10 +296,14 @@ mod tests {
 
     #[test]
     fn artifact_path_treats_extensionless_output_as_directory() {
-        let dir = artifact_path(Path::new("/tmp/prof"), "tui", 7);
-        assert!(dir.to_string_lossy().contains("/tmp/prof/tui-"));
+        // Use the platform's real temp dir instead of a POSIX literal: `/tmp`
+        // doesn't exist on Windows (under Git Bash it maps to the Git install
+        // dir), which made this test fail 1-in-250 there.
+        let base = std::env::temp_dir();
+        let dir = artifact_path(&base.join("prof"), "tui", 7);
+        assert!(dir.to_string_lossy().contains("prof"));
         assert!(dir.to_string_lossy().ends_with("-7.folded"));
-        let file = artifact_path(Path::new("/tmp/prof/run.folded"), "tui", 7);
-        assert_eq!(file, PathBuf::from("/tmp/prof/run.folded"));
+        let file = artifact_path(&base.join("run.folded"), "tui", 7);
+        assert_eq!(file, base.join("run.folded"));
     }
 }

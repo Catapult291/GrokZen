@@ -186,6 +186,11 @@ impl GrokAuth {
     /// Product analytics (`telemetry_enabled`) and user-facing sync
     /// features should use `is_zdr_team()` directly.
     pub(crate) fn is_data_collection_disabled(&self) -> bool {
+        // Privacy build: research data never leaves the machine regardless of
+        // account flags.
+        if xai_grok_version::research_data_collection_forbidden() {
+            return true;
+        }
         self.is_zdr_team() || self.coding_data_retention_opt_out
     }
 

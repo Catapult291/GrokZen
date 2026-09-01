@@ -14027,6 +14027,9 @@ dependencies = [
 [[package]]
 name = "xai-grok-product"
 version = "0.1.0"
+dependencies = [
+ "xai-grok-version",
+]
 
 [[package]]
 name = "xai-grok-sampler"

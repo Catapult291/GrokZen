@@ -29,6 +29,18 @@ use xai_grok_test_support::sse::{
 };
 use xai_grok_test_support::{MockInferenceServer, ScriptedResponse};
 
+/// The real turn-loop future needs a session-sized stack (spawn.rs spawns the
+/// actor thread with 8 MiB); the tokio test-thread default overflows on
+/// Windows, so turn-loop tests run on a dedicated 8 MiB thread.
+fn on_session_stack(test: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(test)
+        .expect("spawn test thread")
+        .join()
+        .expect("test thread panicked");
+}
+
 /// Derived from the harness's own thresholds so retuning them retunes this suite instead
 /// of breaking it. The scripted tool is `todo_write`, which is in the
 /// problematically-repeating tier, so this tracks that tier's constants. Script two more
@@ -100,11 +112,14 @@ fn tool_results_by_call_id(conv: &[ConversationItem]) -> HashMap<String, Vec<Str
 /// Pre-fix this failed: the nudge was pushed after the assistant `tool_use`
 /// was committed and before `execute_tool_calls`, so integrity repair wrote
 /// a cancel result and the real result landed beside it under the same id.
-#[tokio::test(flavor = "current_thread")]
-async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id() {
+    on_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let local = tokio::task::LocalSet::new();
+        rt.block_on(local.run_until(async {
             let server = MockInferenceServer::start().await.expect("mock inference server");
             for i in 1..=SCRIPTED_IDENTICAL_CALLS {
                 server.enqueue_response(
@@ -267,6 +282,6 @@ async fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_us
                  run; deleting the nudge is not a valid fix for chat-history corruption. \
                  conversation={conv:#?}"
             );
-        })
-        .await;
+        }));
+    });
 }

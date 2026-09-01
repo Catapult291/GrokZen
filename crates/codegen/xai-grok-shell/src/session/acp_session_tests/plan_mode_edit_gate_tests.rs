@@ -56,7 +56,7 @@ async fn plan_mode_rejects_grok_edit_outside_plan_file_despite_allow_all_permiss
             );
             let text = tool_result_text(&actor, "call_gate").await;
             assert!(
-                text.contains("/tmp/test-session/plan.md"),
+                text.contains("plan.md"),
                 "must name the plan file so the model knows the one editable path: {text}"
             );
         })
@@ -71,7 +71,10 @@ async fn plan_mode_allows_plan_file_edit() {
             activate_plan_mode(&actor);
             let result = prepare(
                 &actor,
-                search_replace_call_at("call_plan_file", "/tmp/test-session/plan.md"),
+                search_replace_call_at(
+                    "call_plan_file",
+                    &std::env::temp_dir().join("test-session/plan.md").to_string_lossy(),
+                ),
             )
             .await;
             assert!(

@@ -90,7 +90,7 @@ fn test_app() -> AppView {
         settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
         current_ui: xai_grok_shell::agent::config::UiConfig::default(),
         locale: std::sync::Arc::new(crate::locale::LocaleContext::default()),
-        cwd: PathBuf::from("/tmp"),
+        cwd: std::env::temp_dir(),
         cwd_has_git_ancestor: false,
         acp_tx: tx,
         scratch: crate::scrollback::render::ScratchBuffer::new(),
@@ -336,7 +336,7 @@ fn make_test_agent_session(app: &AppView, id: AgentId, sid: &str) -> AgentSessio
         models: ModelState::default(),
         state: AgentState::Idle,
         tracker: AcpUpdateTracker::new(),
-        cwd: PathBuf::from("/tmp"),
+        cwd: std::env::temp_dir(),
         is_worktree: false,
         forked_from: None,
         pending_prompts: std::collections::VecDeque::new(),
@@ -594,7 +594,7 @@ fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
             models: ModelState::default(),
             state: AgentState::Idle,
             tracker: AcpUpdateTracker::new(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: std::env::temp_dir(),
             is_worktree: false,
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
@@ -755,7 +755,7 @@ fn two_agent_app_with_bg_task() -> AppView {
             models: ModelState::default(),
             state: AgentState::Idle,
             tracker: AcpUpdateTracker::new(),
-            cwd: PathBuf::from("/tmp"),
+            cwd: std::env::temp_dir(),
             is_worktree: false,
             forked_from: None,
             pending_prompts: std::collections::VecDeque::new(),
@@ -898,6 +898,22 @@ fn read_toast(app: &AppView) -> String {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast should be set")
+}
+/// Assert a toast carries the given chrome glyph, accepting the legacy
+/// ConHost fallback (`✓`→`√`, `✗`→`x`) that `sanitize_toast_message`
+/// applies on native Windows. Tests pin the toast *format*, not the
+/// glyph-substitution layer (which has its own unit tests in
+/// `xai-grok-pager-render/src/glyphs.rs`).
+fn assert_toast_glyph(toast: &str, fancy: char) {
+    let fallback = match fancy {
+        '\u{2713}' => '\u{221A}',
+        '\u{2717}' => 'x',
+        other => other,
+    };
+    assert!(
+        toast.contains(fancy) || toast.contains(fallback),
+        "toast must contain the `{fancy}` glyph (or its legacy `{fallback}` fallback), got: {toast:?}",
+    );
 }
 /// Enqueue one permission whose options mirror the list the shell builds for TUI, Pager, and Desktop.
 /// The options: "enable-always-approve" (AllowOnce, position 0, default-selected), "opt-allow-once" (AllowOnce), and "opt-reject-once" (RejectOnce).

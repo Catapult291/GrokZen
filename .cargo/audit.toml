@@ -1,0 +1,30 @@
+# cargo-audit 配置（移植自 gork-build 0070-supply-chain-policy）。
+#
+# CI 将 audit 作为**硬门禁**：任何未在下方列表中的漏洞都会使任务失败。
+# 这是"阻断新增未忽略漏洞"，而非"依赖树必须干净"。
+#
+# 注意：ignore 基线最初按 gork 1.0.3 依赖树编写；合并基线与 zh 1.0.12 的
+# 依赖树可能不同，阶段 4 跑 `cargo audit` 时应按实际情况校准（增/删条目）。
+
+[advisories]
+ignore = [
+    # --- RUSTSEC-2023-0071 (rsa, Marvin Attack) ---
+    # Package: rsa (crates.io 截至 2026-07 无修复版本)。
+    # Dependency chain: rsa ← jsonwebtoken / sigstore-* (via xai-grok-shell graph)。
+    # Why ignore: RustSec 未标注已修复版本；只有彻底迁移离开 `rsa` crate 才能消除。
+    # Remove when: jsonwebtoken/sigstore（或本 fork 的 pin）移除 `rsa`，或
+    #   RUSTSEC-2023-0071 出现可锁定的修复版本。
+    "RUSTSEC-2023-0071",
+
+    # --- RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml DoS) ---
+    # Package: quick-xml < 0.41.0
+    # Dependency chain:
+    #   quick-xml ^0.38 ← xai-grok-tools (direct)
+    #   quick-xml ^0.39 ← pdf_oxide ← xai-grok-tools
+    # Why ignore: 修复需要 >=0.41；不升级 xai-grok-tools / pdf_oxide 的 API
+    #   major 版本无法 cargo-update（需协调变更）。
+    # Remove when: xai-grok-tools + pdf_oxide 接受 quick-xml >=0.41 且
+    #   Cargo.lock 刷新。跟踪：后续依赖升级 PR。
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

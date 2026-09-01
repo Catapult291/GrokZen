@@ -2658,7 +2658,10 @@ mod tests {
                         .unwrap_or_default()
                 })
                 .collect();
-            if let Some(x) = row.iter().position(|s| s == "\u{2717}") {
+            if let Some(x) = row
+                .iter()
+                .position(|s| s == "\u{2717}" || s == "x" || s == "\u{2717}")
+            {
                 found = true;
                 for cell in &row[x + 2..] {
                     assert!(

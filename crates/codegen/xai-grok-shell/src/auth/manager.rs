@@ -863,6 +863,10 @@ impl AuthManager {
     /// that must not act on unknown privacy state should use the fail-closed
     /// [`Self::allows_data_collection`] instead.
     pub(crate) fn is_data_collection_disabled(&self) -> bool {
+        // Privacy build: always true (research uploads hard-off).
+        if xai_grok_version::research_data_collection_forbidden() {
+            return true;
+        }
         self.current_or_expired()
             .is_some_and(|a| a.is_data_collection_disabled())
     }
@@ -873,6 +877,10 @@ impl AuthManager {
     /// disabled — nothing may leave the machine while the privacy state is
     /// unknown.
     pub(crate) fn allows_data_collection(&self) -> bool {
+        // Privacy build: always false.
+        if xai_grok_version::research_data_collection_forbidden() {
+            return false;
+        }
         self.current_or_expired()
             .is_some_and(|a| !a.is_data_collection_disabled())
     }

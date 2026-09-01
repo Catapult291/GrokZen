@@ -225,6 +225,8 @@ pub enum SettingValue {
 pub enum CodingDataSharingLock {
     Zdr,
     TeamManaged,
+    /// Privacy build: retention is locked to opt-out for every account.
+    PrivacyBuild,
 }
 
 impl CodingDataSharingLock {
@@ -232,6 +234,7 @@ impl CodingDataSharingLock {
         match self {
             Self::Zdr => "Your team has Zero Data Retention.",
             Self::TeamManaged => "Managed by your team admin.",
+            Self::PrivacyBuild => "Locked to opt-out by this privacy build.",
         }
     }
 }
@@ -663,12 +666,18 @@ pub fn current_value_for(
         )),
         // max_thoughts_width: `u16` widened to `i64`.
         "max_thoughts_width" => Some(SettingValue::Int(ui.max_thoughts_width as i64)),
-        // coding_data_sharing: inverts the `_opt_out` bool.
-        "coding_data_sharing" => Some(SettingValue::Enum(if pager.coding_data_sharing_opt_out {
-            "opt-out"
-        } else {
-            "opt-in"
-        })),
+        // coding_data_sharing: inverts the `_opt_out` bool. In a privacy
+        // build the value is locked to opt-out, so never surface an
+        // opt-in canonical that no longer exists in the catalog.
+        "coding_data_sharing" => Some(SettingValue::Enum(
+            if xai_grok_version::coding_data_retention_locked_opt_out() {
+                "opt-out"
+            } else if pager.coding_data_sharing_opt_out {
+                "opt-out"
+            } else {
+                "opt-in"
+            },
+        )),
         // plan_mode: canonical via `PlanModeKind::from_bool().as_canonical()`.
         "plan_mode" => Some(SettingValue::Enum(
             crate::app::actions::PlanModeKind::from_bool(pager.plan_mode_active).as_canonical(),
