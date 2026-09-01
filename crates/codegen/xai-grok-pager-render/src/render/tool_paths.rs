@@ -94,7 +94,10 @@ fn resolve_tool_path_with_home(
         .unwrap_or_else(|| PathBuf::from(path));
     let relative_to_cwd = target.as_ref().and_then(|_| {
         let cwd = xai_grok_paths::normalize_lexically(cwd?);
-        let mut rel = display_path.strip_prefix(&cwd).ok().map(|r| r.to_path_buf());
+        let mut rel = display_path
+            .strip_prefix(&cwd)
+            .ok()
+            .map(|r| r.to_path_buf());
         // A drive-letter mismatch (C: vs c:) defeats strip_prefix on
         // Windows even though the paths are the same filesystem location;
         // compare case-insensitively as a fallback.

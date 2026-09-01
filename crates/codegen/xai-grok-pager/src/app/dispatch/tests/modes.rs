@@ -468,7 +468,10 @@ fn set_yolo_mode_on_under_plan_uses_plan_aware_toast() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_warning_toast(&toast, "\u{26A0} Always-approve ON: all tool actions auto-run");
+    assert_warning_toast(
+        &toast,
+        "\u{26A0} Always-approve ON: all tool actions auto-run",
+    );
     let _ = toast;
 }
 
@@ -992,7 +995,10 @@ fn set_yolo_mode_toast_format() {
         .as_ref()
         .map(|(s, _)| s.clone())
         .expect("toast must be set");
-    assert_warning_toast(&toast, "\u{26A0} Always-approve ON: all tool actions auto-run");
+    assert_warning_toast(
+        &toast,
+        "\u{26A0} Always-approve ON: all tool actions auto-run",
+    );
 
     let _ = dispatch(Action::SetYoloMode(false), &mut app);
     let toast = app.agents[&AgentId(0)]

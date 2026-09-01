@@ -673,12 +673,7 @@ fn dispatch_open_settings_focus_reopens_when_already_open() {
         agent.active_modal,
         Some(ActiveModal::Settings { .. })
     ));
-    let _ = dispatch(
-        Action::OpenSettingsFocus {
-            key: "theme",
-        },
-        &mut app,
-    );
+    let _ = dispatch(Action::OpenSettingsFocus { key: "theme" }, &mut app);
     let agent = app.agents.get(&AgentId(0)).unwrap();
     let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
         panic!("focused re-entry must keep the settings modal open")
@@ -705,10 +700,7 @@ fn dispatch_open_settings_focus_skips_the_chooser_only_when_locked() {
     use crate::views::modal::ActiveModal;
     use crate::views::settings_modal::SettingsModalMode;
     let open_focused = |app: &mut AppView, key: &'static str| -> SettingsModalMode {
-        let _ = dispatch(
-            Action::OpenSettingsFocus { key },
-            app,
-        );
+        let _ = dispatch(Action::OpenSettingsFocus { key }, app);
         let agent = app.agents.get(&AgentId(0)).unwrap();
         let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
             panic!("settings modal must be open")
@@ -733,14 +725,20 @@ fn dispatch_open_settings_focus_skips_the_chooser_only_when_locked() {
     let mut app = test_app_with_agent();
     app.is_zdr = true;
     assert!(
-        matches!(open_focused(&mut app, "coding_data_sharing"), SettingsModalMode::Browse),
+        matches!(
+            open_focused(&mut app, "coding_data_sharing"),
+            SettingsModalMode::Browse
+        ),
         "ZDR must stop at the row that says so"
     );
     let mut app = test_app_with_agent();
     app.team_name = Some("acme".to_string());
     app.team_role = Some("member".to_string());
     assert!(
-        matches!(open_focused(&mut app, "coding_data_sharing"), SettingsModalMode::Browse),
+        matches!(
+            open_focused(&mut app, "coding_data_sharing"),
+            SettingsModalMode::Browse
+        ),
         "a team-managed lock must stop at the row that says so"
     );
     let mut app = test_app_with_agent();
@@ -761,12 +759,7 @@ fn dispatch_open_settings_focus_sets_close_on_picker_exit_when_chooser_opens() {
     use crate::views::modal::ActiveModal;
     use crate::views::settings_modal::SettingsModalMode;
     let mut app = test_app_with_agent();
-    let _ = dispatch(
-        Action::OpenSettingsFocus {
-            key: "theme",
-        },
-        &mut app,
-    );
+    let _ = dispatch(Action::OpenSettingsFocus { key: "theme" }, &mut app);
     let agent = app.agents.get(&AgentId(0)).unwrap();
     let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
         panic!("settings modal must be open")
@@ -817,12 +810,7 @@ fn open_settings_focus_esc_closes_settings_modal() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let _ = dispatch(
-        Action::OpenSettingsFocus {
-            key: "theme",
-        },
-        &mut app,
-    );
+    let _ = dispatch(Action::OpenSettingsFocus { key: "theme" }, &mut app);
     {
         let agent = app.agents.get(&id).unwrap();
         let Some(ActiveModal::Settings { state }) = &agent.active_modal else {
@@ -850,12 +838,7 @@ fn open_settings_focus_enter_closes_settings_modal() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    let _ = dispatch(
-        Action::OpenSettingsFocus {
-            key: "theme",
-        },
-        &mut app,
-    );
+    let _ = dispatch(Action::OpenSettingsFocus { key: "theme" }, &mut app);
     {
         let agent = app.agents.get(&id).unwrap();
         let Some(ActiveModal::Settings { state }) = &agent.active_modal else {

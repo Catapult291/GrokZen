@@ -2744,11 +2744,14 @@ mod tests {
         // File paths in the command header line should be linkified even
         // when the block is collapsed.
         let mut entries = vec![ScrollbackEntry::new(RenderBlock::execute_with_output(
-            &format!("cd {} && ls", if cfg!(windows) {
-                "C:/Users/foo/project"
-            } else {
-                "/Users/foo/project"
-            }),
+            &format!(
+                "cd {} && ls",
+                if cfg!(windows) {
+                    "C:/Users/foo/project"
+                } else {
+                    "/Users/foo/project"
+                }
+            ),
             "file1\nfile2",
             None::<String>,
         ))];
@@ -2883,20 +2886,26 @@ mod tests {
         // group: 3 entries, header count = group_len - 1 = 2.
         let mut entries = vec![
             ScrollbackEntry::new(RenderBlock::execute_with_output(
-                &format!("cd {} && ls", if cfg!(windows) {
-                    "C:/Users/foo/hidden"
-                } else {
-                    "/Users/foo/hidden"
-                }),
+                &format!(
+                    "cd {} && ls",
+                    if cfg!(windows) {
+                        "C:/Users/foo/hidden"
+                    } else {
+                        "/Users/foo/hidden"
+                    }
+                ),
                 "out",
                 None::<String>,
             )),
             ScrollbackEntry::new(RenderBlock::execute_with_output(
-                &format!("cat {}", if cfg!(windows) {
-                    "C:/Users/foo/visible/file.txt"
-                } else {
-                    "/Users/foo/visible/file.txt"
-                }),
+                &format!(
+                    "cat {}",
+                    if cfg!(windows) {
+                        "C:/Users/foo/visible/file.txt"
+                    } else {
+                        "/Users/foo/visible/file.txt"
+                    }
+                ),
                 "out",
                 None::<String>,
             )),
@@ -2983,9 +2992,7 @@ mod tests {
             "/Users/foo/visible/file.txt"
         };
         assert!(
-            links
-                .iter()
-                .all(|(_, url)| !url.contains(hidden_marker)),
+            links.iter().all(|(_, url)| !url.contains(hidden_marker)),
             "collapse-header entry's hidden line must not be linkified, got: {links:?}"
         );
         assert!(
