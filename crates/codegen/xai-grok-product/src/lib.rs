@@ -25,9 +25,9 @@ pub const LOCALE_ENV: &str = "GROK_ZH_LOCALE";
 pub const DEFAULT_UI_LOCALE: &str = "zh-CN";
 
 /// Repository that owns every update accepted by the community distribution.
-pub const COMMUNITY_RELEASE_REPO: &str = "JoyElliot/grok-build-Chinese";
+pub const COMMUNITY_RELEASE_REPO: &str = "Catapult291/grok-zh";
 /// Canonical download page for the community distribution.
-pub const COMMUNITY_RELEASES_URL: &str = "https://github.com/JoyElliot/grok-build-Chinese/releases";
+pub const COMMUNITY_RELEASES_URL: &str = "https://github.com/Catapult291/grok-zh/releases";
 /// The community updater uses immutable GitHub Releases from the repository
 /// above. Release ZIPs are selected by an exact platform-specific name and
 /// verified against GitHub metadata plus the package's inner hashes before
@@ -73,10 +73,10 @@ mod tests {
     fn updater_uses_only_the_community_release_source() {
         assert!(AUTO_UPDATE_ENABLED);
         assert!(!AUTO_UPDATE_DEFAULT_ENABLED);
-        assert_eq!(COMMUNITY_RELEASE_REPO, "JoyElliot/grok-build-Chinese");
+        assert_eq!(COMMUNITY_RELEASE_REPO, "Catapult291/grok-zh");
         assert_eq!(
             COMMUNITY_RELEASES_URL,
-            "https://github.com/JoyElliot/grok-build-Chinese/releases"
+            "https://github.com/Catapult291/grok-zh/releases"
         );
         assert!(!OFFICIAL_UPDATE_SOURCES_ALLOWED);
         assert!(!OFFICIAL_CHANGELOG_SOURCE_ALLOWED);

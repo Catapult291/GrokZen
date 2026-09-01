@@ -21,7 +21,7 @@ Release ZIP 下载后只需解压一次；所有 `release-v*` 包（包括
 解压目录。包内的 `Install-GrokZh.ps1` 可自动加入用户 `Path`，默认提供
 `grok-zh`、`agent-zh`，并支持由用户显式接管 `grok`、`agent`。完整说明也会
 作为包内的 `INSTALL-WINDOWS.md` 提供，并可在
-[仓库中在线查看](https://github.com/JoyElliot/grok-build-Chinese/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
+[仓库中在线查看](https://github.com/Catapult291/grok-zh/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。
 
 macOS ARM64 与 Linux x86_64 GNU 的 `release-v*` 归档同样只含一个与归档同名
 （去掉 `.tar.gz`）的顶层目录；解压后先进入该目录，再执行包内校验与

@@ -2061,18 +2061,18 @@ mod tests {
 
     #[test]
     fn community_api_urls_follow_the_product_repository_identity() {
-        assert_eq!(release_repo(), "JoyElliot/grok-build-Chinese");
+        assert_eq!(release_repo(), "Catapult291/grok-zh");
         assert_eq!(
             releases_api(2),
-            "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases?per_page=100&page=2"
+            "https://api.github.com/repos/Catapult291/grok-zh/releases?per_page=100&page=2"
         );
         assert_eq!(
             release_by_tag_api("1.0.3").unwrap(),
-            "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases/tags/v1.0.3"
+            "https://api.github.com/repos/Catapult291/grok-zh/releases/tags/v1.0.3"
         );
         assert_eq!(
             release_by_tag_api("1.0.9").unwrap(),
-            "https://api.github.com/repos/JoyElliot/grok-build-Chinese/releases/tags/release-v1.0.9"
+            "https://api.github.com/repos/Catapult291/grok-zh/releases/tags/release-v1.0.9"
         );
     }
 

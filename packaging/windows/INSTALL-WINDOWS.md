@@ -5,7 +5,7 @@
 
 ## 下载与解压
 
-1. 推荐从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
+1. 推荐从本仓库 [Releases](https://github.com/Catapult291/grok-zh/releases)
    下载 `grok-zh-<version>-windows-x86_64-gnu.zip`。开发测试也可从
    **Actions → CI** 下载短期 Artifact。
 2. 解压一次；后续 `release-v*` 版本（含预发布）只会得到一个
@@ -45,11 +45,11 @@
 
 正式 Tag 工作流会为 ZIP 与 `.sha256` 自动生成 GitHub Actions 构建来源证明。下载后可用
 GitHub CLI 核对不可变 Release、资产和构建工作流；以下命令已使用当前仓库
-`JoyElliot/grok-build-Chinese`；以下命令以后续现代预发布 `1.0.12-rc.1` 为例，发布后执行。
+`Catapult291/grok-zh`；以下命令以后续现代预发布 `1.0.12-rc.1` 为例，发布后执行。
 旧桥接版 `1.0.8` 使用 `v1.0.8` Tag，其余命令结构相同：
 
 ```powershell
-$repo = 'JoyElliot/grok-build-Chinese'
+$repo = 'Catapult291/grok-zh'
 $version = '1.0.12-rc.1'
 $tag = "release-v$version"
 $zip = ".\grok-zh-$version-windows-x86_64-gnu.zip"
@@ -235,7 +235,7 @@ npm uninstall -g @xai-official/grok
 ## 通过 GitHub Releases 自动更新
 
 安装带社区更新器的版本后，程序启动时会查询固定仓库
-`JoyElliot/grok-build-Chinese`：
+`Catapult291/grok-zh`：
 
 - 默认 `stable` 只接受 immutable、非 Draft、非 prerelease 的严格三段版本。`v1.0.8`
   是旧更新器可见的最后一个桥接 Tag；后续版本使用 `release-vA.B.C`，二进制报告的版本仍是
