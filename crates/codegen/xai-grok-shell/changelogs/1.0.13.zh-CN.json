@@ -1,0 +1,17 @@
+[
+  {
+    "category": "features",
+    "description": "**独立 fork 发布**：中文社区版现在从 `Catapult291/grok-zh` 发布，内置更新器检查该仓库的 Releases。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**隐私加固**：隐私构建下遥测硬关闭、研究上传门控、编码数据保留锁定为退出。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Windows 测试矩阵**：新增隐私与无隐私双形态的定向门禁，覆盖更新器、设置与汉化。",
+    "breaking_change": false
+  }
+]
