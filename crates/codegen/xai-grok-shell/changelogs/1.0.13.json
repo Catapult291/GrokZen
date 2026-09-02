@@ -1,0 +1,17 @@
+[
+  {
+    "category": "features",
+    "description": "**Independent fork release**: the community distribution is now published from `Catapult291/grok-zh`; the built-in updater checks this repository's Releases.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Privacy hardening**: telemetry is hard-disabled, research uploads are gated, and coding-data retention is locked to opt-out in privacy builds.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Windows test matrix** now covers privacy and no-privacy modes with targeted gates for the updater, settings, and localization.",
+    "breaking_change": false
+  }
+]
