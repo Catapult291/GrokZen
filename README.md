@@ -48,6 +48,23 @@
 - 默认界面语言：`zh-CN`，可用 `--locale en-US` 切换英文
 - 内置更新器只读取本仓库的 Immutable GitHub Releases；官方 npm、GitHub、x.ai 和 GCS 更新源始终禁用
 
+### 隐私验证（v1.0.13）
+
+2026-09 发布的 [隐私验证三层证据链](docs/screenshots/grok-zh-privacy-evidence-1.0.13.png)
+针对 v1.0.13（commit `35b87edcdcc38ca56be0b63f80e08d91984cd611`）给出可复现的验证记录：
+线路层（金丝雀仓库 + mitmproxy 全量抓包，免登录与 OAuth 登录态均未观察到代码仓库上传、
+GCS 流量或遥测外传，金丝雀标记 0 命中）、源码层（上游 `data_collection_disabled`
+测试族与隐私硬开关回归测试 19/19 通过——上传路径代码继承上游但被编译期 `privacy`
+特性封死，无法被环境变量、本地配置或服务端远程设置重新打开）、回归保护（隐私测试
+已进入本仓库 CI）。验证方法与工具来自开源项目
+[grok-build-privacy-retest](https://github.com/arafatkatze/grok-build-privacy-retest)，
+任何人可按相同步骤复现；图表源文件见
+[`docs/grok-zh-privacy-evidence-1.0.13.html`](docs/grok-zh-privacy-evidence-1.0.13.html)。
+该记录仅覆盖上述版本与受控单轮场景，不构成对服务端侧数据处理行为的证明；
+后续版本发布时应按同一方法补充验证。
+
+![grok-zh v1.0.13 隐私验证三层证据链](docs/screenshots/grok-zh-privacy-evidence-1.0.13.png)
+
 ### 中文标题与计划
 
 官方原版的相关提示没有中文语言约束，中文对话中的会话标题和计划容易被生成为英文。社区版没有重写整套上游提示词，只在会话标题和主要计划入口加入少量、按条件生效的语言规则：中文请求优先生成简洁的中文标题，并以简体中文创建计划和任务步骤；命令、路径、工具名、配置键、协议字段、任务 ID 以及 `pending`、`in_progress`、`completed`、`cancelled` 等规范状态仍保持原样。标题为空或中文请求生成纯英文标题时，会回退到用户输入。

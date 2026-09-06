@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>grok-zh v1.0.13 隐私验证 · 三层证据链</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    background: #e8edf3; color: #0f172a; padding: 36px 16px;
+  }
+  .page {
+    max-width: 1160px; margin: 0 auto; background: #ffffff;
+    border-radius: 14px; box-shadow: 0 2px 24px rgba(15,23,42,.10);
+    padding: 42px 46px 30px;
+  }
+  header { margin-bottom: 26px; }
+  header h1 { font-size: 25px; letter-spacing: .5px; }
+  header h1 .v { color: #2563eb; }
+  header .subtitle { margin-top: 8px; font-size: 13.5px; color: #64748b; line-height: 1.7; }
+  h2 {
+    font-size: 17.5px; margin: 34px 0 14px; display: flex; align-items: center; gap: 10px;
+  }
+  h2::before { content: ""; width: 5px; height: 18px; border-radius: 3px; background: #2563eb; display: inline-block; }
+  h2 .h-note { font-size: 12.5px; font-weight: 400; color: #64748b; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; table-layout: fixed; }
+  th {
+    background: #0f172a; color: #ffffff; text-align: left;
+    padding: 11px 16px; font-size: 13.5px; letter-spacing: 1.5px; font-weight: 600;
+  }
+  td { border-bottom: 1px solid #e2e8f0; padding: 15px 16px; vertical-align: top; line-height: 1.8; }
+  tbody tr:nth-child(even) { background: #f8fafc; }
+  .layers td:first-child { width: 148px; }
+  .layers td:last-child { width: 200px; }
+  .layer-badge {
+    display: inline-block; padding: 4px 13px; border-radius: 999px;
+    color: #fff; font-size: 13px; font-weight: 600; white-space: nowrap; margin-bottom: 6px;
+  }
+  .b1 { background: #2563eb; } .b2 { background: #7c3aed; } .b3 { background: #059669; }
+  .layer-sub { display: block; font-size: 12px; color: #94a3b8; }
+  .verdict { font-weight: 600; color: #047857; line-height: 1.6; }
+  .verdict .chk { margin-right: 4px; }
+  .mono {
+    font-family: Consolas, "Cascadia Mono", monospace; font-size: 12.5px;
+    background: #f1f5f9; padding: 1px 6px; border-radius: 4px; color: #334155;
+  }
+  .strong { font-weight: 600; }
+  .tests td:first-child { width: 430px; }
+  .tests td:nth-child(2) { width: 90px; text-align: center; }
+  .pass {
+    display: inline-block; min-width: 52px; text-align: center;
+    background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0;
+    font-weight: 700; border-radius: 6px; padding: 2px 0; font-size: 13px;
+  }
+  .boundary {
+    margin-top: 34px; background: #fffbeb; border-left: 4px solid #f59e0b;
+    border-radius: 8px; padding: 18px 22px;
+  }
+  .boundary h3 { font-size: 15px; color: #92400e; margin-bottom: 10px; }
+  .boundary ul { list-style: none; }
+  .boundary li { font-size: 13.5px; line-height: 1.9; color: #78350f; padding-left: 18px; position: relative; }
+  .boundary li::before { content: "·"; position: absolute; left: 4px; font-weight: 700; }
+  footer {
+    margin-top: 30px; padding-top: 16px; border-top: 1px solid #e2e8f0;
+    font-size: 12.5px; color: #64748b; line-height: 2.0;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>grok-zh <span class="v">v1.0.13</span> 隐私验证：三层证据链</h1>
+    <p class="subtitle">
+      非官方简体中文社区版（开源 Fork）· 验证时间 2026-09-05 至 09-06 ·
+      方法与工具全部开源，任何人可复现。核心结论：<span class="strong">代码上传 / 遥测外传的路径在编译期即被封死，无法在运行期被任何配置或服务端开关重新打开。</span>
+    </p>
+  </header>
+
+  <h2>表 1 · 三层证据链总览</h2>
+  <table class="layers">
+    <thead>
+      <tr><th>证据层</th><th>验证方法</th><th>关键发现</th><th>判定</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>
+          <span class="layer-badge b1">① 线路层</span>
+          <span class="layer-sub">运行时网络行为</span>
+        </td>
+        <td>
+          复用开源项目 <span class="mono">grok-build-privacy-retest</span> 的复现步骤：隔离 HOME +
+          一次性金丝雀仓库（4 个假密钥标记 + git bundle 签名）+ mitmproxy 全量 HTTPS 抓包；
+          免登录与 OAuth 登录态各执行受控单轮会话。
+        </td>
+        <td>
+          全部出站请求（免登录 23 个 + 登录态 5 个）逐字节扫描：<span class="strong">4 个金丝雀标记 0 命中</span>；
+          无 <span class="mono">/v1/storage</span> 上传请求；无 GCS（storage.googleapis.com）流量；
+          无 <span class="mono">/v1/traces</span>、无 events / signals 遥测。
+          与官方 0.2.102 同方法基线对照：官方存在的 7 类遥测请求，grok-zh <span class="strong">一条都没有</span>。
+        </td>
+        <td><span class="verdict"><span class="chk">✓</span>未观察到任何<br>代码上传 / 遥测外传</span></td>
+      </tr>
+      <tr>
+        <td>
+          <span class="layer-badge b2">② 源码层</span>
+          <span class="layer-sub">门禁逻辑审计</span>
+        </td>
+        <td>
+          克隆开源源码（commit <span class="mono">35b87edc</span>，与发布包构建 commit 一致），
+          审计隐私开关实现，运行上游 <span class="mono">data_collection_disabled</span> 测试族 +
+          隐私硬开关回归测试（工具链与依赖版本按仓库 CI 固定）。
+        </td>
+        <td>
+          上传客户端代码仍存在（继承上游，<span class="strong">未删除</span>）；但 <span class="mono">privacy</span> 编译期特性使
+          <span class="mono">PRIVACY_BUILD</span> 恒为真，
+          GrokAuth → AuthManager → workspace/shell 上传入口<span class="strong">三层门禁全部编译期封死</span>；
+          测试 <span class="strong">19/19 通过</span>。
+        </td>
+        <td><span class="verdict"><span class="chk">✓</span>上传路径编译期"不可达"，<br>非运行期侥幸"未触发"</span></td>
+      </tr>
+      <tr>
+        <td>
+          <span class="layer-badge b3">③ 回归保护</span>
+          <span class="layer-sub">可持续性</span>
+        </td>
+        <td>
+          检查 Fork CI 工作流与测试覆盖；执行攻击者场景集成测试
+          （<span class="mono">privacy_resolvers</span>）。
+        </td>
+        <td>
+          集成测试模拟最坏情形：<span class="strong">环境变量 + 本地配置 + 服务端远程设置三路同时强制开启</span>遥测 / trace 上传，
+          配置解析器仍拒绝；隐私测试已进入 Fork CI，
+          未来构建若破坏隐私开关将直接红灯。
+        </td>
+        <td><span class="verdict"><span class="chk">✓</span>防护不可被外部翻转，<br>受 CI 持续守护</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>表 2 · 源码级测试明细 <span class="h-note">（Rust 1.94.0，按 rust-toolchain.toml 固定；--locked --frozen）</span></h2>
+  <table class="tests">
+    <thead>
+      <tr><th>测试组</th><th>结果</th><th>验证内容</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="mono">xai-grok-shell</span> · data_collection_disabled</td>
+        <td><span class="pass">5/5 ✓</span></td>
+        <td>ZDR 团队、编码数据保留 opt-out、组合情形下数据收集禁用（与官方 0.2.102 基线 5 passed 对齐）</td>
+      </tr>
+      <tr>
+        <td><span class="mono">xai-grok-shell</span> · data_collection_enabled</td>
+        <td><span class="pass">2/2 ✓</span></td>
+        <td>隐私构建下"恒禁用"分支生效（普通账号同样禁用）</td>
+      </tr>
+      <tr>
+        <td><span class="mono">xai-grok-shell</span> · product_analytics</td>
+        <td><span class="pass">4/4 ✓</span></td>
+        <td>产品分析（product analytics）恒关闭</td>
+      </tr>
+      <tr>
+        <td><span class="mono">xai-grok-workspace</span> · tool_state_upload_noop_when_opt_out</td>
+        <td><span class="pass">1/1 ✓</span></td>
+        <td>功能开关开启、上传队列就绪、会话存活的条件下，opt-out 仍 0 条目入队</td>
+      </tr>
+      <tr>
+        <td><span class="mono">xai-grok-shell</span> · privacy_resolvers（集成测试）</td>
+        <td><span class="pass">3/3 ✓</span></td>
+        <td>环境变量 + 本地配置 + 服务端远程设置三路同时强制开启，解析器仍拒绝</td>
+      </tr>
+      <tr>
+        <td><span class="mono">xai-grok-version</span> · privacy 锁存</td>
+        <td><span class="pass">4/4 ✓</span></td>
+        <td>privacy feature 为 Fork 默认且被产品 crate 强制依赖，--no-default-features 无法绕过</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="boundary">
+    <h3>结论边界（如实声明）</h3>
+    <ul>
+      <li>验证范围：v1.0.13 Windows x86_64 GNU 单一版本、单一账号、受控单轮会话。</li>
+      <li>不构成证明：服务端侧的数据处理 / 删除承诺；二进制与源码逐字节可复现对应；上传客户端实现本身的安全审计。</li>
+      <li>如实说明：上传客户端代码并未从源码中删除，防护依赖编译期门禁使其不可达——结论是"封死"，而非"移除"。</li>
+    </ul>
+  </div>
+
+  <footer>
+    被测物：grok-zh 1.0.13 windows-x86_64-gnu 完整 ZIP（SHA-256 与 Release .sha256、包内 SHA256SUMS.txt 双层核验一致）·
+    源码 commit <span class="mono">35b87edcdcc38ca56be0b63f80e08d91984cd611</span>（上游 SOURCE_REV <span class="mono">d5a0335a</span>）<br>
+    验证方法来源：github.com/arafatkatze/grok-build-privacy-retest ·
+    被测项目：github.com/Catapult291/grok-zh
+  </footer>
+</div>
+</body>
+</html>
