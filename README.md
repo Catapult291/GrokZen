@@ -51,7 +51,9 @@
 ### 隐私验证（v1.0.13）
 
 2026-09 发布的 [隐私验证三层证据链](docs/screenshots/grok-zh-privacy-evidence-1.0.13.png)
-针对 v1.0.13（commit `35b87edcdcc38ca56be0b63f80e08d91984cd611`）给出可复现的验证记录：
+针对 v1.0.13 给出可复现的验证记录。验证锚定的构建 commit 为 `35b87edcdcc38ca56be0b63f80e08d91984cd611`
+（发布包二进制内置的构建号）；该提交经仓库整理后以等值 squash 提交 `7d45b95c` 存在于 `zh-dev`
+分支，两者源码树完全一致。
 线路层（金丝雀仓库 + mitmproxy 全量抓包，免登录与 OAuth 登录态均未观察到代码仓库上传、
 GCS 流量或遥测外传，金丝雀标记 0 命中）、源码层（上游 `data_collection_disabled`
 测试族与隐私硬开关回归测试 19/19 通过——上传路径代码继承上游但被编译期 `privacy`
