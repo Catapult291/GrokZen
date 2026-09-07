@@ -1500,6 +1500,7 @@ impl MvpAgent {
         &self,
         auth: &crate::auth::GrokAuth,
     ) -> Option<crate::util::config::RemoteSettings> {
+        xai_grok_announcements::load_events::notify_started();
         let identity = auth.user_id.clone();
         let channel = {
             let proxy_url = self.cfg.borrow().endpoints.proxy_url();
@@ -1788,6 +1789,9 @@ impl MvpAgent {
             tracing::debug!("announcements refresh skipped: not authenticated");
             return;
         };
+        if crate::util::config::resolve_remote_fetch_enabled() {
+            xai_grok_announcements::load_events::notify_started();
+        }
         let pre_fetch = self
             .cfg
             .borrow()

@@ -57,6 +57,7 @@ impl SettingsCacheManager {
         Option<crate::util::config::RemoteSettings>,
         Option<SettingsCacheWrite>,
     ) {
+        xai_grok_announcements::load_events::notify_started();
         if crate::agent::config::env_bool("GROK_SETTINGS_CACHE") == Some(false) {
             return (fetch(), None);
         }

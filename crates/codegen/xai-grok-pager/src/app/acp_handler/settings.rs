@@ -418,6 +418,13 @@ pub(super) fn handle_announcements_update(notif: &acp::ExtNotification, app: &mu
         return false;
     }
 
+    // A leader runs in another process, so its load-start signal cannot reach
+    // this TUI. Start the optional local check when its existing push arrives.
+    // Embedded agents already signal before fetching; do not check twice.
+    if app.leader_mode {
+        xai_grok_announcements::load_events::notify_started();
+    }
+
     // Re-merge config layers like startup does: the push carries the remote list only
     // A wholesale replace would drop requirements/user/managed announcements and let the prune erase their persisted hide keys
     // The settings handler performs the same disk reads; pushes are rare
