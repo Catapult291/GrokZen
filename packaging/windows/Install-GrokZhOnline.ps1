@@ -106,23 +106,18 @@ function Get-OnlineReleaseContract {
     $legacy = (Compare-OnlineVersion $version (ConvertTo-OnlineVersion '1.0.8')) -le 0
     if ($modern -eq $legacy) { throw "发布标签与版本不匹配：$tag" }
     $name = "grok-zh-$versionText-windows-x86_64-gnu.zip"
-    $names = @($name, "$name.sha256")
-    if (!$legacy) {
-        $mac = "grok-zh-$versionText-macos-aarch64.tar.gz"
-        $linux = "grok-zh-$versionText-linux-x86_64-gnu.tar.gz"
-        $names += @($mac, "$mac.sha256", $linux, "$linux.sha256")
-    }
     $assets = @(Get-OnlineProperty $Release 'assets')
-    if ($assets.Count -ne $names.Count) { throw 'Release 附件集合不完整或存在额外附件。' }
+    $assets = @($assets | Where-Object { (Get-OnlineProperty $_ 'name') -ceq $name })
+    if ($assets.Count -ne 1) { throw 'Release 缺少当前平台安装包，或存在同名重复附件。' }
     $verified = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
     foreach ($asset in $assets) {
         $assetName = [string](Get-OnlineProperty $asset 'name')
-        if ($names -cnotcontains $assetName -or $verified.ContainsKey($assetName) -or
+        if ($verified.ContainsKey($assetName) -or
             (Get-OnlineProperty $asset 'state') -cne 'uploaded') { throw "无效的发布附件：$assetName" }
         $sizeValue = Get-OnlineProperty $asset 'size'
         if ($sizeValue -isnot [int] -and $sizeValue -isnot [long]) { throw "附件大小无效：$assetName" }
         $size = [long]$sizeValue
-        $maximum = if ($assetName.EndsWith('.sha256')) { 4096L } else { 536870912L }
+        $maximum = 536870912L
         if ($size -le 0 -or $size -gt $maximum) { throw "附件大小超过限制：$assetName" }
         $url = [string](Get-OnlineProperty $asset 'browser_download_url')
         if ($url -cne "https://github.com/$script:OnlineRepo/releases/download/$tag/$assetName") {
@@ -136,7 +131,7 @@ function Get-OnlineReleaseContract {
     }
     return [pscustomobject]@{
         Version = $version; Tag = $tag; Legacy = $legacy; Archive = $verified[$name]
-        Sidecar = $verified["$name.sha256"]; PackageRoot = $name.Substring(0, $name.Length - 4)
+        PackageRoot = $name.Substring(0, $name.Length - 4)
     }
 }
 
@@ -295,15 +290,6 @@ function Get-LatestOnlineRelease {
     throw 'Release 列表超过查询上限，未执行安装。'
 }
 
-function Assert-OnlineSidecar {
-    param([string]$Path, $Contract)
-    $text = (ConvertFrom-OnlineUtf8 ([IO.File]::ReadAllBytes($Path))).TrimEnd("`r", "`n")
-    $expected = '^([0-9a-fA-F]{64})  ' + [regex]::Escape($Contract.Archive.Name) + '$'
-    if ($text -cnotmatch $expected -or $matches[1] -ine $Contract.Archive.Sha256) {
-        throw '外层 .sha256 文件的内容与 ZIP 发布信息不一致。'
-    }
-}
-
 function Assert-OnlinePathChain {
     param([string]$Path)
     $cursor = $Path
@@ -347,6 +333,58 @@ function Remove-OnlineOwnedTree {
     if (Test-Path -LiteralPath $full) { Remove-Item -LiteralPath $full -Recurse -Force -WhatIf:$false -Confirm:$false }
 }
 
+function Assert-OnlinePackageRelativePath {
+    param([string]$Path)
+    if (!$Path -or $Path.Trim() -cne $Path -or $Path -match '[\\:<>"|?*\x00-\x1f\x7f]') { throw "包内路径无效：$Path" }
+    foreach ($part in $Path.Split('/')) {
+        if (!$part -or $part -in @('.', '..') -or $part.EndsWith('.') -or $part.EndsWith(' ') -or
+            $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw "包内路径无效：$Path" }
+    }
+}
+
+function Read-OnlineZipText {
+    param($Entry)
+    if ($Entry.Length -gt 65536) { throw '包内元数据超过大小限制。' }
+    $stream = $Entry.Open()
+    $memory = [IO.MemoryStream]::new()
+    try {
+        $chunk = [byte[]]::new(4096)
+        while (($read = $stream.Read($chunk, 0, $chunk.Length)) -gt 0) {
+            if ($memory.Length + $read -gt $Entry.Length) { throw '包内元数据实际大小超过声明。' }
+            $memory.Write($chunk, 0, $read)
+        }
+        if ($memory.Length -ne $Entry.Length) { throw '包内元数据未完整解压。' }
+        return ConvertFrom-OnlineUtf8 ($memory.ToArray())
+    } finally { $stream.Dispose(); $memory.Dispose() }
+}
+
+function Read-OnlinePackageProtocol {
+    param([string]$Text, [string]$Version)
+    $begin = 'GROK-UPDATE-PROTOCOL-BEGIN'; $end = 'GROK-UPDATE-PROTOCOL-END'
+    if (!$Text.Contains($begin) -and !$Text.Contains($end)) { return $null }
+    $lines = @($Text -split '\r?\n')
+    $starts = @(for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -ceq $begin) { $i } })
+    $ends = @(for ($i = 0; $i -lt $lines.Count; $i++) { if ($lines[$i] -ceq $end) { $i } })
+    if ($starts.Count -ne 1 -or $ends.Count -ne 1 -or $starts[0] + 1 -ge $ends[0]) { throw '包内更新协议块不完整或重复。' }
+    $json = $lines[($starts[0] + 1)..($ends[0] - 1)] -join "`n"
+    $protocol = ConvertFrom-Json -InputObject $json
+    foreach ($field in @('schema', 'version', 'platform', 'mode', 'manifest', 'executable', 'installer')) {
+        $value = Get-OnlineProperty $protocol $field
+        if ([regex]::Matches($json, '"' + $field + '"\s*:').Count -ne 1) { throw "更新协议字段重复或无效：$field" }
+        if ($field -eq 'schema') {
+            if (($value -isnot [int] -and $value -isnot [long]) -or $value -ne 1) { throw '不支持此更新协议，请更新在线安装入口。' }
+        } elseif ($value -isnot [string]) { throw "更新协议字段类型无效：$field" }
+    }
+    if ($protocol.mode -cne 'executable-only' -or $protocol.manifest -cne 'SHA256SUMS.txt') { throw '不支持此更新协议，请更新在线安装入口。' }
+    if ($protocol.version -cne $Version -or $protocol.platform -cne 'x86_64-pc-windows-gnu') { throw '包内更新协议与发布版本或平台不一致。' }
+    Assert-OnlinePackageRelativePath $protocol.executable
+    Assert-OnlinePackageRelativePath $protocol.installer
+    if ($protocol.executable -in @('BUILD-INFO.txt', 'SHA256SUMS.txt') -or
+        $protocol.installer -in @('BUILD-INFO.txt', 'SHA256SUMS.txt') -or
+        $protocol.executable -ieq $protocol.installer) { throw '更新协议入口无效或重叠。' }
+    return $protocol
+}
+
 function Expand-VerifiedOnlinePackage {
     param([string]$ArchivePath, [string]$Destination, $Contract)
     Add-Type -AssemblyName System.IO.Compression
@@ -358,6 +396,7 @@ function Expand-VerifiedOnlinePackage {
         $entries = [Collections.Generic.Dictionary[string, object]]::new([StringComparer]::Ordinal)
         $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
         $total = 0L
+        $directories = @()
         foreach ($entry in $archive.Entries) {
             $name = $entry.FullName
             $directory = $name.EndsWith('/')
@@ -378,20 +417,22 @@ function Expand-VerifiedOnlinePackage {
                 $name = $name.Substring($prefix.Length)
             }
             $logical = $name.TrimEnd('/')
+            Assert-OnlinePackageRelativePath $logical
             if (!$seen.Add($logical)) { throw "ZIP 包含重复路径：$logical" }
             if ($directory) {
-                if (@('licenses', 'licenses/ripgrep', 'licenses/project') -cnotcontains $logical -or $entry.Length -ne 0) { throw "ZIP 包含额外目录：$logical" }
+                if ($entry.Length -ne 0) { throw "ZIP 目录包含文件内容：$logical" }
+                $directories += $logical
             } else {
-                if ($script:OnlinePackageFiles -cnotcontains $logical -and $logical -cne 'SHA256SUMS.txt') { throw "ZIP 包含未批准文件：$logical" }
                 if ($entry.Length -gt 536870912 -or $entry.Length -lt 0) { throw 'ZIP 单文件超过大小限制。' }
                 $total += $entry.Length
                 if ($total -gt 805306368) { throw 'ZIP 解压后总大小超过限制。' }
                 $entries.Add($logical, $entry)
             }
         }
-        foreach ($name in @($script:OnlinePackageFiles) + @('SHA256SUMS.txt')) {
+        foreach ($name in @('BUILD-INFO.txt', 'SHA256SUMS.txt')) {
             if (!$entries.ContainsKey($name)) { throw "ZIP 缺少文件：$name" }
         }
+        $protocol = Read-OnlinePackageProtocol (Read-OnlineZipText $entries['BUILD-INFO.txt']) $Contract.Version.Text
         if ($entries['SHA256SUMS.txt'].Length -gt 65536) { throw '包内校验清单超过大小限制。' }
         $manifestStream = $entries['SHA256SUMS.txt'].Open()
         try {
@@ -416,10 +457,35 @@ function Expand-VerifiedOnlinePackage {
         foreach ($line in $lines) {
             if ($line -cnotmatch '^([0-9A-Fa-f]{64})  (.+)$') { throw '包内 SHA256SUMS.txt 格式无效。' }
             $expected = $matches[1]; $name = $matches[2]
-            if ($manifestNames -cnotcontains $name -or $hashes.ContainsKey($name)) { throw "包内清单包含额外或重复文件：$name" }
+            Assert-OnlinePackageRelativePath $name
+            if ((!$protocol -and $manifestNames -cnotcontains $name) -or $name -ieq 'SHA256SUMS.txt' -or $hashes.ContainsKey($name)) { throw "包内清单包含额外或重复文件：$name" }
             $hashes.Add($name, $expected)
         }
-        if ($hashes.Count -ne $manifestNames.Count) { throw '包内 SHA256SUMS.txt 未覆盖完整文件集合。' }
+        if ($protocol) {
+            foreach ($required in @('BUILD-INFO.txt', $protocol.executable, $protocol.installer)) {
+                if (!$hashes.ContainsKey($required)) { throw "新协议清单缺少必要文件：$required" }
+            }
+            $packageFiles = @($hashes.Keys)
+        } else {
+            if ($hashes.Count -ne $manifestNames.Count) { throw '包内 SHA256SUMS.txt 未覆盖完整文件集合。' }
+            $packageFiles = $script:OnlinePackageFiles
+        }
+        $fileNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+        foreach ($name in $entries.Keys) { $null = $fileNames.Add($name) }
+        $allowedDirs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($name in $packageFiles) {
+            if (!$entries.ContainsKey($name)) { throw "ZIP 缺少清单文件：$name" }
+            $parent = $name
+            while ($parent.Contains('/')) {
+                $parent = $parent.Substring(0, $parent.LastIndexOf('/'))
+                if ($fileNames.Contains($parent)) { throw "ZIP 文件和目录冲突：$parent" }
+                $null = $allowedDirs.Add($parent)
+            }
+        }
+        if ($entries.Count -ne $packageFiles.Count + 1) { throw 'ZIP 包含清单之外的文件。' }
+        foreach ($directory in $directories) {
+            if (!$allowedDirs.Contains($directory)) { throw "ZIP 包含额外目录：$directory" }
+        }
         $null = [IO.Directory]::CreateDirectory($Destination)
         $package = if ($Contract.Legacy) { $Destination } else { Join-Path $Destination $Contract.PackageRoot }
         foreach ($name in $entries.Keys) {
@@ -484,10 +550,13 @@ function Get-OnlineInstallMarker {
 }
 
 function Invoke-OnlinePackageInstaller {
-    param([string]$Package, [string]$Directory, [string]$SharedHome,
+    param([string]$Package, [string]$Directory, [string]$SharedHome, [Parameter(Mandatory = $true)][string]$Version,
         [switch]$Commands, [switch]$NoPathUpdate)
+    $buildInfo = ConvertFrom-OnlineUtf8 ([IO.File]::ReadAllBytes((Join-Path $Package 'BUILD-INFO.txt')))
+    $protocol = Read-OnlinePackageProtocol $buildInfo $Version
+    $installer = if ($protocol) { $protocol.installer } else { 'Install-GrokZh.ps1' }
     $arguments = @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-        (Join-Path $Package 'Install-GrokZh.ps1'), '-PackageDir', $Package,
+        (Join-Path $Package $installer), '-PackageDir', $Package,
         '-InstallDir', $Directory, '-ShowProgress')
     if ($SharedHome) { $arguments += @('-GrokHome', $SharedHome) }
     if ($Commands) { $arguments += '-InteractiveCommandSetup' }
@@ -524,7 +593,7 @@ function Install-OnlinePortable {
         $null = [IO.Directory]::CreateDirectory($stage)
         $stageCreated = $true
         $stageApp = Join-Path $stage 'app'
-        Invoke-OnlinePackageInstaller -Package $Package -Directory $stageApp -SharedHome $SharedHome -NoPathUpdate
+        Invoke-OnlinePackageInstaller -Package $Package -Directory $stageApp -SharedHome $SharedHome -Version $Version -NoPathUpdate
         $markerPath = Join-Path $stageApp '.grok-zh-install.json'
         $marker = Get-OnlineInstallMarker $stageApp
         if ($null -eq $marker) { throw '便携部署未生成安装归属记录。' }
@@ -636,23 +705,21 @@ function Invoke-GrokZhOnline {
             }
         }
         $zipPath = Join-Path $work $release.Archive.Name
-        $sidecarPath = Join-Path $work $release.Sidecar.Name
         Write-Host '正在下载并校验完整安装包...'
-        foreach ($item in @(@($release.Archive, $zipPath), @($release.Sidecar, $sidecarPath))) {
-            Receive-OnlineFile -Client $client -Uri $item[0].Url -Destination $item[1] -MaximumBytes $item[0].Size `
-                -ExpectedBytes $item[0].Size -ExpectedSha256 $item[0].Sha256 -Label '正在下载最新正式版'
-        }
-        Assert-OnlineSidecar -Path $sidecarPath -Contract $release
+        Receive-OnlineFile -Client $client -Uri $release.Archive.Url -Destination $zipPath -MaximumBytes $release.Archive.Size `
+            -ExpectedBytes $release.Archive.Size -ExpectedSha256 $release.Archive.Sha256 -Label '正在下载最新正式版'
         Write-Host '正在校验 ZIP 路径、包内文件与 SHA-256...'
         $package = Expand-VerifiedOnlinePackage -ArchivePath $zipPath -Destination (Join-Path $work 'package') -Contract $release
-        $candidate = Get-OnlineExecutableVersion (Join-Path $package 'grok-zh.exe')
+        $protocol = Read-OnlinePackageProtocol (ConvertFrom-OnlineUtf8 ([IO.File]::ReadAllBytes((Join-Path $package 'BUILD-INFO.txt')))) $release.Version.Text
+        $executable = if ($protocol) { $protocol.executable } else { 'grok-zh.exe' }
+        $candidate = Get-OnlineExecutableVersion (Join-Path $package $executable)
         if ($candidate.Text -cne $release.Version.Text) { throw '候选程序版本与 Release 不一致。' }
         if ($VerifyOnly) { Write-Host "验证通过：$($candidate.Text)。未执行安装。" -ForegroundColor Green; return }
         if (!$PSCmdlet.ShouldProcess($target, "安装 Grok Build 中文社区版 $($candidate.Text)")) { return }
         if ($Mode -eq 'Portable') {
             Install-OnlinePortable -Package $package -Root $target -SharedHome $shared -Version $candidate.Text
         } else {
-            Invoke-OnlinePackageInstaller -Package $package -Directory $target -SharedHome $explicitHome `
+            Invoke-OnlinePackageInstaller -Package $package -Directory $target -SharedHome $explicitHome -Version $candidate.Text `
                 -Commands:($Mode -eq 'Commands') -NoPathUpdate:$NoPathUpdate
             $markerPath = Join-Path $programDirectory '.grok-zh-install.json'
             if (!(Test-Path -LiteralPath $markerPath) -or ($beforeMarker -and

@@ -241,6 +241,7 @@ runs:
           Default commands after installation: grok-zh, agent-zh
           EOF
           sed -i '' 's/^          //' "${package}/BUILD-INFO.txt"
+          python3 .github/scripts/write-package-protocol.py --package "${package}" --version "${GROK_VERSION}" --platform "${TARGET}"
 
           manifest_files=(
             grok-zh
