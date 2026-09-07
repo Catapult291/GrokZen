@@ -1,8 +1,8 @@
 //! Independently versioned, display-only announcement translations.
 //!
-//! This worker never participates in binary updates, official settings fetches,
-//! authentication, or startup waits. Consumers render an immutable snapshot and
-//! receive replacements through a watch channel; all IO stays in the worker.
+//! Official announcement loads trigger a parallel check; this worker adds no
+//! polling timer or dependency to official requests, authentication, or startup.
+//! Consumers render immutable snapshots; all IO stays in the worker.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,6 @@ const MAX_CATALOG_BYTES: usize = 256 * 1024;
 const MAX_CACHE_BYTES: usize = MAX_CATALOG_BYTES * 2 + MAX_MANIFEST_BYTES;
 const MAX_ENTRIES: usize = 512;
 const MAX_TEXT_BYTES: usize = 16 * 1024;
-const REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
 const CACHE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const BUNDLED_CATALOG: &str =
@@ -217,13 +216,14 @@ pub struct TranslationUpdates {
 
 impl TranslationUpdates {
     /// Returns immediately; cache reads, TLS setup and HTTP happen off the
-    /// caller's path. `network_enabled = false` still permits offline cache use.
-    pub fn start(network_enabled: bool) -> Self {
+    /// caller's path. HTTP waits for an official announcement load signal;
+    /// `network_enabled = false` still permits offline cache use.
+    pub fn start(network_enabled: bool, load_started: watch::Receiver<bool>) -> Self {
         let (sender, receiver) = watch::channel(TranslationCatalog::bundled());
         let task = tokio::spawn(async move {
             let cache_path = xai_dirs::resolve_grok_home()
                 .map(|home| home.join("cache/grok-zh/announcement-translations.json"));
-            run_worker(sender, cache_path, network_enabled).await;
+            run_worker(sender, cache_path, network_enabled, load_started).await;
         });
         Self { receiver, task }
     }
@@ -250,6 +250,7 @@ async fn run_worker(
     sender: watch::Sender<Arc<TranslationCatalog>>,
     cache_path: Option<PathBuf>,
     network_enabled: bool,
+    load_started: watch::Receiver<bool>,
 ) {
     let mut current = TranslationCatalog::bundled();
     if let Some(path) = cache_path.as_deref()
@@ -264,33 +265,23 @@ async fn run_worker(
     if !network_enabled || sender.is_closed() {
         return;
     }
-    // OS certificate roots may involve synchronous IO; keep that out of both
-    // the TUI thread and the async executor's cooperative scheduling budget.
-    let client = match tokio::task::spawn_blocking(build_client).await {
-        Ok(Ok(client)) => client,
-        error => {
-            tracing::debug!(?error, "announcement translation client unavailable");
-            return;
-        }
-    };
     refresh_loop(
         sender,
         current,
         cache_path,
         RefreshSource {
-            client,
+            client: None,
             base_url: xai_grok_product::COMMUNITY_ANNOUNCEMENTS_BASE_URL.to_owned(),
-            interval: REFRESH_INTERVAL,
             timeout: REFRESH_TIMEOUT,
         },
+        load_started,
     )
     .await;
 }
 
 struct RefreshSource {
-    client: reqwest::Client,
+    client: Option<reqwest::Client>,
     base_url: String,
-    interval: Duration,
     timeout: Duration,
 }
 
@@ -298,42 +289,66 @@ async fn refresh_loop(
     sender: watch::Sender<Arc<TranslationCatalog>>,
     mut current: Arc<TranslationCatalog>,
     cache_path: Option<PathBuf>,
-    source: RefreshSource,
+    mut source: RefreshSource,
+    mut load_started: watch::Receiver<bool>,
 ) {
-    let mut interval = tokio::time::interval_at(
-        tokio::time::Instant::now() + source.interval,
-        source.interval,
-    );
-    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
-        let refresh = refresh_catalog(&source.client, &source.base_url, &current);
-        match tokio::time::timeout(source.timeout, refresh).await {
-            Ok(Ok(Some(catalog))) => {
-                current = Arc::new(catalog);
-                // Display does not wait for a slow or unwritable cache disk.
-                sender.send_replace(Arc::clone(&current));
-                if let Some(path) = cache_path.as_deref() {
-                    match tokio::time::timeout(CACHE_IO_TIMEOUT, write_cache(path, &current)).await
-                    {
-                        Ok(Ok(())) => {}
-                        error => {
-                            tracing::debug!(?error, "announcement translation cache write skipped")
-                        }
+        tokio::select! {
+            () = sender.closed() => return,
+            changed = load_started.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+        }
+        // A signal sent during cache reads remains pending. Certificate setup
+        // is lazy as well, so starting a worker alone cannot start a request.
+        let check = async {
+            if source.client.is_none() {
+                // OS certificate roots may involve synchronous IO.
+                match tokio::task::spawn_blocking(build_client).await {
+                    Ok(Ok(client)) => source.client = Some(client),
+                    error => {
+                        tracing::debug!(?error, "announcement translation client unavailable");
+                        return;
                     }
                 }
             }
-            Ok(Ok(None)) => {}
-            error => tracing::debug!(
-                ?error,
-                "announcement translation refresh skipped; keeping current catalog"
-            ),
-        }
-        // No immediate retry on 403/429/timeouts. One worker and a fixed poll
-        // interval prevent concurrent requests or an error-driven retry loop.
+            let client = source.client.as_ref().expect("client initialized above");
+            let refresh = refresh_catalog(client, &source.base_url, &current);
+            match tokio::time::timeout(source.timeout, refresh).await {
+                Ok(Ok(Some(catalog))) => {
+                    current = Arc::new(catalog);
+                    // Display does not wait for a slow or unwritable cache disk.
+                    sender.send_replace(Arc::clone(&current));
+                    if let Some(path) = cache_path.as_deref() {
+                        match tokio::time::timeout(CACHE_IO_TIMEOUT, write_cache(path, &current))
+                            .await
+                        {
+                            Ok(Ok(())) => {}
+                            error => {
+                                tracing::debug!(
+                                    ?error,
+                                    "announcement translation cache write skipped"
+                                )
+                            }
+                        }
+                    }
+                }
+                Ok(Ok(None)) => {}
+                error => tracing::debug!(
+                    ?error,
+                    "announcement translation refresh skipped; keeping current catalog"
+                ),
+            }
+        };
         tokio::select! {
             () = sender.closed() => return,
-            _ = interval.tick() => {}
+            () = check => {}
         }
+        // Coalesce loads that arrived during this check (including cache IO).
+        // Errors retry only when another official load starts, never on a timer.
+        load_started.borrow_and_update();
     }
 }
 

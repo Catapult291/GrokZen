@@ -95,7 +95,7 @@ async fn offline_worker_loads_verified_cache_and_rejects_a_corrupt_cache() {
     let path = dir.path().join("catalog.json");
     write_cache(&path, &catalog(2, "离线新版")).await.unwrap();
     let (sender, mut receiver) = watch::channel(TranslationCatalog::bundled());
-    run_worker(sender, Some(path.clone()), false).await;
+    run_worker(sender, Some(path.clone()), false, watch::channel(false).1).await;
     receiver.changed().await.unwrap();
     assert_eq!(receiver.borrow_and_update().version(), 2);
     assert_eq!(
@@ -111,7 +111,7 @@ async fn offline_worker_loads_verified_cache_and_rejects_a_corrupt_cache() {
 
     tokio::fs::write(&path, b"broken cache").await.unwrap();
     let (sender, receiver) = watch::channel(TranslationCatalog::bundled());
-    run_worker(sender, Some(path), false).await;
+    run_worker(sender, Some(path), false, watch::channel(false).1).await;
     assert_eq!(receiver.borrow().version(), 1);
 }
 
@@ -123,16 +123,19 @@ async fn dropping_translation_owner_cancels_an_inflight_request() {
         .mount(&server)
         .await;
     let (sender, receiver) = watch::channel(TranslationCatalog::bundled());
+    let (trigger, load_started) = watch::channel(false);
+    // The official load may start before the worker is first scheduled.
+    trigger.send_replace(true);
     let task = tokio::spawn(refresh_loop(
         sender,
         TranslationCatalog::bundled(),
         None,
         RefreshSource {
-            client: client(),
+            client: Some(client()),
             base_url: server.uri(),
-            interval: REFRESH_INTERVAL,
             timeout: REFRESH_TIMEOUT,
         },
+        load_started,
     ));
     let abort = task.abort_handle();
     let owner = TranslationUpdates { receiver, task };
@@ -361,16 +364,18 @@ async fn stalled_refresh_leaves_snapshot_available_and_does_not_retry_immediatel
         .await;
     let current = TranslationCatalog::bundled();
     let (sender, receiver) = watch::channel(Arc::clone(&current));
+    let (trigger, load_started) = watch::channel(false);
+    trigger.send_replace(true);
     let worker = tokio::spawn(refresh_loop(
         sender,
         current,
         None,
         RefreshSource {
-            client: client(),
+            client: Some(client()),
             base_url: server.uri(),
-            interval: Duration::from_secs(60),
             timeout: Duration::from_millis(50),
         },
+        load_started,
     ));
     // A UI/input task remains schedulable while the network request is stalled.
     tokio::time::timeout(Duration::from_millis(100), tokio::task::yield_now())
@@ -407,16 +412,18 @@ async fn background_refresh_notifies_without_waiting_for_cache_write() {
         .await
         .unwrap();
     let (sender, mut receiver) = watch::channel(TranslationCatalog::bundled());
+    let (trigger, load_started) = watch::channel(false);
+    trigger.send_replace(true);
     let worker = tokio::spawn(refresh_loop(
         sender,
         TranslationCatalog::bundled(),
         Some(invalid_parent.join("catalog.json")),
         RefreshSource {
-            client: client(),
+            client: Some(client()),
             base_url: server.uri(),
-            interval: Duration::from_secs(60),
             timeout: Duration::from_secs(1),
         },
+        load_started,
     ));
     tokio::time::timeout(Duration::from_secs(1), receiver.changed())
         .await
@@ -437,4 +444,164 @@ async fn background_refresh_notifies_without_waiting_for_cache_write() {
         tokio::fs::read_to_string(invalid_parent).await.unwrap(),
         "existing data"
     );
+}
+
+#[tokio::test]
+async fn elapsed_time_never_starts_a_check_without_an_official_load() {
+    let server = MockServer::start().await;
+    serve_manifest(&server, &TranslationCatalog::bundled().manifest).await;
+    let (sender, receiver) = watch::channel(TranslationCatalog::bundled());
+    let (trigger, load_started) = watch::channel(false);
+    let worker = tokio::spawn(refresh_loop(
+        sender,
+        TranslationCatalog::bundled(),
+        None,
+        RefreshSource {
+            client: Some(client()),
+            base_url: server.uri(),
+            timeout: REFRESH_TIMEOUT,
+        },
+        load_started,
+    ));
+    tokio::task::yield_now().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(30 * 60)).await;
+    tokio::task::yield_now().await;
+    assert!(server.received_requests().await.unwrap().is_empty());
+    tokio::time::resume();
+    trigger.send_replace(true);
+    wait_for_request_count(&server, 1).await;
+    drop(receiver);
+    tokio::time::timeout(Duration::from_secs(1), worker)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn concurrent_loads_are_coalesced_and_a_later_load_checks_again() {
+    use tokio::io::AsyncWriteExt as _;
+
+    // Explicitly hold responses until the test releases them. This guarantees
+    // that duplicate signals arrive in flight, independent of host scheduling.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let (request_sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+    let response_gate = Arc::new(tokio::sync::Semaphore::new(0));
+    let server_gate = Arc::clone(&response_gate);
+    let bytes = document(2, "事件驱动新版");
+    let manifest_bytes = serde_json::to_vec(&manifest(2, &bytes)).unwrap();
+    let server = tokio::spawn(async move {
+        for index in 1..=3 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+                assert!(request.len() < 8192);
+            }
+            request_sender.send(index).unwrap();
+            server_gate.acquire().await.unwrap().forget();
+            let body = if request.starts_with(b"GET /catalogs/2.json ") {
+                &bytes
+            } else {
+                assert!(request.starts_with(b"GET /manifest.json "));
+                &manifest_bytes
+            };
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+        }
+    });
+    let (sender, mut receiver) = watch::channel(TranslationCatalog::bundled());
+    let (trigger, load_started) = watch::channel(false);
+    // Multiple loads before the worker runs also coalesce into one check.
+    for _ in 0..5 {
+        trigger.send_replace(true);
+    }
+    let source = RefreshSource {
+        client: Some(client()),
+        base_url,
+        timeout: REFRESH_TIMEOUT,
+    };
+    let worker = tokio::spawn(refresh_loop(
+        sender,
+        TranslationCatalog::bundled(),
+        None,
+        source,
+        load_started,
+    ));
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .unwrap(),
+        Some(1)
+    );
+    for _ in 0..5 {
+        trigger.send_replace(true);
+    }
+    response_gate.add_permits(2);
+    tokio::time::timeout(Duration::from_secs(1), receiver.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receiver.borrow_and_update().version(), 2);
+    assert_eq!(requests.recv().await, Some(2));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), requests.recv())
+            .await
+            .is_err(),
+        "in-flight loads must not queue an extra check"
+    );
+    trigger.send_replace(true);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), requests.recv())
+            .await
+            .unwrap(),
+        Some(3)
+    );
+    drop(receiver);
+    tokio::time::timeout(Duration::from_secs(1), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+}
+
+#[tokio::test]
+async fn worker_stops_while_waiting_when_load_source_closes() {
+    let (sender, receiver) = watch::channel(TranslationCatalog::bundled());
+    let (trigger, load_started) = watch::channel(false);
+    let worker = tokio::spawn(refresh_loop(
+        sender,
+        TranslationCatalog::bundled(),
+        None,
+        RefreshSource {
+            client: None,
+            base_url: "https://example.invalid".into(),
+            timeout: REFRESH_TIMEOUT,
+        },
+        load_started,
+    ));
+    drop(trigger);
+    tokio::time::timeout(Duration::from_secs(1), worker)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(receiver.borrow().version(), 1);
+}
+
+async fn wait_for_request_count(server: &MockServer, count: usize) {
+    // Also bounded while a test has paused Tokio's clock.
+    let deadline = std::time::Instant::now() + Duration::from_secs(1);
+    while server.received_requests().await.unwrap().len() < count {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "request did not arrive"
+        );
+        tokio::task::yield_now().await;
+    }
 }
