@@ -1,3 +1,5 @@
+#[cfg(feature = "community-build")]
+pub mod announcement_translations;
 pub mod auto_update;
 #[cfg(feature = "community-build")]
 mod community_release;
