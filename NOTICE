@@ -23,13 +23,13 @@ open-source projects, each licensed under the Apache License 2.0:
   (shared ~/.grok, GROK_HOME) used by this project.
   https://github.com/JoyElliot/grok-build-Chinese
 
-- thedavidweng/grok-build (Gork Build)
+- thedavidweng/gork-build (Gork Build)
   Community distribution of Grok Build with vendor telemetry removed.
   Provides the telemetry-off approach applied here: Mixpanel/product event
   reporting hard-disabled, GCS research/session-trace upload paths disabled,
   remote feature-flag re-enable paths blocked, and vendor auto-update
   hard-disabled (this build never installs from x.ai update channels).
-  https://github.com/thedavidweng/grok-build
+  https://github.com/thedavidweng/gork-build
 
 Changes made by this project on top of the above include merging the
 telemetry-off patch into the Chinese localization, repository

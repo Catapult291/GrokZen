@@ -131,7 +131,7 @@ cargo test --locked -p xai-grok-locale
 
 - **官方上游**：[xai-org/grok-build](https://github.com/xai-org/grok-build)（SpaceXAI）
 - **中文汉化**：[JoyElliot/grok-build-Chinese](https://github.com/JoyElliot/grok-build-Chinese)
-- **去遥测补丁**：[thedavidweng/grok-build](https://github.com/thedavidweng/grok-build)（Gork Build）
+- **去遥测补丁**：[thedavidweng/gork-build](https://github.com/thedavidweng/gork-build)（Gork Build）
 
 保留上述上游的版权与归属声明，详见 [`NOTICE`](NOTICE) 与 [`LICENSE`](LICENSE)。
 本项目与官方版共享 `~/.grok` 数据目录，仅为兼容，与 SpaceXAI 无关联。
