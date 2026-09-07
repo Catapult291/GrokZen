@@ -52,8 +52,8 @@ try {
 
     Assert-Contains $preview3 '## 本次更新' '正文必须使用中文区块标题'
     Assert-Contains $preview3 '## 上游更新' '上游合并必须生成独立区块'
-    Assert-Contains $preview3 "[本地化 Windows 预览工作流](https://github.com/$repository/commit/a13165f9a03faec5c815e1cbddbd7fdb57e29643)" '本地提交标题必须翻译并链接完整 SHA'
-    Assert-Contains $preview3 "[同步上游 1.0.0 并完成中文本地化](https://github.com/$repository/commit/983bc53f89efde6692faabf2f7ac90fde8fd3f4e)" '上游 merge 提交必须翻译并链接'
+    Assert-Contains $preview3 "[本地化 Windows 预览工作流](https://github.com/$repository/commit/06a61d8d36349cd871ae76d3b0ff37911fb5aab8)" '本地提交标题必须翻译并链接完整 SHA'
+    Assert-Contains $preview3 "[同步上游 1.0.0 并完成中文本地化](https://github.com/$repository/commit/5af99e1871531257b0761b8e37344a3b384d8678)" '上游 merge 提交必须翻译并链接'
     Assert-Contains $preview3 '[查看上游变更范围 393430e...8a14c91](https://github.com/xai-org/grok-build/compare/393430ee4934bc791b0d538f304a21691c517433...8a14c91d88875a831a38b3a066b1683116bcb31c)' '上游更新必须包含 compare 链接'
     Assert-Contains $preview3 '[同步上游代码快照](https://github.com/xai-org/grok-build/commit/afbc0fb710320c7add294c2106d447ecc3e3af2e)' '上游提交必须翻译并链接'
     Assert-Contains $preview3 '[同步上游代码快照](https://github.com/xai-org/grok-build/commit/8a14c91d88875a831a38b3a066b1683116bcb31c)' '上游 tip 必须翻译并链接'
@@ -74,8 +74,8 @@ try {
         -Repository $repository `
         -PublishedReleaseTags $publishedTags
     $preview4 = Get-Content -LiteralPath $preview4Path -Raw
-    Assert-Contains $preview4 "[发布前检查草稿发布](https://github.com/$repository/commit/e4b838ebaddf6802483c87e249a9cd8bec7ab131)" '英文提交必须使用中文映射'
-    Assert-Contains $preview4 "[将社区发布切换为仅 ZIP 资产](https://github.com/$repository/commit/9f8a1850a56a35ae8983c3ee7bf6f60782abb016)" '第二个英文提交必须使用中文映射'
+    Assert-Contains $preview4 "[发布前检查草稿发布](https://github.com/$repository/commit/2eb7d61a3478e02c8164fbb5b3582f020ce6392c)" '英文提交必须使用中文映射'
+    Assert-Contains $preview4 "[将社区发布切换为仅 ZIP 资产](https://github.com/$repository/commit/8a7642f14a83460dd0887580b757523c8304afaa)" '第二个英文提交必须使用中文映射'
     Assert-NotContains $preview4 '## 上游更新' '普通发布区间不得伪造上游更新'
     Assert-NotContains $preview4 'fix: inspect draft releases before publishing' '正文不得保留未翻译英文标题'
 
@@ -182,7 +182,7 @@ try {
     $invalidEntriesMap = Join-Path $tempRoot 'invalid-entries-map.json'
     [IO.File]::WriteAllText(
         $invalidEntriesMap,
-        '{"schema":1,"entries":{"sha":"4072da692c799c4fa9eaa469b89af6aec9dcc56d"}}',
+        '{"schema":1,"entries":{"sha":"8f993258ff9742e84adf077351d0eba435868d0f"}}',
         (New-Object Text.UTF8Encoding($false))
     )
     Assert-Throws {
@@ -201,7 +201,7 @@ try {
         -Repository $repository `
         -PublishedReleaseTags @()
     $firstRelease = Get-Content -LiteralPath $firstReleasePath -Raw
-    Assert-Contains $firstRelease "[完成简体中文文档](https://github.com/$repository/commit/4072da692c799c4fa9eaa469b89af6aec9dcc56d)" '首个 Release 只能记录当前 Tag 提交'
+    Assert-Contains $firstRelease "[完成简体中文文档](https://github.com/$repository/commit/8f993258ff9742e84adf077351d0eba435868d0f)" '首个 Release 只能记录当前 Tag 提交'
     Assert-NotContains $firstRelease '同步上游并与官方版共享 Grok 用户数据' '首个 Release 不得回溯全部历史'
 
     Assert-Throws {

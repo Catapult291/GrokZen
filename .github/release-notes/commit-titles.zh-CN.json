@@ -2,121 +2,121 @@
   "schema": 1,
   "upstream_merges": [
     {
-      "merge_sha": "b844df164f2e335f43b22226e9a12fc2a71873db",
-      "first_parent": "5a386576717b04e6e39e7d58d289151c014cce29",
+      "merge_sha": "226e2775b7b2c782660a6dbdb2d2b8eef1a04fba",
+      "first_parent": "5631a37b377653c6814c07cacd960ec8320add36",
       "upstream_tip": "393430ee4934bc791b0d538f304a21691c517433",
       "upstream_base": "e5478eff1e4050558e12e1328b85e6616632efb6"
     },
     {
-      "merge_sha": "983bc53f89efde6692faabf2f7ac90fde8fd3f4e",
-      "first_parent": "3f51e781fdd8f84c9177acc7a6d37c15777d3c53",
+      "merge_sha": "5af99e1871531257b0761b8e37344a3b384d8678",
+      "first_parent": "575553ce8d9be3bfa0dfa59ac9e9c86eaec5522c",
       "upstream_tip": "8a14c91d88875a831a38b3a066b1683116bcb31c",
       "upstream_base": "393430ee4934bc791b0d538f304a21691c517433"
     },
     {
-      "merge_sha": "3d93de4eded1273d8d87186fab5c025320380bd0",
-      "first_parent": "d40ac9c591b3a131613baea04e001315e59a2df1",
+      "merge_sha": "1e96cd36663940b25e2d62b3f6aa6aba5f8f8161",
+      "first_parent": "68eca05b362878f726d94d9df971e99bc0c23bbc",
       "upstream_tip": "eb267feff13129e568df38fb6fdf0ceb65f735d6",
       "upstream_base": "8a14c91d88875a831a38b3a066b1683116bcb31c"
     },
     {
-      "merge_sha": "46764afd4796f28dc39234e5479d80aa1f32795e",
-      "first_parent": "7f39734463fe29b09ebfd9b1c81866acfad71087",
+      "merge_sha": "fa021efd434a2b3479f5e8af253dac4e9240b33d",
+      "first_parent": "744270234c9ecc07c7fa054788115ce455189d43",
       "upstream_tip": "d92c5b0b8582fda358de1f97446aa74af44a464f",
       "upstream_base": "eb267feff13129e568df38fb6fdf0ceb65f735d6"
     },
     {
-      "merge_sha": "033170737d391b7fd43ca6352512ac1ef55ea7c3",
-      "first_parent": "f97161ecaf6de761bf10e000cb49be22db621352",
+      "merge_sha": "aa17791b676539efed3c2b25b0177a7bae9def22",
+      "first_parent": "5eaeaedb914d10fdb5b8265332442e915577fb60",
       "upstream_tip": "19d42e35c07a9c9244f03f6df0c4c353f970d4f9",
       "upstream_base": "d92c5b0b8582fda358de1f97446aa74af44a464f"
     },
     {
-      "merge_sha": "5d5ed7ccad9bfc457e331c3324591ba9117e610b",
-      "first_parent": "ab3c753312678069bdfd24078c8bebe18eee7cc3",
+      "merge_sha": "361992493161cb658c942fbbd0d8a52caefd0a1d",
+      "first_parent": "5c52c5afcd27b599f87d79534b87b94d1c1b5848",
       "upstream_tip": "07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8",
       "upstream_base": "19d42e35c07a9c9244f03f6df0c4c353f970d4f9"
     },
     {
-      "merge_sha": "ba03fa448966a5ffba5f131fe960cb0441bf03b3",
-      "first_parent": "dfcf92b37854f5b2c0dacc66a9e4195f3881dcae",
+      "merge_sha": "52b6f25cd4d419e401cb51f59e8c5d9ae39a3618",
+      "first_parent": "21a331fa30406945541e10b422b0cf2d9c2669a7",
       "upstream_tip": "bc7f02eddd3d84085849dc19ed216f11c23b0571",
       "upstream_base": "07b2f7144fd5c5c9d3dd1966937a87852d2dbdb8"
     }
   ],
   "local_merges": [
-    "a99e7daf7f97f61c805c8b121e11505ad9477e16",
-    "fb98e0cae2b5ac04f159b9522d93ae1a8fcd612e",
-    "ab3c753312678069bdfd24078c8bebe18eee7cc3"
+    "bab693bfdaf11a75e1037d3e3be4448fc7f4ab3d",
+    "4633593ef9e4bca4d3a542978358be174f9b989a",
+    "5c52c5afcd27b599f87d79534b87b94d1c1b5848"
   ],
   "entries": [
     {
-      "sha": "4072da692c799c4fa9eaa469b89af6aec9dcc56d",
+      "sha": "8f993258ff9742e84adf077351d0eba435868d0f",
       "source_subject": "docs: complete Simplified Chinese documentation",
       "title_zh": "完成简体中文文档"
     },
     {
-      "sha": "a13165f9a03faec5c815e1cbddbd7fdb57e29643",
+      "sha": "06a61d8d36349cd871ae76d3b0ff37911fb5aab8",
       "source_subject": "ci: localize Windows preview workflow",
       "title_zh": "本地化 Windows 预览工作流"
     },
     {
-      "sha": "29b222694acc3de8ed99cffd8c2ff71bce0d2066",
+      "sha": "11d0c3798f2dfca337ea97a64bd64a03d3655c10",
       "source_subject": "Add feedback section to README",
       "title_zh": "新增反馈区与社区入口"
     },
     {
-      "sha": "7f39734463fe29b09ebfd9b1c81866acfad71087",
+      "sha": "744270234c9ecc07c7fa054788115ce455189d43",
       "source_subject": "Update README.md",
       "title_zh": "补全 Linux Do 社区讨论链接"
     },
     {
-      "sha": "3f51e781fdd8f84c9177acc7a6d37c15777d3c53",
+      "sha": "575553ce8d9be3bfa0dfa59ac9e9c86eaec5522c",
       "source_subject": "ci: parallelize and cache Windows preview build",
       "title_zh": "并行化并缓存 Windows 预览构建"
     },
     {
-      "sha": "983bc53f89efde6692faabf2f7ac90fde8fd3f4e",
+      "sha": "5af99e1871531257b0761b8e37344a3b384d8678",
       "source_subject": "merge: sync upstream 1.0.0 and complete Chinese localization",
       "title_zh": "同步上游 1.0.0 并完成中文本地化"
     },
     {
-      "sha": "ef61fb935f9c629b91311ef850e667cc5bfc6d3a",
+      "sha": "ddf9db21bbc2b5ccbd9d7138ec2fcf642c9ca94e",
       "source_subject": "ci: adopt J3 build and reliable resource monitoring",
       "title_zh": "采用 J3 构建并实现可靠的资源监控"
     },
     {
-      "sha": "4693d1a8b8d49e3daeef67c27d1d30cfad6afb66",
+      "sha": "4fda18f31ceb0e8b835e1f8332c10a777c3d8bef",
       "source_subject": "feat: add community GitHub release updater",
       "title_zh": "添加社区 GitHub 发布更新器"
     },
     {
-      "sha": "ca64bd8fc493d141ba12aeec87cc6a54838b598b",
+      "sha": "7fbf2c6657987baa85ad232b80c4aa561e1255d1",
       "source_subject": "fix: avoid admin-only immutable release preflight",
       "title_zh": "避免仅管理员可用的不可变发布预检"
     },
     {
-      "sha": "c71f199c5972dc68faa6fcf5ad03809aa238172b",
+      "sha": "9da316e8bc5d5376886b583c2c2aa26fad8f8ead",
       "source_subject": "fix: clear expected release lookup exit code",
       "title_zh": "清理预期发布查询退出码"
     },
     {
-      "sha": "e4b838ebaddf6802483c87e249a9cd8bec7ab131",
+      "sha": "2eb7d61a3478e02c8164fbb5b3582f020ce6392c",
       "source_subject": "fix: inspect draft releases before publishing",
       "title_zh": "发布前检查草稿发布"
     },
     {
-      "sha": "9f8a1850a56a35ae8983c3ee7bf6f60782abb016",
+      "sha": "8a7642f14a83460dd0887580b757523c8304afaa",
       "source_subject": "feat(update): switch community releases to ZIP-only",
       "title_zh": "将社区发布切换为仅 ZIP 资产"
     },
     {
-      "sha": "5a94ab98c50d6e000be7d89e80b29fed2b3cf5a8",
+      "sha": "9cb43ce0e57a9b54b01e6612a07b9855d5f26565",
       "source_subject": "fix(ci): wait for draft release visibility",
       "title_zh": "等待草稿发布可见后再继续"
     },
     {
-      "sha": "b844df164f2e335f43b22226e9a12fc2a71873db",
+      "sha": "226e2775b7b2c782660a6dbdb2d2b8eef1a04fba",
       "source_subject": "merge: sync upstream and share Grok user data",
       "title_zh": "同步上游并与官方版共享 Grok 用户数据"
     },
@@ -226,17 +226,17 @@
       "title_zh": "优化工作树、MCP 重试、上下文统计与后台任务"
     },
     {
-      "sha": "a99e7daf7f97f61c805c8b121e11505ad9477e16",
+      "sha": "bab693bfdaf11a75e1037d3e3be4448fc7f4ab3d",
       "source_subject": "Merge pull request #2 from dddwill8/ci/macos-arm",
       "title_zh": "合并 macOS ARM 云构建贡献"
     },
     {
-      "sha": "fb98e0cae2b5ac04f159b9522d93ae1a8fcd612e",
+      "sha": "4633593ef9e4bca4d3a542978358be174f9b989a",
       "source_subject": "Merge pull request #3 from JoyElliot/codex/macos-arm-integration",
       "title_zh": "集成 macOS ARM 构建与社区发布适配"
     },
     {
-      "sha": "ab3c753312678069bdfd24078c8bebe18eee7cc3",
+      "sha": "5c52c5afcd27b599f87d79534b87b94d1c1b5848",
       "source_subject": "Merge pull request #4 from JoyElliot/codex/community-release-auto-update",
       "title_zh": "添加社区 Release 自动更新支持"
     }
