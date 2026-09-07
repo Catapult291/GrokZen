@@ -184,6 +184,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Windows PowerShell 5.1 安装程序测试失败：$LASTEXITCODE"
           }
+          & .\packaging\windows\tests\Test-Install-GrokZhOnline.ps1
+          & powershell.exe -NoProfile -NonInteractive `
+            -File .\packaging\windows\tests\Test-Install-GrokZhOnline.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell 5.1 在线安装程序测试失败：$LASTEXITCODE"
+          }
 
       - name: 验证本地化元数据
         shell: pwsh

@@ -51,6 +51,10 @@ try {
     $preview3 = Get-Content -LiteralPath $preview3Path -Raw
 
     Assert-Contains $preview3 '## 本次更新' '正文必须使用中文区块标题'
+    Assert-Contains $preview3 '## Windows 中文安装' '正文必须提供在线安装入口'
+    $installCommand = [IO.File]::ReadAllText((Join-Path $repoRoot 'packaging/windows/ONLINE-INSTALL-COMMAND.txt'), [Text.Encoding]::UTF8).Trim()
+    Assert-Contains $preview3 $installCommand 'Release 正文必须使用统一的一行安装命令'
+    Assert-Contains $preview3 '此入口始终安装最新正式版' '历史或预览页必须说明在线入口版本选择'
     Assert-Contains $preview3 '## 上游更新' '上游合并必须生成独立区块'
     Assert-Contains $preview3 "[本地化 Windows 预览工作流](https://github.com/$repository/commit/a13165f9a03faec5c815e1cbddbd7fdb57e29643)" '本地提交标题必须翻译并链接完整 SHA'
     Assert-Contains $preview3 "[同步上游 1.0.0 并完成中文本地化](https://github.com/$repository/commit/983bc53f89efde6692faabf2f7ac90fde8fd3f4e)" '上游 merge 提交必须翻译并链接'

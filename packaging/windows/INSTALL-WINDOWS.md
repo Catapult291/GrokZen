@@ -3,6 +3,63 @@
 本说明适用于本仓库 GitHub Releases 或 `zh-dev` Actions 生成的未签名 Windows x64 GNU 包。
 它不是 xAI 官方安装器，也不是 Authenticode 签名安装包。
 
+## 推荐：中文在线安装
+
+在 Windows PowerShell 5.1 或 PowerShell 7 中粘贴一行：
+
+```powershell
+$p=Join-Path $env:TEMP ('grok-zh-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); $tls=[Net.ServicePointManager]::SecurityProtocol; try { [Net.ServicePointManager]::SecurityProtocol=$tls -bor [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/JoyElliot/grok-build-Chinese/zh-dev/packaging/windows/Install-GrokZhOnline.ps1' -OutFile $p; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $p; if ($LASTEXITCODE -ne 0) { throw "安装未完成，退出码：$LASTEXITCODE" } } finally { [Net.ServicePointManager]::SecurityProtocol=$tls; Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+```
+
+入口只对本次子进程设置执行策略，不永久更改系统设置。根据中文菜单选择：
+
+1. 安装或更新：默认与官方版共存，安装到 `%LOCALAPPDATA%\Programs\grok-zh\bin`。
+2. 安装并设置 `grok` / `agent` 启动命令：进入发布包自带的中文命令设置菜单。
+3. 自定义安装目录。
+4. 创建或更新便携版：指定一个新目录，或选择此前由本入口创建的便携目录。
+0. 退出。
+
+脚本读取本仓库最新正式、不可变 Release，核对附件集合、固定下载地址、大小、GitHub SHA-256、`.sha256` 文本、ZIP 路径和包内全部文件哈希后，调用包内安装器。安装完成后核对实际程序版本，不自动启动完整界面。版本相同时可退出或修复安装；本地版本更高时停止，避免自动降级。
+
+下载显示进度和速度，网络故障最多尝试 3 次；支持系统代理及 `HTTPS_PROXY` / `HTTP_PROXY`。失败信息与退出码会保留，下载和解压的临时目录在结束或取消时清理。需要安装历史版本或预发布时，使用下方手动下载安装流程。
+
+### 便携版目录
+
+```text
+Grok 中文版/
+├─ 启动.cmd
+├─ 使用说明.md
+└─ app/
+   ├─ grok-zh.exe
+   ├─ agent-zh.cmd
+   ├─ rg.exe
+   └─ 许可证、构建信息与安装记录
+```
+
+双击 `启动.cmd`，或在终端中运行它并传入原有参数；它保留当前工作目录、标准输入输出和退出码。机器接口可使用 `.\app\agent-zh.cmd stdio`。本模式不写入 PATH，账号、会话和配置仍与官方版共用 `~/.grok` / `GROK_HOME`。
+
+更新完整便携版时重新运行在线入口并选择原目录。入口先在同级临时目录准备新版本，成功后切换；旧版本保留在同级 `<目录名>.previous.<时间>-<编号>`，可在关闭相关程序后手动恢复或删除。已有目录必须具有本入口的归属记录，且顶层只有上述 3 项；个人文件请存放在别处。内置自动更新仍只更新 `app/grok-zh.exe`，同步旁载工具与许可证时使用在线入口。
+
+### 在线安装高级参数
+
+需要自动化时，先从本仓库下载 [Install-GrokZhOnline.ps1](https://raw.githubusercontent.com/JoyElliot/grok-build-Chinese/zh-dev/packaging/windows/Install-GrokZhOnline.ps1) 并保存，再运行：
+
+```powershell
+# 指定目录安装，不修改用户 PATH
+& .\Install-GrokZhOnline.ps1 -Mode Install -InstallDir 'D:\Apps\Grok 中文版\bin' -NoPathUpdate -NonInteractive
+
+# 创建或更新便携版；同版本需要明确指定 -Repair
+& .\Install-GrokZhOnline.ps1 -Mode Portable -PortableDir 'D:\Apps\Grok 中文版' -Repair -NonInteractive
+
+# 只下载并验证完整包，不安装
+& .\Install-GrokZhOnline.ps1 -VerifyOnly -NonInteractive
+
+# 下载并验证后显示安装预览，不写入安装目录或 PATH
+& .\Install-GrokZhOnline.ps1 -Mode Install -WhatIf -NonInteractive
+```
+
+`-GrokHome` 用于指定共享数据目录的边界检查，不持久修改 `GROK_HOME`。命令设置需要交互选择，不能与 `-NonInteractive` 合用。在线脚本发布在源码中，不额外添加 Release 附件，也不改变现有更新包布局。
+
 ## 下载与解压
 
 1. 推荐从本仓库 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)

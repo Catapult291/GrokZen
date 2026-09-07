@@ -66,6 +66,18 @@ Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库
 
 ## Windows 安装
 
+推荐在 PowerShell 中粘贴下面一行，按中文菜单安装或更新最新正式版，也可创建便携版。支持 Windows x64、Windows PowerShell 5.1 和 PowerShell 7，无需管理员权限。
+
+```powershell
+$p=Join-Path $env:TEMP ('grok-zh-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); $tls=[Net.ServicePointManager]::SecurityProtocol; try { [Net.ServicePointManager]::SecurityProtocol=$tls -bor [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/JoyElliot/grok-build-Chinese/zh-dev/packaging/windows/Install-GrokZhOnline.ps1' -OutFile $p; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $p; if ($LASTEXITCODE -ne 0) { throw "安装未完成，退出码：$LASTEXITCODE" } } finally { [Net.ServicePointManager]::SecurityProtocol=$tls; Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+```
+
+菜单提供共存安装、设置 `grok` / `agent` 命令、自定义目录和便携版。默认保留官方版；程序下载、完整性校验和安装进度均以中文显示。便携目录顶层只有 `启动.cmd`、`使用说明.md` 和 `app/`，不修改 PATH。便携版仍与官方版共用 `~/.grok` / `GROK_HOME` 数据。
+
+在线入口只选择本仓库可验证的最新正式 Release，不自动降级；下载与安装临时文件在结束后清理。安装完成后重新打开终端运行 `grok-zh`。详细参数和便携更新方式见 [Windows 自动安装说明](packaging/windows/INSTALL-WINDOWS.md)。
+
+### 手动下载安装
+
 正式 Tag 工作流会在 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases)
 中发布完整 Windows ZIP；`CI` 工作流仍会上传短期 Actions Artifact。
 解压完整包后，所有 `release-v*` 包（例如 `release-v1.0.13`）都会得到唯一的
