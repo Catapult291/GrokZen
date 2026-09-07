@@ -1,16 +1,5 @@
 Copyright 2023-2026 SpaceXAI
 
-Additional attribution for this derivative work (GrokZen, repo codename grok-zh):
-
-- Simplified Chinese localization and packaging: derived from
-  JoyElliot/grok-build-Chinese (Apache-2.0).
-- Telemetry-off / community distribution patches: derived from
-  thedavidweng/grok-build (Gork Build, Apache-2.0).
-- Upstream of both: xai-org/grok-build (SpaceXAI, Apache-2.0).
-
-This project is an independent community build and is not affiliated with
-SpaceXAI or the above repositories' maintainers. See README.md for details.
-
 
                                  Apache License
                            Version 2.0, January 2004

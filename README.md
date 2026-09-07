@@ -329,7 +329,10 @@ cargo fmt --all
 
 ## 许可证
 
-本仓库第一方代码采用 **Apache License, Version 2.0**，详见 [`LICENSE`](LICENSE)。本 Fork 的修改继续遵守相同许可证，并保留上游版权和归属说明。
+本仓库第一方代码采用 **Apache License, Version 2.0**，详见 [`LICENSE`](LICENSE)。
+衍生上游（JoyElliot/grok-build-Chinese、thedavidweng/grok-build、官方
+xai-org/grok-build）的版权与归属声明见 [`NOTICE`](NOTICE)；本项目的修改继续遵守
+相同许可证，并保留上游版权和归属说明。
 
 第三方及 vendored 代码保持各自原许可证，详见：
 
