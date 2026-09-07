@@ -710,6 +710,17 @@ pub async fn run(
     )
     .await
     .unwrap_or(None);
+    // Start alongside official settings prefetch, without joining either its
+    // startup wait or the first-frame path. GitHub is an optional text source.
+    let announcement_translation_updates =
+        (locale.locale() == crate::locale::UiLocale::ZhCn).then(|| {
+            let offline = ["GROK_ZH_ANNOUNCEMENTS_OFFLINE", "GROK_CHANGELOG_OFFLINE"]
+                .iter()
+                .any(|name| {
+                    std::env::var(name).is_ok_and(|value| !value.is_empty() && value != "0")
+                });
+            xai_grok_update::announcement_translations::TranslationUpdates::start(!offline)
+        });
     let had_prefetch = match refreshed_auth {
         Some(auth) => xai_grok_shell::agent::models::startup_prefetch::begin_with_auth(Some(auth)),
         None => {
@@ -1131,6 +1142,7 @@ pub async fn run(
         term_state,
         materialized,
         bg_update_rx,
+        announcement_translation_updates,
         writer_event_rx,
     )
     .await;

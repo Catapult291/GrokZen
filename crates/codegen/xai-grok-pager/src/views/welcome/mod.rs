@@ -827,61 +827,36 @@ pub struct WelcomeRenderParams<'a> {
     pub workspace_mode_ack_pending: bool,
 }
 
-/// Translate the small set of server-authored announcements whose semantics
-/// are stable and shipped by the official service. Unknown remote content is
-/// deliberately left untouched so a community catalog can never rewrite an
-/// arbitrary operational or security notice.
+/// Project known display text through the current validated catalog. Missing
+/// entries retain the official original, including entries removed by an update.
 pub(crate) fn localized_announcement_for_display<'a>(
     locale: &crate::locale::LocaleContext,
     announcement: &'a xai_grok_announcements::RemoteAnnouncement,
+    catalog: &xai_grok_update::announcement_translations::TranslationCatalog,
 ) -> std::borrow::Cow<'a, xai_grok_announcements::RemoteAnnouncement> {
+    use xai_grok_update::announcement_translations::TranslationField;
+
     if locale.locale() != crate::locale::UiLocale::ZhCn {
         return std::borrow::Cow::Borrowed(announcement);
     }
 
-    let localized_title = announcement.title.as_deref().and_then(|title| {
-        let id = match title {
-            "Workflows are here!" => "welcome.announcement.workflows.title",
-            "Grok 4.5 is here!" => "welcome.announcement.grok_4_5.title",
-            "Grok 4.6 is here!" => "welcome.announcement.grok_4_6.title",
-            "Grok 4.6 is here, try it out for free for a limited time! Upgrade for more usage." => {
-                "welcome.announcement.grok_4_6.free_trial_message"
-            }
-            "Degraded performance" => "welcome.announcement.degraded_performance.title",
-            _ => return None,
-        };
-        Some(locale.named_text(id, title).into_owned())
-    });
-    let localized_message = announcement.message.as_deref().and_then(|message| {
-        let id = match message {
-            "Try them out using /workflows." => "welcome.announcement.workflows.message",
-            "Select 'Grok 4.5' under /model." => "welcome.announcement.grok_4_5.message",
-            "Select 'Grok 4.6' under /model." => "welcome.announcement.grok_4_6.message",
-            "Grok 4.6 is here, try it out for free for a limited time! Upgrade for more usage." => {
-                "welcome.announcement.grok_4_6.free_trial_message"
-            }
-            "Elevated latency on some requests. Follow status.x.ai for updates." => {
-                "welcome.announcement.degraded_performance.message"
-            }
-            _ => return None,
-        };
-        Some(locale.named_text(id, message).into_owned())
-    });
+    let localized_title = announcement
+        .title
+        .as_deref()
+        .and_then(|title| catalog.lookup(TranslationField::Title, title));
+    let localized_message = announcement
+        .message
+        .as_deref()
+        .and_then(|message| catalog.lookup(TranslationField::Message, message));
     let localized_cta = announcement.cta.as_ref().and_then(|cta| {
-        let localized_label = cta.label.as_deref().and_then(|label| {
-            (label == "Click here to Upgrade").then(|| {
-                locale
-                    .named_text("announcement.cta.click_here_to_upgrade", label)
-                    .into_owned()
-            })
-        });
-        let localized_caption = cta.caption.as_deref().and_then(|caption| {
-            (caption == "or use Ctrl+O").then(|| {
-                locale
-                    .named_text("announcement.cta.or_use_ctrl_o", caption)
-                    .into_owned()
-            })
-        });
+        let localized_label = cta
+            .label
+            .as_deref()
+            .and_then(|label| catalog.lookup(TranslationField::CtaLabel, label));
+        let localized_caption = cta
+            .caption
+            .as_deref()
+            .and_then(|caption| catalog.lookup(TranslationField::CtaCaption, caption));
 
         if localized_label.is_none() && localized_caption.is_none() {
             return None;
@@ -889,10 +864,10 @@ pub(crate) fn localized_announcement_for_display<'a>(
 
         let mut localized = cta.clone();
         if let Some(label) = localized_label {
-            localized.label = Some(label);
+            localized.label = Some(label.to_owned());
         }
         if let Some(caption) = localized_caption {
-            localized.caption = Some(caption);
+            localized.caption = Some(caption.to_owned());
         }
         Some(localized)
     });
@@ -916,10 +891,10 @@ pub(crate) fn localized_announcement_for_display<'a>(
         localized.id = Some(xai_grok_announcements::announcement_hide_key(announcement));
     }
     if let Some(title) = localized_title {
-        localized.title = Some(title);
+        localized.title = Some(title.to_owned());
     }
     if let Some(message) = localized_message {
-        localized.message = Some(message);
+        localized.message = Some(message.to_owned());
     }
     if let Some(cta) = localized_cta {
         localized.cta = Some(cta);
@@ -3624,7 +3599,11 @@ mod tests {
             message: Some("Try them out using /workflows.".to_string()),
             ..Default::default()
         };
-        let localized = localized_announcement_for_display(&ZH_TEST_LOCALE, &workflows);
+        let localized = localized_announcement_for_display(
+            &ZH_TEST_LOCALE,
+            &workflows,
+            &xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
+        );
         assert_eq!(localized.title.as_deref(), Some("工作流功能现已上线！"));
         assert_eq!(
             localized.message.as_deref(),
@@ -3636,7 +3615,11 @@ mod tests {
             message: Some("Review the current policy.".to_string()),
             ..Default::default()
         };
-        let untouched = localized_announcement_for_display(&ZH_TEST_LOCALE, &unknown);
+        let untouched = localized_announcement_for_display(
+            &ZH_TEST_LOCALE,
+            &unknown,
+            &xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
+        );
         assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
         assert_eq!(untouched.as_ref(), &unknown);
     }
@@ -3660,7 +3643,11 @@ mod tests {
                 message: Some(format!("Select 'Grok {version}' under /model.")),
                 ..Default::default()
             };
-            let localized = localized_announcement_for_display(&ZH_TEST_LOCALE, &announcement);
+            let localized = localized_announcement_for_display(
+                &ZH_TEST_LOCALE,
+                &announcement,
+                &xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
+            );
             assert_eq!(localized.title.as_deref(), Some(expected_title));
             assert_eq!(localized.message.as_deref(), Some(expected_message));
         }
@@ -3671,7 +3658,11 @@ mod tests {
                 message: Some(format!("Select Grok {version} under /model.")),
                 ..Default::default()
             };
-            let untouched = localized_announcement_for_display(&ZH_TEST_LOCALE, &near_miss);
+            let untouched = localized_announcement_for_display(
+                &ZH_TEST_LOCALE,
+                &near_miss,
+                &xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
+            );
             assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
             assert_eq!(untouched.as_ref(), &near_miss);
         }
@@ -3687,7 +3678,11 @@ mod tests {
             severity: Some("warning".to_string()),
             ..Default::default()
         };
-        let localized = localized_announcement_for_display(&ZH_TEST_LOCALE, &announcement);
+        let localized = localized_announcement_for_display(
+            &ZH_TEST_LOCALE,
+            &announcement,
+            &xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
+        );
         assert_eq!(localized.title.as_deref(), Some("性能下降"));
         assert_eq!(
             localized.message.as_deref(),
@@ -3703,7 +3698,11 @@ mod tests {
             severity: Some("warning".to_string()),
             ..Default::default()
         };
-        let untouched = localized_announcement_for_display(&ZH_TEST_LOCALE, &near_miss);
+        let untouched = localized_announcement_for_display(
+            &ZH_TEST_LOCALE,
+            &near_miss,
+            &xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
+        );
         assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
         assert_eq!(untouched.as_ref(), &near_miss);
     }
@@ -3724,7 +3723,11 @@ mod tests {
             ..Default::default()
         };
 
-        let localized = localized_announcement_for_display(&ZH_TEST_LOCALE, &announcement);
+        let localized = localized_announcement_for_display(
+            &ZH_TEST_LOCALE,
+            &announcement,
+            &xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
+        );
         assert_eq!(
             xai_grok_announcements::announcement_hide_key(localized.as_ref()),
             xai_grok_announcements::announcement_hide_key(&announcement),
@@ -3753,7 +3756,11 @@ mod tests {
 
         let mut blank_id = announcement.clone();
         blank_id.id = Some("   ".to_string());
-        let localized_blank_id = localized_announcement_for_display(&ZH_TEST_LOCALE, &blank_id);
+        let localized_blank_id = localized_announcement_for_display(
+            &ZH_TEST_LOCALE,
+            &blank_id,
+            &xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
+        );
         assert_eq!(
             xai_grok_announcements::announcement_hide_key(localized_blank_id.as_ref()),
             xai_grok_announcements::announcement_hide_key(&blank_id),
@@ -3768,7 +3775,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        let untouched = localized_announcement_for_display(&ZH_TEST_LOCALE, &near_miss);
+        let untouched = localized_announcement_for_display(
+            &ZH_TEST_LOCALE,
+            &near_miss,
+            &xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
+        );
         assert!(matches!(untouched, std::borrow::Cow::Borrowed(_)));
         assert_eq!(untouched.as_ref(), &near_miss);
     }

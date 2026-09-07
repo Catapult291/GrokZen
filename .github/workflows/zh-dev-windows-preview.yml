@@ -5,9 +5,13 @@ on:
     branches:
       - zh-dev
       - codex/free-account-localization-macos-smoke
+    paths-ignore:
+      - community/announcements/**
   pull_request:
     branches:
       - zh-dev
+    paths-ignore:
+      - community/announcements/**
   workflow_dispatch:
     inputs:
       version:

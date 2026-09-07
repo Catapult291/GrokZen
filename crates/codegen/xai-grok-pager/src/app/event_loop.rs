@@ -1161,6 +1161,9 @@ pub(crate) async fn run(
     bg_update_rx: Option<
         tokio::sync::oneshot::Receiver<Option<xai_grok_update::auto_update::UpdateAvailable>>,
     >,
+    mut announcement_translation_updates: Option<
+        xai_grok_update::announcement_translations::TranslationUpdates,
+    >,
     mut writer_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::render::draw::WriterEvent>,
 ) -> anyhow::Result<RunResult> {
     crate::unified_log::init(connection.tx.clone());
@@ -1178,6 +1181,9 @@ pub(crate) async fn run(
         connection.available_commands,
         locale,
     );
+    if let Some(updates) = &announcement_translation_updates {
+        app.announcement_translations = updates.current();
+    }
     app.pending_startup = Some(pending_startup);
     app.tracing_rx = Some(tracing_handle.rx);
     // Startup terminal height for the auto-compact derivation; kept fresh by `Event::Resize` from here on
@@ -2728,6 +2734,22 @@ pub(crate) async fn run(
                     break;
                 }
                 presenter.request(false);
+            }
+
+            // Translation snapshots arrive independently of official ACP
+            // announcements. Repaint the current raw announcement selection.
+            catalog = async {
+                match announcement_translation_updates.as_mut() {
+                    Some(updates) => updates.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if let Some(catalog) = catalog {
+                    app.announcement_translations = catalog;
+                    presenter.request(false);
+                } else {
+                    announcement_translation_updates = None;
+                }
             }
 
             // Background update check completed.

@@ -669,6 +669,9 @@ pub struct AppView {
     /// Release-safe FPS HUD (`/debug fps`; `GROK_FPS` env on release builds, where the dev overlay is compiled out); see the module doc.
     pub fps_hud: crate::views::fps_hud::FpsHud,
     pub active_announcements: Vec<xai_grok_announcements::RemoteAnnouncement>,
+    /// Immutable display mappings; official announcement state stays verbatim.
+    pub(crate) announcement_translations:
+        std::sync::Arc<xai_grok_update::announcement_translations::TranslationCatalog>,
     /// Persisted hide keys, filtered at the banner selection gate.
     /// Hiding one critical reveals the next unhidden one, and a NEW id shows the banner again.
     pub hidden_announcement_ids: std::collections::BTreeSet<String>,
@@ -1489,6 +1492,8 @@ impl AppView {
             scroll_debug_hud: crate::views::scroll_debug_hud::ScrollDebugHud::new(),
             fps_hud: crate::views::fps_hud::FpsHud::new(),
             active_announcements: Vec::new(),
+            announcement_translations:
+                xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
             hidden_announcement_ids: Default::default(),
             announcements_last_gen: 0,
             announcement: None,
@@ -4507,6 +4512,7 @@ impl AppView {
                         crate::views::welcome::localized_announcement_for_display(
                             &self.locale,
                             announcement,
+                            &self.announcement_translations,
                         )
                         .into_owned()
                     })
@@ -4602,19 +4608,25 @@ impl AppView {
                             display_announcements,
                             &self.hidden_announcement_ids,
                         );
-                        let hero_announcement = hero_cta
-                            .map(|(owner, _, _)| owner)
-                            .or_else(|| {
-                                crate::views::announcements::first_session_announcement(
-                                    display_announcements,
-                                    &self.hidden_announcement_ids,
-                                )
-                            })
-                            .or(self.announcement.as_ref());
+                        // Select from the raw list and translate exactly once:
+                        // a translation may itself be a source in a later map.
+                        let hero_announcement = crate::views::announcements::promo_cta(
+                            &self.active_announcements,
+                            &self.hidden_announcement_ids,
+                        )
+                        .map(|(owner, _, _)| owner)
+                        .or_else(|| {
+                            crate::views::announcements::first_session_announcement(
+                                &self.active_announcements,
+                                &self.hidden_announcement_ids,
+                            )
+                        })
+                        .or(self.announcement.as_ref());
                         let localized_hero_announcement = hero_announcement.map(|announcement| {
                             crate::views::welcome::localized_announcement_for_display(
                                 &self.locale,
                                 announcement,
+                                &self.announcement_translations,
                             )
                         });
                         let hero_announcement = localized_hero_announcement.as_deref();
@@ -6155,6 +6167,8 @@ pub(crate) mod legacy_tests {
             deferred_notification: None,
             tracing_rx: None,
             active_announcements: vec![],
+            announcement_translations:
+                xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
             hidden_announcement_ids: Default::default(),
             announcements_last_gen: 0,
             announcement: None,

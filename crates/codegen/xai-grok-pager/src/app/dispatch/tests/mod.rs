@@ -106,6 +106,8 @@ fn test_app() -> AppView {
         deferred_notification: None,
         tracing_rx: None,
         active_announcements: vec![],
+        announcement_translations:
+            xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
         hidden_announcement_ids: Default::default(),
         announcements_last_gen: 0,
         announcement: None,
