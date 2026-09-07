@@ -190,6 +190,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Windows PowerShell 5.1 在线安装程序测试失败：$LASTEXITCODE"
           }
+          python .github/scripts/tests/test_package_protocol.py
+          if ($LASTEXITCODE -ne 0) { throw '包内更新协议生成测试失败。' }
+          & ./.github/scripts/tests/Test-ReleasePolicy.ps1
 
       - name: 验证本地化元数据
         shell: pwsh
@@ -492,6 +495,8 @@ jobs:
           Default commands after installation: grok-zh, agent-zh
           Optional command takeover: grok, agent
           "@.Trim() | Set-Content -LiteralPath (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
+          python .github/scripts/write-package-protocol.py --package $package --version $env:GROK_VERSION --platform $env:TARGET
+          if ($LASTEXITCODE -ne 0) { throw '生成包内更新协议失败。' }
 
           $manifestNames = @(
             'grok-zh.exe',

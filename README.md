@@ -98,11 +98,13 @@ $p=Join-Path $env:TEMP ('grok-zh-install-'+[guid]::NewGuid().ToString('N')+'.ps1
 ### 自动更新
 
 - 默认使用 `stable` 通道，只接受本仓库非 Draft、非 prerelease 的 Immutable Release；如需预览版，可显式运行 `grok-zh update --alpha`。
-- 发布工作流会核验完整 ZIP 及其 `.sha256` 内容；更新器要求二者的资产元数据齐全，并校验固定下载地址、大小、GitHub SHA-256、ZIP 布局、包内 `SHA256SUMS.txt` 和候选程序版本。
+- 更新器验证当前平台完整 ZIP 的固定下载地址、大小、GitHub SHA-256、包内协议/清单和候选程序版本；新版不依赖独立 `.sha256` 或其他平台附件。
 - 后台自动更新默认关闭。按 `Ctrl+U` 才会下载并安装本次更新；也可以在设置中显式开启后台更新。
 - 激活失败时保留当前版本；需要同步 `agent-zh.cmd`、`rg.exe`、安装器或文档时，重新运行新 ZIP 中的安装器。
 
 旧版迁移、高级参数和恢复方式见 [Windows 自动安装说明](packaging/windows/INSTALL-WINDOWS.md)。正式 Release 同时提供 SHA-256 与 GitHub Artifact Attestation，用于核对文件完整性和云端构建来源；它们不等同于 Windows Authenticode 签名。
+
+每个平台保持一个安装包。同包通过新旧校验，独立 `.sha256` 在约两个月兼容期内保留，后续停止公开发布；包内 `SHA256SUMS.txt` 继续用于文件校验。迁移与维护约定见 [单包更新协议](docs/COMMUNITY-UPDATE-PROTOCOL.md)。
 
 ## macOS ARM64 安装
 

@@ -67,16 +67,18 @@ $originalClientFactory = (Get-Item Function:New-OnlineHttpClient).ScriptBlock
 
 function New-TestZip {
     param([string]$Name, [switch]$Legacy, [string]$Extra, [string]$Missing,
-        [string]$ManifestText, [string]$Corrupt, [switch]$Symlink)
+        [string]$ManifestText, [string]$Corrupt, [switch]$Symlink, [string]$BuildInfo, [hashtable]$Renames = @{})
     $file = Join-Path $testRoot "$Name.zip"
     $archive = [IO.Compression.ZipFile]::Open($file, [IO.Compression.ZipArchiveMode]::Create)
     try {
         foreach ($name in @($script:OnlinePackageFiles) + @('SHA256SUMS.txt') + @($Extra)) {
             if (!$name -or $name -ceq $Missing) { continue }
-            $member = if ($Legacy) { $name } else { "grok-zh-1.0.13-windows-x86_64-gnu/$name" }
+            $logical = if ($Renames.ContainsKey($name)) { $Renames[$name] } else { $name }
+            $member = if ($Legacy) { $logical } else { "grok-zh-1.0.13-windows-x86_64-gnu/$logical" }
             $entry = $archive.CreateEntry($member)
             if ($Symlink -and $name -ceq $Extra) { $entry.ExternalAttributes = -1610612736 }
-            $bytes = if ($name -ceq 'SHA256SUMS.txt' -and $ManifestText) { $utf8.GetBytes($ManifestText) }
+            $bytes = if ($name -ceq 'BUILD-INFO.txt' -and $BuildInfo) { $utf8.GetBytes($BuildInfo) }
+                elseif ($name -ceq 'SHA256SUMS.txt' -and $ManifestText) { $utf8.GetBytes($ManifestText) }
                 elseif ($name -ceq $Extra -or $name -ceq $Corrupt) { $utf8.GetBytes('unexpected') }
                 else { [IO.File]::ReadAllBytes((Join-Path $fixture $name)) }
             $stream = $entry.Open()
@@ -109,7 +111,6 @@ function New-TestTransport {
     $handler.Bodies[$api] = $utf8.GetBytes((ConvertTo-Json -InputObject @($Release) -Depth 8))
     $contract = Get-OnlineReleaseContract $Release
     $handler.Bodies[$contract.Archive.Url] = $ZipBytes
-    $handler.Bodies[$contract.Sidecar.Url] = $utf8.GetBytes("$($contract.Archive.Sha256)  $($contract.Archive.Name)`n")
     return $handler
 }
 
@@ -184,7 +185,7 @@ class Program {
         { param($r) $r.immutable = $false }, { param($r) $r.draft = $true },
         { param($r) $r.prerelease = $true }, { param($r) $r.tag_name = 'v1.0.13' },
         { param($r) $r.assets[0].state = 'new' }, { param($r) $r.assets[0].digest = $null },
-        { param($r) $r.assets[0].size = 536870913L }, { param($r) $r.assets[1].size = 4097L },
+        { param($r) $r.assets[0].size = 536870913L },
         { param($r) $r.assets[0].browser_download_url = 'https://evil.invalid/a.zip' },
         { param($r) $r.assets += $r.assets[0] }
     )) {
@@ -275,16 +276,74 @@ class Program {
     Assert-True (Test-Path -LiteralPath (Join-Path $legacyPackage 'licenses/project/NOTICE')) '桥接包仍保留全部许可证'
     $wrongLegacy = New-TestZip -Name 'legacy-profile-modern' -ManifestText $legacyText
     Assert-Throws { Expand-VerifiedOnlinePackage -ArchivePath $wrongLegacy -Destination (Join-Path $testRoot 'legacy-profile-extract') -Contract $contract } '现代包不能使用旧清单'
-    $badSidecar = Join-Path $testRoot 'sidecar.sha256'
-    [IO.File]::WriteAllText($badSidecar, "$($contract.Archive.Sha256)  other.zip`n", $utf8)
-    Assert-Throws { Assert-OnlineSidecar $badSidecar $contract } 'sidecar 文件名必须匹配'
-    [IO.File]::WriteAllText($badSidecar, "$('0' * 64)  $($contract.Archive.Name)`n", $utf8)
-    Assert-Throws { Assert-OnlineSidecar $badSidecar $contract } 'sidecar 摘要必须匹配'
+    $noSidecars = ($release | ConvertTo-Json -Depth 8) | ConvertFrom-Json
+    $noSidecars.assets = @($noSidecars.assets | Where-Object { !$_.name.EndsWith('.sha256') })
+    Assert-True ((Get-OnlineReleaseContract $noSidecars).Archive.Sha256 -ceq $contract.Archive.Sha256) '三个安装包无需独立校验文件'
+    $noSidecars.assets = @($noSidecars.assets[0])
+    Assert-True ((Get-OnlineReleaseContract $noSidecars).Version.Text -ceq '1.0.13') '当前平台不依赖其他平台附件'
+    $ignoredSidecar = ($release | ConvertTo-Json -Depth 8) | ConvertFrom-Json
+    $ignoredSidecar.assets[1].digest = $null
+    Assert-True ((Get-OnlineReleaseContract $ignoredSidecar).Archive.Sha256 -ceq $contract.Archive.Sha256) '旧 sidecar 元数据不参与新版校验'
+
+    $protocolFields = [ordered]@{ schema = 1; version = '1.0.13'; platform = 'x86_64-pc-windows-gnu'
+        mode = 'executable-only'; manifest = 'SHA256SUMS.txt'; executable = 'grok-zh.exe'; installer = 'Install-GrokZh.ps1' }
+    foreach ($case in @('valid', 'extension', 'no-header', 'nested', 'collision', 'unknown', 'platform', 'version', 'incomplete', 'duplicate', 'unsafe', 'installer-metadata', 'same-entry')) {
+        $fields = @{}
+        foreach ($key in $protocolFields.Keys) { $fields[$key] = $protocolFields[$key] }
+        switch ($case) {
+            'unknown' { $fields.schema = 99 }
+            'platform' { $fields.platform = 'aarch64-apple-darwin' }
+            'version' { $fields.version = '1.0.14' }
+            'unsafe' { $fields.executable = '../grok-zh.exe' }
+            'installer-metadata' { $fields.installer = 'BUILD-INFO.txt' }
+            'same-entry' { $fields.installer = 'GROK-ZH.EXE' }
+            'nested' { $fields.executable = 'bin/grok-zh.exe'; $fields.installer = 'setup/install.ps1' }
+        }
+        $info = "Version: 1.0.13`nGROK-UPDATE-PROTOCOL-BEGIN`n$($fields | ConvertTo-Json -Compress)`nGROK-UPDATE-PROTOCOL-END`n"
+        if ($case -eq 'incomplete') { $info = $info.Replace('GROK-UPDATE-PROTOCOL-END', '') }
+        if ($case -eq 'duplicate') { $info += $info }
+        if ($case -eq 'no-header') { $info = $info.Replace("Version: 1.0.13`n", '') }
+        $newLines = @($manifestLines | Where-Object { !$_.EndsWith('  BUILD-INFO.txt') }) + @("$(Get-TestDigest ($utf8.GetBytes($info)))  BUILD-INFO.txt")
+        $extraName = ''
+        if ($case -eq 'extension') { $extraName = 'docs/future.txt'; $newLines += "$(Get-TestDigest ($utf8.GetBytes('unexpected')))  $extraName" }
+        if ($case -eq 'collision') { $extraName = 'RG.EXE/readme.txt'; $newLines += "$(Get-TestDigest ($utf8.GetBytes('unexpected')))  $extraName" }
+        $renames = @{}
+        if ($case -eq 'nested') {
+            $renames = @{ 'grok-zh.exe' = 'bin/grok-zh.exe'; 'Install-GrokZh.ps1' = 'setup/install.ps1' }
+            $newLines = @($newLines | ForEach-Object { $_.Replace('  grok-zh.exe', '  bin/grok-zh.exe').Replace('  Install-GrokZh.ps1', '  setup/install.ps1') })
+        }
+        $protocolZip = New-TestZip -Name "protocol-$case" -BuildInfo $info -ManifestText (($newLines -join "`n") + "`n") -Extra $extraName -Renames $renames
+        $output = Join-Path $testRoot "protocol-extract-$case"
+        if ($case -in @('valid', 'extension', 'no-header', 'nested')) {
+            $protocolPackage = Expand-VerifiedOnlinePackage $protocolZip $output $contract
+            Assert-True (Test-Path -LiteralPath (Join-Path $protocolPackage $fields.executable)) "新协议可校验：$case"
+            if ($case -eq 'no-header') { $declaredPackage = $protocolPackage; $declaredZipBytes = [IO.File]::ReadAllBytes($protocolZip) }
+        } else { Assert-Throws { Expand-VerifiedOnlinePackage $protocolZip $output $contract } "新协议不静默降级：$case" }
+        if ($case -eq 'collision') { Assert-True (!(Test-Path -LiteralPath $output)) '大小写目录冲突在写入前被拒绝' }
+    }
+
+    $bridgeCheck = Join-Path (Split-Path -Parent (Split-Path -Parent $windowsDirectory)) '.github/scripts/verify-protocol-bridge.ps1'
+    $bridgeRelease = New-TestRelease -ZipBytes $declaredZipBytes
+    $bridgeTransport = New-TestTransport -Release $bridgeRelease -ZipBytes $declaredZipBytes
+    $client = [Net.Http.HttpClient]::new($bridgeTransport)
+    try { & $bridgeCheck -Release $bridgeRelease -Client $client }
+    finally { $client.Dispose() }
+    Assert-True ($bridgeTransport.Requests.Count -eq 1) '退休预检验证过渡包实际内容且无需 sidecar'
+    $client = [Net.Http.HttpClient]::new((New-TestTransport -Release $release -ZipBytes $zipBytes))
+    try { Assert-Throws { & $bridgeCheck -Release $release -Client $client } '旧协议包不能仅凭标签被指定为新引擎过渡包' }
+    finally { $client.Dispose() }
 
     function New-OnlineHttpClient { return [Net.Http.HttpClient]::new($script:TestTransport) }
     $normal = Join-Path $testRoot '中文 空格安装\bin'
     $script:TestTransport = New-TestTransport -Release $release -ZipBytes $zipBytes
     Invoke-GrokZhOnline -Mode Install -InstallDir $normal -GrokHome $shared -NoPathUpdate -NonInteractive
+    Assert-True (@($script:TestTransport.Requests | Where-Object { $_.EndsWith('.sha256') }).Count -eq 0) '在线安装不请求独立 sha256 文件'
+    $declaredRelease = New-TestRelease -ZipBytes $declaredZipBytes
+    $declaredRelease.assets = @($declaredRelease.assets | Where-Object { !$_.name.EndsWith('.sha256') })
+    $script:TestTransport = New-TestTransport -Release $declaredRelease -ZipBytes $declaredZipBytes
+    $declaredTarget = Join-Path $testRoot '新协议完整安装'
+    Invoke-GrokZhOnline -Mode Install -InstallDir $declaredTarget -GrokHome $shared -NoPathUpdate -NonInteractive
+    Assert-True (Test-Path -LiteralPath (Join-Path $declaredTarget 'grok-zh.exe')) '新协议单包复用旧包内安装器成功'
     Assert-True (Test-Path -LiteralPath (Join-Path $normal '.grok-zh-install.json')) '在线流程委托真实包内安装器'
     Assert-True (!(Test-Path -LiteralPath (Join-Path $normal 'Install-GrokZh.ps1'))) '安装脚本不进入运行目录'
     $firstMarker = [IO.File]::ReadAllText((Join-Path $normal '.grok-zh-install.json'))
@@ -378,7 +437,7 @@ class Program {
     Assert-True (!(Test-Path -LiteralPath $whatIfTarget)) 'VerifyOnly 不创建安装目录'
     $script:TestTransport = New-TestTransport -Release $release -ZipBytes $zipBytes
     Invoke-GrokZhOnline -Mode Portable -GrokHome $shared -NonInteractive -VerifyOnly
-    Assert-True ($script:TestTransport.Requests.Count -eq 3) 'VerifyOnly 便携模式无需目标目录'
+    Assert-True ($script:TestTransport.Requests.Count -eq 2) 'VerifyOnly 便携模式无需目标目录且不下载 sidecar'
     Assert-Throws { Invoke-GrokZhOnline -GrokHome ([IO.Path]::GetTempPath()) -NonInteractive -VerifyOnly } '拒绝共享数据与临时下载目录重叠'
     $command = [IO.File]::ReadAllText((Join-Path $windowsDirectory 'ONLINE-INSTALL-COMMAND.txt'), $utf8).Trim()
     $repoRoot = Split-Path -Parent (Split-Path -Parent $windowsDirectory)
