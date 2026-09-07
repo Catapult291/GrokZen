@@ -3,6 +3,15 @@
 > Simplified Chinese community edition: [`README.zh-CN.md`](README.zh-CN.md).
 > Its installation and release chain is independent; the upstream commands below do not install `grok-zh`.
 
+> [!WARNING]
+> This repository (`Catapult291/grok-zh`) is an **unofficial Simplified Chinese community fork** of
+> xAI's [grok-build](https://github.com/xai-org/grok-build). It is **not** an xAI release.
+> The commands in this README are the **upstream official** commands and install the **official `grok`**
+> from xAI — they do **not** install this fork's `grok-zh`. To install the community edition, use the
+> Windows/macOS/Linux installers and Releases from
+> [Catapult291/grok-zh Releases](https://github.com/Catapult291/grok-zh/releases), or the docs in the
+> `packaging/` directory.
+
 A terminal-based AI coding assistant and agentic harness.
 
 Use it interactively as a TUI, or integrate it into your own apps via headless mode and the Agent Client Protocol (ACP).
