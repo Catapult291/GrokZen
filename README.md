@@ -2,7 +2,7 @@
 
 # GrokZen（grok-zh）
 
-**Grok Build 的简体中文纯净社区版**——去遥测、无后台统计，保留与官方版完全一致的体验。
+**Grok Build 简体中文社区版，源码层禁用遥测回传。**
 
 <p>
   <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="Apache 2.0">
@@ -10,36 +10,41 @@
   <img src="https://img.shields.io/badge/locale-zh--CN%20%7C%20en--US-orange.svg" alt="Locale">
 </p>
 
-不是 SpaceXAI 官方发行版，也不是官方翻译。
+非 SpaceXAI 官方发行版。
 
 </div>
 
 ---
 
-## 开头一句话
+## 项目简介
 
-把 xAI 官方的 [Grok Build](https://github.com/xai-org/grok-build) 终端编程智能体，
-做成一个**界面全中文、且不向厂商回传任何遥测数据**的社区纯净版。
+本项目是基于 xAI 官方 [Grok Build](https://github.com/xai-org/grok-build)
+终端编程智能体构建的社区版本，面向中文用户提供**简体中文界面与文档**，
+并在源码层面**禁用遥测数据回传**，兼顾使用习惯与隐私。
 
 ## 解决什么问题
 
-官方 Grok Build 默认开启 Mixpanel 产品事件上报与 GCS 会话/研究追踪上传。
-GrokZen 从源码层把这些路径**硬关闭**，同时提供完整的中文界面与文档：
+GrokZen 在保留完整功能与官方协议兼容的前提下，针对隐私与本地化做了以下处理：
 
-- **去遥测**：Mixpanel / 产品事件硬关闭，GCS 研究与会话追踪上传路径禁用
-- **隐私硬开关**：上传路径被编译期 `privacy` 特性封死，无法被环境变量、配置或
-  服务端远程设置重新打开
-- **厂商更新禁用**：永不从 x.ai 官方更新通道安装，避免被替换回官方版
+- **去遥测**：Mixpanel / 产品事件上报与 GCS 研究/会话追踪上传路径在源码层禁用
+- **隐私防护**：上传路径在编译期由 `privacy` 特性排除，无法被环境变量、配置或
+  服务端远程设置重新启用
+- **厂商更新禁用**：不访问 x.ai 官方更新通道，避免被替换回官方版
 - **中文界面**：CLI、TUI、设置、提示与文档全简体中文，可 `--locale en-US` 切英文
 
 > 隐私验证三层证据链见 [DEVELOPER.md](DEVELOPER.md#隐私验证证据v1013)。
+
+## 致谢
+
+感谢 **Linux Do 社区**（[linux.do](https://linux.do)）在本项目开发交流中提供的
+讨论与支持。
 
 ## 功能
 
 | | |
 |---|---|
 | 简体中文 | CLI / TUI / 设置 / 提示 / 文档全中文 |
-| 去遥测 | Mixpanel、GCS 追踪硬关闭（编译期封死） |
+| 去遥测 | Mixpanel、GCS 上报路径源码层禁用（编译期排除） |
 | 兼容官方 | 与官方版共用 `~/.grok` 数据目录，会话/登录/配置互通 |
 | 独立程序名 | `grok-zh` / `agent-zh`，不与官方 `grok` / `agent` 冲突 |
 | 自动更新 | 只从本仓库 Releases 更新，永不访问 x.ai 官方通道 |
