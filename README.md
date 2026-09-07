@@ -14,7 +14,7 @@
 
 本项目在尽量保持原有功能、命令行参数、配置格式和协议兼容性的前提下，为 Grok Build 的 CLI、TUI、设置、提示信息和用户文档提供简体中文支持。它以独立程序名 `grok-zh` 与官方版并行使用，但有意共用 `~/.grok` 数据目录：会话、登录状态、配置、第三方 API、插件与本地状态在两个入口之间保持一致。
 
-[项目定位](#项目定位) · [致谢](#致谢) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [macOS-arm64-安装](#macos-arm64-安装) · [Linux-x86_64-GNU-安装](#linux-x86_64-gnu-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [开发](#开发) · [Releases](https://github.com/Catapult291/grok-zh/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
+[项目定位](#项目定位) · [致谢](#致谢) · [当前状态](#当前状态) · [Windows-安装](#windows-安装) · [macOS-arm64-安装](#macos-arm64-安装) · [Linux-x86_64-GNU-安装](#linux-x86_64-gnu-安装) · [从源码构建](#从源码构建) · [共享数据与兼容约定](#共享数据与兼容约定) · [文档](#文档) · [开发](#开发) · [Releases](https://github.com/Catapult291/GrokZen/releases) · [上游与发布策略](#上游与发布策略) · [许可证](#许可证)
 
 ![grok-zh 中文 TUI 工具链体检](docs/screenshots/grok-zh-toolchain-check.png)
 
@@ -33,14 +33,32 @@
 - `SOURCE_REV` 记录本仓库源码所对应的官方 monorepo 提交；发布时还会在构建信息中记录 Fork 的 Git 提交。
 - 模型可用性、账号权限、订阅、远程会话、搜索、语音及其他在线能力依赖官方服务端，社区 Fork 无法保证。
 
+### 上游与衍生关系
+
+本项目（**GrokZen**，仓库代号 `grok-zh`）是社区衍生构建，主要基于以下两个开源上游，
+均遵循其 Apache-2.0 许可证：
+
+- **简体中文界面与文档**：基于 [JoyElliot/grok-build-Chinese](https://github.com/JoyElliot/grok-build-Chinese)
+  的汉化成果。本项目从该仓库 fork 而来，保留了其中文翻译、`grok-zh` 命名兼容层
+  （与官方版共享 `~/.grok`、`GROK_HOME` 等标识）及三平台打包方式。
+- **去遥测（telemetry-off）补丁**：整合了 [thedavidweng/grok-build](https://github.com/thedavidweng/grok-build)
+  （Gork Build）的社区改动思路——硬关闭 Mixpanel / 产品事件上报、禁用 GCS 研究/会话
+  追踪上传与远程功能开关复启路径，并硬禁用厂商自动更新（不读取 x.ai 更新通道）。
+- 两者共同的上游是官方 [xai-org/grok-build](https://github.com/xai-org/grok-build)
+  （SpaceXAI），本项目与官方版刻意保留一致的 `~/.grok` 数据目录与协议兼容。
+
+本项目在以上基础上的改动：合并去遥测与汉化、仓库独立化整理，并持续跟随官方上游同步。
+按 Apache-2.0 要求，保留上述上游的版权与许可证声明（见文末[许可证](#许可证)与
+[`LICENSE`](LICENSE)）。
+
 ## 当前状态
 
 `grok-zh` 是活跃开发的社区版本，最新源码位于 `zh-dev` 分支。历史 Release 曾在
 `release-v1.0.13` 发布三平台资产；2026-09-07 为开源推广完成了仓库历史的匿名化整理
 （个人身份邮箱统一映射为匿名 GitHub 身份），相关发布 tag 与 Release 已同步重建整理中，
-请以本仓库 [Releases](https://github.com/Catapult291/grok-zh/releases) 页面为准。
+请以本仓库 [Releases](https://github.com/Catapult291/GrokZen/releases) 页面为准。
 
-`zh-dev` 的统一 [CI 工作流](https://github.com/Catapult291/grok-zh/actions/workflows/zh-dev-windows-preview.yml)
+`zh-dev` 的统一 [CI 工作流](https://github.com/Catapult291/GrokZen/actions/workflows/zh-dev-windows-preview.yml)
 同时构建 Windows x64 GNU、Linux x86_64 GNU 与 macOS ARM64 预览 Artifact，三端构建与常规
 测试矩阵持续通过。预览产物只用于构建和设备验收，不会独立创建 Release；正式 Tag 由统一
 发布工作流按版本契约汇总、核验并证明各平台资产。macOS 产物尚未使用 Apple Developer ID
@@ -50,7 +68,7 @@
 
 历史上 `v1.0.5`→`v1.0.8` 是旧 Windows 桥接迁移链，`v1.0.8` 之后改用 `release-vA.B.C`
 命名空间。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；
-请只从本仓库 [Releases](https://github.com/Catapult291/grok-zh/releases) 下载。
+请只从本仓库 [Releases](https://github.com/Catapult291/GrokZen/releases) 下载。
 
 已建立的产品与数据边界：
 
@@ -91,7 +109,7 @@ GCS 流量或遥测外传，金丝雀标记 0 命中）、源码层（上游 `da
 
 ## Windows 安装
 
-正式 Tag 工作流会在 [Releases](https://github.com/Catapult291/grok-zh/releases)
+正式 Tag 工作流会在 [Releases](https://github.com/Catapult291/GrokZen/releases)
 中发布完整 Windows ZIP；`CI` 工作流仍会上传短期 Actions Artifact。
 解压完整包后，所有 `release-v*` 包（包括 `release-v1.0.12-rc.1`）都会得到唯一的
 `grok-zh-<version>-windows-x86_64-gnu` 目录；进入该目录再双击下列入口。
@@ -160,7 +178,7 @@ Windows 客户端迁移的两资产桥接版本，不包含 macOS 或 Linux 资�
 
 ### 反馈
 
-- 当遇到汉化不全等任何问题时，欢迎提出 [issue](https://github.com/Catapult291/grok-zh/issues)
+- 当遇到汉化不全等任何问题时，欢迎提出 [issue](https://github.com/Catapult291/GrokZen/issues)
 - Linux Do 社区讨论地址：[点此进入](https://linux.do/t/topic/2770188)
 
 ## 从源码构建
@@ -250,7 +268,7 @@ Releases 中通过这些门禁的平台资产。
 - 1.0.6 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.6.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.6.zh-CN.md)
 - 1.0.5 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.5.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.5.zh-CN.md)
 - 1.0.3 简体中文发行说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.3.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.3.zh-CN.md)
-- 版本发布：[`Releases`](https://github.com/Catapult291/grok-zh/releases)
+- 版本发布：[`Releases`](https://github.com/Catapult291/GrokZen/releases)
 - 官方在线文档：[docs.x.ai/build/overview](https://docs.x.ai/build/overview)
 
 中文文档将使用稳定文档 ID 和 `zh-CN` 平行目录，不直接改变英文标题所承担的查找身份，以降低合并上游更新时的冲突。

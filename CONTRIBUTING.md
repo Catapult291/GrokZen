@@ -4,7 +4,7 @@
 
 > [!IMPORTANT]
 > This repository is an **unofficial Simplified Chinese community fork**
-> ([`Catapult291/grok-zh`](https://github.com/Catapult291/grok-zh)) of xAI's
+> ([`Catapult291/GrokZen`](https://github.com/Catapult291/GrokZen)) of xAI's
 > [grok-build](https://github.com/xai-org/grok-build). The upstream text below is retained for
 > reference and describes the **upstream (xAI) policy only**; it does **not** describe this fork.
 > For this community fork, please read
