@@ -35,14 +35,22 @@
 
 ## 当前状态
 
-当前稳定版为 `v1.0.8` Windows 桥接版，提供 Windows x86_64 GNU 完整 ZIP。已发布的 `v1.0.5` 客户端会先升级到该桥接版；从 `v1.0.8` 起，更新器才能继续识别并升级到后续 `release-v*` 版本。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库 [Releases](https://github.com/Catapult291/grok-zh/releases) 下载。
+`grok-zh` 是活跃开发的社区版本，最新源码位于 `zh-dev` 分支。历史 Release 曾在
+`release-v1.0.13` 发布三平台资产；2026-09-07 为开源推广完成了仓库历史的匿名化整理
+（个人身份邮箱统一映射为匿名 GitHub 身份），相关发布 tag 与 Release 已同步重建整理中，
+请以本仓库 [Releases](https://github.com/Catapult291/grok-zh/releases) 页面为准。
 
 `zh-dev` 的统一 [CI 工作流](https://github.com/Catapult291/grok-zh/actions/workflows/zh-dev-windows-preview.yml)
-同时构建 Windows x64 GNU、Linux x86_64 GNU 与 macOS ARM64 预览 Artifact。预览产物只用于
-构建和设备验收，不会独立创建 Release；正式 Tag 由统一发布工作流按版本契约汇总、核验并
-证明各平台资产。macOS 产物尚未使用 Apple Developer ID 签名或公证。安装与安全边界见
+同时构建 Windows x64 GNU、Linux x86_64 GNU 与 macOS ARM64 预览 Artifact，三端构建与常规
+测试矩阵持续通过。预览产物只用于构建和设备验收，不会独立创建 Release；正式 Tag 由统一
+发布工作流按版本契约汇总、核验并证明各平台资产。macOS 产物尚未使用 Apple Developer ID
+签名或公证。安装与安全边界见
 [macOS ARM64 安装说明](packaging/macos/INSTALL-MACOS.md)和
 [Linux x86_64 GNU 安装说明](packaging/linux/INSTALL-LINUX.md)。
+
+历史上 `v1.0.5`→`v1.0.8` 是旧 Windows 桥接迁移链，`v1.0.8` 之后改用 `release-vA.B.C`
+命名空间。Windows 产物尚未经过 Authenticode 签名，首次运行可能触发 SmartScreen；
+请只从本仓库 [Releases](https://github.com/Catapult291/grok-zh/releases) 下载。
 
 已建立的产品与数据边界：
 
