@@ -434,22 +434,65 @@ async fn read_cache(path: &Path) -> Result<TranslationCatalog> {
         bytes.len() <= MAX_CACHE_BYTES,
         "catalog cache exceeds size limit"
     );
-    let cache: CachedCatalog = serde_json::from_slice(&bytes)?;
+    parse_cached_catalog(&bytes)
+}
+
+fn parse_cached_catalog(bytes: &[u8]) -> Result<TranslationCatalog> {
+    ensure!(
+        bytes.len() <= MAX_CACHE_BYTES,
+        "catalog cache exceeds size limit"
+    );
+    let cache: CachedCatalog = serde_json::from_slice(bytes)?;
     TranslationCatalog::parse(cache.manifest, cache.catalog_json.as_bytes())
 }
 
 async fn write_cache(path: &Path, catalog: &TranslationCatalog) -> Result<()> {
     let path = path.to_owned();
     let bytes = catalog.cache_bytes()?;
+    let manifest = catalog.manifest.clone();
     // Keep the entire atomic write and cleanup in one blocking job. Dropping
     // the async waiter on timeout/exit must not skip temporary-file cleanup.
     // As with tokio::fs, an already-started disk operation may finish later.
-    tokio::task::spawn_blocking(move || write_cache_bytes(&path, &bytes))
+    tokio::task::spawn_blocking(move || write_cache_bytes(&path, &bytes, &manifest))
         .await
         .context("announcement cache writer failed")?
 }
 
-fn write_cache_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+fn cache_lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+fn lock_cache_commit(path: &Path) -> Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let lock = options.open(cache_lock_path(path))?;
+    ensure!(
+        lock.metadata()?.is_file(),
+        "catalog cache lock is not a file"
+    );
+    lock.lock().context("locking announcement cache commit")?;
+    Ok(lock)
+}
+
+fn read_cache_blocking(path: &Path) -> Result<TranslationCatalog> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path)?;
+    ensure!(file.metadata()?.is_file(), "catalog cache is not a file");
+    let mut bytes = Vec::new();
+    file.take(MAX_CACHE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    parse_cached_catalog(&bytes)
+}
+
+fn write_cache_bytes(path: &Path, bytes: &[u8], manifest: &Manifest) -> Result<()> {
     use std::io::Write as _;
 
     static SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -464,7 +507,8 @@ fn write_cache_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
         std::process::id(),
         SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
-    let result = (|| {
+    let mut temporary_created = false;
+    let result: Result<()> = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
         #[cfg(unix)]
@@ -473,12 +517,32 @@ fn write_cache_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
             options.mode(0o600);
         }
         let mut file = options.open(&temporary)?;
+        temporary_created = true;
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        std::fs::rename(&temporary, path)
+
+        // A timed-out blocking writer can finish after a newer task or another
+        // TUI. Serialize only commits, and compare the verified cache again
+        // under the shared file lock so late writers can never roll it back.
+        let _commit_lock = lock_cache_commit(path)?;
+        if let Ok(existing) = read_cache_blocking(path)
+            && existing.version() >= manifest.version
+        {
+            ensure!(
+                existing.version() != manifest.version
+                    || existing.manifest.sha256 == manifest.sha256,
+                "cached catalog version was reused"
+            );
+            std::fs::remove_file(&temporary)?;
+            temporary_created = false;
+            return Ok(());
+        }
+        std::fs::rename(&temporary, path)?;
+        temporary_created = false;
+        Ok(())
     })();
-    if result.is_err() {
+    if temporary_created {
         let _ = std::fs::remove_file(&temporary);
     }
     result.context("could not atomically replace announcement translation cache")
