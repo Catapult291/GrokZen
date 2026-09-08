@@ -31,11 +31,11 @@
 
 ## 当前状态
 
-统一稳定版为 `release-v1.0.13`，在同一个不可变 Release 中提供 Windows x86_64 GNU、
+统一稳定版见[最新正式 Release](https://github.com/JoyElliot/grok-build-Chinese/releases/latest)，在同一个不可变 Release 中提供 Windows x86_64 GNU、
 Linux x86_64 GNU 与 macOS ARM64 六个归档及校验资产。`release-v1.0.12` 因 Linux
 发布二进制未移除调试信息、超过旧版更新器的解包安全上限，已保留为预发布历史记录，
 稳定通道不会再选择它。已发布的 Windows `v1.0.3`、`v1.0.5` 客户端会先自动升级到
-`v1.0.8` 桥接版，再继续升级到 `release-v1.0.13`；`v1.0.8` 可直接升级。更早写死旧仓库
+`v1.0.8` 桥接版，再继续升级到当前统一稳定版；`v1.0.8` 可直接升级。更早写死旧仓库
 地址的 `v1.0.0-zh.preview.3` 仍需手工安装一次现代完整包。Windows 产物尚未经过
 Authenticode 签名，首次运行可能触发 SmartScreen；请只从本仓库
 [Releases](https://github.com/JoyElliot/grok-build-Chinese/releases) 下载。
@@ -211,7 +211,7 @@ Releases 中通过这些门禁的平台资产。
 
 ## 动态公告翻译
 
-当前开发代码支持从本仓库独立更新公告中文映射。用户首次安装包含此功能的客户端后，后续公告翻译无需再更新程序；1.0.16 及更早版本尚不支持。软件开始加载官方公告时并行检查译文版本，无独立轮询定时器；GitHub 不可用时沿用缓存或内置译文，未收录的内容显示官方英文原文。译文更新后会自动刷新界面。
+从 `release-v1.0.16` 起，客户端支持从本仓库独立更新公告中文映射。用户首次安装包含此功能的客户端后，后续公告翻译无需再更新程序；已发布的 `release-v1.0.13` 及更早稳定版尚不支持。软件开始加载官方公告时并行检查译文版本，无独立轮询定时器；GitHub 不可用时沿用缓存或内置译文，未收录的内容显示官方英文原文。译文更新后会自动刷新界面。
 
 维护者只需发布新版本的公告 JSON 和清单，流程见[动态公告翻译维护说明](community/announcements/README.md)。
 
@@ -238,6 +238,7 @@ Releases 中通过这些门禁的平台资产。
 - 英文上游用户指南：[`crates/codegen/xai-grok-pager/docs/user-guide/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/README.md)
 - 贡献说明：[`CONTRIBUTING.zh-CN.md`](CONTRIBUTING.zh-CN.md)
 - 安全策略：[`SECURITY.zh-CN.md`](SECURITY.zh-CN.md)
+- 1.0.16 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.16.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.16.zh-CN.md)
 - 1.0.13 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.13.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.13.zh-CN.md)
 - 1.0.12 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.12.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.12.zh-CN.md)
 - 1.0.11 简体中文更新说明：[`crates/codegen/xai-grok-shell/changelogs/1.0.11.zh-CN.md`](crates/codegen/xai-grok-shell/changelogs/1.0.11.zh-CN.md)

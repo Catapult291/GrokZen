@@ -239,10 +239,22 @@ mod tests {
             );
         }
 
+        // Community release notes are maintained separately from the translated
+        // upstream JSON. Only that explicit section is outside the comparison.
+        let mut in_community_section = false;
         let markdown_descriptions: Vec<&str> = BUILTIN_FILES[1]
             .1
             .lines()
-            .filter_map(|line| line.strip_prefix("- "))
+            .filter_map(|line| {
+                if let Some(heading) = line.strip_prefix("## ") {
+                    in_community_section = heading == "中文社区版改进";
+                }
+                if in_community_section {
+                    None
+                } else {
+                    line.strip_prefix("- ")
+                }
+            })
             .collect();
         let json_descriptions: Vec<&str> = entries
             .iter()
