@@ -897,12 +897,14 @@ $parent = Split-Path -Parent $InstallDir
 New-Item -ItemType Directory -Path $parent -Force | Out-Null
 $token = [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $stage = "$InstallDir.stage.$PID-$token"
+$stageCreated = $false
 $previous = $null
 $removedOfficial = @()
 
 try {
     Write-Host '[2/4] 正在复制并安装程序文件...' -ForegroundColor Cyan
     New-Item -ItemType Directory -Path $stage | Out-Null
+    $stageCreated = $true
     $packageOnlyNames = @(
         '一键安装.cmd',
         '[可选]替换原始启动方式.cmd',
@@ -1009,6 +1011,7 @@ try {
             -LiteralPath (Join-Path $stage '.grok-zh-install.json') -Encoding UTF8
 
         Move-Item -LiteralPath $stage -Destination $InstallDir
+        $stageCreated = $false
     } catch {
         if ($previous -and !(Test-Path -LiteralPath $InstallDir) -and (Test-Path -LiteralPath $previous)) {
             Move-Item -LiteralPath $previous -Destination $InstallDir
@@ -1016,7 +1019,7 @@ try {
         throw
     }
 } finally {
-    if (Test-Path -LiteralPath $stage) {
+    if ($stageCreated -and (Test-Path -LiteralPath $stage)) {
         Remove-Item -LiteralPath $stage -Recurse -Force
     }
 }

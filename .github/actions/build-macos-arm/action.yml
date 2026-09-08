@@ -152,6 +152,7 @@ runs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 packaging/macos/tests/test_install_lock.py
           # protoc 会写入 DOTSLASH_CACHE，必须在缓存恢复完成后再调用。
           "${PROTOC}" --version
           cargo fmt --all -- --check

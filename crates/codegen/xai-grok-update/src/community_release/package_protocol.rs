@@ -95,11 +95,48 @@ pub(super) fn safe_path(name: &str) -> bool {
                 return false;
             }
             let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
-            !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
-                && !(stem.len() == 4
-                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
-                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+            let reserved_port = stem
+                .strip_prefix("COM")
+                .or_else(|| stem.strip_prefix("LPT"))
+                .is_some_and(|suffix| {
+                    let mut chars = suffix.chars();
+                    matches!(
+                        chars.next(),
+                        Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}')
+                    ) && chars.next().is_none()
+                });
+            !matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") && !reserved_port
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_rejects_superscript_windows_device_names() {
+        for prefix in ["COM", "LPT", "com", "lpt"] {
+            for digit in ['\u{b9}', '\u{b2}', '\u{b3}'] {
+                for path in [
+                    format!("{prefix}{digit}"),
+                    format!("docs/{prefix}{digit}.txt"),
+                    format!("{prefix}{digit}/readme.md"),
+                ] {
+                    assert!(!safe_path(&path), "accepted device path: {path}");
+                    let manifest = format!("{}  {path}\n", "a".repeat(64));
+                    assert!(parse_manifest(manifest.as_bytes()).is_err());
+                }
+            }
+        }
+        for path in [
+            "docs/中文说明.txt",
+            "COM10.txt",
+            "LPT10/readme.md",
+            "COM¹notes.txt",
+        ] {
+            assert!(safe_path(path), "rejected ordinary path: {path}");
+        }
+    }
 }
 
 pub(super) fn parse_manifest(bytes: &[u8]) -> Result<HashMap<String, String>> {
