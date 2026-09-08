@@ -1,5 +1,5 @@
 use super::*;
-use xai_grok_shell::sampling::error::format_rate_limited_user_message;
+use crate::app::effects::format_rate_limited_user_message_with_locale;
 /// Stash a live stop-family batch under `stash_pid` for the turn marker to fold.
 /// `merge_same_name` merges a same-name repeat instead of pushing it standalone.
 pub(super) fn stash_live_stop_batch(
@@ -1702,8 +1702,10 @@ pub(super) fn apply_retry_state(
                 is_reauth = true;
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::ReAuthRequired));
             } else if *rate_limited {
-                let error = crate::app::effects::sanitize_user_error(
-                    &format_rate_limited_user_message(Some(reason.as_str()), is_api_key_auth),
+                let error = format_rate_limited_user_message_with_locale(
+                    Some(reason.as_str()),
+                    is_api_key_auth,
+                    scrollback.locale(),
                 );
                 scrollback.push_block(RenderBlock::session_event(SessionEvent::RetryFailed {
                     error,

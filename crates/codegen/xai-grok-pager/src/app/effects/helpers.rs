@@ -7,6 +7,7 @@ use super::actions::{PermissionModePersist, SubagentKillOutcome, TaskResult};
 use super::agent::AgentId;
 use crate::unified_log as ulog;
 use xai_grok_shell::sampling::error::{
+    FREE_USAGE_USER_MESSAGE, RATE_LIMITED_USER_MESSAGE_API_KEY, RATE_LIMITED_USER_MESSAGE_OAUTH,
     RATE_LIMITED_ERROR_CODE, error_detail_from_data, error_kind_str_from_error,
     format_rate_limited_user_message, http_status_from_error,
 };
@@ -185,8 +186,8 @@ pub(super) fn format_acp_error_with_locale(
 ) -> String {
     if i32::from(err.code) == RATE_LIMITED_ERROR_CODE {
         let detail = error_data_detail(err);
-        return sanitize_user_error(
-            &format_rate_limited_user_message(detail.as_deref(), is_api_key_auth),
+        return format_rate_limited_user_message_with_locale(
+            detail.as_deref(), is_api_key_auth, locale,
         );
     }
     if err.code == acp::ErrorCode::InvalidParams && let Some(data) = &err.data
@@ -206,6 +207,29 @@ pub(super) fn format_acp_error_with_locale(
     )
     .message()
 }
+
+/// Translate only canonical client copy; provider detail and wire codes stay intact.
+pub(crate) fn format_rate_limited_user_message_with_locale(
+    server_detail: Option<&str>,
+    is_api_key_auth: bool,
+    locale: &crate::locale::LocaleContext,
+) -> String {
+    let message = format_rate_limited_user_message(server_detail, is_api_key_auth);
+    let localized = match message.as_str() {
+        RATE_LIMITED_USER_MESSAGE_OAUTH => locale.named_text(
+            "session.rate_limit.oauth", RATE_LIMITED_USER_MESSAGE_OAUTH,
+        ).into_owned(),
+        RATE_LIMITED_USER_MESSAGE_API_KEY => locale.named_text(
+            "session.rate_limit.api_key", RATE_LIMITED_USER_MESSAGE_API_KEY,
+        ).into_owned(),
+        FREE_USAGE_USER_MESSAGE => locale.named_text(
+            "session.rate_limit.free_usage", FREE_USAGE_USER_MESSAGE,
+        ).into_owned(),
+        _ => message,
+    };
+    sanitize_user_error(&localized)
+}
+
 /// Detail string carried in the error's `data` payload, if any.
 fn error_data_detail(err: &acp::Error) -> Option<String> {
     err.data.as_ref().and_then(error_detail_from_data)
