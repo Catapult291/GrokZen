@@ -338,7 +338,7 @@ function Assert-OnlinePackageRelativePath {
     if (!$Path -or $Path.Trim() -cne $Path -or $Path -match '[\\:<>"|?*\x00-\x1f\x7f]') { throw "包内路径无效：$Path" }
     foreach ($part in $Path.Split('/')) {
         if (!$part -or $part -in @('.', '..') -or $part.EndsWith('.') -or $part.EndsWith(' ') -or
-            $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)') { throw "包内路径无效：$Path" }
+            $part -match '^(?i:CON|PRN|AUX|NUL|COM[1-9\u00b9\u00b2\u00b3]|LPT[1-9\u00b9\u00b2\u00b3])(?:\.|$)') { throw "包内路径无效：$Path" }
     }
 }
 

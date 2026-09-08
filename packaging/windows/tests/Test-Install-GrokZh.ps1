@@ -156,6 +156,32 @@ try {
         (New-Object Text.UTF8Encoding($false))
     )
 
+    # Simulate another process winning the random staging path before creation.
+    # A failed New-Item must not make finally delete that process's directory.
+    & {
+        $collisionInstall = Join-Path $testRoot 'stage-collision-install'
+        $collisionState = @{ Path = $null }
+        function New-Item {
+            param([string]$ItemType, [string]$Path, [switch]$Force)
+            if ($Path.StartsWith($collisionInstall + '.stage.', [StringComparison]::OrdinalIgnoreCase)) {
+                Microsoft.PowerShell.Management\New-Item -ItemType Directory -Path $Path | Out-Null
+                $collisionState.Path = $Path
+                [IO.File]::WriteAllText((Join-Path $Path 'keep.txt'), 'owned-by-another-process')
+                throw 'Simulated staging directory collision'
+            }
+            Microsoft.PowerShell.Management\New-Item @PSBoundParameters
+        }
+        Assert-Throws {
+            & $installer -PackageDir $package -InstallDir $collisionInstall `
+                -GrokHome (Join-Path $testRoot 'unused-collision-home') -NoPathUpdate -Confirm:$false
+        } '暂存目录碰撞后安装器仍然成功'
+        Assert-True ($null -ne $collisionState.Path) '没有触发暂存目录碰撞'
+        $sentinel = Join-Path $collisionState.Path 'keep.txt'
+        Assert-True (Test-Path -LiteralPath $sentinel -PathType Leaf) '删除了非本次创建的暂存目录'
+        Assert-True (([IO.File]::ReadAllText($sentinel)) -ceq 'owned-by-another-process') '改写了其他进程的暂存文件'
+        Assert-True (!(Test-Path -LiteralPath $collisionInstall)) '暂存目录碰撞后仍激活了安装目录'
+    }
+
     $archiveSource = Join-Path $testRoot 'archive-source'
     $archivePackage = Join-Path $archiveSource 'grok-zh-installer-test-windows-x86_64-gnu'
     New-Item -ItemType Directory -Path $archiveSource -Force | Out-Null

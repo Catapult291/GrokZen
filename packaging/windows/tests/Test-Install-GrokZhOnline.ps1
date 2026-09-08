@@ -21,6 +21,18 @@ function Get-TestDigest([byte[]]$Bytes) {
     finally { $sha.Dispose() }
 }
 
+# Validate names as strings only: never attempt to open reserved DOS devices.
+foreach ($prefix in @('COM', 'LPT', 'com', 'lpt')) {
+    foreach ($digit in @([char]0x00b9, [char]0x00b2, [char]0x00b3)) {
+        foreach ($path in @("$prefix$digit", "docs/$prefix$digit.txt", "$prefix$digit/readme.md")) {
+            Assert-Throws { Assert-OnlinePackageRelativePath $path } "拒绝上标数字设备路径：$path"
+        }
+    }
+}
+foreach ($path in @('docs/中文说明.txt', 'COM10.txt', 'LPT10/readme.md', 'COM¹notes.txt')) {
+    Assert-OnlinePackageRelativePath $path
+}
+
 # Inject a transport into the normal HttpClient API. Production URLs, redirect
 # validation and digest checks remain active; no alternate-source CLI is added.
 if (!('GrokOnlineTestHandler' -as [type])) {
