@@ -12,6 +12,7 @@ pub(super) use helpers::{
 };
 pub(crate) use helpers::{
     EffectMeta, RestoreProgressMsg, SessionFlags, compact_error, is_disk_full_error,
+    format_rate_limited_user_message_with_locale,
     persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
 };
 #[cfg(feature = "local-workspace")]

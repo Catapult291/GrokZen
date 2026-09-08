@@ -97,6 +97,37 @@ fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
             FREE_USAGE_USER_MESSAGE
         );
 }
+#[test]
+fn zh_localization_rate_limit_canonical_copy_preserves_provider_detail() {
+    use xai_grok_shell::sampling::error::{RATE_LIMITED_ERROR_CODE, RATE_LIMITED_USER_MESSAGE_OAUTH};
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let empty = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited");
+    assert_eq!(format_acp_error_with_locale(&empty, false, &locale),
+        "你已达到当前套餐的速率限制。请升级账号，或稍后重试。");
+    let team = format_acp_error_with_locale(&empty, true, &locale);
+    assert!(team.starts_with("你已达到团队 API 的速率限制。"));
+    assert!(team.ends_with("https://docs.x.ai/developers/rate-limits#rate-limit-tiers"));
+    let free = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
+        .data("subscription:free-usage-exhausted: You have used all your free usage.");
+    let free_message = format_acp_error_with_locale(&free, false, &locale);
+    assert!(free_message.starts_with("你目前已达到 Grok Build 的免费用量上限。"));
+    assert!(free_message.ends_with("https://grok.com/supergrok?referrer=grok-build"));
+    assert_eq!(format_acp_error_with_locale(&free, true, &locale), free_message);
+    let provider = "Provider quota for model grok-custom: retry in 17 seconds. https://example.test/quota";
+    let custom = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
+        .data(format!("API error (status 429 Too Many Requests): {provider}"));
+    assert_eq!(format_acp_error_with_locale(&custom, false, &locale), provider);
+    let near_match = format!("{RATE_LIMITED_USER_MESSAGE_OAUTH} Extra provider detail.");
+    let custom = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited").data(near_match.clone());
+    assert_eq!(format_acp_error_with_locale(&custom, false, &locale), near_match);
+    let upsell = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
+        .data("Upgrade to https://grok.com/supergrok for higher limits.");
+    assert_eq!(format_acp_error_with_locale(&upsell, true, &locale), team);
+}
+
 /// Non-empty token ranges ride the wire block meta as `skillTokenRanges` byte pairs; the text itself is untouched.
 #[test]
 fn plain_prompt_block_stamps_skill_token_ranges_meta() {

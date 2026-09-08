@@ -190,6 +190,38 @@
         }
     }
 
+    #[test]
+    fn zh_localization_rate_limit_retry_uses_scrollback_locale() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        for (is_api_key, reason, expected) in [
+            (false, "", "你已达到当前套餐的速率限制。"),
+            (true, "", "你已达到团队 API 的速率限制。"),
+            (false, "Provider-specific retry detail.", "Provider-specific retry detail."),
+        ] {
+            let mut session = make_session(Some("s1"));
+            let mut scrollback = ScrollbackState::new();
+            scrollback.set_locale(&locale);
+            apply_retry_state(
+                &RetryState::Exhausted {
+                    attempts: 3,
+                    reason: reason.into(),
+                    is_rate_limited: true,
+                },
+                &mut session, &mut scrollback, is_api_key,
+            );
+            assert!(session.rate_limited);
+            match last_session_event(&scrollback) {
+                Some(SessionEvent::RetryFailed { error, .. }) => {
+                    assert!(error.starts_with(expected), "unexpected rate-limit display: {error}");
+                }
+                other => panic!("expected localized RetryFailed, got {other:?}"),
+            }
+        }
+    }
+
     /// Production `RetryState::Exhausted.reason` is `SamplingError::Api`'s Display: `API error (status 429 Too Many Requests): …`.
     #[test]
     fn retry_exhausted_rate_limited_surfaces_server_detail() {
