@@ -323,7 +323,8 @@ async fn cache_is_atomic_digest_checked_and_bounded() {
     let files = std::fs::read_dir(cache_path.parent().unwrap())
         .unwrap()
         .count();
-    assert_eq!(files, 1);
+    assert_eq!(files, 2);
+    assert!(cache_lock_path(&cache_path).is_file());
     let original = tokio::fs::read(&cache_path).await.unwrap();
     let mut corrupt: CachedCatalog = serde_json::from_slice(&original).unwrap();
     corrupt.catalog_json = corrupt.catalog_json.replace("第三版", "篡改版");
@@ -352,7 +353,71 @@ async fn failed_cache_replacement_cleans_its_temporary_file_and_preserves_existi
             .is_err()
     );
     assert_eq!(tokio::fs::read(existing).await.unwrap(), b"keep me");
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+    assert!(cache_lock_path(&cache_path).is_file());
+}
+
+#[tokio::test]
+async fn timed_out_writer_cannot_replace_a_newer_cached_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache_path = dir.path().join("catalog.json");
+    let old = catalog(2, "迟到的旧版");
+    let bytes = old.cache_bytes().unwrap();
+    let old_path = cache_path.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let mut old_writer = tokio::task::spawn_blocking(move || {
+        started_tx.send(()).unwrap();
+        resume_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        write_cache_bytes(&old_path, &bytes, &old.manifest)
+    });
+    started_rx.await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut old_writer)
+            .await
+            .is_err()
+    );
+    write_cache(&cache_path, &catalog(3, "最新版本"))
+        .await
+        .unwrap();
+    resume_tx.send(()).unwrap();
+    old_writer.await.unwrap().unwrap();
+    let cached = read_cache(&cache_path).await.unwrap();
+    assert_eq!(cached.version(), 3);
+    assert_eq!(
+        cached.lookup(TranslationField::Title, "From the team"),
+        Some("最新版本")
+    );
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+}
+
+#[tokio::test]
+async fn cache_commit_lock_serializes_writers_and_rejects_reused_versions() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache_path = dir.path().join("catalog.json");
+    let lock = lock_cache_commit(&cache_path).unwrap();
+    let contender = std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open(cache_lock_path(&cache_path))
+        .unwrap();
+    assert!(matches!(
+        contender.try_lock(),
+        Err(std::fs::TryLockError::WouldBlock)
+    ));
+    drop(lock);
+    contender.try_lock().unwrap();
+    drop(contender);
+    write_cache(&cache_path, &catalog(3, "第三版"))
+        .await
+        .unwrap();
+    let original = tokio::fs::read(&cache_path).await.unwrap();
+    assert!(
+        write_cache(&cache_path, &catalog(3, "非法重用"))
+            .await
+            .is_err()
+    );
+    assert_eq!(tokio::fs::read(&cache_path).await.unwrap(), original);
 }
 
 #[tokio::test]
