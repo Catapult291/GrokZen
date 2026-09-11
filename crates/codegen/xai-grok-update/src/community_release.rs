@@ -20,11 +20,13 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
+mod package_protocol;
+use package_protocol::{BUILD_INFO, PackageProtocol};
+
 pub(crate) const COMMUNITY_INSTALLER: &str = "community-github";
 
 const API_VERSION: &str = "2026-03-10";
 const MAX_ASSET_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_SIDECAR_BYTES: u64 = 4 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 128;
 const MAX_UNCOMPRESSED_BYTES: u64 = 768 * 1024 * 1024;
 const MAX_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
@@ -32,6 +34,8 @@ const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_TAR_ZERO_PADDING_BYTES: u64 = 1024 * 1024;
 const DOWNLOAD_PROGRESS_TEMPLATE: &str =
     "  下载更新 {bar:30.cyan/dim} {bytes}/{total_bytes} {percent}% ({bytes_per_sec}，剩余 {eta})";
+const DOWNLOAD_COMPLETED_TEMPLATE: &str =
+    "  下载更新 {bar:30.cyan/dim} {bytes}/{total_bytes} {percent}% {msg}";
 const ONE_CLICK_INSTALLER: &str = "一键安装.cmd";
 const COMMAND_SETUP_INSTALLER: &str = "[可选]替换原始启动方式.cmd";
 const WINDOWS_REQUIRED_PACKAGE_FILES: [&str; 15] = [
@@ -341,13 +345,14 @@ fn release_includes_macos_assets(version: &Version) -> bool {
 
 /// The plain v1.0.8 tag is the last legacy release and contains only the two
 /// Windows assets accepted by the published v1.0.5 updater. All prereleases
-/// and all later stable releases use the release-v namespace and the complete
-/// six-asset cross-platform contract. The legacy updater ignores that namespace,
+/// and all later stable releases use the release-v namespace. During the
+/// protocol transition they retain six assets. The oldest updater ignores that namespace,
 /// so a late v1.0.5 installation cannot skip the bridge.
 fn release_includes_linux_assets(version: &Version) -> bool {
     !is_legacy_release_version(version)
 }
 
+#[cfg(test)]
 fn expected_release_asset_names(version: &str) -> Result<Vec<String>> {
     let parsed = canonical_release_version(version)?;
     let windows = release_asset_name_for(CommunityPlatform::WindowsX86_64Gnu, version)?;
@@ -394,56 +399,19 @@ fn select_asset_for_platform(
     if platform == CommunityPlatform::LinuxX86_64Gnu && !release_includes_linux_assets(&parsed) {
         anyhow::bail!("release {version} predates Linux community self-update support");
     }
-    let sidecar_name = format!("{name}.sha256");
-    let mut actual_names: Vec<&str> = release
-        .assets
-        .iter()
-        .filter(|asset| asset.state == "uploaded")
-        .map(|asset| asset.name.as_str())
-        .collect();
-    actual_names.sort_unstable();
-    let expected_names = expected_release_asset_names(version)?;
-    let expected_name_refs: Vec<&str> = expected_names.iter().map(String::as_str).collect();
-    if release.assets.len() != expected_names.len() || actual_names != expected_name_refs {
-        anyhow::bail!("release assets do not match the exact approved platform asset set");
-    }
-    for expected_name in &expected_names {
-        let expected = release
-            .assets
-            .iter()
-            .find(|asset| asset.name == *expected_name)
-            .ok_or_else(|| anyhow::anyhow!("release is missing {expected_name}"))?;
-        let is_sidecar = expected_name.ends_with(".sha256");
-        let max_size = if is_sidecar {
-            MAX_SIDECAR_BYTES
-        } else {
-            MAX_ASSET_BYTES
-        };
-        if expected.size == 0 || expected.size > max_size {
-            anyhow::bail!("release asset size is outside the accepted range: {expected_name}");
-        }
-        let expected_url = format!(
-            "https://github.com/{}/releases/download/{expected_tag}/{expected_name}",
-            release_repo(),
-        );
-        if expected.browser_download_url != expected_url {
-            anyhow::bail!("release asset URL does not match the fixed community repository");
-        }
-        let digest = expected.digest.as_deref().ok_or_else(|| {
-            anyhow::anyhow!("release asset is missing its GitHub SHA-256 digest: {expected_name}")
-        })?;
-        parse_sha256_digest(digest)?;
-    }
-    let asset = release
-        .assets
-        .iter()
-        .find(|asset| asset.name == name)
+    // Only the selected platform archive participates in trust. GitHub's
+    // immutable asset digest authenticates the whole package; legacy sidecars
+    // and unrelated platform assets do not affect this client's eligibility.
+    let mut matches = release.assets.iter().filter(|asset| asset.name == name);
+    let asset = matches
+        .next()
         .ok_or_else(|| anyhow::anyhow!("release is missing {name}"))?;
-    let sidecar = release
-        .assets
-        .iter()
-        .find(|asset| asset.name == sidecar_name)
-        .ok_or_else(|| anyhow::anyhow!("release is missing {sidecar_name}"))?;
+    if matches.next().is_some() || asset.state != "uploaded" {
+        anyhow::bail!("release platform asset is duplicated or not uploaded");
+    }
+    if asset.size == 0 || asset.size > MAX_ASSET_BYTES {
+        anyhow::bail!("release platform asset size is outside the accepted range");
+    }
     let expected_url = format!(
         "https://github.com/{}/releases/download/{expected_tag}/{name}",
         release_repo(),
@@ -451,18 +419,6 @@ fn select_asset_for_platform(
     if asset.browser_download_url != expected_url {
         anyhow::bail!("release asset URL does not match the fixed community repository");
     }
-    let expected_sidecar_url = format!(
-        "https://github.com/{}/releases/download/{expected_tag}/{sidecar_name}",
-        release_repo(),
-    );
-    if sidecar.browser_download_url != expected_sidecar_url {
-        anyhow::bail!("release checksum URL does not match the fixed community repository");
-    }
-    let sidecar_digest = sidecar
-        .digest
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("release checksum is missing its GitHub SHA-256 digest"))?;
-    parse_sha256_digest(sidecar_digest)?;
     let digest = asset
         .digest
         .as_deref()
@@ -624,18 +580,20 @@ pub(crate) async fn download_verified(asset: &VerifiedAsset, destination: &Path)
 
 fn finish_download_progress(progress: &ProgressBar, succeeded: bool) {
     if succeeded {
-        progress.finish();
+        let elapsed_seconds = progress.elapsed().as_secs();
+        progress.set_style(
+            ProgressStyle::default_bar()
+                .template(DOWNLOAD_COMPLETED_TEMPLATE)
+                .expect("valid community download completion template"),
+        );
+        progress.finish_with_message(format!("已完成，用时 {elapsed_seconds} 秒"));
     } else {
         progress.finish_and_clear();
     }
 }
 
 fn normalized_package_name(name: &str) -> String {
-    if name.is_ascii() {
-        name.to_ascii_lowercase()
-    } else {
-        name.to_string()
-    }
+    name.to_lowercase()
 }
 
 fn is_safe_package_relative_path(name: &str) -> bool {
@@ -663,16 +621,29 @@ fn validate_archive_layout(
     required_files: &[&str],
     package_root: Option<&str>,
 ) -> Result<()> {
+    validate_zip_layout(archive, required_files, package_root, false)
+}
+
+fn validate_zip_layout(
+    archive: &mut zip::ZipArchive<File>,
+    required_files: &[&str],
+    package_root: Option<&str>,
+    declared: bool,
+) -> Result<()> {
     if archive.is_empty() || archive.len() > MAX_ARCHIVE_ENTRIES {
         anyhow::bail!("community release ZIP contains an invalid number of entries");
     }
 
     let expected_files = expected_archive_names(required_files);
-    let approved_dirs: HashSet<String> = WINDOWS_APPROVED_PACKAGE_DIRS
-        .iter()
-        .copied()
-        .map(normalized_package_name)
-        .collect();
+    let approved_dirs: HashSet<String> = if declared {
+        package_protocol::directories(required_files)
+    } else {
+        WINDOWS_APPROVED_PACKAGE_DIRS
+            .iter()
+            .copied()
+            .map(normalized_package_name)
+            .collect()
+    };
     let mut seen_files = HashSet::new();
     let mut seen_dirs = HashSet::new();
     let normalized_root = package_root.map(normalized_package_name);
@@ -697,7 +668,12 @@ fn validate_archive_layout(
         let enclosed = entry
             .enclosed_name()
             .ok_or_else(|| anyhow::anyhow!("unsafe ZIP entry path: {raw_name}"))?;
-        if entry.is_symlink() || (!entry.is_file() && !entry.is_dir()) {
+        let file_type = entry.unix_mode().unwrap_or(0) & 0o170000;
+        if entry.is_symlink()
+            || (!entry.is_file() && !entry.is_dir())
+            || (entry.is_dir() && !matches!(file_type, 0 | 0o040000))
+            || (entry.is_file() && !matches!(file_type, 0 | 0o100000))
+        {
             anyhow::bail!("community release ZIP contains a non-regular entry: {raw_name}");
         }
         if entry.size() > MAX_ENTRY_BYTES {
@@ -734,7 +710,11 @@ fn validate_archive_layout(
         } else {
             normalized_full
         };
-        if !normalized.is_ascii() && !is_allowed_unicode_package_name(&normalized) {
+        if (declared && !package_protocol::safe_path(&normalized))
+            || (!declared
+                && !normalized.is_ascii()
+                && !is_allowed_unicode_package_name(&normalized))
+        {
             anyhow::bail!(
                 "community release ZIP entry name contains unapproved Unicode: {raw_name}"
             );
@@ -753,10 +733,11 @@ fn validate_archive_layout(
         if !seen.insert(normalized) {
             anyhow::bail!("community release ZIP contains a duplicate path: {raw_name}");
         }
-        if enclosed
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
+        if !declared
+            && enclosed
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
         {
             anyhow::bail!("community release ZIP must not contain a nested ZIP: {raw_name}");
         }
@@ -951,6 +932,28 @@ fn extract_verified_windows_executable(
                     .ok_or_else(|| anyhow::anyhow!("Windows release asset is not a ZIP"))?,
             )
         };
+        let build_info =
+            package_protocol::read_zip_metadata(&mut archive, package_root, BUILD_INFO)?;
+        let protocol =
+            PackageProtocol::parse(&build_info, &asset.version, "x86_64-pc-windows-gnu")?;
+        if let Some(protocol) = protocol {
+            let manifest =
+                package_protocol::read_zip_metadata(&mut archive, package_root, INNER_MANIFEST)?;
+            let hashes = package_protocol::parse_manifest(&manifest)?;
+            protocol.check_manifest(&hashes)?;
+            let files: Vec<_> = hashes.keys().map(String::as_str).collect();
+            validate_zip_layout(&mut archive, &files, package_root, true)?;
+            for (name, expected) in hashes {
+                let extracted = (name == protocol.executable).then_some(destination);
+                if hash_manifest_entry(&mut archive, &name, package_root, extracted)? != expected {
+                    anyhow::bail!("community release inner SHA-256 mismatch for {name}");
+                }
+            }
+            if !destination.is_file() {
+                anyhow::bail!("community release did not produce its declared executable");
+            }
+            return Ok(());
+        }
         validate_archive_layout(&mut archive, &WINDOWS_REQUIRED_PACKAGE_FILES, package_root)?;
         let manifest_files: &[&str] = if is_legacy_release_version(&parsed_version) {
             &WINDOWS_LEGACY_MANIFEST_FILES
@@ -1077,6 +1080,24 @@ fn extract_verified_unix_executable(
     required_files: &[&str],
     executable_files: &[&str],
 ) -> Result<()> {
+    extract_unix_package(
+        archive_path,
+        destination,
+        package_root,
+        required_files,
+        executable_files,
+        None,
+    )
+}
+
+fn extract_unix_package(
+    archive_path: &Path,
+    destination: &Path,
+    package_root: &str,
+    required_files: &[&str],
+    executable_files: &[&str],
+    protocol: Option<&PackageProtocol>,
+) -> Result<()> {
     if package_root.is_empty()
         || !package_root.is_ascii()
         || package_root
@@ -1110,7 +1131,9 @@ fn extract_verified_unix_executable(
             .context("opening the downloaded community release as tar")?
             .raw(true);
         let expected = expected_archive_names(required_files);
+        let approved_dirs = package_protocol::directories(required_files);
         let mut seen = HashSet::new();
+        let mut seen_dirs = HashSet::new();
         let mut hashes = HashMap::new();
         let mut manifest = None;
         let mut root_seen = false;
@@ -1129,7 +1152,28 @@ fn extract_verified_unix_executable(
                 anyhow::bail!("community release tar must use the USTAR format");
             }
             let raw_path = entry.header().path_bytes();
-            let name = normalized_unix_tar_name(raw_path.as_ref(), package_root)?;
+            let name = if protocol.is_some() {
+                let raw = std::str::from_utf8(raw_path.as_ref())
+                    .context("community tar path is not UTF-8")?;
+                let raw = raw.strip_prefix("./").unwrap_or(raw);
+                if raw.ends_with('/') && !entry.header().entry_type().is_dir() {
+                    anyhow::bail!("community tar regular file has a directory suffix");
+                }
+                let path = raw.strip_suffix('/').unwrap_or(raw);
+                if path == package_root {
+                    None
+                } else {
+                    let relative = path
+                        .strip_prefix(&format!("{package_root}/"))
+                        .context("community tar entry is outside its package root")?;
+                    if !package_protocol::safe_path(relative) {
+                        anyhow::bail!("community tar has an unsafe path");
+                    }
+                    Some(relative.to_string())
+                }
+            } else {
+                normalized_unix_tar_name(raw_path.as_ref(), package_root)?
+            };
             let entry_type = entry.header().entry_type();
             if name.is_none() {
                 let mode = entry
@@ -1151,6 +1195,17 @@ fn extract_verified_unix_executable(
                 anyhow::bail!("community release tar file appears before its package root");
             }
             let name = name.expect("checked above");
+            if protocol.is_some() && entry_type.is_dir() {
+                if entry.size() != 0
+                    || entry.link_name_bytes().is_some()
+                    || entry.header().mode()? & 0o7777 != 0o755
+                    || !approved_dirs.contains(&name.to_lowercase())
+                    || !seen_dirs.insert(name.to_lowercase())
+                {
+                    anyhow::bail!("community tar contains an invalid or duplicate directory");
+                }
+                continue;
+            }
             if !entry_type.is_file() || entry.link_name_bytes().is_some() {
                 anyhow::bail!("community release tar contains a non-regular entry: {name}");
             }
@@ -1172,7 +1227,11 @@ fn extract_verified_unix_executable(
             } else {
                 0o644
             };
-            if mode & 0o7777 != expected_mode {
+            if (protocol.is_none() && mode & 0o7777 != expected_mode)
+                || (protocol.is_some()
+                    && (!matches!(mode & 0o7777, 0o644 | 0o755)
+                        || (executable_files.contains(&name.as_str()) && mode & 0o7777 != 0o755)))
+            {
                 anyhow::bail!("community release tar entry has an unexpected mode: {name}");
             }
             let normalized = normalized_package_name(&name);
@@ -1194,7 +1253,8 @@ fn extract_verified_unix_executable(
                 }
                 manifest = Some(bytes);
             } else {
-                let extracted = (name == "grok-zh").then_some(destination);
+                let executable = protocol.map(|p| p.executable.as_str()).unwrap_or("grok-zh");
+                let extracted = (name == executable).then_some(destination);
                 hashes.insert(name.clone(), hash_tar_entry(&mut entry, &name, extracted)?);
             }
         }
@@ -1241,12 +1301,16 @@ fn extract_verified_unix_executable(
                 "community release tar does not contain the exact approved package files"
             );
         }
-        let manifest = parse_inner_manifest(
-            manifest.as_deref().ok_or_else(|| {
-                anyhow::anyhow!("community release tar is missing SHA256SUMS.txt")
-            })?,
-            required_files,
-        )?;
+        let manifest_bytes = manifest
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("community release tar is missing SHA256SUMS.txt"))?;
+        let manifest = if let Some(protocol) = protocol {
+            let hashes = package_protocol::parse_manifest(manifest_bytes)?;
+            protocol.check_manifest(&hashes)?;
+            hashes
+        } else {
+            parse_inner_manifest(manifest_bytes, required_files)?
+        };
         for (name, expected_hash) in manifest {
             let actual = hashes
                 .get(&name)
@@ -1295,7 +1359,9 @@ fn extract_verified_macos_executable(
     destination: &Path,
 ) -> Result<()> {
     let package_root = expected_unix_package_root(asset, CommunityPlatform::MacosAarch64)?;
-    extract_verified_unix_executable(
+    extract_declared_or_legacy_unix(
+        asset,
+        "aarch64-apple-darwin",
         archive_path,
         destination,
         &package_root,
@@ -1310,13 +1376,48 @@ fn extract_verified_linux_executable(
     destination: &Path,
 ) -> Result<()> {
     let package_root = expected_unix_package_root(asset, CommunityPlatform::LinuxX86_64Gnu)?;
-    extract_verified_unix_executable(
+    extract_declared_or_legacy_unix(
+        asset,
+        "x86_64-unknown-linux-gnu",
         archive_path,
         destination,
         &package_root,
         &LINUX_REQUIRED_PACKAGE_FILES,
         &["grok-zh", "Install-GrokZh.sh"],
     )
+}
+
+fn extract_declared_or_legacy_unix(
+    asset: &VerifiedAsset,
+    platform: &str,
+    archive_path: &Path,
+    destination: &Path,
+    root: &str,
+    legacy_files: &[&str],
+    executable_files: &[&str],
+) -> Result<()> {
+    let (build_info, manifest) = package_protocol::read_tar_metadata(archive_path, root)?;
+    if let Some(protocol) = PackageProtocol::parse(&build_info, &asset.version, platform)? {
+        let hashes = package_protocol::parse_manifest(&manifest)?;
+        protocol.check_manifest(&hashes)?;
+        let files: Vec<_> = hashes.keys().map(String::as_str).collect();
+        extract_unix_package(
+            archive_path,
+            destination,
+            root,
+            &files,
+            &[&protocol.executable, &protocol.installer],
+            Some(&protocol),
+        )
+    } else {
+        extract_verified_unix_executable(
+            archive_path,
+            destination,
+            root,
+            legacy_files,
+            executable_files,
+        )
+    }
 }
 
 pub(crate) fn extract_verified_executable(
@@ -1342,6 +1443,373 @@ mod tests {
     use std::io::Write as _;
 
     use super::*;
+
+    fn protocol_info(version: &str, platform: &str, executable: &str, installer: &str) -> Vec<u8> {
+        let json = serde_json::json!({
+            "schema": 1, "version": version, "platform": platform,
+            "mode": "executable-only", "manifest": INNER_MANIFEST,
+            "executable": executable, "installer": installer
+        });
+        format!(
+            "Version: {version}\nGROK-UPDATE-PROTOCOL-BEGIN\n{json}\nGROK-UPDATE-PROTOCOL-END\n"
+        )
+        .into_bytes()
+    }
+
+    fn rehash_entries(entries: &mut Vec<(String, Vec<u8>)>) {
+        entries.retain(|(name, _)| name != INNER_MANIFEST);
+        let manifest = entries
+            .iter()
+            .map(|(name, bytes)| format!("{}  {name}", sha256_hex(bytes)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        entries.push((INNER_MANIFEST.into(), manifest.into_bytes()));
+    }
+
+    #[test]
+    fn sidecar_retirement_preserves_the_last_legacy_bridge() {
+        let mut bridge = release("release-v1.0.16", false, true);
+        bridge.assets = uploaded_package_assets("1.0.16");
+        let mut future = release("release-v1.0.30", false, true);
+        future.assets = uploaded_package_assets("1.0.30");
+        future
+            .assets
+            .retain(|asset| !asset.name.ends_with(".sha256"));
+        let releases = vec![bridge, future];
+        for platform in [
+            CommunityPlatform::WindowsX86_64Gnu,
+            CommunityPlatform::MacosAarch64,
+            CommunityPlatform::LinuxX86_64Gnu,
+        ] {
+            assert_eq!(
+                select_latest_compatible_release(&releases, "stable", platform)
+                    .unwrap()
+                    .1
+                    .to_string(),
+                "1.0.30"
+            );
+        }
+        // The exact asset-set rule is frozen from v1.0.8/release-v1.0.13.
+        // These clients skip a three-asset release before attempting a download.
+        let legacy_candidates: Vec<_> = releases
+            .iter()
+            .filter(|release| {
+                let version = parse_release_version(release).unwrap().to_string();
+                let mut names = release
+                    .assets
+                    .iter()
+                    .map(|asset| asset.name.clone())
+                    .collect::<Vec<_>>();
+                names.sort();
+                names == expected_release_asset_names(&version).unwrap()
+            })
+            .collect();
+        assert_eq!(legacy_candidates.len(), 1);
+        assert_eq!(legacy_candidates[0].tag_name, "release-v1.0.16");
+        let mut selected = releases[1].clone();
+        selected.assets.push(selected.assets[0].clone());
+        let duplicate_platform = if selected.assets[0].name.contains("linux") {
+            CommunityPlatform::LinuxX86_64Gnu
+        } else {
+            CommunityPlatform::WindowsX86_64Gnu
+        };
+        assert!(select_asset_for_platform(&selected, "1.0.30", duplicate_platform).is_err());
+    }
+
+    #[test]
+    fn one_windows_archive_passes_both_protocols() {
+        let temp = tempfile::tempdir().unwrap();
+        let asset = verified_windows_asset("1.0.16");
+        let root = asset.name.strip_suffix(".zip").unwrap();
+        let mut entries = package_entries_with_manifest(&WINDOWS_REQUIRED_PACKAGE_FILES);
+        entries
+            .iter_mut()
+            .find(|(name, _)| name == BUILD_INFO)
+            .unwrap()
+            .1 = protocol_info(
+            "1.0.16",
+            "x86_64-pc-windows-gnu",
+            "grok-zh.exe",
+            "Install-GrokZh.ps1",
+        );
+        rehash_entries(&mut entries);
+        let archive_path = temp.path().join("package.zip");
+        write_zip(
+            &archive_path,
+            &entries
+                .iter()
+                .map(|(name, bytes)| (format!("{root}/{name}"), bytes.clone()))
+                .collect::<Vec<_>>(),
+        );
+        let mut old_archive = zip::ZipArchive::new(File::open(&archive_path).unwrap()).unwrap();
+        validate_archive_layout(
+            &mut old_archive,
+            &WINDOWS_REQUIRED_PACKAGE_FILES,
+            Some(root),
+        )
+        .unwrap();
+        let old_hashes = read_inner_manifest(
+            &mut old_archive,
+            &WINDOWS_REQUIRED_PACKAGE_FILES,
+            Some(root),
+        )
+        .unwrap();
+        for (name, hash) in old_hashes {
+            assert_eq!(
+                hash_manifest_entry(&mut old_archive, &name, Some(root), None).unwrap(),
+                hash
+            );
+        }
+        let destination = temp.path().join("candidate.exe");
+        extract_verified_executable(&asset, &archive_path, &destination).unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"verified executable");
+    }
+
+    #[test]
+    fn declared_windows_manifest_supports_new_paths_and_rejects_undeclared_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let asset = verified_windows_asset("1.0.30");
+        let root = asset.name.strip_suffix(".zip").unwrap();
+        let mut entries = vec![
+            ("bin/grok-zh.exe".into(), b"new executable".to_vec()),
+            ("setup/install.ps1".into(), b"installer".to_vec()),
+            ("Docs中文/new.txt".into(), b"new companion".to_vec()),
+            ("Docs中文/resource.zip".into(), b"opaque companion".to_vec()),
+            (
+                BUILD_INFO.into(),
+                protocol_info(
+                    "1.0.30",
+                    "x86_64-pc-windows-gnu",
+                    "bin/grok-zh.exe",
+                    "setup/install.ps1",
+                ),
+            ),
+        ];
+        rehash_entries(&mut entries);
+        for extra in [false, true] {
+            let path = temp.path().join(format!("package-{extra}.zip"));
+            let destination = temp.path().join(format!("candidate-{extra}.exe"));
+            let mut archive_entries = entries
+                .iter()
+                .map(|(name, bytes)| (format!("{root}/{name}"), bytes.clone()))
+                .collect::<Vec<_>>();
+            if extra {
+                archive_entries.push((format!("{root}/unlisted.txt"), vec![1]));
+            }
+            let mut writer = zip::ZipWriter::new(File::create(&path).unwrap());
+            let options = zip::write::SimpleFileOptions::default();
+            writer
+                .add_directory(format!("{root}/Docs中文/"), options)
+                .unwrap();
+            for (name, bytes) in &archive_entries {
+                writer.start_file(name, options).unwrap();
+                writer.write_all(bytes).unwrap();
+            }
+            writer.finish().unwrap();
+            let result = extract_verified_executable(&asset, &path, &destination);
+            if extra {
+                assert!(result.is_err());
+                assert!(!destination.exists());
+            } else {
+                result.unwrap();
+                assert_eq!(std::fs::read(destination).unwrap(), b"new executable");
+            }
+        }
+    }
+
+    #[test]
+    fn declared_unix_packages_preserve_legacy_validation_and_allow_new_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        for (platform, target, required) in [
+            (
+                CommunityPlatform::MacosAarch64,
+                "aarch64-apple-darwin",
+                &MACOS_REQUIRED_PACKAGE_FILES,
+            ),
+            (
+                CommunityPlatform::LinuxX86_64Gnu,
+                "x86_64-unknown-linux-gnu",
+                &LINUX_REQUIRED_PACKAGE_FILES,
+            ),
+        ] {
+            let asset = verified_asset(platform, "1.0.16");
+            let root = expected_unix_package_root(&asset, platform).unwrap();
+            for nested in [false, true] {
+                let mut entries = if platform == CommunityPlatform::MacosAarch64 {
+                    macos_package_entries()
+                } else {
+                    linux_package_entries()
+                };
+                let executable = if nested { "bin/grok-zh" } else { "grok-zh" };
+                entries
+                    .iter_mut()
+                    .find(|(name, _, _)| name == "grok-zh")
+                    .unwrap()
+                    .0 = executable.into();
+                entries
+                    .iter_mut()
+                    .find(|(name, _, _)| name == BUILD_INFO)
+                    .unwrap()
+                    .1 = protocol_info("1.0.16", target, executable, "Install-GrokZh.sh");
+                entries.retain(|(name, _, _)| name != INNER_MANIFEST);
+                let manifest = entries
+                    .iter()
+                    .map(|(name, bytes, _)| format!("{}  {name}", sha256_hex(bytes)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                entries.push((INNER_MANIFEST.into(), manifest.into_bytes(), 0o644));
+                let path = temp.path().join(format!("{target}-{nested}.tar.gz"));
+                write_unix_tar(&path, &root, &entries, None);
+                if !nested {
+                    extract_verified_unix_executable(
+                        &path,
+                        &temp.path().join(format!("old-{target}")),
+                        &root,
+                        required,
+                        &["grok-zh", "Install-GrokZh.sh"],
+                    )
+                    .unwrap();
+                }
+                extract_verified_executable(
+                    &asset,
+                    &path,
+                    &temp.path().join(format!("new-{target}-{nested}")),
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn declared_packages_reject_special_files_and_non_executable_entry_points() {
+        let temp = tempfile::tempdir().unwrap();
+        let asset = verified_windows_asset("1.0.16");
+        let root = asset.name.strip_suffix(".zip").unwrap();
+        let mut entries = package_entries_with_manifest(&WINDOWS_REQUIRED_PACKAGE_FILES);
+        entries
+            .iter_mut()
+            .find(|(name, _)| name == BUILD_INFO)
+            .unwrap()
+            .1 = protocol_info(
+            "1.0.16",
+            "x86_64-pc-windows-gnu",
+            "grok-zh.exe",
+            "Install-GrokZh.ps1",
+        );
+        rehash_entries(&mut entries);
+        let zip_path = temp.path().join("fifo.zip");
+        write_zip(
+            &zip_path,
+            &entries
+                .iter()
+                .map(|(name, bytes)| (format!("{root}/{name}"), bytes.clone()))
+                .collect::<Vec<_>>(),
+        );
+        let mut zip_bytes = std::fs::read(&zip_path).unwrap();
+        let central = zip_bytes
+            .windows(4)
+            .position(|bytes| bytes == b"PK\x01\x02")
+            .unwrap();
+        zip_bytes[central + 5] = 3; // Unix creator: external attributes describe a FIFO.
+        zip_bytes[central + 38..central + 42].copy_from_slice(&(0o010644u32 << 16).to_le_bytes());
+        std::fs::write(&zip_path, zip_bytes).unwrap();
+        let output = temp.path().join("fifo.exe");
+        assert!(
+            extract_verified_executable(&asset, &zip_path, &output)
+                .unwrap_err()
+                .to_string()
+                .contains("non-regular")
+        );
+        assert!(!output.exists());
+
+        for (platform, target) in [
+            (CommunityPlatform::MacosAarch64, "aarch64-apple-darwin"),
+            (
+                CommunityPlatform::LinuxX86_64Gnu,
+                "x86_64-unknown-linux-gnu",
+            ),
+        ] {
+            let asset = verified_asset(platform, "1.0.16");
+            let root = expected_unix_package_root(&asset, platform).unwrap();
+            for fault in ["executable-mode", "installer-mode", "file-suffix"] {
+                let mut entries: Vec<(String, Vec<u8>, u32)> = vec![
+                    ("bin/grok-zh".into(), b"executable".to_vec(), 0o755),
+                    ("setup/install.sh".into(), b"installer".to_vec(), 0o755),
+                    (
+                        BUILD_INFO.into(),
+                        protocol_info("1.0.16", target, "bin/grok-zh", "setup/install.sh"),
+                        0o644,
+                    ),
+                ];
+                let manifest = entries
+                    .iter()
+                    .map(|(name, bytes, _)| format!("{}  {name}", sha256_hex(bytes)))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                entries.push((INNER_MANIFEST.into(), manifest.into_bytes(), 0o644));
+                match fault {
+                    "executable-mode" => entries[0].2 = 0o644,
+                    "installer-mode" => entries[1].2 = 0o644,
+                    "file-suffix" => entries[0].0.push('/'),
+                    _ => unreachable!(),
+                }
+                let path = temp.path().join(format!("{target}-{fault}.tar.gz"));
+                let output = temp.path().join(format!("{target}-{fault}"));
+                write_unix_tar(&path, &root, &entries, None);
+                assert!(
+                    extract_verified_executable(&asset, &path, &output).is_err(),
+                    "{target}-{fault}"
+                );
+                assert!(!output.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_declared_protocol_never_falls_back_to_legacy() {
+        let valid = protocol_info(
+            "1.0.16",
+            "x86_64-pc-windows-gnu",
+            "grok-zh.exe",
+            "Install-GrokZh.ps1",
+        );
+        let text = String::from_utf8(valid).unwrap();
+        for invalid in [
+            text.replace("\"schema\":1", "\"schema\":99"),
+            text.replace("executable-only", "execute-validator"),
+            text.replace("GROK-UPDATE-PROTOCOL-END", ""),
+            format!("{text}{text}"),
+            text.replace("grok-zh.exe", "../grok-zh.exe"),
+            text.replace("Install-GrokZh.ps1", "BUILD-INFO.txt"),
+            text.replace("Install-GrokZh.ps1", "GROK-ZH.EXE"),
+            text.replace("1.0.16", "1.0.30"),
+        ] {
+            assert!(
+                PackageProtocol::parse(invalid.as_bytes(), "1.0.16", "x86_64-pc-windows-gnu")
+                    .is_err(),
+                "{invalid}"
+            );
+        }
+        for path in [
+            "../bad",
+            "bad/../file",
+            "NUL.txt",
+            "a./file",
+            "a /file",
+            "x\\file",
+            "x:file",
+            "a\nfile",
+        ] {
+            let manifest = format!("{}  {path}", "ab".repeat(32));
+            assert!(package_protocol::parse_manifest(manifest.as_bytes()).is_err());
+        }
+        let collision = format!(
+            "{}  folder\n{}  folder/file",
+            "ab".repeat(32),
+            "ab".repeat(32)
+        );
+        assert!(package_protocol::parse_manifest(collision.as_bytes()).is_err());
+    }
 
     #[derive(Clone, Debug, Default)]
     struct RecordingTerm {
@@ -1882,7 +2350,7 @@ mod tests {
         ));
         assert!(
             select_asset_for_platform(&bridge, "1.0.8", CommunityPlatform::WindowsX86_64Gnu)
-                .is_err()
+                .is_ok()
         );
         bridge.assets.pop();
 
@@ -1905,11 +2373,16 @@ mod tests {
                 "1.0.8-rc.1",
                 CommunityPlatform::WindowsX86_64Gnu
             )
-            .is_err()
+            .is_ok()
         );
 
         candidate.assets.pop();
-        candidate.assets[0].browser_download_url = "https://example.com/grok-zh.zip".to_string();
+        candidate
+            .assets
+            .iter_mut()
+            .find(|asset| asset.name.ends_with(".zip"))
+            .unwrap()
+            .browser_download_url = "https://example.com/grok-zh.zip".to_string();
         assert!(
             select_asset_for_platform(
                 &candidate,
@@ -2033,7 +2506,13 @@ mod tests {
 
         finish_download_progress(&progress, true);
 
-        assert!(terminal.contents().contains("100%"));
+        let output = terminal.contents();
+        assert!(output.contains("100%"));
+        assert!(output.contains('█'));
+        assert!(output.contains("已完成，用时 "));
+        assert!(output.contains(" 秒"));
+        assert!(!output.contains("剩余"));
+        assert!(!output.contains("/s"));
     }
 
     #[test]

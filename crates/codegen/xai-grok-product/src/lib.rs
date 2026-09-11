@@ -42,6 +42,9 @@ pub const DEFAULT_UI_LOCALE: &str = "zh-CN";
 pub const COMMUNITY_RELEASE_REPO: &str = "Catapult291/GrokZen";
 /// Canonical download page for the community distribution.
 pub const COMMUNITY_RELEASES_URL: &str = "https://github.com/Catapult291/GrokZen/releases";
+/// Independently versioned display translations; no release API or auth token
+/// is involved. Catalog filenames are derived from a validated numeric version.
+pub const COMMUNITY_ANNOUNCEMENTS_BASE_URL: &str = "https://raw.githubusercontent.com/Catapult291/GrokZen/refs/heads/zh-dev/community/announcements";
 /// The community updater uses immutable GitHub Releases from the repository
 /// above. Release ZIPs are selected by an exact platform-specific name and
 /// verified against GitHub metadata plus the package's inner hashes before
@@ -115,5 +118,9 @@ mod tests {
         );
         assert!(!OFFICIAL_UPDATE_SOURCES_ALLOWED);
         assert!(!OFFICIAL_CHANGELOG_SOURCE_ALLOWED);
+        assert_eq!(
+            COMMUNITY_ANNOUNCEMENTS_BASE_URL,
+            "https://raw.githubusercontent.com/Catapult291/GrokZen/refs/heads/zh-dev/community/announcements"
+        );
     }
 }

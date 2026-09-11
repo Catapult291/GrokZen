@@ -106,6 +106,8 @@ fn test_app() -> AppView {
         deferred_notification: None,
         tracing_rx: None,
         active_announcements: vec![],
+        announcement_translations:
+            xai_grok_update::announcement_translations::TranslationCatalog::bundled(),
         hidden_announcement_ids: Default::default(),
         announcements_last_gen: 0,
         announcement: None,
@@ -141,6 +143,7 @@ fn test_app() -> AppView {
         contextual_hints: Default::default(),
         remote_contextual_hints: None,
         tip_seen_counts: Default::default(),
+        export_copy_slash_used: false,
         last_known_terminal_rows: 0,
         small_screen_tip_evaluated: false,
         ssh_wrap_tip_evaluated: false,
@@ -977,7 +980,8 @@ fn enqueue_permission_with_enable_always_approve(
     response_rx
 }
 const POLICY_WARNING: &str =
-    xai_grok_workspace::permission::resolution::YOLO_PIN_REASON_REQUIREMENTS;
+    xai_grok_workspace::permission::resolution::YoloPinReason::DisableBypassPermissionsMode
+        .message();
 fn agent_toast(app: &AppView) -> Option<String> {
     app.agents[&AgentId(0)]
         .toast

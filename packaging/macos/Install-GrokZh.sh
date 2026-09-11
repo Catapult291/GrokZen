@@ -17,6 +17,33 @@ die() {
   exit 1
 }
 
+acquire_install_lock() {
+  [ -x /usr/bin/perl ] || die "缺少系统 /usr/bin/perl，无法安全获取安装锁。"
+  LOCK_FILE="$BIN_DIR/.grok-zh-install.lock"
+  if [ -e "$LOCK_FILE" ] || [ -L "$LOCK_FILE" ]; then
+    [ ! -L "$LOCK_FILE" ] && [ -f "$LOCK_FILE" ] || die "安装锁不是普通文件：$LOCK_FILE"
+  fi
+  exec 9<>"$LOCK_FILE" || die "无法打开安装锁：$LOCK_FILE"
+  # Darwin flock belongs to the shared open-file description. The shell keeps
+  # fd 9 open after this child exits, so the lock lasts until installer exit.
+  # Never explicitly unlock or unlink this shared installer/updater lock.
+  /usr/bin/env -i PATH="$PATH" /usr/bin/perl -MFcntl=:flock,:mode -MConfig -e '
+    $Config{d_flock} eq "define" or die "native flock is unavailable\n";
+    my $path = shift;
+    open(my $lock, "+<&=9") or die "open lock descriptor: $!\n";
+    my @fd = stat($lock);
+    my @entry = lstat($path);
+    @fd && @entry && S_ISREG($fd[2]) && S_ISREG($entry[2])
+      && $fd[0] == $entry[0] && $fd[1] == $entry[1]
+      && $fd[4] == $< && ($fd[2] & 07777) == 0600
+      or die "unsafe install lock\n";
+    flock($lock, LOCK_EX | LOCK_NB) or die "install lock is busy: $!\n";
+    @entry = lstat($path);
+    @entry && S_ISREG($entry[2]) && $fd[0] == $entry[0] && $fd[1] == $entry[1]
+      or die "install lock changed during acquisition\n";
+  ' "$LOCK_FILE" || die "无法获取安装锁；另一个 grok-zh 安装或自动更新可能正在进行，请稍后重试。"
+}
+
 usage() {
   cat <<'EOF'
 用法：./Install-GrokZh.sh [--with-compat-aliases]
@@ -157,6 +184,7 @@ DOWNLOAD_DIR="$GROK_HOME_DIR/grok-zh-downloads"
 ensure_secure_dir "$GROK_HOME_DIR"
 ensure_secure_dir "$BIN_DIR"
 ensure_secure_dir "$DOWNLOAD_DIR"
+acquire_install_lock
 
 cleanup() {
   if [ -n "$STAGE_FILE" ]; then

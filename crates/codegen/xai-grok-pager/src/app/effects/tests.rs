@@ -97,6 +97,37 @@ fn format_acp_error_rate_limit_surfaces_detail_or_fallback() {
             FREE_USAGE_USER_MESSAGE
         );
 }
+#[test]
+fn zh_localization_rate_limit_canonical_copy_preserves_provider_detail() {
+    use xai_grok_shell::sampling::error::{RATE_LIMITED_ERROR_CODE, RATE_LIMITED_USER_MESSAGE_OAUTH};
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let empty = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited");
+    assert_eq!(format_acp_error_with_locale(&empty, false, &locale),
+        "你已达到当前套餐的速率限制。请升级账号，或稍后重试。");
+    let team = format_acp_error_with_locale(&empty, true, &locale);
+    assert!(team.starts_with("你已达到团队 API 的速率限制。"));
+    assert!(team.ends_with("https://docs.x.ai/developers/rate-limits#rate-limit-tiers"));
+    let free = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
+        .data("subscription:free-usage-exhausted: You have used all your free usage.");
+    let free_message = format_acp_error_with_locale(&free, false, &locale);
+    assert!(free_message.starts_with("你目前已达到 Grok Build 的免费用量上限。"));
+    assert!(free_message.ends_with("https://grok.com/supergrok?referrer=grok-build"));
+    assert_eq!(format_acp_error_with_locale(&free, true, &locale), free_message);
+    let provider = "Provider quota for model grok-custom: retry in 17 seconds. https://example.test/quota";
+    let custom = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
+        .data(format!("API error (status 429 Too Many Requests): {provider}"));
+    assert_eq!(format_acp_error_with_locale(&custom, false, &locale), provider);
+    let near_match = format!("{RATE_LIMITED_USER_MESSAGE_OAUTH} Extra provider detail.");
+    let custom = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited").data(near_match.clone());
+    assert_eq!(format_acp_error_with_locale(&custom, false, &locale), near_match);
+    let upsell = acp::Error::new(RATE_LIMITED_ERROR_CODE, "Rate limited")
+        .data("Upgrade to https://grok.com/supergrok for higher limits.");
+    assert_eq!(format_acp_error_with_locale(&upsell, true, &locale), team);
+}
+
 /// Non-empty token ranges ride the wire block meta as `skillTokenRanges` byte pairs; the text itself is untouched.
 #[test]
 fn plain_prompt_block_stamps_skill_token_ranges_meta() {
@@ -305,6 +336,65 @@ fn session_list_partial_parses_reasons() {
             parse_session_list_partial(&payload("something_new")),
             Some(ConversationsPartial::Error)
         );
+}
+#[test]
+fn format_acp_error_localizes_exact_model_policy_denials_only() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let denial = "This model isn't allowed by your organization's policy. Contact your administrator.";
+    let exact = acp::Error::invalid_params().data(denial);
+    assert_eq!(
+        format_acp_error_with_locale(&exact, false, &locale),
+        "组织策略不允许使用此模型。请联系管理员。"
+    );
+
+    let near_miss = acp::Error::invalid_params().data(format!("{denial} extra"));
+    assert_eq!(
+        format_acp_error_with_locale(&near_miss, false, &locale),
+        format!("{denial} extra")
+    );
+}
+
+#[test]
+fn switch_model_error_localizes_policy_denial_at_direct_effect_boundary() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let denial =
+        "This model isn't allowed by your organization's policy. Contact your administrator.";
+    let error = acp::Error::invalid_params().data(denial);
+    let mapped = switch_model_error_from_acp(&error, &None, false, &locale);
+    match mapped {
+        SwitchModelError::Other(message) => {
+            assert_eq!(message, "组织策略不允许使用此模型。请联系管理员。");
+        }
+        SwitchModelError::IncompatibleAgent { .. } => {
+            panic!("policy denial must remain a regular switch-model error")
+        }
+    }
+}
+
+#[test]
+fn session_list_partial_notices_localize_only_the_fixed_copy() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    assert_eq!(
+        ConversationsPartial::NoOauth.picker_notice_with_locale(Some(&locale)),
+        "无法加载聊天：请使用 /login 登录"
+    );
+    assert_eq!(
+        ConversationsPartial::Timeout.picker_notice_with_locale(Some(&locale)),
+        "无法加载会话：请重试"
+    );
+    assert_eq!(
+        ConversationsPartial::Error.picker_notice(),
+        "Couldn't load conversations: retry"
+    );
 }
 #[test]
 fn session_list_partial_absent_for_healthy_or_meta_less_responses() {

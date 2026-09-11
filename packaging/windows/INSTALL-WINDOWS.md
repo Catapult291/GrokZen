@@ -10,6 +10,30 @@
 2. 解压 ZIP，进入解压出的 `grok-zh-<version>-windows-x86_64-gnu` 目录。
    包内 `SHA256SUMS.txt` 是文件清单，`Install-GrokZh.ps1` 会在写入前自动核对哈希。
 
+## 在线安装
+
+不想下载 ZIP 时，在 Windows PowerShell 5.1 或 PowerShell 7 中粘贴下面一行：
+
+```powershell
+$p=Join-Path $env:TEMP ('grok-zh-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); $tls=[Net.ServicePointManager]::SecurityProtocol; try { [Net.ServicePointManager]::SecurityProtocol=$tls -bor [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Catapult291/GrokZen/zh-dev/packaging/windows/Install-GrokZhOnline.ps1' -OutFile $p; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $p; if ($LASTEXITCODE -ne 0) { throw "安装未完成，退出码：$LASTEXITCODE" } } finally { [Net.ServicePointManager]::SecurityProtocol=$tls; Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+```
+
+菜单提供共存安装、设置 `grok` / `agent` 命令、自定义目录和便携版；默认保留官方版，
+全程中文提示，无需管理员权限。在线入口只选择本仓库可验证的最新正式 Release，不会
+自动降级；下载与解压的临时文件在结束后清理。
+
+便携目录顶层只有 `启动.cmd`、`使用说明.md` 与 `app/`，双击 `启动.cmd` 即可使用，
+不修改 `Path`；便携版仍与官方版共用 `~/.grok` / `GROK_HOME` 数据。需要维护便携目录时，
+可复制外部 `Install-GrokZhOnline.ps1` 并运行：
+
+```powershell
+# 按固定目录重建便携版；同版本重跑需显式指定 -Repair
+& .\Install-GrokZhOnline.ps1 -Mode Portable -PortableDir 'D:\Apps\GrokZen' -Repair -NonInteractive
+
+# 只下载并校验，不安装
+& .\Install-GrokZhOnline.ps1 -VerifyOnly -NonInteractive
+```
+
 ## 一键安装（与官方版共存，推荐）
 
 在包目录中双击：
@@ -57,6 +81,11 @@ grok-zh update --alpha  # 检查预览版
 
 默认不后台自动下载；启动时只提示，按 `Ctrl+U` 才下载并安装。更新器校验
 URL、SHA-256、ZIP 布局与包内清单后才替换 `grok-zh.exe`，失败会保留当前版本。
+
+从 1.0.16 起每个平台只发布一个安装包：更新器验证当前平台完整 ZIP 的固定地址、
+大小、GitHub SHA-256、包内协议与清单以及候选程序版本，不再依赖独立 `.sha256`
+或其他平台附件。独立 `.sha256` 在约两个月兼容期内继续保留，之后停止公开发布；
+包内 `SHA256SUMS.txt` 继续用于文件校验。
 
 ## 数据与安全边界
 

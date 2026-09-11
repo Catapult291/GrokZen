@@ -1,8 +1,12 @@
 # Changelog
 
-[1.0.13 简体中文更新说明](changelogs/1.0.13.zh-CN.md) · [1.0.12 简体中文更新说明](changelogs/1.0.12.zh-CN.md) · [1.0.11 简体中文更新说明](changelogs/1.0.11.zh-CN.md) · [1.0.10 简体中文更新说明](changelogs/1.0.10.zh-CN.md) · [1.0.9 简体中文更新说明](changelogs/1.0.9.zh-CN.md) · [1.0.8 简体中文更新说明](changelogs/1.0.8.zh-CN.md) · [1.0.7 简体中文更新说明](changelogs/1.0.7.zh-CN.md) · [1.0.6 简体中文更新说明](changelogs/1.0.6.zh-CN.md) · [1.0.5 简体中文更新说明](changelogs/1.0.5.zh-CN.md) · [1.0.3 简体中文更新说明](changelogs/1.0.3.zh-CN.md)
+[1.0.16 简体中文更新说明](changelogs/1.0.16.zh-CN.md) · [1.0.15 简体中文更新说明](changelogs/1.0.15.zh-CN.md) · [1.0.14 简体中文更新说明](changelogs/1.0.14.zh-CN.md) · [1.0.13 简体中文更新说明](changelogs/1.0.13.zh-CN.md) · [1.0.12 简体中文更新说明](changelogs/1.0.12.zh-CN.md) · [1.0.11 简体中文更新说明](changelogs/1.0.11.zh-CN.md) · [1.0.10 简体中文更新说明](changelogs/1.0.10.zh-CN.md) · [1.0.9 简体中文更新说明](changelogs/1.0.9.zh-CN.md) · [1.0.8 简体中文更新说明](changelogs/1.0.8.zh-CN.md) · [1.0.7 简体中文更新说明](changelogs/1.0.7.zh-CN.md) · [1.0.6 简体中文更新说明](changelogs/1.0.6.zh-CN.md) · [1.0.5 简体中文更新说明](changelogs/1.0.5.zh-CN.md) · [1.0.3 简体中文更新说明](changelogs/1.0.3.zh-CN.md)
 
 # 1.0.12 — 2026-08-27
+
+## Features
+
+- **Credit-limit upsell** now includes a Try Again option. Max-tier users see the same question modal without Upgrade tier.
 
 ## Bug Fixes
 
@@ -105,6 +109,7 @@
 - **Concurrent subagents** no longer trigger rate-limit errors during bursts.
 - **MCP server connections** no longer delay session startup when many servers are configured.
 
+
 # 1.0.8 — 2026-08-20
 
 ## Features
@@ -150,6 +155,7 @@
 - **Subagents** no longer receive the ask-user-question tool.
 - Bare email addresses are now turned into clickable mailto links in the pager.
 
+
 # 1.0.6 — 2026-08-18
 
 ## Breaking Changes
@@ -172,6 +178,7 @@
 - **Consent notice links** are now stricter and more reliable on all terminals.
 - **Video generation** now surfaces a clear ZDR error instead of raw API responses when output storage is required.
 - **Project hooks** on Windows now correctly expand $CLAUDE_PROJECT_DIR when invoking PowerShell scripts.
+
 
 # 1.0.5 — 2026-08-15
 
@@ -320,7 +327,6 @@
 - **History search** no longer leaks background threads in long sessions with many subagents.
 - **Resuming large sessions** is now significantly faster and the UI no longer shows an incomplete transcript while replay is still applying.
 
-[1.0.0 简体中文更新说明](changelogs/1.0.0.zh-CN.md)
 
 # 1.0.0 — 2026-08-07
 
@@ -2324,5 +2330,6 @@
 ## Performance
 
 - **Large chat sessions** now use substantially less memory and run faster during forks, rewinds, and compaction.
+
 
 

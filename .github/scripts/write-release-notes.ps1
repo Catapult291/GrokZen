@@ -371,6 +371,22 @@ if ($upstreamGroups.Count -gt 0) {
     }
 }
 
+$commandPath = Join-Path $PSScriptRoot '../../packaging/windows/ONLINE-INSTALL-COMMAND.txt'
+$installCommand = [IO.File]::ReadAllText($commandPath, [Text.Encoding]::UTF8).Trim()
+if (!$installCommand -or $installCommand.Contains("`n") -or $installCommand.Contains("`r")) {
+    throw 'Windows 在线安装命令必须为非空单行。'
+}
+$lines.Add('')
+$lines.Add('## Windows 中文安装')
+$lines.Add('')
+$lines.Add('在 PowerShell 中粘贴下面一行，按中文菜单安装、更新或创建便携版。此入口始终安装最新正式版；本页为历史版或预发布时，请从下方附件手动下载对应版本。')
+$lines.Add('')
+$lines.Add('```powershell')
+$lines.Add($installCommand)
+$lines.Add('```')
+$lines.Add('')
+$lines.Add('默认与官方版共存，无需管理员权限。完整说明见 [Windows 安装文档](https://github.com/Catapult291/GrokZen/blob/zh-dev/packaging/windows/INSTALL-WINDOWS.md)。')
+
 $parent = Split-Path -Parent $OutputPath
 if ($parent) {
     [IO.Directory]::CreateDirectory($parent) | Out-Null
