@@ -97,5 +97,9 @@ commit 为 `35b87edcdcc38ca56be0b63f80e08d91984cd611`（发布包二进制内置
 [grok-build-privacy-retest](https://github.com/arafatkatze/grok-build-privacy-retest)，
 任何人可按相同步骤复现；图表源文件见
 [`docs/grok-zh-privacy-evidence-1.0.13.html`](docs/grok-zh-privacy-evidence-1.0.13.html)。
-该记录仅覆盖上述版本与受控单轮场景，不构成对服务端侧数据处理行为的证明；后续版本
-发布时应按同一方法补充验证。
+该记录仅覆盖上述版本与受控单轮场景，不构成对服务端侧数据处理行为的证明。
+
+> [!IMPORTANT]
+> 线路层（抓包）证据的测试版本是 **v1.0.13**，未在后续版本重跑。`release-v1.0.16`
+> 沿用同一编译期 `privacy` 门禁与 CI 回归测试，但本仓库目前没有覆盖 1.0.16 的线路层
+> 现场记录；在补充之前，任何涉及运行期网络行为的对外表述都应限定为 v1.0.13。
