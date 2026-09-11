@@ -48,6 +48,12 @@
       "first_parent": "1008d23615fc7b125b506ef46ec33c14ca529e3e",
       "upstream_tip": "72a61251fcffb464bcc687aeb5a998e5a98ec0c9",
       "upstream_base": "bc7f02eddd3d84085849dc19ed216f11c23b0571"
+    },
+    {
+      "merge_sha": "2e5cda4db082c493d8046db7e445cc02df6bbe06",
+      "first_parent": "92e97f8791e1a4d7610f94ad60dd3f0e3d69fecb",
+      "upstream_tip": "74448f295dc6db0a1df067a9c1b7cfb156d59fac",
+      "upstream_base": "bc7f02eddd3d84085849dc19ed216f11c23b0571"
     }
   ],
   "local_merges": [
