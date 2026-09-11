@@ -4,9 +4,14 @@ on:
   push:
     branches:
       - zh-dev
+      - codex/free-account-localization-macos-smoke
+    paths-ignore:
+      - community/announcements/**
   pull_request:
     branches:
       - zh-dev
+    paths-ignore:
+      - community/announcements/**
   workflow_dispatch:
     inputs:
       version:
@@ -156,6 +161,19 @@ jobs:
             grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
             grok-zh-target-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-
 
+      # Explicit --target builds keep proc macros and build scripts outside the
+      # target triple directory. Cache them separately to retain old cache hits.
+      - name: 恢复 Cargo GNU 宿主构建缓存
+        id: cargo_host_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/release
+          key: grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-${{ github.ref_name }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-${{ hashFiles('**/Cargo.toml', '**/build.rs', '.cargo/config.toml', 'rust-toolchain.toml') }}-
+            grok-zh-host-${{ env.CARGO_CACHE_SCHEMA }}-zh-dev-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ env.TARGET }}-release-lto0-debug0-cgu16-shellopt1-shellcgu16-feature-release-dist-
+
       - name: 验证 Windows 安装程序
         shell: pwsh
         run: |
@@ -166,6 +184,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Windows PowerShell 5.1 安装程序测试失败：$LASTEXITCODE"
           }
+          & .\packaging\windows\tests\Test-Install-GrokZhOnline.ps1
+          & powershell.exe -NoProfile -NonInteractive `
+            -File .\packaging\windows\tests\Test-Install-GrokZhOnline.ps1
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows PowerShell 5.1 在线安装程序测试失败：$LASTEXITCODE"
+          }
+          python .github/scripts/tests/test_package_protocol.py
+          if ($LASTEXITCODE -ne 0) { throw '包内更新协议生成测试失败。' }
+          & ./.github/scripts/tests/Test-ReleasePolicy.ps1
 
       - name: 验证本地化元数据
         shell: pwsh
@@ -194,8 +221,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "xai-grok-update 测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib session_summary
           if ($LASTEXITCODE -ne 0) { throw "中文会话标题测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib 'builtin::tests::'
+          if ($LASTEXITCODE -ne 0) { throw "内置中文更新日志测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib bundled_model_provenance_survives_acp_but_config_override_clears_it
           if ($LASTEXITCODE -ne 0) { throw "内置模型来源隔离测试失败：$LASTEXITCODE" }
+          cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-shell --lib prompt_suggest_catalog_check_honors_allowlist
+          if ($LASTEXITCODE -ne 0) { throw "提示词建议模型白名单测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib zh_localization_
           if ($LASTEXITCODE -ne 0) { throw "中文界面定向测试失败：$LASTEXITCODE" }
           cargo test --frozen -j $env:CARGO_BUILD_JOBS -p xai-grok-pager --lib free_usage_upsell_shows_three_options_with_exact_labels
@@ -464,6 +495,8 @@ jobs:
           Default commands after installation: grok-zh, agent-zh
           Optional command takeover: grok, agent
           "@.Trim() | Set-Content -LiteralPath (Join-Path $package 'BUILD-INFO.txt') -Encoding utf8
+          python .github/scripts/write-package-protocol.py --package $package --version $env:GROK_VERSION --platform $env:TARGET
+          if ($LASTEXITCODE -ne 0) { throw '生成包内更新协议失败。' }
 
           $manifestNames = @(
             'grok-zh.exe',
@@ -557,6 +590,13 @@ jobs:
         with:
           path: ${{ runner.temp }}/grok-zh-target/${{ env.TARGET }}/release
           key: ${{ steps.cargo_target_cache.outputs.cache-primary-key }}
+
+      - name: 保存 Cargo GNU 宿主构建缓存
+        if: ${{ success() && github.ref == 'refs/heads/zh-dev' && steps.cargo_host_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ runner.temp }}/grok-zh-target/release
+          key: ${{ steps.cargo_host_cache.outputs.cache-primary-key }}
 
       - name: 保存 Cargo 依赖缓存
         if: ${{ success() && github.ref_name == 'zh-dev' && steps.cargo_home_cache.outputs.cache-hit != 'true' }}
@@ -770,7 +810,7 @@ jobs:
   macos-arm-preview:
     name: macOS ARM64 预览版
     runs-on: macos-15
-    timeout-minutes: 180
+    timeout-minutes: 240
     outputs:
       package_name: ${{ steps.build.outputs.package_name }}
       archive_name: ${{ steps.build.outputs.archive_name }}

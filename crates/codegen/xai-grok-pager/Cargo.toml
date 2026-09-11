@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "1.0.13"
+version = "1.0.16"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -47,6 +47,7 @@ syntect = { workspace = true }
 similar = { workspace = true }
 indexmap = { workspace = true }
 blake3 = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 strum = { workspace = true }

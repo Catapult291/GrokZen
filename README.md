@@ -50,6 +50,7 @@ GrokZen 在保留完整功能与官方协议兼容的前提下，针对隐私与
 | 自动更新 | 只从本仓库 Releases 更新，永不访问 x.ai 官方通道 |
 | 跨平台 | Windows x64、macOS ARM64、Linux x86_64 |
 | 中文会话标题 | 中文请求自动生成中文标题与计划步骤 |
+| 动态公告翻译 | 公告中文映射可独立于程序更新（1.0.16 起） |
 
 ## 安装
 
@@ -63,6 +64,17 @@ GrokZen 在保留完整功能与官方协议兼容的前提下，针对隐私与
 ```powershell
 grok-zh
 ```
+
+也可以不下载 ZIP，直接在 PowerShell 中粘贴下面一行，按中文菜单在线安装或更新最新
+正式版，或创建便携版（支持 Windows PowerShell 5.1 与 PowerShell 7，无需管理员权限）：
+
+```powershell
+$p=Join-Path $env:TEMP ('grok-zh-install-'+[guid]::NewGuid().ToString('N')+'.ps1'); $tls=[Net.ServicePointManager]::SecurityProtocol; try { [Net.ServicePointManager]::SecurityProtocol=$tls -bor [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/Catapult291/GrokZen/zh-dev/packaging/windows/Install-GrokZhOnline.ps1' -OutFile $p; & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $p; if ($LASTEXITCODE -ne 0) { throw "安装未完成，退出码：$LASTEXITCODE" } } finally { [Net.ServicePointManager]::SecurityProtocol=$tls; Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue }
+```
+
+在线入口只选择本仓库可验证的最新正式 Release，不自动降级；便携目录顶层只有
+`启动.cmd`、`使用说明.md` 与 `app/`，不修改 PATH。详细参数见
+[Windows 安装说明](packaging/windows/INSTALL-WINDOWS.md)。
 
 ### macOS（Apple Silicon）
 
@@ -97,6 +109,16 @@ grok-zh update             # 手动检查更新
 
 首次启动会打开浏览器完成身份验证。完整中文用户指南见
 [`crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/README.md`](crates/codegen/xai-grok-pager/docs/user-guide/zh-CN/README.md)。
+
+## 更新与公告译文
+
+更新器只读取本仓库的不可变 GitHub Releases；官方 npm、GitHub、x.ai 与 GCS 更新通道
+始终禁用。从 1.0.16 起每个平台只发一个安装包，独立 `.sha256` 侧车文件保留约两个月
+兼容期后停止发布，校验改由包内 `SHA256SUMS.txt` 与 GitHub digest 完成。
+
+中文公告译文从 1.0.16 起可独立于程序更新：程序在加载官方公告时并行检查译文版本，
+不设轮询定时器；GitHub 不可用时沿用缓存或内置译文，未收录内容显示官方英文原文。
+维护流程见 [`community/announcements/README.md`](community/announcements/README.md)。
 
 ## 从源码构建
 
