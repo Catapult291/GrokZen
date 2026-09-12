@@ -36,4 +36,16 @@ fn main() {
         .unwrap_or_else(|_| "0.0.0".to_string());
 
     println!("cargo:rustc-env=VERSION_WITH_COMMIT={version} ({commit})");
+
+    // Windows gives the main thread 1 MB (MSVC) or 2 MB (GNU), less than the unoptimized
+    // startup frames of this binary need: a debug build dies with STATUS_STACK_OVERFLOW
+    // before printing anything. Reserve the 8 MB the Unix default already provides.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let stack_arg = if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+            "/STACK:8388608"
+        } else {
+            "-Wl,--stack,8388608"
+        };
+        println!("cargo:rustc-link-arg-bins={stack_arg}");
+    }
 }
