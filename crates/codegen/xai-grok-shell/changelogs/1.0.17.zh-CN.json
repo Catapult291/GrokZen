@@ -26,7 +26,7 @@
   },
   {
     "category": "fixes",
-    "description": "**Windows PTY 测试保留必要环境变量** —— ConPTY 查询处理和环境变量大小写无关继承恢复了 Windows 上的 mock 网络测试能力。",
+    "description": "**Windows PTY 测试支持** —— ConPTY 查询处理和环境变量大小写无关继承恢复了 Windows 上的 mock 网络测试能力。",
     "breaking_change": false
   }
 ]
