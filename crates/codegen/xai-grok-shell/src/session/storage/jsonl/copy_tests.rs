@@ -1419,6 +1419,117 @@ async fn sidecar_flags_gate_their_files_independently() {
 }
 
 #[tokio::test]
+async fn partial_fork_does_not_copy_later_sidecars_or_compaction_archive() {
+    use crate::extensions::notification::CompactionSegmentFile;
+
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("src-partial-state"),
+        cwd: "/src".into(),
+    };
+    adapter
+        .init_session(&source, default_model_id())
+        .await
+        .unwrap();
+    for update in [
+        fork_user_chunk(&source.id.to_string(), "P0", 0),
+        fork_user_chunk(&source.id.to_string(), "P1", 1),
+    ] {
+        adapter.append_update(&source, &update).await.unwrap();
+    }
+    let sidecars = [
+        (adapter.plan_file(&source), &b"plan"[..]),
+        (adapter.plan_mode_state_file(&source), &b"plan-mode"[..]),
+        (
+            adapter.session_dir(&source).join("tool_state.json"),
+            &b"{\"todo\":[\"later\"]}"[..],
+        ),
+        (adapter.signals_file(&source), &b"signals"[..]),
+        (adapter.usage_file(&source), &b"usage"[..]),
+        (
+            adapter.announcement_state_file(&source),
+            &b"announcements"[..],
+        ),
+    ];
+    for (path, bytes) in sidecars {
+        std::fs::write(path, bytes).unwrap();
+    }
+    let segment = CompactionSegmentFile {
+        items: vec![ConversationItem::user("compacted")],
+        summary: "later compaction".into(),
+        detail: xai_chat_state::CompactionDetail::Verbose,
+        timestamp: "2026-01-01T00:00:00Z".into(),
+    };
+    adapter
+        .write_compaction_segment(&source, &segment)
+        .await
+        .unwrap();
+
+    let partial = Info {
+        id: acp::SessionId::new("tgt-partial-state"),
+        cwd: "/tgt".into(),
+    };
+    let result = adapter
+        .copy_session_data(
+            &source,
+            &partial,
+            CopySessionOptions {
+                target_prompt_index: Some(0),
+                copy_compaction_segments: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!result.plan_state_copied);
+    assert!(!result.plan_mode_state_copied);
+    assert!(!result.tool_state_copied);
+    assert!(!result.signals_copied);
+    assert!(!result.announcement_state_copied);
+    assert_eq!(result.compaction_segments_copied, 0);
+    assert!(!adapter.plan_file(&partial).exists());
+    assert!(!adapter.plan_mode_state_file(&partial).exists());
+    assert!(
+        !adapter
+            .session_dir(&partial)
+            .join("tool_state.json")
+            .exists()
+    );
+    assert!(!adapter.signals_file(&partial).exists());
+    assert!(!adapter.usage_file(&partial).exists());
+    assert!(!adapter.announcement_state_file(&partial).exists());
+    assert!(
+        !adapter
+            .session_dir(&partial)
+            .join(xai_compaction_transcript::COMPACTION_DIR)
+            .exists()
+    );
+
+    let full = Info {
+        id: acp::SessionId::new("tgt-full-state"),
+        cwd: "/tgt".into(),
+    };
+    let result = adapter
+        .copy_session_data(
+            &source,
+            &full,
+            CopySessionOptions {
+                copy_compaction_segments: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(result.plan_state_copied);
+    assert!(result.plan_mode_state_copied);
+    assert!(result.tool_state_copied);
+    assert!(result.signals_copied);
+    assert!(result.announcement_state_copied);
+    assert_eq!(result.compaction_segments_copied, 2);
+}
+
+#[tokio::test]
 async fn fork_restamps_usage_session_id() {
     use crate::session::usage_file::SessionUsageFile;
 
@@ -1465,7 +1576,7 @@ async fn fork_restamps_usage_session_id() {
 }
 
 #[tokio::test]
-async fn truncating_fork_drops_later_usage_turns() {
+async fn truncating_fork_does_not_copy_parent_usage_or_signals() {
     use crate::session::usage_file::SessionUsageFile;
 
     let tmp = TempDir::new().unwrap();
@@ -1531,19 +1642,17 @@ async fn truncating_fork_drops_later_usage_turns() {
         .await
         .unwrap();
 
-    let copied = adapter.read_usage(&target).await.unwrap().unwrap();
-    assert_eq!(copied.session_id, "tgt-usage-trunc");
-    assert_eq!(copied.turns.len(), 1);
-    assert_eq!(copied.turns[0].turn_number, 1);
-    assert_eq!(copied.session.input_tokens, 10);
-    let signals = adapter
-        .load_session(&target)
-        .await
-        .unwrap()
-        .signals
-        .unwrap();
-    assert_eq!(signals.turn_count, 1);
-    assert_eq!(signals.user_message_count, 1);
+    assert!(!adapter.usage_file(&target).exists());
+    assert!(!adapter.signals_file(&target).exists());
+    assert!(adapter.read_usage(&target).await.unwrap().is_none());
+    assert!(
+        adapter
+            .load_session(&target)
+            .await
+            .unwrap()
+            .signals
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1625,7 +1734,7 @@ async fn copy_usage_is_independent_of_copy_signals() {
 /// The fixture and assertions use the real [`AnnouncementState`] so the strip helper's hard-coded key cannot drift from the serde name unnoticed.
 /// On a rename the helper would no-op and the typed emptiness assert below would fail.
 #[tokio::test]
-async fn fork_truncation_clears_announced_failure_episodes() {
+async fn truncating_fork_does_not_copy_announcement_state() {
     use crate::session::announcement_state::{
         AnnouncedFailure, AnnouncementState, McpServerFingerprint,
     };
@@ -1666,42 +1775,46 @@ async fn fork_truncation_clears_announced_failure_episodes() {
     )
     .unwrap();
 
-    type SetOption = fn(&mut CopySessionOptions);
-    let cases: [(&str, SetOption); 2] = [
-        ("truncating", |o| o.target_prompt_index = Some(0)),
-        ("filtering", |o| o.fork_filter = true),
-    ];
-    for (name, set) in cases {
-        let target = Info {
-            id: acp::SessionId::new(format!("tgt-episodes-{name}")),
-            cwd: "/tgt".to_string(),
-        };
-        let mut options = CopySessionOptions::default();
-        set(&mut options);
-        adapter
-            .copy_session_data(&source, &target, options)
-            .await
-            .unwrap();
-        let raw = std::fs::read(adapter.announcement_state_file(&target)).unwrap();
-        let copied: AnnouncementState = serde_json::from_slice(&raw).unwrap();
-        assert!(
-            copied.announced_failed_servers.is_empty(),
-            "{name}: failure episodes must be cleared"
-        );
-        assert_eq!(
-            copied.mcp_server_fingerprints["srv"].tool_count, 1,
-            "{name}: fingerprints survive"
-        );
-        assert!(
-            copied.announced_skill_names.contains("commit"),
-            "{name}: skill names survive"
-        );
-        let raw: serde_json::Value = serde_json::from_slice(&raw).unwrap();
-        assert_eq!(
-            raw["some_future_field"], true,
-            "{name}: unknown fields survive"
-        );
-    }
+    let target = Info {
+        id: acp::SessionId::new("tgt-episodes-truncating"),
+        cwd: "/tgt".to_string(),
+    };
+    let result = adapter
+        .copy_session_data(
+            &source,
+            &target,
+            CopySessionOptions {
+                target_prompt_index: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert!(!result.announcement_state_copied);
+    assert!(!adapter.announcement_state_file(&target).exists());
+
+    let filtering = Info {
+        id: acp::SessionId::new("tgt-episodes-filtering"),
+        cwd: "/tgt".to_string(),
+    };
+    adapter
+        .copy_session_data(
+            &source,
+            &filtering,
+            CopySessionOptions {
+                fork_filter: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let raw = std::fs::read(adapter.announcement_state_file(&filtering)).unwrap();
+    let copied: AnnouncementState = serde_json::from_slice(&raw).unwrap();
+    assert!(copied.announced_failed_servers.is_empty());
+    assert_eq!(copied.mcp_server_fingerprints["srv"].tool_count, 1);
+    assert!(copied.announced_skill_names.contains("commit"));
+    let raw: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(raw["some_future_field"], true);
 
     let target_full = Info {
         id: acp::SessionId::new("tgt-episodes-full"),

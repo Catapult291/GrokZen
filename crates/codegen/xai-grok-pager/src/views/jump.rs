@@ -28,6 +28,18 @@ pub struct JumpRestore {
     pub follow_mode: bool,
 }
 
+impl JumpRestore {
+    /// A restore that puts nothing back: for a flow that captured no viewport (so dismissing it
+    /// leaves the scroll where it is).
+    pub const fn none() -> Self {
+        Self {
+            bookmark: None,
+            selected: None,
+            follow_mode: false,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct JumpState {
     /// One row per turn, oldest first (row index == `turn_idx`).

@@ -13,6 +13,7 @@ pub mod dock;
 pub mod elicitation_view;
 pub mod extensions_modal;
 pub mod file_search;
+pub mod fork_picker;
 pub mod fps_hud;
 pub mod goal_detail;
 pub mod history_search;

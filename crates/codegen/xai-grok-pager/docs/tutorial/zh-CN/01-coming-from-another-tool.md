@@ -34,6 +34,7 @@
 `[compat.cursor]` 配置节中分别启用或停用每个兼容来源。
 
 另外，有些功能你可能在其他工具中错过了：`/btw` 可在不中断当前任务的情况下
-提出旁支问题，`/rewind` 则将对话回退到较早轮次（文件更改保持不变）。
+提出旁支问题，`/rewind` 可将对话与该轮次碰过的文件一起回退到较早轮次
+（`/undo` 只回退对话）。
 
 *深入了解：`/docs Project Rules (AGENTS.md)`、`/docs Skills` 或 `/docs MCP Servers`*

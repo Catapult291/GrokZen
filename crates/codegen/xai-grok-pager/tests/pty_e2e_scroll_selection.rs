@@ -29,6 +29,8 @@ mod drag_over_gap_rows_does_not_freeze_head_pty;
 mod drag_select_autoscroll_full_scrollout_copy_pty;
 #[path = "pty_e2e/drag_select_wheel_scroll_extends_pty.rs"]
 mod drag_select_wheel_scroll_extends_pty;
+#[path = "pty_e2e/follow_indicator_after_turn_end_pty.rs"]
+mod follow_indicator_after_turn_end_pty;
 #[path = "pty_e2e/forced_wheel_mode_env_scrolls_exact_rows.rs"]
 mod forced_wheel_mode_env_scrolls_exact_rows;
 #[path = "pty_e2e/keep_text_selection_settings_visible_pty.rs"]

@@ -49,6 +49,7 @@ impl AgentView {
             || self.rewind_state.is_some()
             || self.inline_edit.is_some()
             || self.jump_state.is_some()
+            || self.fork_picker_state.is_some()
             || self.prompt.any_dropdown_open();
         if owned_elsewhere {
             ExternalPromptEditorAccess::OwnedElsewhere
@@ -123,6 +124,7 @@ impl AgentView {
             && self.no_input_overlay_pending()
             && !self.modal_owns_input()
             && self.jump_state.is_none()
+            && self.fork_picker_state.is_none()
     }
     pub(crate) fn workflow_runs_newest_first(
         &self,
@@ -140,6 +142,7 @@ impl AgentView {
             && self.rewind_state.is_none()
             && self.btw_state.is_none()
             && self.jump_state.is_none()
+            && self.fork_picker_state.is_none()
     }
     /// Effective screen mode of this process, injected per agent at session creation.
     /// `apply_app_scoped_gates` calls `PromptWidget::set_screen_mode`; the mode is fixed for the process lifetime.
@@ -342,8 +345,9 @@ impl AgentView {
             crate::minimal_api::MinimalBtwInput::Handled(outcome) => *outcome,
             crate::minimal_api::MinimalBtwInput::Occluded => {
                 let jump_dismissed = self.dismiss_jump_picker_if_suppressed();
+                let fork_dismissed = self.dismiss_fork_picker_if_suppressed();
                 let suspended = crate::minimal_api::suspend_minimal_btw(self);
-                let outcome = if jump_dismissed
+                let outcome = if (jump_dismissed || fork_dismissed)
                     && matches!(
                         ev,
                         Event::Key(key)
@@ -492,7 +496,9 @@ impl AgentView {
             }
             return InputOutcome::Unchanged;
         }
-        if self.dismiss_jump_picker_if_suppressed()
+        let jump_dismissed = self.dismiss_jump_picker_if_suppressed();
+        let fork_dismissed = self.dismiss_fork_picker_if_suppressed();
+        if (jump_dismissed || fork_dismissed)
             && let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Esc
@@ -1057,6 +1063,25 @@ impl AgentView {
                     self.handle_jump_key(key)
                 }
                 Event::Mouse(mouse) => self.handle_jump_mouse(mouse),
+                _ => InputOutcome::Unchanged,
+            };
+        }
+        if self.fork_picker_state.is_some() {
+            return match ev {
+                Event::Key(key) if key.kind != crossterm::event::KeyEventKind::Release => {
+                    if key!('q', CONTROL).matches(key) {
+                        return InputOutcome::Unchanged;
+                    }
+                    if registry.matches_id(ActionId::CancelTurn, key)
+                        && (self.stoppable_activity_running() || self.any_cancel_pending())
+                    {
+                        self.dismiss_fork_picker();
+                        return self
+                            .handle_agent_action_with_registry(ActionId::CancelTurn, registry);
+                    }
+                    self.handle_fork_picker_key(key)
+                }
+                Event::Mouse(mouse) => self.handle_fork_picker_mouse(mouse),
                 _ => InputOutcome::Unchanged,
             };
         }

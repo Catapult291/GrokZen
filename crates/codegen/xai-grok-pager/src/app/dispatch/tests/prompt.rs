@@ -2964,6 +2964,7 @@ fn submit_question_answers_cancel_clears_local_modal_and_restores_prompt() {
         QuestionViewState::new("local-fork".into(), vec![q], stashed).with_local_kind(
             LocalQuestionKind::Fork {
                 directive: Some("dropped-on-cancel".into()),
+                cut: Default::default(),
             },
         ),
     );

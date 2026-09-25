@@ -5,7 +5,7 @@ use crate::remote::BackendClient;
 const FORK_LOG: &str = "xai_fork";
 use crate::session::export::ExportedMetadata;
 use crate::session::info::Info;
-use crate::session::storage::{CopySessionOptions, JsonlStorageAdapter};
+use crate::session::storage::{CopySessionOptions, JsonlStorageAdapter, StorageAdapter};
 use crate::util::grok_home::grok_home;
 use agent_client_protocol as acp;
 use std::io;
@@ -78,6 +78,29 @@ pub async fn fork_session(
         cwd: request.new_cwd.clone(),
     };
 
+    // Validate the inclusive wire index before creating the child directory. A
+    // target beyond the authoritative prompt range must not silently degrade to
+    // a full fork, and checked arithmetic keeps malformed extension payloads
+    // from wrapping later in the copy path.
+    if let Some(target) = request.target_prompt_index {
+        let source_prompts = storage.load_prompts_only(&source_info).await?;
+        let Some(next_index) = target.checked_add(1) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "targetPromptIndex is out of range",
+            ));
+        };
+        if next_index > source_prompts.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "targetPromptIndex {target} is out of range (source has {} prompts)",
+                    source_prompts.len()
+                ),
+            ));
+        }
+    }
+
     // Copy session data with parent tracking.
     // Runs on the blocking thread pool so concurrent fork copies can execute truly in parallel
     // On a LocalSet, async copy_session_data serializes because the sync disk I/O blocks the single-threaded runtime
@@ -87,9 +110,9 @@ pub async fn fork_session(
         target_prompt_index: request.target_prompt_index,
         session_kind: request.session_kind.clone(),
         source_workspace_dir: request.source_workspace_dir.clone(),
-        // Carry the parent's compaction segment archive into the fork so the child retains pre-compaction history
-        // The live summary is already copied via chat_history.jsonl
-        copy_compaction_segments: true,
+        // Full forks retain the parent's pre-compaction archive. A partial fork omits it
+        // because that archive describes turns removed by the prompt cut.
+        copy_compaction_segments: request.target_prompt_index.is_none(),
         ..Default::default()
     };
 
@@ -259,6 +282,47 @@ mod tests {
         assert_eq!(deserialized.source_session_id, "abc123");
         assert_eq!(deserialized.new_session_id, None);
         assert_eq!(deserialized.new_model_id, None);
+    }
+
+    /// The TUI builds this payload for `/fork --at <prompt>` and for the fork-point picker's rows
+    /// (`fork_session_params`). Pin the camelCase field name against this side's reader: a rename on
+    /// either end would silently fork the whole conversation instead of cutting it.
+    #[test]
+    fn test_fork_session_request_reads_the_tui_target_prompt_index_payload() {
+        let json = r#"{"sourceSessionId":"abc123","sourceCwd":"/old","newCwd":"/new","sessionKind":"fork","targetPromptIndex":2}"#;
+        let deserialized: ForkSessionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(deserialized.target_prompt_index, Some(2));
+        assert_eq!(deserialized.session_kind.as_deref(), Some("fork"));
+    }
+
+    #[tokio::test]
+    async fn fork_request_rejects_out_of_range_target_before_copying() {
+        use crate::session::storage::StorageAdapter;
+        use tempfile::TempDir;
+
+        let home = TempDir::new().unwrap();
+        let _env = xai_grok_test_support::EnvGuard::set("GROK_HOME", home.path());
+        let storage = JsonlStorageAdapter::with_root(home.path().to_path_buf());
+        let source = Info {
+            id: acp::SessionId::new("fork-range-source"),
+            cwd: "/src".into(),
+        };
+        storage
+            .init_session(&source, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
+        let request = ForkSessionRequest {
+            source_session_id: source.id.to_string(),
+            source_cwd: source.cwd.clone(),
+            new_cwd: "/dst".into(),
+            new_session_id: Some("fork-range-child".into()),
+            target_prompt_index: Some(usize::MAX),
+            ..Default::default()
+        };
+        let error = fork_session(request, "test-agent", None).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("out of range"));
     }
 
     #[test]

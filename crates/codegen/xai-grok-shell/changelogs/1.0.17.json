@@ -1,0 +1,32 @@
+[
+  {
+    "category": "features",
+    "description": "**`/fork` can branch from an earlier prompt** — choose a point in a picker or pass `--at <prompt>`; the selected prompt is prefilled for rewriting in the child session.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**`/undo` is now conversation-only** — it uses the rewind picker without a confirmation and leaves files untouched; `/rewind` can restore conversation, files, or both.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**The session picker supports up to 100 entries** — `/resume` and `F3` hide empty sessions while preserving explicit session selection.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Question freeform answers can include pasted images** — images follow their question and reach the model as answer attachments.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**The compact-mode jump-to-latest indicator owns a row** — the `▼` remains visible after scrolling up instead of being covered by the prompt or overwriting transcript text.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Windows PTY tests preserve required environment variables** — ConPTY query handling and case-insensitive environment inheritance keep mock-network tests usable on Windows.",
+    "breaking_change": false
+  }
+]

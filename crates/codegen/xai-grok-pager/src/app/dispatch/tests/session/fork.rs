@@ -512,8 +512,13 @@ fn dispatch_fork_no_flag_always_opens_question_modal() {
         .as_ref()
         .expect("modal must be open");
     match qv.local_kind.as_ref().expect("local_kind must be set") {
-        crate::views::question_view::LocalQuestionKind::Fork { directive } => {
+        crate::views::question_view::LocalQuestionKind::Fork { directive, cut } => {
             assert_eq!(directive.as_deref(), Some("debug timeout"));
+            assert_eq!(
+                cut,
+                &crate::slash::commands::fork::ForkCut::default(),
+                "the modal carries the cut the picker resolved"
+            );
         }
         other => panic!("expected Fork, got {other:?}"),
     }
@@ -580,12 +585,17 @@ fn dispatch_fork_resolved_no_worktree_emits_fork_effect() {
                 parent_cwd,
                 parent_is_worktree,
                 new_session_id: None,
+                target_prompt_index,
             },
         ] => {
             assert_eq!(*agent_id, AgentId(1));
             assert_eq!(parent_session_id.0.as_ref(), "test-session");
-            assert_eq!(parent_cwd, std::path::Path::new("/tmp"));
+            assert_eq!(parent_cwd, &std::env::temp_dir());
             assert!(!*parent_is_worktree);
+            assert_eq!(
+                *target_prompt_index, None,
+                "no --at means the whole conversation"
+            );
         }
         other => panic!("expected ForkSession, got {other:?}"),
     }
@@ -895,6 +905,7 @@ fn dispatch_fork_answered_re_dispatches_to_dispatch_fork_resolved() {
             worktree: false,
             directive: Some("answered directive".into()),
             persist_mode: None,
+            cut: Default::default(),
         },
         &mut app,
     );
@@ -915,6 +926,7 @@ fn dispatch_fork_answered_worktree_true_emits_create_worktree_session() {
             worktree: true,
             directive: None,
             persist_mode: None,
+            cut: Default::default(),
         },
         &mut app,
     );
@@ -933,6 +945,7 @@ fn dispatch_fork_answered_worktree_false_emits_fork_session() {
             worktree: false,
             directive: None,
             persist_mode: None,
+            cut: Default::default(),
         },
         &mut app,
     );
@@ -982,6 +995,7 @@ fn dispatch_fork_answered_with_persist_always_updates_mode_and_emits_effect() {
             worktree: true,
             directive: None,
             persist_mode: Some(crate::app::app_view::WorktreeMode::Always),
+            cut: Default::default(),
         },
         &mut app,
     );
@@ -1357,6 +1371,7 @@ fn translate_local_submit_yes_returns_worktree_true_action() {
     )
     .with_local_kind(LocalQuestionKind::Fork {
         directive: Some("d".into()),
+        cut: Default::default(),
     });
     // Set selection to option 0 ("Yes" in production).
     state.selections[0] = crate::views::question_view::QuestionSelection::Single(Some(0));
@@ -1367,6 +1382,7 @@ fn translate_local_submit_yes_returns_worktree_true_action() {
             worktree,
             directive,
             persist_mode,
+            ..
         }) => {
             assert!(worktree);
             assert_eq!(directive.as_deref(), Some("d"));
@@ -1400,7 +1416,10 @@ fn translate_local_submit_no_returns_worktree_false_action() {
         vec![q],
         crate::views::prompt_widget::StashedPrompt::default(),
     )
-    .with_local_kind(LocalQuestionKind::Fork { directive: None });
+    .with_local_kind(LocalQuestionKind::Fork {
+        directive: None,
+        cut: Default::default(),
+    });
     // Option 1 is "No", so worktree=false
     state.selections[0] = crate::views::question_view::QuestionSelection::Single(Some(1));
     let kind = state.local_kind.take().unwrap();
@@ -1410,6 +1429,7 @@ fn translate_local_submit_no_returns_worktree_false_action() {
             worktree,
             directive,
             persist_mode,
+            ..
         }) => {
             assert!(!worktree);
             assert!(directive.is_none());
@@ -1443,7 +1463,10 @@ fn translate_local_submit_always_returns_persist_always_for_fork() {
         vec![q],
         crate::views::prompt_widget::StashedPrompt::default(),
     )
-    .with_local_kind(LocalQuestionKind::Fork { directive: None });
+    .with_local_kind(LocalQuestionKind::Fork {
+        directive: None,
+        cut: Default::default(),
+    });
     state.selections[0] = crate::views::question_view::QuestionSelection::Single(Some(2));
     let kind = state.local_kind.take().unwrap();
     let outcome = crate::app::agent_view::translate_local_submit_for_test(&state, kind, false);
@@ -1487,7 +1510,10 @@ fn translate_local_submit_never_returns_persist_never_for_fork() {
         vec![q],
         crate::views::prompt_widget::StashedPrompt::default(),
     )
-    .with_local_kind(LocalQuestionKind::Fork { directive: None });
+    .with_local_kind(LocalQuestionKind::Fork {
+        directive: None,
+        cut: Default::default(),
+    });
     state.selections[0] = crate::views::question_view::QuestionSelection::Single(Some(3));
     let kind = state.local_kind.take().unwrap();
     let outcome = crate::app::agent_view::translate_local_submit_for_test(&state, kind, false);
@@ -1534,6 +1560,7 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
         QuestionViewState::new("local-fork".into(), vec![q], stashed).with_local_kind(
             LocalQuestionKind::Fork {
                 directive: Some("dropped".into()),
+                cut: Default::default(),
             },
         ),
     );

@@ -97,6 +97,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(remember::RememberCommand),
         Arc::new(recap::RecapCommand),
         Arc::new(rewind::RewindCommand),
+        Arc::new(rewind::UndoCommand),
         Arc::new(jump::JumpCommand),
         Arc::new(expand::ExpandCommand),
         Arc::new(edit_prompt::EditPromptCommand),
@@ -257,7 +258,6 @@ mod tests {
         assert!(reg.get("welcome").is_some());
         assert!(reg.get("show-plan").is_some());
         assert!(reg.get("plan-view").is_some());
-        assert!(reg.get("undo").is_some());
     }
     #[test]
     fn aliases_resolve_to_same_command() {
@@ -271,9 +271,16 @@ mod tests {
             assert_eq!(reg.get(alias).unwrap().name(), doctor.name());
             assert_eq!(reg.get(alias).unwrap().usage(), doctor.usage());
         }
+    }
+    /// `/undo` rolls back the conversation only, so it is its own command rather than a `/rewind` alias.
+    #[test]
+    fn undo_is_its_own_command() {
+        let reg = CommandRegistry::new(builtin_commands());
         let rewind = reg.get("rewind").unwrap();
-        assert_eq!(reg.get("undo").unwrap().name(), rewind.name());
-        assert_eq!(reg.get("undo").unwrap().usage(), rewind.usage());
+        let undo = reg.get("undo").unwrap();
+        assert_ne!(undo.name(), rewind.name());
+        assert_eq!(undo.usage(), "/undo");
+        assert_ne!(undo.description(), rewind.description());
     }
     #[test]
     fn exit_returns_quit_action() {

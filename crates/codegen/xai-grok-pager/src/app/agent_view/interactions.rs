@@ -297,9 +297,15 @@ impl AgentView {
     /// Save the free-text answer the composer is holding and return the card to its answer rows.
     /// A non-blank answer becomes this question's selection, exclusive with an option row (single-select clears it).
     /// A blank answer is dropped along with the mark.
+    ///
+    /// Pasted images count as an answer on their own: an image with no text keeps
+    /// this question's freeform answer selected, and the stored text is the
+    /// chip-free prose (`[Image #N]` placeholders belong to the composer, not to
+    /// the answer the model reads).
     pub(super) fn commit_question_freeform(&mut self) {
         use crate::views::question_view::{QuestionFocus, QuestionSelection};
-        let text = self.prompt.text().to_string();
+        let text = self.prompt.text_without_image_chips();
+        let has_images = !self.prompt.images.is_empty();
         let Some(qv) = self.question_view.as_mut() else {
             return;
         };
@@ -309,9 +315,9 @@ impl AgentView {
             *slot = text;
         }
         if let Some(sel) = qv.per_question_freeform_selected.get_mut(idx) {
-            *sel = has_text;
+            *sel = has_text || has_images;
         }
-        if has_text {
+        if has_text || has_images {
             if let Some(QuestionSelection::Single(sel)) = qv.selections.get_mut(idx) {
                 *sel = None;
             }
@@ -355,7 +361,10 @@ impl AgentView {
                     self.last_prompt_click_ms = None;
                     return InputOutcome::Changed;
                 }
-                if qv.is_feedback_report() && crate::input::key::is_paste_key(key) {
+                // Ctrl+V / Cmd+V (and Shift+Insert): the deferred clipboard pipeline, so a raster on
+                // the pasteboard attaches as an image chip instead of being dropped. The composer is
+                // this card's freeform editor, so the chip lands in the answer being written.
+                if qv.accepts_answer_images() && crate::input::key::is_paste_key(key) {
                     let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
                         crate::clipboard::system_clipboard_read_text(),
                     );
@@ -420,6 +429,23 @@ impl AgentView {
                 if key!('f', CONTROL).matches(key) {
                     qv.fullscreen = !qv.fullscreen;
                     return InputOutcome::Changed;
+                }
+                // Pasting can only become part of an answer through the freeform row, so a paste chord
+                // parks the cursor there (whatever row it was on), activates it, and hands the key to
+                // the deferred clipboard pipeline: a raster attaches as an image chip, plain text
+                // still inserts.
+                if !qv.no_freeform
+                    && qv.accepts_answer_images()
+                    && crate::input::key::is_paste_key(key)
+                {
+                    let freeform_idx = qv.total_items(qv.active_tab).saturating_sub(1);
+                    qv.set_cursor(freeform_idx);
+                    let text = qv.activate_freeform_input();
+                    self.prompt.set_text_preserving(&text);
+                    let clipboard_text = crate::app::actions::ClipboardTextRead::from_result(
+                        crate::clipboard::system_clipboard_read_text(),
+                    );
+                    return self.handle_paste_key_deferred(clipboard_text);
                 }
                 let mut needs_scroll_update = false;
                 let mut needs_switch_question: Option<QuestionSwitch> = None;
@@ -1032,29 +1058,65 @@ impl AgentView {
         )
         .filter(|&idx| !qv.no_freeform || idx < question.options.len())
     }
-    /// Save the current prompt text into `per_question_freeform[active_tab]` and load the text for the new `active_tab` into the prompt widget.
+    /// Save the current prompt draft into `per_question_freeform[active_tab]` / `per_question_images[active_tab]`
+    /// and load the draft for the new `active_tab` into the prompt widget.
     /// Call this before changing `active_tab`.
+    ///
+    /// The stored text is chip-free: `[Image #N]` placeholders address chips the
+    /// composer owns, and the attachments travel beside the text as records.
     fn swap_question_freeform(&mut self) {
         let Some(ref mut qv) = self.question_view else {
             return;
         };
         let old = qv.active_tab;
+        let text = self.prompt.text_without_image_chips();
         if let Some(slot) = qv.per_question_freeform.get_mut(old) {
-            *slot = self.prompt.text().to_string();
+            *slot = text;
+        }
+        let has_images = !self.prompt.images.is_empty();
+        let images = self.prompt.drain_images();
+        if has_images {
+            // A chip that landed after the draft was last committed (the clipboard
+            // probe answers off-thread) still makes this a freeform answer, even
+            // with no text beside it.
+            if let Some(sel) = qv.per_question_freeform_selected.get_mut(old) {
+                *sel = true;
+            }
+        }
+        if !images.is_empty() {
+            qv.set_parked_images(old, images);
         }
     }
-    /// Load the freeform text for the current `active_tab` into the prompt.
+    /// Load the freeform draft for the current `active_tab` into the prompt.
     /// Call this after changing `active_tab`.
     fn load_question_freeform(&mut self) {
-        let Some(ref qv) = self.question_view else {
+        let Some(ref mut qv) = self.question_view else {
             return;
         };
         let new_text = qv
             .per_question_freeform
             .get(qv.active_tab)
             .map(|s| s.as_str())
-            .unwrap_or("");
-        self.prompt.set_text_preserving(new_text);
+            .unwrap_or("")
+            .to_string();
+        self.prompt.set_text_preserving(&new_text);
+        // Re-attach this question's pasted images: the chips were stripped with
+        // the draft it left behind, so they are rebuilt after the text lands.
+        let images = std::mem::take(
+            qv.per_question_images
+                .get_mut(qv.active_tab)
+                .expect("per_question_images is sized with questions"),
+        );
+        if images.is_empty() {
+            return;
+        }
+        let locale = self.scrollback.locale().clone();
+        self.prompt.set_cursor(self.prompt.text().len());
+        for image in images {
+            // Rejection is unreachable in practice (the image passed the same
+            // checks on the way in); a rejection only loses the re-attachment.
+            let _ = self.prompt.insert_image_with_locale(image, Some(&locale));
+        }
     }
     /// Dismiss (hide) the question view without submitting answers.
     ///
@@ -1093,6 +1155,7 @@ impl AgentView {
             self.record_question_pause(&qv);
             self.restore_card_prompt(qv.stashed_prompt);
         }
+        self.question_card_generation = self.question_card_generation.wrapping_add(1);
         self.cleanup_question_state();
         if self.question_view.is_none() {
             crate::app::turn_completion::reopen_blocked_card_if_held(self);
@@ -1278,6 +1341,22 @@ impl AgentView {
     }
     pub(super) fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
         use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
+        // A clipboard image probe still in flight would land after the response is built,
+        // dropping the user's screenshot from the answer it belongs to: hold the submit
+        // until the chip is attached, then reissue it (see `AgentDeferredSend`).
+        if !skipped && self.paste_probe_in_flight > 0 {
+            if let Some(qv) = self.question_view.as_ref() {
+                self.deferred_send =
+                    Some(crate::app::agent_view::AgentDeferredSend::SubmitQuestion(
+                        crate::app::agent_view::QuestionPasteIdentity {
+                            tool_call_id: qv.tool_call_id.clone(),
+                            question_idx: qv.active_tab,
+                            card_generation: self.question_card_generation,
+                        },
+                    ));
+            }
+            return InputOutcome::Changed;
+        }
         self.swap_question_freeform();
         let Some(mut qv) = self.question_view.take() else {
             return InputOutcome::Changed;
@@ -1373,7 +1452,13 @@ impl AgentView {
     }
     /// Clean up question-related visual state after the question view is dismissed (submit, cancel, or replacement).
     pub(crate) fn cleanup_question_state(&mut self) {
-        if self.deferred_send == Some(crate::app::agent_view::AgentDeferredSend::SubmitFeedback) {
+        if matches!(
+            self.deferred_send,
+            Some(
+                crate::app::agent_view::AgentDeferredSend::SubmitFeedback
+                    | crate::app::agent_view::AgentDeferredSend::SubmitQuestion(_)
+            )
+        ) {
             self.deferred_send = None;
         }
         self.hovered_question_item = None;
@@ -2451,6 +2536,365 @@ mod question_freeform_chip_tests {
         let _ = agent.handle_question_key(&enter);
         let _ = agent.handle_question_mouse(&down(col, row));
         assert_eq!(paste_chip_count(&agent), 1, "chip must stay folded");
+    }
+}
+
+/// Pasted images in a question answer: the chip lives in the composer (the card's
+/// freeform editor), travels with its own question, and reaches the `accepted`
+/// ext response instead of leaking into the session draft the card restores.
+#[cfg(test)]
+mod question_answer_image_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::super::{AgentDeferredSend, AgentView};
+    use super::question_no_freeform_tests::open_question;
+    use crate::app::app_view::InputOutcome;
+    use crate::views::prompt_widget::StashedPrompt;
+    use crate::views::question_view::{QuestionFocus, QuestionViewState};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use xai_grok_tools::implementations::grok_build::ask_user_question::{
+        AskUserQuestionExtResponse, AskUserQuestionMode, Question, QuestionOption,
+    };
+
+    fn question(prompt: &str, labels: &[&str]) -> Question {
+        Question {
+            question: prompt.into(),
+            options: labels
+                .iter()
+                .map(|label| QuestionOption {
+                    label: (*label).into(),
+                    description: "why".into(),
+                    preview: None,
+                    id: None,
+                })
+                .collect(),
+            multi_select: Some(false),
+            id: None,
+        }
+    }
+
+    /// A real 16×16 PNG: past either the composer's 8px minimum side or the encoder.
+    fn answer_image() -> crate::prompt_images::PastedImage {
+        let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+            image::ImageBuffer::from_pixel(16, 16, image::Rgba([1, 2, 3, 255]));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode test png");
+        crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+            data: bytes,
+            mime_type: "image/png".to_string(),
+        })
+    }
+
+    type WireReply =
+        tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<agent_client_protocol::ExtResponse>>;
+
+    /// Open a two-question card with the ACP answer channel wired, so a submit
+    /// lands where the test can read it.
+    fn open_card(agent: &mut AgentView) -> WireReply {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        agent.question_card_generation = agent.question_card_generation.wrapping_add(1);
+        agent.question_view = Some(QuestionViewState::with_response_tx(
+            "tc-image".into(),
+            vec![
+                question("First?", &["Alpha", "Beta"]),
+                question("Second?", &["Gamma", "Delta"]),
+            ],
+            StashedPrompt::default(),
+            Some(tx),
+            AskUserQuestionMode::Default,
+        ));
+        rx
+    }
+
+    fn ctrl_v() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL)
+    }
+
+    /// `z` jumps to the freeform row and starts editing it, the documented way
+    /// into the free-text answer.
+    fn freeform_key() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE)
+    }
+
+    fn enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+    }
+
+    fn press(agent: &mut AgentView, key: KeyEvent) -> InputOutcome {
+        agent.handle_question_key(&key)
+    }
+
+    fn deferred_ctx(agent: &AgentView) -> crate::app::actions::ClipboardPasteContext {
+        agent
+            .pending_effects
+            .iter()
+            .find_map(|effect| match effect {
+                crate::app::actions::Effect::ProbeClipboardAttachment { ctx, .. } => {
+                    Some(ctx.clone())
+                }
+                _ => None,
+            })
+            .expect("a raster paste must defer a probe")
+    }
+
+    /// Ctrl+V answered by a raster: the probe defers (no chip inline), so the
+    /// test controls when the image lands.
+    fn start_image_paste(agent: &mut AgentView) {
+        crate::clipboard::set_clipboard_probe_hook(
+            crate::clipboard::ClipboardProbeHook::with_raster(None),
+        );
+        let outcome = press(agent, ctrl_v());
+        assert!(matches!(outcome, InputOutcome::Changed), "got {outcome:?}");
+        assert_eq!(agent.paste_probe_in_flight, 1, "the probe must be deferred");
+        assert!(
+            agent.prompt.images.is_empty(),
+            "the chip attaches on completion, not inline"
+        );
+    }
+
+    /// Finish a deferred paste with a decoded image.
+    fn finish_image_paste(agent: &mut AgentView) {
+        let ctx = deferred_ctx(agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(answer_image()),
+            None,
+        );
+    }
+
+    fn accepted_response(
+        rx: &mut WireReply,
+    ) -> (
+        indexmap::IndexMap<String, Vec<String>>,
+        std::collections::HashMap<
+            String,
+            xai_grok_tools::implementations::grok_build::ask_user_question::QuestionAnnotation,
+        >,
+    ) {
+        let reply = rx
+            .try_recv()
+            .expect("the submit must answer the ext request")
+            .expect("policy reply, not an error");
+        let parsed: AskUserQuestionExtResponse =
+            serde_json::from_str(reply.0.get()).expect("typed wire reply");
+        let AskUserQuestionExtResponse::Accepted {
+            answers,
+            annotations,
+        } = parsed
+        else {
+            panic!("expected an accepted response")
+        };
+        (answers, annotations.unwrap_or_default())
+    }
+
+    /// The card's own reason for existing: a paste on the red-boxed answer row
+    /// attaches an image chip to that answer.
+    #[test]
+    fn image_paste_attaches_a_chip_to_the_freeform_answer() {
+        let mut agent = make_agent();
+        open_question(&mut agent, false);
+        start_image_paste(&mut agent);
+        finish_image_paste(&mut agent);
+
+        assert_eq!(agent.prompt.images.len(), 1, "the image must attach");
+        assert!(
+            agent.prompt.text().contains("[Image #1]"),
+            "the composer shows the chip: {:?}",
+            agent.prompt.text()
+        );
+        let state = agent.question_view.as_ref().expect("card open");
+        assert_eq!(state.focus, QuestionFocus::InputMode);
+        assert!(state.is_on_freeform_row(), "the paste parks on that row");
+        assert!(
+            state.per_question_freeform_selected[0],
+            "an attached image marks the freeform answer as given"
+        );
+    }
+
+    /// An image-only answer must reach the wire: `["Other"]` plus the payload in
+    /// the annotation, with no chip text in the notes.
+    #[test]
+    fn image_only_answer_reaches_the_wire() {
+        let mut agent = make_agent();
+        let mut rx = open_card(&mut agent);
+        agent.question_view.as_mut().unwrap().next_question();
+        let _ = press(&mut agent, freeform_key());
+        start_image_paste(&mut agent);
+        finish_image_paste(&mut agent);
+        let _ = press(&mut agent, enter());
+
+        let (answers, annotations) = accepted_response(&mut rx);
+        assert_eq!(answers["Second?"], vec!["Other".to_string()]);
+        assert!(
+            !answers.contains_key("First?"),
+            "the untouched question stays out of the answers"
+        );
+        let mut annotations = annotations;
+        let annotation = annotations
+            .remove("Second?")
+            .expect("keyed by the question text");
+        assert_eq!(annotation.notes, None, "no text was typed");
+        assert_eq!(annotation.answer_images().len(), 1);
+        assert_eq!(annotation.answer_images()[0].mime_type, "image/png");
+    }
+
+    /// The chip follows its own question across the answer walk instead of
+    /// landing on whichever question happens to be active at submit time.
+    #[test]
+    fn switching_questions_keeps_the_image_with_its_question() {
+        let mut agent = make_agent();
+        let mut rx = open_card(&mut agent);
+        start_image_paste(&mut agent);
+        finish_image_paste(&mut agent);
+        assert_eq!(agent.prompt.images.len(), 1);
+
+        // Enter in input mode advances to the next question and parks this draft.
+        let _ = press(&mut agent, enter());
+        assert_eq!(agent.question_view.as_ref().unwrap().active_tab, 1);
+        assert!(
+            agent.prompt.images.is_empty(),
+            "the second question starts with an empty composer"
+        );
+        assert_eq!(
+            agent.question_view.as_ref().unwrap().parked_images(0).len(),
+            1
+        );
+
+        // Leave the second question unanswered, then submit from its freeform row.
+        // Pressing Enter directly here would select the option under the cursor.
+        let _ = press(&mut agent, freeform_key());
+        let _ = press(&mut agent, enter());
+        let (answers, mut annotations) = accepted_response(&mut rx);
+        assert_eq!(answers["First?"], vec!["Other".to_string()]);
+        assert!(!answers.contains_key("Second?"));
+        assert_eq!(
+            annotations.remove("First?").unwrap().answer_images().len(),
+            1
+        );
+    }
+
+    /// Paste then Enter: the submit waits for the off-thread probe, so the image
+    /// is part of the answer instead of arriving after the card closed.
+    #[test]
+    fn paste_in_flight_holds_the_submit_back() {
+        let mut agent = make_agent();
+        let mut rx = open_card(&mut agent);
+        agent.question_view.as_mut().unwrap().next_question();
+        let _ = press(&mut agent, freeform_key());
+        start_image_paste(&mut agent);
+
+        let _ = press(&mut agent, enter());
+        assert!(
+            agent.question_view.is_some(),
+            "the card must stay up until the image lands"
+        );
+        assert!(matches!(
+            agent.deferred_send,
+            Some(AgentDeferredSend::SubmitQuestion(_))
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing may be answered before the image is attached"
+        );
+
+        finish_image_paste(&mut agent);
+        let kind = agent
+            .take_deferred_send_after_paste()
+            .expect("the probe drained, so the submit resumes");
+        agent.resume_deferred_send(kind);
+
+        let (_, mut annotations) = accepted_response(&mut rx);
+        assert_eq!(
+            annotations.remove("Second?").unwrap().answer_images().len(),
+            1
+        );
+    }
+
+    /// A probe that answers after the active tab changed must not land in the
+    /// new question. The old image is discarded rather than silently reattached.
+    #[test]
+    fn image_probe_after_question_switch_is_dropped() {
+        let mut agent = make_agent();
+        let mut rx = open_card(&mut agent);
+        let _ = press(&mut agent, freeform_key());
+        start_image_paste(&mut agent);
+
+        // Leave input mode and move to the second question while the probe is in flight.
+        // Use the same state transition as the answer walk here so the test stays
+        // deterministic even when a platform's Esc handling parks focus.
+        agent.question_view.as_mut().unwrap().focus =
+            crate::views::question_view::QuestionFocus::Navigation;
+        agent.swap_question_freeform();
+        agent.question_view.as_mut().unwrap().next_question();
+        agent.load_question_freeform();
+        assert_eq!(agent.question_view.as_ref().unwrap().active_tab, 1);
+
+        let ctx = deferred_ctx(&agent);
+        crate::clipboard::clear_clipboard_probe_hook();
+        let completion = agent.complete_clipboard_attachment_paste(
+            ctx,
+            crate::app::actions::ProbedAttachment::Image(answer_image()),
+            None,
+        );
+        assert_eq!(
+            completion,
+            crate::app::actions::ClipboardPasteCompletion::Dropped
+        );
+        assert!(agent.prompt.images.is_empty(), "Q2 must stay empty");
+        assert!(agent.prompt.text().is_empty(), "Q2 must stay empty");
+        assert!(rx.try_recv().is_err(), "Q2 must not be answered");
+    }
+
+    /// Replacing the question card while a probe is in flight invalidates the
+    /// old deferred submit; it must not fire into the replacement card.
+    #[test]
+    fn deferred_submit_after_question_replacement_is_dropped() {
+        let mut agent = make_agent();
+        let mut old_rx = open_card(&mut agent);
+        agent.question_view.as_mut().unwrap().next_question();
+        let _ = press(&mut agent, freeform_key());
+        start_image_paste(&mut agent);
+        let _ = press(&mut agent, enter());
+        assert!(agent.deferred_send.is_some());
+
+        agent.question_card_generation = agent.question_card_generation.wrapping_add(1);
+        agent.question_view = Some(QuestionViewState::new(
+            "replacement".into(),
+            vec![question("Replacement?", &["Yes", "No"])],
+            StashedPrompt::default(),
+        ));
+        finish_image_paste(&mut agent);
+        let kind = agent.take_deferred_send_after_paste();
+        if let Some(kind) = kind {
+            assert!(agent.resume_deferred_send(kind).is_none());
+        }
+        assert!(agent.question_view.is_some(), "replacement remains open");
+        assert!(old_rx.try_recv().is_err(), "old response was not sent");
+    }
+
+    /// A probe that answers after the card was dismissed must drop the image
+    /// instead of landing a chip in the restored session draft.
+    #[test]
+    fn image_probe_after_dismissal_is_dropped() {
+        let mut agent = make_agent();
+        open_question(&mut agent, false);
+        start_image_paste(&mut agent);
+        let _ = press(
+            &mut agent,
+            KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL),
+        );
+        assert!(agent.question_view.is_none(), "Ctrl+Y dismisses the card");
+        finish_image_paste(&mut agent);
+
+        assert!(
+            agent.prompt.images.is_empty(),
+            "a dismissed card's image must not become a composer chip"
+        );
+        assert!(!agent.prompt.text().contains("[Image #"));
     }
 }
 #[cfg(test)]

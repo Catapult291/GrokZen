@@ -1042,7 +1042,7 @@ mod tests {
             target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                 agent_id: agent.session.id,
                 images_dir: None,
-                from_feedback_pane: false,
+                owner: crate::app::actions::ClipboardPasteOwner::Composer,
             },
             source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                 text: crate::app::actions::ClipboardTextRead::Success(None),

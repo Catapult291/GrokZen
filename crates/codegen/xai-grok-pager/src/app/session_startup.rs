@@ -72,11 +72,16 @@ impl DeferredStartupActions {
 ///
 /// `new_cwd` is the write namespace for the child (parent session cwd when
 /// cross-cwd); preflight must use the same path via [`effective_fork_new_cwd`].
+///
+/// `target_prompt_index` is the fork point: the child copies prompts
+/// `0..=target_prompt_index`, which is how `/fork --at <prompt>` and the
+/// fork-point picker branch off an earlier turn. `None` copies everything.
 pub fn fork_session_params(
     parent_session_id: &str,
     parent_cwd: &Path,
     new_session_id: Option<&str>,
     parent_is_worktree: bool,
+    target_prompt_index: Option<usize>,
 ) -> serde_json::Value {
     let parent_cwd_str = parent_cwd.to_string_lossy().into_owned();
     let source_cwd = xai_grok_shell::session::resolve_local_session_any_cwd(parent_session_id)
@@ -92,6 +97,9 @@ pub fn fork_session_params(
     }
     if parent_is_worktree {
         payload["sourceWorkspaceDir"] = serde_json::Value::String(parent_cwd_str);
+    }
+    if let Some(target) = target_prompt_index {
+        payload["targetPromptIndex"] = serde_json::Value::from(target);
     }
     payload
 }
@@ -1714,7 +1722,7 @@ mod tests {
     #[test]
     fn fork_session_params_sets_new_session_id_and_workspace_dir() {
         let cwd = PathBuf::from("/wt");
-        let p = fork_session_params("parent-1", &cwd, Some("child-uuid"), true);
+        let p = fork_session_params("parent-1", &cwd, Some("child-uuid"), true, None);
         assert_eq!(p["sourceSessionId"], "parent-1");
         assert_eq!(p["newCwd"], "/wt");
         assert_eq!(p["newSessionId"], "child-uuid");
@@ -1724,9 +1732,23 @@ mod tests {
     #[test]
     fn fork_session_params_omits_workspace_dir_when_not_worktree() {
         let cwd = PathBuf::from("/proj");
-        let p = fork_session_params("parent-1", &cwd, None, false);
+        let p = fork_session_params("parent-1", &cwd, None, false, None);
         assert!(p.get("sourceWorkspaceDir").is_none());
         assert!(p.get("newSessionId").is_none());
+    }
+    /// The fork point travels as camelCase `targetPromptIndex`; the shell's `ForkSessionRequest` reads
+    /// exactly that name, so a rename on either side would silently fork the whole conversation.
+    #[test]
+    fn fork_session_params_sends_target_prompt_index_for_a_cut_fork() {
+        let cwd = PathBuf::from("/proj");
+        let p = fork_session_params("parent-1", &cwd, None, false, Some(2));
+        assert_eq!(p["targetPromptIndex"], 2);
+    }
+    #[test]
+    fn fork_session_params_omits_target_prompt_index_without_a_cut() {
+        let cwd = PathBuf::from("/proj");
+        let p = fork_session_params("parent-1", &cwd, None, false, None);
+        assert!(p.get("targetPromptIndex").is_none());
     }
     #[test]
     fn fork_response_parses_nested_and_top_level_id() {

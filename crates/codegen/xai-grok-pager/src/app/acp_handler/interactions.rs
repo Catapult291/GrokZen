@@ -220,6 +220,7 @@ pub(crate) fn handle_ask_user_question(
     }
 
     // Stash the composer so it comes back when this question closes.
+    agent.question_card_generation = agent.question_card_generation.wrapping_add(1);
     agent.question_view = Some(QuestionViewState::with_response_tx(
         ext_req.tool_call_id,
         ext_req.questions,

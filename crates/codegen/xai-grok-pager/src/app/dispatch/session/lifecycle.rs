@@ -1196,6 +1196,8 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
         permission_mode_override: None,
         preferred_session_id,
         chat_kind,
+        // Worktree creation from `/new` / `--worktree` always copies the whole session (or starts empty).
+        target_prompt_index: None,
     }];
     effects
 }
