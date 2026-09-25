@@ -276,6 +276,11 @@
       "sha": "c43959bdd317db3cd3052c8ad17b56e35b54dec5",
       "source_subject": "fix: align localized release metadata wording",
       "title_zh": "对齐本地化发布元数据文案"
+    },
+    {
+      "sha": "c5afe38526d942060d555c0883cccb0e2bd09b72",
+      "source_subject": "fix(release): add Chinese titles for 1.0.17 commits",
+      "title_zh": "补齐 1.0.17 提交标题的中文映射"
     }
   ]
 }
