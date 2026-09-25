@@ -316,7 +316,9 @@ impl Default for ScrollConfig {
 pub enum FollowIndicator {
     /// No scroll indicators.
     None,
-    /// Show ▼ centered in the gap row below scrollback when not following and there's content below the viewport.
+    /// Show ▼ below scrollback when not following and there's content below the viewport: centered in the
+    /// gap row when the layout reserves one (non-compact prompt gap or a lower pane's leading gap), else
+    /// centered on the scrollback's own last row (compact prompts and short terminals keep no gap row).
     /// Show ▲ centered under the sticky prompt header while the answer being read starts above the viewport top.
     #[default]
     Center,

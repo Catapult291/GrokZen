@@ -809,6 +809,12 @@ impl AgentView {
             self.sync_jump_preview();
             return;
         }
+        self.dismiss_fork_picker_if_suppressed();
+        if let Some(ref mut state) = self.fork_picker_state {
+            crate::views::fork_picker::move_cursor(state, lines.signum());
+            self.sync_fork_picker_preview();
+            return;
+        }
         if let Some(ref mut viewer) = self.line_viewer {
             if let Some(area) = viewer.last_popup_area
                 && (area.contains((col, row).into()) || viewer.list_state.scrollbar_hit(col, row))

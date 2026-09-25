@@ -218,7 +218,7 @@ fn external_prompt_editor_refuses_voice_and_pending_paste_with_visible_messages(
         let agent = app.agents.get_mut(&id).unwrap();
         agent.prompt.set_text("draft");
         agent.paste_probe_in_flight = probes;
-        agent.deferred_send = deferred_send;
+        agent.deferred_send = deferred_send.clone();
         let _ = dispatch(Action::EditPromptExternal, &mut app);
         assert!(app.pending_editor.is_none());
         assert_eq!(app.agents[&id].prompt.text(), "draft");
@@ -251,7 +251,7 @@ fn deferred_paste_completion_after_refused_editor_does_not_implicitly_send_witho
                 target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                     agent_id: id,
                     images_dir: None,
-                    from_feedback_pane: false,
+                    owner: crate::app::actions::ClipboardPasteOwner::Composer,
                 },
                 source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                     text: crate::app::actions::ClipboardTextRead::Success(Some(
@@ -1918,6 +1918,7 @@ fn translate_local_submit_skipped_returns_changed_with_no_action() {
     );
     let kind = LocalQuestionKind::Fork {
         directive: Some("dropped".into()),
+        cut: Default::default(),
     };
     let outcome = crate::app::agent_view::translate_local_submit_for_test(&state, kind, true);
     assert!(matches!(
@@ -1949,7 +1950,10 @@ fn translate_local_submit_no_selection_returns_changed_no_action() {
         vec![q],
         crate::views::prompt_widget::StashedPrompt::default(),
     );
-    let kind = LocalQuestionKind::Fork { directive: None };
+    let kind = LocalQuestionKind::Fork {
+        directive: None,
+        cut: Default::default(),
+    };
     let outcome = crate::app::agent_view::translate_local_submit_for_test(&state, kind, false);
     assert!(matches!(
         outcome,
@@ -1981,7 +1985,10 @@ fn translate_local_submit_out_of_range_index_returns_changed_no_action() {
         crate::views::prompt_widget::StashedPrompt::default(),
     );
     state.selections[0] = crate::views::question_view::QuestionSelection::Single(Some(99));
-    let kind = LocalQuestionKind::Fork { directive: None };
+    let kind = LocalQuestionKind::Fork {
+        directive: None,
+        cut: Default::default(),
+    };
     let outcome = crate::app::agent_view::translate_local_submit_for_test(&state, kind, false);
     assert!(matches!(
         outcome,

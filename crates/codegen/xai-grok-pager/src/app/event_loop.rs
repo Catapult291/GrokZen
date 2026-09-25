@@ -4888,6 +4888,7 @@ mod tests {
             permission_mode_override: None,
             preferred_session_id: None,
             chat_kind: false,
+            target_prompt_index: None,
         };
         assert!(welcome_oneshot_applies_to_effects(std::slice::from_ref(
             &worktree
@@ -5160,6 +5161,7 @@ mod tests {
             permission_mode_override: None,
             preferred_session_id: None,
             chat_kind: false,
+            target_prompt_index: None,
         };
         assert_eq!(
             take_load_restore_code(&mut app, std::slice::from_ref(&wt)),

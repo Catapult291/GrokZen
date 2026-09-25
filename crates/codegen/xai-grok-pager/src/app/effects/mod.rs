@@ -285,6 +285,7 @@ pub(crate) fn execute(
             permission_mode_override,
             preferred_session_id,
             chat_kind,
+            target_prompt_index,
         } => {
             let tx = acp_tx.clone();
             let cwd = cwd.to_path_buf();
@@ -336,6 +337,11 @@ pub(crate) fn execute(
                         }
                         if let Some(ref r) = git_ref {
                             payload["gitRef"] = serde_json::Value::String(r.clone());
+                        }
+                        // `/fork` with a fork point: the shell copies the parent conversation only
+                        // up to this prompt, exactly like the `x.ai/session/fork` payload.
+                        if let Some(target) = target_prompt_index {
+                            payload["targetPromptIndex"] = serde_json::Value::from(target);
                         }
                         let ext_req = acp::ExtRequest::new(
                             "x.ai/git/worktree/resume_session",
@@ -792,7 +798,7 @@ pub(crate) fn execute(
                 .spawn(async move {
                     let mut params = serde_json::json!({
                     "cwd": cwd.to_string_lossy(),
-                    "limit": 30,
+                    "limit": 100,
                     "headless": headless_policy.as_wire_str(),
                 });
                     if let Some(q) = &query {
@@ -4271,7 +4277,12 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RewindExecute { agent_id, session_id, target_prompt_index } => {
+        Effect::RewindExecute {
+            agent_id,
+            session_id,
+            target_prompt_index,
+            mode,
+        } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -4281,6 +4292,7 @@ pub(crate) fn execute(
                                 &rewind_execute_params(
                                     session_id.0.as_ref(),
                                     target_prompt_index,
+                                    mode,
                                 ),
                             )
                             .expect("serialize rewind/execute params")
@@ -4401,6 +4413,7 @@ pub(crate) fn execute(
             parent_cwd,
             parent_is_worktree,
             new_session_id,
+            target_prompt_index,
         } => {
             let tx = acp_tx.clone();
             tasks
@@ -4423,6 +4436,7 @@ pub(crate) fn execute(
                         &parent_cwd,
                         new_session_id.as_deref(),
                         parent_is_worktree,
+                        target_prompt_index,
                     );
                     let req = acp::ExtRequest::new(
                         "x.ai/session/fork",
@@ -5050,16 +5064,18 @@ fn prompt_request_meta(
     }
     serde_json::Value::Object(map)
 }
-pub(crate) const REWIND_MODE_WIRE: &str = "conversation_only";
+/// `force: true` executes straight away (the dialog is the confirmation / preview), and `mode` is
+/// sent explicitly because the shell defaults to `all` for clients that predate the field.
 pub(crate) fn rewind_execute_params(
     session_id: &str,
     target_prompt_index: usize,
+    mode: crate::views::rewind::RewindMode,
 ) -> serde_json::Value {
     serde_json::json!({
         "sessionId": session_id,
         "targetPromptIndex": target_prompt_index,
         "force": true,
-        "mode": REWIND_MODE_WIRE,
+        "mode": mode.wire(),
     })
 }
 /// Build the `x.ai/interject` params.

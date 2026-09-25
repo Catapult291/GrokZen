@@ -4,6 +4,10 @@ use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crossterm::event::{KeyEvent, MouseButton, MouseEvent, MouseEventKind};
 impl AgentView {
+    /// Anchor the picker cursor row's prompt at the top of the transcript, the way the `/fork`
+    /// picker previews its rows: the row being read is the one Enter cuts at, and the timeline rail
+    /// highlights its turn (the rail's active tick is the turn owning the viewport top).
+    /// The same entry is the dim point, so everything from that turn down reads as the part about to go.
     pub(super) fn sync_rewind_anchor_to_picker(&mut self) {
         let prompt_index = {
             let Some(ref rw) = self.rewind_state else {
@@ -29,7 +33,7 @@ impl AgentView {
             rw.anchor_entry_idx = entry_idx.unwrap_or(0);
         }
         if let Some(idx) = entry_idx {
-            self.scrollback.scroll_to_entry_center(idx);
+            self.scrollback.scroll_to_entry_top(idx);
         }
     }
     pub(super) fn rewind_dim_from_entry(&self) -> Option<usize> {
@@ -108,9 +112,11 @@ impl AgentView {
             RewindInput::Dismissed => InputOutcome::Action(Action::RewindDismiss),
             RewindInput::CancelTurnThenProceed => InputOutcome::Action(Action::RewindCancelOffer),
             RewindInput::DismissError => InputOutcome::Action(Action::RewindDismissError),
-            RewindInput::Confirm(target) => InputOutcome::Action(Action::RewindConfirm(target)),
-            RewindInput::ConfirmNeverAsk(target) => {
-                InputOutcome::Action(Action::RewindConfirmNeverAsk(target))
+            RewindInput::Confirm(target, mode) => {
+                InputOutcome::Action(Action::RewindConfirm(target, mode))
+            }
+            RewindInput::ConfirmNeverAsk(target, mode) => {
+                InputOutcome::Action(Action::RewindConfirmNeverAsk(target, mode))
             }
             RewindInput::PickerSelect(prompt_index) => {
                 InputOutcome::Action(Action::RewindPickerSelect(prompt_index))
@@ -273,6 +279,8 @@ mod sync_rewind_anchor_to_picker_tests {
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: None,
+            fixed_mode: None,
+            restore: crate::views::jump::JumpRestore::none(),
         });
     }
     #[test]
@@ -325,5 +333,69 @@ mod sync_rewind_anchor_to_picker_tests {
             alpha_idx,
             "fallback: selected=2 → alpha"
         );
+    }
+    /// A response tall enough to push the transcript past the viewport, so a preview scroll has room
+    /// to move the top row.
+    fn tall_response(tag: &str) -> RenderBlock {
+        RenderBlock::agent_message(
+            &(0..20)
+                .map(|i| format!("{tag} line {i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+    /// The cursor row is previewed with its prompt anchored at the transcript top — the `/fork` and
+    /// `/jump` anchor. The timeline rail's active tick is the turn owning that top row, so the
+    /// highlight follows the row under the cursor.
+    #[test]
+    fn picker_row_anchors_its_turn_at_the_viewport_top() {
+        use crate::views::rewind::{RewindPhase, RewindPointInfo, RewindState};
+        let mut agent = make_agent();
+        let mut prompt_indices = Vec::new();
+        for (i, name) in ["alpha", "bravo", "charlie"].into_iter().enumerate() {
+            let id = agent.scrollback.push_block(user_block(name, Some(i)));
+            prompt_indices.push(agent.scrollback.index_of_id(id).unwrap());
+            agent.scrollback.push_block(tall_response(name));
+        }
+        // Short viewport: the transcript overflows, so the anchored row can reach the top row.
+        agent.scrollback.prepare_layout(80, 12);
+
+        let pt = |pi: usize, preview: &str| RewindPointInfo {
+            prompt_index: pi,
+            created_at: String::new(),
+            num_file_snapshots: 0,
+            has_file_changes: false,
+            prompt_preview: Some(preview.into()),
+        };
+        agent.rewind_state = Some(RewindState {
+            phase: RewindPhase::Picker {
+                points: vec![pt(0, "alpha"), pt(1, "bravo"), pt(2, "charlie")],
+                selected: 2,
+            },
+            anchor_entry_idx: 0,
+            stashed_draft: None,
+            selected_prompt_index: None,
+            fixed_mode: None,
+            restore: crate::views::jump::JumpRestore::none(),
+        });
+
+        agent.sync_rewind_anchor_to_picker();
+        assert_eq!(
+            agent.rewind_state.as_ref().unwrap().anchor_entry_idx,
+            prompt_indices[2]
+        );
+        assert_eq!(
+            agent.scrollback.active_turn_for_viewport(),
+            Some(2),
+            "the cursor row's turn owns the top row, so the rail highlights it"
+        );
+
+        set_selected(&mut agent, 1);
+        agent.sync_rewind_anchor_to_picker();
+        assert_eq!(agent.scrollback.active_turn_for_viewport(), Some(1));
+
+        set_selected(&mut agent, 0);
+        agent.sync_rewind_anchor_to_picker();
+        assert_eq!(agent.scrollback.active_turn_for_viewport(), Some(0));
     }
 }

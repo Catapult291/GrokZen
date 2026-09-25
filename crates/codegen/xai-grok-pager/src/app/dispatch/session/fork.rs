@@ -29,13 +29,13 @@ fn localized_template(
     message
 }
 
-/// Top-level `/fork` dispatcher. Resolves the worktree decision: an
-/// explicit `--worktree` / `--no-worktree` flag short-circuits to
-/// [`dispatch_fork_resolved`]. When no flag is given and a persisted
-/// `fork_worktree_mode` preference is set (`Always` / `Never`), the
-/// popup is skipped and the corresponding path is taken directly. The
-/// `Ask` default opens the [`open_fork_question`] modal so the user is
-/// asked.
+/// Top-level `/fork` dispatcher. Resolves the fork point first: `--at <prompt>` pins it, otherwise the
+/// fork-point picker opens and hands the resolved cut back through [`resolve_fork_after_cut`].
+///
+/// The worktree decision then follows: an explicit `--worktree` / `--no-worktree` flag short-circuits to
+/// [`dispatch_fork_resolved`]. When no flag is given and a persisted `fork_worktree_mode` preference is
+/// set (`Always` / `Never`), the popup is skipped and the corresponding path is taken directly. The
+/// `Ask` default opens the [`open_fork_question`] modal so the user is asked.
 ///
 /// When the parent session's cwd is not inside a git repository (no `git_head_changed` notification, so `current_branch` is `None`):
 /// - `--worktree` is rejected with a toast (nothing to create a worktree from).
@@ -64,11 +64,10 @@ pub(in crate::app::dispatch) fn dispatch_fork(
         app.show_toast(&toast);
         return vec![];
     };
-    let (has_session, in_git_repo) = app
+    let has_session = app
         .agents
         .get(&parent_id)
-        .map(|a| (a.session.session_id.is_some(), a.current_branch.is_some()))
-        .unwrap_or((false, false));
+        .is_some_and(|a| a.session.session_id.is_some());
     if !has_session {
         let toast = app
             .locale
@@ -80,7 +79,42 @@ pub(in crate::app::dispatch) fn dispatch_fork(
         app.show_toast(&toast);
         return vec![];
     }
-    match args.worktree_override {
+
+    let Some(position) = args.at_prompt else {
+        return super::fork_picker::open_fork_picker(app, args.worktree_override, args.directive);
+    };
+    let cut = app.agents.get(&parent_id).and_then(|agent| {
+        super::fork_picker::resolve_cut_for_at_prompt(&agent.scrollback, position)
+    });
+    let Some(cut) = cut else {
+        let toast = localized_template(
+            app.locale.as_ref(),
+            "session.fork.at_out_of_range",
+            "No prompt #{position} to fork before",
+            &[("{position}", &position.to_string())],
+        );
+        app.show_toast(&toast);
+        return vec![];
+    };
+    resolve_fork_after_cut(app, args.worktree_override, args.directive, cut)
+}
+
+/// Resolve the worktree question for a fork whose point is already known, then dispatch it.
+/// Shared by `/fork --at`, the fork-point picker, and the worktree modal's answer path.
+pub(in crate::app::dispatch) fn resolve_fork_after_cut(
+    app: &mut AppView,
+    worktree_override: Option<bool>,
+    directive: Option<String>,
+    cut: crate::slash::commands::fork::ForkCut,
+) -> Vec<Effect> {
+    let ActiveView::Agent(parent_id) = app.active_view else {
+        return vec![];
+    };
+    let in_git_repo = app
+        .agents
+        .get(&parent_id)
+        .is_some_and(|a| a.current_branch.is_some());
+    match worktree_override {
         Some(true) if !in_git_repo => {
             let toast = app
                 .locale
@@ -92,17 +126,17 @@ pub(in crate::app::dispatch) fn dispatch_fork(
             app.show_toast(&toast);
             vec![]
         }
-        Some(worktree) => dispatch_fork_resolved(app, worktree, args.directive),
+        Some(worktree) => dispatch_fork_resolved(app, worktree, directive, cut),
         None => {
             if in_git_repo {
                 use crate::app::app_view::WorktreeMode;
                 match app.fork_worktree_mode {
-                    WorktreeMode::Always => dispatch_fork_resolved(app, true, args.directive),
-                    WorktreeMode::Never => dispatch_fork_resolved(app, false, args.directive),
-                    WorktreeMode::Ask => open_fork_question(app, args.directive),
+                    WorktreeMode::Always => dispatch_fork_resolved(app, true, directive, cut),
+                    WorktreeMode::Never => dispatch_fork_resolved(app, false, directive, cut),
+                    WorktreeMode::Ask => open_fork_question(app, directive, cut),
                 }
             } else {
-                dispatch_fork_resolved(app, false, args.directive)
+                dispatch_fork_resolved(app, false, directive, cut)
             }
         }
     }
@@ -156,7 +190,11 @@ pub(super) fn worktree_persist_options(
 }
 /// Open the local worktree question modal on the active agent.
 /// Refuses with a toast if a question (ACP or local) is already on screen, so two questions never collide.
-fn open_fork_question(app: &mut AppView, directive: Option<String>) -> Vec<Effect> {
+fn open_fork_question(
+    app: &mut AppView,
+    directive: Option<String>,
+    cut: crate::slash::commands::fork::ForkCut,
+) -> Vec<Effect> {
     use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
     use xai_grok_tools::implementations::grok_build::ask_user_question::{
         Question, QuestionOption,
@@ -218,7 +256,7 @@ fn open_fork_question(app: &mut AppView, directive: Option<String>) -> Vec<Effec
         vec![question],
         stashed,
     )
-    .with_local_kind(LocalQuestionKind::Fork { directive });
+    .with_local_kind(LocalQuestionKind::Fork { directive, cut });
     agent.question_view = Some(state);
     agent.prompt.set_text("");
     vec![]
@@ -231,6 +269,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
     app: &mut AppView,
     worktree: bool,
     directive: Option<String>,
+    cut: crate::slash::commands::fork::ForkCut,
 ) -> Vec<Effect> {
     let ActiveView::Agent(parent_id) = app.active_view else {
         return vec![];
@@ -254,14 +293,22 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
     let new_id = AgentId(app.next_agent_id);
     app.next_agent_id += 1;
     let new_agent = build_fork_placeholder(app, new_id, parent_id, &parent_cwd, worktree);
-    let parent_marker = match directive.as_deref() {
-        Some(d) => localized_template(
+    let parent_marker = match (cut.target_prompt_index, directive.as_deref()) {
+        // The wire index is inclusive: target 0 means the child keeps prompt 0,
+        // so the parent marker names the next user-facing prompt (target + 2).
+        (Some(target), _) => localized_template(
+            locale.as_ref(),
+            "session.fork.parent_marker.at",
+            "Forked before prompt #{index}",
+            &[("{index}", &(target + 2).to_string())],
+        ),
+        (None, Some(d)) => localized_template(
             locale.as_ref(),
             "session.fork.parent_marker.directive",
             "Forked: {directive}",
             &[("{directive}", d)],
         ),
-        None => locale
+        (None, None) => locale
             .named_text("session.fork.parent_marker", "Forked")
             .into_owned(),
     };
@@ -304,7 +351,15 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
                 .into_owned();
             agent.scrollback.push_block(RenderBlock::system(message));
         }
+        let has_directive = directive.is_some();
         agent.pending_first_prompt = directive;
+        // A partial fork returns the dropped prompt to the composer so the user can rewrite it.
+        // A directive is the child's first prompt, so it takes precedence over that prefill.
+        if let Some(prefill) = cut.prefill.as_deref()
+            && !has_directive
+        {
+            agent.prompt.set_text_preserving(prefill);
+        }
     }
     if let Some(parent_mut) = app.agents.get_mut(&parent_id) {
         parent_mut
@@ -323,6 +378,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             permission_mode_override: None,
             preferred_session_id: None,
             chat_kind: parent_chat_kind,
+            target_prompt_index: cut.target_prompt_index,
         }]
     } else {
         vec![Effect::ForkSession {
@@ -331,6 +387,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             parent_cwd,
             parent_is_worktree,
             new_session_id: None,
+            target_prompt_index: cut.target_prompt_index,
         }]
     }
 }
@@ -499,6 +556,8 @@ pub(in crate::app::dispatch) fn dispatch_startup_fork_session(
         parent_cwd: cwd,
         parent_is_worktree,
         new_session_id,
+        // `--fork-session` has no fork point; it always copies the whole parent conversation.
+        target_prompt_index: None,
     });
     effects
 }

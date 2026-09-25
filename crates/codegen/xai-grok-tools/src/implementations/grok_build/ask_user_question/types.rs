@@ -21,17 +21,39 @@ use crate::register_resource;
 
 // ── ACP wire-format types ────────────────────────────────────────────────
 
+/// One image the user attached to a question's answer (e.g. a pasted screenshot).
+///
+/// `data` is standard base64 without the `data:` URI prefix; `mimeType` is the
+/// encoded payload's MIME type. The client owns encoding — the tool side only
+/// forwards the payload into the session's vision follow-up.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionAnswerImage {
+    pub mime_type: String,
+    pub data: String,
+}
+
 /// Annotation on a single question's answer.
 ///
 /// Carried inside the `accepted` response alongside the selected label.
 /// - `preview`: verbatim `Option.preview` of the selected option (single-select only).
 /// - `notes`: free-text the user typed in the freeform input.
+/// - `images`: images the user attached to the freeform answer.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuestionAnnotation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<QuestionAnswerImage>>,
+}
+
+impl QuestionAnnotation {
+    /// Images attached to this answer, base64 + MIME, in paste order.
+    pub fn answer_images(&self) -> &[QuestionAnswerImage] {
+        self.images.as_deref().unwrap_or(&[])
+    }
 }
 
 /// Mode context for the question UI.
@@ -350,6 +372,7 @@ mod tests {
             QuestionAnnotation {
                 preview: Some("<div>redis preview</div>".to_string()),
                 notes: None,
+                images: None,
             },
         );
 
@@ -461,6 +484,7 @@ mod tests {
             QuestionAnnotation {
                 preview: Some("preview".to_string()),
                 notes: Some("my notes".to_string()),
+                images: None,
             },
         );
 
@@ -541,10 +565,12 @@ mod tests {
         let ann = QuestionAnnotation {
             preview: None,
             notes: None,
+            images: None,
         };
         let json = serde_json::to_value(&ann).unwrap();
         assert!(json.get("preview").is_none());
         assert!(json.get("notes").is_none());
+        assert!(json.get("images").is_none());
     }
 
     #[test]
@@ -552,10 +578,40 @@ mod tests {
         let ann = QuestionAnnotation {
             preview: Some("prev".to_string()),
             notes: Some("note".to_string()),
+            images: None,
         };
         let json = serde_json::to_value(&ann).unwrap();
         assert_eq!(json["preview"], "prev");
         assert_eq!(json["notes"], "note");
+    }
+
+    /// The client's attached answer images survive the wire round trip under
+    /// camelCase (`mimeType`), so the tool can forward them to the session as
+    /// vision content.
+    #[test]
+    fn annotation_round_trips_answer_images() {
+        let ann = QuestionAnnotation {
+            preview: None,
+            notes: Some("see screenshot".to_string()),
+            images: Some(vec![QuestionAnswerImage {
+                mime_type: "image/png".to_string(),
+                data: "QUJD".to_string(),
+            }]),
+        };
+        let json = serde_json::to_value(&ann).unwrap();
+        assert_eq!(json["images"][0]["mimeType"], "image/png");
+        let back: QuestionAnnotation = serde_json::from_value(json).unwrap();
+        assert_eq!(back.answer_images().len(), 1);
+        assert_eq!(back.answer_images()[0].data, "QUJD");
+    }
+
+    /// Older clients omit `images`; the annotation must still deserialize.
+    #[test]
+    fn annotation_without_images_deserializes() {
+        let raw = r#"{"preview":null,"notes":"hi"}"#;
+        let ann: QuestionAnnotation = serde_json::from_str(raw).unwrap();
+        assert_eq!(ann.notes.as_deref(), Some("hi"));
+        assert!(ann.answer_images().is_empty());
     }
 
     // -- Backwards-compatible deserialization (string -> vec) --

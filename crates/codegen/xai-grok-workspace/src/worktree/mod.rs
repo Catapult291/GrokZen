@@ -2449,6 +2449,10 @@ pub struct ResumeSessionInWorktreeRequest {
     /// When set, the worktree is a clean checkout of this ref (dirty overlay is ignored).
     #[serde(default)]
     pub git_ref: Option<String>,
+    /// `/fork` fork point: copy the parent conversation only up to (and including) this prompt index.
+    /// Absent for every other worktree resume, which copies all of it.
+    #[serde(default)]
+    pub target_prompt_index: Option<usize>,
 }
 
 /// Response from `x.ai/git/worktree/resume_session`.

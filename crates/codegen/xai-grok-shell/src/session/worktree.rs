@@ -394,6 +394,8 @@ async fn resume_local_session_in_worktree(
         new_cwd: effective_cwd.clone(),
         session_kind: Some("worktree".to_string()),
         source_workspace_dir: Some(resolved_source_cwd.to_owned()),
+        // `/fork --at` / the fork-point picker: branch off an earlier turn inside the new worktree.
+        target_prompt_index: req.target_prompt_index,
         ..Default::default()
     };
     let fork_resp = match fork_session(fork_req, agent_id, auth_manager).await {

@@ -568,9 +568,10 @@ pub(crate) fn acp_tool_update(
         }
         ToolOutput::AskUserQuestion(ask) => {
             let message = match ask {
-                xai_grok_tools::types::output::AskUserQuestionOutput::UserAnswered { message } => {
-                    message.clone()
-                }
+                xai_grok_tools::types::output::AskUserQuestionOutput::UserAnswered {
+                    message,
+                    ..
+                } => message.clone(),
                 xai_grok_tools::types::output::AskUserQuestionOutput::QuestionsSent {
                     message,
                     ..

@@ -1068,7 +1068,13 @@ fn question_keys_win_over_rewind() {
     use crossterm::event::Event;
     let mut agent = make_agent();
     open_question(&mut agent);
-    agent.rewind_state = Some(RewindState::new_cancel_offer(0, None, None));
+    agent.rewind_state = Some(RewindState::new_cancel_offer(
+        0,
+        None,
+        None,
+        None,
+        crate::views::jump::JumpRestore::none(),
+    ));
     let registry = ActionRegistry::defaults();
     let _ = agent.handle_input(
         &Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
@@ -1089,7 +1095,13 @@ fn elicitation_keys_win_over_rewind() {
     use crossterm::event::Event;
     let mut agent = make_agent();
     open_elicitation(&mut agent);
-    agent.rewind_state = Some(RewindState::new_cancel_offer(0, None, None));
+    agent.rewind_state = Some(RewindState::new_cancel_offer(
+        0,
+        None,
+        None,
+        None,
+        crate::views::jump::JumpRestore::none(),
+    ));
     let registry = ActionRegistry::defaults();
     let _ = agent.handle_input(
         &Event::Key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)),

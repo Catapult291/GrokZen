@@ -13,6 +13,9 @@ use serde::Serialize;
 
 use crate::agent::session_registry_client::{SessionRecord, SessionRegistryClient};
 use crate::session::persistence::{Summary, list_summaries};
+use crate::session::storage::{
+    JsonlStorageAdapter, PromptExtractIterator, collect_prompts_from_events,
+};
 use xai_grok_workspace::session::git::normalize_repo_url;
 
 pub const REMOTE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -246,7 +249,14 @@ pub(crate) async fn fetch_lanes(
             local.push(summary);
         }
     }
-    // This runs after the uuid promotion so a pasted headless id still obeys the page's policy
+    // The F3/default browse requests opt into cwd relaxation with
+    // `allowRelax: true`; only those requests hide provably empty local husks.
+    // The dashboard and other non-relaxed listings keep their existing behavior.
+    // Search and explicit UUID queries intentionally bypass this browse-only rule.
+    if should_hide_empty_sessions(headless, scope, query) {
+        retain_user_turn_sessions(&mut local, &mut remote);
+    }
+    // This runs after the uuid promotion so a pasted headless id still obeys the page's policy.
     let rows_dropped_by_policy =
         crate::session::visibility::retain_session_lanes(&mut local, &mut remote, headless);
     SessionLanes {
@@ -255,6 +265,124 @@ pub(crate) async fn fetch_lanes(
         repo_urls,
         rows_dropped_by_policy,
     }
+}
+
+/// Evidence used to hide a local session shell without guessing from telemetry counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalSessionContent {
+    HasContent,
+    KnownEmpty,
+    Unknown,
+}
+
+fn local_session_content_in_root(summary: &Summary, sessions_root: &Path) -> LocalSessionContent {
+    // These counters are not turn counts, but any non-zero value is positive
+    // evidence that the session has persisted content.
+    // These counters and the activity timestamp are not turn counts, but any
+    // non-zero value is positive evidence that the session has persisted content.
+    if summary.num_messages > 0 || summary.num_chat_messages > 0 || summary.last_active_at.is_some()
+    {
+        return LocalSessionContent::HasContent;
+    }
+
+    let Ok(Some(dir)) =
+        crate::session::persistence::find_persisted_session_dir_by_id_in_root_result(
+            summary.info.id.0.as_ref(),
+            sessions_root,
+        )
+    else {
+        return LocalSessionContent::Unknown;
+    };
+    let updates_path = dir.join(crate::session::storage::UPDATES_FILE);
+    let chat_path = dir.join(crate::session::storage::CHAT_HISTORY_FILE);
+    if !updates_path.exists() && !chat_path.exists() {
+        return LocalSessionContent::KnownEmpty;
+    }
+    let updates_exists = updates_path.exists();
+    if updates_exists {
+        let Ok(raw) = std::fs::read(&updates_path) else {
+            return LocalSessionContent::Unknown;
+        };
+        for line in raw.split(|byte| *byte == b'\n') {
+            let line = line.trim_ascii();
+            if !line.is_empty() && serde_json::from_slice::<serde_json::Value>(line).is_err() {
+                // A torn or unknown update must not be interpreted as proof of emptiness.
+                return LocalSessionContent::Unknown;
+            }
+        }
+        match PromptExtractIterator::open(&updates_path) {
+            Ok(Some(iter)) => {
+                if !collect_prompts_from_events(iter).is_empty() {
+                    return LocalSessionContent::HasContent;
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return LocalSessionContent::Unknown,
+        }
+    }
+    let adapter = JsonlStorageAdapter::new();
+    match adapter.load_chat_history_from_dir(&dir) {
+        Ok(items)
+            if items
+                .iter()
+                .any(xai_chat_state::compaction_utils::is_real_user_turn) =>
+        {
+            LocalSessionContent::HasContent
+        }
+        Ok(_) if dir.join("chat_history.jsonl.corrupt").exists() => LocalSessionContent::Unknown,
+        Ok(_) => LocalSessionContent::KnownEmpty,
+        Err(_) => LocalSessionContent::Unknown,
+    }
+}
+
+fn should_hide_empty_sessions(
+    headless: HeadlessPolicy,
+    scope: CwdScope,
+    query: Option<&str>,
+) -> bool {
+    headless == HeadlessPolicy::Exclude && scope == CwdScope::RelaxIfEmpty && query.is_none()
+}
+
+fn remote_session_has_content(remote: &SessionRecord) -> bool {
+    remote.last_turn_number > 0
+        || remote.restorable_turn_number.is_some_and(|turn| turn > 0)
+        || remote
+            .first_prompt
+            .as_deref()
+            .is_some_and(|prompt| !prompt.trim().is_empty())
+}
+
+/// Hide local session shells that have no provable conversation content, including
+/// their remote twins. Evidence uncertainty is deliberately fail-open.
+fn retain_user_turn_sessions(local: &mut Vec<Summary>, remote: &mut Vec<SessionRecord>) -> bool {
+    retain_user_turn_sessions_in_root(
+        local,
+        remote,
+        &crate::util::grok_home::grok_home().join("sessions"),
+    )
+}
+
+fn retain_user_turn_sessions_in_root(
+    local: &mut Vec<Summary>,
+    remote: &mut Vec<SessionRecord>,
+    sessions_root: &Path,
+) -> bool {
+    let empty_ids: HashSet<String> = local
+        .iter()
+        .filter_map(|summary| {
+            let content = local_session_content_in_root(summary, sessions_root);
+            match content {
+                LocalSessionContent::KnownEmpty => Some(summary.info.id.0.to_string()),
+                LocalSessionContent::HasContent | LocalSessionContent::Unknown => None,
+            }
+        })
+        .collect();
+    let local_before = local.len();
+    local.retain(|summary| !empty_ids.contains(summary.info.id.0.as_ref()));
+    remote.retain(|row| {
+        !empty_ids.contains(row.session_id.as_str()) || remote_session_has_content(row)
+    });
+    local.len() < local_before
 }
 
 /// Local entries are inserted first so remote entries win on collision (same session_id).
@@ -616,6 +744,110 @@ mod tests {
         assert!(!dropped);
         assert_eq!(local.len(), 2);
         assert_eq!(remote.len(), 2);
+    }
+
+    #[test]
+    fn trace_counter_zero_does_not_drop_a_session_with_persisted_content() {
+        let mut real = make_summary("real", "A real conversation", "2026-03-01T00:00:00Z");
+        real.next_trace_turn = 0;
+        let mut local = vec![real];
+        let mut remote = Vec::new();
+        assert!(!retain_user_turn_sessions(&mut local, &mut remote));
+        assert_eq!(local.len(), 1);
+    }
+
+    #[test]
+    fn remote_content_keeps_a_local_shell_even_when_local_evidence_is_empty() {
+        let mut empty = make_summary("empty", "", "2026-03-01T00:00:00Z");
+        empty.num_messages = 0;
+        empty.num_chat_messages = 0;
+        empty.info.cwd = "/definitely/nonexistent".into();
+        let mut local = vec![empty];
+        let mut remote = vec![SessionRecord {
+            last_turn_number: 1,
+            ..make_remote("empty", "remote has a turn", "2026-03-01T00:00:00Z")
+        }];
+        assert!(!retain_user_turn_sessions(&mut local, &mut remote));
+        assert_eq!(remote.len(), 1);
+    }
+
+    #[test]
+    fn known_empty_local_shell_and_remote_twin_are_removed() {
+        let home = tempfile::TempDir::new().unwrap();
+        let cwd = "/known-empty-session";
+        let id = "known-empty-session-id";
+        let dir = home
+            .path()
+            .join("sessions")
+            .join(crate::util::grok_home::encode_cwd_dirname(cwd))
+            .join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A summary is deliberately written by the fixture so the lookup succeeds;
+        // the content classifier still sees no message or chat files.
+        let mut summary = make_summary(id, "", "2026-03-01T00:00:00Z");
+        summary.num_messages = 0;
+        summary.num_chat_messages = 0;
+        summary.info.cwd = cwd.to_owned();
+        std::fs::write(
+            dir.join("summary.json"),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
+
+        let mut local = vec![summary];
+        let mut remote = vec![
+            SessionRecord {
+                last_turn_number: 0,
+                restorable_turn_number: None,
+                first_prompt: None,
+                ..make_remote(id, "empty local twin", "2026-03-01T00:00:00Z")
+            },
+            SessionRecord {
+                last_turn_number: 1,
+                ..make_remote(
+                    "remote-with-content",
+                    "remote content",
+                    "2026-03-01T00:00:00Z",
+                )
+            },
+        ];
+        assert!(retain_user_turn_sessions_in_root(
+            &mut local,
+            &mut remote,
+            &home.path().join("sessions"),
+        ));
+        assert!(local.is_empty());
+        assert_eq!(
+            remote
+                .iter()
+                .map(|row| row.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["remote-with-content"]
+        );
+    }
+
+    #[test]
+    fn empty_husk_filter_is_limited_to_relaxed_f3_browse() {
+        assert!(should_hide_empty_sessions(
+            HeadlessPolicy::Exclude,
+            CwdScope::RelaxIfEmpty,
+            None,
+        ));
+        assert!(!should_hide_empty_sessions(
+            HeadlessPolicy::Exclude,
+            CwdScope::WithSiblings,
+            None,
+        ));
+        assert!(!should_hide_empty_sessions(
+            HeadlessPolicy::Exclude,
+            CwdScope::RelaxIfEmpty,
+            Some("query"),
+        ));
+        assert!(!should_hide_empty_sessions(
+            HeadlessPolicy::Only,
+            CwdScope::RelaxIfEmpty,
+            None,
+        ));
     }
 
     #[test]

@@ -4,6 +4,7 @@ use super::*;
 
 mod foreign;
 mod fork;
+mod fork_picker;
 mod lifecycle;
 mod load;
 mod modal;

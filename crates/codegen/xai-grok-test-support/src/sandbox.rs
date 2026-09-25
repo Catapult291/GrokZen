@@ -310,7 +310,7 @@ fn baseline_env_from_parent(
 ) -> BTreeMap<OsString, OsString> {
     let mut env = BTreeMap::new();
     for key in platform_allowlist() {
-        if let Some(value) = parent_env.get(OsStr::new(key)) {
+        if let Some(value) = inherited_platform_value(parent_env, key) {
             env.insert((*key).into(), value.to_owned());
         }
     }
@@ -367,7 +367,7 @@ fn apply_hermetic_git_env(
     parent_cwd: &Path,
     parent_env: &BTreeMap<OsString, OsString>,
 ) {
-    let Some(git_bin) = parent_env.get(OsStr::new("GIT_BIN_PATH")) else {
+    let Some(git_bin) = inherited_platform_value(parent_env, "GIT_BIN_PATH") else {
         return;
     };
     let git_bin = PathBuf::from(git_bin);
@@ -381,13 +381,34 @@ fn apply_hermetic_git_env(
     };
 
     let mut paths = vec![parent.to_owned()];
-    if let Some(path) = parent_env.get(OsStr::new("PATH")) {
+    if let Some(path) = inherited_platform_value(parent_env, "PATH") {
         paths.extend(std::env::split_paths(path));
     }
     let path = std::env::join_paths(paths).unwrap_or_else(|_| parent.as_os_str().to_owned());
     env.insert("GIT_BIN_PATH".into(), git_bin.into_os_string());
     env.insert("GIT_EXEC_PATH".into(), parent.into_os_string());
     env.insert("PATH".into(), path);
+}
+
+/// Read one inherited platform variable by its canonical name.
+///
+/// Windows environment names are case-insensitive and an inherited block does not promise
+/// canonical spelling: a Git Bash parent exports `SYSTEMROOT`/`COMSPEC`/`Path`. A case-sensitive
+/// lookup would drop those allowlisted essentials, and a child without `SystemRoot` cannot use
+/// Winsock at all — its provider DLLs are resolved from REG_EXPAND_SZ catalog entries, so every
+/// `connect` fails with `WSAEPROVIDERFAILEDINIT` (os error 10106).
+fn inherited_platform_value<'a>(
+    parent_env: &'a BTreeMap<OsString, OsString>,
+    key: &str,
+) -> Option<&'a OsString> {
+    if cfg!(windows)
+        && let Some((_, value)) = parent_env
+            .iter()
+            .find(|(candidate, _)| candidate.to_string_lossy().eq_ignore_ascii_case(key))
+    {
+        return Some(value);
+    }
+    parent_env.get(OsStr::new(key))
 }
 
 fn platform_allowlist() -> &'static [&'static str] {
@@ -816,6 +837,46 @@ mod tests {
             if std::env::var_os(essential).is_some() {
                 assert!(env_value(&sandbox, essential).is_some(), "{essential}");
             }
+        }
+    }
+
+    /// Windows environment names are case-insensitive, so an inherited block may spell an
+    /// allowlisted essential differently (a Git Bash parent exports `SYSTEMROOT`, `COMSPEC`).
+    /// Dropping `SystemRoot` is not cosmetic: Winsock resolves its provider DLLs from
+    /// REG_EXPAND_SZ catalog entries, and without it every child `connect` fails with
+    /// `WSAEPROVIDERFAILEDINIT` (os error 10106).
+    #[cfg(windows)]
+    #[test]
+    fn windows_essentials_survive_non_canonical_inherited_spelling() {
+        let env = resolved_baseline_env(
+            Path::new("C:/work"),
+            BTreeMap::from([
+                (
+                    OsString::from("Path"),
+                    OsString::from(r"C:\Windows\System32"),
+                ),
+                (OsString::from("PATHEXT"), OsString::from(".COM;.EXE")),
+                (OsString::from("SYSTEMROOT"), OsString::from(r"C:\Windows")),
+                (OsString::from("windir"), OsString::from(r"C:\Windows")),
+                (
+                    OsString::from("comspec"),
+                    OsString::from(r"C:\Windows\system32\cmd.exe"),
+                ),
+            ]),
+        );
+
+        for (key, expected) in [
+            ("PATH", r"C:\Windows\System32"),
+            ("PATHEXT", ".COM;.EXE"),
+            ("SystemRoot", r"C:\Windows"),
+            ("WINDIR", r"C:\Windows"),
+            ("ComSpec", r"C:\Windows\system32\cmd.exe"),
+        ] {
+            assert_eq!(
+                env.get(OsStr::new(key)),
+                Some(&OsString::from(expected)),
+                "inherited {key} must reach the child under its canonical name"
+            );
         }
     }
 

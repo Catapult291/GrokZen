@@ -1,6 +1,7 @@
 //! Tests for conversation rewind dispatchers and prompt-entry lookup.
 
 use super::*;
+use crate::views::rewind::RewindMode;
 
 #[test]
 fn cancel_does_not_rewind_when_in_flight_block_committed() {
@@ -224,7 +225,7 @@ fn drive_inline_submit_to_execute(app: &mut AppView) -> Vec<Effect> {
         app.agents[&id].rewind_state.as_ref().unwrap().phase,
         crate::views::rewind::RewindPhase::Confirm { .. }
     ));
-    dispatch(Action::RewindConfirm(0), app)
+    dispatch(Action::RewindConfirm(0, RewindMode::All), app)
 }
 
 /// Submitting an inline edit enters the exact same flow as `/rewind`: a Loading overlay and a points fetch pre-targeted at the edited prompt.
@@ -381,6 +382,102 @@ fn app_with_two_turns() -> AppView {
     app
 }
 
+/// The picker lists turns oldest first (the `/fork` picker's row order) and starts its cursor on the
+/// newest one, which is the least destructive cut and the row the pre-reorder picker landed on.
+/// Its preview anchor is that same newest turn's prompt.
+#[test]
+fn picker_lists_turns_oldest_first_with_the_cursor_on_the_newest() {
+    let mut app = app_with_two_turns();
+    let id = AgentId(0);
+
+    dispatch(Action::RewindShowPicker, &mut app);
+    // Deliberately newest-first, the order the old sort produced.
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+
+    let state = app.agents[&id].rewind_state.as_ref().expect("picker open");
+    let crate::views::rewind::RewindPhase::Picker { points, selected } = &state.phase else {
+        panic!("expected the turn picker, got {:?}", state.phase);
+    };
+    assert_eq!(
+        points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),
+        vec![0, 1],
+        "rows run oldest first"
+    );
+    assert_eq!(*selected, points.len() - 1, "cursor starts on the newest");
+
+    // The preview anchor is the cursor row's prompt: the fixture's newest turn.
+    let newest_prompt_idx = {
+        let scrollback = &app.agents[&id].scrollback;
+        let newest_id = scrollback
+            .timeline_entries()
+            .last()
+            .expect("two turns")
+            .prompt_entry_id;
+        scrollback.index_of_id(newest_id).expect("resolvable")
+    };
+    assert_eq!(state.anchor_entry_idx, newest_prompt_idx);
+}
+
+/// Dismissing the flow (Esc) puts the transcript back where it was before the picker opened: the
+/// preview's scrolling is a side effect of choosing, not a move the user asked for — the `/jump`
+/// and `/fork` rule.
+#[test]
+fn dismiss_restores_the_viewport_the_flow_opened_from() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("sess".to_string()));
+        for i in 0..2 {
+            let mut b = UserPromptBlock::new(format!("turn {i}"));
+            b.prompt_index = Some(i);
+            agent.scrollback.push_block(RenderBlock::UserPrompt(b));
+            agent.scrollback.push_block(RenderBlock::agent_message(
+                &(0..20)
+                    .map(|line| format!("t{i} line {line}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+        }
+        // Short viewport so the preview scroll actually moves the top row.
+        agent.scrollback.prepare_layout(80, 12);
+        agent.scrollback.set_scroll_offset(4);
+    }
+    let opened_from = app.agents[&id].scrollback.scroll_offset();
+    assert_eq!(opened_from, 4, "fixture sanity: parked mid-transcript");
+
+    dispatch(Action::RewindShowPicker, &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+    assert_ne!(
+        app.agents[&id].scrollback.scroll_offset(),
+        opened_from,
+        "the picker previews by scrolling the cursor row to the transcript top"
+    );
+
+    dispatch(Action::RewindDismiss, &mut app);
+
+    let agent = &app.agents[&id];
+    assert!(agent.rewind_state.is_none(), "the flow is gone");
+    assert!(agent.rewind_points.is_none());
+    assert_eq!(
+        agent.scrollback.scroll_offset(),
+        opened_from,
+        "Esc must put the viewport back"
+    );
+}
+
 /// With confirm-before-rewind off, picking a non-zero turn executes immediately.
 #[test]
 fn picker_select_nonzero_target_executes_immediately_when_confirm_off() {
@@ -504,7 +601,7 @@ fn confirm_yes_executes_rewind() {
         }
     ));
 
-    let effects = dispatch(Action::RewindConfirm(1), &mut app);
+    let effects = dispatch(Action::RewindConfirm(1, RewindMode::All), &mut app);
     assert!(
         matches!(
             &effects[0],
@@ -540,7 +637,7 @@ fn confirm_never_ask_persists_setting_off_and_executes() {
     );
     dispatch(Action::RewindPickerSelect(1), &mut app);
 
-    let effects = dispatch(Action::RewindConfirmNeverAsk(1), &mut app);
+    let effects = dispatch(Action::RewindConfirmNeverAsk(1, RewindMode::All), &mut app);
     assert!(
         effects.iter().any(|e| matches!(
             e,
@@ -665,7 +762,7 @@ fn inline_edit_conversation_only_success_resubmits_and_closes_editor() {
         crate::views::rewind::RewindPhase::Confirm { .. }
     ));
 
-    let effects = dispatch(Action::RewindConfirm(0), &mut app);
+    let effects = dispatch(Action::RewindConfirm(0, RewindMode::All), &mut app);
     assert!(matches!(
         &effects[0],
         Effect::RewindExecute {
@@ -1456,5 +1553,210 @@ fn fallback_path_returns_correct_idx_when_prompt_index_is_none() {
     assert_eq!(
         find_user_prompt_entry_for_shell_index(&sb, 2),
         Some(charlie_idx)
+    );
+}
+
+/// Files-only success: the shell restored the files but kept every turn, so the transcript must
+/// survive untouched and the report names the file half instead of the conversation.
+#[test]
+fn files_only_success_keeps_every_turn_and_reports_files() {
+    let response = crate::views::rewind::RewindResponse {
+        success: true,
+        target_prompt_index: 0,
+        reverted_files: vec!["src/lib.rs".into(), "src/main.rs".into()],
+        clean_files: Vec::new(),
+        conflicts: Vec::new(),
+        error: None,
+        mode: Some("files_only".into()),
+        prompt_text: None,
+    };
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.scrollback.push_block(user_block("alpha", Some(0)));
+        agent.scrollback.push_block(RenderBlock::agent_message("a"));
+        agent.rewind_points = Some(vec![rewind_point(0)]);
+    }
+    let len_before = app.agents[&id].scrollback.len();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteComplete {
+            agent_id: id,
+            response,
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert_eq!(
+        agent.scrollback.len(),
+        len_before,
+        "files-only must not remove any turn"
+    );
+    assert!(agent.rewind_state.is_none(), "the overlay closes");
+    assert!(agent.rewind_points.is_none());
+    assert_eq!(
+        agent.toast.as_ref().map(|(m, _)| m.as_str()),
+        Some("Reverted file changes")
+    );
+}
+
+/// `all` success reports both halves; the conversation half still truncates the transcript.
+#[test]
+fn all_mode_success_truncates_and_reports_both_halves() {
+    let mut response = rewind_success(0, "alpha");
+    response.mode = Some("all".into());
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.scrollback.push_block(user_block("alpha", Some(0)));
+        agent.scrollback.push_block(RenderBlock::agent_message("a"));
+    }
+    let len_before = app.agents[&id].scrollback.len();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteComplete {
+            agent_id: id,
+            response,
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert!(
+        agent.scrollback.len() < len_before,
+        "the conversation half must still truncate"
+    );
+    assert_eq!(
+        agent.toast.as_ref().map(|(m, _)| m.as_str()),
+        Some("Reverted conversation and files")
+    );
+}
+
+/// An unknown or missing response mode keeps the historical conversation-only behaviour, so an
+/// older shell cannot strand the client with a transcript it never truncates.
+#[test]
+fn unknown_response_mode_falls_back_to_conversation_only() {
+    let mut response = rewind_success(0, "alpha");
+    response.mode = None;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    if let Some(agent) = app.agents.get_mut(&id) {
+        agent.scrollback.push_block(user_block("alpha", Some(0)));
+        agent.scrollback.push_block(RenderBlock::agent_message("a"));
+    }
+    let len_before = app.agents[&id].scrollback.len();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteComplete {
+            agent_id: id,
+            response,
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&id];
+    assert!(agent.scrollback.len() < len_before, "must still truncate");
+    assert_eq!(
+        agent.toast.as_ref().map(|(m, _)| m.as_str()),
+        Some("Reverted conversation")
+    );
+}
+
+/// `/undo` pins conversation-only: picking a turn executes straight away, with no mode dialog,
+/// even though confirm-before-rewind is on.
+#[test]
+fn undo_picker_select_executes_conversation_only_without_mode_dialog() {
+    let mut app = app_with_two_turns();
+    assert!(
+        app.current_ui.confirm_before_rewind_enabled(),
+        "fixture sanity: the setting gates the dialog"
+    );
+    let id = AgentId(0);
+
+    let effects = dispatch(Action::UndoShowPicker, &mut app);
+    assert!(
+        matches!(&effects[0], Effect::FetchRewindPoints { .. }),
+        "got {effects:?}"
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Picker { .. }
+    ));
+
+    let effects = dispatch(Action::RewindPickerSelect(1), &mut app);
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                target_prompt_index: 1,
+                mode: RewindMode::ConversationOnly,
+                ..
+            }
+        ),
+        "got {effects:?}"
+    );
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::Executing {
+            target_prompt_index: 1
+        }
+    ));
+}
+
+/// The pinned mode survives the mid-turn cancel offer: after cancelling, `/undo` still runs conversation-only.
+#[test]
+fn undo_keeps_pinned_mode_across_running_turn_cancel_offer() {
+    let mut app = app_with_two_turns();
+    let id = AgentId(0);
+    app.agents.get_mut(&id).unwrap().session.state = crate::app::agent::AgentState::TurnRunning;
+
+    let effects = dispatch(Action::UndoShowPicker, &mut app);
+    assert!(effects.is_empty(), "busy: offer first, got {effects:?}");
+    assert!(matches!(
+        app.agents[&id].rewind_state.as_ref().unwrap().phase,
+        crate::views::rewind::RewindPhase::CancelOffer { .. }
+    ));
+
+    let effects = dispatch(Action::RewindCancelOffer, &mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::CancelTurn { .. }))
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::FetchRewindPoints { .. })),
+        "got {effects:?}"
+    );
+
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![rewind_point(1), rewind_point(0)],
+        }),
+        &mut app,
+    );
+    let effects = dispatch(Action::RewindPickerSelect(1), &mut app);
+    assert!(
+        matches!(
+            &effects[0],
+            Effect::RewindExecute {
+                mode: RewindMode::ConversationOnly,
+                ..
+            }
+        ),
+        "got {effects:?}"
     );
 }

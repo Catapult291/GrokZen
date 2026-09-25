@@ -19,7 +19,7 @@ use ratatui::text::{Line, Span};
 use xai_acp_lib::AcpResult;
 use xai_grok_markdown::StreamingMarkdownRenderer;
 pub use xai_grok_tools::implementations::grok_build::ask_user_question::{
-    AskUserQuestionMode, Question, QuestionOption,
+    AskUserQuestionExtResponse, AskUserQuestionMode, Question, QuestionAnswerImage, QuestionOption,
 };
 
 use unicode_width::UnicodeWidthStr;
@@ -103,6 +103,8 @@ pub enum LocalQuestionKind {
         /// Optional directive supplied via `/fork <directive>`.
         /// Stashed here so the modal can carry it across the synchronous return path back to `dispatch_fork_resolved` without a global mailbox.
         directive: Option<String>,
+        /// Fork point selected before the worktree question.
+        cut: crate::slash::commands::fork::ForkCut,
     },
     /// Modal opened by `/new` to resolve the worktree question.
     /// On submit, the selected option index is translated into an [`crate::app::actions::Action::NewSessionAnswered`].
@@ -191,6 +193,12 @@ pub struct QuestionViewState {
     /// Toggled by Space, auto-set when exiting InputMode with text.
     /// Independent of the text content; text is preserved on untoggle.
     pub per_question_freeform_selected: Vec<bool>,
+    /// Images pasted into each question's freeform answer, per question.
+    ///
+    /// Only the *inactive* questions are parked here: the active question's
+    /// images live in the composer (the same place its text does) and are saved
+    /// on the way out by the freeform swap. Both halves are merged at submit.
+    pub per_question_images: Vec<Vec<crate::prompt_images::PastedImage>>,
 
     // ── Cached chrome caps (recomputed on resize / question switch) ──
     /// Cached cap on description lines in chrome (capped in non-fullscreen).
@@ -287,6 +295,7 @@ impl QuestionViewState {
             per_question_scroll: vec![0; n],
             per_question_freeform: vec![String::new(); n],
             per_question_freeform_selected: vec![false; n],
+            per_question_images: vec![Vec::new(); n],
             cached_desc_cap: DEFAULT_MAX_CHROME_DESC_LINES,
             cached_preview_cap: DEFAULT_MAX_CHROME_PREVIEW_LINES,
             response_tx,
@@ -811,6 +820,36 @@ impl QuestionViewState {
             .unwrap_or_default()
     }
 
+    /// Images parked for a question whose freeform answer is not the one being edited.
+    pub fn parked_images(&self, question_idx: usize) -> &[crate::prompt_images::PastedImage] {
+        self.per_question_images
+            .get(question_idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Whether an answer to this card can carry pasted images.
+    ///
+    /// ACP questions ship them in the `accepted` response and the `/feedback`
+    /// card ships them with `SendFeedback`; every other local question answers
+    /// through an `Action` with no image channel, so pasting there stays
+    /// text-only instead of attaching a chip the submit would silently drop.
+    pub fn accepts_answer_images(&self) -> bool {
+        self.local_kind.is_none() || self.is_feedback()
+    }
+
+    /// Park `images` as the answer attachments of `question_idx`, replacing whatever was there.
+    pub fn set_parked_images(
+        &mut self,
+        question_idx: usize,
+        images: Vec<crate::prompt_images::PastedImage>,
+    ) {
+        if let Some(slot) = self.per_question_images.get_mut(question_idx) {
+            crate::prompt_images::drain_and_cleanup(slot);
+            *slot = images;
+        }
+    }
+
     /// Preview text for the currently focused option, if any.
     ///
     /// Returns `Some(preview)` when the cursor is on an option (not freeform)
@@ -974,7 +1013,14 @@ impl QuestionViewState {
             .get(q_idx)
             .copied()
             .unwrap_or(false);
-        option_selected || freeform_selected
+        let freeform_has_image = !self.parked_images(q_idx).is_empty();
+        option_selected
+            || (freeform_selected
+                && (!self
+                    .per_question_freeform
+                    .get(q_idx)
+                    .is_some_and(|text| !text.trim().is_empty())
+                    || freeform_has_image))
     }
 }
 
@@ -989,8 +1035,24 @@ impl QuestionViewState {
     /// - Freeform-only (no option, only typed text): the label is `"Other"` and the typed text goes in `annotations[q].notes`.
     /// - Preview included for single-select only, verbatim from the option.
     /// - Notes included when freeform text is non-empty and selected.
+    /// - Images the user pasted into an answer ride `annotations[q].images`, and an
+    ///   image-only answer counts as answered on its own.
     pub fn build_accepted_response(
         &self,
+    ) -> xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse
+    {
+        self.build_accepted_response_with_images(Vec::new())
+    }
+
+    /// [`Self::build_accepted_response`] with the composer's live images for the
+    /// active question, whose chips the caller has not parked in
+    /// [`Self::per_question_images`] yet.
+    ///
+    /// Encoding goes through the same helper the composer uses for its own
+    /// attachments, so the two paths cannot drift.
+    pub fn build_accepted_response_with_images(
+        &self,
+        active_question_images: Vec<crate::prompt_images::PastedImage>,
     ) -> xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse
     {
         use indexmap::IndexMap;
@@ -1014,7 +1076,10 @@ impl QuestionViewState {
                 .get(i)
                 .cloned()
                 .unwrap_or_default();
-            let has_freeform = freeform_selected && !freeform_text.trim().is_empty();
+            let images = self.answer_images_for(i, &active_question_images);
+            let has_text = freeform_selected && !freeform_text.trim().is_empty();
+            let has_images = freeform_selected && !images.is_empty();
+            let has_freeform = has_text || has_images;
 
             if labels.is_empty() && !has_freeform {
                 // Unanswered, so omit from answers
@@ -1031,7 +1096,7 @@ impl QuestionViewState {
 
             answers.insert(q.question.clone(), label_vec);
 
-            // Build annotation if there's preview or notes.
+            // Build annotation if there's preview, notes, or attached images.
             let is_single = !q.multi_select.unwrap_or(false);
             let preview = if is_single {
                 // Preview from selected option (single-select only).
@@ -1045,14 +1110,18 @@ impl QuestionViewState {
                 None
             };
 
-            let notes = if has_freeform {
-                Some(freeform_text)
-            } else {
-                None
-            };
+            let notes = if has_text { Some(freeform_text) } else { None };
+            let images = if has_images { Some(images) } else { None };
 
-            if preview.is_some() || notes.is_some() {
-                annotations.insert(q.question.clone(), QuestionAnnotation { preview, notes });
+            if preview.is_some() || notes.is_some() || images.is_some() {
+                annotations.insert(
+                    q.question.clone(),
+                    QuestionAnnotation {
+                        preview,
+                        notes,
+                        images,
+                    },
+                );
             }
         }
 
@@ -1066,6 +1135,41 @@ impl QuestionViewState {
             answers,
             annotations,
         }
+    }
+
+    /// Base64 payloads for the answer to question `question_idx`: the composer's
+    /// live set for the active question, the parked set for every other one.
+    ///
+    /// A caller that already parked the active question's images (the submit
+    /// path swaps the freeform draft first) passes an empty live set, so the
+    /// parked set is the fallback rather than a second source of truth.
+    fn answer_images_for(
+        &self,
+        question_idx: usize,
+        active_question_images: &[crate::prompt_images::PastedImage],
+    ) -> Vec<QuestionAnswerImage> {
+        let images: Vec<crate::prompt_images::PastedImage> =
+            if question_idx == self.active_tab && !active_question_images.is_empty() {
+                active_question_images.to_vec()
+            } else {
+                self.per_question_images
+                    .get(question_idx)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+        if images.is_empty() {
+            return Vec::new();
+        }
+        crate::prompt_images::build_content_blocks_with_prefixes(String::new(), images, None)
+            .into_iter()
+            .filter_map(|block| match block {
+                agent_client_protocol::ContentBlock::Image(image) => Some(QuestionAnswerImage {
+                    mime_type: image.mime_type,
+                    data: image.data,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Send the ACP ext-method response and return `true` if the response was actually sent (i.e. `response_tx` was present).
@@ -1427,6 +1531,7 @@ pub fn build_flat_option_lines(
         theme,
         show_freeform,
         freeform_text,
+        false,
         freeform_selected,
         panel_focused,
         "Type your answer here",
@@ -1443,6 +1548,7 @@ fn build_flat_option_lines_with_placeholder(
     theme: &Theme,
     show_freeform: bool,
     freeform_text: &str,
+    freeform_has_image: bool,
     freeform_selected: bool,
     panel_focused: bool,
     freeform_placeholder: &str,
@@ -1497,6 +1603,7 @@ fn build_flat_option_lines_with_placeholder(
             freeform_idx == cursor,
             hovered == Some(freeform_idx),
             freeform_text,
+            freeform_has_image,
             freeform_selected,
             is_multi,
             theme,
@@ -1727,10 +1834,41 @@ fn build_single_option_lines(
 /// `freeform_text` is the per-question freeform text — when non-empty the row
 /// shows as ticked with a preview of the answer.
 #[cfg(test)]
+fn build_flat_option_lines_with_freeform_image(
+    question: &Question,
+    content_w: usize,
+    cursor: usize,
+    hovered: Option<usize>,
+    selections: &QuestionSelection,
+    theme: &Theme,
+    show_freeform: bool,
+    freeform_text: &str,
+    freeform_selected: bool,
+    panel_focused: bool,
+    freeform_has_image: bool,
+) -> Vec<Line<'static>> {
+    build_flat_option_lines_with_placeholder(
+        question,
+        content_w,
+        cursor,
+        hovered,
+        selections,
+        theme,
+        show_freeform,
+        freeform_text,
+        freeform_has_image,
+        freeform_selected,
+        panel_focused,
+        "Type your answer here",
+    )
+}
+
+#[cfg(test)]
 fn build_freeform_line(
     is_cursor: bool,
     is_hovered: bool,
     freeform_text: &str,
+    freeform_has_image: bool,
     is_selected: bool,
     is_multi: bool,
     theme: &Theme,
@@ -1740,6 +1878,7 @@ fn build_freeform_line(
         is_cursor,
         is_hovered,
         freeform_text,
+        freeform_has_image,
         is_selected,
         is_multi,
         theme,
@@ -1753,14 +1892,15 @@ fn build_freeform_line_with_placeholder(
     is_cursor: bool,
     is_hovered: bool,
     freeform_text: &str,
+    freeform_has_image: bool,
     is_selected: bool,
     is_multi: bool,
     theme: &Theme,
     panel_focused: bool,
     freeform_placeholder: &str,
 ) -> Line<'static> {
-    // Whitespace-only freeform is treated as empty — never shown as selected.
-    let is_selected = is_selected && !freeform_text.trim().is_empty();
+    // An image-only answer is selected even when the text is empty.
+    let is_selected = is_selected && (!freeform_text.trim().is_empty() || freeform_has_image);
 
     let embed = crate::views::modal_window::embedded_row_style(theme, is_cursor && panel_focused);
     let fg = |normal| embed.map_or(normal, |e| e.fg(normal));
@@ -1864,6 +2004,7 @@ pub fn render_question_view(
         focused,
         "Type your answer here",
         None,
+        false,
     )
 }
 
@@ -1878,6 +2019,7 @@ pub fn render_question_view_with_placeholder(
     focused: bool,
     freeform_placeholder: &str,
     locale: Option<&crate::locale::LocaleContext>,
+    active_freeform_has_image: bool,
 ) -> QuestionViewRenderResult {
     if area.height == 0 || area.width == 0 {
         return QuestionViewRenderResult {
@@ -1956,6 +2098,7 @@ pub fn render_question_view_with_placeholder(
         .get(q_idx)
         .copied()
         .unwrap_or(false);
+    let freeform_has_image = active_freeform_has_image || !state.parked_images(q_idx).is_empty();
 
     // The freeform row is always rendered sticky at the bottom (not in the scrollable list), unless in InputMode where the inline prompt replaces it
     // When `no_freeform` is set the row is hidden entirely.
@@ -1972,6 +2115,7 @@ pub fn render_question_view_with_placeholder(
         theme,
         false, // never in scroll list
         freeform_text,
+        freeform_has_image,
         freeform_selected,
         focused,
         freeform_placeholder,
@@ -2004,6 +2148,7 @@ pub fn render_question_view_with_placeholder(
                 freeform_idx == cursor,
                 hovered_item == Some(freeform_idx),
                 freeform_text,
+                freeform_has_image,
                 freeform_selected,
                 is_multi,
                 theme,
@@ -2459,6 +2604,157 @@ mod tests {
         }
     }
 
+    /// A real 16×16 PNG, so the encoder reads back actual bytes and a real MIME type.
+    fn answer_image() -> crate::prompt_images::PastedImage {
+        let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+            image::ImageBuffer::from_pixel(16, 16, image::Rgba([10, 20, 30, 255]));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode test png");
+        crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+            data: bytes,
+            mime_type: "image/png".to_string(),
+        })
+    }
+
+    /// An answer that is only a pasted image must survive as an answer: the
+    /// `answers` entry is `["Other"]` and the payload rides the annotation,
+    /// because the model-visible notes are empty.
+    #[test]
+    fn image_only_answer_is_an_answer_on_the_wire() {
+        let mut state = QuestionViewState::new(
+            "tc".into(),
+            vec![make_question("Pick one?", &["A", "B"], false)],
+            StashedPrompt::default(),
+        );
+        state.per_question_freeform_selected[0] = true;
+        state.set_parked_images(0, vec![answer_image()]);
+
+        let response = state.build_accepted_response();
+        let AskUserQuestionExtResponse::Accepted {
+            answers,
+            annotations,
+        } = response
+        else {
+            panic!("expected an accepted response")
+        };
+        assert_eq!(answers["Pick one?"], vec!["Other".to_string()]);
+        let annotation = annotations
+            .expect("an image-only answer still carries an annotation")
+            .remove("Pick one?")
+            .expect("annotation keyed by the question text");
+        assert_eq!(annotation.notes, None, "no text was typed");
+        assert_eq!(annotation.answer_images().len(), 1);
+        assert_eq!(annotation.answer_images()[0].mime_type, "image/png");
+        assert!(
+            !annotation.answer_images()[0].data.is_empty(),
+            "the base64 payload must be carried"
+        );
+    }
+
+    /// The navigation row keeps its selected marker for an image-only answer.
+    #[test]
+    fn image_only_answer_keeps_navigation_marker() {
+        let q = make_question("Pick one?", &["A", "B"], false);
+        let theme = Theme::default();
+        let lines = build_flat_option_lines_with_freeform_image(
+            &q,
+            80,
+            2,
+            None,
+            &QuestionSelection::Single(None),
+            &theme,
+            true,
+            "",
+            true,
+            false,
+            true,
+        );
+        let row = &lines[2];
+        assert!(row.spans.iter().any(|span| span.content.contains("●")));
+    }
+
+    /// A text answer with an image keeps both, and the notes stay free of the
+    /// composer's `[Image #N]` chip text.
+    #[test]
+    fn text_and_image_answer_carry_both() {
+        let mut state = QuestionViewState::new(
+            "tc".into(),
+            vec![make_question("Pick one?", &["A", "B"], false)],
+            StashedPrompt::default(),
+        );
+        state.per_question_freeform_selected[0] = true;
+        state.per_question_freeform[0] = "look at this".to_string();
+        state.set_parked_images(0, vec![answer_image()]);
+
+        let response = state.build_accepted_response();
+        let AskUserQuestionExtResponse::Accepted { annotations, .. } = response else {
+            panic!("expected an accepted response")
+        };
+        let annotation = annotations.unwrap().remove("Pick one?").unwrap();
+        assert_eq!(annotation.notes.as_deref(), Some("look at this"));
+        assert_eq!(annotation.answer_images().len(), 1);
+    }
+
+    /// The composer's live set is the active question's source of truth: a parked
+    /// copy from an earlier visit to the same tab must not be appended to it.
+    #[test]
+    fn composer_images_win_over_the_parked_copy_for_the_active_question() {
+        let mut state = QuestionViewState::new(
+            "tc".into(),
+            vec![make_question("Pick one?", &["A", "B"], false)],
+            StashedPrompt::default(),
+        );
+        state.per_question_freeform_selected[0] = true;
+        state.set_parked_images(0, vec![answer_image()]);
+
+        let response =
+            state.build_accepted_response_with_images(vec![answer_image(), answer_image()]);
+        let AskUserQuestionExtResponse::Accepted { annotations, .. } = response else {
+            panic!("expected an accepted response")
+        };
+        assert_eq!(
+            annotations
+                .unwrap()
+                .remove("Pick one?")
+                .unwrap()
+                .answer_images()
+                .len(),
+            2,
+            "only the live composer set belongs to the active question"
+        );
+    }
+
+    /// The submit path parks the active draft before building the response, so an
+    /// empty live set must fall back to the parked images rather than lose them.
+    #[test]
+    fn parked_images_are_reused_when_the_composer_holds_none() {
+        let mut state = QuestionViewState::new(
+            "tc".into(),
+            vec![make_question("Pick one?", &["A", "B"], false)],
+            StashedPrompt::default(),
+        );
+        state.per_question_freeform_selected[0] = true;
+        state.set_parked_images(0, vec![answer_image()]);
+
+        let response = state.build_accepted_response();
+        let AskUserQuestionExtResponse::Accepted { annotations, .. } = response else {
+            panic!("expected an accepted response")
+        };
+        assert_eq!(
+            annotations
+                .unwrap()
+                .remove("Pick one?")
+                .unwrap()
+                .answer_images()
+                .len(),
+            1
+        );
+    }
+
     /// Regression: on the terminal-native palette (`bg_visual = Reset`) the
     /// embedded cursor row used to be indistinguishable except for a bold
     /// label.
@@ -2525,7 +2821,8 @@ mod tests {
         );
 
         // Freeform row on cursor: same accent treatment.
-        let freeform_cursor = build_freeform_line(true, false, "", false, false, &theme, true);
+        let freeform_cursor =
+            build_freeform_line(true, false, "", false, false, false, &theme, true);
         assert!(
             freeform_cursor
                 .spans

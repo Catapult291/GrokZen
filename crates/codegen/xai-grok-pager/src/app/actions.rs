@@ -725,8 +725,13 @@ pub enum Action {
         opted_in: bool,
     },
     /// `/fork` slash command: parsed args produced by [`crate::slash::commands::fork::parse_fork_args`].
-    /// The dispatcher resolves the worktree question (via flag or the local QuestionView modal) before constructing the placeholder.
+    /// The dispatcher resolves the fork point (via `--at` or the fork-point picker) and the worktree
+    /// question (via flag or the local QuestionView modal) before constructing the placeholder.
     Fork(crate::slash::commands::fork::ForkArgs),
+    /// Confirm-path action emitted by the fork-point picker: fork with the cut of that row.
+    ForkPointSelect(usize),
+    /// Dismiss-path action emitted by the fork-point picker: close it and restore the viewport.
+    ForkPointDismiss,
     /// Submit-path action emitted by the local fork worktree question modal.
     /// Routes directly to `dispatch_fork_resolved`.
     ForkAnswered {
@@ -734,6 +739,8 @@ pub enum Action {
         directive: Option<String>,
         /// When `Some`, also persist this worktree mode preference so future `/fork` invocations skip the popup.
         persist_mode: Option<crate::app::app_view::WorktreeMode>,
+        /// Fork point resolved before the worktree question (picker row or `--at`), carried through the modal.
+        cut: crate::slash::commands::fork::ForkCut,
     },
     /// Submit-path action emitted by the local `/new` worktree question modal.
     /// `worktree: true` creates the new session in a worktree; `worktree: false` creates it in the current cwd.
@@ -916,10 +923,13 @@ pub enum Action {
     ToggleWorkflows,
     Rewind,
     RewindShowPicker,
+    /// `/undo`: open the rewind picker with the conversation-only mode pinned, so the flow
+    /// neither touches files nor asks for a mode.
+    UndoShowPicker,
     RewindPickerSelect(usize),
-    RewindConfirm(usize),
+    RewindConfirm(usize, crate::views::rewind::RewindMode),
     /// Confirm rewind and turn off `confirm_before_rewind` for future rewinds.
-    RewindConfirmNeverAsk(usize),
+    RewindConfirmNeverAsk(usize, crate::views::rewind::RewindMode),
     RewindCancelOffer,
     RewindDismiss,
     RewindDismissError,
@@ -1108,6 +1118,25 @@ impl CancelTrigger {
         }
     }
 }
+/// Which transient editor owned the composer when a clipboard paste was enqueued.
+///
+/// The completion drops the attachment when that editor is gone (or replaced by
+/// another card), so a screenshot pasted into a card cannot land in the composer
+/// draft an Esc restored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardPasteOwner {
+    /// The live composer / agent prompt.
+    Composer,
+    /// The `/feedback` report pane.
+    FeedbackPane,
+    /// An `AskUserQuestion` card's freeform answer, identified by its tool call id and question index.
+    QuestionCard {
+        tool_call_id: String,
+        question_idx: usize,
+        card_generation: u64,
+    },
+}
+
 /// Where a deferred clipboard-attachment paste lands once the off-thread probe finishes (see [`Effect::ProbeClipboardAttachment`]).
 #[derive(Debug, Clone)]
 pub enum ClipboardPasteTarget {
@@ -1116,10 +1145,8 @@ pub enum ClipboardPasteTarget {
     AgentPrompt {
         agent_id: AgentId,
         images_dir: Option<std::path::PathBuf>,
-        /// Enqueued while the `/feedback` report pane owned the composer.
-        /// The completion drops the attachment when that pane is gone.
-        /// A screenshot pasted into the pane thus cannot land in the composer draft an Esc restored.
-        from_feedback_pane: bool,
+        /// Who held the composer at enqueue time; see [`ClipboardPasteOwner`].
+        owner: ClipboardPasteOwner,
     },
     /// Dashboard new-session dispatch input.
     DashboardDispatch,
@@ -1361,6 +1388,9 @@ pub enum Effect {
         preferred_session_id: Option<String>,
         /// One-shot `/chat` or sticky `--chat`: stamp `_meta` kind=chat on fresh create (resume uses `LoadSession.chat_kind` instead).
         chat_kind: bool,
+        /// `/fork --at <prompt>` and the fork-point picker: copy the parent conversation only up to
+        /// (and including) this prompt index. `None` for every other worktree resume, which copies all of it.
+        target_prompt_index: Option<usize>,
     },
     /// Load (resume) an existing ACP session by ID.
     ///
@@ -2004,6 +2034,9 @@ pub enum Effect {
         parent_is_worktree: bool,
         /// Optional client-chosen ID for the forked session (`--session-id` with `--fork-session`).
         new_session_id: Option<String>,
+        /// `/fork --at <prompt>` and the fork-point picker: copy the parent conversation only up to
+        /// (and including) this prompt index. `None` copies all of it (the default).
+        target_prompt_index: Option<usize>,
     },
     /// Read session display fields from local `summary.json` after load/resume.
     /// Those are the title (and `/rename` manual-ness) plus the last-turn summary for the dashboard secondary line.
@@ -2023,6 +2056,7 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         target_prompt_index: usize,
+        mode: crate::views::rewind::RewindMode,
     },
     /// Fetch billing/credit usage from the agent's `x.ai/billing` extension.
     /// When `silent` is true the result updates `credit_balance` without pushing a system message into scrollback.

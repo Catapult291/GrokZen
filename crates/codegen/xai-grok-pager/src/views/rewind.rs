@@ -5,6 +5,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::theme::Theme;
+use crate::views::jump::JumpRestore;
 use crate::views::prompt_widget::StashedPrompt;
 
 fn rewind_static(
@@ -193,9 +194,106 @@ pub struct RewindConflictInfo {
     pub conflict_type: String,
 }
 
+/// Which halves of the session a rewind touches, for the confirm dialog.
+/// The wire values are the shell's `RewindMode` serde names (`all` / `conversation_only` / `files_only`),
+/// so the dialog and the shell can't drift apart silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RewindMode {
+    /// Conversation and files (the shell's protocol default).
+    All,
+    /// Conversation only; files stay on disk.
+    ConversationOnly,
+    /// Files only; the conversation keeps every turn.
+    FilesOnly,
+}
+
+impl RewindMode {
+    pub const fn wire(self) -> &'static str {
+        match self {
+            RewindMode::All => "all",
+            RewindMode::ConversationOnly => "conversation_only",
+            RewindMode::FilesOnly => "files_only",
+        }
+    }
+    /// i18n id for the mode row label.
+    const fn label_id(self) -> &'static str {
+        match self {
+            RewindMode::All => "rewind.mode.all",
+            RewindMode::ConversationOnly => "rewind.mode.conversation",
+            RewindMode::FilesOnly => "rewind.mode.files",
+        }
+    }
+    /// English label used when the locale has no entry.
+    const fn label_default(self) -> &'static str {
+        match self {
+            RewindMode::All => "Conversation and files",
+            RewindMode::ConversationOnly => "Conversation only",
+            RewindMode::FilesOnly => "Files only",
+        }
+    }
+    /// Confirm-dialog title prefix: states what the cursor row would do.
+    const fn title_prefix_id(self) -> &'static str {
+        match self {
+            RewindMode::All => "rewind.confirm.all_prefix",
+            RewindMode::ConversationOnly => "rewind.confirm.conversation_prefix",
+            RewindMode::FilesOnly => "rewind.confirm.files_prefix",
+        }
+    }
+    const fn title_prefix_default(self) -> &'static str {
+        match self {
+            RewindMode::All => "Rewind files and conversation to \u{201C}",
+            RewindMode::ConversationOnly => "Rewind conversation only to \u{201C}",
+            RewindMode::FilesOnly => "Rewind files only to \u{201C}",
+        }
+    }
+    /// Post-rewind report text.
+    pub const fn reverted_id(self) -> &'static str {
+        match self {
+            RewindMode::All => "rewind.reverted.all",
+            RewindMode::ConversationOnly => "rewind.reverted.conversation",
+            RewindMode::FilesOnly => "rewind.reverted.files",
+        }
+    }
+    pub const fn reverted_default(self) -> &'static str {
+        match self {
+            RewindMode::All => "Reverted conversation and files",
+            RewindMode::ConversationOnly => "Reverted conversation",
+            RewindMode::FilesOnly => "Reverted file changes",
+        }
+    }
+    /// Whether this mode truncates the conversation (and therefore the rendered scrollback).
+    pub const fn rewinds_conversation(self) -> bool {
+        matches!(self, RewindMode::All | RewindMode::ConversationOnly)
+    }
+    /// Read the mode back from a `RewindResponse`. An absent or unknown value keeps the
+    /// historical conversation-only behaviour, so an older shell can't strand the client.
+    pub fn from_wire(value: Option<&str>) -> Self {
+        match value {
+            Some("files_only") | Some("code_only") => RewindMode::FilesOnly,
+            Some("all") => RewindMode::All,
+            _ => RewindMode::ConversationOnly,
+        }
+    }
+}
+
+/// Confirm-dialog rows, in order: the three modes. The cursor starts on `All`,
+/// matching the protocol default.
+pub const CONFIRM_MODES: [RewindMode; 3] = [
+    RewindMode::All,
+    RewindMode::ConversationOnly,
+    RewindMode::FilesOnly,
+];
+
+/// Key that activates the mode row at the same index.
+pub const MODE_KEYS: [char; 3] = ['1', '2', '3'];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RewindPhase {
     Loading,
+    /// Turn picker: one row per rewindable turn, oldest first, so the list reads top-to-bottom in
+    /// conversation order (the `/fork` picker's row order). The cursor starts on the newest turn,
+    /// the least destructive cut, which is also the row the flow picked before the order changed.
+    /// The cursor row's prompt is anchored at the transcript top while the picker is open.
     Picker {
         points: Vec<RewindPointInfo>,
         selected: usize,
@@ -203,11 +301,14 @@ pub enum RewindPhase {
     CancelOffer {
         active_idx: usize,
     },
-    /// Confirm before executing a conversation-only rewind.
+    /// Confirm step: choose what to rewind for the selected turn.
+    /// Row order is `CONFIRM_MODES` (the cursor starts on `All`), then a cancel row.
     Confirm {
         target_prompt_index: usize,
         active_idx: usize,
         prompt_preview: Option<String>,
+        /// File snapshots recorded at that turn; the files-only title shows the count.
+        num_file_snapshots: usize,
     },
     Executing {
         target_prompt_index: usize,
@@ -223,6 +324,13 @@ pub struct RewindState {
     pub anchor_entry_idx: usize,
     pub stashed_draft: Option<StashedPrompt>,
     pub selected_prompt_index: Option<usize>,
+    /// Fixed mode for the whole flow, skipping the mode dialog.
+    /// `/undo` sets `ConversationOnly`: files are never touched, and no confirm step is offered.
+    pub fixed_mode: Option<RewindMode>,
+    /// Viewport the flow opened from, put back when it is dismissed (`Esc`) — the picker's preview
+    /// scrolling is a side effect of choosing, not a move the user asked for (the `/jump` and
+    /// `/fork` rule). Dropped with the state on the execute path, so it can never go stale.
+    pub restore: JumpRestore,
 }
 
 impl RewindState {
@@ -230,12 +338,16 @@ impl RewindState {
         anchor: usize,
         draft: Option<StashedPrompt>,
         selected_prompt_index: Option<usize>,
+        fixed_mode: Option<RewindMode>,
+        restore: JumpRestore,
     ) -> Self {
         Self {
             phase: RewindPhase::CancelOffer { active_idx: 0 },
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index,
+            fixed_mode,
+            restore,
         }
     }
 }
@@ -244,9 +356,9 @@ pub enum RewindInput {
     Dismissed,
     CancelTurnThenProceed,
     DismissError,
-    Confirm(usize),
-    /// Execute this rewind and turn off confirm-before-rewind.
-    ConfirmNeverAsk(usize),
+    Confirm(usize, RewindMode),
+    /// Execute this rewind with `mode` and turn off confirm-before-rewind.
+    ConfirmNeverAsk(usize, RewindMode),
     PickerSelect(usize),
     MoveUp,
     MoveDown,
@@ -255,8 +367,13 @@ pub enum RewindInput {
 }
 
 const CANCEL_OFFER_OPTIONS: usize = 2;
-/// Yes / Yes, and don't ask again / No.
-const CONFIRM_OPTIONS: usize = 3;
+/// Conversation+files / conversation only / files only / cancel.
+const CONFIRM_OPTIONS: usize = CONFIRM_MODES.len() + 1;
+
+/// Mode under the confirm cursor; `None` on the trailing cancel row.
+fn confirm_mode_at(active_idx: usize) -> Option<RewindMode> {
+    CONFIRM_MODES.get(active_idx).copied()
+}
 
 pub fn handle_rewind_key(state: &RewindState, key: &KeyEvent) -> RewindInput {
     if key.kind == crossterm::event::KeyEventKind::Release {
@@ -287,11 +404,22 @@ pub fn handle_rewind_key(state: &RewindState, key: &KeyEvent) -> RewindInput {
         },
         RewindPhase::Confirm {
             target_prompt_index,
+            active_idx,
             ..
         } => match key.code {
-            KeyCode::Char('y') => RewindInput::Confirm(*target_prompt_index),
+            // 1/2/3 pick a mode straight away; y and a act on the highlighted row
+            KeyCode::Char('1') => RewindInput::Confirm(*target_prompt_index, CONFIRM_MODES[0]),
+            KeyCode::Char('2') => RewindInput::Confirm(*target_prompt_index, CONFIRM_MODES[1]),
+            KeyCode::Char('3') => RewindInput::Confirm(*target_prompt_index, CONFIRM_MODES[2]),
+            KeyCode::Char('y') => match confirm_mode_at(*active_idx) {
+                Some(mode) => RewindInput::Confirm(*target_prompt_index, mode),
+                None => RewindInput::Dismissed,
+            },
+            KeyCode::Char('a') => match confirm_mode_at(*active_idx) {
+                Some(mode) => RewindInput::ConfirmNeverAsk(*target_prompt_index, mode),
+                None => RewindInput::Dismissed,
+            },
             KeyCode::Char('n') => RewindInput::Dismissed,
-            KeyCode::Char('a') => RewindInput::ConfirmNeverAsk(*target_prompt_index),
             KeyCode::Char('j') | KeyCode::Down => RewindInput::MoveDown,
             KeyCode::Char('k') | KeyCode::Up => RewindInput::MoveUp,
             KeyCode::Enter => RewindInput::ConfirmCursor,
@@ -342,10 +470,9 @@ pub fn confirm_cursor(phase: &RewindPhase) -> RewindInput {
             target_prompt_index,
             active_idx,
             ..
-        } => match active_idx {
-            0 => RewindInput::Confirm(*target_prompt_index),
-            1 => RewindInput::ConfirmNeverAsk(*target_prompt_index),
-            _ => RewindInput::Dismissed,
+        } => match confirm_mode_at(*active_idx) {
+            Some(mode) => RewindInput::Confirm(*target_prompt_index, mode),
+            None => RewindInput::Dismissed,
         },
         _ => RewindInput::Consumed,
     }
@@ -378,12 +505,13 @@ pub fn rewind_row_at(phase: &RewindPhase, area: Rect, col: u16, row: u16) -> Opt
             Some(1) => Some(1),
             _ => None,
         },
-        RewindPhase::Confirm { .. } => match row.checked_sub(area.y + 2) {
-            Some(0) => Some(0),
-            Some(1) => Some(1),
-            Some(2) => Some(2),
-            _ => None,
-        },
+        RewindPhase::Confirm { .. } => {
+            // One title row, then the CONFIRM_OPTIONS mode/cancel rows
+            match row.checked_sub(area.y + 2) {
+                Some(idx) if (idx as usize) < CONFIRM_OPTIONS => Some(idx as usize),
+                _ => None,
+            }
+        }
         RewindPhase::Error { .. } => {
             if row == area.y + 3 {
                 Some(0)
@@ -457,7 +585,7 @@ pub fn rewind_overlay_height(phase: &RewindPhase, screen_h: u16) -> u16 {
         }
         RewindPhase::CancelOffer { .. } => 5,
         RewindPhase::Executing { .. } => 2,
-        RewindPhase::Confirm { .. } => 5,
+        RewindPhase::Confirm { .. } => 6,
         RewindPhase::Error { .. } => 4,
     };
     content + 1
@@ -625,22 +753,48 @@ pub fn render_rewind_overlay(
         RewindPhase::Confirm {
             active_idx,
             prompt_preview,
+            num_file_snapshots,
             ..
         } => {
             let mut y = area.y + 1;
+            let cursor_mode = confirm_mode_at(*active_idx);
             let preview_text = prompt_preview
                 .as_deref()
                 .unwrap_or_else(|| rewind_static(locale, "rewind.this_turn", "this turn"));
-            let prefix = rewind_static(
-                locale,
-                "rewind.confirm.title_prefix",
-                "Rewind conversation to \u{201C}",
-            );
-            let suffix = rewind_static(locale, "rewind.confirm.suffix", "\u{201D}?");
-            let chrome = unicode_width::UnicodeWidthStr::width(prefix)
-                + unicode_width::UnicodeWidthStr::width(suffix);
+            // The title states what the highlighted row would do, so the consequence is
+            // legible before committing to it.
+            let (prefix, suffix) = match cursor_mode {
+                Some(mode) => {
+                    let suffix = if mode == RewindMode::FilesOnly {
+                        rewind_text(
+                            locale,
+                            "rewind.confirm.files_suffix",
+                            "\u{201D}? ({count} files)",
+                        )
+                        .replace("{count}", &num_file_snapshots.to_string())
+                    } else {
+                        rewind_static(locale, "rewind.confirm.suffix", "\u{201D}?").to_string()
+                    };
+                    (
+                        rewind_static(locale, mode.title_prefix_id(), mode.title_prefix_default())
+                            .to_string(),
+                        suffix,
+                    )
+                }
+                // Cancel row: drop the preview and just ask what to rewind.
+                None => (
+                    rewind_static(locale, "rewind.mode.title", "What should be rewound?")
+                        .to_string(),
+                    String::new(),
+                ),
+            };
+            let chrome = unicode_width::UnicodeWidthStr::width(prefix.as_str())
+                + unicode_width::UnicodeWidthStr::width(suffix.as_str());
             let max_preview = (content_w as usize).saturating_sub(chrome);
-            let preview_trunc = crate::render::line_utils::truncate_str(preview_text, max_preview);
+            let preview_trunc = match cursor_mode {
+                Some(_) => crate::render::line_utils::truncate_str(preview_text, max_preview),
+                None => String::new(),
+            };
             let title = format!("{prefix}{preview_trunc}{suffix}");
             buf.set_line(
                 content_x,
@@ -649,34 +803,20 @@ pub fn render_rewind_overlay(
                 content_w,
             );
             y += 1;
-            render_radio_row(
-                buf,
-                content_x,
-                y,
-                content_w,
-                'y',
-                rewind_static(locale, "rewind.confirm.yes", "Yes"),
-                *active_idx == 0,
-                focused,
-                &theme,
-            );
-            y += 1;
-            render_radio_row(
-                buf,
-                content_x,
-                y,
-                content_w,
-                'a',
-                rewind_static(
-                    locale,
-                    "rewind.confirm.yes_and_dont_ask",
-                    "Yes, and don't ask again",
-                ),
-                *active_idx == 1,
-                focused,
-                &theme,
-            );
-            y += 1;
+            for (idx, mode) in CONFIRM_MODES.iter().enumerate() {
+                render_radio_row(
+                    buf,
+                    content_x,
+                    y,
+                    content_w,
+                    MODE_KEYS[idx],
+                    &rewind_static(locale, mode.label_id(), mode.label_default()),
+                    *active_idx == idx,
+                    focused,
+                    &theme,
+                );
+                y += 1;
+            }
             render_radio_row(
                 buf,
                 content_x,
@@ -684,7 +824,7 @@ pub fn render_rewind_overlay(
                 content_w,
                 'n',
                 rewind_static(locale, "rewind.confirm.no", "No"),
-                *active_idx == 2,
+                *active_idx == CONFIRM_MODES.len(),
                 focused,
                 &theme,
             );
@@ -847,10 +987,13 @@ mod tests {
                 target_prompt_index: 3,
                 active_idx: 0,
                 prompt_preview: None,
+                num_file_snapshots: 0,
             },
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: Some(3),
+            fixed_mode: None,
+            restore: JumpRestore::none(),
         }
     }
 
@@ -884,11 +1027,13 @@ mod tests {
             target_prompt_index: 0,
             active_idx: 0,
             prompt_preview: None,
+            num_file_snapshots: 0,
         };
-        assert_eq!(rewind_row_at(&phase, area(), 5, 2), Some(0));
+        assert_eq!(rewind_row_at(&phase, area(), 5, 2), Some(0), "row 0 = All");
         assert_eq!(rewind_row_at(&phase, area(), 5, 3), Some(1));
         assert_eq!(rewind_row_at(&phase, area(), 5, 4), Some(2));
-        assert_eq!(rewind_row_at(&phase, area(), 5, 5), None);
+        assert_eq!(rewind_row_at(&phase, area(), 5, 5), Some(3), "cancel row");
+        assert_eq!(rewind_row_at(&phase, area(), 5, 6), None);
     }
 
     #[test]
@@ -1032,16 +1177,17 @@ mod tests {
             target_prompt_index: 0,
             active_idx: 0,
             prompt_preview: None,
+            num_file_snapshots: 0,
         };
-        set_rewind_cursor(&mut confirm, 2);
+        set_rewind_cursor(&mut confirm, 3);
         if let RewindPhase::Confirm { active_idx, .. } = confirm {
-            assert_eq!(active_idx, 2);
+            assert_eq!(active_idx, 3);
         } else {
             panic!("expected confirm");
         }
         set_rewind_cursor(&mut confirm, 99);
         if let RewindPhase::Confirm { active_idx, .. } = confirm {
-            assert_eq!(active_idx, 2);
+            assert_eq!(active_idx, 3, "clamps to the last row (cancel)");
         } else {
             panic!("expected confirm");
         }
@@ -1063,30 +1209,34 @@ mod tests {
         };
         assert!(matches!(rewind_activate(&error), RewindInput::DismissError));
 
-        let confirm_go = RewindPhase::Confirm {
+        // Enter on a mode row picks that mode; the trailing row cancels.
+        let confirm_all = RewindPhase::Confirm {
             target_prompt_index: 4,
             active_idx: 0,
             prompt_preview: None,
+            num_file_snapshots: 0,
         };
         assert!(matches!(
-            rewind_activate(&confirm_go),
-            RewindInput::Confirm(4)
+            rewind_activate(&confirm_all),
+            RewindInput::Confirm(4, RewindMode::All)
         ));
 
-        let confirm_never = RewindPhase::Confirm {
+        let confirm_files = RewindPhase::Confirm {
             target_prompt_index: 4,
-            active_idx: 1,
+            active_idx: 2,
             prompt_preview: None,
+            num_file_snapshots: 0,
         };
         assert!(matches!(
-            rewind_activate(&confirm_never),
-            RewindInput::ConfirmNeverAsk(4)
+            rewind_activate(&confirm_files),
+            RewindInput::Confirm(4, RewindMode::FilesOnly)
         ));
 
         let confirm_no = RewindPhase::Confirm {
             target_prompt_index: 4,
-            active_idx: 2,
+            active_idx: 3,
             prompt_preview: None,
+            num_file_snapshots: 0,
         };
         assert!(matches!(
             rewind_activate(&confirm_no),
@@ -1097,18 +1247,89 @@ mod tests {
     #[test]
     fn confirm_letter_keys() {
         let state = confirm_state();
+        // Digits pick a mode directly.
+        assert!(matches!(
+            handle_rewind_key(&state, &key(KeyCode::Char('2'))),
+            RewindInput::Confirm(3, RewindMode::ConversationOnly)
+        ));
+        assert!(matches!(
+            handle_rewind_key(&state, &key(KeyCode::Char('3'))),
+            RewindInput::Confirm(3, RewindMode::FilesOnly)
+        ));
+        // y and a act on the highlighted row; the cursor starts on `All`.
         assert!(matches!(
             handle_rewind_key(&state, &key(KeyCode::Char('y'))),
-            RewindInput::Confirm(3)
+            RewindInput::Confirm(3, RewindMode::All)
+        ));
+        assert!(matches!(
+            handle_rewind_key(&state, &key(KeyCode::Char('a'))),
+            RewindInput::ConfirmNeverAsk(3, RewindMode::All)
         ));
         assert!(matches!(
             handle_rewind_key(&state, &key(KeyCode::Char('n'))),
             RewindInput::Dismissed
         ));
+
+        // On the cancel row y/a cancel rather than executing an unhighlighted mode.
+        let mut cancel_row = confirm_state();
+        if let RewindPhase::Confirm { active_idx, .. } = &mut cancel_row.phase {
+            *active_idx = CONFIRM_OPTIONS - 1;
+        }
         assert!(matches!(
-            handle_rewind_key(&state, &key(KeyCode::Char('a'))),
-            RewindInput::ConfirmNeverAsk(3)
+            handle_rewind_key(&cancel_row, &key(KeyCode::Char('y'))),
+            RewindInput::Dismissed
         ));
+        assert!(matches!(
+            handle_rewind_key(&cancel_row, &key(KeyCode::Char('a'))),
+            RewindInput::Dismissed
+        ));
+    }
+
+    #[test]
+    fn confirm_title_states_the_highlighted_mode() {
+        let locale = zh_cn_locale();
+        let area = Rect::new(0, 0, 160, 8);
+        let phase_with_cursor = |active_idx: usize| RewindPhase::Confirm {
+            target_prompt_index: 1,
+            active_idx,
+            prompt_preview: Some("alpha".into()),
+            num_file_snapshots: 3,
+        };
+
+        let render = |phase: &RewindPhase| {
+            let mut buf = Buffer::empty(area);
+            render_rewind_overlay(&mut buf, area, phase, true, Some(&locale));
+            (0..area.height)
+                .map(|row| {
+                    (0..area.width)
+                        .map(|col| buf[(col, row)].symbol().to_owned())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .replace(' ', "")
+        };
+
+        let all = render(&phase_with_cursor(0));
+        assert!(all.contains("将文件更改和会话回退到“alpha”"), "got: {all}");
+        assert!(all.contains("会话和文件更改"), "got: {all}");
+
+        let conversation = render(&phase_with_cursor(1));
+        assert!(
+            conversation.contains("仅将会话回退到“alpha”"),
+            "got: {conversation}"
+        );
+
+        // Files-only carries the snapshot count, which is what makes its cost legible.
+        let files = render(&phase_with_cursor(2));
+        assert!(
+            files.contains("仅将文件更改回退到“alpha”？（3个文件）"),
+            "got: {files}"
+        );
+
+        let cancel = render(&phase_with_cursor(CONFIRM_OPTIONS - 1));
+        assert!(cancel.contains("要回退什么？"), "got: {cancel}");
+        assert!(cancel.contains("否"), "got: {cancel}");
     }
 
     #[test]
@@ -1139,13 +1360,15 @@ mod tests {
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: None,
+            fixed_mode: None,
+            restore: JumpRestore::none(),
         };
         assert!(matches!(
             handle_rewind_key(&s, &key(KeyCode::Esc)),
             RewindInput::Dismissed
         ));
 
-        let s = RewindState::new_cancel_offer(0, None, None);
+        let s = RewindState::new_cancel_offer(0, None, None, None, JumpRestore::none());
         assert!(matches!(
             handle_rewind_key(&s, &key(KeyCode::Esc)),
             RewindInput::Dismissed
@@ -1156,6 +1379,8 @@ mod tests {
             anchor_entry_idx: 0,
             stashed_draft: None,
             selected_prompt_index: None,
+            fixed_mode: None,
+            restore: JumpRestore::none(),
         };
         assert!(matches!(
             handle_rewind_key(&s, &key(KeyCode::Esc)),

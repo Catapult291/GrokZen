@@ -45,11 +45,15 @@ Show session details — auth method, model, turn count, and context usage. Alia
 
 ### `/fork`
 
-Branch the current session into a new agent, keeping history up to this point.
+Branch the current session into a new agent. Without a fork point, a picker lists earlier prompts; the default row keeps the whole conversation. `--at <prompt>` forks immediately before the given one-based user prompt and prefills that prompt in the child composer. A `directive` is sent as the child's first prompt and takes precedence over the prefill. Position `1` is rejected because it would copy an empty session; use `/new` instead.
 
-### `/rewind` (alias: `/undo`)
+### `/rewind`
 
-Roll the conversation back to an earlier turn and discard everything after it. `/undo` is the same command.
+Roll a session back to an earlier turn. With **Confirm before rewind** on (the default), the confirmation lets you pick whether to rewind the conversation, the files that turn touched, or both.
+
+### `/undo`
+
+Roll the conversation back to an earlier turn, leaving every file alone. No confirmation is shown.
 
 ### `/copy`
 

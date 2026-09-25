@@ -976,7 +976,7 @@ impl ToolOutput {
             },
             ToolOutput::AskUserQuestion(
                 AskUserQuestionOutput::QuestionsSent { message, .. }
-                | AskUserQuestionOutput::UserAnswered { message },
+                | AskUserQuestionOutput::UserAnswered { message, .. },
             ) => message.clone(),
             ToolOutput::SendSubagentMessage(output) => output.to_string(),
             ToolOutput::Monitor(o) => {
@@ -1169,6 +1169,14 @@ pub enum AskUserQuestionOutput {
     UserAnswered {
         /// Pre-formatted tool result string for the model.
         message: String,
+        /// Images the user attached to the answers (base64 + MIME), in
+        /// paste order. Same session-harvest contract as
+        /// [`FileContent::extracted_images`]: they ride the output until the
+        /// session drains them into the vision follow-up, and are never
+        /// rendered as text.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        #[schemars(skip)]
+        extracted_images: Vec<crate::util::base64_images::ExtractedImage>,
     },
 }
 /// Output from the `ExitPlanMode` tool.

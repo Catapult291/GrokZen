@@ -6,8 +6,9 @@ use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::state::ScrollbackState;
+use crate::views::jump::JumpRestore;
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
-use crate::views::rewind::{RewindPhase, RewindState};
+use crate::views::rewind::{RewindMode, RewindPhase, RewindState};
 
 /// User prompt that participates in the shell's prompt numbering.
 /// Interjections render as user prompts but the shell never numbers them, so counting them would skew the positional prompt-to-entry mapping.
@@ -25,6 +26,16 @@ fn stash_prompt(prompt: &mut PromptWidget) -> Option<StashedPrompt> {
         None
     } else {
         Some(prompt.stash())
+    }
+}
+
+/// Viewport snapshot a rewind flow restores when it is dismissed (`Esc`), taken before its preview
+/// scrolling. The same rule `/jump` and `/fork` follow: cancelling leaves the transcript untouched.
+fn capture_rewind_restore(agent: &crate::app::agent_view::AgentView) -> JumpRestore {
+    JumpRestore {
+        bookmark: agent.scrollback.capture_scroll_bookmark(),
+        selected: agent.scrollback.selected(),
+        follow_mode: agent.scrollback.is_follow_mode(),
     }
 }
 
@@ -82,7 +93,14 @@ pub(in crate::app) fn find_user_prompt_entry_for_shell_index(
     None
 }
 
-pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
+/// Start a rewind flow and fetch its points.
+/// `from_cursor` pre-targets the turn under the scrollback cursor (the Esc-Esc path); otherwise the flow always opens the turn picker.
+/// `fixed_mode` pins the rewind's mode and skips the mode dialog: the `/undo` path, which never touches files.
+fn open_rewind(
+    app: &mut AppView,
+    from_cursor: bool,
+    fixed_mode: Option<RewindMode>,
+) -> Vec<Effect> {
     let locale = app.locale.clone();
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -98,7 +116,14 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
     // Rewind takes input priority over the `/jump` picker; close a lingering one first so it can't reappear (stale) after rewind finishes
     agent.dismiss_jump_picker();
 
-    let selected_idx = agent.scrollback.selected();
+    // Captured before any preview scrolling, so dismissing the flow can put the transcript back.
+    let restore = capture_rewind_restore(agent);
+
+    let selected_idx = if from_cursor {
+        agent.scrollback.selected()
+    } else {
+        None
+    };
     let selected_shell_idx =
         selected_idx.and_then(|idx| shell_prompt_index_at(&agent.scrollback, idx));
 
@@ -109,6 +134,8 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
             anchor,
             draft,
             selected_shell_idx,
+            fixed_mode,
+            restore,
         ));
         return vec![];
     }
@@ -119,6 +146,8 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
         anchor_entry_idx: selected_idx.unwrap_or(0),
         stashed_draft: draft,
         selected_prompt_index: selected_shell_idx,
+        fixed_mode,
+        restore,
     });
 
     vec![Effect::FetchRewindPoints {
@@ -127,41 +156,18 @@ pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
     }]
 }
 
+pub(super) fn dispatch_rewind(app: &mut AppView) -> Vec<Effect> {
+    open_rewind(app, true, None)
+}
+
 pub(super) fn dispatch_rewind_show_picker(app: &mut AppView) -> Vec<Effect> {
-    let locale = app.locale.clone();
-    let ActiveView::Agent(id) = app.active_view else {
-        return vec![];
-    };
-    let Some(agent) = app.agents.get_mut(&id) else {
-        return vec![];
-    };
-    let Some(session_id) = agent.session.session_id.clone() else {
-        app.show_toast(locale.named_static_text("session.no_active", "No active session"));
-        return vec![];
-    };
+    open_rewind(app, false, None)
+}
 
-    // Rewind takes input priority over the `/jump` picker; close a lingering one first so it can't reappear (stale) after rewind finishes
-    agent.dismiss_jump_picker();
-
-    if agent.session.state.is_busy() {
-        let anchor = agent.scrollback.len().saturating_sub(1);
-        let draft = stash_prompt(&mut agent.prompt);
-        agent.rewind_state = Some(RewindState::new_cancel_offer(anchor, draft, None));
-        return vec![];
-    }
-
-    let draft = stash_prompt(&mut agent.prompt);
-    agent.rewind_state = Some(RewindState {
-        phase: RewindPhase::Loading,
-        anchor_entry_idx: 0,
-        stashed_draft: draft,
-        selected_prompt_index: None,
-    });
-
-    vec![Effect::FetchRewindPoints {
-        agent_id: id,
-        session_id,
-    }]
+/// `/undo`: rewind the conversation only.
+/// The mode is pinned up front, so the flow offers no mode dialog and no confirm step.
+pub(super) fn dispatch_undo(app: &mut AppView) -> Vec<Effect> {
+    open_rewind(app, false, Some(RewindMode::ConversationOnly))
 }
 
 pub(super) fn dispatch_rewind_picker_select(app: &mut AppView, prompt_index: usize) -> Vec<Effect> {
@@ -179,13 +185,17 @@ pub(super) fn dispatch_rewind_picker_select(app: &mut AppView, prompt_index: usi
         },
     );
     let preview = point.and_then(|p| p.prompt_preview.clone());
+    let num_file_snapshots = point.map_or(0, |p| p.num_file_snapshots);
 
     let anchor = find_user_prompt_entry_for_shell_index(&agent.scrollback, prompt_index);
     if let Some(entry_idx) = anchor {
         agent.scrollback.set_selected(Some(entry_idx));
     }
 
-    let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+    let (draft, fixed_mode, restore) = match agent.rewind_state.take() {
+        Some(state) => (state.stashed_draft, state.fixed_mode, state.restore),
+        None => (None, None, JumpRestore::none()),
+    };
     begin_rewind(
         agent,
         id,
@@ -193,7 +203,10 @@ pub(super) fn dispatch_rewind_picker_select(app: &mut AppView, prompt_index: usi
         anchor.unwrap_or(0),
         draft,
         preview,
+        num_file_snapshots,
         confirm,
+        fixed_mode,
+        restore,
     )
 }
 
@@ -217,12 +230,20 @@ pub(super) fn dispatch_rewind_cancel_offer(app: &mut AppView) -> Vec<Effect> {
         .rewind_state
         .as_ref()
         .and_then(|s| s.selected_prompt_index);
+    let fixed_mode = agent.rewind_state.as_ref().and_then(|s| s.fixed_mode);
+    let restore = agent
+        .rewind_state
+        .as_ref()
+        .map(|s| s.restore)
+        .unwrap_or_else(JumpRestore::none);
     let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
     agent.rewind_state = Some(RewindState {
         phase: RewindPhase::Loading,
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: selected,
+        fixed_mode,
+        restore,
     });
     let mut effects = vec![Effect::CancelTurn {
         session_id: session_id.clone(),
@@ -238,7 +259,11 @@ pub(super) fn dispatch_rewind_cancel_offer(app: &mut AppView) -> Vec<Effect> {
     effects
 }
 
-pub(super) fn dispatch_rewind_confirm(app: &mut AppView, target: usize) -> Vec<Effect> {
+pub(super) fn dispatch_rewind_confirm(
+    app: &mut AppView,
+    target: usize,
+    mode: crate::views::rewind::RewindMode,
+) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -250,13 +275,19 @@ pub(super) fn dispatch_rewind_confirm(app: &mut AppView, target: usize) -> Vec<E
         .as_ref()
         .map(|s| s.anchor_entry_idx)
         .unwrap_or(0);
-    let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-    enter_executing(agent, id, target, anchor, draft)
+    let state = agent.rewind_state.take();
+    let restore = state.as_ref().map_or_else(JumpRestore::none, |s| s.restore);
+    let draft = state.and_then(|s| s.stashed_draft);
+    enter_executing(agent, id, target, anchor, draft, mode, restore)
 }
 
 /// "Yes, and don't ask again": quiet-persist confirm-before-rewind off, then execute.
 /// No settings checkmark toast; success/toast comes from the rewind itself.
-pub(super) fn dispatch_rewind_confirm_never_ask(app: &mut AppView, target: usize) -> Vec<Effect> {
+pub(super) fn dispatch_rewind_confirm_never_ask(
+    app: &mut AppView,
+    target: usize,
+    mode: crate::views::rewind::RewindMode,
+) -> Vec<Effect> {
     let mut effects = Vec::new();
     let prev = app.current_ui.confirm_before_rewind_enabled();
     if prev {
@@ -268,7 +299,7 @@ pub(super) fn dispatch_rewind_confirm_never_ask(app: &mut AppView, target: usize
             rollback_value: crate::settings::SettingValue::Bool(true),
         });
     }
-    effects.extend(dispatch_rewind_confirm(app, target));
+    effects.extend(dispatch_rewind_confirm(app, target, mode));
     effects
 }
 
@@ -279,11 +310,16 @@ pub(super) fn dispatch_rewind_dismiss(app: &mut AppView) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
-    if let Some(d) = draft {
-        agent.prompt.restore(d);
-    }
+    let state = agent.rewind_state.take();
     agent.rewind_points = None;
+    if let Some(state) = state {
+        // Put the transcript back where the flow opened it, so the preview scrolling (and the
+        // cut-point dim) doesn't outlive the flow. `/jump` and `/fork` dismiss the same way.
+        agent.restore_jump_viewport(state.restore);
+        if let Some(draft) = state.stashed_draft {
+            agent.prompt.restore(draft);
+        }
+    }
     vec![]
 }
 
@@ -300,13 +336,17 @@ fn stash_inline_resubmit_if_editing(agent: &mut crate::app::agent_view::AgentVie
     }
 }
 
-/// Enter `Executing` and emit `RewindExecute` (shared by confirm Yes and immediate execute when confirm-before-rewind is off).
+/// Enter `Executing` and emit `RewindExecute` (shared by the confirm rows and immediate
+/// execute when confirm-before-rewind is off).
+#[allow(clippy::too_many_arguments)]
 fn enter_executing(
     agent: &mut crate::app::agent_view::AgentView,
     agent_id: AgentId,
     target: usize,
     anchor: usize,
     draft: Option<StashedPrompt>,
+    mode: crate::views::rewind::RewindMode,
+    restore: JumpRestore,
 ) -> Vec<Effect> {
     let Some(session_id) = agent.session.session_id.clone() else {
         if let Some(d) = draft {
@@ -314,6 +354,8 @@ fn enter_executing(
         }
         agent.rewind_state = None;
         agent.rewind_points = None;
+        // The flow ends here without an execute, so it owes the user the viewport it borrowed.
+        agent.restore_jump_viewport(restore);
         return vec![];
     };
     agent.rewind_state = Some(RewindState {
@@ -323,16 +365,25 @@ fn enter_executing(
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
+        fixed_mode: None,
+        // Carried so a failed execute's `Error` phase can still put the viewport back on dismiss.
+        restore,
     });
     stash_inline_resubmit_if_editing(agent);
     vec![Effect::RewindExecute {
         agent_id,
         session_id,
         target_prompt_index: target,
+        mode,
     }]
 }
 
-/// When `confirm` is true, open the confirm dialog for any target; otherwise execute immediately.
+/// How the flow picks its mode once the target turn is known.
+/// `fixed_mode` is always used as-is (`/undo` pins conversation-only and asks nothing).
+/// Otherwise `confirm` decides between the mode dialog and an immediate run.
+/// With the dialog turned off there is nowhere to pick a mode, so the immediate path uses the
+/// protocol default (`All`) — the mode the dialog pre-selects.
+#[allow(clippy::too_many_arguments)]
 fn begin_rewind(
     agent: &mut crate::app::agent_view::AgentView,
     agent_id: AgentId,
@@ -340,22 +391,39 @@ fn begin_rewind(
     anchor: usize,
     draft: Option<StashedPrompt>,
     prompt_preview: Option<String>,
+    num_file_snapshots: usize,
     confirm: bool,
+    fixed_mode: Option<RewindMode>,
+    restore: JumpRestore,
 ) -> Vec<Effect> {
+    if let Some(mode) = fixed_mode {
+        return enter_executing(agent, agent_id, target, anchor, draft, mode, restore);
+    }
     if confirm {
         agent.rewind_state = Some(RewindState {
             phase: RewindPhase::Confirm {
                 target_prompt_index: target,
                 active_idx: 0,
                 prompt_preview,
+                num_file_snapshots,
             },
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index: Some(target),
+            fixed_mode: None,
+            restore,
         });
         return vec![];
     }
-    enter_executing(agent, agent_id, target, anchor, draft)
+    enter_executing(
+        agent,
+        agent_id,
+        target,
+        anchor,
+        draft,
+        crate::views::rewind::RewindMode::All,
+        restore,
+    )
 }
 
 pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
@@ -388,11 +456,19 @@ pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
         .or_else(|| agent.scrollback.selected())
         .unwrap_or(0);
     let draft = stash_prompt(&mut agent.prompt);
+    // The editor re-centered the transcript on the edited turn; a dismissed flow puts it back there.
+    let restore = capture_rewind_restore(agent);
 
     if agent.session.state.is_busy() {
         // Mid-turn submit: the same cancel offer `/rewind` raises appears over the still-open editor
         // Confirm cancels the turn and re-enters the flow; dismiss returns to the editor
-        agent.rewind_state = Some(RewindState::new_cancel_offer(anchor, draft, Some(target)));
+        agent.rewind_state = Some(RewindState::new_cancel_offer(
+            anchor,
+            draft,
+            Some(target),
+            None,
+            restore,
+        ));
         return vec![];
     }
 
@@ -401,6 +477,8 @@ pub(super) fn dispatch_inline_edit_submit(app: &mut AppView) -> Vec<Effect> {
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: Some(target),
+        fixed_mode: None,
+        restore,
     });
 
     vec![Effect::FetchRewindPoints {
@@ -429,12 +507,16 @@ pub(super) fn dispatch_rewind_success(
             .as_ref()
             .map(|s| s.anchor_entry_idx)
             .unwrap_or(0);
-        let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+        let state = agent.rewind_state.take();
+        let restore = state.as_ref().map_or_else(JumpRestore::none, |s| s.restore);
+        let draft = state.and_then(|s| s.stashed_draft);
         agent.rewind_state = Some(RewindState {
             phase: RewindPhase::Error { message: err },
             anchor_entry_idx: anchor,
             stashed_draft: draft,
             selected_prompt_index: None,
+            fixed_mode: None,
+            restore,
         });
         // The inline editor (if any) stays open; dismissing the error returns to editing
         return vec![];
@@ -447,7 +529,31 @@ pub(super) fn dispatch_rewind_success(
     }
 
     let target = response.target_prompt_index;
+    // What the shell actually did; an absent/unknown value means the old conversation-only shape.
+    let mode = crate::views::rewind::RewindMode::from_wire(response.mode.as_deref());
     let stashed_draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+
+    // Files-only keeps every turn (and its rendered blocks), so there is nothing to truncate,
+    // no summary to clear, and no rewound point to resubmit an inline edit from. The editor
+    // stays open on that path; the report below is the whole visible effect.
+    if !mode.rewinds_conversation() {
+        if inline_resubmit.is_none() {
+            let msg = locale.named_static_text(mode.reverted_id(), mode.reverted_default());
+            if app.screen_mode.is_minimal() {
+                agent
+                    .scrollback
+                    .push_block(RenderBlock::system(msg.to_string()));
+            } else {
+                agent.show_toast(msg);
+            }
+        }
+        if let Some(draft) = stashed_draft {
+            agent.prompt.restore(draft);
+        }
+        agent.set_active_pane(crate::app::agent_view::ActivePane::Prompt, false);
+        agent.rewind_points = None;
+        return vec![];
+    }
 
     // The summary describes turns the rewind just removed (the shell clears its persisted copy on the same branch)
     // Bump gen so a late SessionMetaFromDisk hydrate cannot restore the pre-rewind summary.json value into the cleared field
@@ -463,7 +569,7 @@ pub(super) fn dispatch_rewind_success(
 
     // An inline resubmit skips the confirmation; the edited prompt re-appearing at the same spot is self-explanatory
     if inline_resubmit.is_none() {
-        let msg = locale.named_static_text("rewind.reverted.conversation", "Reverted conversation");
+        let msg = locale.named_static_text(mode.reverted_id(), mode.reverted_default());
         if app.screen_mode.is_minimal() {
             // Minimal has no toast area and can't erase committed lines, so the confirmation stays in scrollback there
             agent
@@ -530,7 +636,10 @@ pub(super) fn handle_rewind_points_loaded(
         .rewind_state
         .as_ref()
         .and_then(|s| s.selected_prompt_index);
-    let stashed = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+    let (stashed, fixed_mode, restore) = match agent.rewind_state.take() {
+        Some(state) => (state.stashed_draft, state.fixed_mode, state.restore),
+        None => (None, None, JumpRestore::none()),
+    };
 
     if points.is_empty() {
         if let Some(stashed) = stashed {
@@ -552,6 +661,7 @@ pub(super) fn handle_rewind_points_loaded(
         if let Some(point) = resolved {
             let target = point.prompt_index;
             let preview = point.prompt_preview.clone();
+            let num_file_snapshots = point.num_file_snapshots;
             let anchor = find_user_prompt_entry_for_shell_index(&agent.scrollback, target);
             let draft = stashed.or_else(|| stash_prompt(&mut agent.prompt));
             if let Some(entry_idx) = anchor {
@@ -564,16 +674,23 @@ pub(super) fn handle_rewind_points_loaded(
                 anchor.unwrap_or(0),
                 draft,
                 preview,
+                num_file_snapshots,
                 confirm,
+                fixed_mode,
+                restore,
             );
         }
     }
 
+    // Oldest first, like the `/fork` picker's rows, so the picker reads in conversation order.
     let mut sorted = points;
-    sorted.sort_by(|a, b| b.prompt_index.cmp(&a.prompt_index));
+    sorted.sort_by_key(|p| p.prompt_index);
     let draft = stashed.or_else(|| stash_prompt(&mut agent.prompt));
+    // The cursor starts on the newest turn — the least destructive cut, and the row the flow landed
+    // on before the list was reordered — so its preview anchors that turn at the transcript top.
+    let selected = sorted.len() - 1;
     let initial_anchor = sorted
-        .first()
+        .last()
         .map(|p| {
             find_user_prompt_entry_for_shell_index(&agent.scrollback, p.prompt_index).unwrap_or(0)
         })
@@ -581,13 +698,15 @@ pub(super) fn handle_rewind_points_loaded(
     agent.rewind_state = Some(RewindState {
         phase: RewindPhase::Picker {
             points: sorted,
-            selected: 0,
+            selected,
         },
         anchor_entry_idx: initial_anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
+        fixed_mode,
+        restore,
     });
-    agent.scrollback.scroll_to_entry_center(initial_anchor);
+    agent.scrollback.scroll_to_entry_top(initial_anchor);
     vec![]
 }
 
@@ -606,12 +725,16 @@ pub(super) fn handle_rewind_execute_failed(
         .as_ref()
         .map(|s| s.anchor_entry_idx)
         .unwrap_or(0);
-    let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
+    let state = agent.rewind_state.take();
+    let restore = state.as_ref().map_or_else(JumpRestore::none, |s| s.restore);
+    let draft = state.and_then(|s| s.stashed_draft);
     agent.rewind_state = Some(RewindState {
         phase: RewindPhase::Error { message: error },
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
+        fixed_mode: None,
+        restore,
     });
     vec![]
 }

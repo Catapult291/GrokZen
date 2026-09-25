@@ -158,6 +158,7 @@ mod cta;
 mod elicitation;
 mod input;
 pub(crate) use input::ExternalPromptEditorAccess;
+mod fork_picker;
 mod interactions;
 mod jump;
 mod key_owner;
@@ -832,7 +833,14 @@ pub(crate) struct FollowUps {
 /// A composer action held back while a clipboard attachment probe is off-thread.
 ///
 /// Kind-only: the payload is re-derived at resume (see [`AgentView::resume_deferred_send`]), so the freshly attached image chip travels with it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct QuestionPasteIdentity {
+    pub tool_call_id: String,
+    pub question_idx: usize,
+    pub card_generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum AgentDeferredSend {
     /// Enter: a normal prompt send.
     SendPrompt,
@@ -840,6 +848,9 @@ pub(crate) enum AgentDeferredSend {
     Interject,
     /// Enter on the `/feedback` pane: a feedback submit.
     SubmitFeedback,
+    /// Enter (or another submit key) on a question card while a clipboard image
+    /// probe was still in flight: the answer is submitted once the image lands.
+    SubmitQuestion(QuestionPasteIdentity),
     /// Ctrl+S / Alt+S: set the draft aside once its image lands.
     Stash,
 }
@@ -1568,6 +1579,9 @@ pub struct AgentView {
     pub(crate) pending_inline_resubmit: Option<String>,
     /// `/jump` picker overlay (pure client-side turn navigation).
     pub(crate) jump_state: Option<crate::views::jump::JumpState>,
+    /// `/fork` fork-point picker overlay (pure client-side: one row per earlier prompt, plus the
+    /// "keep the whole conversation" row that reproduces the pre-picker behaviour).
+    pub(crate) fork_picker_state: Option<crate::views::fork_picker::ForkPickerState>,
     /// Timeline sidebar rail geometry for the current frame (`None` means
     /// hidden). Set by the renderer, consumed by mouse hit-testing.
     pub(crate) timeline_rail: Option<crate::views::timeline::TimelineRail>,
@@ -1696,6 +1710,9 @@ pub struct AgentView {
     /// paste-then-immediate-send never builds content blocks before the image
     /// attaches.
     pub(crate) paste_probe_in_flight: usize,
+    /// Monotonic identity for the current question card. Deferred clipboard work
+    /// records it so a late completion cannot attach to a replacement card.
+    pub(crate) question_card_generation: u64,
     /// A prompt send / interject deferred until the in-flight paste probe(s)
     /// complete. Kind-only: the payload is re-derived from the widget on
     /// reissue so the freshly attached image chip travels with it.
@@ -1908,7 +1925,7 @@ fn translate_local_submit(
             };
             InputOutcome::Action(Action::PromptBlockAnswered { row_id, choice })
         }
-        LocalQuestionKind::Fork { directive } => {
+        LocalQuestionKind::Fork { directive, cut } => {
             let Some((worktree, persist_mode)) = worktree_choice_from_index(*idx) else {
                 return InputOutcome::Changed;
             };
@@ -1916,6 +1933,7 @@ fn translate_local_submit(
                 worktree,
                 directive,
                 persist_mode,
+                cut,
             })
         }
         LocalQuestionKind::NewSession => {

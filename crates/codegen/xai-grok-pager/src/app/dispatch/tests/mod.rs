@@ -664,6 +664,16 @@ fn fork_args(worktree_override: Option<bool>, directive: Option<&str>) -> ForkAr
     ForkArgs {
         worktree_override,
         directive: directive.map(String::from),
+        // No fork point: `/fork` resolves it with the picker, `--at` pins it via [`fork_args_at`].
+        at_prompt: None,
+    }
+}
+/// [`fork_args`] with an explicit `/fork --at <prompt>` fork point.
+fn fork_args_at(worktree_override: Option<bool>, at_prompt: usize) -> ForkArgs {
+    ForkArgs {
+        worktree_override,
+        directive: None,
+        at_prompt: Some(at_prompt),
     }
 }
 /// Build a single-agent app for the `/fork` dispatcher tests.

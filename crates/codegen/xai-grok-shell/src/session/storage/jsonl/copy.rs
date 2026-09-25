@@ -317,6 +317,13 @@ impl JsonlStorageAdapter {
             options.inherited_prefix_len
         };
 
+        // A prompt cut discards every turn after the cut. Sidecars and compaction archives
+        // describe the parent at its latest state, so carrying them into the child would
+        // resurrect work that the prompt cut intentionally removed.
+        let partial_fork = options.target_prompt_index.is_some() && !options.fork_filter;
+        let copy_sidecars = !partial_fork;
+        let copy_compaction_segments = options.copy_compaction_segments && !partial_fork;
+
         // Worktree forks skip the cwd rewrite: their display_cwd already shows the model the original project path
         // Rewritten conversation paths would contradict it
         if !options.skip_cwd_transform && source_info.cwd != target_info.cwd {
@@ -375,17 +382,17 @@ impl JsonlStorageAdapter {
         std::fs::write(self.summary_file(target_info), summary_bytes)?;
 
         let plan_copied = copy_sidecar_file(
-            options.copy_plan_state,
+            copy_sidecars && options.copy_plan_state,
             &self.plan_file(source_info),
             &self.plan_file(target_info),
         )?;
         let signals_copied = copy_sidecar_file(
-            options.copy_signals,
+            copy_sidecars && options.copy_signals,
             &self.signals_file(source_info),
             &self.signals_file(target_info),
         )?;
         let usage_copied = copy_sidecar_file(
-            options.copy_usage,
+            copy_sidecars && options.copy_usage,
             &self.usage_file(source_info),
             &self.usage_file(target_info),
         )?;
@@ -411,17 +418,17 @@ impl JsonlStorageAdapter {
             )?;
         }
         let plan_mode_state_copied = copy_sidecar_file(
-            options.copy_plan_mode_state,
+            copy_sidecars && options.copy_plan_mode_state,
             &self.plan_mode_state_file(source_info),
             &self.plan_mode_state_file(target_info),
         )?;
         let tool_state_copied = copy_sidecar_file(
-            options.copy_tool_state,
+            copy_sidecars && options.copy_tool_state,
             &self.session_dir(source_info).join("tool_state.json"),
             &self.session_dir(target_info).join("tool_state.json"),
         )?;
         let announcement_state_copied = copy_sidecar_file(
-            options.copy_announcement_state,
+            copy_sidecars && options.copy_announcement_state,
             &self.announcement_state_file(source_info),
             &self.announcement_state_file(target_info),
         )?;
@@ -456,7 +463,7 @@ impl JsonlStorageAdapter {
         }
 
         // Copied verbatim: the archive is immutable, so no cwd rewrite.
-        let compaction_segments_copied = if options.copy_compaction_segments {
+        let compaction_segments_copied = if copy_compaction_segments {
             let src_dir = self
                 .session_dir(source_info)
                 .join(xai_compaction_transcript::COMPACTION_DIR);

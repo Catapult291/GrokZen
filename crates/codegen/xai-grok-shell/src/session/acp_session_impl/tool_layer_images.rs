@@ -13,6 +13,15 @@ pub(super) fn drain_tool_layer_extracted_images(
             std::mem::take(&mut fc.extracted_images)
         }
         ToolsToolOutput::MCP(mcp) => std::mem::take(&mut mcp.extracted_images),
+        // Images the user attached to their questionnaire answers: not
+        // "extracted" from anything, but they ride the same channel into the
+        // session's vision follow-up.
+        ToolsToolOutput::AskUserQuestion(
+            xai_grok_tools::types::output::AskUserQuestionOutput::UserAnswered {
+                extracted_images,
+                ..
+            },
+        ) => std::mem::take(extracted_images),
         _ => Vec::new(),
     }
 }
