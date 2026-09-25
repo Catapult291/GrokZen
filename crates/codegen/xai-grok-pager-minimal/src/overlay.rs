@@ -679,6 +679,7 @@ fn render_question(
             true,
             locale.text(xai_grok_pager::locale::TextKey::QuestionOtherPlaceholder),
             Some(locale),
+            false,
         );
     }
 
