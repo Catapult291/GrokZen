@@ -261,6 +261,21 @@
       "sha": "5c52c5afcd27b599f87d79534b87b94d1c1b5848",
       "source_subject": "Merge pull request #4 from JoyElliot/codex/community-release-auto-update",
       "title_zh": "添加社区 Release 自动更新支持"
+    },
+    {
+      "sha": "ecd93758dfda27a3fca2e4fc48dbd10ab850bdea",
+      "source_subject": "release: 1.0.17 fork rewind images and session list",
+      "title_zh": "发布 1.0.17：分叉、回退、图片回答与会话列表"
+    },
+    {
+      "sha": "9e4c3aacfd933c182fe594841df92c966671749d",
+      "source_subject": "fix: update minimal pager question render call",
+      "title_zh": "更新分页器最小问题渲染调用"
+    },
+    {
+      "sha": "c43959bdd317db3cd3052c8ad17b56e35b54dec5",
+      "source_subject": "fix: align localized release metadata wording",
+      "title_zh": "对齐本地化发布元数据文案"
     }
   ]
 }
