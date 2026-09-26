@@ -1017,6 +1017,53 @@ pub(crate) fn background_capable_cfg() -> ToolServerConfig {
         behavior_preset: None,
     }
 }
+/// Point the durable background-task registry at the built `grok-zh` binary.
+///
+/// A durable task is hosted by re-entering the executable as a hidden worker
+/// (`xai_grok_tools::computer::local::persistent::maybe_run_worker`), and only
+/// `xai-grok-pager-bin`'s `main` implements that entry point. Under `cargo
+/// test` the registry would otherwise re-enter the libtest harness, which
+/// exits immediately, so the caller must hand it the real binary. `None` means
+/// `grok-zh` has not been built — the same "skip rather than fail" policy as
+/// `TaskRegistry::for_live_worker`: a test binary is not a defect.
+///
+/// The registry root is redirected to a root private to `tag` as well, because
+/// the snapshot assertions count what the root holds: a shared root would list
+/// the tasks of a peer test, and workers outliving their test keep writing
+/// into theirs. Hold the returned guard for the test's lifetime: it restores
+/// both variables under the crate's env lock, which also serializes these
+/// fixtures so no two of them share a root.
+pub(crate) fn live_background_worker_env(tag: &str) -> Option<crate::LockedTestEnv> {
+    static EXE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let executable = EXE
+        .get_or_init(|| {
+            // Windows turns the crate name `grok-zh` into `grok_zh.exe`, so try
+            // both spellings; cargo puts binaries beside the test executable's
+            // parent directory.
+            let mut dir = std::env::current_exe()
+                .ok()?
+                .parent()
+                .map(ToOwned::to_owned);
+            while let Some(current) = dir {
+                for name in ["grok-zh", "grok_zh"] {
+                    let path = current.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+                    if path.is_file() {
+                        return Some(path);
+                    }
+                }
+                dir = current.parent().map(ToOwned::to_owned);
+            }
+            None
+        })
+        .clone()?;
+    let root = std::env::temp_dir().join(format!("grok-background-{}-{tag}", std::process::id()));
+    let env = crate::LockedTestEnv::lock();
+    let _ = std::fs::remove_dir_all(&root);
+    Some(
+        env.set("GROK_BACKGROUND_WORKER_EXECUTABLE", &executable)
+            .set("GROK_BACKGROUND_TASK_DIR", &root),
+    )
+}
 /// A minimal bash-kind [`TerminalRunRequest`] for `command`, writing output under `out_dir`.
 ///
 /// [`TerminalRunRequest`]: xai_grok_tools::computer::types::TerminalRunRequest
@@ -1112,6 +1159,11 @@ async fn rebind_swap_preserves_session_terminal_backend() {
 /// This locks the regression where snapshot-triggered swaps killed background tasks by building a fresh backend per session.
 #[tokio::test]
 async fn re_resolve_all_sessions_preserves_session_terminal_backend() {
+    let Some(_worker_env) =
+        live_background_worker_env("re_resolve_all_sessions_preserves_session_terminal_backend")
+    else {
+        return;
+    };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1280,6 +1332,10 @@ async fn local_bound_session_skips_snapshot_rebuild() {
 /// This locks the incident where a swap left an empty task table and SIGKILLed running tasks.
 #[tokio::test]
 async fn background_task_survives_toolset_swap() {
+    let Some(_worker_env) = live_background_worker_env("background_task_survives_toolset_swap")
+    else {
+        return;
+    };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1634,11 +1690,18 @@ async fn drop_session_leaves_externally_owned_hunk_tracker_alive() {
         })
         .await;
 }
-/// Isolation matrix #5: a workspace process restart loses tasks (they are process state), and what's pinned here is the recovery UX.
-/// The same session id recreates cleanly on the fresh process and the task table starts empty (loss is visible, not silent).
-/// `get_task_output` for the lost id returns the informative not-found message.
+/// Isolation matrix #5: an explicit background task is durable — it outlives the
+/// workspace process that started it — so the fresh handle finds it by id again
+/// instead of reporting it lost, and can still act on it.
+/// What the recovery pins is that the task comes back from the durable record,
+/// while the fresh process's own table starts empty.
 #[tokio::test]
-async fn restarted_workspace_recreates_session_and_reports_lost_task() {
+async fn restarted_workspace_rediscovers_durable_task() {
+    let Some(_worker_env) =
+        live_background_worker_env("restarted_workspace_rediscovers_durable_task")
+    else {
+        return;
+    };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -1674,9 +1737,14 @@ async fn restarted_workspace_recreates_session_and_reports_lost_task() {
                     false,
                 )
                 .expect("the session must recreate cleanly after a restart");
+            let rediscovered = session_b
+                .terminal_backend()
+                .get_task(&bg.task_id)
+                .await
+                .expect("the durable record must survive the restart");
             assert!(
-                session_b.terminal_backend().list_tasks().await.is_empty(),
-                "precondition: a fresh handle must start with an empty task table"
+                !rediscovered.completed,
+                "the task is still running across the restart"
             );
             let result = session_b
                 .toolset()
@@ -1689,20 +1757,16 @@ async fn restarted_workspace_recreates_session_and_reports_lost_task() {
                 .await
                 .expect("get_task_output must answer, not error");
             let xai_grok_tools::types::output::ToolOutput::TaskOutput(
-                xai_tool_types::TaskOutputOutput::TaskNotFound(msg),
+                xai_tool_types::TaskOutputOutput::Result(report),
             ) = &result.output
             else {
-                panic!("expected TaskNotFound, got: {:?}", result.output);
+                panic!("expected the running task, got: {:?}", result.output);
             };
-            assert!(
-                msg.contains(&format!("Task {} not found", bg.task_id)),
-                "the message must name the lost task id: {msg}"
+            assert_eq!(
+                report.task_id, bg.task_id,
+                "the surviving id must address the same task"
             );
-            assert!(
-                msg.contains("No background tasks or subagents exist in this session"),
-                "the message must say the restarted session has no tasks: {msg}"
-            );
-            session_a.terminal_backend().kill_task(&bg.task_id).await;
+            session_b.terminal_backend().kill_task(&bg.task_id).await;
         })
         .await;
 }
@@ -3237,7 +3301,7 @@ async fn on_mcp_snapshot_changed_emits_per_session_events_and_rebuilds() {
                 .expect("subB ok");
             let mut rx = handle.shared.events.subscribe();
             let mcp_tool = tc("GrokBuild:read_file", Some(ToolKind::Read));
-            let rebuilt = handle.on_mcp_snapshot_changed(vec![mcp_tool]);
+            let rebuilt = handle.on_mcp_snapshot_changed(vec![mcp_tool]).await;
             assert_eq!(rebuilt, 3, "main + 2 subagents");
             let mut got: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for _ in 0..3 {
@@ -3530,7 +3594,7 @@ async fn on_hub_tools_changed_emits_per_session_events() {
                 .expect("hubA ok");
             let mut rx = handle.shared.events.subscribe();
             let hub_tool = tc("hub:remote_exec", None);
-            let rebuilt = handle.on_hub_tools_changed(vec![hub_tool]);
+            let rebuilt = handle.on_hub_tools_changed(vec![hub_tool]).await;
             assert_eq!(rebuilt, 2, "main + 1 subagent");
             let mut got: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
             for _ in 0..2 {
@@ -3562,7 +3626,7 @@ async fn on_hub_tools_changed_updates_snapshot() {
             let handle = make_handle();
             assert!(handle.shared().hub_tools_snapshot().is_empty());
             let hub_tool = tc("hub:remote_exec", None);
-            handle.on_hub_tools_changed(vec![hub_tool]);
+            handle.on_hub_tools_changed(vec![hub_tool]).await;
             let snapshot = handle.shared().hub_tools_snapshot();
             assert_eq!(snapshot.len(), 1);
             assert_eq!(snapshot[0].id, "hub:remote_exec");
@@ -7537,6 +7601,11 @@ async fn restored_server_first_bind_ordering_decides_capability_and_toolset() {
 /// The snapshot-driven rebuild with a live task is in `re_resolve_all_sessions_preserves_session_terminal_backend`.
 #[tokio::test]
 async fn bind_flow_rebinds_keep_backend_and_task_alive_end_to_end() {
+    let Some(_worker_env) =
+        live_background_worker_env("bind_flow_rebinds_keep_backend_and_task_alive_end_to_end")
+    else {
+        return;
+    };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
