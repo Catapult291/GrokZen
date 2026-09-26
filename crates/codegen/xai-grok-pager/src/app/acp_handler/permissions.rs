@@ -1,5 +1,19 @@
 use super::*;
 
+/// Whether the permission manager let this request through *because* an
+/// always-approve floor applied, so a human still has to answer it.
+///
+/// Read from the request `_meta` the server stamps in
+/// `AcpPrompter::permission_request_meta`; unknown or absent meta means "no
+/// special handling", which keeps older agents behaving as before.
+fn requires_user_confirmation(req: &acp::RequestPermissionRequest) -> bool {
+    req.meta
+        .as_ref()
+        .and_then(|meta| meta.get(xai_grok_workspace::permission::REQUIRES_CONFIRMATION_META_KEY))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 pub(super) fn handle_permission_request(
     perm: xai_acp_lib::AcpArgs<acp::RequestPermissionRequest>,
     app: &mut AppView,
@@ -22,7 +36,13 @@ pub(super) fn handle_permission_request(
         return false;
     };
 
+    // Always-approve drain: answer with the first allow option instead of
+    // rendering a card. It must not touch a request the manager flagged as
+    // needing a human — a detached background command reaches this point
+    // precisely because it outlives the session, and auto-answering it here
+    // would silently undo the one gate that protects the user's machine.
     if agent.session.is_yolo()
+        && !requires_user_confirmation(&perm.request)
         && let Some(allow) = perm
             .request
             .options

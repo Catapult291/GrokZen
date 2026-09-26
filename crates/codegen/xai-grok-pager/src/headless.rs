@@ -443,10 +443,29 @@ fn mcp_server_names(cwd: &Path) -> Vec<McpServer> {
         .collect()
 }
 
+/// Answer a permission request on the user's behalf, when the requested option
+/// kind is offered.
+///
+/// Returns `None` when the request must not be auto-answered: the manager
+/// stamped it as needing a human, and a headless run has nobody to ask. The
+/// caller turns that into a cancellation, so the tool is refused rather than
+/// run unapproved.
 fn auto_respond_to_permissions(
     args: &acp::RequestPermissionRequest,
     option_kinds: &[acp::PermissionOptionKind],
 ) -> Option<acp::RequestPermissionResponse> {
+    let needs_human = args
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get(xai_grok_workspace::permission::REQUIRES_CONFIRMATION_META_KEY))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if needs_human {
+        tracing::warn!(
+            "refusing to auto-approve a request that requires a human; no interactive client is attached"
+        );
+        return None;
+    }
     for &option_kind in option_kinds {
         for option in &args.options {
             if option.kind == option_kind {

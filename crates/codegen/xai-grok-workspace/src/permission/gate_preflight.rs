@@ -91,7 +91,7 @@ impl GatePreflight {
     /// after the session ends, so the user is asked even under always-approve;
     /// the model may propose it, but it never becomes effective silently.
     pub(crate) fn requires_user_confirmation(&self) -> bool {
-        matches!(self.access, AccessKind::DetachBackground { .. })
+        self.access.requires_user_confirmation()
     }
 
     /// Blocks bash grants from satisfying a Read/Edit ask escalated from shell-file access.
