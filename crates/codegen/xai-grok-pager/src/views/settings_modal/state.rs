@@ -802,6 +802,9 @@ pub(super) fn setting_row_visible(
     minimal: bool,
     voice_mode: bool,
 ) -> bool {
+    if meta.key == "default_shell" && !cfg!(windows) {
+        return false;
+    }
     if !voice_mode
         && matches!(
             meta.key,
@@ -953,6 +956,7 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             _ => None,
         },
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
+        "default_shell" => Some(Action::SetDefaultShell(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
         "voice_capture_mode" => Some(Action::SetVoiceCaptureMode(choice.to_string())),
         "voice_stt_language" => Some(Action::SetVoiceSttLanguage(choice.to_string())),

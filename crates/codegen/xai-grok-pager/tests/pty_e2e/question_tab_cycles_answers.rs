@@ -310,3 +310,87 @@ async fn question_tab_cycles_answers() {
 async fn question_tab_cycles_answers_in_vim_mode() {
     assert_question_tab_contract(true).await;
 }
+
+/// `m` collapses the card to a single row and hands the keyboard to the transcript, so a pending
+/// question can be read against the conversation behind it; `m` (or `Tab`) collects it again and
+/// expands it, because answer keys must act on rows the user can see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
+async fn question_minimize_collapses_and_expands() {
+    let content = ContentController::start().await.expect("start content");
+    let _turn = expect_tool_turn(
+        &content,
+        "call_ask_minimize",
+        "ask_user_question",
+        ask_user_question_args(),
+    );
+    content.set_response(DONE_SENTINEL);
+
+    let binary = pager_binary().expect("resolve pager binary");
+    let mut harness = PtyHarness::spawn_with_content_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &["--yolo", "--trust"],
+        Some(content.home()),
+    )
+    .expect("spawn pager with content");
+
+    harness
+        .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
+        .expect("welcome text");
+    harness
+        .inject_keys(format!("{PROMPT}\r").as_bytes())
+        .expect("submit prompt");
+    harness
+        .wait_for_text(FIRST_ROWS[2], Duration::from_secs(30))
+        .expect("question card renders");
+    expect_text(&mut harness, "y copy", "the answer footer is up");
+    write_screen_dump_if_requested(&harness, "question_minimize_00_open");
+
+    harness.inject_keys(b"m").expect("m minimizes the card");
+    harness
+        .wait_for_text(PARKED_HINT, Duration::from_secs(10))
+        .expect("minimizing parks the card and names the way back");
+    expect_text(&mut harness, "minimized", "the collapsed row says so");
+    assert!(
+        !harness.contains_text("y copy"),
+        "a collapsed card keeps no answer footer\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    assert!(
+        !harness.contains_text(FIRST_ROWS[0]),
+        "a collapsed card hides its answer rows\nscreen:\n{}",
+        harness.screen_contents()
+    );
+    write_screen_dump_if_requested(&harness, "question_minimize_01_collapsed");
+
+    // The keyboard is on the transcript while the card waits: paging it must not answer anything.
+    harness.inject_keys(b"\x1b[5~").expect("PageUp");
+    assert!(
+        !harness.contains_text("y copy"),
+        "paging the transcript must not collect the card\nscreen:\n{}",
+        harness.screen_contents()
+    );
+
+    harness.inject_keys(b"m").expect("m expands the card");
+    harness
+        .wait_for_text(FOCUSED_HINT, Duration::from_secs(10))
+        .expect("expanding hands the keyboard back to the card");
+    expect_text(&mut harness, "y copy", "the answer footer returns");
+    expect_cursor_row(
+        &mut harness,
+        FIRST_ROWS[0],
+        "the walk resumes on the answer it collapsed on",
+    );
+    write_screen_dump_if_requested(&harness, "question_minimize_02_expanded");
+
+    // Answer both questions: Enter picks the focused row and moves on.
+    harness.inject_keys(b"\r").expect("answer question 1");
+    harness.inject_keys(b"\r").expect("answer question 2");
+    harness
+        .wait_for_text(DONE_SENTINEL, Duration::from_secs(30))
+        .expect("agent turn resumes after the answer");
+    harness.quit().expect("clean quit");
+}

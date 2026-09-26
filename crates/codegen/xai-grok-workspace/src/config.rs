@@ -40,6 +40,16 @@ impl SessionTerminalBackend {
             shutdown: Arc::new(move || canceller.cancel()),
         }
     }
+    /// Wrap a local backend while preserving its persistent background worker.
+    /// Session teardown stops only the foreground actor; detached jobs remain
+    /// queryable by their task ids.
+    pub fn local_persistent(backend: xai_grok_tools::computer::local::LocalTerminalBackend) -> Self {
+        let canceller = backend.clone();
+        Self {
+            backend: Arc::new(backend),
+            shutdown: Arc::new(move || canceller.cancel_foreground_only()),
+        }
+    }
     /// The type-erased backend, as injected into toolset resolves.
     pub fn backend(&self) -> &Arc<dyn xai_grok_tools::computer::types::TerminalBackend> {
         &self.backend

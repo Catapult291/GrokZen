@@ -447,6 +447,9 @@ impl HeuristicPermissionClassifier {
 
         match access {
             AccessKind::Bash(cmd) => classify_bash(cmd),
+            // A detached process outlives the session, so the classifier is not
+            // asked to wave it through: it fails closed to a user prompt.
+            AccessKind::DetachBackground { .. } => ClassifierVerdict::Block,
             AccessKind::WebFetch(url) => {
                 let u = url.to_ascii_lowercase();
                 if u.contains("localhost") || u.contains("127.0.0.1") || u.starts_with("file:") {
@@ -1305,6 +1308,7 @@ pub fn build_classifier_messages(
         AccessKind::Grep { .. } => "grep",
         AccessKind::Edit(_) => "edit",
         AccessKind::Bash(_) => "bash",
+        AccessKind::DetachBackground { .. } => "bash_detach",
         AccessKind::MCPTool { .. } => "mcp",
         AccessKind::WebFetch(_) => "web_fetch",
         AccessKind::WebSearch(_) => "web_search",

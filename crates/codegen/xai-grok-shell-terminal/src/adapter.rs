@@ -108,6 +108,7 @@ impl TrackedTask {
             kind: self.kind,
             owner_session_id: self.owner_session_id.clone(),
             description: self.description.clone(),
+            output_encoding: None,
             // ACP tracked tasks are only registered via run_background.
             is_backgrounded: true,
             output_total_bytes: 0,

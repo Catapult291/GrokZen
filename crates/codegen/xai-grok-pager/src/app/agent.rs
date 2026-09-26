@@ -1818,6 +1818,7 @@ mod tests {
             task_id: "t1".into(),
             command: String::new(),
             display_command: None,
+            output_encoding: None,
             cwd: "/tmp".into(),
             start_time: SystemTime::now(),
             end_time: None,

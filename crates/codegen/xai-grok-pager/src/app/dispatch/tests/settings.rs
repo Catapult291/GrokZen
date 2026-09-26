@@ -1613,6 +1613,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 app,
             );
         }
+        "default_shell" => {
+            let _ = dispatch(Action::SetDefaultShell("pwsh".to_string()), app);
+        }
         "hunk_tracker_mode" => {
             let _ = dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
         }
@@ -1654,6 +1657,45 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         }
     }
 }
+#[test]
+fn default_shell_persist_failure_rolls_back_ui_mirror() {
+    let mut app = test_app_with_agent();
+    dispatch(Action::SetDefaultShell("pwsh".to_string()), &mut app);
+    assert_eq!(app.current_ui.default_shell.as_deref(), Some("pwsh"));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SettingPersistFailed {
+            key: "default_shell",
+            rollback_value: crate::settings::SettingValue::Enum("git-bash"),
+            error: "write failed".to_string(),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(app.current_ui.default_shell.as_deref(), Some("git-bash"));
+}
+
+#[test]
+fn set_default_shell_persists_restart_required_choice() {
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetDefaultShell("pwsh".to_string()), &mut app);
+    assert_eq!(effects.len(), 1);
+    assert!(matches!(
+        &effects[0],
+        Effect::PersistSetting {
+            key: "default_shell",
+            value: crate::settings::SettingValue::Enum("pwsh"),
+            rollback_value: crate::settings::SettingValue::Enum("git-bash"),
+        }
+    ));
+    assert_eq!(app.current_ui.default_shell.as_deref(), Some("pwsh"));
+    let toast = read_toast(&app);
+    assert!(toast.contains("Default shell"));
+    assert!(toast.to_lowercase().contains("restart"));
+
+    let again = dispatch(Action::SetDefaultShell("pwsh".to_string()), &mut app);
+    assert!(again.is_empty());
+}
+
 #[test]
 fn set_compact_mode_toast_format() {
     let mut app = test_app_with_agent();

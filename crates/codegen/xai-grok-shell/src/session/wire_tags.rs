@@ -90,6 +90,7 @@ pub(crate) static TASK_COMPLETED: LazyLock<String> = LazyLock::new(|| {
             kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
         },

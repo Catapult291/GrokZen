@@ -264,6 +264,7 @@ impl AgentView {
             QuestionFocus::Navigation => {
                 vec![
                     HintItem::new(key!(Tab), "next answer"),
+                    HintItem::new(key!('m'), "collapse"),
                     esc,
                     HintItem::new(key!('X'), "dismiss"),
                 ]
@@ -943,6 +944,18 @@ impl AgentView {
         hint_key: Style,
         locale: Option<&crate::locale::LocaleContext>,
     ) -> Vec<Span<'static>> {
+        // A collapsed card shows nothing to walk or copy: the only move left is expanding it again.
+        if qv.minimized {
+            return vec![
+                Span::styled("m", hint_key),
+                Span::styled("/", hint_style),
+                Span::styled("Tab", hint_key),
+                Span::styled(
+                    format!(" {}", localized_ui_label(locale, "shortcut.expand", "expand")),
+                    hint_style,
+                ),
+            ];
+        }
         let mut left_spans: Vec<Span<'static>> = Vec::new();
         if qv.questions.len() > 1 {
             let counter = format!("[{}/{}] ", qv.active_tab + 1, qv.questions.len());
@@ -1381,7 +1394,14 @@ impl AgentView {
         } else {
             0
         };
-        let question_footer_h: u16 = if question_view_h > 0 { 3 } else { 0 };
+        // A collapsed question card keeps a single hint row and no gaps: its rows are the transcript's.
+        let question_footer_h: u16 = if question_view_h == 0 {
+            0
+        } else if self.question_view.as_ref().is_some_and(|qv| qv.minimized) {
+            1
+        } else {
+            3
+        };
         let prompt_height = if permission_view_h > 0 {
             if is_permission_followup && perm_inline_prompt_h > 1 {
                 permission_view_h + perm_inline_prompt_h.saturating_sub(1)
@@ -1389,7 +1409,12 @@ impl AgentView {
                 permission_view_h
             }
         } else if question_view_h > 0 {
-            let freeform_offset = if is_question_input_mode { 1u16 } else { 0 };
+            // In input mode the inline composer replaces the freeform cell, divider and all.
+            let freeform_offset = if is_question_input_mode {
+                crate::views::question_view::FREEFORM_ROW_ROWS
+            } else {
+                0
+            };
             question_view_h.saturating_sub(freeform_offset)
                 + question_prompt_body_h
                 + question_footer_h
@@ -3009,16 +3034,11 @@ impl AgentView {
             } else {
                 0
             };
-            let question_area = Rect {
-                x: layout.prompt.x,
-                y: layout.prompt.y,
-                width: layout.prompt.width,
-                height: layout
-                    .prompt
-                    .height
-                    .saturating_sub(inline_prompt_h)
-                    .saturating_sub(question_footer_h),
-            };
+            let question_area = crate::views::question_view::question_card_area(
+                layout.prompt,
+                inline_prompt_h,
+                question_footer_h,
+            );
             if let Some(ref mut qv) = self.question_view {
                 let content_w = inner_width.saturating_sub(QUESTION_VIEW_HPAD) as usize;
                 if let Some(question) = qv.questions.get(qv.active_tab) {
@@ -3220,7 +3240,11 @@ impl AgentView {
                 self.inline_prompt_area = None;
             }
             if let Some(ref qv) = self.question_view {
-                let footer_y = question_area.y + question_area.height + painted_prompt_h + 1;
+                // A collapsed card keeps its hint row flush under the summary; the expanded card
+                // keeps the blank row above and below it.
+                let footer_gap_above = u16::from(!qv.minimized);
+                let footer_y =
+                    question_area.y + question_area.height + painted_prompt_h + footer_gap_above;
                 let footer_x = layout.prompt.x;
                 let footer_w = layout.prompt.width;
                 self.question_nav_buttons.clear();
@@ -3258,7 +3282,8 @@ impl AgentView {
                         height: 1,
                     };
                     buf.set_style(footer_rect, Style::default().bg(footer_bg));
-                    let content_x = layout.prompt.x + 3;
+                    // Aligned with the card's inner text column, so hints sit under the body.
+                    let content_x = layout.prompt.x + crate::views::question_view::QUESTION_VIEW_CONTENT_X;
                     let hint_style = Style::default()
                         .fg(theme.gray)
                         .bg(footer_bg)
@@ -3278,7 +3303,10 @@ impl AgentView {
                     let avail_w = footer_w.saturating_sub(3);
                     buf.set_line_safe(content_x, footer_y, &left_line, avail_w);
                     let is_last = qv.active_tab >= qv.questions.len().saturating_sub(1);
-                    let enter_label = if feedback_pane || qv.is_feedback_trace() {
+                    // A collapsed card keeps no action button: it would act on rows that are not on screen.
+                    let enter_label = if qv.minimized {
+                        ""
+                    } else if feedback_pane || qv.is_feedback_trace() {
                         localized_ui_label(locale, "shortcut.send", "send")
                     } else if qv.is_on_freeform_row() {
                         localized_ui_label(locale, "shortcut.edit", "edit")
@@ -3299,7 +3327,7 @@ impl AgentView {
                         unicode_width::UnicodeWidthStr::width(enter_label) as u16;
                     let bw = 1 + btn_key.len() as u16 + 1 + enter_label_width + 1;
                     let btn_x = footer_x + footer_w.saturating_sub(3).saturating_sub(bw);
-                    if btn_x > content_x {
+                    if btn_x > content_x && !enter_label.is_empty() {
                         buf.set_span_safe(btn_x, footer_y, &Span::styled(" ", bpad_style), 1);
                         buf.set_span_safe(
                             btn_x + 1,
@@ -5584,13 +5612,18 @@ mod feedback_input_tests {
             screen.contains("Enter:send"),
             "footer must offer the send action\n{screen}"
         );
-        let top = screen
-            .lines()
-            .position(|l| l.contains('\u{256d}'))
+        // The report box is the innermost frame: the card's own top rule sits above it.
+        let rows: Vec<&str> = screen.lines().collect();
+        let top = rows
+            .iter()
+            .rposition(|l| l.contains('\u{256d}'))
             .expect("report box needs a top rule");
-        let bottom = screen
-            .lines()
-            .position(|l| l.contains('\u{2570}'))
+        let bottom = rows
+            .iter()
+            .enumerate()
+            .skip(top + 1)
+            .find(|(_, l)| l.contains('\u{2570}'))
+            .map(|(y, _)| y)
             .expect("report box needs a bottom rule");
         let box_rows = (bottom - top + 1) as u16;
         assert_eq!(
@@ -5618,7 +5651,9 @@ mod feedback_input_tests {
             let qv = agent.question_view.as_mut().expect("pane");
             qv.begin_feedback_trace_stage("clipboard is broken over ssh".into(), vec![]);
         }
-        let screen = render_text(&mut agent);
+        // The card frame costs rows the 33%-of-40 panel cannot spare, so the whole option list only
+        // fits on a taller screen; that is what this asserts.
+        let screen = render_text_sized(&mut agent, 100, 60);
         for fragment in ["Opt-in to provide your trace", "retain and train"] {
             assert!(
                 screen.contains(fragment),

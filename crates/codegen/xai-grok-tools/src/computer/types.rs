@@ -7,6 +7,88 @@ use std::{
 
 use crate::notification::types::ToolNotificationHandle;
 
+/// A validated, non-wide WHATWG source encoding for terminal output.
+///
+/// Terminal output is captured as raw bytes and decoded to UTF-8 at the
+/// presentation boundary. Keeping the label here lets the local backend
+/// validate it before spawning, while other `TerminalBackend` implementations
+/// can ignore the hint and continue decoding as UTF-8.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputEncoding {
+    label: String,
+}
+
+impl OutputEncoding {
+    /// Parse a WHATWG encoding label such as `gbk`, `shift_jis`, or
+    /// `windows-1252`. UTF-16/UTF-32 labels are rejected because a byte
+    /// stream without an unambiguous boundary cannot be decoded safely while
+    /// it is being streamed.
+    pub fn parse(value: &str) -> Result<Self, String> {
+        let label = value.trim();
+        if label.eq_ignore_ascii_case("utf-32")
+            || label.eq_ignore_ascii_case("utf-32le")
+            || label.eq_ignore_ascii_case("utf-32be")
+        {
+            return Err(wide_label_error(value));
+        }
+        let Some(encoding) = encoding_rs::Encoding::for_label_no_replacement(label.as_bytes())
+        else {
+            return Err(format!(
+                "Invalid encoding value \"{value}\". Use a WHATWG encoding label such as \"gbk\", \"shift_jis\", \"big5\", \"euc-kr\", or \"windows-1252\"."
+            ));
+        };
+        if encoding == encoding_rs::UTF_16LE || encoding == encoding_rs::UTF_16BE {
+            return Err(wide_label_error(value));
+        }
+        Ok(Self {
+            label: encoding.name().to_ascii_lowercase(),
+        })
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+impl serde::Serialize for OutputEncoding {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.label)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for OutputEncoding {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let label = String::deserialize(deserializer)?;
+        Self::parse(&label).map_err(serde::de::Error::custom)
+    }
+}
+
+impl schemars::JsonSchema for OutputEncoding {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "OutputEncoding".into()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        <String as schemars::JsonSchema>::json_schema(generator)
+    }
+
+    fn inline_schema() -> bool {
+        true
+    }
+}
+
+fn wide_label_error(value: &str) -> String {
+    format!(
+        "Encoding \"{value}\" is not supported for streamed command output. Use a single-byte or stateful non-wide encoding such as \"gbk\", \"shift_jis\", or \"windows-1252\"."
+    )
+}
+
 // ============================================================================
 // Error types
 // ============================================================================
@@ -86,7 +168,12 @@ pub struct TerminalRunRequest {
     /// File path to write output incrementally as it arrives.
     /// This ensures full output is always available even after in-memory buffer is truncated.
     /// For background tasks, this allows retrieval of output after the agent has moved on.
+    /// The file contains UTF-8 bytes; explicit source encodings are decoded before writing.
     pub output_file: PathBuf,
+
+    /// Source encoding selected by the caller. `None` preserves the existing
+    /// UTF-8/lossy behavior. The label is validated before a process is spawned.
+    pub output_encoding: Option<OutputEncoding>,
 
     /// Notification handle for streaming output chunks during execution.
     /// The backend sends `BashOutputChunk` notifications every ~100ms.
@@ -109,6 +196,15 @@ pub struct TerminalRunRequest {
 
     /// Auto-background on timeout instead of killing (default `false`).
     pub auto_background_on_timeout: bool,
+
+    /// Keep this background command running past session end (default `false`).
+    ///
+    /// Only meaningful for an explicit background run. When set, session
+    /// teardown leaves the task alone and the durable record outlives the
+    /// process, so a later session can rediscover, query, and stop it. The
+    /// permission gate requires a user confirmation before this ever takes
+    /// effect, so a model cannot detach a process on its own authority.
+    pub detach: bool,
 
     /// When [`Self::auto_background_on_timeout`] is true, maximum time the
     /// command may block the turn before being moved to the background (process
@@ -242,6 +338,9 @@ pub struct TaskSnapshot {
     /// Model-supplied label for task UI / snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Encoding to use when decoding this task's raw output log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_encoding: Option<OutputEncoding>,
     /// True after explicit/user/auto backgrounding; false for pure foreground runs.
     #[serde(default)]
     pub is_backgrounded: bool,
@@ -468,6 +567,18 @@ mod tests {
     }
 
     #[test]
+    fn output_encoding_accepts_whatwg_aliases_and_rejects_wide_encodings() {
+        assert_eq!(OutputEncoding::parse("GBK").unwrap().label(), "gbk");
+        assert_eq!(
+            OutputEncoding::parse("windows-1252").unwrap().label(),
+            "windows-1252"
+        );
+        assert!(OutputEncoding::parse("definitely-not-an-encoding").is_err());
+        assert!(OutputEncoding::parse("utf-16le").is_err());
+        assert!(OutputEncoding::parse("utf-32be").is_err());
+    }
+
+    #[test]
     fn io_error_kind_is_a_directory() {
         let io_err = std::io::Error::new(std::io::ErrorKind::IsADirectory, "it's a dir");
         let ce = ComputerError::from(io_err);
@@ -557,6 +668,7 @@ mod tests {
             kill_result_delivered: false,
             owner_session_id: None,
             description: None,
+            output_encoding: None,
             is_backgrounded: false,
         };
         assert!(!snap.is_auto_wake_suppressed());
@@ -604,6 +716,7 @@ mod tests {
             kill_result_delivered: true,
             owner_session_id: None,
             description: None,
+            output_encoding: None,
             is_backgrounded: false,
         };
         let mut value = serde_json::to_value(&snap).expect("serialize");

@@ -308,6 +308,26 @@ const SCREEN_MODE_CHOICES: &[EnumChoice] = &[
     },
 ];
 
+// Default Windows shell catalog. `pwsh` names the executable family rather than
+// a major version, so future PowerShell majors continue to work automatically.
+const DEFAULT_SHELL_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "git-bash",
+        display: "Git Bash",
+        description: "Use Git Bash as the default command shell. Includes Unix utilities.",
+    },
+    EnumChoice {
+        canonical: "pwsh",
+        display: "PowerShell 7+",
+        description: "Use pwsh.exe from the installed PowerShell 7 or newer release.",
+    },
+    EnumChoice {
+        canonical: "powershell",
+        display: "Windows PowerShell 5.1",
+        description: "Use the Windows PowerShell 5.1 command shell.",
+    },
+];
+
 // Voice-capture-mode catalog. SHELL-owned, persisted to `[ui].voice_capture_mode`.
 // `hold` is gated on `kitty_releases_reported`; `effective_enum_choices` hides it elsewhere, and it falls back to `toggle` at runtime
 // "Kitty-protocol terminal" in the copy below is a deliberate user-facing simplification
@@ -1356,6 +1376,34 @@ pub fn default_settings() -> Vec<SettingMeta> {
             hidden_in_minimal: false,
         },
         // SHELL-owned, persisted to `[ui].hunk_tracker_mode`. Restart-required: the mode is read once when the session connects.
+        SettingMeta {
+            key: "default_shell",
+            category: SettingCategory::Advanced,
+            owner: SettingOwner::Shell,
+            label: "Default shell",
+            description: "Command shell used for tools, hooks, terminals, and status-line commands. \
+                          GROK_SHELL overrides this setting. Writes [ui] default_shell in config.toml. \
+                          Restart required.",
+            keywords: &[
+                "shell",
+                "terminal",
+                "command",
+                "bash",
+                "git",
+                "pwsh",
+                "powershell",
+                "windows",
+            ],
+            kind: SettingKind::Enum {
+                default: crate::settings::canonical_default_shell(
+                    ui_default.default_shell.as_deref(),
+                ),
+                choices: DEFAULT_SHELL_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: true,
+            hidden_in_minimal: false,
+        },
         SettingMeta {
             key: "hunk_tracker_mode",
             category: SettingCategory::Advanced,

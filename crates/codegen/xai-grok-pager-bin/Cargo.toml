@@ -49,6 +49,7 @@ serde_json = { workspace = true }
 dunce = { workspace = true }
 semver = { workspace = true }
 xai-tty-utils = { workspace = true }
+xai-grok-tools = { workspace = true }
 # `collect_crashed()` for the startup crash notice.
 xai-grok-active-sessions = { workspace = true }
 xai-grok-config = { workspace = true }
