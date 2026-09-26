@@ -31,6 +31,12 @@ xai-grok-product = { path = "../xai-grok-product" }
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = { workspace = true }
 
+# file-id: volume serial number + file id for the parent-directory and source
+# identity checks. `std`'s MetadataExt::file_index is still unstable, and
+# directory length/mtime are too volatile on Windows to serve as identity.
+[target.'cfg(windows)'.dependencies]
+file-id = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

@@ -161,6 +161,7 @@ fastrace-opentelemetry = { version = "0.18" }
 fastrace-reqwest = { version = "0.2" }
 fastrace-tonic = { version = "0.1" }
 fastrand = "2"
+file-id = "0.2.3"
 filetime = "0.2.25"
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 fontdb = "0.23"

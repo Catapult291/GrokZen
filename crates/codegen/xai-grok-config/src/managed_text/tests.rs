@@ -227,7 +227,10 @@ fn invalid_inputs_and_all_marker_shapes_are_refused() {
         vec![b'x'; super::source::MAX_CONFIG_BYTES as usize + 1],
     )
     .unwrap();
-    let nul = temp.path().join("nul");
+    // Not "nul": on Windows that name resolves to the NUL device in any
+    // directory, so the write would vanish and the read would fail before the
+    // in-file NUL byte check is ever reached.
+    let nul = temp.path().join("nul-bytes");
     fs::write(&nul, b"a\0b").unwrap();
     let non_utf8 = temp.path().join("non-utf8");
     fs::write(&non_utf8, [0xff]).unwrap();

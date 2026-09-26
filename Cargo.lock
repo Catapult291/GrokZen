@@ -13473,6 +13473,7 @@ dependencies = [
  "blake3",
  "core-foundation",
  "dunce",
+ "file-id",
  "prod-mc-cli-chat-proxy-types",
  "ring",
  "semver",
