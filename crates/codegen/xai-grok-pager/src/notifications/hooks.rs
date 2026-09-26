@@ -22,6 +22,11 @@ fn execute_hook(
         .stderr(Stdio::null());
     if let Some(sid) = session_id {
         cmd.env("GROK_SESSION_ID", sid);
+    } else {
+        // Not setting it is not enough: the child inherits this process's env, so a hook
+        // spawned from inside a session would see the outer session's id and attribute
+        // itself to it. "No session" has to mean absent, not merely unset-by-us.
+        cmd.env_remove("GROK_SESSION_ID");
     }
 
     xai_tty_utils::detach_std_command(&mut cmd);
