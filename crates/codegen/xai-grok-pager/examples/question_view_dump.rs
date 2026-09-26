@@ -12,7 +12,8 @@ use xai_grok_pager::locale::{LocaleContext, LocaleSource, ResolvedLocale, UiLoca
 use xai_grok_pager::theme::Theme;
 use xai_grok_pager::views::prompt_widget::StashedPrompt;
 use xai_grok_pager::views::question_view::{
-    QUESTION_VIEW_HPAD, QuestionViewState, question_view_height, render_question_view_with_placeholder,
+    QUESTION_VIEW_HPAD, QuestionViewState, question_view_height,
+    render_question_view_with_placeholder,
 };
 use xai_grok_tools::implementations::grok_build::ask_user_question::{Question, QuestionOption};
 
@@ -143,6 +144,8 @@ fn main() {
         focused,
         "直接输入你的答案…",
         Some(&locale),
+        // The scenarios have no freeform answer, so nothing to badge as carrying an image.
+        false,
     );
     // Same scrollbar over the same region the pager uses, so an overflowing list can be checked.
     let res = xai_grok_pager::views::question_view::render_question_scrollbar(

@@ -307,6 +307,15 @@ fn discovery_priority_order() {
 /// When no .claude/settings.json exists anywhere, find returns paths but load returns None for each.
 #[test]
 fn discovery_with_no_settings_files() {
+    // The home tier is a real directory on any machine that has run the tool, so a temp
+    // HOME is what makes "no settings files exist" true. USERPROFILE is pinned alongside it
+    // because home_dir() prefers it on Windows and ignores HOME.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let _home_guard = EnvVarGuard::set("HOME", home.path());
+    let _userprofile_guard = EnvVarGuard::set("USERPROFILE", home.path());
+    let _grok_guard = EnvVarGuard::set("GROK_HOME", &home.path().join(".grok"));
+
     let tmp = tempfile::tempdir().unwrap();
     let cwd = tmp.path();
 
@@ -962,6 +971,9 @@ fn untrusted_project_claude_permissions_are_not_honored() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempfile::tempdir().unwrap();
     let _home_guard = EnvVarGuard::set("HOME", home.path());
+    // Pin USERPROFILE too: home_dir() prefers it on Windows and ignores HOME,
+    // so without this the untrusted-project case reads the real `~/.claude/settings.json`.
+    let _userprofile_guard = EnvVarGuard::set("USERPROFILE", home.path());
     let _grok_guard = EnvVarGuard::set("GROK_HOME", home.path());
     let _marker_guard = EnvVarGuard::unset("_GROK_CLAUDE_MARKER_OVERRIDE");
 

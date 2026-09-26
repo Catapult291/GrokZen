@@ -494,51 +494,66 @@ mod tests {
     use crate::handle::tests::{make_handle, make_handle_with_rewind_all_outcomes};
     #[tokio::test]
     async fn start_with_prompt_index_begins_and_end_finalizes_fs_rewind() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let cwd = session.cwd().to_path_buf();
-        handle
-            .on_turn_boundary("main", TurnBoundary::rewind_begin(3))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                let cwd = session.cwd().to_path_buf();
+                handle
+                    .on_turn_boundary("main", TurnBoundary::rewind_begin(3))
+                    .await;
+                let tracker = session.file_state_tracker();
+                assert_eq!(tracker.current_prompt_index().await, Some(3));
+                assert!(
+                    tracker.get_rewind_point(3).await.is_some(),
+                    "begin should create a rewind point for the prompt"
+                );
+                tracker
+                    .add_before_snapshot_for_prompt(
+                        3,
+                        &cwd.join("a.txt"),
+                        &cwd,
+                        Some("v1".to_owned()),
+                    )
+                    .await;
+                handle
+                    .on_turn_boundary("main", TurnBoundary::rewind_finalize(3))
+                    .await;
+                assert_eq!(
+                    tracker.current_prompt_index().await,
+                    None,
+                    "finalize (end_prompt) clears the current prompt index"
+                );
+                let point = tracker
+                    .get_rewind_point(3)
+                    .await
+                    .expect("rewind point still present after finalize");
+                assert!(
+                    !point.after_snapshots.is_empty(),
+                    "finalize should capture after-snapshots for touched files"
+                );
+            })
             .await;
-        let tracker = session.file_state_tracker();
-        assert_eq!(tracker.current_prompt_index().await, Some(3));
-        assert!(
-            tracker.get_rewind_point(3).await.is_some(),
-            "begin should create a rewind point for the prompt"
-        );
-        tracker
-            .add_before_snapshot_for_prompt(3, &cwd.join("a.txt"), &cwd, Some("v1".to_owned()))
-            .await;
-        handle
-            .on_turn_boundary("main", TurnBoundary::rewind_finalize(3))
-            .await;
-        assert_eq!(
-            tracker.current_prompt_index().await,
-            None,
-            "finalize (end_prompt) clears the current prompt index"
-        );
-        let point = tracker
-            .get_rewind_point(3)
-            .await
-            .expect("rewind point still present after finalize");
-        assert!(
-            !point.after_snapshots.is_empty(),
-            "finalize should capture after-snapshots for touched files"
-        );
     }
     #[tokio::test]
     async fn turn_hook_start_does_not_touch_fs_rewind() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        handle
-            .on_turn_boundary("main", TurnBoundary::turn_start(7))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                handle
+                    .on_turn_boundary("main", TurnBoundary::turn_start(7))
+                    .await;
+                let tracker = session.file_state_tracker();
+                assert!(
+                    tracker.get_rewind_points().await.is_empty(),
+                    "turn-hook boundary must not create rewind points"
+                );
+                assert_eq!(tracker.current_prompt_index().await, None);
+            })
             .await;
-        let tracker = session.file_state_tracker();
-        assert!(
-            tracker.get_rewind_points().await.is_empty(),
-            "turn-hook boundary must not create rewind points"
-        );
-        assert_eq!(tracker.current_prompt_index().await, None);
     }
     /// Open a checkpoint and record one touched file so finalize has an after-snapshot.
     async fn open_checkpoint_with_touched_file(handle: &WorkspaceHandle, prompt_index: usize) {
@@ -559,325 +574,391 @@ mod tests {
     }
     #[tokio::test]
     async fn non_completed_turn_end_finalizes_open_fs_rewind_when_flag_on() {
-        let handle = make_handle_with_rewind_all_outcomes(true);
-        open_checkpoint_with_touched_file(&handle, 5).await;
-        let session = handle.session("main").expect("main session exists");
-        let tracker = session.file_state_tracker();
-        assert_eq!(tracker.current_prompt_index().await, Some(5));
-        handle
-            .on_turn_boundary(
-                "main",
-                TurnBoundary::turn_end(5, 0, TurnHookOutcome::Error, Vec::new()),
-            )
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle_with_rewind_all_outcomes(true);
+                open_checkpoint_with_touched_file(&handle, 5).await;
+                let session = handle.session("main").expect("main session exists");
+                let tracker = session.file_state_tracker();
+                assert_eq!(tracker.current_prompt_index().await, Some(5));
+                handle
+                    .on_turn_boundary(
+                        "main",
+                        TurnBoundary::turn_end(5, 0, TurnHookOutcome::Error, Vec::new()),
+                    )
+                    .await;
+                assert_eq!(
+                    tracker.current_prompt_index().await,
+                    None,
+                    "non-Completed turn-end should finalize (clear) the open prompt"
+                );
+                let point = tracker
+                    .get_rewind_point(5)
+                    .await
+                    .expect("rewind point present");
+                assert!(
+                    !point.after_snapshots.is_empty(),
+                    "finalize should capture after-snapshots for touched files"
+                );
+            })
             .await;
-        assert_eq!(
-            tracker.current_prompt_index().await,
-            None,
-            "non-Completed turn-end should finalize (clear) the open prompt"
-        );
-        let point = tracker
-            .get_rewind_point(5)
-            .await
-            .expect("rewind point present");
-        assert!(
-            !point.after_snapshots.is_empty(),
-            "finalize should capture after-snapshots for touched files"
-        );
     }
     #[tokio::test]
     async fn non_completed_turn_end_does_not_finalize_when_flag_off() {
-        let handle = make_handle();
-        open_checkpoint_with_touched_file(&handle, 5).await;
-        let session = handle.session("main").expect("main session exists");
-        let tracker = session.file_state_tracker();
-        handle
-            .on_turn_boundary(
-                "main",
-                TurnBoundary::turn_end(5, 0, TurnHookOutcome::Error, Vec::new()),
-            )
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                open_checkpoint_with_touched_file(&handle, 5).await;
+                let session = handle.session("main").expect("main session exists");
+                let tracker = session.file_state_tracker();
+                handle
+                    .on_turn_boundary(
+                        "main",
+                        TurnBoundary::turn_end(5, 0, TurnHookOutcome::Error, Vec::new()),
+                    )
+                    .await;
+                assert_eq!(
+                    tracker.current_prompt_index().await,
+                    Some(5),
+                    "with the flag off the turn-hook path must leave the checkpoint open"
+                );
+                let point = tracker
+                    .get_rewind_point(5)
+                    .await
+                    .expect("rewind point present");
+                assert!(
+                    point.after_snapshots.is_empty(),
+                    "no after-snapshots should be captured when the flag is off"
+                );
+            })
             .await;
-        assert_eq!(
-            tracker.current_prompt_index().await,
-            Some(5),
-            "with the flag off the turn-hook path must leave the checkpoint open"
-        );
-        let point = tracker
-            .get_rewind_point(5)
-            .await
-            .expect("rewind point present");
-        assert!(
-            point.after_snapshots.is_empty(),
-            "no after-snapshots should be captured when the flag is off"
-        );
     }
     #[tokio::test]
     async fn completed_turn_end_hook_does_not_finalize_even_when_flag_on() {
-        let handle = make_handle_with_rewind_all_outcomes(true);
-        open_checkpoint_with_touched_file(&handle, 5).await;
-        let session = handle.session("main").expect("main session exists");
-        let tracker = session.file_state_tracker();
-        handle
-            .on_turn_boundary(
-                "main",
-                TurnBoundary::turn_end(5, 0, TurnHookOutcome::Completed, Vec::new()),
-            )
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle_with_rewind_all_outcomes(true);
+                open_checkpoint_with_touched_file(&handle, 5).await;
+                let session = handle.session("main").expect("main session exists");
+                let tracker = session.file_state_tracker();
+                handle
+                    .on_turn_boundary(
+                        "main",
+                        TurnBoundary::turn_end(5, 0, TurnHookOutcome::Completed, Vec::new()),
+                    )
+                    .await;
+                assert_eq!(
+                    tracker.current_prompt_index().await,
+                    Some(5),
+                    "Completed turn-ends are finalized by the RPC path, not the hook path"
+                );
+            })
             .await;
-        assert_eq!(
-            tracker.current_prompt_index().await,
-            Some(5),
-            "Completed turn-ends are finalized by the RPC path, not the hook path"
-        );
     }
     /// The non-Completed canary advances when a non-`Completed` turn-end finalizes an open FS checkpoint (flag on).
     /// Counters are monotonic, so `after > before` is robust.
     #[tokio::test]
     async fn canary_counts_non_completed_finalize() {
-        let label = crate::handle::rewind_outcome_label(TurnHookOutcome::Error);
-        let before = crate::handle::REWIND_NON_COMPLETED_FINALIZE_TOTAL
-            .with_label_values(&[label])
-            .get();
-        let handle = make_handle_with_rewind_all_outcomes(true);
-        open_checkpoint_with_touched_file(&handle, 11).await;
-        handle
-            .on_turn_boundary(
-                "main",
-                TurnBoundary::turn_end(11, 0, TurnHookOutcome::Error, Vec::new()),
-            )
-            .await;
-        let after = crate::handle::REWIND_NON_COMPLETED_FINALIZE_TOTAL
-            .with_label_values(&[label])
-            .get();
-        assert!(
-            after > before,
-            "canary must advance on a non-Completed finalize (before={before}, after={after})"
-        );
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let label = crate::handle::rewind_outcome_label(TurnHookOutcome::Error);
+            let before = crate::handle::REWIND_NON_COMPLETED_FINALIZE_TOTAL
+                .with_label_values(&[label])
+                .get();
+            let handle = make_handle_with_rewind_all_outcomes(true);
+            open_checkpoint_with_touched_file(&handle, 11).await;
+            handle
+                .on_turn_boundary(
+                    "main",
+                    TurnBoundary::turn_end(11, 0, TurnHookOutcome::Error, Vec::new()),
+                )
+                .await;
+            let after = crate::handle::REWIND_NON_COMPLETED_FINALIZE_TOTAL
+                .with_label_values(&[label])
+                .get();
+            assert!(
+                after > before,
+                "canary must advance on a non-Completed finalize (before={before}, after={after})"
+            );
+    }).await;
     }
     /// A `Completed` turn-end never feeds the canary: the `completed` label must stay zero, guarding the `outcome != Completed` gate.
     #[tokio::test]
     async fn canary_never_labeled_completed() {
-        let handle = make_handle_with_rewind_all_outcomes(true);
-        open_checkpoint_with_touched_file(&handle, 12).await;
-        handle
-            .on_turn_boundary(
-                "main",
-                TurnBoundary::turn_end(12, 0, TurnHookOutcome::Completed, Vec::new()),
-            )
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle_with_rewind_all_outcomes(true);
+                open_checkpoint_with_touched_file(&handle, 12).await;
+                handle
+                    .on_turn_boundary(
+                        "main",
+                        TurnBoundary::turn_end(12, 0, TurnHookOutcome::Completed, Vec::new()),
+                    )
+                    .await;
+                assert_eq!(
+                    crate::handle::REWIND_NON_COMPLETED_FINALIZE_TOTAL
+                        .with_label_values(&[crate::handle::rewind_outcome_label(
+                            TurnHookOutcome::Completed
+                        )])
+                        .get(),
+                    0,
+                    "Completed turns must never increment the non-Completed finalize canary"
+                );
+            })
             .await;
-        assert_eq!(
-            crate::handle::REWIND_NON_COMPLETED_FINALIZE_TOTAL
-                .with_label_values(&[crate::handle::rewind_outcome_label(
-                    TurnHookOutcome::Completed
-                )])
-                .get(),
-            0,
-            "Completed turns must never increment the non-Completed finalize canary"
-        );
     }
     /// Capture two turns, then rewind: the earlier turn survives; the target and later turns are dropped and truncated.
     #[tokio::test]
     async fn capture_then_restore_round_trips_turn_delta() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let cwd = session.cwd().to_path_buf();
-        let hunks = session.hunk_tracker();
-        hunks.record_agent_write(cwd.join("a.rs"), "fn a() {}\n".to_owned(), 0, None);
-        hunks.record_agent_write(cwd.join("b.rs"), "fn b() {}\n".to_owned(), 1, None);
-        session.capture_hunk_delta(0).await;
-        session.capture_hunk_delta(1).await;
-        assert!(!hunks.get_turn_hunks(0).await.is_empty());
-        assert!(!hunks.get_turn_hunks(1).await.is_empty());
-        session.restore_hunk_checkpoints(1).await;
-        assert!(
-            hunks.get_turn_hunks(1).await.is_empty(),
-            "rewind must drop the rewound turn's hunks"
-        );
-        assert!(
-            !hunks.get_turn_hunks(0).await.is_empty(),
-            "rewind must keep turns before the target"
-        );
-        let tracked = hunks.get_all_tracked_paths().await;
-        assert!(
-            tracked.contains(&cwd.join("a.rs")),
-            "kept turn's file remains"
-        );
-        assert!(
-            !tracked.contains(&cwd.join("b.rs")),
-            "rewound turn's file is gone"
-        );
-        let store = session.hunk_checkpoints.lock().await;
-        assert!(store.contains_key(&0), "kept delta remains in the store");
-        assert!(!store.contains_key(&1), "rewound delta is dropped");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                let cwd = session.cwd().to_path_buf();
+                let hunks = session.hunk_tracker();
+                hunks.record_agent_write(cwd.join("a.rs"), "fn a() {}\n".to_owned(), 0, None);
+                hunks.record_agent_write(cwd.join("b.rs"), "fn b() {}\n".to_owned(), 1, None);
+                session.capture_hunk_delta(0).await;
+                session.capture_hunk_delta(1).await;
+                assert!(!hunks.get_turn_hunks(0).await.is_empty());
+                assert!(!hunks.get_turn_hunks(1).await.is_empty());
+                session.restore_hunk_checkpoints(1).await;
+                assert!(
+                    hunks.get_turn_hunks(1).await.is_empty(),
+                    "rewind must drop the rewound turn's hunks"
+                );
+                assert!(
+                    !hunks.get_turn_hunks(0).await.is_empty(),
+                    "rewind must keep turns before the target"
+                );
+                let tracked = hunks.get_all_tracked_paths().await;
+                assert!(
+                    tracked.contains(&cwd.join("a.rs")),
+                    "kept turn's file remains"
+                );
+                assert!(
+                    !tracked.contains(&cwd.join("b.rs")),
+                    "rewound turn's file is gone"
+                );
+                let store = session.hunk_checkpoints.lock().await;
+                assert!(store.contains_key(&0), "kept delta remains in the store");
+                assert!(!store.contains_key(&1), "rewound delta is dropped");
+            })
+            .await;
     }
     /// `get_checkpoint` assembles both domains: the FS rewind point and the stored hunk delta.
     #[tokio::test]
     async fn get_checkpoint_bundles_fs_point_and_hunk_delta() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let cwd = session.cwd().to_path_buf();
-        let tracker = session.file_state_tracker();
-        tracker.begin_prompt(0).await;
-        tracker
-            .add_before_snapshot_for_prompt(0, &cwd.join("a.rs"), &cwd, Some("v0".to_owned()))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                let cwd = session.cwd().to_path_buf();
+                let tracker = session.file_state_tracker();
+                tracker.begin_prompt(0).await;
+                tracker
+                    .add_before_snapshot_for_prompt(
+                        0,
+                        &cwd.join("a.rs"),
+                        &cwd,
+                        Some("v0".to_owned()),
+                    )
+                    .await;
+                session.hunk_tracker().record_agent_write(
+                    cwd.join("a.rs"),
+                    "fn a() {}\n".to_owned(),
+                    0,
+                    None,
+                );
+                session.capture_hunk_delta(0).await;
+                let checkpoint = session.get_checkpoint(0).await.expect("checkpoint exists");
+                assert_eq!(checkpoint.prompt_index, 0);
+                assert!(
+                    !checkpoint.fs.file_snapshots.is_empty(),
+                    "fs side carries the before-snapshot"
+                );
+                let delta = checkpoint.hunks.expect("hunk delta captured");
+                assert!(delta.file_states.contains_key(&cwd.join("a.rs")));
+                assert!(session.get_checkpoint(5).await.is_none());
+            })
             .await;
-        session.hunk_tracker().record_agent_write(
-            cwd.join("a.rs"),
-            "fn a() {}\n".to_owned(),
-            0,
-            None,
-        );
-        session.capture_hunk_delta(0).await;
-        let checkpoint = session.get_checkpoint(0).await.expect("checkpoint exists");
-        assert_eq!(checkpoint.prompt_index, 0);
-        assert!(
-            !checkpoint.fs.file_snapshots.is_empty(),
-            "fs side carries the before-snapshot"
-        );
-        let delta = checkpoint.hunks.expect("hunk delta captured");
-        assert!(delta.file_states.contains_key(&cwd.join("a.rs")));
-        assert!(session.get_checkpoint(5).await.is_none());
     }
     /// Flag off (default): finalize never captures a hunk delta.
     #[tokio::test]
     async fn turn_end_with_flag_off_skips_hunk_capture() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let cwd = session.cwd().to_path_buf();
-        session.hunk_tracker().record_agent_write(
-            cwd.join("a.rs"),
-            "fn a() {}\n".to_owned(),
-            0,
-            None,
-        );
-        assert!(
-            !rewind_hunks_enabled(),
-            "flag must default off for the legacy path"
-        );
-        handle
-            .on_turn_boundary("main", TurnBoundary::rewind_finalize(0))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                let cwd = session.cwd().to_path_buf();
+                session.hunk_tracker().record_agent_write(
+                    cwd.join("a.rs"),
+                    "fn a() {}\n".to_owned(),
+                    0,
+                    None,
+                );
+                assert!(
+                    !rewind_hunks_enabled(),
+                    "flag must default off for the legacy path"
+                );
+                handle
+                    .on_turn_boundary("main", TurnBoundary::rewind_finalize(0))
+                    .await;
+                assert!(
+                    session.hunk_checkpoints.lock().await.is_empty(),
+                    "flag-off finalize must not store hunk deltas (legacy default)"
+                );
+            })
             .await;
-        assert!(
-            session.hunk_checkpoints.lock().await.is_empty(),
-            "flag-off finalize must not store hunk deltas (legacy default)"
-        );
     }
     /// The flag was enabled mid-session, so no deltas exist before a non-zero target: restore must not wipe live hunks.
     #[tokio::test]
     async fn restore_with_no_deltas_before_target_does_not_wipe() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let cwd = session.cwd().to_path_buf();
-        let hunks = session.hunk_tracker();
-        hunks.record_agent_write(cwd.join("early.rs"), "fn e() {}\n".to_owned(), 1, None);
-        hunks.record_agent_write(cwd.join("late.rs"), "fn l() {}\n".to_owned(), 5, None);
-        session.capture_hunk_delta(5).await;
-        session.restore_hunk_checkpoints(3).await;
-        let tracked = hunks.get_all_tracked_paths().await;
-        assert!(
-            tracked.contains(&cwd.join("early.rs")),
-            "uncaptured live hunks must not be wiped when nothing is captured before the target"
-        );
-        assert!(
-            session.hunk_checkpoints.lock().await.contains_key(&5),
-            "the store is left untouched when restore cannot reconstruct"
-        );
+        let local = tokio::task::LocalSet::new();
+        local.run_until(async {
+            let handle = make_handle();
+            let session = handle.session("main").expect("main session exists");
+            let cwd = session.cwd().to_path_buf();
+            let hunks = session.hunk_tracker();
+            hunks.record_agent_write(cwd.join("early.rs"), "fn e() {}\n".to_owned(), 1, None);
+            hunks.record_agent_write(cwd.join("late.rs"), "fn l() {}\n".to_owned(), 5, None);
+            session.capture_hunk_delta(5).await;
+            session.restore_hunk_checkpoints(3).await;
+            let tracked = hunks.get_all_tracked_paths().await;
+            assert!(
+                tracked.contains(&cwd.join("early.rs")),
+                "uncaptured live hunks must not be wiped when nothing is captured before the target"
+            );
+            assert!(
+                session.hunk_checkpoints.lock().await.contains_key(&5),
+                "the store is left untouched when restore cannot reconstruct"
+            );
+    }).await;
     }
     /// Rewind to 0: re-seed to the empty start-of-session state.
     #[tokio::test]
     async fn restore_to_zero_clears_all_hunk_state() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let cwd = session.cwd().to_path_buf();
-        let hunks = session.hunk_tracker();
-        hunks.record_agent_write(cwd.join("a.rs"), "fn a() {}\n".to_owned(), 0, None);
-        session.capture_hunk_delta(0).await;
-        assert!(!hunks.get_all_tracked_paths().await.is_empty());
-        session.restore_hunk_checkpoints(0).await;
-        assert!(
-            hunks.get_all_tracked_paths().await.is_empty(),
-            "rewind to 0 reconstructs the empty start-of-session hunk state"
-        );
-        assert!(
-            session.hunk_checkpoints.lock().await.is_empty(),
-            "rewind to 0 truncates the entire delta store"
-        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                let cwd = session.cwd().to_path_buf();
+                let hunks = session.hunk_tracker();
+                hunks.record_agent_write(cwd.join("a.rs"), "fn a() {}\n".to_owned(), 0, None);
+                session.capture_hunk_delta(0).await;
+                assert!(!hunks.get_all_tracked_paths().await.is_empty());
+                session.restore_hunk_checkpoints(0).await;
+                assert!(
+                    hunks.get_all_tracked_paths().await.is_empty(),
+                    "rewind to 0 reconstructs the empty start-of-session hunk state"
+                );
+                assert!(
+                    session.hunk_checkpoints.lock().await.is_empty(),
+                    "rewind to 0 truncates the entire delta store"
+                );
+            })
+            .await;
     }
     /// `workspace_rewind_git` default (OFF): capture must not touch git.
     #[tokio::test]
     async fn git_capture_is_noop_when_flag_disabled_by_default() {
-        assert!(
-            !git::git_rewind_enabled(),
-            "workspace_rewind_git must default OFF"
-        );
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        handle
-            .on_turn_boundary("main", TurnBoundary::rewind_begin(2))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                assert!(
+                    !git::git_rewind_enabled(),
+                    "workspace_rewind_git must default OFF"
+                );
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                handle
+                    .on_turn_boundary("main", TurnBoundary::rewind_begin(2))
+                    .await;
+                assert!(
+                    session.git_checkpoints().get(2).await.is_none(),
+                    "git state must not be captured while workspace_rewind_git is disabled"
+                );
+                assert!(
+                    session
+                        .file_state_tracker()
+                        .get_rewind_point(2)
+                        .await
+                        .is_some(),
+                    "FS-rewind capture must be unaffected by the git flag"
+                );
+            })
             .await;
-        assert!(
-            session.git_checkpoints().get(2).await.is_none(),
-            "git state must not be captured while workspace_rewind_git is disabled"
-        );
-        assert!(
-            session
-                .file_state_tracker()
-                .get_rewind_point(2)
-                .await
-                .is_some(),
-            "FS-rewind capture must be unaffected by the git flag"
-        );
     }
     /// A fully-populated checkpoint (FS and hunk delta) round-trips through JSON: the re-encoded `Value` matches and both payloads survive.
     /// `Hunk.selected` is `#[serde(skip)]` (transient), so it decodes to default.
     #[tokio::test]
     async fn rewind_checkpoint_round_trips_through_json() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let cwd = session.cwd().to_path_buf();
-        let tracker = session.file_state_tracker();
-        tracker.begin_prompt(0).await;
-        tracker
-            .add_before_snapshot_for_prompt(0, &cwd.join("a.rs"), &cwd, Some("v0".to_owned()))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                let cwd = session.cwd().to_path_buf();
+                let tracker = session.file_state_tracker();
+                tracker.begin_prompt(0).await;
+                tracker
+                    .add_before_snapshot_for_prompt(
+                        0,
+                        &cwd.join("a.rs"),
+                        &cwd,
+                        Some("v0".to_owned()),
+                    )
+                    .await;
+                tracker.end_prompt(session.async_fs(), 0).await;
+                session.hunk_tracker().record_agent_write(
+                    cwd.join("a.rs"),
+                    "fn a() {}\n".to_owned(),
+                    0,
+                    None,
+                );
+                session.capture_hunk_delta(0).await;
+                let original = session.get_checkpoint(0).await.expect("checkpoint exists");
+                assert!(
+                    original.hunks.is_some(),
+                    "precondition: hunk delta captured, so serde covers all populated domains"
+                );
+                let encoded = serde_json::to_value(&original).expect("serialize");
+                let decoded: RewindCheckpoint =
+                    serde_json::from_value(encoded.clone()).expect("deserialize");
+                let re_encoded = serde_json::to_value(&decoded).expect("re-serialize");
+                assert_eq!(
+                    encoded, re_encoded,
+                    "RewindCheckpoint must round-trip through JSON unchanged"
+                );
+                assert_eq!(decoded.prompt_index, 0);
+                assert_eq!(
+                    decoded.fs.file_snapshots.len(),
+                    1,
+                    "fs before-snapshot survives the round-trip"
+                );
+                let delta = decoded.hunks.expect("hunk delta survives round-trip");
+                assert_eq!(delta.prompt_index, 0);
+                let snapshot = delta
+                    .file_states
+                    .get(&cwd.join("a.rs"))
+                    .expect("hunk delta's touched file survives");
+                let hunk = snapshot.hunks.first().expect("the file's hunk survives");
+                assert!(
+                    hunk.new_text.contains("fn a()"),
+                    "hunk new_text payload survives the round-trip, got {:?}",
+                    hunk.new_text
+                );
+                assert!(!hunk.selected, "transient `selected` is not persisted");
+            })
             .await;
-        tracker.end_prompt(session.async_fs(), 0).await;
-        session.hunk_tracker().record_agent_write(
-            cwd.join("a.rs"),
-            "fn a() {}\n".to_owned(),
-            0,
-            None,
-        );
-        session.capture_hunk_delta(0).await;
-        let original = session.get_checkpoint(0).await.expect("checkpoint exists");
-        assert!(
-            original.hunks.is_some(),
-            "precondition: hunk delta captured, so serde covers all populated domains"
-        );
-        let encoded = serde_json::to_value(&original).expect("serialize");
-        let decoded: RewindCheckpoint =
-            serde_json::from_value(encoded.clone()).expect("deserialize");
-        let re_encoded = serde_json::to_value(&decoded).expect("re-serialize");
-        assert_eq!(
-            encoded, re_encoded,
-            "RewindCheckpoint must round-trip through JSON unchanged"
-        );
-        assert_eq!(decoded.prompt_index, 0);
-        assert_eq!(
-            decoded.fs.file_snapshots.len(),
-            1,
-            "fs before-snapshot survives the round-trip"
-        );
-        let delta = decoded.hunks.expect("hunk delta survives round-trip");
-        assert_eq!(delta.prompt_index, 0);
-        let snapshot = delta
-            .file_states
-            .get(&cwd.join("a.rs"))
-            .expect("hunk delta's touched file survives");
-        let hunk = snapshot.hunks.first().expect("the file's hunk survives");
-        assert!(
-            hunk.new_text.contains("fn a()"),
-            "hunk new_text payload survives the round-trip, got {:?}",
-            hunk.new_text
-        );
-        assert!(!hunk.selected, "transient `selected` is not persisted");
     }
     /// Optional domain fields are additive: a checkpoint round-trips with `hunks: None`, and JSON omitting the optional field still deserializes.
     #[tokio::test]
@@ -910,131 +991,156 @@ mod tests {
     /// Durable flag off (default): finalize does no disk I/O; the on-disk store directory is never created.
     #[tokio::test]
     async fn turn_end_with_durable_flag_off_writes_nothing_to_disk() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let cwd = session.cwd().to_path_buf();
-        assert!(
-            !rewind_durable_enabled(),
-            "durable flag must default off for the legacy path"
-        );
-        handle
-            .on_turn_boundary("main", TurnBoundary::rewind_begin(0))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                let cwd = session.cwd().to_path_buf();
+                assert!(
+                    !rewind_durable_enabled(),
+                    "durable flag must default off for the legacy path"
+                );
+                handle
+                    .on_turn_boundary("main", TurnBoundary::rewind_begin(0))
+                    .await;
+                session
+                    .file_state_tracker()
+                    .add_before_snapshot_for_prompt(
+                        0,
+                        &cwd.join("a.txt"),
+                        &cwd,
+                        Some("v".to_owned()),
+                    )
+                    .await;
+                handle
+                    .on_turn_boundary("main", TurnBoundary::rewind_finalize(0))
+                    .await;
+                let store_root = cwd.join(".grok").join("rewind-checkpoints");
+                assert!(
+                    !store_root.exists(),
+                    "flag-off finalize must not touch disk (legacy default)"
+                );
+            })
             .await;
-        session
-            .file_state_tracker()
-            .add_before_snapshot_for_prompt(0, &cwd.join("a.txt"), &cwd, Some("v".to_owned()))
-            .await;
-        handle
-            .on_turn_boundary("main", TurnBoundary::rewind_finalize(0))
-            .await;
-        let store_root = cwd.join(".grok").join("rewind-checkpoints");
-        assert!(
-            !store_root.exists(),
-            "flag-off finalize must not touch disk (legacy default)"
-        );
     }
     /// `persist_checkpoint` writes the assembled checkpoint through the session's durable store (called directly to bypass the flag).
     /// The stored blob is retrievable with both domains.
     #[tokio::test]
     async fn persist_checkpoint_serializes_through_session_store() {
-        let handle = make_handle();
-        let session = handle.session("main").expect("main session exists");
-        let cwd = session.cwd().to_path_buf();
-        let tracker = session.file_state_tracker();
-        tracker.begin_prompt(0).await;
-        tracker
-            .add_before_snapshot_for_prompt(0, &cwd.join("a.rs"), &cwd, Some("v0".to_owned()))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let session = handle.session("main").expect("main session exists");
+                let cwd = session.cwd().to_path_buf();
+                let tracker = session.file_state_tracker();
+                tracker.begin_prompt(0).await;
+                tracker
+                    .add_before_snapshot_for_prompt(
+                        0,
+                        &cwd.join("a.rs"),
+                        &cwd,
+                        Some("v0".to_owned()),
+                    )
+                    .await;
+                tracker.end_prompt(session.async_fs(), 0).await;
+                session.hunk_tracker().record_agent_write(
+                    cwd.join("a.rs"),
+                    "fn a() {}\n".to_owned(),
+                    0,
+                    None,
+                );
+                session.capture_hunk_delta(0).await;
+                session.persist_checkpoint(0).await;
+                let store_root = cwd.join(".grok").join("rewind-checkpoints");
+                assert!(store_root.exists(), "persist creates the durable store dir");
+                let stored = session
+                    .checkpoint_store
+                    .get(0)
+                    .await
+                    .expect("checkpoint persisted");
+                assert_eq!(stored.prompt_index, 0);
+                assert!(
+                    stored.hunks.is_some(),
+                    "hunk delta is bundled into the blob"
+                );
+                assert_eq!(stored.fs.file_snapshots.len(), 1);
+            })
             .await;
-        tracker.end_prompt(session.async_fs(), 0).await;
-        session.hunk_tracker().record_agent_write(
-            cwd.join("a.rs"),
-            "fn a() {}\n".to_owned(),
-            0,
-            None,
-        );
-        session.capture_hunk_delta(0).await;
-        session.persist_checkpoint(0).await;
-        let store_root = cwd.join(".grok").join("rewind-checkpoints");
-        assert!(store_root.exists(), "persist creates the durable store dir");
-        let stored = session
-            .checkpoint_store
-            .get(0)
-            .await
-            .expect("checkpoint persisted");
-        assert_eq!(stored.prompt_index, 0);
-        assert!(
-            stored.hunks.is_some(),
-            "hunk delta is bundled into the blob"
-        );
-        assert_eq!(stored.fs.file_snapshots.len(), 1);
     }
     /// Full rewind lifecycle against a disabled (`noop()`) hunk tracker, the operating mode when the user sets `hunk_tracker_mode = off`.
     /// Capture must report "nothing stored" and restore must be a clean no-op.
     /// The FS-rewind half keeps working; hunks are simply absent from the blob.
     #[tokio::test]
     async fn rewind_lifecycle_is_clean_noop_with_disabled_hunk_tracker() {
-        let handle = make_handle();
-        handle.drop_session("main", "main").expect("drop main");
-        let session = handle
-            .create_session_with_tracker_and_viewer_ctx(
-                "main",
-                handle.root_cwd().unwrap(),
-                xai_hunk_tracker::HunkTrackerHandle::noop(),
-                None,
-                crate::capability::CapabilityMode::All,
-                None,
-                false,
-            )
-            .expect("create session with noop tracker");
-        let cwd = session.cwd().to_path_buf();
-        let file = cwd.join("a.rs");
-        let tracker = session.file_state_tracker();
-        tracker.begin_prompt(0).await;
-        tracker
-            .add_before_snapshot_for_prompt(0, &file, &cwd, Some("v0\n".to_owned()))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                handle.drop_session("main", "main").expect("drop main");
+                let session = handle
+                    .create_session_with_tracker_and_viewer_ctx(
+                        "main",
+                        handle.root_cwd().unwrap(),
+                        xai_hunk_tracker::HunkTrackerHandle::noop(),
+                        None,
+                        crate::capability::CapabilityMode::All,
+                        None,
+                        false,
+                    )
+                    .expect("create session with noop tracker");
+                let cwd = session.cwd().to_path_buf();
+                let file = cwd.join("a.rs");
+                let tracker = session.file_state_tracker();
+                tracker.begin_prompt(0).await;
+                tracker
+                    .add_before_snapshot_for_prompt(0, &file, &cwd, Some("v0\n".to_owned()))
+                    .await;
+                session
+                    .async_fs()
+                    .write_file(&file, b"v1\n")
+                    .await
+                    .expect("write v1");
+                tracker.end_prompt(session.async_fs(), 0).await;
+                session
+                    .hunk_tracker()
+                    .record_agent_write(file.clone(), "v1\n".to_owned(), 0, None);
+                assert!(
+                    !session.capture_hunk_delta(0).await,
+                    "capture_hunk_delta must return false under a disabled hunk tracker"
+                );
+                session.restore_hunk_checkpoints(0).await;
+                session.persist_checkpoint(0).await;
+                let stored = session
+                    .checkpoint_store
+                    .get(0)
+                    .await
+                    .expect("FS checkpoint persisted even with the tracker disabled");
+                assert_eq!(stored.prompt_index, 0);
+                assert!(
+                    stored.hunks.is_none(),
+                    "no hunk delta is bundled when the tracker is disabled"
+                );
+                assert_eq!(stored.fs.file_snapshots.len(), 1);
+                let resp = handle.rewind_to("main", 0).await;
+                assert!(resp.success, "FS rewind must succeed: {:?}", resp.error);
+                assert!(
+                    resp.reverted_files.iter().any(|f| f.ends_with("a.rs")),
+                    "a.rs must be among the reverted files: {:?}",
+                    resp.reverted_files
+                );
+                let restored = session
+                    .async_fs()
+                    .try_read_to_string(&file)
+                    .await
+                    .expect("read a.rs");
+                assert_eq!(
+                    restored.as_deref(),
+                    Some("v0\n"),
+                    "file content must revert to its pre-prompt state"
+                );
+            })
             .await;
-        session
-            .async_fs()
-            .write_file(&file, b"v1\n")
-            .await
-            .expect("write v1");
-        tracker.end_prompt(session.async_fs(), 0).await;
-        session
-            .hunk_tracker()
-            .record_agent_write(file.clone(), "v1\n".to_owned(), 0, None);
-        assert!(
-            !session.capture_hunk_delta(0).await,
-            "capture_hunk_delta must return false under a disabled hunk tracker"
-        );
-        session.restore_hunk_checkpoints(0).await;
-        session.persist_checkpoint(0).await;
-        let stored = session
-            .checkpoint_store
-            .get(0)
-            .await
-            .expect("FS checkpoint persisted even with the tracker disabled");
-        assert_eq!(stored.prompt_index, 0);
-        assert!(
-            stored.hunks.is_none(),
-            "no hunk delta is bundled when the tracker is disabled"
-        );
-        assert_eq!(stored.fs.file_snapshots.len(), 1);
-        let resp = handle.rewind_to("main", 0).await;
-        assert!(resp.success, "FS rewind must succeed: {:?}", resp.error);
-        assert!(
-            resp.reverted_files.iter().any(|f| f.ends_with("a.rs")),
-            "a.rs must be among the reverted files: {:?}",
-            resp.reverted_files
-        );
-        let restored = session
-            .async_fs()
-            .try_read_to_string(&file)
-            .await
-            .expect("read a.rs");
-        assert_eq!(
-            restored.as_deref(),
-            Some("v0\n"),
-            "file content must revert to its pre-prompt state"
-        );
     }
 }
