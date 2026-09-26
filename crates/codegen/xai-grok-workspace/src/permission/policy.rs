@@ -826,7 +826,7 @@ fn absolute_normalized_path(path: &str, cwd: Option<&Path>) -> PathBuf {
         return raw.to_path_buf();
     }
     let joined = match cwd {
-        Some(cwd) if !raw.is_absolute() => cwd.join(raw),
+        Some(cwd) if !names_a_rooted_location(raw) => cwd.join(raw),
         _ => raw.to_path_buf(),
     };
     normalize_lexically(&joined)
@@ -873,10 +873,10 @@ fn raw_absolute_tool_path(path: &str, cwd: Option<&Path>) -> Option<String> {
         return None;
     }
     let joined = match cwd {
-        Some(cwd) if !raw.is_absolute() => cwd.join(raw),
+        Some(cwd) if !names_a_rooted_location(raw) => cwd.join(raw),
         _ => raw.to_path_buf(),
     };
-    joined.is_absolute().then(|| path_match_string(&joined))
+    names_a_rooted_location(&joined).then(|| path_match_string(&joined))
 }
 
 fn path_match_string(path: &Path) -> String {
@@ -890,7 +890,7 @@ fn path_has_parent_dir(path: &Path) -> bool {
 /// True if any existing component of `absolute` is a symlink.
 fn path_has_symlink(absolute: &str) -> bool {
     let path = Path::new(absolute);
-    if !path.is_absolute() {
+    if !names_a_rooted_location(path) {
         return false;
     }
     let mut prefix = PathBuf::new();
@@ -903,10 +903,23 @@ fn path_has_symlink(absolute: &str) -> bool {
     false
 }
 
+/// Whether `path` names a location on its own, rather than one the cwd has to be joined onto.
+///
+/// This is [`Path::has_root`] rather than [`Path::is_absolute`] because the latter
+/// additionally requires a prefix on Windows, so a Git Bash spelling such as
+/// `/work/src/main.rs` — rooted at the current drive, which is what a shell hands
+/// us — would read as relative there and get joined onto the cwd. Every caller in
+/// this module is asking the weaker question, and the shell gate already answers it
+/// that way (its `is_absolute_shell_path` accepts a leading `/`), so the two layers
+/// agree instead of diverging on the same operand.
+pub(crate) fn names_a_rooted_location(path: &Path) -> bool {
+    path.has_root()
+}
+
 /// Canonical target, or `None` on relative input, cycles, depth limits, or fs errors.
 fn resolve_symlink_target(absolute: &str) -> Option<String> {
     let path = Path::new(absolute);
-    if !path.is_absolute() {
+    if !names_a_rooted_location(path) {
         return None;
     }
     let resolved = resolve_following_symlinks(path)?;
@@ -2510,6 +2523,31 @@ mod tests {
                 "expected Reject for {tool:?} via symlink, got {decision:?}"
             );
         }
+    }
+
+    /// A rule written against a rooted path must match that path as the shell
+    /// spells it. Joining the cwd on instead rewrites `/etc/hosts` to
+    /// `C:/etc/hosts` on Windows, which is outside the rule's reach and would
+    /// silently drop a deny — while on unix the two spellings are the same.
+    #[test]
+    fn rooted_deny_rule_matches_a_rooted_target() {
+        // Built here rather than via the unix-gated `file_rule` helper: this is
+        // exactly the case that only differs on Windows.
+        let rule = PermissionRule {
+            action: RuleAction::Deny,
+            tool: ToolFilter::Read,
+            pattern: Some("/etc/**".to_owned()),
+            pattern_mode: PatternMode::Glob,
+        };
+        let policy = CompiledPolicy::new(PermissionConfig::new(vec![rule]));
+        let decision = policy.evaluate_with_cwd(
+            &AccessKind::Read(Some("/etc/hosts".into())),
+            Some(Path::new("/workspace")),
+        );
+        assert!(
+            matches!(decision, Some(Decision::Reject(_))),
+            "expected the rooted deny rule to match /etc/hosts, got {decision:?}"
+        );
     }
 
     #[test]

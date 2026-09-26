@@ -10,8 +10,8 @@ use crate::permission::bash_command_splitting::{
 };
 use crate::permission::policy::{
     CompiledPolicy, GateDecision, InlineShellScript, ShellWord, SymlinkFollow,
-    combine_gate_decisions, follow_absolute_symlink, resolve_following_symlinks,
-    shell_dash_c_script,
+    combine_gate_decisions, follow_absolute_symlink, names_a_rooted_location,
+    resolve_following_symlinks, shell_dash_c_script,
 };
 use crate::permission::types::{AccessKind, Decision};
 
@@ -447,7 +447,7 @@ impl ProtectedEditPermission {
 /// This helper preserves its uncollapsed components for physical symlink and `..` resolution.
 /// It also checks a separate lexical normalization for traversal aliases.
 pub(crate) fn edit_target_protection(path: &Path) -> Option<ProtectedEditReason> {
-    if !path.is_absolute() {
+    if !names_a_rooted_location(path) {
         return Some(ProtectedEditReason::Sensitive);
     }
     let lexical = xai_grok_paths::normalize_lexically(path);
@@ -1514,6 +1514,40 @@ mod tests {
                 "ordinary edit target should not prompt: {path}"
             );
         }
+    }
+
+    /// Windows counterpart of the POSIX vectors above: a Git Bash spelling is rooted
+    /// at the current drive rather than prefixed, and must still resolve to its
+    /// protection reason instead of falling back to the blanket `Sensitive` prompt.
+    #[cfg(windows)]
+    #[test]
+    fn prefixless_paths_resolve_their_protection_reason() {
+        assert_eq!(
+            edit_target_protection(Path::new("/work/.git/hooks/pre-commit")),
+            Some(ProtectedEditReason::GitHooks)
+        );
+        assert_eq!(
+            edit_target_protection(Path::new("/home/user/.zshrc")),
+            Some(ProtectedEditReason::StartupFile)
+        );
+        assert_eq!(
+            edit_target_protection(Path::new("/home/user/.grok/sandbox.toml")),
+            Some(ProtectedEditReason::GrokSandbox)
+        );
+        assert_eq!(
+            edit_target_protection(Path::new("/etc")),
+            Some(ProtectedEditReason::Etc)
+        );
+        assert_eq!(edit_target_protection(Path::new("/work/src/main.rs")), None);
+        // The prefixed spelling is the same question answered by `is_absolute` alone.
+        assert_eq!(
+            edit_target_protection(Path::new(r"C:\work\.git\hooks\pre-commit")),
+            Some(ProtectedEditReason::GitHooks)
+        );
+        assert_eq!(
+            edit_target_protection(Path::new(r"C:\work\src\main.rs")),
+            None
+        );
     }
 
     #[test]
