@@ -7,21 +7,37 @@ use super::{ManagedConfigError, ManagedConfigPlan};
 pub(super) const MAX_SYMLINKS: usize = 40;
 pub(super) const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
-/// Directory identity on Windows is (len, is_dir) only — mtimes are
-/// volatile there (tempdir churn flips them between captures). Files keep
-/// mtime so a same-length content rewrite is still detected.
+/// Identity of the filesystem entry a capture was taken from, compared on
+/// every revalidation to catch a path whose entry was replaced in between.
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct FileIdentity {
-    #[cfg(unix)]
     dev: u64,
-    #[cfg(unix)]
     ino: u64,
-    #[cfg(not(unix))]
-    len: u64,
-    #[cfg(not(unix))]
-    is_dir: bool,
-    #[cfg(not(unix))]
-    modified: Option<std::time::SystemTime>,
+}
+
+/// Windows identity. The filesystem's own record for the entry — volume serial
+/// number plus file id — is the only identity that survives a rename and
+/// differs for a replacement created at the same path; directory length and
+/// mtime are useless here because creating, renaming, or deleting an entry
+/// inside a directory flips both. [`FileIdentity::Proxy`] is the fallback for
+/// filesystems that report no file id at all.
+#[cfg(not(unix))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum FileIdentity {
+    /// `high_res` distinguishes the 128-bit `FILE_ID_INFO` form from the
+    /// legacy 64-bit `BY_HANDLE_FILE_INFORMATION` one, so the same entry
+    /// captured through either form never compares equal.
+    Id {
+        volume: u64,
+        id: u128,
+        high_res: bool,
+    },
+    Proxy {
+        is_dir: bool,
+        len: u64,
+        modified: Option<std::time::SystemTime>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -77,7 +93,7 @@ impl ParentPlan {
                     }
                     chain.push(PathIdentity {
                         path: current.clone(),
-                        identity: FileIdentity::from_metadata(&metadata),
+                        identity: FileIdentity::from_metadata(&current, &metadata),
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -132,7 +148,7 @@ impl ParentPlan {
                 .map_err(|_| ManagedConfigError::ParentChanged(expected.path.clone()))?;
             if metadata.file_type().is_symlink()
                 || !metadata.is_dir()
-                || FileIdentity::from_metadata(&metadata) != expected.identity
+                || FileIdentity::from_metadata(&expected.path, &metadata) != expected.identity
             {
                 return Err(ManagedConfigError::ParentChanged(expected.path.clone()));
             }
@@ -169,7 +185,7 @@ impl ParentAnchor {
         })?;
         Ok(Self {
             path: path.to_path_buf(),
-            identity: FileIdentity::from_metadata(&metadata),
+            identity: FileIdentity::from_metadata(path, &metadata),
             #[cfg(unix)]
             directory,
         })
@@ -207,27 +223,54 @@ struct PathIdentity {
 }
 
 impl FileIdentity {
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt as _;
-            Self {
-                dev: metadata.dev(),
-                ino: metadata.ino(),
-            }
+    /// Identity of the entry at `path`, which `metadata` was taken from. The
+    /// path is only needed where the identity has to be read through a handle
+    /// (Windows).
+    #[cfg(unix)]
+    fn from_metadata(_path: &Path, metadata: &fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+        Self {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
         }
-        #[cfg(not(unix))]
-        {
-            // Directory mtimes are volatile on Windows (tempdir churn in
-            // particular flips `modified` between captures), so directory
-            // identity drops `modified` — `len` is stable for dirs. Files
-            // keep `modified` so an mtime-only change is still detected.
-            let is_dir = metadata.is_dir();
-            Self {
-                len: metadata.len(),
-                is_dir,
-                modified: (!is_dir).then(|| metadata.modified().ok()).flatten(),
-            }
+    }
+
+    #[cfg(not(unix))]
+    fn from_metadata(path: &Path, metadata: &fs::Metadata) -> Self {
+        match file_id::get_file_id(path) {
+            Ok(file_id::FileId::HighRes {
+                volume_serial_number,
+                file_id,
+            }) => Self::Id {
+                volume: volume_serial_number,
+                id: file_id,
+                high_res: true,
+            },
+            Ok(file_id::FileId::LowRes {
+                volume_serial_number,
+                file_index,
+            }) => Self::Id {
+                volume: u64::from(volume_serial_number),
+                id: u128::from(file_index),
+                high_res: false,
+            },
+            // No filesystem id for this entry (or the probe failed): fall back
+            // to the weaker proxy rather than pretending the entry is gone.
+            _ => Self::proxy(metadata),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn proxy(metadata: &fs::Metadata) -> Self {
+        let is_dir = metadata.is_dir();
+        Self::Proxy {
+            is_dir,
+            // A directory's `len` tracks its index allocation, not its content,
+            // and moves as entries come and go — the same volatility that rules
+            // out mtime above. Kind-only identity is all this fallback can
+            // offer without refusing legitimate writes.
+            len: if is_dir { 0 } else { metadata.len() },
+            modified: (!is_dir).then(|| metadata.modified().ok()).flatten(),
         }
     }
 }
@@ -400,7 +443,7 @@ pub(super) fn read_source(path: &Path) -> Result<SourceState, ManagedConfigError
         hash: blake3::hash(&bytes).to_hex().to_string(),
         bytes: Some(bytes),
         mode: file_mode(&metadata),
-        identity: Some(FileIdentity::from_metadata(&metadata)),
+        identity: Some(FileIdentity::from_metadata(path, &metadata)),
     })
 }
 
