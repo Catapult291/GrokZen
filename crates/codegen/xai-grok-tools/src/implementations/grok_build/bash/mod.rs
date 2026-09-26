@@ -304,6 +304,30 @@ pub struct BashToolInput {
         deserialize_with = "crate::types::schema::deserialize_lenient_bool"
     )]
     pub is_background: bool,
+
+    /// Known source encoding of the command output, as a WHATWG label such as
+    /// `gbk`, `shift_jis`, `big5`, `euc-kr`, or `windows-1252`. The tool always
+    /// returns UTF-8 text. Omit for the default UTF-8/lossy decoder.
+    #[schemars(
+        description = "Known source encoding of the command output as a WHATWG label (for example, gbk, shift_jis, big5, euc-kr, or windows-1252). The tool result is always UTF-8. Omit for the default UTF-8/lossy decoder."
+    )]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
+
+    /// Set to true only when the command must keep running after this session
+    /// ends — a service the user will still want later, or work they intend to
+    /// come back to. Requires `is_background`. The user is asked to confirm
+    /// before it takes effect, because a detached process keeps running with no
+    /// session left to stop it. Omit it for ordinary background work: those
+    /// tasks end with the session like any other command.
+    #[schemars(
+        description = "Set to true only when this background command must keep running after the session ends (a service the user will want later, or work they will return to). Requires is_background. The user confirms before it takes effect, since a detached process keeps running with no session left to stop it. Omit for ordinary background work, which ends with the session."
+    )]
+    #[serde(
+        default,
+        deserialize_with = "crate::types::schema::deserialize_lenient_bool"
+    )]
+    pub detach: bool,
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -1480,7 +1504,9 @@ Usage notes:
   - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). ${%- if auto_background_on_timeout %} If not specified, foreground commands exceeding the default timeout will be automatically backgrounded instead of killed. You will receive a task id to check output later.${%- else %} If not specified, foreground commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.${%- endif %} Background tasks are not bounded by the default: with ${{ params.execute.timeout }} omitted or 0 they run until they exit or are killed; a positive ${{ params.execute.timeout }} still applies.
   - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period). Descendants that did not detach via `setsid` / `nohup` will also be killed.${%- endif %} `${{ params.execute.timeout }}: 0` in `${%- if params is defined and params.execute is defined and params.execute.is_background %}${{ params.execute.is_background }}${%- else %}background${%- endif %}: true` mode disables the wrapper timeout entirely${%- if tools.by_kind.kill_task_action %}; the child's lifetime is owned by the model via ${{ tools.by_kind.kill_task_action }}${%- endif %}.
   - If the output exceeds {max_output_bytes} characters, the middle is truncated (you keep the beginning and end) and the result includes the path to a log file with the full output, which you can read or search.
+  - If the command writes text in a known non-UTF-8 encoding (commonly GBK from Windows tools), pass its WHATWG label in the `encoding` parameter, for example `gbk`. The tool returns UTF-8 text.
   - You can use the ${{ params.execute.is_background }} parameter to run the command in the background (e.g., dev servers, long builds): it returns a task id immediately and keeps running in the background.${%- if system_reminders_enabled %} You are notified on completion, so do not poll or sleep-wait for it.${%- elif tools.by_kind.background_task_action %} Check on it later with the ${{ tools.by_kind.background_task_action }} tool.${%- endif %}${%- if has_unix_utilities %} You do not need to use '&' at the end of the command when using this parameter.${%- endif %}
+  - Background tasks normally end when the session ends. When the user says a process must outlive the conversation — a service they will still want later, or work they will return to — set `detach: true` alongside ${{ params.execute.is_background }} and explain why. The user confirms before it takes effect, and the task stays running and stoppable in later sessions. Do not set it just because a command is long-running: an ordinary build or test ends with the session and should not be detached.
 ${%- if shell_uses_semicolon %}
   - '&&' is not supported in this shell; chain sequential commands with ';'.
 ${%- endif %}
@@ -1494,6 +1520,7 @@ ${%- endif %}"#
 
 Usage notes:
   - You can specify an optional ${{ params.execute.timeout }} in milliseconds (up to ${{ max_timeout_ms | default(300000) }}ms). If not specified, commands will timeout after ${{ default_timeout_ms | default(120000) }}ms.
+  - If the command writes text in a known non-UTF-8 encoding (commonly GBK from Windows tools), pass its WHATWG label in the `encoding` parameter, for example `gbk`. The tool returns UTF-8 text.
   - Timeout enforcement: when the timeout fires, the wrapper${%- if is_windows %} terminates the child's Job Object, killing every descendant process immediately (no graceful-termination grace period).${%- else %} kills the child process group (SIGTERM, escalated to SIGKILL after a ~1s grace period).${%- endif %}
   - If the output exceeds {max_output_bytes} characters, output will be truncated before being returned to you.
 ${%- if shell_uses_semicolon %}
@@ -1975,6 +2002,12 @@ impl xai_tool_runtime::Tool for BashTool {
         // populated only by tools that intentionally surface a friendlier form
         // to the model (e.g. the monitor tool). Bash commands run as-is.
         let display_command: Option<String> = None;
+        let output_encoding = input
+            .encoding
+            .as_deref()
+            .map(crate::computer::types::OutputEncoding::parse)
+            .transpose()
+            .map_err(xai_tool_runtime::ToolError::invalid_arguments)?;
 
         // --- Route to foreground or background ---
         let output_file = session_folder
@@ -2006,10 +2039,12 @@ impl xai_tool_runtime::Tool for BashTool {
                 timeout,
                 output_byte_limit,
                 output_file,
+                output_encoding: output_encoding.clone(),
                 notification_handle: notification_handle.clone(),
                 tool_call_id: tool_call_id.as_str().to_owned(),
                 display_command: display_command.clone(),
                 auto_background_on_timeout: false,
+                detach: input.detach,
                 foreground_block_budget: None,
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
@@ -2090,6 +2125,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 timeout,
                 output_byte_limit,
                 output_file: output_file.clone(),
+                output_encoding: output_encoding.clone(),
                 notification_handle: notification_handle.clone(),
                 tool_call_id: tool_call_id.as_str().to_owned(),
                 display_command,
@@ -2107,6 +2143,9 @@ impl xai_tool_runtime::Tool for BashTool {
                 // existing grok_build callers that never opted in are
                 // unaffected.
                 auto_background_on_timeout: Self::auto_background_on_timeout_enabled(&params),
+                // A foreground run is never detached: the process is tied to
+                // this turn whether or not the model asked.
+                detach: false,
                 foreground_block_budget: Self::effective_foreground_block_budget(&params),
                 kind: crate::computer::types::TaskKind::Bash,
                 owner_session_id: owner_session_id.clone(),
@@ -2291,6 +2330,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn encoding_is_exposed_and_validated_before_spawning() {
+        let schema = serde_json::to_value(schemars::schema_for!(BashToolInput)).unwrap();
+        assert!(
+            schema["properties"]["encoding"]["type"]
+                .as_array()
+                .is_some_and(|types| types.iter().any(|kind| kind == "string"))
+        );
+
+        let encoded = make_input("unused");
+        assert_eq!(encoded.encoding, None);
+    }
+
+    /// `detach` must be advertised to the model and default to off, so an
+    /// ordinary background command keeps its session-scoped lifetime.
+    #[test]
+    fn detach_is_exposed_and_defaults_off() {
+        let schema = serde_json::to_value(schemars::schema_for!(BashToolInput)).unwrap();
+        let detach = &schema["properties"]["detach"];
+        // A plain boolean: unlike `timeout` there is no numeric/string union to
+        // advertise, so schemars emits the scalar type directly.
+        assert_eq!(detach["type"], "boolean", "detach schema: {detach}");
+        assert_eq!(
+            detach["default"], false,
+            "the schema must advertise the off default so the model does not assume detaching is normal"
+        );
+
+        let default = make_input("unused");
+        assert!(
+            !default.detach,
+            "detach must default to off so the model cannot detach silently"
+        );
+
+        // Lenient bool parsing keeps `true` working when a model sends the
+        // flag as a string, matching `is_background`.
+        let parsed: BashToolInput =
+            serde_json::from_str(r#"{"command":"sleep 1","description":"d","detach":"true"}"#)
+                .unwrap();
+        assert!(parsed.detach);
+    }
+
     use crate::computer::types::{
         BackgroundHandle, ComputerError, KillOutcome, TaskSnapshot, TerminalBackend,
         TerminalRunRequest, TerminalRunResult,
@@ -2300,6 +2380,7 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
+    use xai_tool_runtime::Tool as _;
 
     /// Models occasionally serialize numeric tool args as JSON strings. The
     /// `timeout` field must accept both `120000` and `"120000"`, stay `None`
@@ -2369,6 +2450,18 @@ mod tests {
 
     // A foreground command must not block longer than the cap, whatever its
     // requested `timeout`.
+    #[tokio::test]
+    async fn invalid_encoding_is_rejected_before_terminal_spawn() {
+        let mock = MockTerminal::background_ok("unused");
+        let resources = make_resources(mock);
+        let mut input = make_input("printf test");
+        input.encoding = Some("not-an-encoding".to_string());
+        let error = BashTool::run(&BashTool, test_ctx(resources.into_shared()), input)
+            .await
+            .expect_err("invalid encoding");
+        assert!(error.to_string().contains("Invalid encoding value"));
+    }
+
     #[test]
     fn foreground_block_clamps_explicit_long_timeout() {
         let cfg = DEFAULT_TIMEOUT; // 120s session default
@@ -2584,6 +2677,8 @@ mod tests {
             timeout: None,
             description: "test".to_string(),
             is_background: false,
+            encoding: None,
+            detach: false,
         }
     }
 
@@ -2593,6 +2688,8 @@ mod tests {
             timeout: None,
             description: "test".to_string(),
             is_background: true,
+            encoding: None,
+            detach: false,
         }
     }
 

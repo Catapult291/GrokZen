@@ -751,6 +751,13 @@ fn pattern_matches(access: &AccessKind, cr: &CompiledRule<'_>, cwd: Option<&Path
             let cmd = cmd.trim_start();
             cmd.starts_with(pattern) || glob_matches(cmd, MatchContext::Freeform, cr.matcher)
         }
+        // A detached background command is still a shell command, so bash
+        // allow/deny rules must match it too; otherwise a denied script could
+        // run by asking to detach.
+        AccessKind::DetachBackground { command } => {
+            let cmd = command.trim_start();
+            cmd.starts_with(pattern) || glob_matches(cmd, MatchContext::Freeform, cr.matcher)
+        }
         AccessKind::Edit(path) => path_context_matches(path, cr, cwd),
         AccessKind::Read(path) => match path {
             Some(p) => path_context_matches(p, cr, cwd),

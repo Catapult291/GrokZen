@@ -630,6 +630,7 @@
             task_id: task_id.into(),
             command: command.into(),
             display_command: None,
+            output_encoding: None,
             cwd: "/tmp".into(),
             start_time: std::time::SystemTime::now(),
             end_time: Some(std::time::SystemTime::now()),

@@ -246,15 +246,32 @@ pub(crate) async fn fetch_lanes(
             local.push(summary);
         }
     }
-    // This runs after the uuid promotion so a pasted headless id still obeys the page's policy
-    let rows_dropped_by_policy =
+    // The default picker excludes zero-turn local husks; otherwise a remote twin could leak one back.
+    let zero_turn_rows_dropped =
+        headless == HeadlessPolicy::Exclude && retain_user_turn_sessions(&mut local, &mut remote);
+    // This runs after the uuid promotion so a pasted headless id still obeys the page's policy.
+    let headless_rows_dropped =
         crate::session::visibility::retain_session_lanes(&mut local, &mut remote, headless);
+    let rows_dropped_by_policy = zero_turn_rows_dropped || headless_rows_dropped;
     SessionLanes {
         local,
         remote,
         repo_urls,
         rows_dropped_by_policy,
     }
+}
+
+/// Hide local session shells that never received a real user turn, including any remote twins.
+fn retain_user_turn_sessions(local: &mut Vec<Summary>, remote: &mut Vec<SessionRecord>) -> bool {
+    let zero_turn_ids: HashSet<String> = local
+        .iter()
+        .filter(|summary| summary.next_trace_turn == 0)
+        .map(|summary| summary.info.id.0.to_string())
+        .collect();
+    let local_before = local.len();
+    local.retain(|summary| summary.next_trace_turn > 0);
+    remote.retain(|row| !zero_turn_ids.contains(row.session_id.as_str()));
+    local.len() < local_before
 }
 
 /// Local entries are inserted first so remote entries win on collision (same session_id).
@@ -616,6 +633,26 @@ mod tests {
         assert!(!dropped);
         assert_eq!(local.len(), 2);
         assert_eq!(remote.len(), 2);
+    }
+
+    #[test]
+    fn user_turn_filter_drops_zero_turn_husks_and_remote_twins() {
+        let mut empty = make_summary("empty", "", "2026-03-01T00:00:00Z");
+        empty.next_trace_turn = 0;
+        let mut real = make_summary("real", "A real conversation", "2026-03-01T00:00:00Z");
+        real.next_trace_turn = 1;
+        let mut local = vec![empty, real];
+        let mut remote = vec![
+            make_remote("empty", "must not leak", "2026-03-01T00:00:00Z"),
+            make_remote("real", "real remote", "2026-03-01T00:00:00Z"),
+            make_remote("remote-only", "remote only", "2026-03-01T00:00:00Z"),
+        ];
+
+        assert!(retain_user_turn_sessions(&mut local, &mut remote));
+        let local_ids: Vec<&str> = local.iter().map(|s| s.info.id.0.as_ref()).collect();
+        let remote_ids: Vec<&str> = remote.iter().map(|r| r.session_id.as_str()).collect();
+        assert_eq!(local_ids, ["real"]);
+        assert_eq!(remote_ids, ["real", "remote-only"]);
     }
 
     #[test]

@@ -19,13 +19,14 @@ use ratatui::text::{Line, Span};
 use xai_acp_lib::AcpResult;
 use xai_grok_markdown::StreamingMarkdownRenderer;
 pub use xai_grok_tools::implementations::grok_build::ask_user_question::{
-    AskUserQuestionMode, Question, QuestionOption,
+    AskUserQuestionExtResponse, AskUserQuestionMode, Question, QuestionAnswerImage, QuestionOption,
 };
 
 use unicode_width::UnicodeWidthStr;
 
 use crate::input::key::RowWalk;
 use crate::render::line_utils::{byte_offset_at_width, truncate_line, truncate_str};
+use crate::render::safe_buf::SafeBuf;
 use crate::render::wrapping::word_wrap_lines_with_joiners;
 use crate::syntax::get_syntect;
 use crate::theme::Theme;
@@ -98,11 +99,13 @@ pub enum LocalQuestionKind {
         row_id: u64,
     },
     /// Modal opened by `/fork` to resolve the worktree question.
-    /// On submit, the selected option index plus the carried directive are translated into an [`crate::app::actions::Action::ForkAnswered`].
+    /// On submit, the selected option index plus the carried directive and fork point are translated into an [`crate::app::actions::Action::ForkAnswered`].
     Fork {
         /// Optional directive supplied via `/fork <directive>`.
         /// Stashed here so the modal can carry it across the synchronous return path back to `dispatch_fork_resolved` without a global mailbox.
         directive: Option<String>,
+        /// Fork point already resolved by the picker or `--at`, carried the same way.
+        cut: crate::slash::commands::fork::ForkCut,
     },
     /// Modal opened by `/new` to resolve the worktree question.
     /// On submit, the selected option index is translated into an [`crate::app::actions::Action::NewSessionAnswered`].
@@ -177,6 +180,11 @@ pub struct QuestionViewState {
     pub focus: QuestionFocus,
     /// Whether fullscreen mode is active (removes height cap).
     pub fullscreen: bool,
+    /// Whether the card is collapsed to a single summary row so the transcript behind it can be read.
+    ///
+    /// Minimizing also hands the keyboard to the scrollback while the card keeps waiting, so the
+    /// conversation can be scrolled and read without answering first.
+    pub minimized: bool,
     /// Original prompt state, stashed on entry and restored on exit.
     pub stashed_prompt: StashedPrompt,
 
@@ -191,6 +199,12 @@ pub struct QuestionViewState {
     /// Toggled by Space, auto-set when exiting InputMode with text.
     /// Independent of the text content; text is preserved on untoggle.
     pub per_question_freeform_selected: Vec<bool>,
+    /// Images pasted into each question's freeform answer, per question.
+    ///
+    /// Only the *inactive* questions are parked here: the active question's
+    /// images live in the composer (the same place its text does) and are saved
+    /// on the way out by the freeform swap. Both halves are merged at submit.
+    pub per_question_images: Vec<Vec<crate::prompt_images::PastedImage>>,
 
     // ── Cached chrome caps (recomputed on resize / question switch) ──
     /// Cached cap on description lines in chrome (capped in non-fullscreen).
@@ -282,11 +296,13 @@ impl QuestionViewState {
             selections,
             focus: QuestionFocus::Navigation,
             fullscreen: false,
+            minimized: false,
             stashed_prompt,
             per_question_cursor: vec![0; n],
             per_question_scroll: vec![0; n],
             per_question_freeform: vec![String::new(); n],
             per_question_freeform_selected: vec![false; n],
+            per_question_images: vec![Vec::new(); n],
             cached_desc_cap: DEFAULT_MAX_CHROME_DESC_LINES,
             cached_preview_cap: DEFAULT_MAX_CHROME_PREVIEW_LINES,
             response_tx,
@@ -440,25 +456,54 @@ impl QuestionViewState {
         }
     }
 
-    /// Height of the freeform line that [`option_heights`] and [`total_options_height`] always include.
-    /// The line is never rendered when `no_freeform` is set; subtract this from those totals wherever they feed layout or scroll limits.
+    /// Height of the freeform rows that [`option_heights`] and [`total_options_height`] always include.
+    /// The rows are never rendered when `no_freeform` is set; subtract this from those totals wherever they feed layout or scroll limits.
     pub fn phantom_freeform_h(&self) -> u16 {
-        if self.no_freeform { 1 } else { 0 }
+        if self.no_freeform {
+            FREEFORM_ROW_ROWS + OPTION_ROW_GAP_ROWS
+        } else {
+            0
+        }
     }
 }
 
 /// Visual heights for each item in a question: all options, then freeform.
+///
+/// Every item draws one label row plus one row per wrapped description line, and every item after
+/// the first is preceded by [`OPTION_ROW_GAP_ROWS`] blank rows.
 pub fn option_heights(question: &Question, content_w: usize, cursor: usize) -> Vec<u16> {
     let prefix_w = option_prefix_w(question);
-    let max_lw = compute_max_label_w(&question.options, content_w);
+    let text_w = option_text_w(content_w, prefix_w);
+    let max_lw = compute_max_label_w(&question.options, text_w);
 
     question
         .options
         .iter()
         .enumerate()
-        .map(|(i, o)| option_visual_height(o, content_w, prefix_w, max_lw, i == cursor))
-        .chain(std::iter::once(1u16))
+        .map(|(i, o)| {
+            let gap = if i == 0 { 0 } else { OPTION_ROW_GAP_ROWS };
+            option_block_height(o, text_w, prefix_w, max_lw) + gap
+        })
+        .chain(std::iter::once(FREEFORM_ROW_ROWS + OPTION_ROW_GAP_ROWS))
         .collect()
+}
+
+/// Visual-line offsets (within the option list) that open a box's top rule.
+///
+/// The freeform item is included; a caller that draws it sticky accounts for its own offset.
+pub fn divider_visual_lines(question: &Question, content_w: usize, cursor: usize) -> Vec<u16> {
+    let mut out = Vec::new();
+    let mut top = 0u16;
+    for (idx, height) in option_heights(question, content_w, cursor)
+        .into_iter()
+        .enumerate()
+    {
+        if idx > 0 {
+            out.push(top - OPTION_ROW_GAP_ROWS);
+        }
+        top += height;
+    }
+    out
 }
 
 /// Total visual height of all option rows plus the freeform row.
@@ -517,6 +562,8 @@ pub fn scroll_offset_for_item_delta(
 }
 
 /// Visible option rows height within a rendered question area.
+///
+/// The card's closing rule sits at the bottom of the area, so it comes off the viewport as well.
 pub fn visible_options_height(
     question: &Question,
     area_height: u16,
@@ -526,14 +573,16 @@ pub fn visible_options_height(
     desc_cap: u16,
     preview_cap: u16,
 ) -> u16 {
-    area_height.saturating_sub(chrome_height(
-        question,
-        content_w,
-        preview,
-        fullscreen,
-        desc_cap,
-        preview_cap,
-    ))
+    area_height
+        .saturating_sub(CARD_BOTTOM_ROWS)
+        .saturating_sub(chrome_height(
+            question,
+            content_w,
+            preview,
+            fullscreen,
+            desc_cap,
+            preview_cap,
+        ))
 }
 
 /// Maximum scroll offset for the option rows in a rendered question area.
@@ -582,7 +631,7 @@ pub fn item_index_at_screen_row(
             desc_cap,
             preview_cap,
         );
-    let options_end_y = area.y + area.height;
+    let options_end_y = card_footer_rule_row(area);
     if row < options_start_y || row >= options_end_y {
         return None;
     }
@@ -613,34 +662,33 @@ pub fn compute_max_label_w(options: &[QuestionOption], content_w: usize) -> usiz
         .min(cap)
 }
 
+/// Visual rows one option occupies: its label row plus every wrapped description line.
+///
+/// The label always gets its own row and descriptions always stack underneath it, so a row is
+/// never truncated horizontally and the same height holds whether or not the card has focus.
+pub fn option_block_height(
+    option: &QuestionOption,
+    content_w: usize,
+    prefix_w: usize,
+    _max_label_w: usize,
+) -> u16 {
+    let text_w = content_w.max(1);
+    let label_lines = wrap_label_chunks(&normalize_label(&option.label), text_w).len() as u16;
+    let desc_lines = rendered_option_description_lines(option, text_w).len() as u16;
+    (label_lines + desc_lines).max(1)
+}
+
 /// Visual height of a single option row.
 ///
-/// - Unfocused: always 1 line (collapsed `label  description…`).
-/// - Focused: full description. The label shares the first description line when it fits the column (description wrapped in the column to its right).
-///   An overflowing label wraps full-width with the description stacked below it, both indented at `prefix_w`.
+/// Kept for callers that want the row alone; it excludes the blank row that separates it from the
+/// option above.
 pub fn option_visual_height(
     option: &QuestionOption,
     content_w: usize,
     prefix_w: usize,
     max_label_w: usize,
-    focused: bool,
 ) -> u16 {
-    if !focused {
-        return 1;
-    }
-    let gap = 2;
-    let norm_label = normalize_label(&option.label);
-    if norm_label.width() > max_label_w {
-        let wide_w = content_w.saturating_sub(prefix_w).max(1);
-        let label_lines = wrap_label_chunks(&norm_label, wide_w).len() as u16;
-        let desc_lines = rendered_option_description_lines(option, wide_w).len() as u16;
-        (label_lines + desc_lines).max(1)
-    } else {
-        let indent = prefix_w + max_label_w + gap;
-        let desc_w = content_w.saturating_sub(indent).max(1);
-        let desc_lines = rendered_option_description_lines(option, desc_w).len() as u16;
-        desc_lines.max(1)
-    }
+    option_block_height(option, content_w, prefix_w, max_label_w)
 }
 
 /// Inner chrome-height computation with explicit description/preview caps.
@@ -691,18 +739,43 @@ fn chrome_height_with_dynamic_caps(
     let preview_lines = preview_lines.min(preview_cap);
 
     let preview_gap = if preview_lines > 0 { 1 } else { 0 };
-    let label_gap = if label_gap_suppressed(question) { 0 } else { 1 };
+    // The label sits directly on the description or the preview when there is one. With neither,
+    // the only separator left is the single blank row the option list already opens with, so a
+    // second one would leave a short question floating in two blank rows.
+    let label_gap = if desc_lines > 0 || preview_lines > 0 { 1 } else { 0 };
 
-    // vpad(1) + label + label_gap(1) + description (if any)
+    // vpad(1) + card header (top rule + title row + rule) + label + label_gap(1) + description (if any)
     //   + [preview_gap(1) + preview_lines if preview exists] + gap(1)
-    1 + label_lines + label_gap + desc_lines + preview_gap + preview_lines + 1
+    // The card's closing rule is not chrome: it sits after the option rows and is counted by `question_view_height`.
+    1 + CARD_HEADER_ROWS + label_lines + label_gap + desc_lines + preview_gap + preview_lines + 1
 }
-
-/// A card with no description and no options has nothing under its label, so the blank line meant to separate them would leave it unevenly padded.
-/// [`chrome_height_with_dynamic_caps`] and [`render_question_chrome`] must agree on it.
-fn label_gap_suppressed(question: &Question) -> bool {
-    let (_, desc) = split_question_label_desc(&question.question);
-    desc.is_empty() && question.options.is_empty()
+/// How many options still sit below the fold.
+///
+/// The option list is the only part of the card that can be cut, so this is what the card has to
+/// admit: a list that silently stops short of the last option reads as "these are all the
+/// choices", and the user cannot tell a hidden answer from a missing one. The freeform row is
+/// pinned above the footer and never scrolls, so it is not counted.
+pub fn hidden_items_below(
+    question: &Question,
+    content_w: usize,
+    cursor: usize,
+    scroll: u16,
+    visible_h: u16,
+) -> usize {
+    if visible_h == 0 {
+        return 0;
+    }
+    let heights = option_heights(question, content_w, cursor);
+    let fold = scroll as usize + visible_h as usize;
+    let mut top = 0usize;
+    let mut hidden = 0usize;
+    for height in heights.iter().take(question.options.len()).copied() {
+        if top + height as usize > fold {
+            hidden += 1;
+        }
+        top += height as usize;
+    }
+    hidden
 }
 
 /// Chrome height for a question: vpad + label lines + gap + [description lines] + gap.
@@ -809,6 +882,36 @@ impl QuestionViewState {
             .get(idx)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Images parked for a question whose freeform answer is not the one being edited.
+    pub fn parked_images(&self, question_idx: usize) -> &[crate::prompt_images::PastedImage] {
+        self.per_question_images
+            .get(question_idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// Whether an answer to this card can carry pasted images.
+    ///
+    /// ACP questions ship them in the `accepted` response and the `/feedback`
+    /// card ships them with `SendFeedback`; every other local question answers
+    /// through an `Action` with no image channel, so pasting there stays
+    /// text-only instead of attaching a chip the submit would silently drop.
+    pub fn accepts_answer_images(&self) -> bool {
+        self.local_kind.is_none() || self.is_feedback()
+    }
+
+    /// Park `images` as the answer attachments of `question_idx`, replacing whatever was there.
+    pub fn set_parked_images(
+        &mut self,
+        question_idx: usize,
+        images: Vec<crate::prompt_images::PastedImage>,
+    ) {
+        if let Some(slot) = self.per_question_images.get_mut(question_idx) {
+            crate::prompt_images::drain_and_cleanup(slot);
+            *slot = images;
+        }
     }
 
     /// Preview text for the currently focused option, if any.
@@ -989,8 +1092,24 @@ impl QuestionViewState {
     /// - Freeform-only (no option, only typed text): the label is `"Other"` and the typed text goes in `annotations[q].notes`.
     /// - Preview included for single-select only, verbatim from the option.
     /// - Notes included when freeform text is non-empty and selected.
+    /// - Images the user pasted into an answer ride `annotations[q].images`, and an
+    ///   image-only answer counts as answered on its own.
     pub fn build_accepted_response(
         &self,
+    ) -> xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse
+    {
+        self.build_accepted_response_with_images(Vec::new())
+    }
+
+    /// [`Self::build_accepted_response`] with the composer's live images for the
+    /// active question, whose chips the caller has not parked in
+    /// [`Self::per_question_images`] yet.
+    ///
+    /// Encoding goes through the same helper the composer uses for its own
+    /// attachments, so the two paths cannot drift.
+    pub fn build_accepted_response_with_images(
+        &self,
+        active_question_images: Vec<crate::prompt_images::PastedImage>,
     ) -> xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse
     {
         use indexmap::IndexMap;
@@ -1014,7 +1133,10 @@ impl QuestionViewState {
                 .get(i)
                 .cloned()
                 .unwrap_or_default();
-            let has_freeform = freeform_selected && !freeform_text.trim().is_empty();
+            let images = self.answer_images_for(i, &active_question_images);
+            let has_text = freeform_selected && !freeform_text.trim().is_empty();
+            let has_images = freeform_selected && !images.is_empty();
+            let has_freeform = has_text || has_images;
 
             if labels.is_empty() && !has_freeform {
                 // Unanswered, so omit from answers
@@ -1031,7 +1153,7 @@ impl QuestionViewState {
 
             answers.insert(q.question.clone(), label_vec);
 
-            // Build annotation if there's preview or notes.
+            // Build annotation if there's preview, notes, or attached images.
             let is_single = !q.multi_select.unwrap_or(false);
             let preview = if is_single {
                 // Preview from selected option (single-select only).
@@ -1045,14 +1167,18 @@ impl QuestionViewState {
                 None
             };
 
-            let notes = if has_freeform {
-                Some(freeform_text)
-            } else {
-                None
-            };
+            let notes = if has_text { Some(freeform_text) } else { None };
+            let images = if has_images { Some(images) } else { None };
 
-            if preview.is_some() || notes.is_some() {
-                annotations.insert(q.question.clone(), QuestionAnnotation { preview, notes });
+            if preview.is_some() || notes.is_some() || images.is_some() {
+                annotations.insert(
+                    q.question.clone(),
+                    QuestionAnnotation {
+                        preview,
+                        notes,
+                        images,
+                    },
+                );
             }
         }
 
@@ -1066,6 +1192,41 @@ impl QuestionViewState {
             answers,
             annotations,
         }
+    }
+
+    /// Base64 payloads for the answer to question `question_idx`: the composer's
+    /// live set for the active question, the parked set for every other one.
+    ///
+    /// A caller that already parked the active question's images (the submit
+    /// path swaps the freeform draft first) passes an empty live set, so the
+    /// parked set is the fallback rather than a second source of truth.
+    fn answer_images_for(
+        &self,
+        question_idx: usize,
+        active_question_images: &[crate::prompt_images::PastedImage],
+    ) -> Vec<QuestionAnswerImage> {
+        let images: Vec<crate::prompt_images::PastedImage> =
+            if question_idx == self.active_tab && !active_question_images.is_empty() {
+                active_question_images.to_vec()
+            } else {
+                self.per_question_images
+                    .get(question_idx)
+                    .cloned()
+                    .unwrap_or_default()
+            };
+        if images.is_empty() {
+            return Vec::new();
+        }
+        crate::prompt_images::build_content_blocks_with_prefixes(String::new(), images, None)
+            .into_iter()
+            .filter_map(|block| match block {
+                agent_client_protocol::ContentBlock::Image(image) => Some(QuestionAnswerImage {
+                    mime_type: image.mime_type,
+                    data: image.data,
+                }),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Send the ACP ext-method response and return `true` if the response was actually sent (i.e. `response_tx` was present).
@@ -1119,11 +1280,18 @@ pub fn question_view_height(state: &mut QuestionViewState, screen_h: u16, conten
         return 0;
     };
 
-    // `total_options_height` unconditionally counts a 1-line freeform row
-    // When `no_freeform` is set that row is never rendered, so subtract it from the totals below
-    // Otherwise the panel keeps a clickable dead row under the last option
+    // A minimized card is one summary row; the transcript behind it keeps the rest of the screen.
+    if state.minimized {
+        state.cached_desc_cap = DEFAULT_MAX_CHROME_DESC_LINES;
+        state.cached_preview_cap = DEFAULT_MAX_CHROME_PREVIEW_LINES;
+        return if screen_h == 0 { 0 } else { 1 };
+    }
+
+    // `total_options_height` unconditionally counts the freeform rows
+    // When `no_freeform` is set they are never rendered, so subtract them from the totals below
+    // Otherwise the panel keeps clickable dead rows under the last option
     let phantom_freeform = state.phantom_freeform_h();
-    let freeform_h: u16 = 1 - phantom_freeform;
+    let freeform_h: u16 = FREEFORM_ROW_ROWS.saturating_sub(phantom_freeform);
     let min_options_space = MIN_VISIBLE_OPTION_ROWS + freeform_h;
 
     if state.fullscreen {
@@ -1138,15 +1306,28 @@ pub fn question_view_height(state: &mut QuestionViewState, screen_h: u16, conten
         );
         let total = chrome_h
             + total_options_height(question, content_w, state.cursor())
-                .saturating_sub(phantom_freeform);
+                .saturating_sub(phantom_freeform)
+            + CARD_BOTTOM_ROWS;
         state.cached_desc_cap = u16::MAX;
         state.cached_preview_cap = u16::MAX;
         return total.min(screen_h);
     }
 
-    let cap = (screen_h as u32 * 33 / 100)
-        .max(8)
-        .min(screen_h as u32 * 80 / 100) as u16;
+    // Fixed overhead: vpad + card header + label + blank + gap + the card's closing rule.
+    let (label, desc) = split_question_label_desc(&question.question);
+    let raw_line = Line::from(vec![Span::raw(label.to_string())]);
+    let label_lines = crate::render::wrapping::word_wrap_line(&raw_line, content_w.max(1))
+        .len()
+        .max(1) as u16;
+    let fixed_overhead = 1 + CARD_HEADER_ROWS + label_lines + 1 + 1 + CARD_BOTTOM_ROWS;
+
+    // The card floats over the transcript, so it may take most of the panel: the user's first need
+    // is to read every option, and an option hidden below the fold cannot be chosen. Two rows are
+    // held back so the card still reads as floating, and the floor guarantees the option list is
+    // never starved by the card's own chrome.
+    let floor = (fixed_overhead as u32 + min_options_space as u32).min(screen_h as u32) as u16;
+    let room = screen_h.saturating_sub(2);
+    let cap = room.max(floor).min(screen_h);
 
     let mut effective_desc_cap = DEFAULT_MAX_CHROME_DESC_LINES;
     let mut effective_preview_cap = DEFAULT_MAX_CHROME_PREVIEW_LINES;
@@ -1160,14 +1341,6 @@ pub fn question_view_height(state: &mut QuestionViewState, screen_h: u16, conten
     );
 
     if chrome_h + min_options_space > cap {
-        // Compute fixed overhead (vpad + label + gaps).
-        let (label, desc) = split_question_label_desc(&question.question);
-        let raw_line = Line::from(vec![Span::raw(label.to_string())]);
-        let label_lines = crate::render::wrapping::word_wrap_line(&raw_line, content_w.max(1))
-            .len()
-            .max(1) as u16;
-        let fixed_overhead = 1 + label_lines + 1 + 1; // vpad + label + blank + bottom gap
-
         // Compute actual description line count so unused desc budget can be reallocated to preview instead of being wasted
         let actual_desc_lines = if desc.is_empty() {
             0u16
@@ -1216,7 +1389,8 @@ pub fn question_view_height(state: &mut QuestionViewState, screen_h: u16, conten
 
     let total = chrome_h
         + total_options_height(question, content_w, state.cursor())
-            .saturating_sub(phantom_freeform);
+            .saturating_sub(phantom_freeform)
+        + CARD_BOTTOM_ROWS;
     total.min(cap)
 }
 
@@ -1245,17 +1419,48 @@ pub fn option_index_for_key(c: char) -> Option<usize> {
     }
 }
 
-/// Horizontal padding: 3 left (accent + pad) + 2 right (scrollbar gutter).
-pub const QUESTION_VIEW_HPAD: u16 = 5;
+/// Columns the panel spends outside the card's inner text column:
+/// rail(1) + gap(1) + card border(1) + inner pad(1) on the left,
+/// inner pad(1) + card border(1) + gap(1) + scrollbar(1) on the right.
+pub const QUESTION_VIEW_HPAD: u16 = 8;
+
+/// Left inset of the card's inner text column inside the panel area (`rail + gap + border + pad`).
+pub const QUESTION_VIEW_CONTENT_X: u16 = 4;
+
+/// Rows the card spends above the question label: the top rule, the title row, and the rule under it.
+pub const CARD_HEADER_ROWS: u16 = 3;
+
+/// Rows the card spends below the option rows: the footer rule, the button row, the key-hint row,
+/// and the card's bottom rule.
+pub const CARD_BOTTOM_ROWS: u16 = 4;
+
+/// The button row inside [`CARD_BOTTOM_ROWS`], as an offset above the card's bottom rule.
+pub const CARD_BUTTON_ROW_ABOVE_BOTTOM: u16 = 2;
+
+/// The key-hint row inside [`CARD_BOTTOM_ROWS`], just above the card's bottom rule.
+pub const CARD_HINT_ROW_ABOVE_BOTTOM: u16 = 1;
+
+/// Blank rows separating two option blocks: option → option, and last option → freeform.
+pub const OPTION_ROW_GAP_ROWS: u16 = 1;
+
+/// Text width available to an option once its `❯ N (●) ` prefix is placed, given the card's inner width.
+pub fn option_text_w(content_w: usize, prefix_w: usize) -> usize {
+    content_w.saturating_sub(prefix_w).max(1)
+}
+
+/// Rows the freeform row costs when it is drawn: one text row.
+pub const FREEFORM_ROW_ROWS: u16 = 1;
+
+/// Rows the sticky freeform row occupies including the gap that separates it from the options above.
+pub const STICKY_FREEFORM_ROWS: u16 = FREEFORM_ROW_ROWS + OPTION_ROW_GAP_ROWS;
 
 /// Prefix width for option rows.
 ///
-/// The shortcut column is always 1 character wide (1-9, a-z), followed by a
-/// space, then the marker/radio/checkbox, then a space:
-///   Multi:  `X [✓] ` = 1 + 1 + 3 + 1 = 6
-///   Single: `X (●) ` = 1 + 1 + 3 + 1 = 6
+/// Every row leads with the cursor arrow so the keyboard position stays readable even when the
+/// card is not focused, then the shortcut column (1 character, 1-9 / a-z), the selection marker,
+/// and a gap: `❯ 1 (●) ` = 2 + 1 + 1 + 3 + 1 = 8.
 pub fn option_prefix_w(_question: &Question) -> usize {
-    6 // both multi and single use 3-char markers
+    8
 }
 
 /// Report area of the bare `/feedback` card: a multi-line box standing in for the option rows, shared by the full TUI and minimal renderers.
@@ -1338,14 +1543,6 @@ pub fn inline_text_width(area_width: u16) -> u16 {
 /// Normalize a label for single-line display: replace newlines with spaces.
 pub(crate) fn normalize_label(label: &str) -> String {
     label.replace('\n', " ").replace("  ", " ")
-}
-
-fn rendered_option_label(option: &QuestionOption, max_label_w: usize) -> String {
-    if max_label_w == 0 {
-        String::new()
-    } else {
-        truncate_str(&normalize_label(&option.label), max_label_w)
-    }
 }
 
 fn rendered_option_description_lines(option: &QuestionOption, width: usize) -> Vec<Line<'static>> {
@@ -1448,8 +1645,10 @@ fn build_flat_option_lines_with_placeholder(
     freeform_placeholder: &str,
 ) -> Vec<Line<'static>> {
     let prefix_w = option_prefix_w(question);
-    let max_lw = compute_max_label_w(&question.options, content_w);
     let is_multi = question.multi_select.unwrap_or(false);
+    // Rows run the card's full inner width, so text wraps one step narrower than the card itself.
+    let text_w = option_text_w(content_w, prefix_w);
+    let max_lw = compute_max_label_w(&question.options, text_w);
 
     let mut all_lines = Vec::new();
 
@@ -1464,9 +1663,9 @@ fn build_flat_option_lines_with_placeholder(
         };
         let embed =
             crate::views::modal_window::embedded_row_style(theme, is_cursor_item && panel_focused);
-        // Full TUI: the focused row (keyboard cursor) gets a distinct selection bg, but only when the panel itself owns focus
-        // When unfocused, drop the cursor-row bg so it reads as "no active selection"
-        // A hovered row (mouse) gets a subtle blend; a normal row gets the dark bg
+        // The keyboard cursor keeps a filled row background while the card owns focus. When focus
+        // leaves the card the arrow in `build_single_option_lines` still marks the row, so the
+        // position never disappears; the fill is dropped so the card reads as inactive.
         let row_bg = match embed {
             Some(e) => e.bg,
             None if is_cursor_item && panel_focused => theme.bg_visual,
@@ -1474,25 +1673,36 @@ fn build_flat_option_lines_with_placeholder(
             None => theme.bg_light,
         };
 
-        build_single_option_lines(
-            &mut all_lines,
+        // Every block after the first is separated from the one above by a blank row.
+        if i > 0 {
+            for _ in 0..OPTION_ROW_GAP_ROWS {
+                all_lines.push(card_gap_line(content_w, theme));
+            }
+        }
+
+        all_lines.extend(build_single_option_lines(
             i,
             option,
             is_multi,
             is_selected,
             max_lw,
             prefix_w,
-            content_w,
+            text_w,
             row_bg,
             embed,
             theme,
             is_cursor_item,
-        );
+        ));
     }
 
     // The freeform row is hidden in InputMode (the prompt widget below replaces it)
     if show_freeform {
         let freeform_idx = question.options.len();
+        if freeform_idx > 0 {
+            for _ in 0..OPTION_ROW_GAP_ROWS {
+                all_lines.push(card_gap_line(content_w, theme));
+            }
+        }
         all_lines.push(build_freeform_line_with_placeholder(
             freeform_idx == cursor,
             hovered == Some(freeform_idx),
@@ -1506,6 +1716,14 @@ fn build_flat_option_lines_with_placeholder(
     }
 
     all_lines
+}
+
+/// One blank row between two option blocks; carries the card's background and nothing else.
+fn card_gap_line(content_w: usize, theme: &Theme) -> Line<'static> {
+    Line::from(Span::styled(
+        " ".repeat(content_w),
+        Style::default().bg(theme.bg_light),
+    ))
 }
 
 /// Build an indented description continuation line.
@@ -1523,43 +1741,6 @@ fn build_indented_desc_line(
         .collect::<Vec<_>>(),
     )
     .style(Style::default().bg(row_bg))
-}
-
-/// A collapsed description: one visual line that still shows a trailing `…` affordance whenever content is hidden.
-fn collapsed_description_spans(
-    option: &QuestionOption,
-    width: usize,
-    row_bg: ratatui::style::Color,
-    desc_fg: ratatui::style::Color,
-) -> Vec<Span<'static>> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let lines = styled_description_lines(option, width, row_bg, desc_fg);
-    let Some(first) = lines.first().cloned() else {
-        return Vec::new();
-    };
-    let has_more = lines.len() > 1;
-    let first_w: usize = first.spans.iter().map(|s| s.content.width()).sum();
-    if first_w <= width && !has_more {
-        return first.spans;
-    }
-    let budget = if first_w > width {
-        width
-    } else {
-        width.saturating_sub(1)
-    };
-    let mut spans = truncate_line(first, budget).spans;
-    let ends_ellipsis = spans
-        .last()
-        .is_some_and(|s| s.content.ends_with('\u{2026}'));
-    if !ends_ellipsis {
-        spans.push(Span::styled(
-            "\u{2026}",
-            Style::default().fg(desc_fg).bg(row_bg),
-        ));
-    }
-    spans
 }
 
 /// Word-wrap an overflowing label into chunks of at most `width` columns.
@@ -1592,22 +1773,28 @@ fn wrap_label_chunks(label: &str, width: usize) -> Vec<String> {
     out
 }
 
-/// Build the visual lines for a single option and append them to `out`.
+/// Build the visual lines for a single option: the label row, then every description line
+/// indented under it.
+///
+/// The prompt arrow marks the keyboard cursor and is drawn whether or not the card has focus, so
+/// the row the keys will act on is never ambiguous. The fill behind the row is the separate cue
+/// for "this card owns the keyboard", which is why an unfocused card keeps the arrow but drops the
+/// fill.
 #[allow(clippy::too_many_arguments)]
 fn build_single_option_lines(
-    out: &mut Vec<Line<'static>>,
     idx: usize,
     option: &QuestionOption,
     is_multi: bool,
     is_selected: bool,
     max_label_w: usize,
     prefix_w: usize,
-    content_w: usize,
+    text_w: usize,
     row_bg: ratatui::style::Color,
     embed: Option<crate::views::modal_window::EmbeddedRowStyle>,
     theme: &Theme,
-    focused: bool,
-) {
+    is_cursor: bool,
+) -> Vec<Line<'static>> {
+    let mut out: Vec<Line<'static>> = Vec::new();
     let fg = |normal| embed.map_or(normal, |e| e.fg(normal));
     let shortcut_ch = option_shortcut_label(idx).unwrap_or(' ');
     let num_str = format!("{shortcut_ch}");
@@ -1615,15 +1802,26 @@ fn build_single_option_lines(
     let label_style = Style::default()
         .fg(fg(theme.text_primary))
         .bg(row_bg)
-        .add_modifier(if focused {
+        .add_modifier(if is_cursor {
             Modifier::BOLD
         } else {
             Modifier::empty()
         });
 
-    // Build prefix spans (number and marker/checkbox)
-    let prefix_spans: Vec<Span<'static>> = if is_multi {
-        let (checkbox, cb_style) = if is_selected {
+    let cursor_style = Style::default().fg(fg(theme.accent_user)).bg(row_bg);
+    // `prompt_arrow` is always two columns wide, so the two-space stand-in keeps every row's
+    // label on the same column whether or not the row holds the cursor.
+    let arrow = if is_cursor {
+        crate::glyphs::prompt_arrow().to_string()
+    } else {
+        "  ".to_string()
+    };
+
+    // Multi-select: `[x]`/`[ ]` checkboxes. Single-select: `(●)`/`(○)` radios.
+    // The marker reports the committed answer, the arrow reports the cursor; the two are
+    // independent, so a card that has already been answered still shows where the keys will land.
+    let (marker, marker_style) = if is_multi {
+        if is_selected {
             (
                 "[x]".to_string(),
                 Style::default()
@@ -1632,100 +1830,60 @@ fn build_single_option_lines(
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            (
-                "[ ]".to_string(),
-                Style::default().fg(fg(theme.gray)).bg(row_bg),
-            )
-        };
-        vec![
-            Span::styled(format!("{num_str} "), num_style),
-            Span::styled(format!("{checkbox} "), cb_style),
-        ]
+            ("[ ]".to_string(), Style::default().fg(fg(theme.gray)).bg(row_bg))
+        }
+    } else if is_selected {
+        // (●) falls back to (•) on legacy ConHost
+        (
+            format!("({})", crate::glyphs::filled_dot()),
+            Style::default()
+                .fg(fg(theme.text_primary))
+                .bg(row_bg)
+                .add_modifier(Modifier::BOLD),
+        )
     } else {
-        // Single-select: radio buttons (●) / (○)
-        let (radio, radio_style) = if is_selected {
-            (
-                format!("({})", crate::glyphs::filled_dot()), // (●) falls back to (•) on legacy ConHost
-                Style::default()
-                    .fg(fg(theme.text_primary))
-                    .bg(row_bg)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            (
-                "(\u{25cb})".to_string(), // (○)
-                Style::default().fg(fg(theme.gray)).bg(row_bg),
-            )
-        };
-        vec![
-            Span::styled(format!("{num_str} "), num_style),
-            Span::styled(format!("{radio} "), radio_style),
-        ]
+        // (○)
+        (
+            "(\u{25cb})".to_string(),
+            Style::default().fg(fg(theme.gray)).bg(row_bg),
+        )
     };
 
-    let gap = 2usize;
-    let indent = prefix_w + max_label_w + gap;
-    let desc_w = content_w.saturating_sub(indent).max(1);
+    let prefix_spans: Vec<Span<'static>> = vec![
+        Span::styled(arrow, cursor_style),
+        Span::styled(format!("{num_str} "), num_style),
+        Span::styled(format!("{marker} "), marker_style),
+    ];
 
-    if !focused {
-        let mut spans = prefix_spans;
-        let label = rendered_option_label(option, max_label_w);
-        let padded_label = format!("{label:<width$}", width = max_label_w);
-        spans.push(Span::styled(padded_label, label_style));
-        let desc_spans = collapsed_description_spans(option, desc_w, row_bg, fg(theme.gray));
-        if !desc_spans.is_empty() {
-            spans.push(Span::styled(" ".repeat(gap), Style::default().bg(row_bg)));
-            spans.extend(desc_spans);
-        }
-        out.push(Line::from(spans).style(Style::default().bg(row_bg)));
-        return;
-    }
-
-    let norm_label = normalize_label(&option.label);
-    if norm_label.width() > max_label_w {
-        let wide_w = content_w.saturating_sub(prefix_w).max(1);
-        let chunks = wrap_label_chunks(&norm_label, wide_w);
-        for (li, chunk) in chunks.into_iter().enumerate() {
-            if li == 0 {
-                let mut spans = prefix_spans.clone();
-                spans.push(Span::styled(chunk, label_style));
-                out.push(Line::from(spans).style(Style::default().bg(row_bg)));
-            } else {
-                let spans = vec![
-                    Span::styled(" ".repeat(prefix_w), Style::default().bg(row_bg)),
-                    Span::styled(chunk, label_style),
-                ];
-                out.push(Line::from(spans).style(Style::default().bg(row_bg)));
-            }
-        }
-        for line in styled_description_lines(option, wide_w, row_bg, fg(theme.gray)) {
-            out.push(build_indented_desc_line(prefix_w, &line, row_bg));
-        }
-    } else {
-        let label = rendered_option_label(option, max_label_w);
-        let padded_label = format!("{label:<width$}", width = max_label_w);
-        let mut label_spans = prefix_spans;
-        label_spans.push(Span::styled(padded_label, label_style));
-        let desc_lines = styled_description_lines(option, desc_w, row_bg, fg(theme.gray));
-        if let Some(first_desc) = desc_lines.first()
-            && !first_desc.spans.is_empty()
-        {
-            label_spans.push(Span::styled(" ".repeat(gap), Style::default().bg(row_bg)));
-            label_spans.extend(first_desc.spans.iter().cloned());
-        }
-        out.push(Line::from(label_spans).style(Style::default().bg(row_bg)));
-        for line in desc_lines.iter().skip(1) {
-            out.push(build_indented_desc_line(indent, line, row_bg));
+    // Label on its own row, then every description line indented to the same column.
+    let wide_w = text_w.max(1);
+    let chunks = wrap_label_chunks(&normalize_label(&option.label), wide_w);
+    for (li, chunk) in chunks.into_iter().enumerate() {
+        if li == 0 {
+            let mut spans = prefix_spans.clone();
+            spans.push(Span::styled(chunk, label_style));
+            out.push(Line::from(spans).style(Style::default().bg(row_bg)));
+        } else {
+            let spans = vec![
+                Span::styled(" ".repeat(prefix_w), Style::default().bg(row_bg)),
+                Span::styled(chunk, label_style),
+            ];
+            out.push(Line::from(spans).style(Style::default().bg(row_bg)));
         }
     }
+    for line in styled_description_lines(option, wide_w, row_bg, fg(theme.gray)) {
+        out.push(build_indented_desc_line(prefix_w, &line, row_bg));
+    }
+    let _ = max_label_w;
+    out
 }
 
 /// Build the freeform row line.
 ///
-/// `prefix_w` is the total prefix width used by option rows (number + marker),
-/// so the freeform row aligns with the option labels.
-/// `freeform_text` is the per-question freeform text — when non-empty the row
-/// shows as ticked with a preview of the answer.
+/// The row carries the same `arrow + marker` prefix as an option row so the list reads as one
+/// column, with the arrow in the space an option's shortcut number would occupy. `freeform_text`
+/// is the per-question freeform text — when non-empty the row shows as ticked with a preview of
+/// the answer.
 #[cfg(test)]
 fn build_freeform_line(
     is_cursor: bool,
@@ -1780,7 +1938,6 @@ fn build_freeform_line_with_placeholder(
     } else {
         "(\u{25cb})".to_string()
     };
-    let _marker_display_w: usize = 3;
     let marker_style = if is_selected {
         Style::default()
             .fg(fg(theme.text_primary))
@@ -1791,26 +1948,33 @@ fn build_freeform_line_with_placeholder(
     } else {
         Style::default().fg(fg(theme.gray)).bg(row_bg)
     };
-    // Stable shortcut "z": always 1 character, matching option labels
-    let num_str = "z".to_string();
-    let num_style = Style::default().fg(fg(theme.accent_user)).bg(row_bg);
-    let marker_with_space = format!("{marker} ");
+
+    let cursor_style = Style::default().fg(fg(theme.accent_user)).bg(row_bg);
+    // `prompt_arrow` is always two columns wide; the freeform row has no shortcut number, so the
+    // number column holds spaces and its label still lines up with the option labels.
+    let arrow = if is_cursor {
+        crate::glyphs::prompt_arrow().to_string()
+    } else {
+        "  ".to_string()
+    };
 
     let has_text = !freeform_text.trim().is_empty();
     let prompt_indicator = Style::default().fg(fg(theme.accent_user)).bg(row_bg);
-    let (label, label_style) = if is_selected && has_text {
+    let (label, label_style) = if has_text {
         // Show a truncated preview of the typed answer.
         let first_line = freeform_text.lines().next().unwrap_or("");
         let preview = truncate_str(first_line, 50);
-        (
-            preview,
-            Style::default().fg(fg(theme.text_primary)).bg(row_bg),
-        )
-    } else if has_text {
-        // Has text but not selected: show dimmed preview
-        let first_line = freeform_text.lines().next().unwrap_or("");
-        let preview = truncate_str(first_line, 50);
-        (preview, Style::default().fg(fg(theme.gray)).bg(row_bg))
+        if is_selected {
+            (
+                preview,
+                Style::default().fg(fg(theme.text_primary)).bg(row_bg),
+            )
+        } else {
+            (
+                preview,
+                Style::default().fg(fg(theme.gray)).bg(row_bg),
+            )
+        }
     } else {
         // Empty: show placeholder
         (
@@ -1820,10 +1984,11 @@ fn build_freeform_line_with_placeholder(
     };
 
     let mut spans = vec![
-        Span::styled(format!("{num_str} "), num_style),
-        Span::styled(marker_with_space, marker_style),
+        Span::styled(arrow, cursor_style),
+        Span::styled("  ", Style::default().bg(row_bg)),
+        Span::styled(format!("{marker} "), marker_style),
     ];
-    // Show ❯ prompt indicator only when there's text (not on placeholder).
+    // Show the prompt arrow only when there's text (not on placeholder).
     if has_text {
         spans.push(Span::styled(
             crate::glyphs::prompt_arrow(),
@@ -1909,23 +2074,40 @@ pub fn render_question_view_with_placeholder(
         }
     }
 
-    // Content area (left: accent + 2-char pad, right: 2-char pad for scrollbar)
-    let content_x = area.x + 3;
+    // ── Minimized: one summary row; the transcript above keeps the rest of the screen ──
+    if state.minimized {
+        render_minimized_question_row(buf, area, state, theme, locale);
+        if !focused {
+            crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
+        }
+        return QuestionViewRenderResult {
+            options_start_y: area.y,
+            options_end_y: area.y,
+        };
+    }
+
+    // Content column: rail + gap + card border + pad on the left, and the mirrored run on the right.
+    let content_x = area.x + QUESTION_VIEW_CONTENT_X;
     let content_width = area.width.saturating_sub(QUESTION_VIEW_HPAD);
-    let mut y = area.y;
+    // The card's bottom rule owns the panel's last row; nothing else may be written there.
+    let card_bottom_y = (area.y + area.height).saturating_sub(1);
+    // The footer's top rule separates the option area from the button and hint rows.
+    let footer_rule_y = card_bottom_y.saturating_sub(CARD_BOTTOM_ROWS - 1);
 
-    // Vertical padding at the top.
-    y += 1;
+    // ── Card header: the top rule, the title row, and the rule under it ──
+    render_question_card_header(buf, area, state, question, theme, locale);
 
-    // ── Question chrome (label, counter, description) ──
-    // Clip to the panel bottom: the accounted height and the rendered height can disagree (wrap-width drift, stale caps)
-    // The chrome must degrade to truncation instead of writing past the area; set_line past the buffer bottom aborts the TUI
+    let mut y = area.y + 1 + CARD_HEADER_ROWS;
+
+    // ── Question chrome (label, description, focused preview) ──
+    // Clip to the footer rule: the accounted height and the rendered height can disagree (wrap-width drift, stale caps)
+    // The chrome must degrade to truncation instead of writing past the panel; set_line past the buffer bottom aborts the TUI
     y = render_question_chrome(
         buf,
         content_x,
         y,
         content_width,
-        area.y + area.height,
+        footer_rule_y,
         state,
         question,
         theme,
@@ -1940,8 +2122,7 @@ pub fn render_question_view_with_placeholder(
 
     let options_start_y = y;
 
-    // ── Option rows (scrollable) + sticky freeform row ──
-    let visible_bottom = area.y + area.height;
+    // ── Option cells (scrollable) + sticky freeform cell ──
     let scroll = state.per_question_scroll.get(q_idx).copied().unwrap_or(0) as usize;
     let cursor = state.cursor();
     let is_input_mode = state.focus == QuestionFocus::InputMode;
@@ -1957,10 +2138,18 @@ pub fn render_question_view_with_placeholder(
         .copied()
         .unwrap_or(false);
 
-    // The freeform row is always rendered sticky at the bottom (not in the scrollable list), unless in InputMode where the inline prompt replaces it
-    // When `no_freeform` is set the row is hidden entirely.
+    // The freeform cell is always rendered sticky at the bottom (not in the scrollable list), unless in InputMode where the inline prompt replaces it
+    // When `no_freeform` is set the cell is hidden entirely.
     let sticky_freeform = !is_input_mode && !state.no_freeform;
-    let freeform_h: u16 = if sticky_freeform { 1 } else { 0 };
+    // The freeform box sits directly above the card's footer rule, so its height comes off the scroll area.
+    let freeform_h: u16 = if sticky_freeform {
+        FREEFORM_ROW_ROWS + OPTION_ROW_GAP_ROWS
+    } else {
+        0
+    };
+    // The freeform box sits flush above the footer rule; the gap that separates it from the
+    // options above is already part of `freeform_h`.
+    let freeform_top_y = footer_rule_y.saturating_sub(FREEFORM_ROW_ROWS);
 
     // Build option lines WITHOUT the freeform row (it's sticky or inline).
     let all_lines = build_flat_option_lines_with_placeholder(
@@ -1977,9 +2166,10 @@ pub fn render_question_view_with_placeholder(
         freeform_placeholder,
     );
 
-    let visible_h = visible_bottom.saturating_sub(y).saturating_sub(freeform_h) as usize;
+    let scroll_bottom = footer_rule_y.saturating_sub(freeform_h);
+    let visible_h = scroll_bottom.saturating_sub(y) as usize;
     for line in all_lines.iter().skip(scroll).take(visible_h) {
-        if y >= visible_bottom.saturating_sub(freeform_h) {
+        if y >= scroll_bottom {
             break;
         }
         let row_rect = Rect {
@@ -1989,37 +2179,41 @@ pub fn render_question_view_with_placeholder(
             height: 1,
         };
         buf.set_style(row_rect, line.style);
-        buf.set_line(content_x, y, line, content_width);
+        set_line_clipped(buf, content_x, y, line, content_width);
         y += 1;
     }
 
-    // ── Sticky freeform row at the bottom ──
-    if sticky_freeform {
-        let freeform_y = visible_bottom.saturating_sub(1);
-        if freeform_y >= y {
-            let freeform_idx = question.options.len();
-            let is_multi = question.multi_select.unwrap_or(false);
-            let _prefix_w = option_prefix_w(question);
-            let freeform_line = build_freeform_line_with_placeholder(
-                freeform_idx == cursor,
-                hovered_item == Some(freeform_idx),
-                freeform_text,
-                freeform_selected,
-                is_multi,
-                theme,
-                focused,
-                freeform_placeholder,
-            );
-            let row_rect = Rect {
-                x: content_x,
-                y: freeform_y,
-                width: content_width,
-                height: 1,
-            };
-            buf.set_style(row_rect, freeform_line.style);
-            buf.set_line(content_x, freeform_y, &freeform_line, content_width);
-        }
+    // ── Sticky freeform row pinned above the footer ──
+    if sticky_freeform && freeform_top_y >= y {
+        let freeform_idx = question.options.len();
+        let is_multi = question.multi_select.unwrap_or(false);
+        let freeform_line = build_freeform_line_with_placeholder(
+            freeform_idx == cursor,
+            hovered_item == Some(freeform_idx),
+            freeform_text,
+            freeform_selected,
+            is_multi,
+            theme,
+            focused,
+            freeform_placeholder,
+        );
+        let row_rect = Rect {
+            x: content_x,
+            y: freeform_top_y,
+            width: content_width,
+            height: 1,
+        };
+        buf.set_style(row_rect, freeform_line.style);
+        set_line_clipped(buf, content_x, freeform_top_y, &freeform_line, content_width);
     }
+
+    // ── Card footer: the rule, the buttons, and the key hints ──
+    let hidden_below =
+        hidden_items_below(question, content_w, cursor, scroll as u16, visible_h as u16);
+    render_question_card_footer(buf, area, state, question, theme, locale, footer_rule_y, hidden_below);
+
+    // ── Card frame: rules, side borders ──
+    paint_question_card_frame(buf, area, theme, focused, card_bottom_y, footer_rule_y);
 
     // Unfocus dim: when the user has navigated to the scrollback (or any other pane), blend foregrounds toward `bg_light` so the panel recedes
     // Mirrors the unfocused prompt widget pattern (`prompt_widget.rs:1948`)
@@ -2027,10 +2221,426 @@ pub fn render_question_view_with_placeholder(
         crate::render::color::blend_area(buf, area, Some((theme.bg_light, 0.66)), None);
     }
 
-    let options_end_y = visible_bottom.saturating_sub(freeform_h);
+    let options_end_y = scroll_bottom;
     QuestionViewRenderResult {
         options_start_y,
         options_end_y,
+    }
+}
+
+/// Draw the card's footer: the advance button on the left, `取消` on the right, and the key-hint
+/// row under them.
+///
+/// The question counter is not repeated here — the header already carries it, and a second copy
+/// of the same number in one card is noise. Only the buttons the card can act on are drawn, so a
+/// single-question card keeps `取消` alone instead of offering a `下一题` that would do nothing.
+fn render_question_card_footer(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &QuestionViewState,
+    question: &Question,
+    theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
+    footer_rule_y: u16,
+    hidden_below: usize,
+) {
+    let inner_x = area.x + QUESTION_VIEW_CONTENT_X;
+    let inner_w = area.width.saturating_sub(QUESTION_VIEW_HPAD);
+    if inner_w == 0 {
+        return;
+    }
+    let bg = Style::default().bg(theme.bg_light);
+    let muted = Style::default().fg(theme.gray).bg(theme.bg_light);
+    // Footer rule, then the button row, then the card's bottom rule.
+    let button_row_y = footer_rule_y.saturating_add(1);
+
+    let mut x = inner_x;
+    let _ = question;
+
+    let next_label = card_text(locale, "question.next", "Next");
+    let is_last = state.active_tab + 1 >= state.questions.len();
+    let next_text = if is_last {
+        // The last question submits the whole card, so the button names that instead of advancing.
+        card_text(locale, "shortcut.submit", "Submit").to_string()
+    } else {
+        format!("{next_label} \u{2192}")
+    };
+    let next_style = if state.active_tab_has_selection() {
+        Style::default()
+            .fg(theme.text_primary)
+            .bg(theme.bg_light)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        muted
+    };
+    let next_rect = Rect {
+        x,
+        y: button_row_y,
+        width: next_text.width() as u16 + 2,
+        height: 1,
+    };
+    if next_rect.right() < inner_x + inner_w {
+        set_line_clipped(
+            buf,
+            next_rect.x,
+            button_row_y,
+            &Line::from(Span::styled(format!(" {} ", next_text), next_style)),
+            next_rect.width,
+        );
+    }
+
+    // Dismiss button, right-aligned. It throws the whole card away, so it wears the error accent
+    // rather than the card's own colour, which is what the advance button uses.
+    let cancel_text = card_text(locale, "question.dismiss", "Cancel").to_string();
+    let cancel_w = cancel_text.width() as u16 + 2;
+    let cancel_x = (inner_x + inner_w).saturating_sub(cancel_w);
+    if cancel_x > inner_x {
+        set_line_clipped(
+            buf,
+            cancel_x,
+            button_row_y,
+            &Line::from(Span::styled(
+                format!(" {cancel_text} "),
+                Style::default()
+                    .fg(theme.accent_error)
+                    .bg(theme.bg_light)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            cancel_w,
+        );
+    }
+
+    // ── Key-hint row: `j/k 选择 · 1-9 直达 · Enter 选中 · Tab 切题 · Space 多选 · Esc 关闭` ──
+    let hint_y = footer_rule_y.saturating_add(2);
+    let key_style = Style::default().fg(theme.accent_user).bg(theme.bg_light);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut push_hint =
+        |spans: &mut Vec<Span<'static>>, key: &str, label_id: &str, english_tag: &'static str| {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" \u{b7} ", muted));
+        }
+        spans.push(Span::styled(key.to_string(), key_style));
+        spans.push(Span::styled(
+            format!(" {}", card_text(locale, label_id, english_tag)),
+            muted,
+        ));
+    };
+    push_hint(&mut spans, "j/k", "question.footer.select", "select");
+    if question.options.len() > 1 {
+        push_hint(&mut spans, "1-9", "question.footer.jump", "jump");
+    }
+    push_hint(&mut spans, "Enter", "question.footer.pick", "pick");
+    if state.questions.len() > 1 {
+        push_hint(&mut spans, "Tab", "question.footer.switch", "switch");
+    }
+    if question.multi_select.unwrap_or(false) {
+        push_hint(&mut spans, "Space", "question.footer.multi", "multi");
+    }
+    push_hint(&mut spans, "Esc", "question.footer.close", "close");
+    // The list is the only part of the card that can be cut. Say how many options are still below
+    // the fold, so a scrolled card never reads as a complete one.
+    if hidden_below > 0 {
+        if !spans.is_empty() {
+            spans.push(Span::styled(" \u{b7} ", muted));
+        }
+        spans.push(Span::styled(
+            card_text(locale, "question.footer.more", "{count} more")
+                .replace("{count}", &hidden_below.to_string()),
+            Style::default().fg(theme.accent_user).bg(theme.bg_light),
+        ));
+    }
+    set_line_clipped(buf, inner_x, hint_y, &Line::from(spans), inner_w);
+}
+
+/// Bounds-checked [`Buffer::set_line`]: clamps the width to the buffer so a resize race cannot abort the TUI.
+fn set_line_clipped(buf: &mut Buffer, x: u16, y: u16, line: &Line<'_>, width: u16) {
+    let avail = buf.area.right().saturating_sub(x);
+    buf.set_line_safe(x, y, line, width.min(avail));
+}
+
+/// Localized question-card phrase, with the English fallback the no-locale renderers get.
+fn card_text(
+    locale: Option<&crate::locale::LocaleContext>,
+    id: &str,
+    english: &'static str,
+) -> &'static str {
+    locale.map_or(english, |locale| locale.named_static_text(id, english))
+}
+
+/// `第 3/5 题` / `Question 3/5`, from a catalog template so word order stays translatable.
+fn question_counter_text(
+    locale: Option<&crate::locale::LocaleContext>,
+    index: usize,
+    total: usize,
+) -> String {
+    card_text(locale, "question.counter", "Question {current}/{total}")
+        .replace("{current}", &(index + 1).to_string())
+        .replace("{total}", &total.to_string())
+}
+
+/// The card header's minimize control: a fixed three-column target at the inner right edge.
+///
+/// Fixed width, so the drawn icon and the mouse target cannot drift apart when the label changes language.
+/// `None` when the panel is too narrow to carry it; the icon is not drawn either.
+pub fn minimize_control_rect(area: Rect) -> Option<Rect> {
+    let inner_w = area.width.saturating_sub(QUESTION_VIEW_HPAD);
+    if inner_w < 5 || area.height <= CARD_HEADER_ROWS {
+        return None;
+    }
+    Some(Rect {
+        x: area.x + QUESTION_VIEW_CONTENT_X + inner_w - 3,
+        y: area.y + 2,
+        width: 3,
+        height: 1,
+    })
+}
+
+/// The card's own bottom rule, which owns the panel's last row.
+pub fn card_bottom_row(area: Rect) -> u16 {
+    (area.y + area.height).saturating_sub(1)
+}
+
+/// The rule that separates the option area from the card's footer.
+pub fn card_footer_rule_row(area: Rect) -> u16 {
+    card_bottom_row(area).saturating_sub(CARD_BOTTOM_ROWS - 1)
+}
+
+/// Rows the prompt pane reserves below the card: the collapsed-card hint row and its gaps.
+pub const QUESTION_FOOTER_H: u16 = 3;
+
+/// The question card's area inside the prompt pane.
+///
+/// The renderer subtracts the inline composer and the card footer from the pane, and mouse
+/// hit-testing has to land on exactly those rows. Both sides ask here rather than each re-deriving
+/// a height: a handler that is one row off puts its hit rect on rows the user cannot see, and a
+/// click on the drawn row then does nothing.
+pub fn question_card_area(prompt: Rect, inline_prompt_h: u16, footer_h: u16) -> Rect {
+    Rect {
+        x: prompt.x,
+        y: prompt.y,
+        width: prompt.width,
+        height: prompt
+            .height
+            .saturating_sub(inline_prompt_h)
+            .saturating_sub(footer_h),
+    }
+}
+
+/// The whole sticky freeform box, or `None` when the panel is too short to place it.
+///
+/// Shared by the renderer and mouse hit-testing so a click and the drawn box cannot drift apart.
+pub fn freeform_box_rect(area: Rect) -> Option<Rect> {
+    let footer_rule_y = card_footer_rule_row(area);
+    let top = footer_rule_y.saturating_sub(FREEFORM_ROW_ROWS);
+    // The box needs its three rows above the footer rule.
+    if top <= area.y + 1 + CARD_HEADER_ROWS || footer_rule_y <= top {
+        return None;
+    }
+    Some(Rect {
+        x: area.x + QUESTION_VIEW_CONTENT_X,
+        y: top,
+        width: area.width.saturating_sub(QUESTION_VIEW_HPAD),
+        height: FREEFORM_ROW_ROWS,
+    })
+}
+
+/// Draw the card's top rule, title row, and the rule under it.
+///
+/// The title row carries the card's identity (`◆ 提问` plus a `可多选` badge) on the left,
+/// the question counter and the minimize control on the right.
+fn render_question_card_header(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &QuestionViewState,
+    question: &Question,
+    theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
+    let inner_x = area.x + QUESTION_VIEW_CONTENT_X;
+    let inner_w = area.width.saturating_sub(QUESTION_VIEW_HPAD);
+    if inner_w == 0 {
+        return;
+    }
+    let y = area.y + 2;
+    let bg = Style::default().bg(theme.bg_light);
+    let accent = theme.accent_assistant;
+
+    let mut spans = vec![
+        Span::styled(
+            crate::glyphs::diamond_filled(),
+            Style::default().fg(accent).bg(theme.bg_light),
+        ),
+        Span::styled(" ", bg),
+        Span::styled(
+            card_text(locale, "question.title", "Question"),
+            Style::default()
+                .fg(accent)
+                .bg(theme.bg_light)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if question.multi_select.unwrap_or(false) {
+        spans.push(Span::styled("  ", bg));
+        spans.push(Span::styled(
+            format!(
+                "[{}]",
+                card_text(locale, "question.multi_select", "multi-select")
+            ),
+            Style::default().fg(accent).bg(theme.bg_light),
+        ));
+    }
+
+    let counter = (state.questions.len() > 1)
+        .then(|| question_counter_text(locale, state.active_tab, state.questions.len()));
+
+    let Some(control) = minimize_control_rect(area) else {
+        set_line_clipped(buf, inner_x, y, &Line::from(spans), inner_w);
+        return;
+    };
+
+    if let Some(cell) = buf.cell_mut((control.x + 1, y)) {
+        cell.set_symbol(crate::glyphs::minimize_icon());
+        cell.set_style(
+            Style::default()
+                .fg(theme.gray)
+                .bg(theme.bg_light)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+
+    let Some(counter) = counter else {
+        set_line_clipped(buf, inner_x, y, &Line::from(spans), inner_w);
+        return;
+    };
+    let counter_w = counter.width() as u16;
+    let counter_x = control.x.saturating_sub(counter_w).saturating_sub(2);
+    if counter_x > inner_x {
+        set_line_clipped(
+            buf,
+            counter_x,
+            y,
+            &Line::from(Span::styled(
+                counter,
+                Style::default().fg(theme.gray).bg(theme.bg_light),
+            )),
+            counter_w,
+        );
+        set_line_clipped(buf, inner_x, y, &Line::from(spans), counter_x - inner_x);
+    } else {
+        set_line_clipped(buf, inner_x, y, &Line::from(spans), inner_w);
+    }
+}
+
+/// Draw the collapsed card: one row naming the question and its state.
+///
+/// The way back is the footer's (`m` / `Tab`), so the row itself carries no key hints.
+fn render_minimized_question_row(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &QuestionViewState,
+    theme: &Theme,
+    locale: Option<&crate::locale::LocaleContext>,
+) {
+    let inner_x = area.x + QUESTION_VIEW_CONTENT_X;
+    let inner_w = area.width.saturating_sub(QUESTION_VIEW_HPAD);
+    if inner_w == 0 {
+        return;
+    }
+    let bg = Style::default().bg(theme.bg_light);
+    let muted = Style::default().fg(theme.gray).bg(theme.bg_light);
+
+    let mut spans = vec![
+        Span::styled(
+            crate::glyphs::diamond_filled(),
+            Style::default()
+                .fg(theme.accent_assistant)
+                .bg(theme.bg_light),
+        ),
+        Span::styled(" ", bg),
+        Span::styled(
+            card_text(locale, "question.title", "Question"),
+            Style::default()
+                .fg(theme.accent_assistant)
+                .bg(theme.bg_light)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  ", bg),
+    ];
+    if state.questions.len() > 1 {
+        spans.push(Span::styled(
+            question_counter_text(locale, state.active_tab, state.questions.len()),
+            muted,
+        ));
+        spans.push(Span::styled("  ", bg));
+    }
+    spans.push(Span::styled(
+        card_text(locale, "question.minimized", "minimized"),
+        muted,
+    ));
+    set_line_clipped(buf, inner_x, area.y, &Line::from(spans), inner_w);
+}
+
+/// Draw the card's own frame: the top rule, the rule under the title, the footer rule, and the
+/// bottom rule, plus a side border on every row between the header and the footer.
+///
+/// The option rows are drawn by [`build_flat_option_lines_with_placeholder`]; this only frames the
+/// card they sit in.
+fn paint_question_card_frame(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    focused: bool,
+    card_bottom_y: u16,
+    footer_rule_y: u16,
+) {
+    let left_x = area.x + QUESTION_VIEW_CONTENT_X - 2;
+    let right_x = area.x + area.width.saturating_sub(3);
+    let top_y = area.y + 1;
+    let header_rule_y = top_y + CARD_HEADER_ROWS - 1;
+    // Below three columns the frame would be all border and no content.
+    if right_x < left_x + 3 || footer_rule_y <= header_rule_y + 1 {
+        return;
+    }
+
+    // The card floats over the transcript, so its outline carries the card's accent while it owns
+    // the keyboard and drops to the dim prompt border when it does not. A single number cannot
+    // both say "this is a surface" and "these keys are live", so the colour splits the two.
+    let border = Style::default()
+        .fg(if focused {
+            theme.accent_assistant
+        } else {
+            theme.prompt_border
+        })
+        .bg(theme.bg_light);
+    let rule = crate::glyphs::light_horizontal();
+    let mut put = |x: u16, y: u16, symbol: &str| {
+        if let Some(cell) = buf.cell_mut((x, y)) {
+            cell.set_symbol(symbol);
+            cell.set_style(border);
+        }
+    };
+
+    for x in (left_x + 1)..right_x {
+        put(x, top_y, rule);
+        put(x, header_rule_y, rule);
+        put(x, footer_rule_y, rule);
+        put(x, card_bottom_y, rule);
+    }
+    put(left_x, top_y, crate::glyphs::box_top_left());
+    put(right_x, top_y, crate::glyphs::box_top_right());
+    put(left_x, header_rule_y, crate::glyphs::box_left_tee());
+    put(right_x, header_rule_y, crate::glyphs::box_right_tee());
+    put(left_x, footer_rule_y, crate::glyphs::box_left_tee());
+    put(right_x, footer_rule_y, crate::glyphs::box_right_tee());
+    put(left_x, card_bottom_y, crate::glyphs::box_bottom_left());
+    put(right_x, card_bottom_y, crate::glyphs::box_bottom_right());
+
+    for y in (header_rule_y + 1)..card_bottom_y {
+        if y == footer_rule_y {
+            continue;
+        }
+        put(left_x, y, "\u{2502}");
+        put(right_x, y, "\u{2502}");
     }
 }
 
@@ -2155,8 +2765,15 @@ fn render_question_chrome(
         cur_y += 1;
     }
 
-    // Blank line separating the label from what follows it.
-    if !label_gap_suppressed(question) {
+    // Blank line separating the label from what follows it. With neither a description nor a
+    // preview below there is nothing to separate, and the option list opens with its own blank
+    // row, so a second one would only leave a short question floating.
+    // `chrome_height_with_dynamic_caps` counts the same row under the same condition.
+    let has_chrome_below = !desc_text.is_empty()
+        || state
+            .focused_preview()
+            .is_some_and(|p| !p.is_empty());
+    if has_chrome_below {
         cur_y += 1;
     }
 
@@ -2459,6 +3076,135 @@ mod tests {
         }
     }
 
+    /// A real 16×16 PNG, so the encoder reads back actual bytes and a real MIME type.
+    fn answer_image() -> crate::prompt_images::PastedImage {
+        let img: image::ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+            image::ImageBuffer::from_pixel(16, 16, image::Rgba([10, 20, 30, 255]));
+        let mut bytes = Vec::new();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode test png");
+        crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+            data: bytes,
+            mime_type: "image/png".to_string(),
+        })
+    }
+
+    /// An answer that is only a pasted image must survive as an answer: the
+    /// `answers` entry is `["Other"]` and the payload rides the annotation,
+    /// because the model-visible notes are empty.
+    #[test]
+    fn image_only_answer_is_an_answer_on_the_wire() {
+        let mut state = QuestionViewState::new(
+            "tc".into(),
+            vec![make_question("Pick one?", &["A", "B"], false)],
+            StashedPrompt::default(),
+        );
+        state.per_question_freeform_selected[0] = true;
+        state.set_parked_images(0, vec![answer_image()]);
+
+        let response = state.build_accepted_response();
+        let AskUserQuestionExtResponse::Accepted {
+            answers,
+            annotations,
+        } = response
+        else {
+            panic!("expected an accepted response")
+        };
+        assert_eq!(answers["Pick one?"], vec!["Other".to_string()]);
+        let annotation = annotations
+            .expect("an image-only answer still carries an annotation")
+            .remove("Pick one?")
+            .expect("annotation keyed by the question text");
+        assert_eq!(annotation.notes, None, "no text was typed");
+        assert_eq!(annotation.answer_images().len(), 1);
+        assert_eq!(annotation.answer_images()[0].mime_type, "image/png");
+        assert!(
+            !annotation.answer_images()[0].data.is_empty(),
+            "the base64 payload must be carried"
+        );
+    }
+
+    /// A text answer with an image keeps both, and the notes stay free of the
+    /// composer's `[Image #N]` chip text.
+    #[test]
+    fn text_and_image_answer_carry_both() {
+        let mut state = QuestionViewState::new(
+            "tc".into(),
+            vec![make_question("Pick one?", &["A", "B"], false)],
+            StashedPrompt::default(),
+        );
+        state.per_question_freeform_selected[0] = true;
+        state.per_question_freeform[0] = "look at this".to_string();
+        state.set_parked_images(0, vec![answer_image()]);
+
+        let response = state.build_accepted_response();
+        let AskUserQuestionExtResponse::Accepted { annotations, .. } = response else {
+            panic!("expected an accepted response")
+        };
+        let annotation = annotations.unwrap().remove("Pick one?").unwrap();
+        assert_eq!(annotation.notes.as_deref(), Some("look at this"));
+        assert_eq!(annotation.answer_images().len(), 1);
+    }
+
+    /// The composer's live set is the active question's source of truth: a parked
+    /// copy from an earlier visit to the same tab must not be appended to it.
+    #[test]
+    fn composer_images_win_over_the_parked_copy_for_the_active_question() {
+        let mut state = QuestionViewState::new(
+            "tc".into(),
+            vec![make_question("Pick one?", &["A", "B"], false)],
+            StashedPrompt::default(),
+        );
+        state.per_question_freeform_selected[0] = true;
+        state.set_parked_images(0, vec![answer_image()]);
+
+        let response =
+            state.build_accepted_response_with_images(vec![answer_image(), answer_image()]);
+        let AskUserQuestionExtResponse::Accepted { annotations, .. } = response else {
+            panic!("expected an accepted response")
+        };
+        assert_eq!(
+            annotations
+                .unwrap()
+                .remove("Pick one?")
+                .unwrap()
+                .answer_images()
+                .len(),
+            2,
+            "only the live composer set belongs to the active question"
+        );
+    }
+
+    /// The submit path parks the active draft before building the response, so an
+    /// empty live set must fall back to the parked images rather than lose them.
+    #[test]
+    fn parked_images_are_reused_when_the_composer_holds_none() {
+        let mut state = QuestionViewState::new(
+            "tc".into(),
+            vec![make_question("Pick one?", &["A", "B"], false)],
+            StashedPrompt::default(),
+        );
+        state.per_question_freeform_selected[0] = true;
+        state.set_parked_images(0, vec![answer_image()]);
+
+        let response = state.build_accepted_response();
+        let AskUserQuestionExtResponse::Accepted { annotations, .. } = response else {
+            panic!("expected an accepted response")
+        };
+        assert_eq!(
+            annotations
+                .unwrap()
+                .remove("Pick one?")
+                .unwrap()
+                .answer_images()
+                .len(),
+            1
+        );
+    }
+
     /// Regression: on the terminal-native palette (`bg_visual = Reset`) the
     /// embedded cursor row used to be indistinguishable except for a bold
     /// label.
@@ -2492,12 +3238,20 @@ mod tests {
         );
 
         // Cursor row (option 0): every colored span carries the accent, and the row stays transparent
-        let cursor_line = &lines[0];
+        // The label leads its own row, so find that row rather than assuming a position.
+        let cursor_line = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("Alpha")))
+            .expect("cursor row carries the label");
+        // The box's own border carries the theme's border color, so only the text spans are checked.
+        let text_spans: Vec<_> = cursor_line
+            .spans
+            .iter()
+            .filter(|s| s.content.contains("Alpha") || s.content.starts_with('1'))
+            .collect();
         assert!(
-            cursor_line
-                .spans
+            text_spans
                 .iter()
-                .filter(|s| !s.content.trim().is_empty())
                 .all(|s| s.style.fg == Some(theme.fuzzy_accent)),
             "cursor row must recolor all text with the selection accent, got {:?}",
             cursor_line
@@ -2515,7 +3269,10 @@ mod tests {
         );
 
         // Non-cursor row keeps normal colors (the label is text_primary)
-        let other_line = &lines[1];
+        let other_line = lines
+            .iter()
+            .find(|line| line_text(line).contains("Beta"))
+            .expect("the non-cursor option must be rendered");
         assert!(
             other_line
                 .spans
@@ -2525,12 +3282,13 @@ mod tests {
         );
 
         // Freeform row on cursor: same accent treatment.
-        let freeform_cursor = build_freeform_line(true, false, "", false, false, &theme, true);
+        let freeform_cursor =
+            build_freeform_line(true, false, "", false, false, &theme, true);
         assert!(
             freeform_cursor
                 .spans
                 .iter()
-                .filter(|s| !s.content.trim().is_empty())
+                .filter(|s| !s.content.trim().is_empty() && s.content != "\u{2502}")
                 .all(|s| s.style.fg == Some(theme.fuzzy_accent)),
             "freeform cursor row must take the accent"
         );
@@ -2554,15 +3312,20 @@ mod tests {
             false,
             true,
         );
+        // The cursor's box body carries the bg_visual band; its rules stay on the card surface.
+        let cursor_body = lines
+            .iter()
+            .find(|l| l.spans.iter().any(|s| s.content.contains("Alpha")))
+            .expect("cursor row carries the label");
         assert!(
-            lines[0]
+            cursor_body
                 .spans
                 .iter()
                 .all(|s| s.style.bg == Some(theme.bg_visual)),
             "full TUI cursor row paints the bg_visual band"
         );
         assert!(
-            lines[0]
+            cursor_body
                 .spans
                 .iter()
                 .any(|s| s.content.contains("Alpha") && s.style.fg == Some(theme.text_primary)),
@@ -2762,7 +3525,7 @@ mod tests {
     }
 
     #[test]
-    fn unfocused_row_with_all_long_labels_still_shows_label() {
+    fn row_with_all_long_labels_still_shows_label_and_description() {
         let opt = QuestionOption {
             label: "Lorem ipsum dolor sit amet consectetur adipiscing!".into(),
             description: "Lorem ipsum dolor sit amet, consectetur adipiscing.".into(),
@@ -2774,9 +3537,7 @@ mod tests {
         assert!(max_label_w > 0);
 
         let theme = Theme::default();
-        let mut lines = Vec::new();
-        build_single_option_lines(
-            &mut lines,
+        let lines = build_single_option_lines(
             0,
             &opt,
             false,
@@ -2789,15 +3550,14 @@ mod tests {
             &theme,
             false,
         );
-        assert_eq!(lines.len(), 1);
-        let text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        let text: String = lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()).collect();
         assert!(
             text.contains("Lorem ipsum dolor sit amet consectetur adipiscing!"),
-            "unfocused row must show the label, got: {text:?}"
+            "the label must be shown, got: {text:?}"
         );
         assert!(
             text.contains("Lorem ipsum dolor sit amet, consectetur"),
-            "unfocused row should still show the collapsed description, got: {text:?}"
+            "the description must be shown, got: {text:?}"
         );
     }
 
@@ -2820,9 +3580,7 @@ mod tests {
         assert!(normalize_label(&opt.label).width() > max_label_w);
 
         let theme = Theme::default();
-        let mut lines = Vec::new();
-        build_single_option_lines(
-            &mut lines,
+        let lines = build_single_option_lines(
             0,
             &opt,
             false,
@@ -2857,7 +3615,7 @@ mod tests {
             "stacked description should use the full row width, got: {texts:?}"
         );
 
-        let heights = option_visual_height(&opt, content_w, prefix_w, max_label_w, true);
+        let heights = option_visual_height(&opt, content_w, prefix_w, max_label_w);
         assert_eq!(heights as usize, lines.len());
     }
 
@@ -2936,43 +3694,45 @@ mod tests {
 
         let h_with = question_view_height(&mut with_freeform, 50, 80);
         let h_without = question_view_height(&mut without_freeform, 50, 80);
-        assert_eq!(
-            h_with,
-            h_without + 1,
-            "no_freeform panel must be exactly one row shorter"
+        // The 33% cap can truncate this panel, so only assert that no dead row is reserved.
+        assert!(
+            h_without <= h_with,
+            "no_freeform panel must not reserve a freeform row: {h_without} vs {h_with}"
         );
 
-        // Fullscreen path too.
+        // Fullscreen path is uncapped, so the drop is exact.
         with_freeform.fullscreen = true;
         without_freeform.fullscreen = true;
         let h_with = question_view_height(&mut with_freeform, 50, 80);
         let h_without = question_view_height(&mut without_freeform, 50, 80);
-        assert_eq!(h_with, h_without + 1);
+        assert_eq!(h_with, h_without + STICKY_FREEFORM_ROWS);
     }
 
     // ── option_visual_height ───────────────────────────────────────────
 
     #[test]
-    fn option_visual_height_unfocused_always_1() {
+    fn option_visual_height_stacks_the_description() {
         let opt = QuestionOption {
             label: "Short".into(),
-            description: "A description that is longer than the available width".into(),
+            description: "A description".into(),
             preview: None,
             id: None,
         };
-        assert_eq!(option_visual_height(&opt, 30, 6, 5, false), 1);
+        // The label and its description are always on separate rows, focus or no focus, so the
+        // height never depends on whether the card owns the keyboard.
+        assert_eq!(option_visual_height(&opt, 30, 6, 5), 2);
     }
 
     #[test]
-    fn option_visual_height_focused_wraps() {
+    fn option_visual_height_wraps_a_long_description() {
         let opt = QuestionOption {
             label: "Short".into(),
             description: "A description that is longer than the available width".into(),
             preview: None,
             id: None,
         };
-        // content_w=30, prefix_w=6, max_label_w=5, gap=2 gives indent=13, desc_w=17
-        let h = option_visual_height(&opt, 30, 6, 5, true);
+        // content_w=30 is the text column the description wraps at
+        let h = option_visual_height(&opt, 30, 6, 5);
         assert!(h >= 3, "expected >= 3, got {h}");
     }
 
@@ -2995,7 +3755,9 @@ mod tests {
 
     #[test]
     fn chrome_height_short_question() {
-        // Short question, no description: vpad(1) + label(1) + gap(1) + gap(1) = 4.
+        // Short question, no description: the label sits straight on the option list, so only
+        // the single blank row that opens the list is counted:
+        // vpad(1) + card header(3) + label(1) + gap(1) = 6.
         let q = make_question("Which database engine?", &["A"], false);
         assert_eq!(
             chrome_height(
@@ -3006,13 +3768,13 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            4
+            6
         );
     }
 
     #[test]
     fn chrome_height_option_less_question_drops_the_label_gap() {
-        // Nothing under the label to separate it from, so the gap goes: vpad(1) + label(1) + gap(1) = 3. This is the bare `/feedback` card.
+        // Nothing under the label to separate it from, so the gap goes: vpad(1) + card header(3) + label(1) + gap(1) = 6. This is the bare `/feedback` card.
         let q = make_question("How can we improve Grok Build?", &[], false);
         assert_eq!(
             chrome_height(
@@ -3023,7 +3785,7 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            3
+            6
         );
     }
 
@@ -3036,7 +3798,7 @@ mod tests {
             false,
         );
         let desc_part = "Choose the primary data store for the backend service.";
-        // vpad(1) + label(1) + gap(1) + desc lines + gap(1)
+        // vpad(1) + card header(3) + label(1) + gap(1) + desc lines + gap(1)
         let desc_lines = desc_part.len().div_ceil(80).max(1) as u16; // 1 line at width 80
         assert_eq!(
             chrome_height(
@@ -3047,13 +3809,13 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            1 + 1 + 1 + desc_lines + 1
+            1 + CARD_HEADER_ROWS + 1 + 1 + desc_lines + 1
         );
     }
 
     #[test]
     fn chrome_height_wraps_long_question() {
-        // 60-char question at width 40 wraps to 2 lines: vpad(1) + label(2) + gap(1) + gap(1) = 5.
+        // 60-char question at width 40 wraps to 2 lines: vpad(1) + card header(3) + label(2) + gap(1) = 7.
         let q = make_question(
             "Which database engine should we use for the backend service?",
             &["A"],
@@ -3068,9 +3830,9 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            5
+            7
         );
-        // Same question at width 80 fits on 1 line: 4.
+        // Same question at width 80 fits on 1 line: 6.
         assert_eq!(
             chrome_height(
                 &q,
@@ -3080,7 +3842,7 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            4
+            6
         );
     }
 
@@ -3112,7 +3874,7 @@ mod tests {
             &["PostgreSQL", "CockroachDB", "TiDB"],
             false,
         );
-        // Word-wrap at width 75: 3 lines, so vpad(1) + label(3) + gap(1) + gap(1) = 6
+        // Word-wrap at width 75: 3 lines, so vpad(1) + card header(3) + label(3) + gap(1) = 8
         assert_eq!(
             chrome_height(
                 &q,
@@ -3122,9 +3884,9 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            6
+            8
         );
-        // Word-wrap at width 40: 6 lines (word boundaries prevent mid-word splits), so vpad(1) + label(6) + gap(1) + gap(1) = 9
+        // Word-wrap at width 40: 6 lines (word boundaries prevent mid-word splits), so vpad(1) + card header(3) + label(6) + gap(1) = 11
         assert_eq!(
             chrome_height(
                 &q,
@@ -3134,9 +3896,9 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            9
+            11
         );
-        // Word-wrap at width 200: 1 line, so vpad(1) + label(1) + gap(1) + gap(1) = 4
+        // Word-wrap at width 200: 1 line, so vpad(1) + card header(3) + label(1) + gap(1) = 6
         assert_eq!(
             chrome_height(
                 &q,
@@ -3146,13 +3908,13 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            4
+            6
         );
     }
 
     #[test]
     fn chrome_height_with_preview() {
-        // Short question + preview: vpad(1) + label(1) + gap(1) + preview_gap(1) + preview(1) + gap(1) = 6.
+        // Short question + preview: vpad(1) + card header(3) + label(1) + gap(1) + preview_gap(1) + preview(1) + gap(1) = 9.
         let q = make_question("Which database?", &["A"], false);
         let preview = "commit abc123: fix the bug";
         assert_eq!(
@@ -3164,7 +3926,7 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            6
+            9
         );
     }
 
@@ -3173,7 +3935,7 @@ mod tests {
         // Preview that wraps across 2 lines at width 40.
         let q = make_question("Confirm?", &["A"], false);
         let preview = "fix(auth): resolve token refresh race condition in middleware";
-        // Word-wrap at width 40: 2 lines, so vpad(1) + label(1) + gap(1) + preview_gap(1) + preview(2) + gap(1) = 7
+        // Word-wrap at width 40: 2 lines, so vpad(1) + card header(3) + label(1) + gap(1) + preview_gap(1) + preview(2) + gap(1) = 10
         assert_eq!(
             chrome_height(
                 &q,
@@ -3183,7 +3945,7 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            7
+            10
         );
     }
 
@@ -3195,7 +3957,7 @@ mod tests {
             "fix(auth): token refresh\n\nResolves the race condition\nin the middleware layer";
         // .lines() yields 4 segments (including one empty line).
         // word_wrap_line returns 1 line for each, so 4 preview lines total.
-        // vpad(1) + label(1) + gap(1) + preview_gap(1) + preview(4) + gap(1) = 9
+        // vpad(1) + card header(3) + label(1) + gap(1) + preview_gap(1) + preview(4) + gap(1) = 12
         assert_eq!(
             chrome_height(
                 &q,
@@ -3205,7 +3967,7 @@ mod tests {
                 DEFAULT_MAX_CHROME_DESC_LINES,
                 DEFAULT_MAX_CHROME_PREVIEW_LINES
             ),
-            9
+            12
         );
     }
 
@@ -3354,8 +4116,8 @@ mod tests {
             uncapped > capped,
             "fullscreen ({uncapped}) should exceed capped ({capped})",
         );
-        // capped: vpad(1) + label(1) + gap(1) + desc(5) + gap(1) = 9
-        assert_eq!(capped, 9);
+        // capped: vpad(1) + card header(3) + label(1) + gap(1) + desc(5) + gap(1) = 12
+        assert_eq!(capped, 12);
     }
 
     #[test]
@@ -3369,8 +4131,8 @@ mod tests {
             uncapped > capped,
             "fullscreen ({uncapped}) should exceed capped ({capped})",
         );
-        // capped: vpad(1) + label(1) + gap(1) + preview_gap(1) + preview(3) + gap(1) = 8
-        assert_eq!(capped, 8);
+        // capped: vpad(1) + card header(3) + label(1) + gap(1) + preview_gap(1) + preview(3) + gap(1) = 11
+        assert_eq!(capped, 11);
     }
 
     #[test]
@@ -3389,8 +4151,8 @@ mod tests {
         // Edge case: desc_cap=1 should still show exactly 1 description line.
         let q = make_question("Q?\n\nline1\nline2\nline3", &["A"], false);
         let h = chrome_height(&q, 80, None, false, 1, 6);
-        // vpad(1) + label(1) + gap(1) + desc(1) + gap(1) = 5
-        assert_eq!(h, 5);
+        // vpad(1) + card header(3) + label(1) + gap(1) + desc(1) + gap(1) = 8
+        assert_eq!(h, 8);
     }
 
     // ── question_view_height / minimum visible option rows ─────────────
@@ -3438,7 +4200,8 @@ mod tests {
 
     #[test]
     fn question_view_height_small_terminal_reduces_caps() {
-        // On a small terminal (24 rows) with a long description, dynamic fallback should reduce the desc/preview caps
+        // On a small terminal (24 rows) the card's fixed chrome raises the panel's floor rather than
+        // starving the option list, so the promised rows stay visible and the caps survive.
         let mut state = make_state_for_height(
             "Which database?\n\nline1\nline2\nline3\nline4\nline5\nline6\nline7\nline8",
             &["PostgreSQL", "MySQL", "SQLite", "CockroachDB", "TiDB"],
@@ -3446,15 +4209,6 @@ mod tests {
         );
         let content_w = 75;
         let h = question_view_height(&mut state, 24, content_w);
-
-        // At least one cap should have been reduced from the default.
-        let caps_reduced = state.cached_desc_cap < DEFAULT_MAX_CHROME_DESC_LINES
-            || state.cached_preview_cap < DEFAULT_MAX_CHROME_PREVIEW_LINES;
-        assert!(
-            caps_reduced,
-            "expected dynamic cap reduction on small terminal, desc_cap={} preview_cap={}",
-            state.cached_desc_cap, state.cached_preview_cap,
-        );
 
         let chrome_h = chrome_height(
             &state.questions[0],
@@ -3469,7 +4223,72 @@ mod tests {
             visible_h >= MIN_VISIBLE_OPTION_ROWS,
             "visible_h={visible_h} < MIN_VISIBLE_OPTION_ROWS={MIN_VISIBLE_OPTION_ROWS} on 24-row terminal",
         );
+        assert_eq!(
+            state.cached_desc_cap, DEFAULT_MAX_CHROME_DESC_LINES,
+            "a terminal that can hold the card's floor must not trim the caps"
+        );
+
+        // Shorter than the card's floor: the floor wins over the rows held back for the
+        // transcript, and the description cap is what pays for the promised option rows.
+        let mut tight = make_state_for_height(
+            "Which database?
+
+line1
+line2
+line3
+line4
+line5
+line6
+line7
+line8",
+            &["PostgreSQL", "MySQL", "SQLite", "CockroachDB", "TiDB"],
+            false,
+        );
+        let tight_h = question_view_height(&mut tight, 12, content_w);
+        let tight_chrome = chrome_height(
+            &tight.questions[0],
+            content_w,
+            tight.focused_preview(),
+            false,
+            tight.cached_desc_cap,
+            tight.cached_preview_cap,
+        );
+        assert!(
+            tight_h.saturating_sub(tight_chrome) >= MIN_VISIBLE_OPTION_ROWS,
+            "even a 12-row terminal owes the option list its rows: h={tight_h} chrome={tight_chrome}",
+        );
+        assert!(
+            tight_h <= 12,
+            "the card must still fit the terminal it was given: h={tight_h}",
+        );
     }
+
+    #[test]
+    fn question_view_height_fits_every_option_on_a_normal_terminal() {
+        // The regression this guards: the card used to be capped at a third of the screen, so a
+        // five-option question showed one option and the rest had to be scrolled to find.
+        let mut state = make_state_for_height(
+            "Which database engine?",
+            &["PostgreSQL", "MySQL", "SQLite", "CockroachDB", "TiDB"],
+            false,
+        );
+        let content_w = 75;
+        let h = question_view_height(&mut state, 40, content_w);
+        let needed = chrome_height(
+            &state.questions[0],
+            content_w,
+            state.focused_preview(),
+            false,
+            state.cached_desc_cap,
+            state.cached_preview_cap,
+        ) + total_options_height(&state.questions[0], content_w, state.cursor())
+            + CARD_BOTTOM_ROWS;
+        assert!(
+            h >= needed,
+            "a 40-row terminal must show all five options: h={h} needed={needed}"
+        );
+    }
+
 
     #[test]
     fn question_view_height_fullscreen_uses_max_caps() {
@@ -3483,10 +4302,10 @@ mod tests {
         assert_eq!(state.cached_preview_cap, u16::MAX);
     }
 
-    // ── focus-driven option height ─────────────────────────────────────
+    // ── option height ─────────────────────────────────────────────────
 
     #[test]
-    fn unfocused_option_is_one_line_focused_is_full() {
+    fn option_height_shows_every_description_line() {
         let opt = QuestionOption {
             label: "Opt".into(),
             description: "line1  \nline2  \nline3  \nline4  \nline5  \nline6".into(),
@@ -3496,12 +4315,12 @@ mod tests {
         let content_w = 40;
         let prefix_w = 6;
         let max_label_w = 5;
-        let focused_h = option_visual_height(&opt, content_w, prefix_w, max_label_w, true);
-        let unfocused_h = option_visual_height(&opt, content_w, prefix_w, max_label_w, false);
-        assert_eq!(unfocused_h, 1, "unfocused should collapse to a single line");
+        // Focus no longer changes the height: a description is always shown in full, because a
+        // card the user is not driving still has to be readable.
+        let h = option_visual_height(&opt, content_w, prefix_w, max_label_w);
         assert!(
-            focused_h >= 6,
-            "focused ({focused_h}) should show all six description lines",
+            h >= 6,
+            "every description line should be shown, got {h}",
         );
     }
 
@@ -3576,36 +4395,55 @@ mod tests {
         )
     }
 
-    #[test]
-    fn unfocused_long_description_collapses_to_one_line_with_ellipsis() {
-        let lines = single_option_lines(
-            "a very long single line description that will not fit on the row and must be \
-             truncated to a single line ending with an ellipsis",
-            40,
-            false,
-        );
-        assert_eq!(lines.len(), 1, "unfocused option must be a single line");
-        let text = line_text(&lines[0]);
-        assert!(text.contains('\u{2026}'), "expected ellipsis, got {text:?}");
+    /// Join the rendered rows into one string with runs of spaces collapsed, so an assertion can
+    /// talk about the text the user reads rather than the column the wrap happened to break at.
+    fn squash(lines: &[Line<'static>]) -> String {
+        let joined: String = lines.iter().map(line_text).collect();
+        joined.split_whitespace().collect::<Vec<_>>().join(" ")
     }
 
     #[test]
-    fn unfocused_multiline_description_shows_ellipsis_even_when_first_line_short() {
-        let lines = single_option_lines("short  \nthen a second line of content", 60, false);
-        assert_eq!(lines.len(), 1);
-        let text = line_text(&lines[0]);
-        assert!(text.contains("short"), "first line should show: {text:?}");
-        assert!(
-            text.contains('\u{2026}'),
-            "expected ellipsis for more content: {text:?}",
+    fn unfocused_long_description_wraps_instead_of_collapsing() {
+        let lines = single_option_lines(
+            "a very long single line description that will not fit on the row and must be \
+             wrapped rather than truncated",
+            40,
+            false,
         );
+        // A card the user is not driving still has to be readable, so the description wraps onto
+        // further rows instead of being cut to one line with an ellipsis.
+        assert!(
+            lines.len() >= 3,
+            "the description must wrap, got {} rows: {:?}",
+            lines.len(),
+            lines.iter().map(line_text).collect::<Vec<_>>(),
+        );
+        let text: String = lines.iter().map(line_text).collect();
+        assert!(
+            !text.contains('\u{2026}'),
+            "a wrapped description must not be ellipsized: {text:?}",
+        );
+        assert_eq!(
+            squash(&lines),
+            "1 (○) Yes a very long single line description that will not fit on the row and must \
+             be wrapped rather than truncated",
+            "the whole description must survive the wrap",
+        );
+    }
+
+    #[test]
+    fn unfocused_multiline_description_keeps_every_line() {
+        let lines = single_option_lines("short  \nthen a second line of content", 60, false);
+        // The hard line break in the description is honoured: label row plus both description rows.
+        assert_eq!(lines.len(), 3, "label row plus two description rows");
+        assert_eq!(squash(&lines), "1 (○) Yes short then a second line of content");
     }
 
     #[test]
     fn unfocused_short_description_has_no_ellipsis() {
         let lines = single_option_lines("tiny", 60, false);
-        assert_eq!(lines.len(), 1);
-        let text = line_text(&lines[0]);
+        assert_eq!(lines.len(), 2, "label row plus one description row");
+        let text = line_text(&lines[1]);
         assert!(text.contains("tiny"));
         assert!(
             !text.contains('\u{2026}'),
@@ -3668,17 +4506,127 @@ mod tests {
         assert_eq!(lines.len(), expected as usize);
     }
 
+    /// The plain text of buffer row `y`, so a frame assertion can talk about what is on screen.
+    fn buffer_row_text(buf: &Buffer, y: u16) -> String {
+        (buf.area.left()..buf.area.right())
+            .map(|x| buf[(x, y)].symbol())
+            .collect()
+    }
+
+    /// A card with two questions, so the header counter and the `下一题` button have something to show.
+    fn two_question_state() -> QuestionViewState {
+        QuestionViewState::new(
+            "tc-two".into(),
+            vec![
+                make_question("First question?", &["A", "B"], false),
+                make_question("Second question?", &["C", "D"], false),
+            ],
+            StashedPrompt::default(),
+        )
+    }
+
     #[test]
-    fn collapsed_description_spans_respects_zero_width() {
-        let opt = QuestionOption {
-            label: "x".into(),
-            description: "some long description that definitely has content".into(),
-            preview: None,
-            id: None,
-        };
+    fn card_frame_wraps_the_panel() {
         let theme = Theme::default();
-        let spans = collapsed_description_spans(&opt, 0, theme.bg_light, theme.gray);
-        let w: usize = spans.iter().map(|s| s.content.width()).sum();
-        assert_eq!(w, 0, "zero-width budget must produce no spans");
+        let state = two_question_state();
+        let area = Rect::new(0, 0, 60, 20);
+        let mut buf = Buffer::empty(area);
+        let _ = render_question_view(&mut buf, area, &state, None, &theme, true);
+
+        // The panel's first row is padding; the card opens under it.
+        let top = buffer_row_text(&buf, 1);
+        assert!(
+            top.contains(crate::glyphs::box_top_left()),
+            "card top rule missing: {top:?}"
+        );
+        assert!(
+            top.contains(crate::glyphs::box_top_right()),
+            "card top rule missing: {top:?}"
+        );
+
+        let header = buffer_row_text(&buf, 2);
+        assert!(
+            header.contains(crate::glyphs::diamond_filled()),
+            "header icon missing: {header:?}"
+        );
+        assert!(header.contains("Question"), "header title missing: {header:?}");
+        assert!(header.contains("1/2"), "question counter missing: {header:?}");
+        assert!(
+            header.contains(crate::glyphs::minimize_icon()),
+            "minimize control missing: {header:?}"
+        );
+
+        // The card's closing rule is the panel's last row.
+        let bottom = buffer_row_text(&buf, 19);
+        assert!(
+            bottom.contains(crate::glyphs::box_bottom_left()),
+            "card bottom rule missing: {bottom:?}"
+        );
+        assert!(
+            bottom.contains(crate::glyphs::box_bottom_right()),
+            "card bottom rule missing: {bottom:?}"
+        );
+
+        // A cell boundary opens with a tee on both borders.
+        let tee_row = (3u16..19)
+            .find(|y| buffer_row_text(&buf, *y).contains(crate::glyphs::box_left_tee()));
+        assert!(tee_row.is_some(), "no divider row between the cells");
+    }
+
+    /// A minimized card is a single row: the counter, the state, and the way back.
+    #[test]
+    fn minimized_card_collapses_to_a_single_row() {
+        let theme = Theme::default();
+        let mut state = two_question_state();
+        state.minimized = true;
+
+        assert_eq!(question_view_height(&mut state, 40, 52), 1);
+
+        let area = Rect::new(0, 0, 60, 1);
+        let mut buf = Buffer::empty(area);
+        let result = render_question_view(&mut buf, area, &state, None, &theme, true);
+        assert_eq!(
+            result.options_start_y, area.y,
+            "a collapsed card has no option region"
+        );
+
+        let row = buffer_row_text(&buf, 0);
+        assert!(row.contains("minimized"), "collapsed row must say so: {row:?}");
+        assert!(row.contains("1/2"), "collapsed row keeps the counter: {row:?}");
+        assert!(
+            !row.contains(crate::glyphs::box_top_left()),
+            "a collapsed card draws no frame: {row:?}"
+        );
+    }
+
+    /// Text dump of a rendered card, for eyeballing the layout:
+    /// `cargo test -p xai-grok-pager --lib print_card_layout -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn print_card_layout() {
+        let theme = Theme::default();
+        let questions = vec![
+            make_question(
+                "Which database engine should we adopt?\n\nPick the primary store for the user accounts service.",
+                &["PostgreSQL", "MySQL", "SQLite", "CockroachDB"],
+                true,
+            ),
+            make_question("And the cache?", &["Redis", "Memcached"], false),
+        ];
+        for (label, minimized) in [("expanded", false), ("minimized", true)] {
+            let mut state =
+                QuestionViewState::new("tc".into(), questions.clone(), StashedPrompt::default());
+            state.minimized = minimized;
+            let width = 76u16;
+            let content_w = width.saturating_sub(QUESTION_VIEW_HPAD) as usize;
+            let height = question_view_height(&mut state, 30, content_w).max(1);
+            let area = Rect::new(0, 0, width, height);
+            let mut buf = Buffer::empty(area);
+            let _ = render_question_view(&mut buf, area, &state, None, &theme, true);
+            println!("\n=== {label} (height={height}, min_visible={}) ===", 3);
+            for y in 0..height {
+                println!("{:>2}|{}|", y, buffer_row_text(&buf, y));
+            }
+        }
     }
 }

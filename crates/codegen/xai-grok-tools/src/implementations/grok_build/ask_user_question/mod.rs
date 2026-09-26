@@ -32,8 +32,8 @@ pub mod types;
 
 pub use types::{
     AskUserQuestionExtRequest, AskUserQuestionExtResponse, AskUserQuestionMode, QuestionAnnotation,
-    UserQuestionError, UserQuestionRequest, UserQuestionResponse, UserQuestionResult,
-    UserQuestionSender,
+    QuestionAnswerImage, UserQuestionError, UserQuestionRequest, UserQuestionResponse,
+    UserQuestionResult, UserQuestionSender,
 };
 
 use crate::notification::types::UserQuestionAsked;
@@ -478,6 +478,7 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
                 // a new ext_method arrives). Same model text as cancel.
                 return Ok(AskUserQuestionOutput::UserAnswered {
                     message: unanswered.to_string(),
+                    extracted_images: Vec::new(),
                 });
             }
         };
@@ -497,24 +498,35 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
                 } else {
                     format::format_accepted_tool_result(&answers, &annotations)
                 };
-                Ok(AskUserQuestionOutput::UserAnswered { message })
+                let extracted_images = collect_answer_images(&answers, &annotations);
+                Ok(AskUserQuestionOutput::UserAnswered {
+                    message,
+                    extracted_images,
+                })
             }
             Ok(UserQuestionResponse::ChatAboutThis {
                 questions,
                 partial_answers,
             }) => {
                 let message = format::format_chat_about_this(&questions, &partial_answers);
-                Ok(AskUserQuestionOutput::UserAnswered { message })
+                Ok(AskUserQuestionOutput::UserAnswered {
+                    message,
+                    extracted_images: Vec::new(),
+                })
             }
             Ok(UserQuestionResponse::SkipInterview {
                 questions,
                 partial_answers,
             }) => {
                 let message = format::format_skip_interview(&questions, &partial_answers);
-                Ok(AskUserQuestionOutput::UserAnswered { message })
+                Ok(AskUserQuestionOutput::UserAnswered {
+                    message,
+                    extracted_images: Vec::new(),
+                })
             }
             Ok(UserQuestionResponse::Cancelled) => Ok(AskUserQuestionOutput::UserAnswered {
                 message: unanswered.to_string(),
+                extracted_images: Vec::new(),
             }),
             Err(UserQuestionError::TransportError(msg)) => {
                 Err(xai_tool_runtime::ToolError::execution(
@@ -530,6 +542,29 @@ impl xai_tool_runtime::Tool for AskUserQuestionTool {
             }
         }
     }
+}
+
+/// Collect the images the user attached to their answers, in answer order.
+///
+/// One flat list is enough: the images ride the tool result as attachments
+/// rather than per-question annotations. Iterating `answers` (an `IndexMap`)
+/// keeps the order deterministic — annotations themselves are a plain map.
+fn collect_answer_images(
+    answers: &indexmap::IndexMap<String, Vec<String>>,
+    annotations: &Option<std::collections::HashMap<String, types::QuestionAnnotation>>,
+) -> Vec<crate::util::base64_images::ExtractedImage> {
+    let Some(annotations) = annotations else {
+        return Vec::new();
+    };
+    answers
+        .keys()
+        .filter_map(|question| annotations.get(question))
+        .flat_map(|annotation| annotation.answer_images())
+        .map(|image| crate::util::base64_images::ExtractedImage {
+            data: image.data.clone(),
+            mime_type: image.mime_type.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -810,7 +845,7 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
+            AskUserQuestionOutput::UserAnswered { message, .. } => {
                 assert!(message.contains("Which database?"));
                 assert!(message.contains("Redis"));
             }
@@ -844,7 +879,7 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
+            AskUserQuestionOutput::UserAnswered { message, .. } => {
                 assert_eq!(message, format::CANCEL_TEXT);
             }
             other => panic!("Expected UserAnswered with cancel text, got {:?}", other),
@@ -882,7 +917,7 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
+            AskUserQuestionOutput::UserAnswered { message, .. } => {
                 assert_eq!(message, format::NO_OPERATOR_TEXT);
             }
             other => panic!(
@@ -925,7 +960,7 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
+            AskUserQuestionOutput::UserAnswered { message, .. } => {
                 assert_eq!(message, format::NO_OPERATOR_TEXT);
             }
             other => panic!(
@@ -971,7 +1006,7 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
+            AskUserQuestionOutput::UserAnswered { message, .. } => {
                 assert_eq!(message, format::CANCEL_TEXT);
             }
             other => panic!(
@@ -1019,7 +1054,7 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
+            AskUserQuestionOutput::UserAnswered { message, .. } => {
                 assert!(message.contains("\"Which database?\"=\"Redis\""));
             }
             other => panic!("Expected UserAnswered, got {:?}", other),
@@ -1091,7 +1126,7 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
+            AskUserQuestionOutput::UserAnswered { message, .. } => {
                 assert_eq!(message, format::CANCEL_TEXT);
             }
             other => panic!("Expected UserAnswered with cancel text, got {:?}", other),
@@ -1142,7 +1177,7 @@ mod tests {
 
         let result = handle.await.unwrap().unwrap();
         match result {
-            AskUserQuestionOutput::UserAnswered { message } => {
+            AskUserQuestionOutput::UserAnswered { message, .. } => {
                 assert!(message.contains("\"Which database?\"=\"Redis\""));
             }
             other => panic!("Expected UserAnswered, got {:?}", other),

@@ -2288,6 +2288,9 @@ fn main() {
     if let Some(code) = xai_grok_pager::app::mermaid_worker::maybe_run_render_subprocess() {
         std::process::exit(code);
     }
+    if let Some(code) = xai_grok_tools::computer::local::persistent::maybe_run_worker() {
+        std::process::exit(code);
+    }
     if let Some(code) = xai_grok_pager::voice::maybe_run_capture_subprocess() {
         std::process::exit(code);
     }

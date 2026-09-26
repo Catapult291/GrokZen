@@ -23,7 +23,7 @@ where
         .collect())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ShellEnvironmentPolicyInherit {
     /// Core platform variables only (PATH, HOME, SHELL, ...).
@@ -38,7 +38,7 @@ pub enum ShellEnvironmentPolicyInherit {
 /// patterns `*KEY*`/`*SECRET*`/`*TOKEN*`; drop `exclude`; insert `set`; if
 /// `include_only` is non-empty, keep only those. Patterns are case-insensitive
 /// globs (`*`, `?`).
-#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct ShellEnvironmentPolicy {
     pub inherit: ShellEnvironmentPolicyInherit,

@@ -70,6 +70,9 @@ follow_up_behavior = "queue"           # 轮次中途跟进："queue"（等待�
                                        # "steer"（普通 Enter 仍先显示在队列，然后在下一个
                                        # 工具／模型安全间隙插话）。参见“键盘快捷键 → 活动轮次期间”。
 screen_mode = "fullscreen"             # 默认渲染模式："fullscreen" | "minimal"
+default_shell = "git-bash"             # Windows 默认命令 Shell："git-bash"（默认）|
+                                       # "pwsh"（PowerShell 7+）| "powershell"（Windows PowerShell 5.1）
+                                       # GROK_SHELL 优先；需要重启
                                        #（未设置 → fullscreen）；可通过 /settings → 默认屏幕模式设置
 
 [features]
@@ -145,6 +148,23 @@ default_selected_permission = "allow_once"
 可在运行时使用 `/vim-mode` 切换，或从 `/settings` → **Vim 回滚导航**切换。Grok 会立即将更改写入 `[ui] vim_mode`，并应用于该进程中所有未来的 pager 会话，包括新智能体和子智能体。不存在按会话覆盖——下次启动时 `config.toml` 才是事实来源。`vim_mode` 与 `simple_mode` 相互独立。
 
 <a id="screen-mode"></a>
+#### 默认 Shell（Windows）
+
+在 Windows 上，`[ui] default_shell` 决定 Grok Build 的工具、钩子、终端、状态栏命令以及模型上下文中显示所使用的命令 Shell。可从 `/settings` → **默认 Shell** 中选择（需重启），也可直接设置：
+
+```toml
+[ui]
+default_shell = "git-bash"  # 默认值
+```
+
+| 值 | Shell |
+|----|-------|
+| `"git-bash"` 或未设置 | Git Bash。这是产品默认值，并提供 `grep`、`sed` 等 Unix 工具。 |
+| `"pwsh"` | 已安装的 PowerShell 7 或更新版本提供的 `pwsh.exe`。配置保存的是可执行程序族而非主版本号，因此未来兼容版本无需迁移配置。 |
+| `"powershell"` | Windows PowerShell 5.1（`powershell.exe`）。 |
+
+`GROK_SHELL` 仍是优先级更高的显式进程级覆盖设置。支持的值包括 `git-bash`、`pwsh`、`powershell`，以及仅供内部兼容的 `cmd`。修改设置后需要重启 Grok Build；使用 leader 模式时也需重启 leader，使模型工具、钩子和终端会话统一使用所选 Shell。
+
 #### 屏幕模式
 
 `[ui] screen_mode` 是直接运行 `grok-zh` 时的**默认渲染模式**。可在 `/settings` → **默认屏幕模式**中设置（需重启），或手动编辑 `config.toml`——两种方式都会写入该文件。CLI 标志（`--minimal` / `--fullscreen`）和斜杠命令（`/minimal` / `/fullscreen`）仅作用于当前会话，**不会**写入此键；使用斜杠命令切换后，反向命令只会在该会话中将你切回。

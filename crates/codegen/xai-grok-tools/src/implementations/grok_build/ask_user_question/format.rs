@@ -53,6 +53,9 @@ pub fn unanswered_text(non_interactive: bool) -> &'static str {
 ///   in `annotations[q].notes`.
 /// - Preview is appended only when present in annotations.
 /// - Notes are appended only when present in annotations.
+/// - Attached images are announced but never inlined: the bytes travel as
+///   tool-result image attachments, and the model needs the pointer that says
+///   which answer they belong to.
 /// - Questions/labels are interpolated raw (no escaping).
 pub fn format_accepted_tool_result(
     answers: &IndexMap<String, Vec<String>>,
@@ -73,6 +76,10 @@ pub fn format_accepted_tool_result(
                 if let Some(ref notes) = ann.notes {
                     parts.push(format!("user notes: {}", notes));
                 }
+                let images = ann.answer_images().len();
+                if images > 0 {
+                    parts.push(attached_images_note(images));
+                }
             }
 
             parts.join(" ")
@@ -83,6 +90,21 @@ pub fn format_accepted_tool_result(
         "User has answered your questions: {}. You can now continue with the user's answers in mind.",
         entries.join(", ")
     )
+}
+
+/// Announcement for an answer that carries user-attached images.
+///
+/// The bytes arrive as image attachments on this tool result; this text only
+/// tells the model they exist and belong to the sibling answer.
+fn attached_images_note(count: usize) -> String {
+    if count == 1 {
+        "user attached 1 image to this answer (provided as an image attachment on this tool result)"
+            .to_string()
+    } else {
+        format!(
+            "user attached {count} images to this answer (provided as image attachments on this tool result)"
+        )
+    }
 }
 
 // ── Alternate id-keyed tool-result formatting ────
@@ -143,19 +165,27 @@ pub fn format_id_keyed_accepted_tool_result(
                         .and_then(|o| o.id.as_deref())
                 })
                 .collect();
+            let annotation = annotations.as_ref().and_then(|m| m.get(&q.question));
+            let image_count = annotation.map_or(0, |a| a.answer_images().len());
+            let image_suffix = (image_count > 0)
+                .then(|| format!(" ({})", attached_images_note(image_count)))
+                .unwrap_or_default();
             if oids.is_empty() {
                 // Freeform / dismissed: emit the raw text from the freeform
                 // input directly after `Question <qid>: `.
-                let notes = annotations
-                    .as_ref()
-                    .and_then(|m| m.get(&q.question))
+                let notes = annotation
                     .and_then(|a| a.notes.as_deref())
                     .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())?;
-                return Some(format!("Question {qid}: {notes}"));
+                    .filter(|s| !s.is_empty());
+                // An image-only answer is still an answer: it must not vanish
+                // from the result just because no text came with it.
+                let Some(notes) = notes.or((image_count > 0).then_some("(no text answer)")) else {
+                    return None;
+                };
+                return Some(format!("Question {qid}: {notes}{image_suffix}"));
             }
             Some(format!(
-                "Question {qid}: Selected option(s) {}",
+                "Question {qid}: Selected option(s) {}{image_suffix}",
                 oids.join(", ")
             ))
         })
@@ -293,6 +323,7 @@ mod tests {
             QuestionAnnotation {
                 preview: Some("<div>redis preview</div>".to_string()),
                 notes: None,
+                images: None,
             },
         );
         anns.insert(
@@ -300,6 +331,7 @@ mod tests {
             QuestionAnnotation {
                 preview: None,
                 notes: Some("I prefer React hooks".to_string()),
+                images: None,
             },
         );
 
@@ -334,6 +366,7 @@ mod tests {
             QuestionAnnotation {
                 preview: None,
                 notes: Some("I want to use DynamoDB".to_string()),
+                images: None,
             },
         );
 
@@ -353,6 +386,7 @@ mod tests {
             QuestionAnnotation {
                 preview: Some("<div class=\"grid\">...</div>".to_string()),
                 notes: Some("Use CSS Grid for the main layout".to_string()),
+                images: None,
             },
         );
 
@@ -556,6 +590,7 @@ mod tests {
             QuestionAnnotation {
                 preview: None,
                 notes: Some("nvm".to_string()),
+                images: None,
             },
         );
         let result = format_id_keyed_accepted_tool_result(&questions, &answers, &Some(anns));

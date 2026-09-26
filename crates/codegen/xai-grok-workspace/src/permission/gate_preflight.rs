@@ -21,6 +21,9 @@ pub(crate) struct GatePreflight {
     /// In auto mode, a fail-closed gate Ask with no rule match lets the classifier run (Allow executes, Block denies within budget).
     /// A rule-match Ask never defers.
     defers_gate_ask: bool,
+    /// The access this preflight was computed for; retained for request-shape
+    /// decisions that no policy rule expresses.
+    access: AccessKind,
 }
 
 impl GatePreflight {
@@ -56,6 +59,7 @@ impl GatePreflight {
             shell_file,
             native_symlink_fail_closed,
             defers_gate_ask,
+            access: access.clone(),
         }
     }
 
@@ -78,6 +82,16 @@ impl GatePreflight {
         self.bash_command.as_ref().is_some_and(GateDecision::is_ask)
             || self.shell_file_forced_prompt()
             || self.native_symlink_fail_closed
+    }
+
+    /// True when the request itself must reach a human regardless of policy
+    /// grants, YOLO, or the auto classifier.
+    ///
+    /// A detached background command is the one tool shape that keeps running
+    /// after the session ends, so the user is asked even under always-approve;
+    /// the model may propose it, but it never becomes effective silently.
+    pub(crate) fn requires_user_confirmation(&self) -> bool {
+        matches!(self.access, AccessKind::DetachBackground { .. })
     }
 
     /// Blocks bash grants from satisfying a Read/Edit ask escalated from shell-file access.

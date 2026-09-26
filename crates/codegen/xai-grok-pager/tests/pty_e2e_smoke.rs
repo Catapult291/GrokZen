@@ -19,6 +19,8 @@ mod doubled_lines_out_of_band_repro;
 mod embedded_mode_boots_without_hanging_on_blocked_backend;
 #[path = "pty_e2e/feedback_slash_opens_descriptive_pane.rs"]
 mod feedback_slash_opens_descriptive_pane;
+#[path = "pty_e2e/fork_picker_lists_earlier_prompts.rs"]
+mod fork_picker_lists_earlier_prompts;
 #[path = "pty_e2e/fullscreen_external_editor_round_trip.rs"]
 mod fullscreen_external_editor_round_trip;
 #[path = "pty_e2e/initial_prompt_positional_auto_submits.rs"]
@@ -33,6 +35,8 @@ mod question_tab_cycles_answers;
 mod renders_on_action;
 #[path = "pty_e2e/requirements_version_failure_exits_2_with_guidance.rs"]
 mod requirements_version_failure_exits_2_with_guidance;
+#[path = "pty_e2e/rewind_picker_lists_turns_oldest_first.rs"]
+mod rewind_picker_lists_turns_oldest_first;
 #[path = "pty_e2e/shift_selection_key_encodings.rs"]
 mod shift_selection_key_encodings;
 #[path = "pty_e2e/shift_tab_in_session_cycles_mode.rs"]
@@ -43,6 +47,8 @@ mod shift_tab_on_welcome_starts_session_in_plan_mode;
 mod small_screen_tip_survives_slow_turn;
 #[path = "pty_e2e/tab_focuses_scrollback_in_vim_and_default_modes.rs"]
 mod tab_focuses_scrollback_in_vim_and_default_modes;
+#[path = "pty_e2e/undo_slash_runs_conversation_only_rewind.rs"]
+mod undo_slash_runs_conversation_only_rewind;
 #[path = "pty_e2e/waiting_for_model_label.rs"]
 mod waiting_for_model_label;
 #[path = "pty_e2e/welcome_screen.rs"]

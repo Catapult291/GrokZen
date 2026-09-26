@@ -1116,6 +1116,7 @@ mod tests {
             cwd: "/tmp".to_owned(),
             start_time: std::time::SystemTime::UNIX_EPOCH,
             end_time: Some(std::time::SystemTime::UNIX_EPOCH),
+            output_encoding: None,
             output: String::new(),
             output_file: std::path::PathBuf::from("/tmp/x.log"),
             truncated: false,

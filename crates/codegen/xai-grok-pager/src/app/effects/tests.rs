@@ -922,6 +922,19 @@ async fn persist_setting_type_mismatch_errors_compact_mode() {
             "error message must mention key + expected kind, got: {err}",
         );
 }
+/// Type-mismatch for the persisted default shell.
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_default_shell() {
+    use crate::settings::SettingValue;
+    let err = persist_setting("default_shell", SettingValue::Bool(true))
+        .await
+        .expect_err("default_shell with Bool payload must return Err");
+    assert!(
+        err.contains("persist_setting(default_shell) expected Enum"),
+        "error message must mention key + expected kind, got: {err}",
+    );
+}
+
 /// Type-mismatch for `show_timestamps`.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_show_timestamps() {
@@ -1770,7 +1783,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 3);
     assert_eq!(captured[0]["query"], "hit");
-    assert_eq!(captured[0]["limit"], 30);
+    assert_eq!(captured[0]["limit"], 100);
     assert_eq!(captured[0]["headless"], "exclude");
     assert_eq!(captured[1]["headless"], "exclude");
     assert_eq!(captured[2]["headless"], "exclude");
@@ -2931,11 +2944,19 @@ fn session_picker_entry_maps_to_dormant_roster_row() {
     assert_eq!(roster.origin.host.as_deref(), Some("box"));
 }
 #[test]
-fn rewind_execute_params_sends_conversation_only_with_force() {
-    let params = rewind_execute_params("sess-1", 3);
-    assert_eq!(params["sessionId"], "sess-1");
-    assert_eq!(params["targetPromptIndex"], 3);
-    assert_eq!(params["force"], true);
-    assert_eq!(params["mode"], REWIND_MODE_WIRE);
-    assert_eq!(params["mode"], "conversation_only");
+fn rewind_execute_params_carry_the_selected_mode_with_force() {
+    for (mode, wire) in [
+        (crate::views::rewind::RewindMode::All, "all"),
+        (
+            crate::views::rewind::RewindMode::ConversationOnly,
+            "conversation_only",
+        ),
+        (crate::views::rewind::RewindMode::FilesOnly, "files_only"),
+    ] {
+        let params = rewind_execute_params("sess-1", 3, mode);
+        assert_eq!(params["sessionId"], "sess-1");
+        assert_eq!(params["targetPromptIndex"], 3);
+        assert_eq!(params["force"], true);
+        assert_eq!(params["mode"], wire, "{mode:?} must go out as its shell wire value");
+    }
 }

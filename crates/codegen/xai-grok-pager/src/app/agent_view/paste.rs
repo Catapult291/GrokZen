@@ -102,17 +102,22 @@ impl AgentView {
             &self.session.cwd,
         );
         self.paste_probe_in_flight += 1;
-        let from_feedback_pane = self
-            .question_view
-            .as_ref()
-            .is_some_and(crate::views::question_view::QuestionViewState::is_feedback_report);
+        let owner = match self.question_view.as_ref() {
+            Some(qv) if qv.is_feedback_report() => {
+                crate::app::actions::ClipboardPasteOwner::FeedbackPane
+            }
+            Some(qv) => crate::app::actions::ClipboardPasteOwner::QuestionCard {
+                tool_call_id: qv.tool_call_id.clone(),
+            },
+            None => crate::app::actions::ClipboardPasteOwner::Composer,
+        };
         self.pending_effects
             .push(crate::app::actions::Effect::ProbeClipboardAttachment {
                 ctx: crate::app::actions::ClipboardPasteContext {
                     target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                         agent_id: self.session.id,
                         images_dir,
-                        from_feedback_pane,
+                        owner,
                     },
                     source,
                 },
@@ -150,6 +155,32 @@ impl AgentView {
         }
         self.insert_prompt_plain_text(clipboard_text.as_deref()).0
     }
+    /// Whether the editor that owned the composer at enqueue time still owns it.
+    ///
+    /// A paste chord answered after its card was dismissed, replaced, or answered
+    /// would otherwise drop its chip into whatever now holds the composer (the
+    /// restored session draft). Non-prompt targets are unaffected.
+    fn paste_owner_still_holds_composer(
+        &self,
+        target: &crate::app::actions::ClipboardPasteTarget,
+    ) -> bool {
+        use crate::app::actions::{ClipboardPasteOwner, ClipboardPasteTarget};
+        let ClipboardPasteTarget::AgentPrompt { owner, .. } = target else {
+            return true;
+        };
+        match owner {
+            ClipboardPasteOwner::Composer => true,
+            ClipboardPasteOwner::FeedbackPane => self
+                .question_view
+                .as_ref()
+                .is_some_and(crate::views::question_view::QuestionViewState::is_feedback_report),
+            ClipboardPasteOwner::QuestionCard { tool_call_id } => self
+                .question_view
+                .as_ref()
+                .is_some_and(|qv| &qv.tool_call_id == tool_call_id),
+        }
+    }
+
     /// Attach the result of a deferred clipboard attachment probe ([`Effect::ProbeClipboardAttachment`]).
     /// The heavy read/decode/persist already ran off-thread; this only mutates prompt state on the event loop.
     pub(crate) fn complete_clipboard_attachment_paste(
@@ -162,17 +193,7 @@ impl AgentView {
             ClipboardPasteCompletion, ClipboardPasteFailure, ProbedAttachment,
         };
         self.paste_probe_in_flight = self.paste_probe_in_flight.saturating_sub(1);
-        if matches!(
-            &ctx.target,
-            crate::app::actions::ClipboardPasteTarget::AgentPrompt {
-                from_feedback_pane: true,
-                ..
-            }
-        ) && !self
-            .question_view
-            .as_ref()
-            .is_some_and(crate::views::question_view::QuestionViewState::is_feedback_report)
-        {
+        if !self.paste_owner_still_holds_composer(&ctx.target) {
             if let ProbedAttachment::Image(pasted) = &image {
                 crate::prompt_images::cleanup_temp_file(pasted);
             }
@@ -296,6 +317,15 @@ impl AgentView {
                 {
                     return None;
                 }
+                match self.submit_question_answers(false) {
+                    crate::app::app_view::InputOutcome::Action(action) => Some(action),
+                    _ => None,
+                }
+            }
+            AgentDeferredSend::SubmitQuestion => {
+                // Dismissed or replaced while the probe ran: the answer is gone, so the held-back
+                // submit must not fire into whatever card took its place.
+                self.question_view.as_ref()?;
                 match self.submit_question_answers(false) {
                     crate::app::app_view::InputOutcome::Action(action) => Some(action),
                     _ => None,
@@ -2286,7 +2316,7 @@ pub(super) mod paste_key_tests {
             target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                 agent_id: agent.session.id,
                 images_dir: None,
-                from_feedback_pane: false,
+                owner: crate::app::actions::ClipboardPasteOwner::Composer,
             },
             source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                 text: crate::app::actions::ClipboardTextRead::Success(
@@ -2305,7 +2335,7 @@ pub(super) mod paste_key_tests {
             target: crate::app::actions::ClipboardPasteTarget::AgentPrompt {
                 agent_id: agent.session.id,
                 images_dir: None,
-                from_feedback_pane: true,
+                owner: crate::app::actions::ClipboardPasteOwner::FeedbackPane,
             },
             source: crate::app::actions::ClipboardPasteSource::ClipboardKey {
                 text: crate::app::actions::ClipboardTextRead::Success(None),

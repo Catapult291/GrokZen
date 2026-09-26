@@ -63,6 +63,7 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "collapsed_edit_blocks",
     "respect_manual_folds",
     "hunk_tracker_mode",
+    "default_shell",
     "voice_keybind_enabled",
     "voice_capture_mode",
     "voice_stt_language",
@@ -112,6 +113,20 @@ fn matrix_is_subset_of_registry() {
 // ---------------------------------------------------------------------------
 
 fn make_state() -> SettingsModalState {
+    // Settings snapshot reads consult the live UI caches. Pin every cache-backed field
+    // to its shipped default so this table-driven test is independent of execution order.
+    use xai_grok_pager::appearance::{FollowUpBehavior, ScrollMode, TextSelection};
+    xai_grok_pager::appearance::cache::set_page_flip_on_send(true);
+    xai_grok_pager::appearance::cache::set_combine_queued_prompts(false);
+    xai_grok_pager::appearance::cache::set_follow_up_behavior(FollowUpBehavior::Queue);
+    xai_grok_pager::appearance::cache::set_keep_text_selection(TextSelection::Flash);
+    xai_grok_pager::appearance::cache::set_scroll_mode(ScrollMode::Auto);
+    xai_grok_pager::appearance::cache::set_invert_scroll(false);
+    xai_grok_pager::appearance::cache::set_scroll_lines(3);
+    xai_grok_pager::appearance::cache::set_show_thinking_blocks(true);
+    xai_grok_pager::appearance::cache::set_group_tool_verbs(true);
+    xai_grok_pager::appearance::cache::set_collapsed_edit_blocks(false);
+
     // Voice rows are hidden when the process gate is off (default until startup).
     xai_grok_pager::app::set_voice_mode_enabled_for_test(true);
     SettingsModalState::new(
@@ -1897,6 +1912,7 @@ fn registry_kind_membership_through_pr_14() {
             "auto_light_theme",
             "coding_data_sharing",
             "default_selected_permission",
+            "default_shell",
             "follow_up_behavior",
             "hunk_tracker_mode",
             "keep_text_selection",
@@ -1967,6 +1983,7 @@ fn enum_settings_membership_through_pr_14() {
             "auto_light_theme",
             "coding_data_sharing",
             "default_selected_permission",
+            "default_shell",
             "follow_up_behavior",
             "hunk_tracker_mode",
             "keep_text_selection",
@@ -2009,6 +2026,7 @@ fn defaults_round_trip_through_registry() {
     xai_grok_pager::appearance::cache::set_invert_scroll(false);
     // 3 = the registry default shown while the profile is in charge.
     xai_grok_pager::appearance::cache::set_scroll_lines(3);
+    xai_grok_pager::appearance::cache::set_collapsed_edit_blocks(false);
 
     // Hard-coded per-key expectations (independent of registry).
     let expected = |key: &str| -> SettingValue {
@@ -2019,6 +2037,7 @@ fn defaults_round_trip_through_registry() {
             "show_timeline" => SettingValue::Bool(false),
             "page_flip_on_send" => SettingValue::Bool(true),
             "confirm_before_rewind" => SettingValue::Bool(true),
+            "default_shell" => SettingValue::Enum("git-bash"),
             "combine_queued_prompts" => SettingValue::Bool(false),
             "follow_up_behavior" => SettingValue::Enum("queue"),
             "simple_mode" => SettingValue::Bool(true),
@@ -5953,6 +5972,110 @@ fn mouse_click_on_screen_mode_indicator_opens_picker_in_one_click() {
 }
 
 // ---------------------------------------------------------------------------
+// default_shell (Windows-only SHELL Enum, Advanced, restart_required, no preview).
+// Catalog [git-bash, pwsh, powershell]; product default is Git Bash.
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+#[test]
+fn enter_on_default_shell_row_enters_picking_enum() {
+    let mut s = make_state();
+    navigate_to(&mut s, "default_shell");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    assert!(
+        matches!(outcome, SettingsKeyOutcome::Changed),
+        "Enter on default_shell row must transition to PickingEnum, got {outcome:?}"
+    );
+    match &s.mode() {
+        SettingsModalMode::PickingEnum {
+            key,
+            original_value,
+            ..
+        } => {
+            assert_eq!(*key, "default_shell");
+            assert_eq!(original_value, &SettingValue::Enum("git-bash"));
+        }
+        other => panic!("expected PickingEnum mode, got {other:?}"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn default_shell_picker_nav_does_not_dispatch_preview() {
+    for nav_key in &[
+        KeyCode::Down,
+        KeyCode::Char('j'),
+        KeyCode::Up,
+        KeyCode::Char('k'),
+    ] {
+        let mut s = make_state();
+        navigate_to(&mut s, "default_shell");
+        let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
+        if matches!(nav_key, KeyCode::Up | KeyCode::Char('k')) {
+            let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+        }
+        let outcome = handle_settings_key(&mut s, &press(*nav_key));
+        assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn default_shell_picker_enter_dispatches_set_commit() {
+    let mut s = make_state();
+    navigate_to(&mut s, "default_shell");
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    let _ = handle_settings_key(&mut s, &press(KeyCode::Down));
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+    match outcome {
+        SettingsKeyOutcome::Action(Action::SetDefaultShell(shell)) => {
+            assert_eq!(shell, "pwsh");
+        }
+        other => panic!("expected Action::SetDefaultShell commit, got {other:?}"),
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn default_shell_choices_use_canonical_strings() {
+    let reg = SettingsRegistry::defaults();
+    let meta = reg.find("default_shell").unwrap();
+    let canonicals: Vec<&str> = match &meta.kind {
+        SettingKind::Enum { choices, .. } => choices.iter().map(|c| c.canonical).collect(),
+        _ => panic!("default_shell must be Enum"),
+    };
+    assert_eq!(canonicals, vec!["git-bash", "pwsh", "powershell"]);
+    assert!(meta.restart_required);
+    assert!(matches!(
+        meta.kind,
+        SettingKind::Enum {
+            supports_preview: false,
+            ..
+        }
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn mouse_click_on_default_shell_indicator_opens_picker_in_one_click() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "default_shell") as u16;
+    let outcome = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        72,
+        row_y,
+    );
+    assert!(matches!(outcome, SettingsKeyOutcome::Changed));
+    assert!(matches!(
+        s.mode(),
+        SettingsModalMode::PickingEnum { key, .. } if key == "default_shell"
+    ));
+}
+
+// ---------------------------------------------------------------------------
 // hunk_tracker_mode (SHELL Enum, Advanced, restart_required, no preview).
 // Catalog [agent_only, all_dirty, off]; `disabled` aliases `off` at parse time
 // Mirrors the render_mermaid enum tests (keyboard and mouse parity)
@@ -7006,7 +7129,11 @@ fn invert_scroll_space_dispatches_typed_setter() {
 #[test]
 fn invert_scroll_enter_dispatches_typed_setter() {
     xai_grok_pager::appearance::cache::set_invert_scroll(true);
-    let mut s = make_state();
+    let mut s = SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        PagerLocalSnapshot::default(),
+    );
     navigate_to(&mut s, "invert_scroll");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     assert_set_bool_action(outcome, "invert_scroll", false);
@@ -7151,8 +7278,13 @@ fn display_refresh_auto_cadence_defaults_roundtrip_via_current_value_for() {
 #[test]
 fn show_thinking_blocks_space_dispatches_typed_setter() {
     // Pin off so space toggles to true.
-    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
+    let mut s = SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        PagerLocalSnapshot::default(),
+    );
     navigate_to(&mut s, "show_thinking_blocks");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
     assert_set_bool_action(outcome, "show_thinking_blocks", true);
@@ -7161,8 +7293,13 @@ fn show_thinking_blocks_space_dispatches_typed_setter() {
 
 #[test]
 fn show_thinking_blocks_enter_dispatches_typed_setter() {
-    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
+    let mut s = SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        PagerLocalSnapshot::default(),
+    );
     navigate_to(&mut s, "show_thinking_blocks");
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     assert_set_bool_action(outcome, "show_thinking_blocks", true);
@@ -7171,8 +7308,13 @@ fn show_thinking_blocks_enter_dispatches_typed_setter() {
 
 #[test]
 fn show_thinking_blocks_mouse_click_two_stage_toggles() {
-    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
     let mut s = make_state();
+    xai_grok_pager::appearance::cache::set_show_thinking_blocks(false);
+    let mut s = SettingsModalState::new(
+        Arc::new(SettingsRegistry::defaults()),
+        UiConfig::default(),
+        PagerLocalSnapshot::default(),
+    );
     synth_rects(&mut s);
     let row_y = row_idx_for(&s, "show_thinking_blocks") as u16;
 

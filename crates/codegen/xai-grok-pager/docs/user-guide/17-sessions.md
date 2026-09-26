@@ -137,22 +137,36 @@ Alias: `/title`. `/rename --auto` clears a manual title and re-enables auto-titl
 
 ## The /rewind Command
 
-`/rewind` (alias `/undo`) rewinds the conversation to an earlier turn, dropping later turns. File changes made after that turn are left as-is on disk.
+`/rewind` rolls a session back to an earlier turn. What it rolls back depends on the choice you make in the confirmation: the conversation, the files that turn touched, or both. `/undo` is the conversation-only form: same picker, no confirmation, files left alone.
 
 ```
 /rewind
 /undo
 ```
 
-When you run `/rewind` or `/undo` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), Grok:
+When you run `/rewind` (or press **Esc Esc** within 800ms while idle with an empty prompt and conversation messages), Grok:
 
-1. Shows a list of rewind points (one per user prompt)
-2. Lets you select which point to rewind to
+1. Shows a list of rewind points (one per user prompt, oldest first) with the cursor on the newest
+2. Lets you select which point to rewind to — the turn under the cursor is scrolled to the top of the transcript and marked on the timeline rail, and **Esc** closes the list leaving the transcript where it was
 3. Truncates the conversation history to that point
 
-When **Confirm before rewind** is on (default in `/settings`), every pick asks for confirmation (Yes / Yes, and don't ask again / No). **Yes, and don't ask again** turns that setting off. With the setting off, picks run immediately.
+When **Confirm before rewind** is on (default in `/settings`), the pick opens a confirmation that asks *what* to rewind. The cursor starts on the first choice and the title follows the highlighted row, so each one can be read before picking:
 
-**Important:** `/rewind` does not restore files on disk. Only conversation history is truncated.
+| Choice | Keys | Effect |
+| --- | --- | --- |
+| Conversation and files | `1`, `y` | Truncate the conversation to that turn and restore the files that turn touched to their state before it ran. Files the turn created are deleted. |
+| Conversation only | `2` | Truncate the conversation and leave every file alone. |
+| Files only | `3` | Restore the files and keep every turn, so the conversation context survives. |
+
+`a` applies the highlighted choice and turns **Confirm before rewind** off; `n` or **Esc** cancels. `j`/`k` and the arrow keys move the cursor, and clicking a row picks it. On the files choice the title also shows how many file snapshots that turn recorded.
+
+Reaching conversation-only or files-only requires the setting to be on: with it off, a pick runs immediately as **Conversation and files**, the choice the dialog pre-selects.
+
+**Important:** a file rewind writes back the snapshot taken before that turn ran, so edits you made to those files outside Grok are overwritten too. Commit or stash first when that matters.
+
+### `/undo`
+
+`/undo` shows the same rewind-point list and truncates the conversation to the turn you pick, but it always rolls back the conversation alone. It asks nothing: no confirmation, no mode choice, and the files stay exactly as they are on disk. Reach for `/rewind` instead when the turn's file changes should go back with it.
 
 ---
 
@@ -383,6 +397,6 @@ Session history (`updates.jsonl`, `chat_history.jsonl`) dominates disk usage in 
 
 - Use `/new` to start fresh when your current context is no longer relevant.
 - Use `/compact` proactively in long sessions to keep the context window effective.
-- Use `/rewind` to undo mistakes; it rewinds the conversation to an earlier turn (file changes from removed turns are left as-is).
+- Use `/rewind` to undo mistakes; it rolls the conversation — and, if you pick that, the files — back to an earlier turn.
 - In headless mode, capture the `sessionId` from JSON output and pass it to `-r` to build multi-step automations that maintain context.
 - Check `/session-info` to see how much of your context window has been used.

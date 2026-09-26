@@ -108,6 +108,36 @@ pub(super) fn set_screen_mode_inner(app: &mut AppView, canonical: &str) {
     app.current_ui.screen_mode = Some(canonical.to_string());
 }
 
+pub(super) fn set_default_shell_inner(app: &mut AppView, canonical: &str) {
+    app.current_ui.default_shell = Some(canonical.to_string());
+}
+
+/// Persist `[ui].default_shell` (`git-bash` | `pwsh` | `powershell`). Restart-required.
+/// `GROK_SHELL` remains the runtime override and the resolver is cached for this process.
+pub(in crate::app::dispatch) fn set_default_shell(app: &mut AppView, value: String) -> Vec<Effect> {
+    let canonical = crate::settings::canonical_default_shell(Some(&value));
+    let prev_raw = app.current_ui.default_shell.as_deref();
+    let prev = crate::settings::canonical_default_shell(prev_raw);
+    if prev_raw.is_some_and(|raw| raw.eq_ignore_ascii_case(canonical)) {
+        return vec![];
+    }
+    set_default_shell_inner(app, canonical);
+    refresh_open_settings_modals(app);
+    tracing::info!(target: "settings", key = "default_shell", value = canonical, "setting changed");
+    show_restart_required_setting_choice_toast(
+        app,
+        "default_shell",
+        "Default shell",
+        canonical,
+        canonical,
+    );
+    vec![Effect::PersistSetting {
+        key: "default_shell",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(prev),
+    }]
+}
+
 /// Persist `[ui].screen_mode` (`fullscreen` | `minimal`). Restart-required.
 ///
 /// Unset is *displayed* as Fullscreen but is not an explicit on-disk value.

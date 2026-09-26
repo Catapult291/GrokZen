@@ -29,12 +29,13 @@ impl AgentView {
     }
 
     /// True when another prompt overlay owns the input slot, so the `/jump` picker must not open and an open one must be dismissed.
-    /// The owners: rewind, inline edit, the `/btw` panel, or a pending permission / question / cancel-turn / plan-approval overlay.
+    /// The owners: rewind, inline edit, the `/btw` panel, the `/fork` fork-point picker, or a pending permission / question / cancel-turn / plan-approval overlay.
     /// One predicate keeps dispatch, key, mouse, and scroll routing from disagreeing on the owner.
     pub(crate) fn jump_slot_taken(&self) -> bool {
         self.rewind_state.is_some()
             || self.inline_edit.is_some()
             || self.btw_state.is_some()
+            || self.fork_picker_state.is_some()
             || !self.no_input_overlay_pending()
     }
 
@@ -52,7 +53,8 @@ impl AgentView {
 
     /// Live-scroll the transcript to the turn under the picker cursor, anchored at the viewport TOP (where `jump_to_turn` lands).
     /// The preview then shows exactly what Enter commits to.
-    /// (Rewind centers instead: it previews a cut point and needs both sides visible.)
+    /// The `/rewind` and `/fork` pickers anchor their cursor row's prompt the same way, so all three
+    /// previews agree and the timeline rail highlights the row being read.
     pub(super) fn sync_jump_preview(&mut self) {
         let Some(prompt_id) = self
             .jump_state

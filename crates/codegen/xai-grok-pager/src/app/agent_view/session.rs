@@ -348,6 +348,7 @@ impl AgentView {
             inline_edit: None,
             pending_inline_resubmit: None,
             jump_state: None,
+            fork_picker_state: None,
             timeline_rail: None,
             timeline_hover: None,
             timeline_hover_preview: None,

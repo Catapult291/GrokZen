@@ -14,6 +14,25 @@ pub(crate) enum DockWatcherId {
     Loop(String),
 }
 impl AgentView {
+    /// Whether a collapsed question card is parked behind the scrollback.
+    pub(crate) fn parked_minimized_question(&self) -> bool {
+        self.parked_card() == Some(super::BlockingCard::Question)
+            && self.question_view.as_ref().is_some_and(|qv| qv.minimized)
+    }
+
+    /// Take the keyboard back to a parked card.
+    ///
+    /// A collapsed question card expands as it collects: its navigation keys act on answer rows,
+    /// and acting on rows the user cannot see is a dead end.
+    pub(crate) fn collect_parked_card(&mut self) {
+        if self.parked_card() == Some(super::BlockingCard::Question)
+            && let Some(qv) = self.question_view.as_mut()
+        {
+            qv.minimized = false;
+        }
+        self.set_active_pane(AgentPane::Prompt, false);
+    }
+
     /// Scrollback-focused key handling.
     ///
     /// When the block viewer is open, routes keys to the viewer.
@@ -31,12 +50,17 @@ impl AgentView {
             .as_ref()
             .is_some_and(|v| v.list_state.input_mode().is_some());
         let allow_i_alt = self.vim_mode;
+        // A minimized question card answers `m` as well: it is parked, so the card's own
+        // key handler never sees the key that would expand it again.
         if !viewer_has_input
             && (matches!(key.code, KeyCode::Tab | KeyCode::Char(' '))
-                || (allow_i_alt && matches!(key.code, KeyCode::Char('i'))))
+                || (allow_i_alt && matches!(key.code, KeyCode::Char('i')))
+                || (matches!(key.code, KeyCode::Char('m'))
+                    && key.modifiers.is_empty()
+                    && self.parked_minimized_question()))
         {
             if self.parked_card().is_some() {
-                self.set_active_pane(AgentPane::Prompt, false);
+                self.collect_parked_card();
                 return InputOutcome::Changed;
             }
             if key.code == KeyCode::Tab
@@ -807,6 +831,12 @@ impl AgentView {
         if let Some(ref mut js) = self.jump_state {
             crate::views::jump::move_cursor(js, lines.signum());
             self.sync_jump_preview();
+            return;
+        }
+        self.dismiss_fork_picker_if_suppressed();
+        if let Some(ref mut state) = self.fork_picker_state {
+            crate::views::fork_picker::move_cursor(state, lines.signum());
+            self.sync_fork_picker_preview();
             return;
         }
         if let Some(ref mut viewer) = self.line_viewer {

@@ -645,7 +645,8 @@ async fn fork_then_open(
         ensure_session_id_available(nid, &new_cwd_str)?;
     }
     let parent_is_worktree = parent_session_is_worktree(parent_id, &write_cwd);
-    let mut payload = fork_session_params(parent_id, &write_cwd, new_id, parent_is_worktree);
+    // `-p --fork-session` has no fork point: the child always resumes the whole parent conversation.
+    let mut payload = fork_session_params(parent_id, &write_cwd, new_id, parent_is_worktree, None);
     // Shared helper stamps `fork` for interactive `/fork`
     // `-p` children must stay headless: the load path below never restamps
     payload["sessionKind"] = serde_json::Value::String("headless".into());

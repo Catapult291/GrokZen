@@ -261,6 +261,18 @@ mod tests {
         assert_eq!(deserialized.new_model_id, None);
     }
 
+    /// The TUI builds this payload for `/fork --at <prompt>` and for the fork-point picker's rows
+    /// (`fork_session_params`). Pin the camelCase field name against this side's reader: a rename on
+    /// either end would silently fork the whole conversation instead of cutting it.
+    #[test]
+    fn test_fork_session_request_reads_the_tui_target_prompt_index_payload() {
+        let json = r#"{"sourceSessionId":"abc123","sourceCwd":"/old","newCwd":"/new","sessionKind":"fork","targetPromptIndex":2}"#;
+        let deserialized: ForkSessionRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(deserialized.target_prompt_index, Some(2));
+        assert_eq!(deserialized.session_kind.as_deref(), Some("fork"));
+    }
+
     #[test]
     fn test_fork_session_response_serialization() {
         let response = ForkSessionResponse {

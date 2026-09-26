@@ -1,12 +1,64 @@
 //! Windows shell detection for terminal command execution.
 //!
-//! Default cascade: pwsh, then powershell.exe, then Git Bash, then powershell.exe as the fallback.
+//! The persisted default is Git Bash. The preference is read from `[ui].default_shell`;
+//! `GROK_SHELL` remains an explicit process-level override. The resolved result is
+//! cached for the process lifetime, so changing the setting requires a restart.
 //!
-//! PowerShell is preferred over Git Bash: MSYS2 path translation mangles every flag starting with `/` (e.g. MSBuild `/t:Build`, cl.exe `/nologo`).
-//! This breaks native Windows C++/C#/.NET builds.
-//!
-//! Set `GROK_SHELL` to override auto-detection: `pwsh`, `powershell`, `bash`, or `cmd`.
-//! The result is cached for the process lifetime.
+//! PowerShell 7+ is intentionally represented by the executable name `pwsh`, not
+//! a major-version number. A future PowerShell 8 or 9 that keeps the `pwsh.exe`
+//! command name therefore works without a configuration migration.
+
+/// A user-selectable Windows shell family.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowsShellPreference {
+    /// Git Bash, bundled with Git for Windows.
+    #[default]
+    GitBash,
+    /// PowerShell 7 or newer (`pwsh.exe`).
+    Pwsh,
+    /// Windows PowerShell 5.1 (`powershell.exe`).
+    PowerShell,
+}
+
+impl WindowsShellPreference {
+    /// Canonical value persisted in `[ui].default_shell`.
+    pub fn as_canonical(self) -> &'static str {
+        match self {
+            Self::GitBash => "git-bash",
+            Self::Pwsh => "pwsh",
+            Self::PowerShell => "powershell",
+        }
+    }
+
+    /// User-facing label. The `+` deliberately avoids pinning future PowerShell
+    /// majors to this build's label.
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::GitBash => "Git Bash",
+            Self::Pwsh => "PowerShell 7+",
+            Self::PowerShell => "Windows PowerShell 5.1",
+        }
+    }
+
+    /// Parse a canonical value or one of the historical `GROK_SHELL` aliases.
+    /// Unknown, blank, and absent values use the product default, Git Bash.
+    pub fn parse(value: Option<&str>) -> Self {
+        let normalized = value.unwrap_or_default().trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "bash" | "gitbash" | "git-bash" => Self::GitBash,
+            "pwsh" | "powershell-7" | "powershell-7+" | "powershell-core" => Self::Pwsh,
+            "powershell" | "windows-powershell" | "powershell-5" | "powershell-5.1" => {
+                Self::PowerShell
+            }
+            _ => Self::GitBash,
+        }
+    }
+}
+
+/// Canonicalize a raw persisted shell preference.
+pub fn canonical_windows_shell(value: Option<&str>) -> &'static str {
+    WindowsShellPreference::parse(value).as_canonical()
+}
 
 /// Detected Windows shell and how to invoke it.
 #[cfg(not(unix))]
@@ -18,87 +70,145 @@ pub enum WindowsShell {
     Cmd,
 }
 
-/// Detect the best available shell on Windows.
+#[cfg(not(unix))]
+fn configured_windows_shell_preference() -> WindowsShellPreference {
+    let Ok(layers) = crate::ConfigLayers::load() else {
+        return WindowsShellPreference::default();
+    };
+    let effective = layers.effective_config_base();
+    let raw = effective
+        .get("ui")
+        .and_then(|ui| ui.get("default_shell"))
+        .and_then(toml::Value::as_str);
+    WindowsShellPreference::parse(raw)
+}
+
+#[cfg(not(unix))]
+fn windows_command_exists(name: &str) -> bool {
+    let Ok(output) = ({
+        let mut cmd = std::process::Command::new("where");
+        xai_tty_utils::detach_std_command(&mut cmd);
+        cmd.arg(name).stdin(std::process::Stdio::null());
+        cmd.output()
+    }) else {
+        return false;
+    };
+    output.status.success() || which::which(name).is_ok()
+}
+
+#[cfg(not(unix))]
+fn shell_for_preference(preference: WindowsShellPreference) -> Option<WindowsShell> {
+    match preference {
+        WindowsShellPreference::GitBash => find_git_bash().map(WindowsShell::GitBash),
+        WindowsShellPreference::Pwsh => {
+            windows_command_exists("pwsh.exe").then_some(WindowsShell::Pwsh)
+        }
+        WindowsShellPreference::PowerShell => {
+            if std::path::Path::new(
+                "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            )
+            .exists()
+                || windows_command_exists("powershell.exe")
+            {
+                Some(WindowsShell::PowerShell)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn fallback_windows_shell() -> WindowsShell {
+    if let Some(path) = find_git_bash() {
+        tracing::info!(shell = path, "Windows shell: Git Bash");
+        return WindowsShell::GitBash(path);
+    }
+    if windows_command_exists("pwsh.exe") {
+        tracing::info!("Windows shell: pwsh (fallback)");
+        return WindowsShell::Pwsh;
+    }
+    tracing::info!("Windows shell: powershell.exe (fallback)");
+    WindowsShell::PowerShell
+}
+
+#[cfg(not(unix))]
+fn resolve_windows_shell() -> WindowsShell {
+    if let Ok(value) = std::env::var("GROK_SHELL") {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "cmd" | "cmd.exe" => {
+                tracing::info!("Windows shell (GROK_SHELL override): cmd.exe");
+                return WindowsShell::Cmd;
+            }
+            "bash" | "gitbash" | "git-bash" => {
+                if let Some(path) = find_git_bash() {
+                    tracing::info!(
+                        shell = path,
+                        "Windows shell (GROK_SHELL override): Git Bash"
+                    );
+                    return WindowsShell::GitBash(path);
+                }
+                tracing::warn!(
+                    "GROK_SHELL={value} but Git Bash was not found; using the configured fallback"
+                );
+            }
+            "pwsh" | "powershell-7" | "powershell-7+" | "powershell-core" => {
+                if windows_command_exists("pwsh.exe") {
+                    tracing::info!("Windows shell (GROK_SHELL override): pwsh");
+                    return WindowsShell::Pwsh;
+                }
+                tracing::warn!(
+                    "GROK_SHELL={value} but pwsh.exe was not found; using the configured fallback"
+                );
+            }
+            "powershell" | "windows-powershell" | "powershell-5" | "powershell-5.1" => {
+                if shell_for_preference(WindowsShellPreference::PowerShell).is_some() {
+                    tracing::info!("Windows shell (GROK_SHELL override): powershell.exe");
+                    return WindowsShell::PowerShell;
+                }
+                tracing::warn!(
+                    "GROK_SHELL={value} but powershell.exe was not found; using the configured fallback"
+                );
+            }
+            other => {
+                tracing::warn!(
+                    "GROK_SHELL={other} is not recognized \
+                     (expected pwsh|powershell|bash|cmd); using the configured default"
+                );
+            }
+        }
+    }
+
+    let preference = configured_windows_shell_preference();
+    match shell_for_preference(preference) {
+        Some(shell) => {
+            tracing::info!(
+                preference = preference.as_canonical(),
+                shell = shell.name(),
+                "Windows shell selected by config"
+            );
+            shell
+        }
+        None => {
+            tracing::warn!(
+                preference = preference.as_canonical(),
+                "configured Windows shell is unavailable; falling back"
+            );
+            fallback_windows_shell()
+        }
+    }
+}
+
+/// Detect the selected Windows shell.
 ///
-/// If `GROK_SHELL` is set, it takes precedence over auto-detection.
-/// Otherwise the cascade is: pwsh → powershell.exe → Git Bash → cmd.exe.
-///
-/// Result is cached for the process lifetime.
+/// Precedence is `GROK_SHELL` > `[ui].default_shell` > Git Bash default.
+/// The result is cached for the process lifetime.
 #[cfg(not(unix))]
 pub fn detect_windows_shell() -> &'static WindowsShell {
     use std::sync::OnceLock;
     static CACHED: OnceLock<WindowsShell> = OnceLock::new();
-
-    CACHED.get_or_init(|| {
-        // Explicit override via GROK_SHELL.
-        if let Ok(val) = std::env::var("GROK_SHELL") {
-            match val.trim().to_ascii_lowercase().as_str() {
-                "pwsh" => {
-                    tracing::info!("Windows shell (GROK_SHELL override): pwsh");
-                    return WindowsShell::Pwsh;
-                }
-                "powershell" => {
-                    tracing::info!("Windows shell (GROK_SHELL override): powershell.exe");
-                    return WindowsShell::PowerShell;
-                }
-                "bash" | "gitbash" | "git-bash" => {
-                    if let Some(path) = find_git_bash() {
-                        tracing::info!(
-                            shell = path,
-                            "Windows shell (GROK_SHELL override): Git Bash"
-                        );
-                        return WindowsShell::GitBash(path);
-                    }
-                    tracing::warn!(
-                        "GROK_SHELL={val} but Git Bash not found; falling through to auto-detect"
-                    );
-                }
-                "cmd" | "cmd.exe" => {
-                    tracing::info!("Windows shell (GROK_SHELL override): cmd.exe");
-                    return WindowsShell::Cmd;
-                }
-                other => {
-                    tracing::warn!(
-                        "GROK_SHELL={other} is not recognized \
-                         (expected pwsh|powershell|bash|cmd); falling through to auto-detect"
-                    );
-                }
-            }
-        }
-
-        // Auto-detect: prefer PowerShell over Git Bash
-        // PowerShell passes `/flag` arguments through unchanged, which is required for native Windows toolchains (MSBuild, cl.exe, dotnet)
-
-        // pwsh (PowerShell 7+).
-        if let Ok(output) = {
-            let mut cmd = std::process::Command::new("where");
-            xai_tty_utils::detach_std_command(&mut cmd);
-            cmd.arg("pwsh.exe").stdin(std::process::Stdio::null());
-            cmd.output()
-        } {
-            if output.status.success() {
-                tracing::info!("Windows shell: pwsh");
-                return WindowsShell::Pwsh;
-            }
-        }
-
-        // powershell.exe (Windows PowerShell 5.1).
-        if std::path::Path::new("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe")
-            .exists()
-        {
-            tracing::info!("Windows shell: powershell.exe");
-            return WindowsShell::PowerShell;
-        }
-
-        // Git Bash: available but not preferred (MSYS2 path translation breaks `/flag` arguments for native toolchains)
-        if let Some(path) = find_git_bash() {
-            tracing::info!(shell = path, "Windows shell: Git Bash");
-            return WindowsShell::GitBash(path);
-        }
-
-        tracing::info!("Windows shell: powershell.exe (fallback)");
-        WindowsShell::PowerShell
-    })
+    CACHED.get_or_init(resolve_windows_shell)
 }
 
 /// Checks common install paths, then falls back to `where bash.exe` (filtering for Git paths to avoid WSL bash).
@@ -461,6 +571,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shell_preference_parser_normalizes_all_supported_aliases() {
+        for value in [
+            Some("bash"),
+            Some("BASH"),
+            Some("gitbash"),
+            Some("git-bash"),
+            Some("  Git-Bash  "),
+            None,
+            Some(""),
+            Some("unknown"),
+        ] {
+            assert_eq!(canonical_windows_shell(value), "git-bash", "{value:?}");
+        }
+        for value in ["pwsh", "PWSh", "powershell-core", "powershell-7+"] {
+            assert_eq!(canonical_windows_shell(Some(value)), "pwsh", "{value:?}");
+        }
+        for value in ["powershell", "Windows-PowerShell", "powershell-5.1"] {
+            assert_eq!(
+                canonical_windows_shell(Some(value)),
+                "powershell",
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn preference_display_names_do_not_pin_future_pwsh_major() {
+        assert_eq!(WindowsShellPreference::Pwsh.display_name(), "PowerShell 7+");
+        assert_eq!(WindowsShellPreference::GitBash.display_name(), "Git Bash");
+        assert_eq!(
+            WindowsShellPreference::PowerShell.display_name(),
+            "Windows PowerShell 5.1"
+        );
+    }
+
+    #[test]
     fn is_command_available_detects_present_and_absent() {
         // `cmd` resolves via PATHEXT on Windows, `sh` lives on $PATH on Unix
         #[cfg(windows)]
@@ -517,7 +663,38 @@ mod tests {
         assert!(!WindowsShell::Cmd.has_unix_utilities());
     }
 
-    /// Git Bash backgrounds with a bare `&`; PowerShell uses `&` as the call operator; `cmd.exe` uses it as a sequential separator.
+    #[cfg(not(unix))]
+    #[test]
+    fn configured_shell_preference_reads_effective_ui_layer() {
+        let layers = crate::ConfigLayers {
+            user: toml::from_str("[ui]\ndefault_shell = \"pwsh\"\n").unwrap(),
+            ..Default::default()
+        };
+        let effective = layers.effective_config_base();
+        let raw = effective
+            .get("ui")
+            .and_then(toml::Value::as_table)
+            .and_then(|ui| ui.get("default_shell"))
+            .and_then(toml::Value::as_str);
+        assert_eq!(
+            WindowsShellPreference::parse(raw),
+            WindowsShellPreference::Pwsh
+        );
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn shell_for_preference_keeps_pwsh_and_windows_powershell_distinct() {
+        assert!(matches!(
+            shell_for_preference(WindowsShellPreference::Pwsh),
+            Some(WindowsShell::Pwsh)
+        ));
+        assert!(matches!(
+            shell_for_preference(WindowsShellPreference::PowerShell),
+            Some(WindowsShell::PowerShell)
+        ));
+    }
+
     #[cfg(not(unix))]
     #[test]
     fn ampersand_semantics_per_windows_shell() {

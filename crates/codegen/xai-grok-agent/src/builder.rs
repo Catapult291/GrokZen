@@ -1311,7 +1311,7 @@ pub(crate) fn build_task_description(
 /// Resolve the shell name for the system prompt.
 ///
 /// Unix: `$SHELL` env var (e.g. `/bin/zsh`).
-/// Windows: detected shell from the `detect_windows_shell` cascade.
+/// Windows: shell selected by `GROK_SHELL` or `[ui].default_shell`, cached for the process lifetime.
 fn resolve_shell_for_prompt() -> String {
     #[cfg(unix)]
     {

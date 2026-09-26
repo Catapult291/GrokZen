@@ -880,6 +880,8 @@ pub fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::Grep { .. } => "grep".to_owned(),
         AccessKind::Edit(_) => "search_replace".to_owned(),
         AccessKind::Bash(_) => "run_terminal_command".to_owned(),
+        // Same tool as `Bash`; the event carries the tool, not the request shape.
+        AccessKind::DetachBackground { .. } => "run_terminal_command".to_owned(),
         AccessKind::MCPTool { name, .. } => format!("mcp:{name}"),
         AccessKind::WebFetch(_) => "web_fetch".to_owned(),
         AccessKind::WebSearch(_) => "web_search".to_owned(),

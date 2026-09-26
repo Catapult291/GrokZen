@@ -167,7 +167,10 @@ impl PtyHarness {
             spawned_at: Instant::now(),
             cast_events: Vec::new(),
             cast_size: (cols, rows),
-            respond_to_queries: false,
+            // The Windows ConPTY host does not answer the startup cursor probe (`ESC [ 6 n`) the
+            // inline backend sends before its first paint, so an unanswered probe would leave the
+            // pager silent until the harness timeout. The emulator answers it on that platform.
+            respond_to_queries: cfg!(windows),
         }
     }
 

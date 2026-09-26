@@ -52,12 +52,14 @@ use super::rewind::{
     dispatch_inline_edit_submit, dispatch_rewind, dispatch_rewind_cancel_offer,
     dispatch_rewind_confirm, dispatch_rewind_confirm_never_ask, dispatch_rewind_dismiss,
     dispatch_rewind_dismiss_error, dispatch_rewind_picker_select, dispatch_rewind_show_picker,
+    dispatch_undo,
 };
 use super::session::foreign::dispatch_fetch_session_list;
 use super::session::fork::{
     apply_persist_worktree_mode, dispatch_fork, dispatch_fork_resolved,
     dispatch_startup_fork_session,
 };
+use super::session::fork_picker::{dispatch_fork_picker_dismiss, dispatch_fork_picker_select};
 use super::session::lifecycle::{
     clear_startup_actions, dispatch_accept_consent, dispatch_agent_type_mismatch_answered,
     dispatch_delete_current_session_answered, dispatch_exit_session, dispatch_new_session,
@@ -81,14 +83,14 @@ use super::settings::setters::{
     set_contextual_hint_export_copy, set_contextual_hint_image_input,
     set_contextual_hint_plan_mode, set_contextual_hint_send_now, set_contextual_hint_small_screen,
     set_contextual_hint_ssh_wrap, set_contextual_hint_undo, set_contextual_hint_word_select,
-    set_default_model, set_default_selected_permission, set_display_refresh_auto_cadence,
-    set_follow_up_behavior, set_fork_secondary_model, set_group_tool_verbs, set_hunk_tracker_mode,
-    set_invert_scroll, set_keep_text_selection, set_max_thoughts_width, set_multiline_mode,
-    set_page_flip_on_send, set_prompt_suggestions, set_remember_tool_approvals, set_render_mermaid,
-    set_respect_manual_folds, set_screen_mode, set_scroll_lines, set_scroll_mode, set_scroll_speed,
-    set_show_thinking_blocks, set_show_tips, set_simple_mode, set_theme, set_timeline,
-    set_timestamps, set_vim_mode, set_voice_capture_mode, set_voice_keybind_enabled,
-    set_voice_stt_language,
+    set_default_model, set_default_selected_permission, set_default_shell,
+    set_display_refresh_auto_cadence, set_follow_up_behavior, set_fork_secondary_model,
+    set_group_tool_verbs, set_hunk_tracker_mode, set_invert_scroll, set_keep_text_selection,
+    set_max_thoughts_width, set_multiline_mode, set_page_flip_on_send, set_prompt_suggestions,
+    set_remember_tool_approvals, set_render_mermaid, set_respect_manual_folds, set_screen_mode,
+    set_scroll_lines, set_scroll_mode, set_scroll_speed, set_show_thinking_blocks, set_show_tips,
+    set_simple_mode, set_theme, set_timeline, set_timestamps, set_vim_mode, set_voice_capture_mode,
+    set_voice_keybind_enabled, set_voice_stt_language,
 };
 use super::settings::ui::{
     dispatch_confirm_reset_setting, dispatch_open_command_palette, dispatch_open_howto_guides,
@@ -1081,6 +1083,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::SetRespectManualFolds(v) => set_respect_manual_folds(app, v),
         Action::SetDefaultSelectedPermission(s) => set_default_selected_permission(app, s),
         Action::SetHunkTrackerMode(s) => set_hunk_tracker_mode(app, s),
+        Action::SetDefaultShell(s) => set_default_shell(app, s),
         Action::SetScreenMode(s) => set_screen_mode(app, s),
         Action::SetVoiceKeybindEnabled(v) => set_voice_keybind_enabled(app, v),
         Action::SetVoiceCaptureMode(s) => set_voice_capture_mode(app, s),
@@ -1269,12 +1272,15 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }]
         }
         Action::Fork(args) => dispatch_fork(app, args),
+        Action::ForkPointSelect(row) => dispatch_fork_picker_select(app, row),
+        Action::ForkPointDismiss => dispatch_fork_picker_dismiss(app),
         Action::ForkAnswered {
             worktree,
             directive,
             persist_mode,
+            cut,
         } => {
-            let mut effects = dispatch_fork_resolved(app, worktree, directive);
+            let mut effects = dispatch_fork_resolved(app, worktree, directive, cut);
             apply_persist_worktree_mode(
                 &mut app.fork_worktree_mode,
                 &mut effects,
@@ -1515,11 +1521,14 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         }
         Action::Rewind => dispatch_rewind(app),
         Action::RewindShowPicker => dispatch_rewind_show_picker(app),
+        Action::UndoShowPicker => dispatch_undo(app),
         Action::RewindPickerSelect(prompt_index) => {
             dispatch_rewind_picker_select(app, prompt_index)
         }
-        Action::RewindConfirm(target) => dispatch_rewind_confirm(app, target),
-        Action::RewindConfirmNeverAsk(target) => dispatch_rewind_confirm_never_ask(app, target),
+        Action::RewindConfirm(target, mode) => dispatch_rewind_confirm(app, target, mode),
+        Action::RewindConfirmNeverAsk(target, mode) => {
+            dispatch_rewind_confirm_never_ask(app, target, mode)
+        }
         Action::RewindCancelOffer => dispatch_rewind_cancel_offer(app),
         Action::RewindDismiss => dispatch_rewind_dismiss(app),
         Action::RewindDismissError => dispatch_rewind_dismiss_error(app),

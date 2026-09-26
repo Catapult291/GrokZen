@@ -1268,6 +1268,10 @@ fn session_grant_pre_decision(
     yolo_pin: Option<&'static str>,
 ) -> Option<(Decision, &'static str)> {
     match access {
+        // A detached background command is deliberately given no session-grant
+        // short-circuit: it outlives the session, so a remembered grant for the
+        // foreground command must not silently authorize detaching it.
+        AccessKind::DetachBackground { .. } => None,
         AccessKind::MCPTool { name, .. } => mcp_pre_decision(name, state, false, false).map(|d| {
             let reason = if matches!(d, Decision::Reject(_)) {
                 reasons::SESSION_DENY
@@ -1547,6 +1551,9 @@ pub fn spawn_permission_manager_with_pin(
                         AccessKind::Grep { path, glob: _ } => ("grep".to_string(), path.clone()),
                         AccessKind::Edit(path) => ("edit".to_string(), Some(path.clone())),
                         AccessKind::Bash(cmd) => ("bash".to_string(), Some(cmd.clone())),
+                        AccessKind::DetachBackground { command } => {
+                            ("bash_detach".to_string(), Some(command.clone()))
+                        }
                         AccessKind::MCPTool { name, input } => (
                             "mcp".to_string(),
                             Some(crate::permission::auto_mode::mcp_access_detail(name, input)),
@@ -1726,7 +1733,12 @@ pub fn spawn_permission_manager_with_pin(
                     );
                     let policy_decision = preflight.policy_decision();
                     let policy_forced_prompt = preflight.policy_forced_prompt();
-                    let shell_forced_prompt = preflight.shell_forced_prompt();
+                    // A detached background command always reaches the user, even
+                    // under YOLO: unlike every other access it keeps running with
+                    // no session left to stop it.
+                    let detach_forced_prompt = preflight.requires_user_confirmation();
+                    let shell_forced_prompt =
+                        preflight.shell_forced_prompt() || detach_forced_prompt;
                     let hook_forced_prompt = hook_ask.is_some();
                     let pre_classifier_forced_prompt =
                         policy_forced_prompt || shell_forced_prompt || hook_forced_prompt;
@@ -2126,6 +2138,9 @@ pub fn spawn_permission_manager_with_pin(
                     }
 
                     let mut pre_decision: Option<(Decision, &'static str)> = match &access {
+                        // Falls through to the prompt: no pre-decision shortcut
+                        // may auto-approve a process that outlives the session.
+                        AccessKind::DetachBackground { .. } => None,
                         AccessKind::Read(_) | AccessKind::Grep { .. } if policy_forced_prompt => {
                             None
                         }
@@ -6517,6 +6532,74 @@ mod tests {
                     prompts.borrow().len(),
                     2,
                     "both prompts open; only the dead one is abandoned"
+                );
+            })
+            .await;
+    }
+
+    /// A detached background command must reach the user even in
+    /// always-approve mode: it is the one access that keeps running with no
+    /// session left to stop it, so auto-approval would leak a process the user
+    /// never agreed to. An ordinary background bash call in the same mode must
+    /// still be auto-approved, proving the gate is narrow.
+    #[tokio::test]
+    async fn detached_background_prompts_under_yolo_while_plain_bash_does_not() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let client = RecordingClient::default();
+                let prompts = client.prompts.clone();
+                let (mgr, mut events) =
+                    manager_with_recording_client(&cwd, None, client, ClientType::Generic);
+                mgr.set_yolo_mode(true);
+                for _ in 0..20 {
+                    if mgr.is_yolo_mode() {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                assert!(mgr.is_yolo_mode(), "test requires always-approve mode");
+
+                // Control: plain bash is still auto-approved under YOLO.
+                let plain = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    decide(&mgr, AccessKind::Bash("echo hi".into()), tool_call()),
+                )
+                .await
+                .expect("plain bash must resolve without prompting");
+                assert_eq!(plain, Decision::Allow);
+                let plain_event = events.try_recv().expect("plain bash event");
+                assert!(plain_event.auto_approved && !plain_event.user_prompted);
+
+                // The detach request opens a prompt instead of auto-approving.
+                // The decision is awaited first: the prompt only opens once the
+                // future is polled.
+                let decision = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    decide(
+                        &mgr,
+                        AccessKind::DetachBackground {
+                            command: "npm run dev".into(),
+                        },
+                        tool_call(),
+                    ),
+                )
+                .await
+                .expect("detach prompt must resolve, not hang");
+                assert!(
+                    !prompts.borrow().is_empty(),
+                    "a detached command must open a confirmation prompt under always-approve"
+                );
+                let detach_event = events.try_recv().expect("detach event");
+                assert!(
+                    detach_event.user_prompted && !detach_event.auto_approved,
+                    "the detach decision must come from the user, not from always-approve: {detach_event:?}"
+                );
+                assert!(
+                    !matches!(decision, Decision::Allow),
+                    "the default recorded client rejects, so an unapproved detach never runs"
                 );
             })
             .await;

@@ -1142,11 +1142,41 @@ fn settings_helpers_target_correct_ui_fields() {
     assert_eq!(cfg.ui.auto_light_theme, Some("grokday".to_string()));
     let cfg = apply(|cfg| cfg.ui.hunk_tracker_mode = Some("off".to_string()));
     assert_eq!(cfg.ui.hunk_tracker_mode, Some("off".to_string()));
+    let cfg = apply(|cfg| cfg.ui.default_shell = Some("pwsh".to_string()));
+    assert_eq!(cfg.ui.default_shell, Some("pwsh".to_string()));
     let cfg = apply(|cfg| cfg.ui.screen_mode = Some("minimal".to_string()));
     assert_eq!(cfg.ui.screen_mode, Some("minimal".to_string()));
     let cfg = apply(|cfg| cfg.ui.screen_mode = Some("fullscreen".to_string()));
     assert_eq!(cfg.ui.screen_mode, Some("fullscreen".to_string()));
 }
+#[test]
+fn default_shell_round_trips_through_merge_and_preserves_unknown_keys() {
+    let original = r#"
+[ui]
+default_shell = "git-bash"
+screen_mode = "minimal"
+custom_default_shell_note = "preserve-me"
+"#;
+    let root: TomlValue = toml::from_str(original).unwrap();
+    let mut cfg = load_config_from_toml(&root);
+    cfg.ui.default_shell = Some("pwsh".to_string());
+    let mut table = root.as_table().unwrap().clone();
+    merge_section(&mut table, "ui", &cfg.ui);
+    let ui = table.get("ui").unwrap().as_table().unwrap();
+    assert_eq!(
+        ui.get("default_shell").and_then(|v| v.as_str()),
+        Some("pwsh")
+    );
+    assert_eq!(
+        ui.get("screen_mode").and_then(|v| v.as_str()),
+        Some("minimal")
+    );
+    assert_eq!(
+        ui.get("custom_default_shell_note").and_then(|v| v.as_str()),
+        Some("preserve-me")
+    );
+}
+
 #[test]
 fn set_theme_round_trips_through_merge() {
     let original = r#"

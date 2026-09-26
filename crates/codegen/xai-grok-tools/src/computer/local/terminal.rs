@@ -80,6 +80,81 @@ fn notification_interval() -> Duration {
     Duration::from_millis(DEFAULT_NOTIFICATION_INTERVAL_MS)
 }
 
+/// One output stream's source decoder plus its end-of-stream state.
+///
+/// `encoding_rs::Decoder` panics if it is used after a `last = true` call, and
+/// more than one actor path observes the same end of stream: the poll loop sees
+/// pipe EOF, the post-exit drain reports the tail, and the kill paths flush
+/// whatever is left. Tracking the finish here makes that final flush idempotent,
+/// so the second observer contributes nothing instead of aborting the process.
+struct StreamDecoder {
+    source: &'static encoding_rs::Encoding,
+    decoder: encoding_rs::Decoder,
+    finished: bool,
+}
+
+impl StreamDecoder {
+    fn for_label(label: &str) -> Option<Self> {
+        let source = encoding_rs::Encoding::for_label_no_replacement(label.as_bytes())?;
+        Some(Self {
+            source,
+            decoder: source.new_decoder_without_bom_handling(),
+            finished: false,
+        })
+    }
+
+    /// Decode `bytes`; `last` marks the end of the stream. Bytes arriving after
+    /// a `last` call are decoded by a fresh decoder: the stream is over, so the
+    /// pending multibyte state is already flushed, but the bytes themselves are
+    /// still output and must not be dropped.
+    fn decode(&mut self, bytes: &[u8], last: bool) -> Vec<u8> {
+        if self.finished {
+            if bytes.is_empty() {
+                return Vec::new();
+            }
+            self.decoder = self.source.new_decoder_without_bom_handling();
+        }
+        let mut decoded = String::new();
+        let mut remaining = bytes;
+        loop {
+            // `decode_to_string` fills only the string's spare capacity and
+            // reports `OutputFull` when that runs out, leaving the unread bytes
+            // for the caller: an undersized reservation loses output instead of
+            // failing, so size it from the decoder's own worst case.
+            let needed = self
+                .decoder
+                .max_utf8_buffer_length(remaining.len())
+                .unwrap_or_else(|| remaining.len().saturating_mul(3))
+                .saturating_add(8);
+            decoded.reserve(needed);
+            let (_, read, _) = self.decoder.decode_to_string(remaining, &mut decoded, last);
+            remaining = &remaining[read..];
+            if remaining.is_empty() {
+                break;
+            }
+        }
+        self.finished |= last;
+        decoded.into_bytes()
+    }
+}
+
+fn encoding_from_label(
+    encoding: &crate::computer::types::OutputEncoding,
+) -> Option<StreamDecoder> {
+    StreamDecoder::for_label(encoding.label())
+}
+
+fn decode_output_chunk(
+    bytes: &[u8],
+    decoder: Option<&mut StreamDecoder>,
+    last: bool,
+) -> Vec<u8> {
+    let Some(decoder) = decoder else {
+        return bytes.to_vec();
+    };
+    decoder.decode(bytes, last)
+}
+
 struct ActorSettings {
     completed_task_ttl: Duration,
     foreground_block_budget: Duration,
@@ -188,7 +263,8 @@ enum TerminalCommand {
     /// A detached post-exit drain finished; complete the task with its output.
     DrainedOutput {
         task_id: String,
-        output: Vec<u8>,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
         status: ExitStatus,
     },
 
@@ -354,6 +430,12 @@ struct ProcessState {
     /// Scopes kill operations so subagent teardown only kills its own tasks.
     owner_session_id: Option<String>,
     description: Option<String>,
+    output_encoding: Option<crate::computer::types::OutputEncoding>,
+    /// Streaming source decoder. stdout and stderr have independent decoder
+    /// state because a multibyte character may be split across reads on one
+    /// stream while the other stream has already produced a different byte.
+    output_decoder: Option<StreamDecoder>,
+    stderr_decoder: Option<StreamDecoder>,
 }
 
 impl ProcessState {
@@ -479,6 +561,7 @@ impl ProcessState {
             kind: self.kind,
             owner_session_id: self.owner_session_id.clone(),
             description: self.description.clone(),
+            output_encoding: self.output_encoding.clone(),
             is_backgrounded: self.bg_status.is_backgrounded(),
         }
     }
@@ -548,7 +631,9 @@ struct LocalTerminalActor {
     memory_monitor: MemoryMonitor,
 
     persistent_shell: bool,
-
+    // Only the Unix login-env capture path reads this; Windows still threads the
+    // flag through so one constructor signature serves every platform.
+    #[cfg_attr(not(unix), allow(dead_code))]
     login_shell_capture: bool,
 
     /// Baked in at construction, not read from a process-global, so a subagent
@@ -945,17 +1030,25 @@ impl LocalTerminalActor {
         match cmd {
             TerminalCommand::DrainedOutput {
                 task_id,
-                output,
+                stdout,
+                stderr,
                 status,
             } => {
                 let Some(process) = self.processes.get_mut(&task_id) else {
                     return;
                 };
-                if !output.is_empty() {
-                    process.output_buffer.extend_from_slice(&output);
-                    process.total_bytes += output.len();
+                let mut decoded =
+                    decode_output_chunk(&stdout, process.output_decoder.as_mut(), true);
+                decoded.extend_from_slice(&decode_output_chunk(
+                    &stderr,
+                    process.stderr_decoder.as_mut(),
+                    true,
+                ));
+                if !decoded.is_empty() {
+                    process.output_buffer.extend_from_slice(&decoded);
+                    process.total_bytes += decoded.len();
                     if let Some(ref mut file) = process.file_handle {
-                        let _ = file.write_all(&output).await;
+                        let _ = file.write_all(&decoded).await;
                     }
                     process.maybe_truncate();
                 }
@@ -1185,6 +1278,15 @@ impl LocalTerminalActor {
             state_dump_handle,
             owner_session_id: request.owner_session_id.clone(),
             description: request.description.filter(|d| !d.trim().is_empty()),
+            output_encoding: request.output_encoding.clone(),
+            output_decoder: request
+                .output_encoding
+                .as_ref()
+                .and_then(encoding_from_label),
+            stderr_decoder: request
+                .output_encoding
+                .as_ref()
+                .and_then(encoding_from_label),
         };
 
         // Initial empty notification so the TUI shows the execution timer
@@ -1336,6 +1438,15 @@ impl LocalTerminalActor {
             },
             owner_session_id: request.owner_session_id.clone(),
             description: request.description.filter(|d| !d.trim().is_empty()),
+            output_encoding: request.output_encoding.clone(),
+            output_decoder: request
+                .output_encoding
+                .as_ref()
+                .and_then(encoding_from_label),
+            stderr_decoder: request
+                .output_encoding
+                .as_ref()
+                .and_then(encoding_from_label),
         };
 
         let pid = process_state.child.id();
@@ -1517,7 +1628,7 @@ impl LocalTerminalActor {
         }
     }
 
-    async fn collect_shell_state_dumps(&mut self, task_ids: &[String]) {
+    async fn collect_shell_state_dumps(&mut self, _task_ids: &[String]) {
         #[cfg(unix)]
         if self.persistent_shell {
             for task_id in task_ids {
@@ -1699,6 +1810,7 @@ impl LocalTerminalActor {
                     kill_result_delivered: p.kill_result_delivered,
                     owner_session_id: p.owner_session_id.clone(),
                     description: p.description.clone(),
+                    output_encoding: p.output_encoding.clone(),
                     is_backgrounded: true,
                     output_total_bytes: p.total_bytes,
                 };
@@ -1770,8 +1882,7 @@ impl LocalTerminalActor {
             return;
         }
 
-        let mut new_bytes: Vec<u8> = Vec::new();
-
+        let mut stdout_bytes: Vec<u8> = Vec::new();
         let mut stdout_eof = false;
         if let Some(stdout) = process.child.stdout.as_mut() {
             loop {
@@ -1782,7 +1893,7 @@ impl LocalTerminalActor {
                         break;
                     }
                     Some(Ok(n)) => {
-                        new_bytes.extend_from_slice(&buf[..n]);
+                        stdout_bytes.extend_from_slice(&buf[..n]);
                     }
                     Some(Err(_)) => {
                         stdout_eof = true;
@@ -1793,6 +1904,7 @@ impl LocalTerminalActor {
             }
         }
 
+        let mut stderr_bytes: Vec<u8> = Vec::new();
         let mut stderr_eof = false;
         if let Some(stderr) = process.child.stderr.as_mut() {
             loop {
@@ -1803,7 +1915,7 @@ impl LocalTerminalActor {
                         break;
                     }
                     Some(Ok(n)) => {
-                        new_bytes.extend_from_slice(&buf[..n]);
+                        stderr_bytes.extend_from_slice(&buf[..n]);
                     }
                     Some(Err(_)) => {
                         stderr_eof = true;
@@ -1813,6 +1925,14 @@ impl LocalTerminalActor {
                 }
             }
         }
+
+        let mut new_bytes =
+            decode_output_chunk(&stdout_bytes, process.output_decoder.as_mut(), stdout_eof);
+        new_bytes.extend_from_slice(&decode_output_chunk(
+            &stderr_bytes,
+            process.stderr_decoder.as_mut(),
+            stderr_eof,
+        ));
 
         // Flush so readers (`read_file` on the output file) see output promptly.
         if !new_bytes.is_empty() {
@@ -1919,6 +2039,9 @@ impl LocalTerminalActor {
 
     async fn shutdown_all(&mut self) {
         for (_, process) in self.processes.iter_mut() {
+            if process.bg_status.is_backgrounded() {
+                continue;
+            }
             send_sigkill_to_group(process);
             // The dump reader's spawn_blocking thread must not outlive the actor.
             if let Some(handle) = process.state_dump_handle.take() {
@@ -2231,6 +2354,8 @@ impl LocalTerminalActor {
 pub struct LocalTerminalBackend {
     cmd_tx: mpsc::Sender<TerminalCommand>,
     cancel_token: CancellationToken,
+    persistent_task_registry:
+        Option<std::sync::Arc<crate::computer::local::persistent::TaskRegistry>>,
 }
 
 /// Grouped inputs for [`LocalTerminalBackend::new_inner`]; constructors override
@@ -2247,6 +2372,8 @@ struct LocalTerminalConfig {
     /// See [`LocalTerminalActor::scope`].
     scope: crate::util::ProcessScope,
     settings: ActorSettings,
+    persistent_task_registry:
+        Option<std::sync::Arc<crate::computer::local::persistent::TaskRegistry>>,
 }
 
 impl Default for LocalTerminalConfig {
@@ -2261,6 +2388,7 @@ impl Default for LocalTerminalConfig {
             process_scope: None,
             scope: crate::util::global_process_scope().clone(),
             settings: ActorSettings::from_env(),
+            persistent_task_registry: None,
         }
     }
 }
@@ -2268,6 +2396,69 @@ impl Default for LocalTerminalConfig {
 impl LocalTerminalBackend {
     pub fn new() -> Self {
         Self::new_inner(LocalTerminalConfig::default())
+    }
+
+    /// Local terminal backend whose explicit background commands are hosted
+    /// by a detached, restart-surviving worker. Foreground commands and Ctrl+G
+    /// transitions remain in the in-process actor.
+    pub fn with_persistent_background_tasks() -> Self {
+        Self::new_local_with_persistent_background_tasks(
+            SearchShadowConfig::default(),
+            true,
+            None,
+            None,
+            false,
+        )
+    }
+
+    /// Variant used by ACP/local sessions. Explicit background commands are
+    /// hosted by durable workers, while foreground commands retain the
+    /// session's shell and search-shadow configuration.
+    pub fn new_local_with_persistent_background_tasks(
+        search_shadows: SearchShadowConfig,
+        login_shell_capture: bool,
+        shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
+        process_scope: Option<crate::util::ProcessScope>,
+        persistent_shell: bool,
+    ) -> Self {
+        let registry = crate::computer::local::persistent::TaskRegistry::new_with_config(
+            search_shadows,
+            login_shell_capture,
+            shell_env_policy.clone(),
+            persistent_shell,
+        );
+        Self::new_inner(LocalTerminalConfig {
+            use_spawn_local: true,
+            persistent_shell,
+            login_shell_capture,
+            search_shadows,
+            shell_env_policy,
+            process_scope,
+            persistent_task_registry: Some(std::sync::Arc::new(registry)),
+            ..Default::default()
+        })
+    }
+
+    /// Local actor used inside a detached worker. It keeps the shell settings
+    /// but must not recursively spawn another persistent worker.
+    pub(crate) fn new_local_worker_backend(
+        search_shadows: SearchShadowConfig,
+        login_shell_capture: bool,
+        shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
+        process_scope: Option<crate::util::ProcessScope>,
+        persistent_shell: bool,
+    ) -> Self {
+        Self::new_inner(LocalTerminalConfig {
+            // The detached worker owns a dedicated current-thread runtime;
+            // use Send-backed spawning so no LocalSet is required.
+            use_spawn_local: false,
+            persistent_shell,
+            login_shell_capture,
+            search_shadows,
+            shell_env_policy,
+            process_scope,
+            ..Default::default()
+        })
     }
 
     /// Env vars, cwd, functions, and aliases persist across commands; the login
@@ -2302,14 +2493,13 @@ impl LocalTerminalBackend {
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
         process_scope: Option<crate::util::ProcessScope>,
     ) -> Self {
-        Self::new_inner(LocalTerminalConfig {
-            use_spawn_local: true,
-            login_shell_capture,
+        Self::new_local_with_persistent_background_tasks(
             search_shadows,
+            login_shell_capture,
             shell_env_policy,
             process_scope,
-            ..Default::default()
-        })
+            false,
+        )
     }
 
     pub fn new_local_with_persistent_shell(
@@ -2317,14 +2507,13 @@ impl LocalTerminalBackend {
         shell_env_policy: Option<crate::util::ShellEnvironmentPolicy>,
         process_scope: Option<crate::util::ProcessScope>,
     ) -> Self {
-        Self::new_inner(LocalTerminalConfig {
-            use_spawn_local: true,
-            persistent_shell: true,
+        Self::new_local_with_persistent_background_tasks(
             search_shadows,
+            true,
             shell_env_policy,
             process_scope,
-            ..Default::default()
-        })
+            true,
+        )
     }
 
     /// Test-only: enrolls children into `scope` instead of the process-global
@@ -2399,6 +2588,7 @@ impl LocalTerminalBackend {
             process_scope: session_scope,
             scope,
             settings,
+            persistent_task_registry,
         } = config;
         let (cmd_tx, cmd_rx) = mpsc::channel(COMMAND_CHANNEL_SIZE);
         let actor_tx = cmd_tx.downgrade();
@@ -2440,10 +2630,18 @@ impl LocalTerminalBackend {
         Self {
             cmd_tx,
             cancel_token,
+            persistent_task_registry,
         }
     }
 
     pub fn cancel(&self) {
+        self.cancel_token.cancel();
+    }
+
+    /// Stop the foreground actor and release its shell resources. Detached
+    /// background workers are intentionally not stopped; this is the
+    /// session-lifetime shutdown hook for persistent jobs.
+    pub fn cancel_foreground_only(&self) {
         self.cancel_token.cancel();
     }
 }
@@ -2476,6 +2674,15 @@ impl TerminalBackend for LocalTerminalBackend {
         &self,
         request: TerminalRunRequest,
     ) -> Result<BackgroundHandle, ComputerError> {
+        if let Some(registry) = &self.persistent_task_registry
+            && request.kind == crate::computer::types::TaskKind::Bash
+            && !request.auto_background_on_timeout
+        {
+            return crate::computer::local::persistent::run_persistent_background(
+                registry, request,
+            )
+            .await;
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
 
         self.cmd_tx
@@ -2492,6 +2699,11 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn get_task(&self, task_id: &str) -> Option<TaskSnapshot> {
+        if let Some(registry) = &self.persistent_task_registry
+            && let Some(snapshot) = registry.get_task(task_id).await
+        {
+            return Some(snapshot);
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
             .send(TerminalCommand::GetTask {
@@ -2509,6 +2721,12 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn kill_task_with_source(&self, task_id: &str, source: KillSource) -> KillOutcome {
+        if let Some(registry) = &self.persistent_task_registry {
+            let outcome = registry.kill_task(task_id, source).await;
+            if outcome != KillOutcome::NotFound {
+                return outcome;
+            }
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -2530,6 +2748,11 @@ impl TerminalBackend for LocalTerminalBackend {
         task_id: &str,
         timeout: Option<Duration>,
     ) -> Option<TaskSnapshot> {
+        if let Some(registry) = &self.persistent_task_registry
+            && let Some(snapshot) = registry.wait_for_completion(task_id, timeout).await
+        {
+            return Some(snapshot);
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         self.cmd_tx
             .send(TerminalCommand::WaitForCompletion {
@@ -2543,6 +2766,10 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn list_tasks(&self) -> Vec<TaskSnapshot> {
+        let mut tasks = Vec::new();
+        if let Some(registry) = &self.persistent_task_registry {
+            tasks.extend(registry.list_tasks().await);
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -2550,9 +2777,10 @@ impl TerminalBackend for LocalTerminalBackend {
             .await
             .is_err()
         {
-            return vec![];
+            return tasks;
         }
-        reply_rx.await.unwrap_or_default()
+        tasks.extend(reply_rx.await.unwrap_or_default());
+        tasks
     }
 
     async fn get_shell_cwd(&self) -> Option<PathBuf> {
@@ -2581,10 +2809,31 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn kill_all_background_tasks(&self) {
-        let tasks = self.list_tasks().await;
+        // Durable worker tasks are explicitly managed through the registry;
+        // actor-held tasks (monitor pipelines, auto-backgrounded commands) are
+        // still torn down here.
+        if let Some(registry) = &self.persistent_task_registry {
+            registry.kill_all_by_owner(None).await;
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(TerminalCommand::ListTasks { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let tasks = reply_rx.await.unwrap_or_default();
         for task in tasks {
-            if task.exit_code.is_none() && task.signal.is_none() {
-                self.kill_task_with_source(&task.task_id, KillSource::Teardown)
+            if !task.completed {
+                let _ = self
+                    .cmd_tx
+                    .send(TerminalCommand::Kill {
+                        task_id: task.task_id,
+                        source: KillSource::Teardown,
+                        reply: oneshot::channel().0,
+                    })
                     .await;
             }
         }
@@ -2600,6 +2849,9 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn kill_all_background_tasks_by_owner(&self, owner_session_id: &str) {
+        if let Some(registry) = &self.persistent_task_registry {
+            registry.kill_all_by_owner(Some(owner_session_id)).await;
+        }
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -2737,14 +2989,15 @@ fn spawn_detached_drain(
     status: ExitStatus,
 ) {
     tokio::spawn(async move {
-        let mut output = Vec::new();
-        let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        let mut stdout_bytes = Vec::new();
+        let mut stderr_bytes = Vec::new();
+        let _drained = tokio::time::timeout(DRAIN_TIMEOUT, async {
             if let Some(mut stdout) = stdout {
                 let mut buf = [0u8; READ_BUFFER_SIZE];
                 loop {
                     match stdout.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => output.extend_from_slice(&buf[..n]),
+                        Ok(n) => stdout_bytes.extend_from_slice(&buf[..n]),
                     }
                 }
             }
@@ -2753,7 +3006,7 @@ fn spawn_detached_drain(
                 loop {
                     match stderr.read(&mut buf).await {
                         Ok(0) | Err(_) => break,
-                        Ok(n) => output.extend_from_slice(&buf[..n]),
+                        Ok(n) => stderr_bytes.extend_from_slice(&buf[..n]),
                     }
                 }
             }
@@ -2763,7 +3016,8 @@ fn spawn_detached_drain(
             let _ = tx
                 .send(TerminalCommand::DrainedOutput {
                     task_id,
-                    output,
+                    stdout: stdout_bytes,
+                    stderr: stderr_bytes,
                     status,
                 })
                 .await;
@@ -2781,12 +3035,26 @@ async fn drain_remaining_output(process: &mut ProcessState) {
                 match stdout.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        process.output_buffer.extend_from_slice(&buf[..n]);
-                        process.total_bytes += n;
+                        let decoded =
+                            decode_output_chunk(&buf[..n], process.output_decoder.as_mut(), false);
+                        process.output_buffer.extend_from_slice(&decoded);
+                        process.total_bytes += decoded.len();
                         if let Some(ref mut file) = process.file_handle {
-                            let _ = file.write_all(&buf[..n]).await;
+                            let _ = file.write_all(&decoded).await;
                         }
                     }
+                }
+            }
+            if let Some(decoded) = Some(decode_output_chunk(
+                &[],
+                process.output_decoder.as_mut(),
+                true,
+            )) && !decoded.is_empty()
+            {
+                process.output_buffer.extend_from_slice(&decoded);
+                process.total_bytes += decoded.len();
+                if let Some(ref mut file) = process.file_handle {
+                    let _ = file.write_all(&decoded).await;
                 }
             }
         }
@@ -2797,12 +3065,26 @@ async fn drain_remaining_output(process: &mut ProcessState) {
                 match stderr.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        process.output_buffer.extend_from_slice(&buf[..n]);
-                        process.total_bytes += n;
+                        let decoded =
+                            decode_output_chunk(&buf[..n], process.stderr_decoder.as_mut(), false);
+                        process.output_buffer.extend_from_slice(&decoded);
+                        process.total_bytes += decoded.len();
                         if let Some(ref mut file) = process.file_handle {
-                            let _ = file.write_all(&buf[..n]).await;
+                            let _ = file.write_all(&decoded).await;
                         }
                     }
+                }
+            }
+            if let Some(decoded) = Some(decode_output_chunk(
+                &[],
+                process.stderr_decoder.as_mut(),
+                true,
+            )) && !decoded.is_empty()
+            {
+                process.output_buffer.extend_from_slice(&decoded);
+                process.total_bytes += decoded.len();
+                if let Some(ref mut file) = process.file_handle {
+                    let _ = file.write_all(&decoded).await;
                 }
             }
         }
@@ -2827,16 +3109,23 @@ async fn drain_remaining_output(process: &mut ProcessState) {
 /// Never waits: a live pipe would hold the single-threaded actor for the full
 /// drain timeout, so this is safe on a process that is still running.
 async fn take_available_output(process: &mut ProcessState) {
-    let mut collected = Vec::new();
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
     if let Some(stdout) = process.child.stdout.as_mut() {
-        read_available(stdout, &mut collected);
+        read_available(stdout, &mut stdout_bytes);
     }
     if let Some(stderr) = process.child.stderr.as_mut() {
-        read_available(stderr, &mut collected);
+        read_available(stderr, &mut stderr_bytes);
     }
     process.child.stdout.take();
     process.child.stderr.take();
 
+    let mut collected = decode_output_chunk(&stdout_bytes, process.output_decoder.as_mut(), true);
+    collected.extend_from_slice(&decode_output_chunk(
+        &stderr_bytes,
+        process.stderr_decoder.as_mut(),
+        true,
+    ));
     if collected.is_empty() {
         return;
     }
@@ -3216,7 +3505,7 @@ fn spawn_shell_command(
     };
 
     #[cfg(not(unix))]
-    let mut build_cmd = |with_breakaway: bool| {
+    let build_cmd = |with_breakaway: bool| {
         use windows::Win32::System::Threading::{
             CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
         };
@@ -3329,10 +3618,12 @@ mod tests {
             timeout: Duration::from_secs(30),
             output_byte_limit: 10000,
             output_file,
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -3473,6 +3764,66 @@ mod tests {
         assert_eq!(result.exit_code, Some(42));
     }
 
+    /// `encoding_rs` panics when a decoder is used after a `last = true` call,
+    /// and several actor paths observe the same end of stream (pipe EOF, the
+    /// post-exit drain, the kill paths). Only the first of them may finish.
+    #[test]
+    fn stream_decoder_finishes_the_stream_once() {
+        let mut decoder = StreamDecoder::for_label("gbk").expect("gbk is a known label");
+
+        // 中文 in GBK, with the second character split across the reads.
+        assert_eq!(decoder.decode(&[0xD6, 0xD0], false), "中".as_bytes());
+        assert!(
+            decoder.decode(&[0xCE], false).is_empty(),
+            "a pending lead byte must produce no output yet"
+        );
+        assert_eq!(decoder.decode(&[0xC4], true), "文".as_bytes());
+
+        // Every later observer of the same end of stream contributes nothing.
+        assert!(decoder.decode(&[], true).is_empty());
+        assert!(decoder.decode(&[], false).is_empty());
+
+        // Bytes that arrive after the finish are still output, not dropped.
+        assert_eq!(
+            decoder.decode(&[0xD6, 0xD0, 0xCE, 0xC4], true),
+            "中文".as_bytes()
+        );
+    }
+
+    /// Malformed bytes expand to a REPLACEMENT CHARACTER each, so the decoded
+    /// text can be three times the input. Reserving less than that made
+    /// `decode_to_string` report `OutputFull` and drop the rest of the chunk.
+    #[test]
+    fn stream_decoder_keeps_bytes_that_expand_past_a_tight_buffer() {
+        let mut decoder = StreamDecoder::for_label("gbk").expect("gbk is a known label");
+        let decoded = decoder.decode(&[0xFF, 0xFF, 0xFF, 0xFF], true);
+        assert_eq!(
+            String::from_utf8(decoded).unwrap(),
+            "\u{FFFD}\u{FFFD}\u{FFFD}\u{FFFD}",
+            "every malformed byte must still be accounted for"
+        );
+    }
+
+    /// Driving a real process with an explicit `encoding` is what aborted the
+    /// pager: the poll loop finishes the decoder at pipe EOF and the post-exit
+    /// drain reports that same end of stream. The default shell on Windows is
+    /// Git Bash, so `printf` octal escapes produce the GBK bytes directly.
+    #[tokio::test]
+    async fn run_with_explicit_encoding_decodes_gbk_output() {
+        let backend = LocalTerminalBackend::new();
+        let mut request = make_request("printf '\\326\\320\\316\\304\\n'");
+        request.output_encoding =
+            Some(crate::computer::types::OutputEncoding::parse("gbk").unwrap());
+
+        let result = backend.run(request).await.unwrap();
+
+        assert!(
+            result.combined_output.contains("中文"),
+            "GBK output must reach the caller as UTF-8, got {:?}",
+            result.combined_output
+        );
+    }
+
     #[tokio::test]
     async fn test_timeout() {
         let backend = LocalTerminalBackend::new();
@@ -3487,10 +3838,12 @@ mod tests {
             timeout: Duration::from_millis(200),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-timeout".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -3518,7 +3871,9 @@ mod tests {
             timeout: Duration::from_millis(500),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
+            detach: false,
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
             auto_background_on_timeout: true,
@@ -3573,11 +3928,13 @@ mod tests {
             timeout: Duration::from_secs(60),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
             // Not auto-backgroundable: must be backgrounded on demand, never killed.
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -3644,7 +4001,9 @@ mod tests {
             timeout: Duration::from_secs(3600),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
+            detach: false,
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
             auto_background_on_timeout: true,
@@ -3706,10 +4065,12 @@ mod tests {
             timeout: Duration::from_millis(500),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-fg-budget-skip".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -3748,7 +4109,9 @@ mod tests {
             timeout: Duration::from_secs(3600),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
+            detach: false,
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
             auto_background_on_timeout: true,
@@ -3797,7 +4160,9 @@ mod tests {
             timeout: Duration::from_millis(800),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
+            detach: false,
             tool_call_id: tool_call_id.to_string(),
             display_command: None,
             auto_background_on_timeout: true,
@@ -3844,10 +4209,12 @@ mod tests {
             timeout: Duration::from_secs(30),
             output_byte_limit: 10_000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-size".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -3890,10 +4257,12 @@ mod tests {
             timeout: Duration::from_secs(30),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-bg".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -3928,10 +4297,12 @@ mod tests {
             timeout: Duration::from_secs(300),
             output_byte_limit: 10000,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-kill".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -3961,10 +4332,12 @@ mod tests {
             timeout: Duration::from_secs(5),
             output_byte_limit: 1024 * 1024,
             output_file: tmp.path().join("output.log"),
+            output_encoding: None,
             notification_handle: handle,
             tool_call_id: "test-call-123".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4025,10 +4398,12 @@ mod tests {
             timeout: Duration::from_secs(10),
             output_byte_limit: 200,
             output_file: tmp.path().join("output.log"),
+            output_encoding: None,
             notification_handle: handle,
             tool_call_id: "trunc-call".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4087,10 +4462,12 @@ mod tests {
             timeout: Duration::from_secs(30),
             output_byte_limit: 1024,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "cap-test".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4121,10 +4498,12 @@ mod tests {
             timeout: Duration::from_secs(10),
             output_byte_limit: 1024,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "trunc-exit-test".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4154,10 +4533,12 @@ mod tests {
             timeout: Duration::from_secs(5),
             output_byte_limit: 1024 * 1024,
             output_file: tmp.path().join("output.log"),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-call".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4184,10 +4565,12 @@ mod tests {
             timeout: Duration::from_secs(5),
             output_byte_limit: 1024 * 1024,
             output_file: tmp.path().join("output.log"),
+            output_encoding: None,
             notification_handle: handle,
             tool_call_id: "unique-id-abc".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4223,10 +4606,12 @@ mod tests {
             timeout: Duration::from_secs(5),
             output_byte_limit: 1024 * 1024,
             output_file: tmp.path().join("output.log"),
+            output_encoding: None,
             notification_handle: handle,
             tool_call_id: "test-idle".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4263,10 +4648,12 @@ mod tests {
             timeout: Duration::from_millis(200),
             output_byte_limit: 10000,
             output_file: tmp.path().join("timeout-test.out"),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-timeout-graceful".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4292,10 +4679,12 @@ mod tests {
             timeout: Duration::from_secs(2),
             output_byte_limit: 10000,
             output_file: tmp.path().join("timeout-output.out"),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-timeout-output".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4325,10 +4714,12 @@ mod tests {
                 "terminal-test-drain-timeout-{}.out",
                 std::process::id()
             )),
+            output_encoding: None,
             notification_handle: ToolNotificationHandle::noop(),
             tool_call_id: "test-drain-timeout".to_string(),
             display_command: None,
             auto_background_on_timeout: false,
+            detach: false,
             foreground_block_budget: None,
             kind: TaskKind::Bash,
             owner_session_id: None,
@@ -4745,6 +5136,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_parse_login_env_capture() {
         let stdout = "motd noise\n\x01/opt/rc/bin:/usr/bin\x01\
@@ -4775,6 +5167,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_parse_login_env_capture_path_only() {
         let (path, env) = parse_login_env_capture("\x01/usr/bin\x01");

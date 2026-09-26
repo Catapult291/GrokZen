@@ -251,6 +251,67 @@ pub fn light_horizontal() -> &'static str {
     "\u{2500}"
 }
 
+/// `"╭"` (U+256D) normally, `"┌"` (U+250C, CP437 `0xDA`) on legacy ConHost. Always 1 column wide.
+///
+/// The rounded card corners read as a soft box; CP437 ships only the square corners, so the fallback keeps the frame closed.
+pub fn box_top_left() -> &'static str {
+    if is_legacy_windows_console() {
+        "\u{250C}"
+    } else {
+        "\u{256D}"
+    }
+}
+
+/// `"╮"` (U+256E) normally, `"┐"` (U+2510, CP437 `0xBF`) on legacy ConHost. Always 1 column wide.
+pub fn box_top_right() -> &'static str {
+    if is_legacy_windows_console() {
+        "\u{2510}"
+    } else {
+        "\u{256E}"
+    }
+}
+
+/// `"╰"` (U+2570) normally, `"└"` (U+2514, CP437 `0xC0`) on legacy ConHost. Always 1 column wide.
+pub fn box_bottom_left() -> &'static str {
+    if is_legacy_windows_console() {
+        "\u{2514}"
+    } else {
+        "\u{2570}"
+    }
+}
+
+/// `"╯"` (U+256F) normally, `"┘"` (U+2518, CP437 `0xD9`) on legacy ConHost. Always 1 column wide.
+pub fn box_bottom_right() -> &'static str {
+    if is_legacy_windows_console() {
+        "\u{2518}"
+    } else {
+        "\u{256F}"
+    }
+}
+
+/// `"├"` (U+251C, CP437 `0xC3`). Always 1 column wide and present on every target.
+///
+/// Where a horizontal cell divider meets the card's left edge.
+pub fn box_left_tee() -> &'static str {
+    "\u{251C}"
+}
+
+/// `"┤"` (U+2524, CP437 `0xB4`). Always 1 column wide and present on every target.
+pub fn box_right_tee() -> &'static str {
+    "\u{2524}"
+}
+
+/// `"–"` (U+2013 EN DASH) normally, `"-"` (ASCII) on legacy ConHost. Always 1 column wide.
+///
+/// The collapse/minimize control on a card header; pairs with [`enlarge`], which is the expand side.
+pub fn minimize_icon() -> &'static str {
+    if is_legacy_windows_console() {
+        "-"
+    } else {
+        "\u{2013}"
+    }
+}
+
 /// Precomposed 2-col active tick for the timeline rail: `"━━"` normally, `"══"` (U+2550, CP437 `0xCD`) on legacy ConHost.
 /// The double stroke keeps the active tick distinct from the light hover/idle stroke there.
 pub fn timeline_tick_active() -> &'static str {

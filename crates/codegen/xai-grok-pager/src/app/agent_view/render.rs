@@ -264,6 +264,7 @@ impl AgentView {
             QuestionFocus::Navigation => {
                 vec![
                     HintItem::new(key!(Tab), "next answer"),
+                    HintItem::new(key!('m'), "collapse"),
                     esc,
                     HintItem::new(key!('X'), "dismiss"),
                 ]
@@ -943,6 +944,18 @@ impl AgentView {
         hint_key: Style,
         locale: Option<&crate::locale::LocaleContext>,
     ) -> Vec<Span<'static>> {
+        // A collapsed card shows nothing to walk or copy: the only move left is expanding it again.
+        if qv.minimized {
+            return vec![
+                Span::styled("m", hint_key),
+                Span::styled("/", hint_style),
+                Span::styled("Tab", hint_key),
+                Span::styled(
+                    format!(" {}", localized_ui_label(locale, "shortcut.expand", "expand")),
+                    hint_style,
+                ),
+            ];
+        }
         let mut left_spans: Vec<Span<'static>> = Vec::new();
         if qv.questions.len() > 1 {
             let counter = format!("[{}/{}] ", qv.active_tab + 1, qv.questions.len());
@@ -1305,6 +1318,15 @@ impl AgentView {
         } else {
             0
         };
+        let fork_picker_view_h = if !self.fork_picker_slot_taken() {
+            if let Some(ref state) = self.fork_picker_state {
+                crate::views::fork_picker::fork_picker_overlay_height(state, area.height)
+            } else {
+                0
+            }
+        } else {
+            0
+        };
         let is_question_input_mode = self
             .question_view
             .as_ref()
@@ -1372,7 +1394,14 @@ impl AgentView {
         } else {
             0
         };
-        let question_footer_h: u16 = if question_view_h > 0 { 3 } else { 0 };
+        // A collapsed question card keeps a single hint row and no gaps: its rows are the transcript's.
+        let question_footer_h: u16 = if question_view_h == 0 {
+            0
+        } else if self.question_view.as_ref().is_some_and(|qv| qv.minimized) {
+            1
+        } else {
+            3
+        };
         let prompt_height = if permission_view_h > 0 {
             if is_permission_followup && perm_inline_prompt_h > 1 {
                 permission_view_h + perm_inline_prompt_h.saturating_sub(1)
@@ -1380,7 +1409,12 @@ impl AgentView {
                 permission_view_h
             }
         } else if question_view_h > 0 {
-            let freeform_offset = if is_question_input_mode { 1u16 } else { 0 };
+            // In input mode the inline composer replaces the freeform cell, divider and all.
+            let freeform_offset = if is_question_input_mode {
+                crate::views::question_view::FREEFORM_ROW_ROWS
+            } else {
+                0
+            };
             question_view_h.saturating_sub(freeform_offset)
                 + question_prompt_body_h
                 + question_footer_h
@@ -1388,6 +1422,8 @@ impl AgentView {
             elicitation_view_h
         } else if rewind_view_h > 0 {
             rewind_view_h
+        } else if fork_picker_view_h > 0 {
+            fork_picker_view_h
         } else if jump_view_h > 0 {
             jump_view_h
         } else if cancel_turn_view_h > 0 {
@@ -1620,7 +1656,17 @@ impl AgentView {
                 .height
                 .saturating_sub(search_reserved_rows);
         }
+        // The ▼ arrow owns a row of its own: with none reserved, a pane below (a compact prompt has no gap,
+        // turn status has none without its gap row) covers the arrow, and without that pane the arrow would
+        // have to sit on the scrollback's last row, on top of a line of the answer. Reserve before rendering.
+        let follow_indicator_offered = self.block_viewer.is_none() && !search_active;
+        let mut follow_indicator_slot_y = if follow_indicator_offered {
+            self.follow_indicator_row_for_frame(&mut layout, &appearance)
+        } else {
+            None
+        };
         let overlay_blocks_rail_hover = self.jump_state.is_some()
+            || self.fork_picker_state.is_some()
             || self.rewind_state.is_some()
             || self.blocking_card().is_some()
             || self.block_viewer.is_some();
@@ -1672,6 +1718,10 @@ impl AgentView {
                             .scrollback_content
                             .height
                             .saturating_sub(search_reserved_rows);
+                    }
+                    if follow_indicator_offered {
+                        follow_indicator_slot_y =
+                            self.follow_indicator_row_for_frame(&mut layout, &appearance);
                     }
                     self.scrollback.prepare_layout(
                         layout.scrollback_content.width,
@@ -2192,7 +2242,7 @@ impl AgentView {
         }
         let mut follow_indicator_y: Option<u16> = None;
         let mut response_top_indicator_y: Option<u16> = None;
-        if self.block_viewer.is_none() && !search_active {
+        if follow_indicator_offered {
             use crate::appearance::FollowIndicator;
             let gap_y = layout.scrollback.y + layout.scrollback.height;
             let gap_x = layout.scrollback.x;
@@ -2219,11 +2269,8 @@ impl AgentView {
                 }
             }
             if appearance.scrollback.scroll.follow_indicator != FollowIndicator::None {
-                if !self.scrollback.is_follow_mode()
-                    && self.scrollback.has_content_below()
-                    && content_line_y.is_none()
-                {
-                    follow_indicator_y = Some(gap_y);
+                if content_line_y.is_none() {
+                    follow_indicator_y = follow_indicator_slot_y;
                 }
                 if self.scrollback.has_response_top_above() {
                     response_top_indicator_y = sticky_gap_row.map(|row| layout.scrollback.y + row);
@@ -2987,16 +3034,11 @@ impl AgentView {
             } else {
                 0
             };
-            let question_area = Rect {
-                x: layout.prompt.x,
-                y: layout.prompt.y,
-                width: layout.prompt.width,
-                height: layout
-                    .prompt
-                    .height
-                    .saturating_sub(inline_prompt_h)
-                    .saturating_sub(question_footer_h),
-            };
+            let question_area = crate::views::question_view::question_card_area(
+                layout.prompt,
+                inline_prompt_h,
+                question_footer_h,
+            );
             if let Some(ref mut qv) = self.question_view {
                 let content_w = inner_width.saturating_sub(QUESTION_VIEW_HPAD) as usize;
                 if let Some(question) = qv.questions.get(qv.active_tab) {
@@ -3197,7 +3239,11 @@ impl AgentView {
                 self.inline_prompt_area = None;
             }
             if let Some(ref qv) = self.question_view {
-                let footer_y = question_area.y + question_area.height + painted_prompt_h + 1;
+                // A collapsed card keeps its hint row flush under the summary; the expanded card
+                // keeps the blank row above and below it.
+                let footer_gap_above = u16::from(!qv.minimized);
+                let footer_y =
+                    question_area.y + question_area.height + painted_prompt_h + footer_gap_above;
                 let footer_x = layout.prompt.x;
                 let footer_w = layout.prompt.width;
                 self.question_nav_buttons.clear();
@@ -3235,7 +3281,8 @@ impl AgentView {
                         height: 1,
                     };
                     buf.set_style(footer_rect, Style::default().bg(footer_bg));
-                    let content_x = layout.prompt.x + 3;
+                    // Aligned with the card's inner text column, so hints sit under the body.
+                    let content_x = layout.prompt.x + crate::views::question_view::QUESTION_VIEW_CONTENT_X;
                     let hint_style = Style::default()
                         .fg(theme.gray)
                         .bg(footer_bg)
@@ -3255,7 +3302,10 @@ impl AgentView {
                     let avail_w = footer_w.saturating_sub(3);
                     buf.set_line_safe(content_x, footer_y, &left_line, avail_w);
                     let is_last = qv.active_tab >= qv.questions.len().saturating_sub(1);
-                    let enter_label = if feedback_pane || qv.is_feedback_trace() {
+                    // A collapsed card keeps no action button: it would act on rows that are not on screen.
+                    let enter_label = if qv.minimized {
+                        ""
+                    } else if feedback_pane || qv.is_feedback_trace() {
                         localized_ui_label(locale, "shortcut.send", "send")
                     } else if qv.is_on_freeform_row() {
                         localized_ui_label(locale, "shortcut.edit", "edit")
@@ -3276,7 +3326,7 @@ impl AgentView {
                         unicode_width::UnicodeWidthStr::width(enter_label) as u16;
                     let bw = 1 + btn_key.len() as u16 + 1 + enter_label_width + 1;
                     let btn_x = footer_x + footer_w.saturating_sub(3).saturating_sub(bw);
-                    if btn_x > content_x {
+                    if btn_x > content_x && !enter_label.is_empty() {
                         buf.set_span_safe(btn_x, footer_y, &Span::styled(" ", bpad_style), 1);
                         buf.set_span_safe(
                             btn_x + 1,
@@ -3356,6 +3406,16 @@ impl AgentView {
                     buf,
                     layout.prompt,
                     &rw.phase,
+                    prompt_focused,
+                    locale,
+                );
+            }
+        } else if fork_picker_view_h > 0 {
+            if let Some(ref state) = self.fork_picker_state {
+                crate::views::fork_picker::render_fork_picker_overlay_with_locale(
+                    buf,
+                    layout.prompt,
+                    state,
                     prompt_focused,
                     locale,
                 );
@@ -4952,6 +5012,61 @@ impl AgentView {
         };
         (cursor, prompt_post_flush)
     }
+
+    /// Row the ▼ jump-to-bottom arrow takes this frame, `None` when the arrow is not offered.
+    ///
+    /// State gate for [`follow_indicator_row`]: enabled, viewport parked off the tail, content below it. The
+    /// row is taken here rather than at draw time because the panes that would claim it render in between.
+    fn follow_indicator_row_for_frame(
+        &self,
+        layout: &mut AgentViewLayout,
+        appearance: &crate::appearance::AppearanceConfig,
+    ) -> Option<u16> {
+        use crate::appearance::FollowIndicator;
+        if appearance.scrollback.scroll.follow_indicator == FollowIndicator::None {
+            return None;
+        }
+        if self.scrollback.is_follow_mode() || !self.scrollback.has_content_below() {
+            return None;
+        }
+        follow_indicator_row(layout)
+    }
+}
+/// Row the ▼ jump-to-bottom arrow takes, or `None` when the layout has no row to give it.
+///
+/// The row right below the scrollback is only free when the layout reserved it: the prompt gap (which compact
+/// prompts and short terminals drop) or the leading gap of a lower pane (turn status, queue, banner, dock…).
+/// Without one the next pane starts on that row and its chrome, painted after the arrow, covers it. Taking the
+/// scrollback's own last row instead would paint the arrow over a transcript cell, so the row is reserved out
+/// of the scrollback for the frame: the pane renders one row shorter and the arrow lands on blank space — a row
+/// of its own, matching the gap row it uses when the layout provides one.
+fn follow_indicator_row(layout: &mut AgentViewLayout) -> Option<u16> {
+    let gap_y = layout.scrollback.y + layout.scrollback.height;
+    let next_pane_y = [
+        layout.btw,
+        layout.queue,
+        layout.turn_status,
+        layout.banner,
+        layout.plugin_cta,
+        layout.follow_ups,
+        layout.dock,
+        layout.voice_recording,
+        layout.prompt,
+    ]
+    .iter()
+    .filter(|rect| rect.height > 0)
+    .map(|rect| rect.y)
+    .min();
+    if !next_pane_y.is_some_and(|y| y <= gap_y) {
+        return Some(gap_y);
+    }
+    // Never take the scrollback's only row: an empty transcript is a worse trade than a missing arrow.
+    if layout.scrollback.height < 2 {
+        return None;
+    }
+    layout.scrollback.height -= 1;
+    layout.scrollback_content.height = layout.scrollback_content.height.saturating_sub(1);
+    Some(layout.scrollback.y + layout.scrollback.height)
 }
 /// Draw one ▼/▲ scroll-indicator arrow centered on row `y`, or clear its hit area when hidden (`y: None`).
 /// The unconditional set-or-clear is the point: a hit rect must never outlive the frame that painted its arrow.
@@ -4992,6 +5107,77 @@ fn fit_toast_text(msg: &str, avail_width: u16) -> Option<String> {
     }
     let truncated = crate::views::goal_detail::truncate_to_width(msg.trim_end(), max_msg_width);
     Some(format!(" {truncated} "))
+}
+#[cfg(test)]
+mod follow_indicator_row_tests {
+    use super::follow_indicator_row;
+    use crate::views::agent::{AgentViewLayout, AgentViewLayoutParams};
+    use ratatui::layout::Rect;
+
+    /// A normal-height agent screen with the prompt gap under the caller's control (0 is the compact shape).
+    fn layout_with_prompt_gap(prompt_gap: u16) -> AgentViewLayout {
+        AgentViewLayout::compute(AgentViewLayoutParams {
+            area: Rect::new(0, 0, 60, 24),
+            prompt_gap,
+            prompt_height: 3,
+            shortcuts_height: 1,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn reserved_prompt_gap_carries_the_arrow_below_the_scrollback() {
+        let mut layout = layout_with_prompt_gap(1);
+        let gap_y = layout.scrollback.y + layout.scrollback.height;
+        let scrollback_height = layout.scrollback.height;
+        assert_eq!(
+            layout.prompt.y,
+            gap_y + 1,
+            "setup: the gap row must be free"
+        );
+        assert_eq!(follow_indicator_row(&mut layout), Some(gap_y));
+        assert_eq!(
+            layout.scrollback.height, scrollback_height,
+            "a gap row below the scrollback costs the pane nothing"
+        );
+    }
+
+    #[test]
+    fn missing_gap_row_takes_a_row_out_of_the_scrollback() {
+        let mut layout = layout_with_prompt_gap(0);
+        let gap_y = layout.scrollback.y + layout.scrollback.height;
+        let scrollback_height = layout.scrollback.height;
+        assert_eq!(
+            layout.prompt.y, gap_y,
+            "setup: the prompt box starts on the row below the scrollback"
+        );
+        assert_eq!(
+            follow_indicator_row(&mut layout),
+            Some(gap_y - 1),
+            "the arrow must not share a row with the scrollback's last line"
+        );
+        assert_eq!(
+            layout.scrollback.height,
+            scrollback_height - 1,
+            "the arrow's row comes out of the scrollback"
+        );
+        assert_eq!(layout.scrollback_content.height, scrollback_height - 1);
+        assert_eq!(layout.prompt.y, gap_y, "the panes below must stay put");
+    }
+
+    #[test]
+    fn the_scrollback_never_gives_up_its_last_row() {
+        let mut layout = layout_with_prompt_gap(0);
+        // A very short terminal: the prompt box pushed up against a one-row scrollback.
+        layout.scrollback.height = 1;
+        layout.prompt.y = layout.scrollback.y + 1;
+        assert_eq!(
+            follow_indicator_row(&mut layout),
+            None,
+            "with one row left the arrow is dropped rather than painted over a line"
+        );
+        assert_eq!(layout.scrollback.height, 1);
+    }
 }
 #[cfg(test)]
 mod toast_fit_tests {
@@ -5425,13 +5611,18 @@ mod feedback_input_tests {
             screen.contains("Enter:send"),
             "footer must offer the send action\n{screen}"
         );
-        let top = screen
-            .lines()
-            .position(|l| l.contains('\u{256d}'))
+        // The report box is the innermost frame: the card's own top rule sits above it.
+        let rows: Vec<&str> = screen.lines().collect();
+        let top = rows
+            .iter()
+            .rposition(|l| l.contains('\u{256d}'))
             .expect("report box needs a top rule");
-        let bottom = screen
-            .lines()
-            .position(|l| l.contains('\u{2570}'))
+        let bottom = rows
+            .iter()
+            .enumerate()
+            .skip(top + 1)
+            .find(|(_, l)| l.contains('\u{2570}'))
+            .map(|(y, _)| y)
             .expect("report box needs a bottom rule");
         let box_rows = (bottom - top + 1) as u16;
         assert_eq!(
@@ -5459,7 +5650,9 @@ mod feedback_input_tests {
             let qv = agent.question_view.as_mut().expect("pane");
             qv.begin_feedback_trace_stage("clipboard is broken over ssh".into(), vec![]);
         }
-        let screen = render_text(&mut agent);
+        // The card frame costs rows the 33%-of-40 panel cannot spare, so the whole option list only
+        // fits on a taller screen; that is what this asserts.
+        let screen = render_text_sized(&mut agent, 100, 60);
         for fragment in ["Opt-in to provide your trace", "retain and train"] {
             assert!(
                 screen.contains(fragment),

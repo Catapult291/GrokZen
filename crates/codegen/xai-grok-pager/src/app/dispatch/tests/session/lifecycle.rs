@@ -3748,6 +3748,7 @@ mod welcome_workspace_mode {
                 permission_mode_override: None,
                 preferred_session_id: None,
                 chat_kind: false,
+                target_prompt_index: None,
             }],
             true
         ));
@@ -3762,6 +3763,7 @@ mod welcome_workspace_mode {
                     permission_mode_override: None,
                     preferred_session_id: None,
                     chat_kind: false,
+                    target_prompt_index: None,
                 }],
                 true
             ),

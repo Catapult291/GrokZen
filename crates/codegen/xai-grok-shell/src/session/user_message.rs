@@ -60,7 +60,7 @@ pub(crate) const USER_INFO_DATE_MARKER: &str = "Today's date:";
 /// Resolve a display string for the user's shell.
 ///
 /// Unix: full path from `$SHELL` (e.g. `/bin/zsh`).
-/// Windows: `detect_windows_shell` tries pwsh, then powershell.exe, then Git Bash, then cmd.exe.
+/// Windows: the shell selected by `GROK_SHELL` or `[ui].default_shell`, cached for the process lifetime.
 fn resolve_shell_display() -> String {
     #[cfg(unix)]
     {

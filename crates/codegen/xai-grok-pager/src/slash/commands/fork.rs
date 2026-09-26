@@ -1,9 +1,9 @@
 //! `/fork`: branch the current session into a peer top-level agent.
 //!
-//! The command parses optional flags (`--worktree`, `--no-worktree`) and an optional free-form directive.
+//! The command parses optional flags (`--worktree`, `--no-worktree`, `--at <prompt>`) and an optional free-form directive.
 //! It returns [`Action::Fork`](crate::app::actions::Action::Fork) carrying a [`ForkArgs`] payload.
 //! The placeholder construction, modal routing, and effect emission live in `dispatch::dispatch_fork`.
-//! The fork itself is dispatched in `dispatch_fork_resolved`, after the worktree question is resolved and the placeholder spawn succeeds.
+//! The fork itself is dispatched in `dispatch_fork_resolved`, after the fork point and worktree question are resolved and the placeholder spawn succeeds.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_meta};
@@ -19,6 +19,22 @@ pub struct ForkArgs {
     /// Optional first prompt for the new session. Whitespace-trimmed.
     /// `None` when the user typed `/fork` (with or without flags) and no directive text; the new agent then opens with no first prompt.
     pub directive: Option<String>,
+    /// `Some(k)` -> fork the conversation up to (not including) user prompt `k`, the one-based-by-history
+    /// position the fork-point picker shows. `None` -> keep the whole conversation (the default and the
+    /// picker's "current state" row).
+    pub at_prompt: Option<usize>,
+}
+
+/// Where the fork's copy of the parent conversation ends.
+///
+/// The shell's `target_prompt_index` keeps every prompt up to and including the index, so
+/// "fork before prompt `k`" is the wire value `k - 1`. The picker and `--at k` both resolve to this.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForkCut {
+    /// Wire value for `targetPromptIndex`; `None` copies the whole conversation.
+    pub target_prompt_index: Option<usize>,
+    /// Text of the prompt the cut lands before, pre-filled into the child's composer so the user can rewrite it.
+    pub prefill: Option<String>,
 }
 
 /// Parse the raw argument string after `/fork`.
@@ -29,11 +45,10 @@ pub struct ForkArgs {
 ///
 /// Errors:
 /// - `--worktree` and `--no-worktree` cannot both appear.
-/// - `--at <turn>` returns a friendly "not supported in this version" message.
-///   The shell already supports the parameter as `xai_grok_shell::session::fork::ForkSessionRequest::target_prompt_index`.
-///   A turn-picker UI is planned; rejecting the flag now tells the user the feature is deferred.
+/// - `--at` needs a numeric prompt position of at least 1 (forking before the first prompt is `/new`).
 pub fn parse_fork_args(args: &str) -> Result<ForkArgs, String> {
     let mut worktree_override: Option<bool> = None;
+    let mut at_prompt: Option<usize> = None;
     let mut rest = args.trim_start();
 
     while !rest.is_empty() {
@@ -63,7 +78,22 @@ pub fn parse_fork_args(args: &str) -> Result<ForkArgs, String> {
                 rest = after.trim_start();
             }
             "--at" => {
-                return Err("--at is not supported in this version".into());
+                if at_prompt.is_some() {
+                    return Err("--at specified twice".into());
+                }
+                let (value, after_value) = after
+                    .trim_start()
+                    .split_once(char::is_whitespace)
+                    .map(|(v, rest)| (v, rest.trim_start()))
+                    .unwrap_or((after.trim_start(), ""));
+                let Some(position) = value.parse::<usize>().ok().filter(|p| *p > 0) else {
+                    return Err(
+                        "--at needs the position of the prompt to fork before (1 or greater); use /new to start an empty session"
+                            .into(),
+                    );
+                };
+                at_prompt = Some(position);
+                rest = after_value;
             }
             _ => break,
         }
@@ -77,6 +107,7 @@ pub fn parse_fork_args(args: &str) -> Result<ForkArgs, String> {
     Ok(ForkArgs {
         worktree_override,
         directive,
+        at_prompt,
     })
 }
 
@@ -85,8 +116,8 @@ pub struct ForkCommand;
 impl SlashCommand for ForkCommand {
     slash_meta! {
         name: "fork",
-        description: "Branch the current session into a peer agent",
-        usage: "/fork [--worktree|--no-worktree] [directive]",
+        description: "Branch the session into a peer agent, optionally from an earlier prompt",
+        usage: "/fork [--worktree|--no-worktree] [--at <prompt>] [directive]",
         takes_args: true,
         args_required: false,
         session_scoped: true,
@@ -187,12 +218,50 @@ mod tests {
     }
 
     #[test]
-    fn parse_at_flag_returns_friendly_v1_error() {
-        let err = parse_fork_args("--at 3 directive").expect_err("--at must error in v1");
-        assert!(
-            err.contains("--at is not supported"),
-            "error should mention --at deferral: {err}"
-        );
+    fn parse_at_flag_records_the_prompt_position() {
+        let parsed = parse_fork_args("--at 3").expect("--at parse");
+        assert_eq!(parsed.at_prompt, Some(3));
+        assert_eq!(parsed.worktree_override, None);
+        assert_eq!(parsed.directive, None);
+    }
+
+    #[test]
+    fn parse_at_flag_with_directive_keeps_both() {
+        let parsed = parse_fork_args("--at 2 try the other design").expect("--at + directive");
+        assert_eq!(parsed.at_prompt, Some(2));
+        assert_eq!(parsed.directive.as_deref(), Some("try the other design"));
+    }
+
+    #[test]
+    fn parse_at_flag_with_worktree_keeps_both() {
+        let parsed = parse_fork_args("--worktree --at 4").expect("--worktree + --at");
+        assert_eq!(parsed.worktree_override, Some(true));
+        assert_eq!(parsed.at_prompt, Some(4));
+    }
+
+    #[test]
+    fn parse_at_flag_rejects_missing_value() {
+        let err = parse_fork_args("--at").expect_err("--at without a value must error");
+        assert!(err.contains("--at needs"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_at_flag_rejects_non_numeric_value() {
+        let err = parse_fork_args("--at abc").expect_err("non-numeric --at must error");
+        assert!(err.contains("--at needs"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_at_flag_rejects_zero() {
+        // Forking before the first prompt leaves nothing to fork; `/new` is that operation.
+        let err = parse_fork_args("--at 0").expect_err("--at 0 must error");
+        assert!(err.contains("--at needs"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_at_flag_repeated_returns_error() {
+        let err = parse_fork_args("--at 1 --at 2").expect_err("duplicate --at must error");
+        assert!(err.contains("twice"), "got: {err}");
     }
 
     #[test]
@@ -280,13 +349,26 @@ mod tests {
     }
 
     #[test]
-    fn run_at_flag_returns_error_result() {
+    fn run_at_flag_returns_fork_action_carrying_the_position() {
         let models = ModelState::default();
         let mut ctx = make_ctx(&models);
         let cmd = ForkCommand;
         match cmd.run(&mut ctx, "--at 5") {
+            CommandResult::Action(Action::Fork(args)) => {
+                assert_eq!(args.at_prompt, Some(5));
+            }
+            other => panic!("expected Action(Fork(..)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_at_flag_without_value_returns_error_result() {
+        let models = ModelState::default();
+        let mut ctx = make_ctx(&models);
+        let cmd = ForkCommand;
+        match cmd.run(&mut ctx, "--at") {
             CommandResult::Error(msg) => {
-                assert!(msg.contains("--at is not supported"), "got: {msg}");
+                assert!(msg.contains("--at needs"), "got: {msg}");
             }
             other => panic!("expected Error, got {other:?}"),
         }
