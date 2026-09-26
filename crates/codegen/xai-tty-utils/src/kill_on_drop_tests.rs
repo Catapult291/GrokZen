@@ -1,17 +1,44 @@
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::KillOnDrop;
 
-fn spawn_sleeper() -> std::process::Child {
-    let mut cmd = Command::new("sleep");
-    cmd.arg("300")
-        .stdin(Stdio::null())
+/// Spawn a fixture child, detached and with every standard stream discarded.
+fn spawn(cmd: &mut Command) -> Child {
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    crate::detach_std_command(&mut cmd);
+    crate::detach_std_command(cmd);
     #[allow(clippy::disallowed_methods)] // test fixture; guarded/reaped by the test
-    cmd.spawn().expect("spawn sleeper")
+    cmd.spawn().expect("spawn test child")
+}
+
+#[cfg(unix)]
+fn spawn_sleeper() -> Child {
+    let mut cmd = Command::new("sleep");
+    cmd.arg("300");
+    spawn(&mut cmd)
+}
+
+/// `ping` is the cheapest always-present stand-in for `sleep`: 300 one-second
+/// loopback pings, killed long before they finish.
+#[cfg(windows)]
+fn spawn_sleeper() -> Child {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/C", "ping", "-n", "300", "127.0.0.1"]);
+    spawn(&mut cmd)
+}
+
+#[cfg(unix)]
+fn exit_zero_command() -> Command {
+    Command::new("true")
+}
+
+#[cfg(windows)]
+fn exit_zero_command() -> Command {
+    let mut cmd = Command::new("cmd");
+    cmd.args(["/C", "exit", "0"]);
+    cmd
 }
 
 /// Zombie-tolerant bounded probe: the contract is that the child stops
@@ -55,16 +82,16 @@ fn into_inner_disarms_without_killing() {
 
 #[test]
 fn drop_after_in_handle_reap_is_a_no_op() {
-    let mut cmd = Command::new("true");
+    let mut cmd = exit_zero_command();
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     crate::detach_std_command(&mut cmd);
     #[allow(clippy::disallowed_methods)] // test fixture; reaped through the guard
-    let mut guard = KillOnDrop::new(cmd.spawn().expect("spawn true"));
+    let mut guard = KillOnDrop::new(cmd.spawn().expect("spawn exit-zero child"));
 
     let status = guard.wait().expect("in-handle reap through the guard");
-    assert!(status.success(), "true exits 0");
+    assert!(status.success(), "exit-zero child succeeds");
 
     // Drop after the in-handle reap must not panic and must not signal a
     // recycled PID (std's Child::kill refuses already-waited children).

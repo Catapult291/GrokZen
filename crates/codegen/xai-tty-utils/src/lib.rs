@@ -593,6 +593,35 @@ pub fn process_not_running(pid: u32) -> bool {
     }
 }
 
+/// Windows has no zombie state to read: a child that has terminated reports an
+/// exit code other than `STILL_ACTIVE` for as long as any handle keeps its
+/// process object alive, so a killed-but-unreaped child already counts as not
+/// running. A pid that cannot be opened at all — already reaped and destroyed,
+/// or never valid — counts as not running too, which is what a caller polling
+/// after a kill needs; a live process we are not allowed to query would read
+/// the same way, so this stays test-only. A child that exits with the
+/// `STILL_ACTIVE` code itself (259) is indistinguishable from a running one.
+#[cfg(windows)]
+pub fn process_not_running(pid: u32) -> bool {
+    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: `handle` is a process handle owned by this function, closed
+    // before returning, and the out-parameter points at a local.
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return true;
+        };
+        let mut exit_code = 0u32;
+        let running = GetExitCodeProcess(handle, &mut exit_code).is_ok()
+            && exit_code == STILL_ACTIVE.0 as u32;
+        let _ = CloseHandle(handle);
+        !running
+    }
+}
+
 /// Configure a command so the spawned child becomes the leader of a new
 /// process group.
 pub fn new_process_group(cmd: &mut tokio::process::Command) {
@@ -1199,6 +1228,7 @@ fn is_wsl_from_inputs(env: &HashMap<String, String>, osrelease: Option<&str>) ->
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
     use std::sync::Mutex;
 
     use super::*;
