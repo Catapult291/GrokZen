@@ -86,6 +86,9 @@ follow_up_behavior = "queue"           # mid-turn follow-ups: "queue" (wait for 
                                        # next tool/model safe gap). See Keyboard Shortcuts → Mid-turn.
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
+default_shell = "git-bash"             # Windows default command shell: "git-bash" (default) |
+                                       # "pwsh" (PowerShell 7+) | "powershell" (Windows PowerShell 5.1)
+                                       # GROK_SHELL overrides this; restart required
 
 [features]
 telemetry = false                      # anonymous usage telemetry
@@ -165,6 +168,23 @@ You can also override this with `GROK_DEFAULT_SELECTED_PERMISSION`, which is han
 | `true` | All vim-style scrollback bindings are active, exactly as listed in [Keyboard Shortcuts](03-keyboard-shortcuts.md). Mid-turn `Esc` is swallowed in this mode (`Ctrl+C` cancels); minimal mode keeps Esc-cancel regardless. |
 
 Toggle it at runtime with `/vim-mode`, or from `/settings` → **Vim scrollback navigation**. Grok writes the change to `[ui] vim_mode` immediately and applies it to every future pager session, including new agents and subagents in the same process. There's no per-session override — `config.toml` is the source of truth on next launch. `vim_mode` is independent of `simple_mode`.
+
+#### Default shell (Windows)
+
+On Windows, `[ui] default_shell` selects the command shell used by Grok Build tools, hooks, terminals, status-line commands, and the shell shown in model context. Choose it from `/settings` → **Default shell** (restart required), or set it directly:
+
+```toml
+[ui]
+default_shell = "git-bash"  # default
+```
+
+| Value | Shell |
+|-------|-------|
+| `"git-bash"` or unset | Git Bash. This is the product default and provides Unix utilities such as `grep` and `sed`. |
+| `"pwsh"` | The installed `pwsh.exe` from PowerShell 7 or newer. The executable name is stored instead of a major version, so future compatible releases are supported without migration. |
+| `"powershell"` | Windows PowerShell 5.1 (`powershell.exe`). |
+
+`GROK_SHELL` remains an explicit process-level override and takes precedence. Its recognized values include `git-bash`, `pwsh`, `powershell`, and the internal compatibility value `cmd`. A setting change applies after restarting Grok Build; when leader mode is active, restart the leader as well so model tools, hooks, and terminal sessions use the same shell.
 
 #### Screen mode
 

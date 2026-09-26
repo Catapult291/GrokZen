@@ -222,6 +222,8 @@ impl From<BashInput> for ToolInput {
             timeout: value.timeout,
             description: value.description,
             is_background: false,
+            encoding: None,
+            detach: false,
         })
     }
 }
@@ -390,10 +392,12 @@ impl xai_tool_runtime::Tool for BashTool {
             timeout,
             output_byte_limit,
             output_file: output_file.clone(),
+            output_encoding: None,
             notification_handle: notification_handle.clone(),
             tool_call_id: tool_call_id.clone(),
             display_command: None, // OpenCode doesn't use isolation wrapping
             auto_background_on_timeout: false, // OpenCode doesn't support auto-backgrounding
+            detach: false,         // OpenCode has no cross-session task registry
             foreground_block_budget: None,
             kind: crate::computer::types::TaskKind::Bash,
             // OpenCode doesn't use shared terminal backends.

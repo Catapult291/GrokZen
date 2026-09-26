@@ -3,6 +3,7 @@ pub mod cgroup;
 pub mod embedded_search_tools;
 pub mod file_system;
 pub mod mock_fs;
+pub mod persistent;
 #[cfg(unix)]
 pub mod shell_state;
 #[cfg(unix)]
@@ -27,7 +28,7 @@ pub use terminal::{ExitStatus, LocalTerminalBackend};
 /// `LocalTerminalBackend` inherits the parent's shadows — it can't overwrite the
 /// enable state for bash that later runs on the shared backend. Defaults to
 /// both-on for standalone backends with no host wiring.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SearchShadowConfig {
     pub find_bfs: bool,
     pub grep_ugrep: bool,

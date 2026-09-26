@@ -354,6 +354,12 @@ pub fn canonical_hunk_tracker_mode(value: Option<&str>) -> &'static str {
     }
 }
 
+/// Canonicalize a raw default-shell preference through the shared Windows resolver.
+/// Unknown, blank, and `None` values resolve to Git Bash.
+pub fn canonical_default_shell(value: Option<&str>) -> &'static str {
+    xai_grok_config::shell::canonical_windows_shell(value)
+}
+
 /// `minimal` stays; everything else (including unset and the legacy `default`) becomes `fullscreen`.
 pub fn canonical_screen_mode(value: Option<&str>) -> &'static str {
     let raw = value.unwrap_or_default().trim();
@@ -506,6 +512,9 @@ pub fn current_value_for(
             crate::appearance::cache::load_follow_up_behavior().as_canonical(),
         )),
         "confirm_before_rewind" => Some(SettingValue::Bool(ui.confirm_before_rewind_enabled())),
+        "default_shell" => Some(SettingValue::Enum(canonical_default_shell(
+            ui.default_shell.as_deref(),
+        ))),
         "simple_mode" => Some(SettingValue::Bool(ui.simple_mode.unwrap_or(true))),
         // Per-tip contextual hints: `None` (inherit) reads as the default ON
         "contextual_hints.undo" => {
@@ -847,6 +856,18 @@ mod tests {
                         ui.confirm_before_rewind_enabled(),
                         "confirm_before_rewind default drifts from UiConfig::default()"
                     );
+                }
+                ("default_shell", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        ui.default_shell, None,
+                        "test assumes UiConfig::default().default_shell is None",
+                    );
+                    assert_eq!(
+                        *default,
+                        canonical_default_shell(None),
+                        "default_shell default drifts from the shared Windows resolver"
+                    );
+                    assert_eq!(*default, "git-bash");
                 }
                 ("combine_queued_prompts", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -1291,6 +1312,32 @@ mod tests {
         let ui = UiConfig::default();
         let pager = PagerLocalSnapshot::default();
         assert!(current_value_for("never-registered-key-xyzzy", &ui, &pager).is_none());
+    }
+
+    #[test]
+    fn default_shell_current_value_uses_shared_canonicalizer() {
+        let pager = PagerLocalSnapshot::default();
+        assert_eq!(
+            current_value_for("default_shell", &UiConfig::default(), &pager),
+            Some(SettingValue::Enum("git-bash"))
+        );
+        for (raw, expected) in [
+            ("bash", "git-bash"),
+            ("git-bash", "git-bash"),
+            ("pwsh", "pwsh"),
+            ("powershell", "powershell"),
+            ("unknown", "git-bash"),
+        ] {
+            let ui = UiConfig {
+                default_shell: Some(raw.to_string()),
+                ..UiConfig::default()
+            };
+            assert_eq!(
+                current_value_for("default_shell", &ui, &pager),
+                Some(SettingValue::Enum(expected)),
+                "raw={raw}"
+            );
+        }
     }
 
     #[test]

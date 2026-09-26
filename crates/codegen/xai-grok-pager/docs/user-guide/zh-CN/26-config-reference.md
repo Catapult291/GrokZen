@@ -599,6 +599,7 @@ Grok Build 还会按以下层级读取配置；后列层级优先，但 requirem
 | `ui.remember_tool_approvals` | `boolean` | `yes` | `user` | 显示按工具“始终允许”选项。也对应 `GROK_REMEMBER_TOOL_APPROVALS`。 |
 | `ui.render_mermaid` | `auto / on / off` | `yes` | `user` | Mermaid 代码围栏显示方式：可点击打开行或原始源文本。 |
 | `ui.screen_mode` | `fullscreen / minimal` | `yes` | `user` | 普通 `grok-zh` 的默认渲染模式；需要重启。 |
+| `ui.default_shell` | `git-bash / pwsh / powershell` | `yes` | `user` | Windows 命令 Shell；默认为 Git Bash。由 `GROK_SHELL` 覆盖；需要重启。 |
 | `ui.scroll_lines` | `integer` | `yes` | `user` | 每次滚动的行数（1–10）。也对应 `GROK_SCROLL_LINES`。 |
 | `ui.scroll_mode` | `auto / wheel / trackpad` | `yes` | `user` | 滚动输入分类。也对应 `GROK_SCROLL_MODE`。 |
 | `ui.scroll_speed` | `integer` | `yes` | `user` | 鼠标／触控板滚动速度倍数（1–100）。也对应 `GROK_SCROLL_SPEED`。 |

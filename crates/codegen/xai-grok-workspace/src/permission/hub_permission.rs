@@ -100,6 +100,7 @@ impl PermissionHookTransport for ToolServerPermissionTransport {
 fn scope_for_access(access: &AccessKind) -> &'static str {
     match access {
         AccessKind::Bash(_)
+        | AccessKind::DetachBackground { .. }
         | AccessKind::Edit(_)
         | AccessKind::MCPTool { .. }
         | AccessKind::AgentMessage { .. } => "write",
@@ -112,6 +113,9 @@ fn scope_for_access(access: &AccessKind) -> &'static str {
 fn describe_access(access: &AccessKind) -> String {
     match access {
         AccessKind::Bash(_) => "Run a terminal command".to_owned(),
+        AccessKind::DetachBackground { command } => {
+            format!("Keep this command running after the session ends: {command}")
+        }
         AccessKind::Edit(path) => format!("Edit {path}"),
         AccessKind::MCPTool { name, .. } => format!("Run MCP tool {name}"),
         AccessKind::WebFetch(url) => format!("Fetch {url}"),

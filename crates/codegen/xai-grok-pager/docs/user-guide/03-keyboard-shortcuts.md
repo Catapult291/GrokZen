@@ -157,6 +157,7 @@ The title always includes the MCP server name.
 | `Enter` | Select and advance, submit on the last question, or edit the free-text row |
 | `Esc` | Unselect this question's answer; with nothing selected, park focus in the scrollback (`Tab` returns). On the *first* question inside the dashboard's session overlay it returns to the dashboard instead — from a later question `←` is still the way back, so the park comes first and the next `Esc` leaves. The shortcuts bar names whichever rung is live |
 | `y` | Copy the focused answer |
+| `m` | Collapse the card to a single summary row and park the keyboard, so a pending question can be read against the conversation behind it. `m`, `Tab` or `Space` bring it back — and take the keyboard with it, expanding as they do |
 | `Shift+X` | Dismiss the question (the agent continues without an answer) |
 | `Ctrl+F` | Fullscreen the card |
 

@@ -922,6 +922,19 @@ async fn persist_setting_type_mismatch_errors_compact_mode() {
             "error message must mention key + expected kind, got: {err}",
         );
 }
+/// Type-mismatch for the persisted default shell.
+#[tokio::test]
+async fn persist_setting_type_mismatch_errors_default_shell() {
+    use crate::settings::SettingValue;
+    let err = persist_setting("default_shell", SettingValue::Bool(true))
+        .await
+        .expect_err("default_shell with Bool payload must return Err");
+    assert!(
+        err.contains("persist_setting(default_shell) expected Enum"),
+        "error message must mention key + expected kind, got: {err}",
+    );
+}
+
 /// Type-mismatch for `show_timestamps`.
 #[tokio::test]
 async fn persist_setting_type_mismatch_errors_show_timestamps() {

@@ -152,7 +152,7 @@ pub(super) fn should_show_resolved_model(
 /// Resolve the shell name for the system prompt `Shell:` field.
 ///
 /// Unix: basename of `$SHELL` (e.g. "zsh", "bash").
-/// Windows: name from the `detect_windows_shell` cascade (pwsh, then powershell.exe, then Git Bash, then cmd.exe), since `$SHELL` is absent.
+/// Windows: the shell selected by `GROK_SHELL` or `[ui].default_shell`, since `$SHELL` is absent.
 pub(super) fn resolve_session_shell() -> String {
     #[cfg(unix)]
     {
@@ -249,6 +249,8 @@ impl SessionActor {
             timeout: None,
             description: title_command.clone().into_owned(),
             is_background: false,
+            encoding: None,
+            detach: false,
         });
         // Bash mode has no model-issued wire name; resolve the toolset's execute tool by kind so the x.ai/tool identity still stamps
         let bash_marker = serde_json::json!({"bash_mode": true}).as_object().cloned();

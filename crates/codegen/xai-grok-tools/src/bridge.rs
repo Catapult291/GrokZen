@@ -876,6 +876,7 @@ mod tests {
             kill_result_delivered: false,
             owner_session_id: owner.map(|s| s.to_string()),
             description: None,
+            output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
         }

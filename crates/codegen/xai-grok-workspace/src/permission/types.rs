@@ -116,6 +116,14 @@ pub enum AccessKind {
     },
     Edit(String),
     Bash(String),
+    /// A background command the model asked to keep alive past the session.
+    /// Kept distinct from [`AccessKind::Bash`] so the gate can force a
+    /// confirmation even when the session runs in always-approve mode: a
+    /// detached process is the one Bash shape that outlives the turn, so the
+    /// user gets a say before anything keeps running without a session.
+    DetachBackground {
+        command: String,
+    },
     MCPTool {
         name: String,
         input: serde_json::Value,
@@ -269,7 +277,15 @@ impl From<&xai_grok_tools::types::ToolInput> for AccessKind {
             ToolInput::ApplyPatch(_) => AccessKind::Edit("apply_patch".to_string()),
             ToolInput::HashlineEdit(he) => AccessKind::Edit(he.file_path.to_string()),
             ToolInput::Write(w) => AccessKind::Edit(w.file_path.clone()),
-            ToolInput::Bash(bash) => AccessKind::Bash(bash.command.to_string()),
+            ToolInput::Bash(bash) => {
+                if bash.detach && bash.is_background {
+                    AccessKind::DetachBackground {
+                        command: bash.command.to_string(),
+                    }
+                } else {
+                    AccessKind::Bash(bash.command.to_string())
+                }
+            }
             ToolInput::Monitor(m) => AccessKind::Bash(m.command.clone()),
             ToolInput::MCPTool(mcp) => AccessKind::MCPTool {
                 name: mcp.tool_name.to_string(),
@@ -631,11 +647,46 @@ mod tests {
             timeout: None,
             description: "run tests".into(),
             is_background: false,
+            encoding: None,
+            detach: false,
         });
         let access = AccessKind::from(&input);
         assert!(
             matches!(access, AccessKind::Bash(ref cmd) if cmd == "cargo test"),
             "Bash should produce AccessKind::Bash with the command, got {access:?}"
+        );
+    }
+
+    /// Only a background call that actually asked to detach routes to the
+    /// confirming access. A foreground call, or a background call without the
+    /// flag, must stay ordinary `Bash` so it keeps the normal fast path.
+    #[test]
+    fn detach_maps_to_confirming_access_only_when_background() {
+        use xai_grok_tools::implementations::grok_build::bash::BashToolInput;
+        use xai_grok_tools::types::ToolInput;
+
+        let bash = |is_background, detach| {
+            ToolInput::Bash(BashToolInput {
+                command: "npm run dev".into(),
+                timeout: None,
+                description: "serve".into(),
+                is_background,
+                encoding: None,
+                detach,
+            })
+        };
+
+        assert!(matches!(
+            AccessKind::from(&bash(true, true)),
+            AccessKind::DetachBackground { ref command } if command == "npm run dev"
+        ));
+        assert!(matches!(
+            AccessKind::from(&bash(true, false)),
+            AccessKind::Bash(_)
+        ));
+        assert!(
+            matches!(AccessKind::from(&bash(false, true)), AccessKind::Bash(_)),
+            "a foreground call is never detached, so it keeps the ordinary bash access"
         );
     }
     #[test]

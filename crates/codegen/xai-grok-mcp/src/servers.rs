@@ -2426,6 +2426,11 @@ where
     W: AsyncWrite,
 {
     read: BufReader<R>,
+    /// Bytes already consumed from `read` for the current newline-delimited message.
+    ///
+    /// `read_until` appends partial input before it yields, so a cancelled
+    /// `receive()` must leave those bytes here for the next call to resume.
+    line_buf: Vec<u8>,
     /// `Arc<Mutex<Option<…>>>` so `send` can return a `Send + 'static` future (the `Transport` contract) without borrowing `self`.
     /// It also lets `close` drop the writer; mirrors rmcp's own `AsyncRwTransport`.
     write: Arc<Mutex<Option<W>>>,
@@ -2459,6 +2464,7 @@ where
     ) -> Self {
         Self {
             read: BufReader::new(read),
+            line_buf: Vec::new(),
             write: Arc::new(Mutex::new(Some(write))),
             server_name,
             event_writer,
@@ -2518,9 +2524,11 @@ where
 
     async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
         loop {
-            let mut line = Vec::new();
-            match self.read.read_until(b'\n', &mut line).await {
-                Ok(0) => return None, // genuine end-of-stream
+            // `read_until` appends into `line_buf` before it yields. Since the
+            // service loop polls `receive()` in a `select!`, cancellation can
+            // leave a partial line here; reuse the same buffer on the next call.
+            match self.read.read_until(b'\n', &mut self.line_buf).await {
+                Ok(0) => return None,
                 Ok(_) => {}
                 Err(e) => {
                     tracing::debug!(
@@ -2531,30 +2539,35 @@ where
                     return None;
                 }
             }
-            if line.last() == Some(&b'\n') {
-                line.pop();
-            }
-            if line.last() == Some(&b'\r') {
-                line.pop();
-            }
-            if line.is_empty() {
-                continue;
-            }
 
-            match serde_json::from_slice::<RxJsonRpcMessage<RoleClient>>(&line) {
-                Ok(msg) => return Some(msg),
-                // The whole point: a single undecodable line must not collapse the transport; skip it and keep reading
-                Err(err) => {
-                    if is_ignorable_notification(&line) {
-                        tracing::trace!(
-                            server = %self.server_name,
-                            "Ignoring unrecognized MCP notification",
-                        );
-                    } else {
-                        self.record_decode_error(&line, &err);
+            let parsed = {
+                let line = self.line_buf.strip_suffix(b"\n").unwrap_or(&self.line_buf);
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                if line.is_empty() {
+                    None
+                } else {
+                    match serde_json::from_slice::<RxJsonRpcMessage<RoleClient>>(line) {
+                        Ok(msg) => Some(Ok(msg)),
+                        Err(err) => {
+                            if is_ignorable_notification(line) {
+                                tracing::trace!(
+                                    server = %self.server_name,
+                                    "Ignoring unrecognized MCP notification",
+                                );
+                            } else {
+                                self.record_decode_error(line, &err);
+                            }
+                            Some(Err(()))
+                        }
                     }
-                    continue;
                 }
+            };
+            // A complete newline-delimited line has now been consumed. Keep
+            // the allocation for the next line, but never clear a partial read:
+            // cancellation can only happen while the await above is pending.
+            self.line_buf.clear();
+            if let Some(Ok(msg)) = parsed {
+                return Some(msg);
             }
         }
     }

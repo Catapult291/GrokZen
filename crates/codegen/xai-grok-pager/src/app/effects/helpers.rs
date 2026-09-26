@@ -1488,6 +1488,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "default_shell" => {
+            let SettingValue::Enum(s) = value else {
+                return Err(kind_mismatch("default_shell", "Enum", &value));
+            };
+            xai_grok_shell::util::config::set_default_shell(s.to_string())
+                .await
+                .map_err(|e| e.to_string())
+        }
         "screen_mode" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("screen_mode", "Enum", &value));

@@ -33,6 +33,41 @@ async fn resilient_transport_skips_undecodable_line_and_keeps_stream_alive() {
     );
 }
 
+#[tokio::test]
+async fn resilient_transport_resumes_after_receive_is_cancelled_mid_line() {
+    let (mut server_out, client_in) = tokio::io::duplex(64 * 1024);
+    let mut transport = ResilientRwTransport::new(
+        client_in,
+        tokio::io::sink(),
+        "fwbuild".to_string(),
+        xai_grok_session_events::EventWriter::noop(),
+    );
+
+    let expected = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "test/long-line",
+        "params": { "payload": "x".repeat(32 * 1024) },
+    });
+    let mut line = serde_json::to_vec(&expected).unwrap();
+    line.push(b'\n');
+    let split = line.len() / 2;
+
+    // Make one read observe a real partial line, then cancel that receive future
+    // before the delimiter arrives. The bytes already consumed must survive.
+    server_out.write_all(&line[..split]).await.unwrap();
+    let mut cancelled_receive = Box::pin(transport.receive());
+    assert!(futures::poll!(cancelled_receive.as_mut()).is_pending());
+    drop(cancelled_receive);
+
+    server_out.write_all(&line[split..]).await.unwrap();
+    drop(server_out);
+    let received = transport
+        .receive()
+        .await
+        .expect("the next receive must resume the cancelled line");
+    assert_eq!(serde_json::to_value(received).unwrap(), expected);
+}
+
 fn make_stdio_server(name: &str, command: &str) -> acp::McpServer {
     acp::McpServer::Stdio(acp::McpServerStdio::new(name, PathBuf::from(command)))
 }

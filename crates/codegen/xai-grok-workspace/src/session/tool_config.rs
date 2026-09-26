@@ -464,8 +464,8 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
         }
     }
     fn build_terminal_backend(&self) -> crate::config::SessionTerminalBackend {
-        crate::config::SessionTerminalBackend::local(
-            xai_grok_tools::computer::local::LocalTerminalBackend::new(),
+        crate::config::SessionTerminalBackend::local_persistent(
+            xai_grok_tools::computer::local::LocalTerminalBackend::with_persistent_background_tasks(),
         )
     }
     fn registry_builder(&self) -> ToolRegistryBuilder {
@@ -600,7 +600,9 @@ pub mod test_support {
             }
         }
         fn build_terminal_backend(&self) -> crate::config::SessionTerminalBackend {
-            crate::config::SessionTerminalBackend::local(LocalTerminalBackend::new())
+            crate::config::SessionTerminalBackend::local_persistent(
+                LocalTerminalBackend::with_persistent_background_tasks(),
+            )
         }
         fn registry_builder(&self) -> ToolRegistryBuilder {
             ToolRegistryBuilder::new()

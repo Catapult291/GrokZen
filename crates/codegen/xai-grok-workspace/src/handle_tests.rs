@@ -944,6 +944,8 @@ pub(crate) fn terminal_run_request(
         timeout: std::time::Duration::from_secs(60),
         output_byte_limit: 4096,
         output_file: out_dir.join(format!("{tool_call_id}.out")),
+        output_encoding: None,
+        detach: false,
         notification_handle: xai_grok_tools::notification::ToolNotificationHandle::noop(),
         tool_call_id: tool_call_id.to_string(),
         display_command: None,
@@ -1234,7 +1236,7 @@ impl crate::config::SessionContextFactory for PersistentShellFactory {
             .build_session_context(session_id, cwd, session_env, backend)
     }
     fn build_terminal_backend(&self) -> crate::config::SessionTerminalBackend {
-        crate::config::SessionTerminalBackend::local(
+        crate::config::SessionTerminalBackend::local_persistent(
             xai_grok_tools::computer::local::LocalTerminalBackend::with_persistent_shell(),
         )
     }

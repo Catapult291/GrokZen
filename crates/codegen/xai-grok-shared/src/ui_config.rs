@@ -56,6 +56,11 @@ pub struct UiConfig {
     /// Written by the pager's settings modal / rewind "Yes, and don't ask again".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirm_before_rewind: Option<bool>,
+    /// Default Windows command shell family (`git-bash`, `pwsh`, or `powershell`).
+    /// `None` means Git Bash, the product default. `pwsh` represents PowerShell 7+
+    /// and is intentionally not tied to a major-version number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_shell: Option<String>,
     /// Theme to use when the OS is in dark mode. Written by the pager's theme persist module.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_dark_theme: Option<String>,
@@ -269,6 +274,7 @@ impl Default for UiConfig {
             show_timeline: None,
             page_flip_on_send: None,
             confirm_before_rewind: None,
+            default_shell: None,
             auto_dark_theme: None,
             auto_light_theme: None,
             scroll_speed: None,
@@ -409,6 +415,25 @@ mod tests {
             let ui: UiConfig = serde_json::from_str(json).expect("[ui] survives it");
             let saved = serde_json::to_value(&ui).expect("[ui] serializes");
             assert!(saved.get("status_line").is_some(), "{json}");
+        }
+    }
+
+    #[test]
+    fn default_shell_is_absent_by_default_and_omitted_when_unset() {
+        let ui = UiConfig::default();
+        assert_eq!(ui.default_shell, None);
+        let saved = serde_json::to_value(&ui).expect("[ui] serializes");
+        assert!(saved.get("default_shell").is_none());
+
+        for value in ["git-bash", "pwsh", "powershell"] {
+            let ui = UiConfig {
+                default_shell: Some(value.to_string()),
+                ..UiConfig::default()
+            };
+            let saved = serde_json::to_value(&ui).expect("[ui] serializes");
+            assert_eq!(saved["default_shell"], value);
+            let reread: UiConfig = serde_json::from_value(saved).expect("[ui] reloads");
+            assert_eq!(reread.default_shell.as_deref(), Some(value));
         }
     }
 

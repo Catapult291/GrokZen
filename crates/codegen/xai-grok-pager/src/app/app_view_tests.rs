@@ -10,6 +10,17 @@ use crossterm::event::{
 };
 
 #[test]
+fn f3_opens_session_picker_before_pane_routing() {
+    let event = Event::Key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    for mut app in [test_app(), test_app_with_agent()] {
+        assert!(matches!(
+            app.handle_input(&event),
+            InputOutcome::Action(Action::ShowSessionPicker)
+        ));
+    }
+}
+
+#[test]
 fn welcome_model_name_localizes_effort_without_changing_model_name() {
     let zh = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
         locale: crate::locale::UiLocale::ZhCn,

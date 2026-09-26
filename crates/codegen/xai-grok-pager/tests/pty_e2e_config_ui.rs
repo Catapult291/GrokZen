@@ -21,6 +21,8 @@ mod campaign_remote_settings_nudge_and_dismiss;
 mod critical_announcement_session_banner_pty;
 #[path = "pty_e2e/dashboard_overlay_tab_esc_backout_and_ctrl_backslash.rs"]
 mod dashboard_overlay_tab_esc_backout_and_ctrl_backslash;
+#[path = "pty_e2e/default_shell_settings_round_trip_pty.rs"]
+mod default_shell_settings_round_trip_pty;
 #[path = "pty_e2e/extensions_modal_copy_hints_pty.rs"]
 mod extensions_modal_copy_hints_pty;
 #[path = "pty_e2e/extensions_modal_workflows_tab_pty.rs"]

@@ -391,6 +391,14 @@ pub async fn set_cancel_subagents_on_turn_cancel(value: String) -> Result<()> {
     .await
 }
 
+/// Persist `[ui].default_shell` (`git-bash` | `pwsh` | `powershell`).
+/// The value is normalized by the shared Windows shell parser, so future
+/// PowerShell majors continue to use `pwsh` without a config migration.
+pub async fn set_default_shell(value: String) -> Result<()> {
+    let canonical = xai_grok_config::shell::canonical_windows_shell(Some(&value));
+    update_config(|cfg| cfg.ui.default_shell = Some(canonical.to_string())).await
+}
+
 /// Persist `[ui].screen_mode` (`fullscreen` | `minimal`). Empty clears the key.
 pub async fn set_screen_mode(value: String) -> Result<()> {
     update_config(|cfg| {

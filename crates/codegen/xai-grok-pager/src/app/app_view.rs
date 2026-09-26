@@ -2493,6 +2493,15 @@ impl AppView {
             self.pending_action = None;
         }
         let modal_open = self.is_scroll_blocking_modal_open();
+        // F3 is the top-level session-browser action. Handle it before
+        // pane-specific routing so prompt, scrollback, and terminal modes
+        // cannot swallow the function key before the picker is opened.
+        if !modal_open
+            && key_event.is_some_and(|key| key.code == KeyCode::F(3) && key.modifiers.is_empty())
+            && matches!(self.active_view, ActiveView::Welcome | ActiveView::Agent(_))
+        {
+            return InputOutcome::Action(Action::ShowSessionPicker);
+        }
         if let Event::Mouse(mouse) = ev
             && let Some(direction) = ScrollDirection::from_mouse_event(mouse)
             && !modal_open

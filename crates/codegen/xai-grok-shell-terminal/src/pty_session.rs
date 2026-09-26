@@ -685,7 +685,7 @@ pub async fn close_all() {
 }
 
 /// Explicit `shell` param, then `$SHELL`, then the platform default.
-/// Windows has no `$SHELL`, so it uses the `detect_windows_shell` cascade.
+/// Windows has no `$SHELL`, so it uses the configured `default_shell` resolver.
 fn resolve_pty_shell(shell: Option<&str>) -> (String, Vec<String>) {
     if let Some(s) = shell {
         return (s.to_string(), vec![]);
