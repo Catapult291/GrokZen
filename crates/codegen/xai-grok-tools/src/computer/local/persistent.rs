@@ -1006,8 +1006,8 @@ mod tests {
             if *detach {
                 assert!(
                     still_running,
-                    "a detached task was confirmed to outlive the session, so teardown \
-                     must leave its worker running"
+                    "{label}: a detached task was confirmed to outlive the session, so \
+                     teardown must leave its worker running"
                 );
                 // Clean up the survivor the teardown deliberately spared.
                 let _ = registry
@@ -1016,8 +1016,8 @@ mod tests {
             } else {
                 assert!(
                     !still_running,
-                    "an ordinary background task is session-scoped; teardown must \
-                     have killed its worker"
+                    "{label}: an ordinary background task is session-scoped; teardown \
+                     must have killed its worker"
                 );
             }
         }
