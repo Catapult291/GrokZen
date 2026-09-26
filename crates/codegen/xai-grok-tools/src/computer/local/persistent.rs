@@ -29,6 +29,9 @@ pub const WORKER_SUBCOMMAND: &str = "__grok-terminal-background";
 const SCHEMA_VERSION: u32 = 1;
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Exit polling for a durable worker. The registry only reconciles an exit when
+/// a caller asks for the task, so the owning process watches the worker itself.
+const COMPLETION_WATCH_INTERVAL: Duration = Duration::from_millis(500);
 
 /// Shared handle used by a local terminal backend to manage durable jobs.
 #[derive(Clone)]
@@ -97,7 +100,10 @@ impl TaskRegistry {
         // Windows turns the crate name `grok-zh` into `grok_zh.exe`, so try
         // both spellings rather than assuming the dashed one exists.
         let mut candidates = Vec::new();
-        let mut dir = std::env::current_exe().ok()?.parent().map(Path::to_path_buf);
+        let mut dir = std::env::current_exe()
+            .ok()?
+            .parent()
+            .map(Path::to_path_buf);
         while let Some(current) = dir {
             for name in ["grok-zh", "grok_zh"] {
                 candidates.push(current.join(format!("{name}{}", std::env::consts::EXE_SUFFIX)));
@@ -139,6 +145,10 @@ impl TaskRegistry {
         std::fs::create_dir(&directory)
             .map_err(|e| ComputerError::io(format!("create background-task directory: {e}")))?;
 
+        // Cloned before `from_request` consumes the request. The worker cannot
+        // carry this handle (it is not persistable), so the completion
+        // notification for a durable task can only originate in this process.
+        let notification_handle = request.notification_handle.clone();
         let spec = PersistentTaskSpec::from_request(
             task_id.clone(),
             request,
@@ -159,6 +169,12 @@ impl TaskRegistry {
                 && state.worker_pid == Some(worker_pid)
             {
                 drop(child);
+                spawn_completion_watcher(
+                    directory.clone(),
+                    task_id.clone(),
+                    worker_pid,
+                    notification_handle,
+                );
                 return Ok(BackgroundHandle {
                     task_id,
                     output_file: spec.output_file,
@@ -507,6 +523,41 @@ fn reconcile_worker_state(state: &mut PersistentTaskState) {
     if state.snapshot.signal.is_none() {
         state.snapshot.signal = Some("worker_exited".to_string());
     }
+}
+
+/// Reports a durable task's exit to the session that started it.
+///
+/// The worker runs as a separate process and its own completion notification
+/// goes to a no-op handle (see [`PersistentTaskSpec::into_request`]), while this
+/// registry only reconciles an exit when a caller asks for the task. Without a
+/// watcher nothing ever emits `TaskCompleted`, so the pager's task row stays
+/// running until the session ends. The handle lives in this process on purpose:
+/// a task re-discovered by a later session must not notify again.
+fn spawn_completion_watcher(
+    directory: PathBuf,
+    task_id: String,
+    worker_pid: u32,
+    notification_handle: ToolNotificationHandle,
+) {
+    tokio::spawn(async move {
+        while worker_process_is_alive(worker_pid) {
+            sleep(COMPLETION_WATCH_INTERVAL).await;
+        }
+        let Some(mut state) = read_state(&directory.join("state.json")) else {
+            return;
+        };
+        if !state.ready {
+            return;
+        }
+        reconcile_worker_state(&mut state);
+        if !state.snapshot.completed {
+            return;
+        }
+        hydrate_output(&mut state.snapshot).await;
+        let mut snapshot = state.snapshot;
+        snapshot.task_id = task_id;
+        notification_handle.send_task_complete(snapshot);
+    });
 }
 
 fn terminate_worker_process(pid: u32) {
@@ -947,7 +998,8 @@ mod tests {
             // the command down, so give it a bounded moment to actually exit
             // rather than racing the very next syscall.
             let deadline = std::time::Instant::now() + Duration::from_secs(10);
-            while registry.worker_is_alive(&handle.task_id) && std::time::Instant::now() < deadline {
+            while registry.worker_is_alive(&handle.task_id) && std::time::Instant::now() < deadline
+            {
                 sleep(Duration::from_millis(100)).await;
             }
             let still_running = registry.worker_is_alive(&handle.task_id);
@@ -969,5 +1021,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A durable task's completion must reach the session that started it.
+    ///
+    /// The worker's own handle is a no-op (`PersistentTaskSpec::into_request`),
+    /// so this notification can only come from the watcher `start` installs.
+    /// Without it the pager keeps the task row running until the session ends.
+    #[tokio::test]
+    async fn durable_task_reports_completion_to_its_starting_session() {
+        let Some(registry) = TaskRegistry::for_live_worker() else {
+            eprintln!("skipping: no grok-zh binary with the background-worker entry point");
+            return;
+        };
+        let temp = tempfile::tempdir().expect("temp dir");
+        let root = temp.path().join("tasks");
+        let registry = TaskRegistry {
+            root: Arc::new(root.clone()),
+            ..registry
+        };
+
+        let (notification_handle, mut notifications) = ToolNotificationHandle::channel();
+        let mut request = spec_for_detach(false).into_request();
+        // Short command: the watcher only reports once the worker is gone.
+        request.command = "echo durable-done".into();
+        request.notification_handle = notification_handle;
+
+        let handle = registry
+            .start(request)
+            .await
+            .expect("start durable background task");
+
+        let received = tokio::time::timeout(Duration::from_secs(30), notifications.recv())
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "a durable task must report completion, otherwise the pager row for \
+                     {} never settles",
+                    handle.task_id
+                )
+            });
+        let Some(crate::notification::types::ToolNotification::TaskCompleted(snapshot)) = received
+        else {
+            panic!("expected a task-completed notification");
+        };
+        assert_eq!(snapshot.task_id, handle.task_id);
+        assert!(
+            snapshot.completed,
+            "the snapshot reported on completion must be the finished one"
+        );
     }
 }
