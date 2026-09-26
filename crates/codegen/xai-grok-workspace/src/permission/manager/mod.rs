@@ -22,7 +22,7 @@ use crate::permission::exec_risk::{
     git_words_have_unsafe_query_option, script_may_invoke_git, segment_exec_facts,
 };
 use crate::permission::gate_preflight::GatePreflight;
-use crate::permission::policy::{CompiledPolicy, ShellWord};
+use crate::permission::policy::{CompiledPolicy, ShellWord, names_a_rooted_location};
 use crate::permission::prompter::{AcpPrompter, PromptOutcome, PromptOutcomeKind};
 use crate::permission::shell_access::{
     command_write_paths_split, edit_target_protection, is_creation_program, is_safe_write_sink,
@@ -1704,7 +1704,7 @@ pub fn spawn_permission_manager_with_pin(
                             if e.has_cwd_change
                                 && e.creation_paths
                                     .iter()
-                                    .any(|p| !std::path::Path::new(p).is_absolute())
+                                    .any(|p| !names_a_rooted_location(std::path::Path::new(p)))
                             {
                                 return Some(
                                     crate::permission::shell_access::ProtectedEditReason::Sensitive,

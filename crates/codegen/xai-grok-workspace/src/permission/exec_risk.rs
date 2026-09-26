@@ -7,6 +7,7 @@ use crate::permission::bash_command_splitting::{
     MAX_TRANSPARENT_PREFIX_DEPTH, MAX_WRAPPER_DEPTH, TransparentPrefixPeel,
     peel_transparent_prefixes, unwrap_wrappers_checked,
 };
+use crate::permission::policy::names_a_rooted_location;
 
 #[cfg(test)]
 use crate::permission::bash_command_splitting::{
@@ -435,7 +436,7 @@ fn is_static_path_operand(p: &str) -> bool {
 
 fn join_cwd(base: &Path, operand: &str) -> PathBuf {
     let p = Path::new(operand);
-    if p.is_absolute() {
+    if names_a_rooted_location(p) {
         p.to_path_buf()
     } else {
         base.join(p)
