@@ -665,6 +665,82 @@
         }
     }
 
+    /// The YOLO drain answers "always-approve" prompts in place, but not the
+    /// ones the permission manager deliberately let through: a detached
+    /// background command outlives the session, so its card has to reach a
+    /// human. Both directions are asserted in one test on purpose — asserting
+    /// only the spared half would still pass if the drain stopped firing at all.
+    #[test]
+    fn yolo_auto_approve_spares_a_request_that_requires_a_human() {
+        let mut app = make_app_with_agent("sess-A");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.yolo_mode = true;
+
+        let allow_once = || {
+            acp::PermissionOption::new(
+                acp::PermissionOptionId::new(Arc::from("allow-once")),
+                "Allow once",
+                acp::PermissionOptionKind::AllowOnce,
+            )
+        };
+
+        // Baseline: an ordinary always-approve prompt is still auto-answered.
+        let (plain_tx, mut plain_rx) = tokio::sync::oneshot::channel();
+        let plain = acp::RequestPermissionRequest::new(
+            acp::SessionId::new("sess-A"),
+            acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from("call-plain")),
+                acp::ToolCallUpdateFields::default(),
+            ),
+            vec![allow_once()],
+        );
+        handle(
+            AcpClientMessage::RequestPermission(xai_acp_lib::AcpArgs {
+                request: plain,
+                response_tx: plain_tx,
+            }),
+            &mut app,
+        );
+        assert!(
+            plain_rx.try_recv().is_ok(),
+            "an unmarked request must still be auto-approved in always-approve"
+        );
+
+        // The flagged request must render a card instead.
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            xai_grok_workspace::permission::REQUIRES_CONFIRMATION_META_KEY.to_owned(),
+            serde_json::Value::Bool(true),
+        );
+        let request = acp::RequestPermissionRequest::new(
+            acp::SessionId::new("sess-A"),
+            acp::ToolCallUpdate::new(
+                acp::ToolCallId::new(Arc::from("call-detach")),
+                acp::ToolCallUpdateFields::default(),
+            ),
+            vec![allow_once()],
+        )
+        .meta(Some(meta));
+
+        handle(
+            AcpClientMessage::RequestPermission(xai_acp_lib::AcpArgs {
+                request,
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+
+        assert_eq!(
+            app.agents[&AgentId(0)].permission_queue.len(),
+            1,
+            "a detach confirmation must render a card even in always-approve"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "nothing may be answered until the user picks a row"
+        );
+    }
+
     #[test]
     fn permission_for_unknown_session_id_is_cancelled() {
         // No agent owns the session and the active agent already has a session_id (so the race-window fallback does not fire)

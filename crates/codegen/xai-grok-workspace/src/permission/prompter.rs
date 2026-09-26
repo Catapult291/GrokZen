@@ -5,7 +5,7 @@ use std::time::Instant;
 use crate::permission::{
     bash_command_splitting::{BashCommandHighlights, primary_command_from_script},
     manager::web_fetch_deny_key_from_url,
-    types::{AccessKind, ClientType, HOOK_ASK_META_KEY, HookAsk},
+    types::{AccessKind, ClientType, HOOK_ASK_META_KEY, HookAsk, REQUIRES_CONFIRMATION_META_KEY},
 };
 use agent_client_protocol::{self as acp, Client as _};
 use xai_acp_lib::AcpAgentGatewaySender as GatewaySender;
@@ -43,6 +43,8 @@ const ENABLE_ALWAYS_APPROVE_LABEL: &str =
 /// Build the "enable always-approve mode" option prepended to every TUI/Pager/Desktop prompt; see [`ENABLE_ALWAYS_APPROVE_OPTION_ID`].
 /// `kind` is `AllowOnce` so the pager's YOLO auto-approve drain, which answers with the first `AllowOnce`, picks this option.
 /// That is safe: the drain bypasses `dispatch_permission_select`, so picking it does not re-fire `set_yolo_mode(true)`.
+/// The drain skips requests carrying [`REQUIRES_CONFIRMATION_META_KEY`], so this row is only ever auto-picked for a prompt
+/// the manager would have allowed anyway.
 fn enable_always_approve_option() -> acp::PermissionOption {
     acp::PermissionOption::new(
         ENABLE_ALWAYS_APPROVE_OPTION_ID,
@@ -552,6 +554,11 @@ impl AcpPrompter {
 
     /// Request `_meta`: the bash selection scope or the protected-edit description (never both).
     /// The hook ask is merged in when one forced this prompt, so a client that writes its own title still sees it.
+    ///
+    /// [`REQUIRES_CONFIRMATION_META_KEY`] rides along whenever the prompt exists only because an
+    /// always-approve floor applied. Without it a client is free to answer the request itself under
+    /// always-approve, which is exactly how a detach would slip past the gate: the manager did the
+    /// right thing by prompting, and the client then undid it.
     fn permission_request_meta(
         &self,
         access: &AccessKind,
@@ -564,6 +571,12 @@ impl AcpPrompter {
             .unwrap_or_default();
         if let Some(value) = hook_ask.and_then(|ask| serde_json::to_value(ask).ok()) {
             meta.insert(HOOK_ASK_META_KEY.to_owned(), value);
+        }
+        if access.requires_user_confirmation() || hook_ask.is_some() {
+            meta.insert(
+                REQUIRES_CONFIRMATION_META_KEY.to_owned(),
+                serde_json::Value::Bool(true),
+            );
         }
         (!meta.is_empty()).then_some(meta)
     }
@@ -1095,6 +1108,7 @@ mod tests {
             serde_json::Value::Object(meta),
             serde_json::json!({
                 "hookAsk": { "hookName": "guard", "reason": "confirm this" },
+                "requiresConfirmation": true,
             })
         );
         let merged = prompter
@@ -1109,6 +1123,7 @@ mod tests {
             serde_json::json!({
                 "kind": "sensitive",
                 "hookAsk": { "hookName": "guard", "reason": "confirm this" },
+                "requiresConfirmation": true,
             }),
             "an ask and a protected edit must both survive the merge"
         );
@@ -1148,6 +1163,38 @@ mod tests {
             titled.fields.title,
             "no ask leaves the title untouched"
         );
+    }
+
+    /// The detach gate only works if the client can tell "you must ask" from
+    /// "always-approve would have allowed this anyway". Pins that the flag is on
+    /// exactly the accesses whose prompt exists despite always-approve, and that
+    /// an ordinary bash command stays unmarked so the pager keeps auto-approving it.
+    #[test]
+    fn requires_confirmation_marks_only_accesses_that_need_a_human() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let prompter = AcpPrompter::new(
+            acp::SessionId::new(Arc::from("sess-detach")),
+            GatewaySender::new(tx),
+            ClientType::Generic,
+        );
+        let flagged = |access: &AccessKind| {
+            prompter
+                .permission_request_meta(
+                    access, /*protected_edit=*/ None, /*hook_ask=*/ None,
+                )
+                .and_then(|meta| meta.get(REQUIRES_CONFIRMATION_META_KEY).cloned())
+        };
+
+        let detach = AccessKind::DetachBackground {
+            command: "npm run dev".to_owned(),
+        };
+        assert_eq!(flagged(&detach), Some(serde_json::Value::Bool(true)));
+
+        // A plain bash command is what always-approve is for: the pager must
+        // keep answering it without a card, so it must not carry the flag.
+        assert_eq!(flagged(&AccessKind::Bash("npm run dev".to_owned())), None);
+        assert_eq!(flagged(&AccessKind::Read(Some("a.rs".to_owned()))), None);
+        assert_eq!(flagged(&AccessKind::Edit("a.rs".to_owned())), None);
     }
 
     /// Wire-compatibility pin: `PromptOutcome::kind()` maps each variant to the [`PromptOutcomeKind`] whose `wire_str` is the stable event string.

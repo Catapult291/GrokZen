@@ -106,6 +106,16 @@ impl ClientType {
         !matches!(self, Self::Generic)
     }
 }
+
+/// Request `_meta` flag telling the client that a human must answer this prompt.
+///
+/// The permission manager owns the always-approve decision, so a request that
+/// reaches a prompt *because* an always-approve floor applied carries this.
+/// Clients that auto-answer under always-approve (the TUI's YOLO drain, the
+/// headless auto-responder) must not answer these: the request exists precisely
+/// because auto-approving it is unsafe.
+pub const REQUIRES_CONFIRMATION_META_KEY: &str = "requiresConfirmation";
+
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub enum AccessKind {
@@ -133,6 +143,21 @@ pub enum AccessKind {
     AgentMessage {
         subagent_id: String,
     },
+}
+
+impl AccessKind {
+    /// Whether this access must reach a human no matter what the session's
+    /// always-approve mode would otherwise allow.
+    ///
+    /// A detached background command is the one tool shape that keeps running
+    /// after the session ends, so the model may propose it but it never becomes
+    /// effective silently. This is the single definition of that rule: the
+    /// manager's gate consults it before short-circuiting YOLO, and the prompter
+    /// copies it onto the wire so the client does not re-approve what the
+    /// manager deliberately let through.
+    pub fn requires_user_confirmation(&self) -> bool {
+        matches!(self, AccessKind::DetachBackground { .. })
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {

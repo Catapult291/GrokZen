@@ -185,9 +185,10 @@ pub(super) fn dispatch_permission_select(
     // "Enable always-approve" side effect: flip YOLO, persist, and notify
     // Reuses the existing `set_yolo_mode` flow so telemetry, queue drain, toast, modal refresh, persistence, and the notification share a path
     //
-    // Idempotency: if YOLO is already on, the pager auto-approves in `handle_permission_request` before the panel is shown
-    // So the user couldn't have selected this option
-    // The `is_yolo()` guard is defensive; a redundant call would re-emit the toast and a duplicate `PersistPermissionMode` effect, but is safe
+    // Idempotency: the panel only reaches the user under an already-on YOLO when the request was
+    // flagged as needing a human (a detach), so this option is reachable with YOLO already on.
+    // The `is_yolo()` guard keeps that a no-op instead of a redundant toast + duplicate
+    // PersistPermissionMode effect.
     if enable_always_approve {
         let already_on = app
             .agents

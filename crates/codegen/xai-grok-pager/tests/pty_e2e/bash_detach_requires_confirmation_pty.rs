@@ -7,10 +7,37 @@
 //! session still runs without one. The confirmation is the whole reason the
 //! durable worker exists, so these tests pin both the prompt and its outcomes.
 //!
-//! `Ctrl+C` is the card's cancel (the only one), which resolves the request as
-//! rejected: the command must not run.
+//! `Ctrl+C` is the card's cancel (the only one). It resolves the request as
+//! `Cancelled`, which the session turns into a cancelled turn rather than a
+//! rejected tool call — so there is no follow-up model turn to wait for, and
+//! the assertion that matters is the one about the command not running.
 #[allow(unused_imports)]
 use super::common::*;
+
+/// Text of the permission card's reject row, in the locale the pager renders.
+///
+/// The pager is localized, so the hard-coded English needle never appears in a
+/// zh-CN run. Both catalog spellings are accepted: the row is what these tests
+/// are about, and its wording is a presentation detail.
+fn reject_row_visible(screen: &str) -> bool {
+    const EN: &str = "No, reject";
+    const ZH: &str = "否，拒绝";
+    screen.contains(EN) || screen.contains(ZH)
+}
+
+/// Block until the reject row is on screen in any supported locale.
+fn wait_for_reject_row(harness: &mut PtyHarness, timeout: Duration) -> Result<(), ()> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if reject_row_visible(&harness.screen_contents()) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(());
+        }
+        harness.update(Duration::from_millis(100));
+    }
+}
 
 /// Marker a rejected detach must never create.
 fn marker_path(content: &ContentController, name: &str) -> PathBuf {
@@ -48,13 +75,19 @@ async fn bash_detach_prompts_under_always_approve_and_reject_does_not_run() {
 
     // Control: an ordinary command in the same session is auto-approved, so no
     // card can be up when that turn settles.
+    //
+    // One user turn is one model call *per tool round-trip*: a tool call does not
+    // end the turn, so each turn needs a scripted tool call AND a scripted text
+    // reply to close it. Registering only the two tool calls made the second one
+    // land inside the first turn, which is how the detach ran before its own
+    // prompt was ever submitted. Foreground expectations are consumed FIFO.
     let plain = json!({
         "command": "echo plain-control",
         "description": "control"
     })
     .to_string();
-    let _plain_turn = expect_tool_turn(&content, "call_plain", "run_terminal_command", plain);
-    content.set_response("PLAIN_TURN_SETTLED");
+    let _plain_call = expect_tool_turn(&content, "call_plain", "run_terminal_command", plain);
+    let _plain_done = content.expect_agent_turn("plain turn closed", "PLAIN_TURN_SETTLED");
 
     let detach = json!({
         "command": format!("echo ran > {}", shell_path(&marker)),
@@ -63,8 +96,7 @@ async fn bash_detach_prompts_under_always_approve_and_reject_does_not_run() {
         "detach": true
     })
     .to_string();
-    let _detach_turn = expect_tool_turn(&content, "call_detach", "run_terminal_command", detach);
-    content.set_response("DETACH_TURN_SETTLED");
+    let _detach_call = expect_tool_turn(&content, "call_detach", "run_terminal_command", detach);
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness = PtyHarness::spawn_with_content_in_dir(
@@ -93,7 +125,7 @@ async fn bash_detach_prompts_under_always_approve_and_reject_does_not_run() {
             )
         });
     assert!(
-        !harness.contains_text("No, reject"),
+        !reject_row_visible(&harness.screen_contents()),
         "always-approve must still auto-approve a plain command: no card may be open\nscreen:\n{}",
         harness.screen_contents()
     );
@@ -101,31 +133,32 @@ async fn bash_detach_prompts_under_always_approve_and_reject_does_not_run() {
     harness
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit detach prompt");
-    harness
-        .wait_for_text("No, reject", Duration::from_secs(45))
-        .unwrap_or_else(|_| {
-            panic!(
-                "a detached background command must open a confirmation card even in \
+    wait_for_reject_row(&mut harness, Duration::from_secs(45)).unwrap_or_else(|_| {
+        panic!(
+            "a detached background command must open a confirmation card even in \
                  always-approve mode; screen:\n{}",
-                harness.screen_contents()
-            )
-        });
+            harness.screen_contents()
+        )
+    });
 
-    // Ctrl+C rejects the front request.
+    // Ctrl+C is the card's only cancel. The request resolves as `Cancelled`,
+    // which the session turns into a cancelled turn, so nothing further is
+    // scripted for it — the property under test is that the command never ran.
     harness
         .inject_keys(b"\x03")
         .expect("reject the detach request");
-    harness
-        .wait_for_text("DETACH_TURN_SETTLED", Duration::from_secs(45))
-        .unwrap_or_else(|_| {
-            panic!(
-                "the turn never settled after rejecting the detach; screen:\n{}",
-                harness.screen_contents()
-            )
-        });
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while reject_row_visible(&harness.screen_contents()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the detach card stayed open after Ctrl+C; screen:\n{}",
+            harness.screen_contents()
+        );
+        harness.update(Duration::from_millis(100));
+    }
 
     assert!(
-        !marker.exists(),
+        !poll_until(Duration::from_secs(10), || marker.exists()),
         "a rejected detach must not run the command; marker {} exists",
         marker.display()
     );
@@ -158,7 +191,8 @@ async fn bash_detach_confirmed_task_outlives_the_session() {
         "detach": true
     })
     .to_string();
-    let _detach_turn = expect_tool_turn(&content, "call_detach_keep", "run_terminal_command", detach);
+    let _detach_turn =
+        expect_tool_turn(&content, "call_detach_keep", "run_terminal_command", detach);
     content.set_response("DETACH_KEEP_SETTLED");
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -178,14 +212,12 @@ async fn bash_detach_confirmed_task_outlives_the_session() {
     harness
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit detach prompt");
-    harness
-        .wait_for_text("No, reject", Duration::from_secs(45))
-        .unwrap_or_else(|_| {
-            panic!(
-                "the detach card must open; screen:\n{}",
-                harness.screen_contents()
-            )
-        });
+    wait_for_reject_row(&mut harness, Duration::from_secs(45)).unwrap_or_else(|_| {
+        panic!(
+            "the detach card must open; screen:\n{}",
+            harness.screen_contents()
+        )
+    });
 
     // The first option is an allow option (the always-approve shortcut, or the
     // session allow row), so `1` confirms.
@@ -214,7 +246,9 @@ async fn bash_detach_confirmed_task_outlives_the_session() {
     );
 
     // The pager is gone; a detached task keeps ticking.
-    let grew = poll_until(Duration::from_secs(20), || heartbeat_len(&heartbeat) > before);
+    let grew = poll_until(Duration::from_secs(20), || {
+        heartbeat_len(&heartbeat) > before
+    });
     assert!(
         grew,
         "a confirmed detach must outlive the session: {} stopped growing after the pager exited",

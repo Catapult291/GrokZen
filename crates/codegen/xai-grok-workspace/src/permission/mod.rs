@@ -82,5 +82,5 @@ pub use state::PermissionState;
 pub use state::cleanup_stale_permission_state;
 pub use types::{
     AccessKind, ClientType, Decision, HOOK_ASK_META_KEY, HookAsk, PermissionCommand,
-    PermissionEvent, PermissionRequest, PermissionResolution,
+    PermissionEvent, PermissionRequest, PermissionResolution, REQUIRES_CONFIRMATION_META_KEY,
 };
