@@ -7,10 +7,6 @@ use super::{ManagedConfigError, ManagedConfigPlan};
 pub(super) const MAX_SYMLINKS: usize = 40;
 pub(super) const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
-/// How many existing ancestor directories are captured per parent chain.
-/// Bounded so an adversarial deep tree cannot force unbounded storage.
-const MAX_EXISTING_CHAIN: usize = 64;
-
 /// Directory identity on Windows is (len, is_dir) only — mtimes are
 /// volatile there (tempdir churn flips them between captures). Files keep
 /// mtime so a same-length content rewrite is still detected.
@@ -149,14 +145,12 @@ impl ParentPlan {
 pub(super) struct ParentAnchor {
     path: PathBuf,
     identity: FileIdentity,
-    /// Directory handle for the unix fsync path. Windows has no directory
+    /// Directory handle for the unix fsync path. Non-unix has no directory
     /// fsync here (`sync()` is a no-op below), and `File::open` on a
     /// directory is unreliable there (NotFound/PermissionDenied depending on
-    /// the directory), so non-unix keeps this `None`.
+    /// the directory), so the handle only exists where it is used.
     #[cfg(unix)]
     directory: fs::File,
-    #[cfg(not(unix))]
-    directory: Option<fs::File>,
 }
 
 impl ParentAnchor {
@@ -173,11 +167,10 @@ impl ParentAnchor {
             path: path.to_path_buf(),
             source,
         })?;
-        #[cfg(not(unix))]
-        let directory = None;
         Ok(Self {
             path: path.to_path_buf(),
             identity: FileIdentity::from_metadata(&metadata),
+            #[cfg(unix)]
             directory,
         })
     }
