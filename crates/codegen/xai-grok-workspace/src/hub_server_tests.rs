@@ -1,7 +1,8 @@
 use super::*;
 use crate::capability::CapabilityMode;
 use crate::handle::tests::{
-    background_capable_cfg, make_confining_handle, make_handle, start_background_sleep,
+    background_capable_cfg, live_background_worker_env, make_confining_handle, make_handle,
+    start_background_sleep,
 };
 use std::sync::Arc;
 use xai_grok_tools::implementations::grok_build::scheduler::types::{
@@ -241,6 +242,11 @@ async fn handle_evict_shuts_down_terminal_backend_explicitly() {
 }
 #[tokio::test]
 async fn list_background_tasks_rpc_stays_truthful_across_rebinds() {
+    let Some(_worker_env) =
+        live_background_worker_env("list_background_tasks_rpc_stays_truthful_across_rebinds")
+    else {
+        return;
+    };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -335,6 +341,11 @@ async fn list_background_tasks_rpc_stays_truthful_across_rebinds() {
 }
 #[tokio::test]
 async fn tasks_snapshot_rpc_lists_outstanding_background_tasks() {
+    let Some(_worker_env) =
+        live_background_worker_env("tasks_snapshot_rpc_lists_outstanding_background_tasks")
+    else {
+        return;
+    };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -510,6 +521,11 @@ async fn seed_scheduled_task(toolset: &FinalizedToolset, id: &str) {
 }
 #[tokio::test]
 async fn kill_task_rpc_terminates_outstanding_background_task() {
+    let Some(_worker_env) =
+        live_background_worker_env("kill_task_rpc_terminates_outstanding_background_task")
+    else {
+        return;
+    };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -566,6 +582,11 @@ async fn kill_task_rpc_terminates_outstanding_background_task() {
 }
 #[tokio::test]
 async fn tasks_snapshot_excludes_foreground_and_completed_processes() {
+    let Some(_worker_env) =
+        live_background_worker_env("tasks_snapshot_excludes_foreground_and_completed_processes")
+    else {
+        return;
+    };
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {

@@ -3163,32 +3163,30 @@ impl WorkspaceHandle {
         self.shared.tool_defs_last_emit.remove(session_id);
     }
     /// Re-resolve every session's toolset against `new_snapshot` and emit one `WorkspaceEvent::ToolsChanged` per session.
-    pub fn on_mcp_snapshot_changed(
+    ///
+    /// Async rather than a sync method bridging into the runtime: the caller
+    /// may be driving local (`spawn_local`) tasks, where `block_in_place` is
+    /// not allowed to run.
+    pub async fn on_mcp_snapshot_changed(
         &self,
         new_snapshot: Vec<xai_grok_tools::registry::types::ToolConfig>,
     ) -> usize {
         self.shared.mcp_tools_snapshot.store(Arc::new(new_snapshot));
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                self.shared
-                    .re_resolve_all_sessions("mcp_snapshot_changed", true),
-            )
-        })
+        self.shared
+            .re_resolve_all_sessions("mcp_snapshot_changed", true)
+            .await
     }
     /// Bulk-replace hub tool configs and re-resolve every session.
-    pub fn on_hub_tools_changed(
+    pub async fn on_hub_tools_changed(
         &self,
         new_hub_tools: Vec<xai_grok_tools::registry::types::ToolConfig>,
     ) -> usize {
         self.shared
             .hub_tools_snapshot
             .store(Arc::new(new_hub_tools));
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(
-                self.shared
-                    .re_resolve_all_sessions("hub_tools_changed", true),
-            )
-        })
+        self.shared
+            .re_resolve_all_sessions("hub_tools_changed", true)
+            .await
     }
     /// Per-`session.bind` handler resolver: resolves the bind metadata into a session toolset (fail-closed in strict mode).
     /// Returns the handlers plus the bind-report fields.
