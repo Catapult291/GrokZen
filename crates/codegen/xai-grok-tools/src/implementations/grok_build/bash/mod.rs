@@ -5068,7 +5068,8 @@ mod tests {
 
                 // Windows + PowerShell / cmd, and Unix: no translation layer to explain.
                 for (is_windows, has_unix_utilities) in [(true, false), (false, true)] {
-                    let plain = render_path_guidance(template, is_windows, has_unix_utilities, "none");
+                    let plain =
+                        render_path_guidance(template, is_windows, has_unix_utilities, "none");
                     assert!(
                         !plain.contains("MSYS2_ARG_CONV_EXCL")
                             && !plain.contains("//t:Build")
