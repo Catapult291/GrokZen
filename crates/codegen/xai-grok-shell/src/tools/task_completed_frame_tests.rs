@@ -31,6 +31,7 @@ fn notification(output: &str) -> SessionNotification {
                 kind: TaskKind::Bash,
                 owner_session_id: None,
                 description: None,
+                output_encoding: None,
                 is_backgrounded: true,
             },
             will_wake: false,
