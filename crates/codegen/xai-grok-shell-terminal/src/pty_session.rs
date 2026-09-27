@@ -702,6 +702,10 @@ fn resolve_pty_shell(shell: Option<&str>) -> (String, Vec<String>) {
         use xai_grok_config::shell::{WindowsShell, detect_windows_shell};
         match detect_windows_shell() {
             WindowsShell::GitBash(path) => (path.clone(), vec!["-l".to_string()]),
+            // niubash needs no login flag: it reads `~/.niubashrc` on interactive
+            // startup, and unlike MSYS there is no `/etc/profile` PATH fixup for `-l`
+            // to trigger.
+            WindowsShell::Niu(path) => (path.clone(), vec![]),
             WindowsShell::Pwsh => ("pwsh".to_string(), vec!["-NoLogo".to_string()]),
             WindowsShell::PowerShell => ("powershell.exe".to_string(), vec!["-NoLogo".to_string()]),
             WindowsShell::Cmd => ("cmd.exe".to_string(), vec![]),

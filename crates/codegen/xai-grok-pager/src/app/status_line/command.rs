@@ -397,6 +397,10 @@ async fn run_command(
                 let inv = xai_grok_config::shell::shell_command_argv(&expanded);
                 let mut c = Command::new(&inv.program);
                 c.args(&inv.args).envs(inv.env);
+                // An inherited MSYS_NO_PATHCONV would silently keep path translation off.
+                for name in &inv.remove_env {
+                    c.env_remove(name);
+                }
                 c
             };
             configure(&mut shell);

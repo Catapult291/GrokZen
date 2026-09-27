@@ -128,6 +128,10 @@ pub async fn run_command_hook(
             let inv = xai_grok_config::shell::shell_command_argv(command_str.as_ref());
             let mut c = tokio::process::Command::new(&inv.program);
             c.args(&inv.args).envs(inv.env);
+            // An inherited MSYS_NO_PATHCONV would silently keep path translation off.
+            for name in &inv.remove_env {
+                c.env_remove(name);
+            }
             c
         }
     } else {
@@ -153,6 +157,8 @@ pub async fn run_command_hook(
     #[cfg(not(unix))]
     let env_root = {
         use xai_grok_config::shell::{WindowsShell, detect_windows_shell};
+        // Only the MSYS shells eat backslashes; niubash is native and passes
+        // `C:\...` through byte-for-byte, so its workspace root is left as-is.
         if is_shell_command && matches!(detect_windows_shell(), WindowsShell::GitBash(_)) {
             Cow::Owned(ctx.workspace_root.replace('\\', "/"))
         } else {
@@ -462,7 +468,7 @@ fn rewrite_hook_command_for_windows_shell<'a>(
         WindowsShell::Pwsh | WindowsShell::PowerShell => {
             rewrite_posix_env_refs_for_powershell(command, extra_env)
         }
-        WindowsShell::GitBash(_) => Cow::Borrowed(command),
+        WindowsShell::GitBash(_) | WindowsShell::Niu(_) => Cow::Borrowed(command),
         WindowsShell::Cmd => {
             if command.contains('$') {
                 tracing::warn!(

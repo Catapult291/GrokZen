@@ -3524,6 +3524,10 @@ fn spawn_shell_command(
         let active_policy = shell_env_policy.filter(|p| !p.is_noop());
         crate::util::shell_env_policy::install_policy_base_env(&mut cmd, active_policy);
         cmd.envs(inv.env);
+        // An inherited MSYS_NO_PATHCONV would silently keep path translation off.
+        for name in &inv.remove_env {
+            cmd.env_remove(name);
+        }
         layer_request_env(&mut cmd, env, active_policy);
         cmd.envs(crate::util::pager_env());
         crate::util::apply_grok_agent_marker(&mut cmd);

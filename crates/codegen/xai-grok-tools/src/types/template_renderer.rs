@@ -6,7 +6,7 @@
 //! call `render()` at runtime to resolve `${{ tools.by_kind.read }}`,
 //! `${{ params.edit.old_string }}`, etc. Host-shell flags
 //! (`is_windows`, `shell_uses_semicolon`, `has_unix_utilities`,
-//! `msys_pathconv_disabled`) are
+//! `path_guidance`) are
 //! computed once at construction so templates can branch on the runtime
 //! environment without per-tool plumbing.
 //!
@@ -65,13 +65,14 @@ struct TemplateContext {
     /// true everywhere else. Tool descriptions branch on this to swap
     /// Unix-centric guidance for PowerShell-aware guidance.
     has_unix_utilities: bool,
-    /// Whether the active shell spawns children with MSYS path translation
-    /// disabled (`MSYS_NO_PATHCONV=1` + `MSYS2_ARG_CONV_EXCL=*`). True on
-    /// Windows with Git Bash, false elsewhere. Shell-tool descriptions branch
-    /// on this to tell the model that `/flags` pass through untouched (use
-    /// `/d /c`, not the `//c` translation escape) and that MSYS paths must be
-    /// written Windows-style for native tools.
-    msys_pathconv_disabled: bool,
+    /// How the active shell treats path-like and switch-like arguments, as a
+    /// [`xai_grok_config::shell::PathGuidance`] template value: `msys_translating`,
+    /// `dialect_resolving`, or `none`. Descriptions branch on it because the three
+    /// states need different instructions — an MSYS shell needs a switch the
+    /// converter would eat written as `//flag`, while a native Bash (niubash) takes
+    /// the argument unchanged — and telling either host about the other's escape
+    /// hatch is worse than saying nothing.
+    path_guidance: &'static str,
     /// Whether the client delivers system reminders (e.g. completion
     /// notifications for backgrounded commands/subagents) to the model.
     /// Descriptions that promise "you are notified on completion" branch
@@ -225,7 +226,7 @@ impl TemplateRenderer {
                 // comparison is naturally false there — no cfg guard needed.
                 shell_uses_semicolon: xai_grok_config::shell::chain_separator() == ";",
                 has_unix_utilities: xai_grok_config::shell::has_unix_utilities(),
-                msys_pathconv_disabled: xai_grok_config::shell::msys_pathconv_disabled(),
+                path_guidance: xai_grok_config::shell::path_guidance().as_template_value(),
                 system_reminders_enabled: true,
             },
         }
