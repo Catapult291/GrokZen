@@ -32,6 +32,20 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Exit polling for a durable worker. The registry only reconciles an exit when
 /// a caller asks for the task, so the owning process watches the worker itself.
 const COMPLETION_WATCH_INTERVAL: Duration = Duration::from_millis(500);
+/// Retry cadence for publishing the durable record.
+const PUBLISH_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+/// Retries for a routine publish: about five seconds of a transiently locked
+/// record. Another process holding the record open without delete sharing (an
+/// indexer, a scanner, a backup tool) only makes `MoveFileExW` fail while it
+/// holds it, so retrying is enough.
+const PUBLISH_RETRY_ATTEMPTS: u32 = 50;
+/// Retries for a finished task's result: about five minutes, so a command that
+/// succeeded is never reported as a lost worker just because the record stayed
+/// locked for longer.
+const PUBLISH_FINAL_ATTEMPTS: u32 = 3_000;
+/// Cap on worker diagnostics written per run so a permanently locked record
+/// cannot fill the task directory.
+const MAX_WORKER_LOG_LINES: u32 = 20;
 
 /// Shared handle used by a local terminal backend to manage durable jobs.
 #[derive(Clone)]
@@ -673,10 +687,13 @@ pub fn maybe_run_worker() -> Option<i32> {
         Ok(runtime) => runtime,
         Err(_) => return Some(1),
     };
-    Some(match runtime.block_on(run_worker(directory)) {
+    Some(match runtime.block_on(run_worker(directory.clone())) {
         Ok(()) => 0,
         Err(error) => {
             tracing::error!(%error, "persistent background worker failed");
+            // The worker's own stdio is null and it starts before logging is
+            // configured, so the task directory is the only place this can land.
+            note_worker_event(&directory, &format!("worker failed: {error}"));
             1
         }
     })
@@ -725,8 +742,14 @@ async fn run_worker(directory: PathBuf) -> Result<(), String> {
         worker_pid: Some(worker_pid),
         snapshot,
     };
-    write_state(&directory, &state).map_err(|e| e.to_string())?;
+    // The parent only learns the task exists by reading this record, so the first
+    // publish gets the generous budget too rather than failing the whole task.
+    if let Some(error) = publish_state(&directory, &state, PUBLISH_FINAL_ATTEMPTS).await {
+        return Err(format!("publish background-task record: {error}"));
+    }
 
+    let mut revision = record_revision(&state.snapshot);
+    let mut logged_failures = 0u32;
     loop {
         if directory.join("kill.request").exists() {
             let _ = backend.kill_task(&handle.task_id).await;
@@ -738,8 +761,40 @@ async fn run_worker(directory: PathBuf) -> Result<(), String> {
         next.is_backgrounded = true;
         next.output.clear();
         state.snapshot = next;
-        write_state(&directory, &state).map_err(|e| e.to_string())?;
-        if state.snapshot.completed {
+        let next_revision = record_revision(&state.snapshot);
+        let completed = state.snapshot.completed;
+        if completed || next_revision != revision {
+            let attempts = if completed {
+                PUBLISH_FINAL_ATTEMPTS
+            } else {
+                PUBLISH_RETRY_ATTEMPTS
+            };
+            match publish_state(&directory, &state, attempts).await {
+                None => {
+                    revision = next_revision;
+                    logged_failures = 0;
+                }
+                Some(error) => {
+                    // A record that cannot be replaced is a hiccup, not the end of
+                    // the task: keep running and try again on the next tick. Only a
+                    // finished task, whose result would otherwise be lost, gives up
+                    // after the long budget above — and says so in `worker.log`.
+                    if logged_failures < MAX_WORKER_LOG_LINES {
+                        logged_failures += 1;
+                        note_worker_event(
+                            &directory,
+                            &format!("publish deferred, record still locked ({error})"),
+                        );
+                    }
+                    if completed {
+                        return Err(format!("publish background-task record: {error}"));
+                    }
+                    sleep(POLL_INTERVAL).await;
+                    continue;
+                }
+            }
+        }
+        if completed {
             return Ok(());
         }
         sleep(POLL_INTERVAL).await;
@@ -750,6 +805,86 @@ fn write_state(directory: &Path, state: &PersistentTaskState) -> Result<(), Comp
     let bytes = serde_json::to_vec(state)
         .map_err(|e| ComputerError::io(format!("encode background-task state: {e}")))?;
     atomic_write(&directory.join("state.json"), &bytes)
+}
+
+/// The parts of a snapshot the durable record exposes to the parent.
+///
+/// A publish is skipped while these are unchanged, so a long silent command
+/// does not create ten files per second. That churn is what gives another
+/// process a chance to be holding the record at the wrong moment, and it buys
+/// nothing: the fields below are the ones a reader can observe changing.
+#[derive(PartialEq, Eq)]
+struct RecordRevision {
+    completed: bool,
+    exit_code: Option<i32>,
+    signal: Option<String>,
+    output_total_bytes: usize,
+    truncated: bool,
+    explicitly_killed: bool,
+    kill_result_delivered: bool,
+    block_waited: bool,
+}
+
+fn record_revision(snapshot: &TaskSnapshot) -> RecordRevision {
+    RecordRevision {
+        completed: snapshot.completed,
+        exit_code: snapshot.exit_code,
+        signal: snapshot.signal.clone(),
+        output_total_bytes: snapshot.output_total_bytes,
+        truncated: snapshot.truncated,
+        explicitly_killed: snapshot.explicitly_killed,
+        kill_result_delivered: snapshot.kill_result_delivered,
+        block_waited: snapshot.block_waited,
+    }
+}
+
+/// Publishes the durable record, retrying while the file cannot be replaced.
+///
+/// Returns the last error only once the retry budget is exhausted. Callers must
+/// not treat that as a reason to stop: the task outlives a locked record, and
+/// the parent reports `worker_exited` — with no exit code and no output — only
+/// when this process is gone.
+async fn publish_state(
+    directory: &Path,
+    state: &PersistentTaskState,
+    attempts: u32,
+) -> Option<ComputerError> {
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match write_state(directory, state) {
+            Ok(()) => {
+                if let Some(error) = last_error {
+                    note_worker_event(
+                        directory,
+                        &format!("record published again after {attempt} retries ({error})"),
+                    );
+                }
+                return None;
+            }
+            Err(error) => last_error = Some(error),
+        }
+        sleep(PUBLISH_RETRY_INTERVAL).await;
+    }
+    last_error
+}
+
+/// Appends a worker-side diagnostic line to the task directory.
+///
+/// The worker runs with null stdio and is started before logging is configured,
+/// so it never reaches the unified log; without this file a failure inside it
+/// leaves no trace anywhere. Best effort: a diagnostic must never fail the task.
+fn note_worker_event(directory: &Path, line: &str) {
+    use std::io::Write;
+
+    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("worker.log"))
+    else {
+        return;
+    };
+    let _ = writeln!(file, "{stamp} {line}");
 }
 
 /// Local backend's durable registry is optional; tests and remote/ACP backends
@@ -811,6 +946,118 @@ mod tests {
             .expect("durable task");
         assert_eq!(rediscovered.output, "中文完成\n");
         assert_eq!(rediscovered.output_encoding.unwrap().label(), "gbk");
+    }
+
+    /// Minimal durable record for publish-behaviour tests.
+    fn probe_state(completed: bool) -> PersistentTaskState {
+        let now = std::time::SystemTime::now();
+        PersistentTaskState {
+            ready: true,
+            worker_pid: Some(std::process::id()),
+            snapshot: TaskSnapshot {
+                task_id: "probe-task".into(),
+                command: "sleep".into(),
+                display_command: None,
+                cwd: ".".into(),
+                start_time: now,
+                end_time: completed.then_some(now),
+                output: String::new(),
+                output_file: PathBuf::new(),
+                truncated: false,
+                output_total_bytes: if completed { 5 } else { 0 },
+                exit_code: completed.then_some(0),
+                signal: None,
+                completed,
+                kind: TaskKind::Bash,
+                block_waited: false,
+                explicitly_killed: false,
+                kill_result_delivered: false,
+                owner_session_id: Some("session".into()),
+                description: None,
+                output_encoding: None,
+                is_backgrounded: true,
+            },
+        }
+    }
+
+    /// The durable record must not be republished for fields a reader cannot
+    /// observe changing; a long silent command would otherwise write ten files
+    /// per second for its whole lifetime.
+    #[test]
+    fn record_revision_ignores_unobservable_snapshot_fields() {
+        let mut state = probe_state(false);
+        let before = record_revision(&state.snapshot);
+
+        state.snapshot.output = "fresh output".into();
+        state.snapshot.task_id = "renamed".into();
+        state.snapshot.is_backgrounded = false;
+        assert!(record_revision(&state.snapshot) == before);
+
+        state.snapshot.output_total_bytes = 12;
+        assert!(record_revision(&state.snapshot) != before);
+
+        let mut finished = probe_state(false);
+        finished.snapshot.completed = true;
+        assert!(
+            record_revision(&finished.snapshot) != record_revision(&probe_state(false).snapshot)
+        );
+    }
+
+    /// A record another process holds without delete sharing cannot be replaced.
+    /// The publish helper must retry through that window instead of reporting
+    /// the task dead, and land the record once the holder lets go.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn publish_state_retries_while_the_record_is_locked() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().to_path_buf();
+        let settled = probe_state(false);
+        write_state(&directory, &settled).unwrap();
+
+        // Hold the record the way an indexer or scanner does: no delete sharing,
+        // so the worker's MoveFileExW cannot replace it.
+        let held = std::sync::Arc::new(AtomicBool::new(false));
+        let holder = {
+            let path = directory.join("state.json");
+            let held = held.clone();
+            std::thread::spawn(move || {
+                let lock = std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(0)
+                    .open(&path)
+                    .unwrap();
+                held.store(true, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(400));
+                drop(lock);
+            })
+        };
+        while !held.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // While the holder is alive the helper gives up only after its budget.
+        assert!(
+            publish_state(&directory, &settled, 3).await.is_some(),
+            "a locked record has to be reported"
+        );
+
+        let finished = probe_state(true);
+        assert!(
+            publish_state(&directory, &finished, PUBLISH_RETRY_ATTEMPTS)
+                .await
+                .is_none(),
+            "the publish must succeed once the holder releases the record"
+        );
+        holder.join().unwrap();
+        assert!(
+            read_state(&directory.join("state.json"))
+                .unwrap()
+                .snapshot
+                .completed
+        );
     }
 
     #[test]
