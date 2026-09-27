@@ -669,6 +669,28 @@ fn sweep_staged_scripts(dir: &std::path::Path) {
     }
 }
 
+/// Prefix a Bash-family command so the child's stderr joins its stdout pipe.
+///
+/// The tool reads stdout and stderr as two pipes and appends a stdout chunk
+/// before a stderr chunk on every poll tick, so a command that interleaves the
+/// streams reads back as all-of-stdout-then-all-of-stderr: a `grep` diagnostic
+/// lands after the match lines it belongs to, or inside a later command's
+/// output. The Unix persistent shell merges the streams with `2>&1` around its
+/// `eval` for the same reason; on Windows there is no equivalent wrapper, so the
+/// merge belongs to the invocation.
+///
+/// `exec 2>&1` on its own line — not `{ command; } 2>&1`. A group redirection
+/// swallows output on niubash: with `{ yes\n} 2>&1` the runaway writer produced
+/// 0 bytes in 3 s (Git Bash and the `exec` form each produced ~4.5 GB), so a
+/// long-running command's output would stall the size guard and the streaming
+/// notifications. `exec` duplicates the descriptor once and leaves the command
+/// text untouched, which also keeps `exit N`, `&`, heredocs, trailing
+/// backslashes and comments behaving exactly as they do unwrapped.
+#[cfg(not(unix))]
+fn bash_family_merged_command(command: &str) -> String {
+    format!("exec 2>&1\n{command}")
+}
+
 /// Pure builder split out of `shell_command_argv` so tests can exercise every `WindowsShell` variant, not just the one installed on the test host.
 #[cfg(not(unix))]
 fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
@@ -693,7 +715,7 @@ fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
         // excluding `/c` would also stop `/c/Users/...` from being converted.
         WindowsShell::GitBash(path) => ShellInvocation {
             program: path.clone(),
-            args: vec!["-c".to_string(), command.to_string()],
+            args: vec!["-c".to_string(), bash_family_merged_command(command)],
             env: utf8_env.to_vec(),
             remove_env: vec!["MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL"],
         },
@@ -703,7 +725,7 @@ fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
         // so nothing has to be cleared.
         WindowsShell::Niu(path) => ShellInvocation {
             program: path.clone(),
-            args: vec!["-c".to_string(), command.to_string()],
+            args: vec!["-c".to_string(), bash_family_merged_command(command)],
             env: utf8_env.to_vec(),
             remove_env: Vec::new(),
         },
@@ -1164,7 +1186,8 @@ mod tests {
     }
 
     /// The Bash family runs one `-c <command>` argv node; niubash is invoked exactly
-    /// like Git Bash, with no translation-layer variables to carry.
+    /// like Git Bash, with no translation-layer variables to carry. The command node
+    /// is the stream-merging form, never a second argv node.
     #[cfg(not(unix))]
     #[test]
     fn bash_family_invocations_are_single_argv() {
@@ -1175,8 +1198,68 @@ mod tests {
             let inv = invocation_for(&shell, "echo hi");
             assert_eq!(
                 inv.args,
-                vec!["-c".to_string(), "echo hi".to_string()],
+                vec!["-c".to_string(), "exec 2>&1\necho hi".to_string()],
                 "{shell:?}"
+            );
+        }
+    }
+
+    /// The merge adds one line ahead of the command and changes nothing after it, so
+    /// every command shape survives verbatim — including the ones a `{ …; } 2>&1`
+    /// group would have to special-case (`exit N`, a trailing `&`, a heredoc, a
+    /// comment-only line, a trailing backslash, nothing at all).
+    #[cfg(not(unix))]
+    #[test]
+    fn bash_family_merge_prefix_leaves_the_command_verbatim() {
+        for command in [
+            "echo hi",
+            "echo before; exit 5",
+            "sleep 1 &",
+            "cat <<EOF\nhi\nEOF",
+            "# note",
+            "",
+            "   ",
+            "echo a \\",
+            "echo a \\\\",
+            "grep -rn '中文' . | head",
+        ] {
+            assert_eq!(
+                bash_family_merged_command(command),
+                format!("exec 2>&1\n{command}"),
+                "{command:?}"
+            );
+        }
+    }
+
+    /// End-to-end guard for the reason the wrapper exists: the tool appends a stdout
+    /// chunk before a stderr chunk on every tick, so without the merge an interleaved
+    /// command reads back reordered. Skips a shell that is not installed.
+    #[cfg(not(unix))]
+    #[test]
+    fn bash_family_invocation_keeps_stdout_and_stderr_in_write_order() {
+        for shell in [
+            find_git_bash().map(WindowsShell::GitBash),
+            find_niu().map(WindowsShell::Niu),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let inv = invocation_for(&shell, "echo o1; echo e1 1>&2; echo o2; echo e2 1>&2");
+            let mut cmd = std::process::Command::new(&inv.program);
+            cmd.args(&inv.args).envs(inv.env);
+            for name in &inv.remove_env {
+                cmd.env_remove(name);
+            }
+            let output = cmd.output().expect("spawn the shell");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert_eq!(
+                stdout, "o1\ne1\no2\ne2\n",
+                "{shell:?} lost the write order of the two streams"
+            );
+            assert!(
+                output.stderr.is_empty(),
+                "{shell:?} kept a separate stderr: {:?}",
+                String::from_utf8_lossy(&output.stderr)
             );
         }
     }
@@ -1239,7 +1322,16 @@ mod tests {
     fn shell_command_argv_stages_only_past_the_ceiling() {
         let shell = detect_windows_shell();
         let short = shell_command_argv("echo hi");
-        assert_eq!(short.args.last().map(String::as_str), Some("echo hi"));
+        // Below the ceiling the command stays inline; only the Bash family wraps it.
+        let short_command = short
+            .args
+            .last()
+            .map(String::as_str)
+            .expect("argv has a command");
+        assert!(
+            short_command.contains("echo hi"),
+            "{shell:?}: {short_command}"
+        );
 
         let ceiling = inline_command_ceiling(shell);
         if ceiling == usize::MAX {
