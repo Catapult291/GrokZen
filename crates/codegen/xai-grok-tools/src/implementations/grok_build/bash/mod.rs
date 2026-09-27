@@ -1513,9 +1513,14 @@ ${%- endif %}
 ${%- if not has_unix_utilities %}
   - The Unix utilities `grep`, `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
 ${%- endif %}
-${%- if msys_pathconv_disabled %}
-  - This shell runs with MSYS path translation turned off, so `/flag` arguments reach Windows tools untouched. Give them single-slash switches: `cmd.exe /d /c "..."`, never `//c`. `//c` is the escape for a *translating* shell; here it reaches cmd.exe verbatim, cmd drops into an interactive shell, prints its banner, and exits 0 without ever running your command.
-  - The same setting means MSYS paths are NOT converted. Pass Windows tools a Windows-style path — `'C:/Users/name/path'`, or `cygpath -w <path>` — never `/c/Users/name/path`, which arrives verbatim and is parsed as an unknown switch. Programs with no console (`wscript.exe`, `rundll32.exe`) then raise a modal dialog on the user's desktop instead of failing visibly.
+${%- if path_guidance == "msys_translating" %}
+  - MSYS path translation is active for this shell, so a POSIX path handed to a Windows program is rewritten for you: `/c/Users/name` and `/tmp/file` work as written and need no `cygpath -w`.
+  - The one clause the translator gets wrong is a switch. A bare `/flag` (MSBuild `/t:Build`, cl.exe `/nologo`) is rewritten into a path, so write such a switch with a doubled slash (`//t:Build`), or exclude its prefix for the rest of the command: `export MSYS2_ARG_CONV_EXCL='/t:;/nologo'; cmd //d //c "..."`. This is also why `cmd.exe /c "..."` and `/d /c` are written `cmd.exe //c "..."` and `//d //c` here.
+  - Never add `/c` to `MSYS2_ARG_CONV_EXCL`: the list matches as a prefix, so excluding `/c` also stops `/c/Users/...` from being converted.
+${%- elif path_guidance == "dialect_resolving" %}
+  - This shell has no path-translation layer, so nothing is rewritten: `C:\Users\name`, `C:/Users/name`, `/c/Users/name` and `/mnt/c/Users/name` are all understood, and `/tmp` is the real Windows temp directory.
+  - A `/flag` such as `/nologo` or `/t:Build` reaches the program unchanged, so give it as-is with a single slash: `cmd.exe /c "..."`. `//c` is the escape for a *translating* shell; here it reaches cmd.exe verbatim, cmd drops into an interactive shell, prints its banner, and exits 0 without ever running your command.
+  - A literal argument is never rewritten, so a value or pattern starting with `/` needs no escaping.
 ${%- endif %}"#
     }
 
@@ -1533,9 +1538,14 @@ ${%- endif %}
 ${%- if not has_unix_utilities %}
   - The Unix utilities `grep`, `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
 ${%- endif %}
-${%- if msys_pathconv_disabled %}
-  - This shell runs with MSYS path translation turned off, so `/flag` arguments reach Windows tools untouched. Give them single-slash switches: `cmd.exe /d /c "..."`, never `//c`. `//c` is the escape for a *translating* shell; here it reaches cmd.exe verbatim, cmd drops into an interactive shell, prints its banner, and exits 0 without ever running your command.
-  - The same setting means MSYS paths are NOT converted. Pass Windows tools a Windows-style path — `'C:/Users/name/path'`, or `cygpath -w <path>` — never `/c/Users/name/path`, which arrives verbatim and is parsed as an unknown switch. Programs with no console (`wscript.exe`, `rundll32.exe`) then raise a modal dialog on the user's desktop instead of failing visibly.
+${%- if path_guidance == "msys_translating" %}
+  - MSYS path translation is active for this shell, so a POSIX path handed to a Windows program is rewritten for you: `/c/Users/name` and `/tmp/file` work as written and need no `cygpath -w`.
+  - The one clause the translator gets wrong is a switch. A bare `/flag` (MSBuild `/t:Build`, cl.exe `/nologo`) is rewritten into a path, so write such a switch with a doubled slash (`//t:Build`), or exclude its prefix for the rest of the command: `export MSYS2_ARG_CONV_EXCL='/t:;/nologo'; cmd //d //c "..."`. This is also why `cmd.exe /c "..."` and `/d /c` are written `cmd.exe //c "..."` and `//d //c` here.
+  - Never add `/c` to `MSYS2_ARG_CONV_EXCL`: the list matches as a prefix, so excluding `/c` also stops `/c/Users/...` from being converted.
+${%- elif path_guidance == "dialect_resolving" %}
+  - This shell has no path-translation layer, so nothing is rewritten: `C:\Users\name`, `C:/Users/name`, `/c/Users/name` and `/mnt/c/Users/name` are all understood, and `/tmp` is the real Windows temp directory.
+  - A `/flag` such as `/nologo` or `/t:Build` reaches the program unchanged, so give it as-is with a single slash: `cmd.exe /c "..."`. `//c` is the escape for a *translating* shell; here it reaches cmd.exe verbatim, cmd drops into an interactive shell, prints its banner, and exits 0 without ever running your command.
+  - A literal argument is never rewritten, so a value or pattern starting with `/` needs no escaping.
 ${%- endif %}"#
     }
 
@@ -4944,17 +4954,17 @@ mod tests {
         }
 
         fn render_flags(template: &str, is_windows: bool, has_unix_utilities: bool) -> String {
-            render_git_bash(template, is_windows, has_unix_utilities, false)
+            render_path_guidance(template, is_windows, has_unix_utilities, "none")
         }
 
-        /// Decoupled variant that also forces `msys_pathconv_disabled`, so the
-        /// Windows + Git Bash quadrant (both `has_unix_utilities` and
-        /// `msys_pathconv_disabled` true) is reachable from any test host.
-        fn render_git_bash(
+        /// Decoupled variant that also pins `path_guidance`, so every path contract
+        /// (MSYS translating, native dialect-resolving, no translation layer) is
+        /// reachable from any test host.
+        fn render_path_guidance(
             template: &str,
             is_windows: bool,
             has_unix_utilities: bool,
-            msys_pathconv_disabled: bool,
+            path_guidance: &str,
         ) -> String {
             let renderer = full_renderer();
             let extras = serde_json::json!({
@@ -4962,7 +4972,7 @@ mod tests {
                 "is_windows": is_windows,
                 "shell_uses_semicolon": !has_unix_utilities,
                 "has_unix_utilities": has_unix_utilities,
-                "msys_pathconv_disabled": msys_pathconv_disabled,
+                "path_guidance": path_guidance,
             });
             renderer.render_with_extra(template, &extras).unwrap()
         }
@@ -5025,37 +5035,47 @@ mod tests {
             assert_ne!(unix, pwsh);
         }
 
-        /// The `msys_pathconv_disabled` notes must appear on Windows + Git Bash
-        /// (the only quadrant where `MSYS_NO_PATHCONV=1` is set) and nowhere
-        /// else — telling a Unix or PowerShell host about `/c` escapes and
-        /// `cygpath` would be wrong. Both template variants are covered
-        /// because the copy ships whether or not background is enabled.
+        /// Each path contract gets its own notes and nobody else's: an MSYS shell
+        /// must hear about the doubled switch and the exclusion list, a native
+        /// dialect-resolving shell (niubash) about single-slash switches, and a host
+        /// with no translation layer about neither. Both template variants are
+        /// covered because the copy ships whether or not background is enabled.
         #[test]
-        fn msys_pathconv_notes_only_on_windows_git_bash() {
+        fn path_guidance_notes_match_the_active_shell() {
             for template in [
                 BashTool::default_description_template_enabled(),
                 BashTool::default_description_template_disabled(),
             ] {
-                // Windows + Git Bash: the real host.
-                let git_bash = render_git_bash(template, true, true, true);
+                // Windows + Git Bash: the translating MSYS host.
+                let translating = render_path_guidance(template, true, true, "msys_translating");
                 assert!(
-                    git_bash.contains("never `//c`") && git_bash.contains("cygpath -w"),
-                    "Windows + Git Bash must document both the //c trap and the path form:\n{git_bash}"
+                    translating.contains("//t:Build")
+                        && translating.contains("MSYS2_ARG_CONV_EXCL")
+                        && translating.contains("cygpath -w"),
+                    "MSYS host must document the doubled switch, the exclusion list, and the path form:\n{translating}"
                 );
 
-                // Windows + PowerShell / cmd: no MSYS, so no such notes.
-                let pwsh = render_git_bash(template, true, false, false);
+                // Windows + niubash: native Bash with no converter.
+                let dialect = render_path_guidance(template, true, true, "dialect_resolving");
                 assert!(
-                    !pwsh.contains("never `//c`") && !pwsh.contains("cygpath -w"),
-                    "PowerShell host must not get MSYS notes:\n{pwsh}"
+                    dialect.contains("single slash") && dialect.contains("never rewritten"),
+                    "niubash must document single-slash switches and untouched literals:\n{dialect}"
+                );
+                assert!(
+                    !dialect.contains("MSYS2_ARG_CONV_EXCL") && !dialect.contains("cygpath -w"),
+                    "niubash has no converter, so MSYS notes would be wrong:\n{dialect}"
                 );
 
-                // Unix: same, and must still render the plain bash wording.
-                let unix = render_git_bash(template, false, true, false);
-                assert!(
-                    !unix.contains("never `//c`") && !unix.contains("cygpath -w"),
-                    "Unix host must not get MSYS notes:\n{unix}"
-                );
+                // Windows + PowerShell / cmd, and Unix: no translation layer to explain.
+                for (is_windows, has_unix_utilities) in [(true, false), (false, true)] {
+                    let plain = render_path_guidance(template, is_windows, has_unix_utilities, "none");
+                    assert!(
+                        !plain.contains("MSYS2_ARG_CONV_EXCL")
+                            && !plain.contains("//t:Build")
+                            && !plain.contains("cygpath -w"),
+                        "a host without a translation layer must get no MSYS notes:\n{plain}"
+                    );
+                }
             }
         }
     }

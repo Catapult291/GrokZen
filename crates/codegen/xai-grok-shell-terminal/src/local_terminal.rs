@@ -96,6 +96,10 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
             let inv = xai_grok_config::shell::shell_command_argv(&request.command);
             let mut c = Command::new(inv.program);
             c.args(&inv.args).envs(inv.env);
+            // An inherited MSYS_NO_PATHCONV would silently keep path translation off.
+            for name in &inv.remove_env {
+                c.env_remove(name);
+            }
             c
         };
         cmd.current_dir(&request.cwd)

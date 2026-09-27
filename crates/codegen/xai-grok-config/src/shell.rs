@@ -4,6 +4,11 @@
 //! `GROK_SHELL` remains an explicit process-level override. The resolved result is
 //! cached for the process lifetime, so changing the setting requires a restart.
 //!
+//! niubash (`niu.exe`) is available as an opt-in preference, never as the default:
+//! it is a third-party native Windows Bash with no MSYS translation layer, so a
+//! machine without it installed must keep working. When the configured preference
+//! cannot be resolved, the cascade falls back to Git Bash.
+//!
 //! PowerShell 7+ is intentionally represented by the executable name `pwsh`, not
 //! a major-version number. A future PowerShell 8 or 9 that keeps the `pwsh.exe`
 //! command name therefore works without a configuration migration.
@@ -14,6 +19,9 @@ pub enum WindowsShellPreference {
     /// Git Bash, bundled with Git for Windows.
     #[default]
     GitBash,
+    /// niubash (`niu.exe`), a native Windows Bash that resolves POSIX dialect
+    /// paths itself and has no MSYS translation layer to disable.
+    Niu,
     /// PowerShell 7 or newer (`pwsh.exe`).
     Pwsh,
     /// Windows PowerShell 5.1 (`powershell.exe`).
@@ -25,6 +33,7 @@ impl WindowsShellPreference {
     pub fn as_canonical(self) -> &'static str {
         match self {
             Self::GitBash => "git-bash",
+            Self::Niu => "niubash",
             Self::Pwsh => "pwsh",
             Self::PowerShell => "powershell",
         }
@@ -35,6 +44,7 @@ impl WindowsShellPreference {
     pub fn display_name(self) -> &'static str {
         match self {
             Self::GitBash => "Git Bash",
+            Self::Niu => "Niubash",
             Self::Pwsh => "PowerShell 7+",
             Self::PowerShell => "Windows PowerShell 5.1",
         }
@@ -46,6 +56,7 @@ impl WindowsShellPreference {
         let normalized = value.unwrap_or_default().trim().to_ascii_lowercase();
         match normalized.as_str() {
             "bash" | "gitbash" | "git-bash" => Self::GitBash,
+            "niubash" | "niu" | "niu.exe" => Self::Niu,
             "pwsh" | "powershell-7" | "powershell-7+" | "powershell-core" => Self::Pwsh,
             "powershell" | "windows-powershell" | "powershell-5" | "powershell-5.1" => {
                 Self::PowerShell
@@ -65,9 +76,43 @@ pub fn canonical_windows_shell(value: Option<&str>) -> &'static str {
 #[derive(Clone, Debug)]
 pub enum WindowsShell {
     GitBash(String),
+    /// niubash, resolved to the absolute path of `niu.exe`.
+    Niu(String),
     Pwsh,
     PowerShell,
     Cmd,
+}
+
+/// How the active shell treats path-like and switch-like arguments.
+///
+/// A single boolean cannot express this: there are three real states, not two.
+/// An MSYS shell with translation on rewrites both POSIX paths *and* `/flag`
+/// switches; an MSYS shell with translation off rewrites neither; and a native
+/// shell such as niubash resolves POSIX dialect paths while leaving every
+/// argument otherwise untouched.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathGuidance {
+    /// No path-translation layer is involved (Unix, `pwsh`, `powershell.exe`, `cmd.exe`).
+    NoTranslationLayer,
+    /// An MSYS translation layer is active. A POSIX path handed to a native tool
+    /// is rewritten to a Windows path, and so is a `/flag` argument — which is why
+    /// a single-slash switch must be doubled (`//c`) to survive.
+    MsysTranslating,
+    /// A native shell that resolves POSIX dialect paths itself and never rewrites
+    /// an argument (niubash): `/c/...` reaches native tools as a Windows path
+    /// while `/flag` and literal `/words` pass through untouched.
+    DialectResolving,
+}
+
+impl PathGuidance {
+    /// Value exposed to description templates as `path_guidance`.
+    pub fn as_template_value(self) -> &'static str {
+        match self {
+            Self::NoTranslationLayer => "none",
+            Self::MsysTranslating => "msys_translating",
+            Self::DialectResolving => "dialect_resolving",
+        }
+    }
 }
 
 #[cfg(not(unix))]
@@ -100,6 +145,7 @@ fn windows_command_exists(name: &str) -> bool {
 fn shell_for_preference(preference: WindowsShellPreference) -> Option<WindowsShell> {
     match preference {
         WindowsShellPreference::GitBash => find_git_bash().map(WindowsShell::GitBash),
+        WindowsShellPreference::Niu => find_niu().map(WindowsShell::Niu),
         WindowsShellPreference::Pwsh => {
             windows_command_exists("pwsh.exe").then_some(WindowsShell::Pwsh)
         }
@@ -151,6 +197,15 @@ fn resolve_windows_shell() -> WindowsShell {
                 }
                 tracing::warn!(
                     "GROK_SHELL={value} but Git Bash was not found; using the configured fallback"
+                );
+            }
+            "niubash" | "niu" | "niu.exe" => {
+                if let Some(path) = find_niu() {
+                    tracing::info!(shell = path, "Windows shell (GROK_SHELL override): niubash");
+                    return WindowsShell::Niu(path);
+                }
+                tracing::warn!(
+                    "GROK_SHELL={value} but niu.exe was not found; using the configured fallback"
                 );
             }
             "pwsh" | "powershell-7" | "powershell-7+" | "powershell-core" => {
@@ -250,12 +305,82 @@ fn find_git_bash() -> Option<String> {
     None
 }
 
+/// Locates `niu.exe` for the opt-in niubash shell.
+///
+/// niubash is third-party and never bundled, so discovery is deliberately
+/// permissive: an explicit `GROK_NIU` path wins, then the installer's default
+/// locations, then `PATH`. There is no probe spawn here — the portable archive
+/// can live anywhere, and a candidate that exists but misbehaves surfaces as a
+/// failed command with the shell's own error rather than as a silent fallback.
+#[cfg(not(unix))]
+fn find_niu() -> Option<String> {
+    /// Absolute path to `niu.exe`, for portable layouts that never register on `PATH`.
+    const GROK_NIU: &str = "GROK_NIU";
+
+    if let Ok(explicit) = std::env::var(GROK_NIU) {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            if niu_candidate_is_usable(std::path::Path::new(trimmed)) {
+                return Some(trimmed.to_string());
+            }
+            tracing::warn!(
+                path = trimmed,
+                "GROK_NIU does not point at a usable niu.exe; falling back to discovery"
+            );
+        }
+    }
+
+    // The per-user install directory the Inno Setup installer uses
+    // (`{localappdata}\Programs\Niubash`), then PATH for portable layouts.
+    let candidates = [std::env::var("LOCALAPPDATA")
+        .map(|dir| format!("{dir}\\Programs\\Niubash\\niu.exe"))
+        .unwrap_or_default()];
+    for candidate in &candidates {
+        if !candidate.is_empty() && niu_candidate_is_usable(std::path::Path::new(candidate)) {
+            return Some(candidate.clone());
+        }
+    }
+
+    // Fall back to PATH, taking the first entry that is really an executable file.
+    if let Ok(output) = {
+        let mut cmd = std::process::Command::new("where");
+        xai_tty_utils::detach_std_command(&mut cmd);
+        cmd.arg("niu.exe").stdin(std::process::Stdio::null());
+        cmd.output()
+    } {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let line = line.trim();
+                if niu_candidate_is_usable(std::path::Path::new(line)) {
+                    return Some(line.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Whether a candidate path is the `niu.exe` file itself, not a directory or a
+/// differently named neighbour a stray `GROK_NIU` value may have pointed at.
+#[cfg(not(unix))]
+fn niu_candidate_is_usable(path: &std::path::Path) -> bool {
+    path.is_file()
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("niu.exe"))
+}
+
 #[cfg(not(unix))]
 impl WindowsShell {
     /// Short display name for user-facing contexts (e.g. "bash", "pwsh").
+    ///
+    /// niubash reports `bash` on purpose: it executes Bash, and the system
+    /// prompt's `Shell:` line is what keeps the model writing Bash idiom.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::GitBash(_) => "bash",
+            Self::GitBash(_) | Self::Niu(_) => "bash",
             Self::Pwsh => "pwsh",
             Self::PowerShell => "powershell",
             Self::Cmd => "cmd.exe",
@@ -263,40 +388,44 @@ impl WindowsShell {
     }
 
     /// Whether this shell supports the `&&` pipeline chain operator for error-propagating command chaining.
-    /// True for pwsh (`&&` arrived in PS 7.0) and Git Bash; powershell.exe 5.1 has no `&&`.
+    /// True for pwsh (`&&` arrived in PS 7.0), Git Bash, and niubash; powershell.exe 5.1 has no `&&`.
     /// `cmd.exe` has `&&` but we use `;` there for uniformity with the `-Command` invocation style used elsewhere.
     pub fn supports_chain_operator(&self) -> bool {
-        matches!(self, Self::Pwsh | Self::GitBash(_))
+        matches!(self, Self::Pwsh | Self::GitBash(_) | Self::Niu(_))
     }
 
     /// Whether `grep`, `head`, `tail`, `sed`, `awk`, `find` are usable from this shell.
-    /// True only for Git Bash, where MSYS2 bundles them inside the bash subprocess.
+    /// True for Git Bash, where MSYS2 bundles them inside the bash subprocess, and for
+    /// niubash, which puts the winuxcmd binaries on the shell's own `PATH`.
     pub fn has_unix_utilities(&self) -> bool {
-        matches!(self, Self::GitBash(_))
+        matches!(self, Self::GitBash(_) | Self::Niu(_))
     }
 
-    /// Whether child processes get MSYS POSIX→Windows path translation turned off.
+    /// Which path/switch guidance this shell needs.
     ///
-    /// [`Self::GitBash`] is spawned with `MSYS_NO_PATHCONV=1` and
-    /// `MSYS2_ARG_CONV_EXCL=*` (see [`crate::shell::ShellInvocation`]) so
-    /// `/flag` arguments reach native Windows tools untouched. The two settings
-    /// are mutually exclusive at the MSYS level — `MSYS2_ARG_CONV_EXCL` matches
-    /// by prefix, so excluding `/c` also excludes `/c/Users/...` — which means
-    /// the cost is that an MSYS-style path handed to a native tool is no longer
-    /// converted and gets parsed as a switch instead.
+    /// Git Bash reports [`PathGuidance::MsysTranslating`] because the resolver leaves
+    /// MSYS path translation at its default (on): `/c/Users/...` reaches a native tool
+    /// as `C:/Users/...`, and a `/flag` argument is rewritten too. The escape hatches
+    /// stay the MSYS ones — double the slash (`//flag`) for a switch the converter
+    /// would eat, or `export MSYS2_ARG_CONV_EXCL='...'` earlier in the same command.
+    /// `/c` must never be excluded: the list matches by prefix, so excluding `/c`
+    /// would also stop `/c/Users/...` from being converted.
     ///
-    /// Tool descriptions branch on this so the model writes `/d /c` (not the
-    /// `//c` escape, which is only correct when translation is *on*) and hands
-    /// native tools Windows-style paths.
-    pub fn msys_pathconv_disabled(&self) -> bool {
-        matches!(self, Self::GitBash(_))
+    /// niubash reports [`PathGuidance::DialectResolving`]: it has no converter, so no
+    /// argument is rewritten at all and a single-slash switch is already correct.
+    pub fn path_guidance(&self) -> PathGuidance {
+        match self {
+            Self::GitBash(_) => PathGuidance::MsysTranslating,
+            Self::Niu(_) => PathGuidance::DialectResolving,
+            Self::Pwsh | Self::PowerShell | Self::Cmd => PathGuidance::NoTranslationLayer,
+        }
     }
 
     /// How this shell interprets a bare `&` token.
     /// Drives the `run_terminal_cmd` background-operator validation, which must differ per shell.
     pub fn ampersand_semantics(&self) -> AmpersandSemantics {
         match self {
-            Self::GitBash(_) => AmpersandSemantics::PosixBackground,
+            Self::GitBash(_) | Self::Niu(_) => AmpersandSemantics::PosixBackground,
             Self::Pwsh => AmpersandSemantics::PowerShellCore,
             Self::PowerShell => AmpersandSemantics::WindowsPowerShell,
             Self::Cmd => AmpersandSemantics::CmdSeparator,
@@ -339,19 +468,18 @@ pub fn has_unix_utilities() -> bool {
     }
 }
 
-/// Whether the active shell disables MSYS POSIX→Windows path translation for
-/// its children. True on Windows with Git Bash; false everywhere else.
+/// Which path/switch guidance describes the active shell.
 ///
-/// See [`WindowsShell::msys_pathconv_disabled`] for why the two settings are
-/// mutually exclusive and what the model is told about it.
-pub fn msys_pathconv_disabled() -> bool {
+/// Unix reports [`PathGuidance::NoTranslationLayer`]. Tool descriptions branch on
+/// this through the `path_guidance` template variable.
+pub fn path_guidance() -> PathGuidance {
     #[cfg(unix)]
     {
-        false
+        PathGuidance::NoTranslationLayer
     }
     #[cfg(not(unix))]
     {
-        detect_windows_shell().msys_pathconv_disabled()
+        detect_windows_shell().path_guidance()
     }
 }
 
@@ -397,8 +525,21 @@ pub fn ampersand_semantics() -> AmpersandSemantics {
 pub struct ShellInvocation {
     pub program: String,
     pub args: Vec<String>,
-    /// Env vars that must be set on the child process, e.g. `MSYS_NO_PATHCONV` so Git Bash does not translate `/flags` to Windows paths.
+    /// Env vars to set on the child process. The MSYS path-translation toggles
+    /// deliberately never appear here: leaving translation at its default is the
+    /// contract, because that is what rewrites a POSIX path for a native tool. See
+    /// [`WindowsShell::path_guidance`] for what each shell needs instead.
     pub env: Vec<(&'static str, &'static str)>,
+    /// Env vars to **remove** from the child process, which callers must apply with
+    /// `env_remove`.
+    ///
+    /// Unsetting is not enough for the MSYS toggles: Git for Windows treats the mere
+    /// *presence* of `MSYS_NO_PATHCONV` as "translation off", so a parent that still
+    /// carries it — a `grok-zh` launched from an older session's command inherits it,
+    /// and in leader mode every session inherits the leader's environment — would
+    /// silently restore the behaviour this contract removes. Values cannot fix that
+    /// either: `MSYS_NO_PATHCONV=0` and `MSYS_NO_PATHCONV=` both leave translation off.
+    pub remove_env: Vec<&'static str>,
 }
 
 /// Build `(program, args, env)` for running `command` in the detected shell.
@@ -421,16 +562,29 @@ fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
         ("PYTHONIOENCODING", "utf-8:surrogateescape"),
     ];
     match shell {
+        // MSYS path translation is deliberately left at its default (on): a POSIX
+        // path handed to a native tool is then rewritten for us, which is exactly
+        // what the model's Bash instinct writes. Turning it off inverts that — the
+        // same path reaches `python.exe` verbatim and fails. The one clause the
+        // converter gets wrong is a `/flag` argument for a native tool; the model
+        // doubles the slash (`//flag`) or exports `MSYS2_ARG_CONV_EXCL` in the
+        // command. `/c` must never be added to that list: it matches by prefix, so
+        // excluding `/c` would also stop `/c/Users/...` from being converted.
         WindowsShell::GitBash(path) => ShellInvocation {
             program: path.clone(),
             args: vec!["-c".to_string(), command.to_string()],
-            // Disable MSYS2 POSIX-to-Windows path translation so `/flag` arguments (MSBuild /t:, cl.exe /nologo, etc.) pass through
-            env: vec![
-                ("MSYS_NO_PATHCONV", "1"),
-                ("MSYS2_ARG_CONV_EXCL", "*"),
-                utf8_env[0],
-                utf8_env[1],
-            ],
+            env: utf8_env.to_vec(),
+            remove_env: vec!["MSYS_NO_PATHCONV", "MSYS2_ARG_CONV_EXCL"],
+        },
+        // niubash has no translation layer, so it needs no MSYS variables at all:
+        // its own path model already accepts `/c/...`, `/mnt/c/...`, and `C:\...`,
+        // and it never rewrites a switch. Inherited MSYS variables are inert to it,
+        // so nothing has to be cleared.
+        WindowsShell::Niu(path) => ShellInvocation {
+            program: path.clone(),
+            args: vec!["-c".to_string(), command.to_string()],
+            env: utf8_env.to_vec(),
+            remove_env: Vec::new(),
         },
         WindowsShell::Pwsh => ShellInvocation {
             program: "pwsh".to_string(),
@@ -441,6 +595,7 @@ fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
                 command.to_string(),
             ],
             env: utf8_env.to_vec(),
+            remove_env: Vec::new(),
         },
         WindowsShell::PowerShell => ShellInvocation {
             program: "powershell.exe".to_string(),
@@ -451,11 +606,13 @@ fn invocation_for(shell: &WindowsShell, command: &str) -> ShellInvocation {
                 command.to_string(),
             ],
             env: utf8_env.to_vec(),
+            remove_env: Vec::new(),
         },
         WindowsShell::Cmd => ShellInvocation {
             program: "cmd".to_string(),
             args: vec!["/C".to_string(), command.to_string()],
             env: utf8_env.to_vec(),
+            remove_env: Vec::new(),
         },
     }
 }
@@ -627,15 +784,56 @@ mod tests {
                 "{value:?}"
             );
         }
+        for value in ["niubash", "Niubash", "niu", "niu.exe", "  NIU  "] {
+            assert_eq!(canonical_windows_shell(Some(value)), "niubash", "{value:?}");
+        }
     }
 
     #[test]
     fn preference_display_names_do_not_pin_future_pwsh_major() {
         assert_eq!(WindowsShellPreference::Pwsh.display_name(), "PowerShell 7+");
         assert_eq!(WindowsShellPreference::GitBash.display_name(), "Git Bash");
+        assert_eq!(WindowsShellPreference::Niu.display_name(), "Niubash");
         assert_eq!(
             WindowsShellPreference::PowerShell.display_name(),
             "Windows PowerShell 5.1"
+        );
+    }
+
+    /// The default must stay Git Bash: niubash is opt-in and never assumed present.
+    #[test]
+    fn git_bash_remains_the_product_default() {
+        assert_eq!(WindowsShellPreference::default(), WindowsShellPreference::GitBash);
+        assert_eq!(WindowsShellPreference::default().as_canonical(), "git-bash");
+    }
+
+    /// `path_guidance` is what tool descriptions branch on, so pin all three states.
+    #[cfg(not(unix))]
+    #[test]
+    fn path_guidance_distinguishes_translation_states() {
+        assert_eq!(
+            WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into()).path_guidance(),
+            PathGuidance::MsysTranslating
+        );
+        assert_eq!(
+            WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()).path_guidance(),
+            PathGuidance::DialectResolving
+        );
+        for shell in [WindowsShell::Pwsh, WindowsShell::PowerShell, WindowsShell::Cmd] {
+            assert_eq!(shell.path_guidance(), PathGuidance::NoTranslationLayer);
+        }
+    }
+
+    #[test]
+    fn path_guidance_template_values_are_stable() {
+        assert_eq!(PathGuidance::NoTranslationLayer.as_template_value(), "none");
+        assert_eq!(
+            PathGuidance::MsysTranslating.as_template_value(),
+            "msys_translating"
+        );
+        assert_eq!(
+            PathGuidance::DialectResolving.as_template_value(),
+            "dialect_resolving"
         );
     }
 
@@ -683,17 +881,30 @@ mod tests {
         assert!(!is_executable(tmp.path()));
     }
 
-    /// Only Git Bash bundles the Unix utilities; the PowerShell and cmd variants do not.
+    /// The Bash family ships the Unix utilities — Git Bash from MSYS2, niubash from
+    /// winuxcmd; the PowerShell and cmd variants do not.
     #[cfg(not(unix))]
     #[test]
-    fn has_unix_utilities_only_true_for_gitbash() {
+    fn has_unix_utilities_true_for_the_bash_family_only() {
         assert!(
             WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into())
                 .has_unix_utilities()
         );
+        assert!(WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()).has_unix_utilities());
         assert!(!WindowsShell::Pwsh.has_unix_utilities());
         assert!(!WindowsShell::PowerShell.has_unix_utilities());
         assert!(!WindowsShell::Cmd.has_unix_utilities());
+    }
+
+    /// niubash executes Bash, so the system prompt's `Shell:` line keeps reading
+    /// `bash` and the model keeps writing Bash idiom.
+    #[cfg(not(unix))]
+    #[test]
+    fn niubash_reports_the_bash_prompt_name() {
+        assert_eq!(
+            WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()).name(),
+            "bash"
+        );
     }
 
     #[cfg(not(unix))]
@@ -737,6 +948,10 @@ mod tests {
             AmpersandSemantics::PosixBackground
         );
         assert_eq!(
+            WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()).ampersand_semantics(),
+            AmpersandSemantics::PosixBackground
+        );
+        assert_eq!(
             WindowsShell::Pwsh.ampersand_semantics(),
             AmpersandSemantics::PowerShellCore
         );
@@ -750,19 +965,34 @@ mod tests {
         );
     }
 
-    /// Every Windows shell variant injects the UTF-8 env defaults.
-    /// Builds all four variants directly so it doesn't depend on the test host's shell.
+    /// niubash chains with `&&` like the other Bash-family shells.
     #[cfg(not(unix))]
     #[test]
-    fn invocation_for_sets_utf8_env_on_every_variant() {
-        let variants = [
+    fn niubash_chains_with_double_ampersand() {
+        assert!(
+            WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()).supports_chain_operator()
+        );
+    }
+
+    /// Every Windows shell variant, so env tests cover all of them without
+    /// depending on the test host's installed shell.
+    #[cfg(not(unix))]
+    fn windows_shell_variants() -> Vec<WindowsShell> {
+        vec![
             WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into()),
+            WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()),
             WindowsShell::Pwsh,
             WindowsShell::PowerShell,
             WindowsShell::Cmd,
-        ];
-        for shell in &variants {
-            let inv = invocation_for(shell, "echo hi");
+        ]
+    }
+
+    /// Every Windows shell variant injects the UTF-8 env defaults.
+    #[cfg(not(unix))]
+    #[test]
+    fn invocation_for_sets_utf8_env_on_every_variant() {
+        for shell in windows_shell_variants() {
+            let inv = invocation_for(&shell, "echo hi");
             assert!(
                 inv.env.contains(&("PYTHONUTF8", "1")),
                 "expected PYTHONUTF8=1 in env for {shell:?}, got {:?}",
@@ -777,23 +1007,91 @@ mod tests {
         }
     }
 
-    /// GitBash keeps its MSYS2 path-translation guards in addition to the UTF-8 defaults (the UTF-8 entries are appended, not replacing).
+    /// Regression guard for the path contract: no variant may disable MSYS path
+    /// translation again. `MSYS_NO_PATHCONV=1` + `MSYS2_ARG_CONV_EXCL=*` left a POSIX
+    /// path handed to a native tool verbatim (`python /c/Users/...` → `C:\c\Users\...`),
+    /// a shape the model writes constantly; letting the translation layer stand is the
+    /// fix, so neither variable may reappear in the spawned environment.
     #[cfg(not(unix))]
     #[test]
-    fn invocation_for_gitbash_keeps_msys_vars() {
+    fn invocation_for_injects_no_msys_path_guards() {
+        for shell in windows_shell_variants() {
+            let inv = invocation_for(&shell, "echo hi");
+            for (name, _) in &inv.env {
+                assert!(
+                    !name.starts_with("MSYS"),
+                    "{shell:?} must not inject {name}: {:?}",
+                    inv.env
+                );
+            }
+        }
+    }
+
+    /// Git Bash must *clear* the MSYS toggles, not merely leave them unset: a parent
+    /// that still carries `MSYS_NO_PATHCONV=1` (a nested `grok-zh`, or every session
+    /// under a leader started that way) would otherwise keep translation off, because
+    /// Git for Windows reads the variable's presence and ignores its value.
+    #[cfg(not(unix))]
+    #[test]
+    fn git_bash_clears_inherited_msys_path_guards() {
         let inv = invocation_for(
             &WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into()),
             "echo hi",
         );
-        assert!(
-            inv.env.contains(&("MSYS_NO_PATHCONV", "1")),
-            "{:?}",
-            inv.env
+        assert!(inv.remove_env.contains(&"MSYS_NO_PATHCONV"), "{:?}", inv.remove_env);
+        assert!(inv.remove_env.contains(&"MSYS2_ARG_CONV_EXCL"), "{:?}", inv.remove_env);
+    }
+
+    /// The Bash family runs one `-c <command>` argv node; niubash is invoked exactly
+    /// like Git Bash, with no translation-layer variables to carry.
+    #[cfg(not(unix))]
+    #[test]
+    fn bash_family_invocations_are_single_argv() {
+        for shell in [
+            WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into()),
+            WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()),
+        ] {
+            let inv = invocation_for(&shell, "echo hi");
+            assert_eq!(
+                inv.args,
+                vec!["-c".to_string(), "echo hi".to_string()],
+                "{shell:?}"
+            );
+        }
+    }
+
+    /// End-to-end check of the whole Git Bash invocation: build it through
+    /// [`invocation_for`], spawn it while the parent still carries the MSYS guards
+    /// (what a nested `grok-zh` or a leader-spawned session inherits), and require a
+    /// POSIX path to reach a native program converted.
+    ///
+    /// Skips when Git Bash or `python` is unavailable on the test host, so a bare
+    /// machine reports "ok" rather than a failure it cannot fix.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_leaked_msys_guard_does_not_survive_the_invocation() {
+        let Some(bash) = find_git_bash() else { return };
+        let inv = invocation_for(
+            &WindowsShell::GitBash(bash),
+            "python -c \"import sys;print(sys.argv[1])\" /c/Users/bypassnro",
         );
+        let mut cmd = std::process::Command::new(&inv.program);
+        // The guard is set before the invocation is applied, mirroring how it arrives
+        // from a parent environment; `env_remove` must still win.
+        cmd.env("MSYS_NO_PATHCONV", "1")
+            .env("MSYS2_ARG_CONV_EXCL", "*");
+        cmd.args(&inv.args).envs(inv.env);
+        for name in &inv.remove_env {
+            cmd.env_remove(name);
+        }
+        let Ok(output) = cmd.output() else { return };
+        if !output.status.success() {
+            return; // no python on this host
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            inv.env.contains(&("MSYS2_ARG_CONV_EXCL", "*")),
-            "{:?}",
-            inv.env
+            stdout.contains("C:/Users/bypassnro") || stdout.contains("C:\\Users\\bypassnro"),
+            "an inherited guard must not survive the invocation, got: {stdout}"
         );
     }
 }

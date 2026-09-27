@@ -829,6 +829,10 @@ fn spawn_shell_command(
         let inv = xai_grok_config::shell::shell_command_argv(command);
         spawn_with_argv(&inv.program, cwd, env, |cmd| {
             cmd.args(&inv.args).envs(inv.env);
+            // An inherited MSYS_NO_PATHCONV would silently keep path translation off.
+            for name in &inv.remove_env {
+                cmd.env_remove(name);
+            }
         })
     }
 }
