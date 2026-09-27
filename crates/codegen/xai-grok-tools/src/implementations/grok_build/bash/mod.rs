@@ -1512,6 +1512,10 @@ ${%- if shell_uses_semicolon %}
 ${%- endif %}
 ${%- if not has_unix_utilities %}
   - The Unix utilities `grep`, `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
+${%- endif %}
+${%- if msys_pathconv_disabled %}
+  - This shell runs with MSYS path translation turned off, so `/flag` arguments reach Windows tools untouched. Give them single-slash switches: `cmd.exe /d /c "..."`, never `//c`. `//c` is the escape for a *translating* shell; here it reaches cmd.exe verbatim, cmd drops into an interactive shell, prints its banner, and exits 0 without ever running your command.
+  - The same setting means MSYS paths are NOT converted. Pass Windows tools a Windows-style path — `'C:/Users/name/path'`, or `cygpath -w <path>` — never `/c/Users/name/path`, which arrives verbatim and is parsed as an unknown switch. Programs with no console (`wscript.exe`, `rundll32.exe`) then raise a modal dialog on the user's desktop instead of failing visibly.
 ${%- endif %}"#
     }
 
@@ -1528,6 +1532,10 @@ ${%- if shell_uses_semicolon %}
 ${%- endif %}
 ${%- if not has_unix_utilities %}
   - The Unix utilities `grep`, `head`, `tail`, `sed`, `awk`, and `find` are NOT available in this shell. Use the dedicated tools instead.
+${%- endif %}
+${%- if msys_pathconv_disabled %}
+  - This shell runs with MSYS path translation turned off, so `/flag` arguments reach Windows tools untouched. Give them single-slash switches: `cmd.exe /d /c "..."`, never `//c`. `//c` is the escape for a *translating* shell; here it reaches cmd.exe verbatim, cmd drops into an interactive shell, prints its banner, and exits 0 without ever running your command.
+  - The same setting means MSYS paths are NOT converted. Pass Windows tools a Windows-style path — `'C:/Users/name/path'`, or `cygpath -w <path>` — never `/c/Users/name/path`, which arrives verbatim and is parsed as an unknown switch. Programs with no console (`wscript.exe`, `rundll32.exe`) then raise a modal dialog on the user's desktop instead of failing visibly.
 ${%- endif %}"#
     }
 
@@ -4936,12 +4944,25 @@ mod tests {
         }
 
         fn render_flags(template: &str, is_windows: bool, has_unix_utilities: bool) -> String {
+            render_git_bash(template, is_windows, has_unix_utilities, false)
+        }
+
+        /// Decoupled variant that also forces `msys_pathconv_disabled`, so the
+        /// Windows + Git Bash quadrant (both `has_unix_utilities` and
+        /// `msys_pathconv_disabled` true) is reachable from any test host.
+        fn render_git_bash(
+            template: &str,
+            is_windows: bool,
+            has_unix_utilities: bool,
+            msys_pathconv_disabled: bool,
+        ) -> String {
             let renderer = full_renderer();
             let extras = serde_json::json!({
                 "auto_background_on_timeout": true,
                 "is_windows": is_windows,
                 "shell_uses_semicolon": !has_unix_utilities,
                 "has_unix_utilities": has_unix_utilities,
+                "msys_pathconv_disabled": msys_pathconv_disabled,
             });
             renderer.render_with_extra(template, &extras).unwrap()
         }
@@ -5002,6 +5023,40 @@ mod tests {
             let unix = render(BashTool::default_description_template_disabled(), true);
             let pwsh = render(BashTool::default_description_template_disabled(), false);
             assert_ne!(unix, pwsh);
+        }
+
+        /// The `msys_pathconv_disabled` notes must appear on Windows + Git Bash
+        /// (the only quadrant where `MSYS_NO_PATHCONV=1` is set) and nowhere
+        /// else — telling a Unix or PowerShell host about `/c` escapes and
+        /// `cygpath` would be wrong. Both template variants are covered
+        /// because the copy ships whether or not background is enabled.
+        #[test]
+        fn msys_pathconv_notes_only_on_windows_git_bash() {
+            for template in [
+                BashTool::default_description_template_enabled(),
+                BashTool::default_description_template_disabled(),
+            ] {
+                // Windows + Git Bash: the real host.
+                let git_bash = render_git_bash(template, true, true, true);
+                assert!(
+                    git_bash.contains("never `//c`") && git_bash.contains("cygpath -w"),
+                    "Windows + Git Bash must document both the //c trap and the path form:\n{git_bash}"
+                );
+
+                // Windows + PowerShell / cmd: no MSYS, so no such notes.
+                let pwsh = render_git_bash(template, true, false, false);
+                assert!(
+                    !pwsh.contains("never `//c`") && !pwsh.contains("cygpath -w"),
+                    "PowerShell host must not get MSYS notes:\n{pwsh}"
+                );
+
+                // Unix: same, and must still render the plain bash wording.
+                let unix = render_git_bash(template, false, true, false);
+                assert!(
+                    !unix.contains("never `//c`") && !unix.contains("cygpath -w"),
+                    "Unix host must not get MSYS notes:\n{unix}"
+                );
+            }
         }
     }
 }
