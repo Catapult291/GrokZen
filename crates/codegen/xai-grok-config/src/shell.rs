@@ -543,9 +543,130 @@ pub struct ShellInvocation {
 }
 
 /// Build `(program, args, env)` for running `command` in the detected shell.
+///
+/// A command past the shell's inline ceiling is staged in a temporary script and run
+/// through a wrapper instead of being passed as one `-c` argument; see
+/// [`stage_command_script`] for why.
 #[cfg(not(unix))]
 pub fn shell_command_argv(command: &str) -> ShellInvocation {
-    invocation_for(detect_windows_shell(), command)
+    let shell = detect_windows_shell();
+    if command.len() > inline_command_ceiling(shell) {
+        if let Some(staged) = stage_command_script(shell, command) {
+            return invocation_for(shell, &staged);
+        }
+    }
+    invocation_for(shell, command)
+}
+
+/// Longest command *text* that may be passed inline as one shell argument.
+///
+/// Both Bash-family shells limit this below what most callers assume, and they fail
+/// in different ways:
+///
+/// - Git Bash silently truncates a single argument past 8192 bytes: a 9000-byte `-c`
+///   reached `bash` as 8186 bytes and still exited 0, so the tail of the command never
+///   ran and nothing reported a problem. `-lc` cuts at the same argument length as
+///   `-c`, so the limit belongs to the argument, not to the command line.
+/// - niubash hands the whole line to `CreateProcess` and fails outright once it passes
+///   32767 UTF-16 units, with `WinError 206`.
+///
+/// The PowerShell and `cmd.exe` arms keep the inline form: each has its own script
+/// convention (`-File`, a `.cmd` file) that would need a separate cleanup path, and
+/// neither has been measured for where it breaks.
+#[cfg(not(unix))]
+fn inline_command_ceiling(shell: &WindowsShell) -> usize {
+    match shell {
+        WindowsShell::GitBash(_) => 8_000,
+        WindowsShell::Niu(_) => 24_000,
+        WindowsShell::Pwsh | WindowsShell::PowerShell | WindowsShell::Cmd => usize::MAX,
+    }
+}
+
+/// Prefix shared by every staged command script, so leftovers can be swept.
+#[cfg(not(unix))]
+const STAGED_SCRIPT_PREFIX: &str = "grok-zh-cmd-";
+
+/// Age past which a staged script counts as a leftover.
+///
+/// The normal path cleans up after itself: the wrapper's `EXIT` trap removes the file
+/// even when the staged command sets its own exit code. Only a shell killed before its
+/// trap can run — a command timeout, a cancelled background task — leaves a file, so
+/// the sweep may be conservative without ever deleting a file a live command is using.
+#[cfg(not(unix))]
+const STAGED_SCRIPT_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// Write `command` to a temporary script and return the wrapper that runs it.
+///
+/// Only the Bash-family arms have a script form; every other arm returns `None` and
+/// keeps the inline invocation. The wrapper sources the script and removes it on
+/// `EXIT`, so the exit code survives — including a trailing `exit N` inside the
+/// command — and no file is left behind.
+#[cfg(not(unix))]
+fn stage_command_script(shell: &WindowsShell, command: &str) -> Option<String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
+
+    if !matches!(shell, WindowsShell::GitBash(_) | WindowsShell::Niu(_)) {
+        return None;
+    }
+
+    let temp = std::env::temp_dir();
+    sweep_staged_scripts(&temp);
+    let path = temp.join(format!(
+        "{STAGED_SCRIPT_PREFIX}{}-{}.sh",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut body = command.to_string();
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    std::fs::write(&path, body).ok()?;
+    tracing::debug!(
+        path = %path.display(),
+        bytes = command.len(),
+        "staged a long command in a script"
+    );
+
+    // Both shells read a forward-slash Windows path, and holding the path in a
+    // variable keeps the `trap` body free of nested quoting.
+    let quoted = posix_single_quote(&path.to_string_lossy().replace('\\', "/"));
+    Some(format!(
+        "__grok_staged_cmd={quoted}; trap 'rm -f \"$__grok_staged_cmd\"' EXIT; . \"$__grok_staged_cmd\""
+    ))
+}
+
+/// Quote `value` for a POSIX shell, escaping embedded single quotes the usual way.
+#[cfg(not(unix))]
+fn posix_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Delete staged scripts older than [`STAGED_SCRIPT_MAX_AGE`].
+#[cfg(not(unix))]
+fn sweep_staged_scripts(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(STAGED_SCRIPT_PREFIX) || !name.ends_with(".sh") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age > STAGED_SCRIPT_MAX_AGE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Pure builder split out of `shell_command_argv` so tests can exercise every `WindowsShell` variant, not just the one installed on the test host.
@@ -1057,6 +1178,118 @@ mod tests {
                 vec!["-c".to_string(), "echo hi".to_string()],
                 "{shell:?}"
             );
+        }
+    }
+
+    /// Pull the staged script path back out of the wrapper produced by
+    /// [`stage_command_script`], so tests can inspect and clean up the file.
+    #[cfg(not(unix))]
+    fn staged_script_path(wrapper: &str) -> std::path::PathBuf {
+        const MARKER: &str = "__grok_staged_cmd='";
+        let start = wrapper.find(MARKER).expect("wrapper assigns the script path") + MARKER.len();
+        let end = start + wrapper[start..].find('\'').expect("assignment is closed");
+        std::path::PathBuf::from(&wrapper[start..end])
+    }
+
+    /// The ceiling is what decides inline versus staged, so pin its shape: the two
+    /// Bash arms are bounded, and the arms without a script form are not.
+    #[cfg(not(unix))]
+    #[test]
+    fn inline_ceiling_bounds_only_the_bash_family() {
+        let git_bash = WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into());
+        assert!(inline_command_ceiling(&git_bash) < 8_192);
+        assert!(inline_command_ceiling(&WindowsShell::Niu("C:\\tools\\niu.exe".into())) < 32_767);
+        for shell in [WindowsShell::Pwsh, WindowsShell::PowerShell, WindowsShell::Cmd] {
+            assert_eq!(inline_command_ceiling(&shell), usize::MAX, "{shell:?}");
+            assert!(stage_command_script(&shell, &"x".repeat(40_000)).is_none(), "{shell:?}");
+        }
+    }
+
+    /// A staged command reaches the shell verbatim, and the wrapper is shaped so the
+    /// script is sourced (shell state and exit code survive) and then removed.
+    #[cfg(not(unix))]
+    #[test]
+    fn staged_wrapper_sources_and_removes_the_script() {
+        let shell = WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into());
+        let command = format!("echo BEGIN; echo {} TAIL", "x".repeat(9_000));
+        let wrapper = stage_command_script(&shell, &command).expect("Git Bash stages long commands");
+
+        let script = staged_script_path(&wrapper);
+        assert_eq!(
+            std::fs::read_to_string(&script).expect("staged script is readable"),
+            format!("{command}\n"),
+            "the script holds the command unchanged, with a newline for the last line"
+        );
+        assert!(
+            wrapper.contains("trap 'rm -f \"$__grok_staged_cmd\"' EXIT"),
+            "{wrapper}"
+        );
+        assert!(wrapper.ends_with(". \"$__grok_staged_cmd\""), "{wrapper}");
+        let _ = std::fs::remove_file(&script);
+
+        // Below the ceiling nothing is staged: the invoked shell is the only check.
+        assert!(command.len() > inline_command_ceiling(&shell));
+        assert!("echo hi".len() <= inline_command_ceiling(&shell));
+    }
+
+    /// The dispatch in [`shell_command_argv`] must stage exactly the commands the
+    /// detected shell cannot take inline.
+    #[cfg(not(unix))]
+    #[test]
+    fn shell_command_argv_stages_only_past_the_ceiling() {
+        let shell = detect_windows_shell();
+        let short = shell_command_argv("echo hi");
+        assert_eq!(short.args.last().map(String::as_str), Some("echo hi"));
+
+        let ceiling = inline_command_ceiling(shell);
+        if ceiling == usize::MAX {
+            return; // pwsh / cmd.exe arm: inline is the only form available
+        }
+        let inv = shell_command_argv(&format!("echo {}", "x".repeat(ceiling + 1)));
+        let staged = inv.args.last().expect("invocation ends with the command text");
+        assert!(staged.contains("__grok_staged_cmd"), "{shell:?}: {staged}");
+        let _ = std::fs::remove_file(staged_script_path(staged));
+    }
+
+    /// End-to-end proof that staging is what saves a long command: each installed
+    /// Bash-family shell runs a command past its inline ceiling, and the tail — which
+    /// an inline Git Bash invocation drops without an error — must still run. The
+    /// command exits non-zero to pin that the staged exit code survives, and the
+    /// script must be gone afterwards.
+    ///
+    /// Skips a shell that is not installed, so a bare machine reports "ok".
+    #[cfg(not(unix))]
+    #[test]
+    fn staged_command_survives_the_inline_ceiling_end_to_end() {
+        for shell in [
+            find_git_bash().map(WindowsShell::GitBash),
+            find_niu().map(WindowsShell::Niu),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let command = format!(
+                "echo STAGED_BEGIN; echo {}; echo STAGED_END; exit 7",
+                "x".repeat(inline_command_ceiling(&shell) + 1_000)
+            );
+            let wrapper = stage_command_script(&shell, &command).expect("Bash-family shell stages");
+            let script = staged_script_path(&wrapper);
+            let inv = invocation_for(&shell, &wrapper);
+
+            let mut cmd = std::process::Command::new(&inv.program);
+            cmd.args(&inv.args).envs(inv.env);
+            for name in &inv.remove_env {
+                cmd.env_remove(name);
+            }
+            let output = cmd.output().expect("spawn the shell");
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("STAGED_END"),
+                "{shell:?} lost the tail of a staged command: {stdout}"
+            );
+            assert_eq!(output.status.code(), Some(7), "{shell:?}: {output:?}");
+            assert!(!script.exists(), "{shell:?} left its staged script behind");
         }
     }
 
