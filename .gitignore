@@ -1,3 +1,20 @@
 /target
 **/*.rs.bk
 .DS_Store
+
+# 本地构建产物与构建日志（不入库，发布产物由 CI 生成）
+/dist/
+/*.exe
+/.release-build-*.log
+
+# 本机工作区数据与一次性产物
+/.grok/
+/.scratch/
+/.codex-*.diff
+/.codex-*.txt
+
+# 本地计划与构建脚本（真要发布时用 git add -f 显式覆盖）
+/FORK-INPUTS.md
+/FORK-PUBLISH-PLAN.md
+/MERGE-PRIVACY-PLAN.md
+/run-release-build-a.cmd
