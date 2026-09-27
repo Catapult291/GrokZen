@@ -138,17 +138,11 @@ impl StreamDecoder {
     }
 }
 
-fn encoding_from_label(
-    encoding: &crate::computer::types::OutputEncoding,
-) -> Option<StreamDecoder> {
+fn encoding_from_label(encoding: &crate::computer::types::OutputEncoding) -> Option<StreamDecoder> {
     StreamDecoder::for_label(encoding.label())
 }
 
-fn decode_output_chunk(
-    bytes: &[u8],
-    decoder: Option<&mut StreamDecoder>,
-    last: bool,
-) -> Vec<u8> {
+fn decode_output_chunk(bytes: &[u8], decoder: Option<&mut StreamDecoder>, last: bool) -> Vec<u8> {
     let Some(decoder) = decoder else {
         return bytes.to_vec();
     };
