@@ -275,6 +275,23 @@ impl WindowsShell {
         matches!(self, Self::GitBash(_))
     }
 
+    /// Whether child processes get MSYS POSIX→Windows path translation turned off.
+    ///
+    /// [`Self::GitBash`] is spawned with `MSYS_NO_PATHCONV=1` and
+    /// `MSYS2_ARG_CONV_EXCL=*` (see [`crate::shell::ShellInvocation`]) so
+    /// `/flag` arguments reach native Windows tools untouched. The two settings
+    /// are mutually exclusive at the MSYS level — `MSYS2_ARG_CONV_EXCL` matches
+    /// by prefix, so excluding `/c` also excludes `/c/Users/...` — which means
+    /// the cost is that an MSYS-style path handed to a native tool is no longer
+    /// converted and gets parsed as a switch instead.
+    ///
+    /// Tool descriptions branch on this so the model writes `/d /c` (not the
+    /// `//c` escape, which is only correct when translation is *on*) and hands
+    /// native tools Windows-style paths.
+    pub fn msys_pathconv_disabled(&self) -> bool {
+        matches!(self, Self::GitBash(_))
+    }
+
     /// How this shell interprets a bare `&` token.
     /// Drives the `run_terminal_cmd` background-operator validation, which must differ per shell.
     pub fn ampersand_semantics(&self) -> AmpersandSemantics {
@@ -319,6 +336,22 @@ pub fn has_unix_utilities() -> bool {
     #[cfg(not(unix))]
     {
         detect_windows_shell().has_unix_utilities()
+    }
+}
+
+/// Whether the active shell disables MSYS POSIX→Windows path translation for
+/// its children. True on Windows with Git Bash; false everywhere else.
+///
+/// See [`WindowsShell::msys_pathconv_disabled`] for why the two settings are
+/// mutually exclusive and what the model is told about it.
+pub fn msys_pathconv_disabled() -> bool {
+    #[cfg(unix)]
+    {
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        detect_windows_shell().msys_pathconv_disabled()
     }
 }
 
