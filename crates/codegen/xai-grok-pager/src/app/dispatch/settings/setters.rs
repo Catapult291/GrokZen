@@ -112,7 +112,7 @@ pub(super) fn set_default_shell_inner(app: &mut AppView, canonical: &str) {
     app.current_ui.default_shell = Some(canonical.to_string());
 }
 
-/// Persist `[ui].default_shell` (`git-bash` | `pwsh` | `powershell`). Restart-required.
+/// Persist `[ui].default_shell` (`git-bash` | `niubash` | `pwsh` | `powershell`). Restart-required.
 /// `GROK_SHELL` remains the runtime override and the resolver is cached for this process.
 pub(in crate::app::dispatch) fn set_default_shell(app: &mut AppView, value: String) -> Vec<Effect> {
     let canonical = crate::settings::canonical_default_shell(Some(&value));

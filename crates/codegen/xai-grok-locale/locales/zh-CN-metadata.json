@@ -879,6 +879,8 @@
   "settings.setting.screen_mode.choice.minimal.description": "以使用终端原生回滚区的极简模式打开 grok-zh。",
   "settings.setting.default_shell.choice.git-bash.label": "Git Bash",
   "settings.setting.default_shell.choice.git-bash.description": "使用 Git Bash 作为默认命令 Shell，并提供常用 Unix 工具。",
+  "settings.setting.default_shell.choice.niubash.label": "Niubash",
+  "settings.setting.default_shell.choice.niubash.description": "使用 niubash（niu.exe）作为默认命令 Shell：原生 Bash 与 Unix 工具，无 MSYS 路径转换层。需先安装 niubash。",
   "settings.setting.default_shell.choice.pwsh.label": "PowerShell 7+",
   "settings.setting.default_shell.choice.pwsh.description": "使用已安装的 PowerShell 7 或更新版本提供的 pwsh.exe。",
   "settings.setting.default_shell.choice.powershell.label": "Windows PowerShell 5.1",
