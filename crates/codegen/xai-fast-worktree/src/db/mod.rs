@@ -370,11 +370,16 @@ impl WorktreeDb {
 
     /// Look up by ID, label, or path.
     ///
-    /// If `id_or_path` contains `/`, it's treated as a path (canonicalized
-    /// before lookup). Otherwise it's looked up first as a DB ID, then as a
-    /// worktree label (stored in `metadata.label`).
+    /// An argument that carries a path separator or a root is treated as a path
+    /// (canonicalized before lookup). Otherwise it's looked up first as a DB
+    /// ID, then as a worktree label (stored in `metadata.label`).
     pub fn get(&self, id_or_path: &str) -> Result<Option<WorktreeRecord>> {
-        if id_or_path.contains('/') {
+        // `is_separator` accepts both `/` and `\` on Windows and only `/` on
+        // unix. Testing for `'/'` alone sent every native Windows path
+        // (`C:\...\wt`) down the ID/label branch, which always missed.
+        let is_path =
+            id_or_path.chars().any(std::path::is_separator) || Path::new(id_or_path).has_root();
+        if is_path {
             let canon = PathBuf::from(id_or_path);
             let canon = dunce::canonicalize(&canon).unwrap_or(canon);
             queries::get_by_path(&self.conn, &canon)

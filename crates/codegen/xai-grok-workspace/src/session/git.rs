@@ -510,6 +510,12 @@ pub async fn get_branch(cwd: &Path) -> Option<String> {
 /// Path-component tilde collapse (`~/src/repo`).
 /// String prefix matching would treat `HOME=/Users/u` as a prefix of `/Users/user/xai`.
 fn collapse_home_path(path: &Path, home: Option<&Path>) -> String {
+    // Rebuild through `components()` so the string always uses `MAIN_SEPARATOR`:
+    // libgit2 hands back forward slashes on Windows while the marker and DB
+    // branches carry native paths, and callers also use this string as a dedup
+    // key. On unix a `\` is an ordinary filename byte, and `components()` keeps
+    // it inside its component, so such names survive verbatim.
+    let path = PathBuf::from_iter(path.components());
     let Some(home) = home else {
         return path.display().to_string();
     };

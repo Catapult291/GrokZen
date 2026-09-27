@@ -54,6 +54,33 @@ fn get_missing_returns_none() {
     assert!(db.get("/no/such/path").unwrap().is_none());
 }
 
+/// A native path must reach the path branch, not the ID/label one.
+///
+/// The record path is built from `temp_dir()`, so it carries `\` on Windows and
+/// `/` on unix — the Windows form is what the old `contains('/')` test missed.
+#[test]
+fn get_finds_a_native_path_with_the_platform_separator() {
+    let db = WorktreeDb::open_in_memory().unwrap();
+    let path = std::env::temp_dir().join("wt-native-sep");
+    let path_str = path.to_string_lossy().into_owned();
+    let rec = make_record("native", &path_str, WorktreeKind::Session);
+    db.register(&rec).unwrap();
+
+    assert_eq!(
+        db.get(&path_str).unwrap().expect("should find by path").id,
+        "native"
+    );
+    // An ID/label without any separator still resolves through the other branch.
+    assert_eq!(
+        db.get("native").unwrap().expect("should find by id").id,
+        "native"
+    );
+    assert!(
+        db.get_by_label("native").unwrap().is_none(),
+        "the label branch must not be reached for an id"
+    );
+}
+
 #[test]
 fn unregister_by_id() {
     let db = WorktreeDb::open_in_memory().unwrap();

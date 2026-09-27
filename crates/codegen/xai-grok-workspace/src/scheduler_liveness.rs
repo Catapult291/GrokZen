@@ -233,51 +233,56 @@ mod tests {
 
     #[tokio::test]
     async fn poll_finds_a_live_scheduler_through_a_real_session() {
-        let handle = crate::handle::WorkspaceHandle::for_test();
-        handle
-            .create_session_with_config(
-                "main",
-                None,
-                None,
-                crate::capability::CapabilityMode::All,
-                None,
-                false,
-            )
-            .expect("create session");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::WorkspaceHandle::for_test();
+                handle
+                    .create_session_with_config(
+                        "main",
+                        None,
+                        None,
+                        crate::capability::CapabilityMode::All,
+                        None,
+                        false,
+                    )
+                    .expect("create session");
 
-        assert_eq!(
-            poll_schedulers_once(&handle.shared).await,
-            PollUpdate::Record(None),
-            "a live scheduler with nothing to run must clear the hold"
-        );
-
-        // Create a real task through the session's own scheduler actor.
-        let scheduler = {
-            let session = handle.session("main").expect("session exists");
-            let toolset = session.toolset();
-            let res = toolset.resources.lock().await;
-            res.get::<SchedulerHandle>()
-                .cloned()
-                .expect("scheduler handle in resources")
-        };
-        let (reply, rx) = tokio::sync::oneshot::channel();
-        scheduler
-            .0
-            .send(SchedulerCommand::Create {
-                task: ScheduledTask::new(3600, "p".into(), true, false),
-                reply,
-            })
-            .expect("scheduler alive");
-        rx.await.expect("actor replies").expect("task created");
-
-        match poll_schedulers_once(&handle.shared).await {
-            PollUpdate::Record(Some(run)) => {
-                assert!(
-                    run > chrono::Utc::now().timestamp_millis() as u64,
-                    "the recorded run must be in the future"
+                assert_eq!(
+                    poll_schedulers_once(&handle.shared).await,
+                    PollUpdate::Record(None),
+                    "a live scheduler with nothing to run must clear the hold"
                 );
-            }
-            other => panic!("a live loop must record its coming run, got {other:?}"),
-        }
+
+                // Create a real task through the session's own scheduler actor.
+                let scheduler = {
+                    let session = handle.session("main").expect("session exists");
+                    let toolset = session.toolset();
+                    let res = toolset.resources.lock().await;
+                    res.get::<SchedulerHandle>()
+                        .cloned()
+                        .expect("scheduler handle in resources")
+                };
+                let (reply, rx) = tokio::sync::oneshot::channel();
+                scheduler
+                    .0
+                    .send(SchedulerCommand::Create {
+                        task: ScheduledTask::new(3600, "p".into(), true, false),
+                        reply,
+                    })
+                    .expect("scheduler alive");
+                rx.await.expect("actor replies").expect("task created");
+
+                match poll_schedulers_once(&handle.shared).await {
+                    PollUpdate::Record(Some(run)) => {
+                        assert!(
+                            run > chrono::Utc::now().timestamp_millis() as u64,
+                            "the recorded run must be in the future"
+                        );
+                    }
+                    other => panic!("a live loop must record its coming run, got {other:?}"),
+                }
+            })
+            .await;
     }
 }

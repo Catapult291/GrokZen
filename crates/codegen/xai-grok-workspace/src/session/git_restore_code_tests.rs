@@ -16,6 +16,10 @@ async fn init_repo_with_commit(dir: &Path) -> String {
     git_cli(dir, &["config", "commit.gpgsign", "false"])
         .await
         .unwrap();
+    // Keep stashed/restored bytes LF: Git for Windows defaults to autocrlf=true.
+    git_cli(dir, &["config", "core.autocrlf", "false"])
+        .await
+        .unwrap();
     std::fs::write(dir.join("README.md"), "hello\n").unwrap();
     git_cli(dir, &["add", "."]).await.unwrap();
     git_cli(dir, &["commit", "-q", "-m", "init"]).await.unwrap();

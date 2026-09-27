@@ -491,234 +491,274 @@ mod tests {
     /// `stat` consults the memo (no re-hash for an unchanged file) and recomputes when `(size, mtime)` no longer match.
     #[tokio::test]
     async fn stat_uses_memo_until_file_changes() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        std::fs::write(root.join("data.txt"), b"hello world").unwrap();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                std::fs::write(root.join("data.txt"), b"hello world").unwrap();
 
-        let req = FsStatReq {
-            path: "data.txt".into(),
-        };
-        let first = stat(&ws, None, &req).await.unwrap();
-        assert!(first.exists);
-        assert_eq!(first.node_type, Some(FsNodeType::File));
-        assert_eq!(first.size, Some(11));
-        let real_hash = first.hash.clone().expect("hash for files");
+                let req = FsStatReq {
+                    path: "data.txt".into(),
+                };
+                let first = stat(&ws, None, &req).await.unwrap();
+                assert!(first.exists);
+                assert_eq!(first.node_type, Some(FsNodeType::File));
+                assert_eq!(first.size, Some(11));
+                let real_hash = first.hash.clone().expect("hash for files");
 
-        // Plant a sentinel hash for the file's current (size, mtime)
-        // A second stat must return the sentinel, proof it did not re-hash
-        let abs = root.join("data.txt");
-        let md = std::fs::metadata(&abs).unwrap();
-        let mtime = system_time_ms(md.modified().unwrap());
-        ws.shared
-            .client_fs_hash_memo
-            .store(&abs, md.len(), mtime, "sentinel".into());
-        let memoized = stat(&ws, None, &req).await.unwrap();
-        assert_eq!(memoized.hash.as_deref(), Some("sentinel"));
+                // Plant a sentinel hash for the file's current (size, mtime)
+                // A second stat must return the sentinel, proof it did not re-hash
+                let abs = root.join("data.txt");
+                let md = std::fs::metadata(&abs).unwrap();
+                let mtime = system_time_ms(md.modified().unwrap());
+                ws.shared
+                    .client_fs_hash_memo
+                    .store(&abs, md.len(), mtime, "sentinel".into());
+                let memoized = stat(&ws, None, &req).await.unwrap();
+                assert_eq!(memoized.hash.as_deref(), Some("sentinel"));
 
-        // A size change invalidates the memo entry and re-hashes.
-        std::fs::write(&abs, b"hello brave new world").unwrap();
-        let rehashed = stat(&ws, None, &req).await.unwrap();
-        let new_hash = rehashed.hash.expect("hash for files");
-        assert_ne!(new_hash, "sentinel");
-        assert_ne!(new_hash, real_hash);
+                // A size change invalidates the memo entry and re-hashes.
+                std::fs::write(&abs, b"hello brave new world").unwrap();
+                let rehashed = stat(&ws, None, &req).await.unwrap();
+                let new_hash = rehashed.hash.expect("hash for files");
+                assert_ne!(new_hash, "sentinel");
+                assert_ne!(new_hash, real_hash);
+            })
+            .await;
     }
 
     /// A path with a *file* as an intermediate component (`ENOTDIR`) is an existence miss, not an RPC error.
     #[tokio::test]
     async fn stat_enotdir_intermediate_reports_not_exists() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        std::fs::write(root.join("file.txt"), b"x").unwrap();
-        let res = stat(
-            &ws,
-            None,
-            &FsStatReq {
-                path: "file.txt/nested".into(),
-            },
-        )
-        .await
-        .unwrap();
-        assert!(!res.exists);
-        assert_eq!(res.node_type, None);
-        assert_eq!(res.hash, None);
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                std::fs::write(root.join("file.txt"), b"x").unwrap();
+                let res = stat(
+                    &ws,
+                    None,
+                    &FsStatReq {
+                        path: "file.txt/nested".into(),
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(!res.exists);
+                assert_eq!(res.node_type, None);
+                assert_eq!(res.hash, None);
+            })
+            .await;
     }
 
     #[tokio::test]
     async fn stat_missing_path_reports_not_exists() {
-        let ws = make_handle();
-        let res = stat(
-            &ws,
-            None,
-            &FsStatReq {
-                path: "nope.txt".into(),
-            },
-        )
-        .await
-        .unwrap();
-        assert!(!res.exists);
-        assert_eq!(res.node_type, None);
-        assert_eq!(res.hash, None);
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let res = stat(
+                    &ws,
+                    None,
+                    &FsStatReq {
+                        path: "nope.txt".into(),
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(!res.exists);
+                assert_eq!(res.node_type, None);
+                assert_eq!(res.hash, None);
+            })
+            .await;
     }
 
     #[tokio::test]
     async fn read_file_chunks_are_binary_safe_and_capped() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        // Non-UTF-8 payload: every byte value once.
-        let payload: Vec<u8> = (0u8..=255).collect();
-        std::fs::write(root.join("blob.bin"), &payload).unwrap();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                // Non-UTF-8 payload: every byte value once.
+                let payload: Vec<u8> = (0u8..=255).collect();
+                std::fs::write(root.join("blob.bin"), &payload).unwrap();
 
-        let req = FsReadFileReq {
-            path: "blob.bin".into(),
-            // Bytes 200..210 are bare continuation bytes, never valid UTF-8
-            offset: Some(200),
-            length: Some(50),
-            max_bytes: 10, // cap below the requested length
-            encoding: FsReadEncoding::Base64,
-        };
-        let res = read_file(&ws, None, &req).await.unwrap();
-        assert_eq!(res.size, 256);
-        assert_eq!(res.content, None);
-        assert_eq!(res.content_type, FsContentType::Binary);
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(res.content_base64.unwrap())
-            .unwrap();
-        assert_eq!(bytes, payload[200..210], "maxBytes caps the chunk");
+                let req = FsReadFileReq {
+                    path: "blob.bin".into(),
+                    // Bytes 200..210 are bare continuation bytes, never valid UTF-8
+                    offset: Some(200),
+                    length: Some(50),
+                    max_bytes: 10, // cap below the requested length
+                    encoding: FsReadEncoding::Base64,
+                };
+                let res = read_file(&ws, None, &req).await.unwrap();
+                assert_eq!(res.size, 256);
+                assert_eq!(res.content, None);
+                assert_eq!(res.content_type, FsContentType::Binary);
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(res.content_base64.unwrap())
+                    .unwrap();
+                assert_eq!(bytes, payload[200..210], "maxBytes caps the chunk");
 
-        // Full-file hash regardless of the requested range.
-        use sha2::{Digest, Sha256};
-        assert_eq!(res.hash, format!("{:x}", Sha256::digest(&payload)));
+                // Full-file hash regardless of the requested range.
+                use sha2::{Digest, Sha256};
+                assert_eq!(res.hash, format!("{:x}", Sha256::digest(&payload)));
 
-        // Memoized second read (range-only fast path) returns the identical chunk and hash
-        let again = read_file(&ws, None, &req).await.unwrap();
-        assert_eq!(again.hash, res.hash);
-        let again_bytes = base64::engine::general_purpose::STANDARD
-            .decode(again.content_base64.unwrap())
-            .unwrap();
-        assert_eq!(again_bytes, payload[200..210]);
+                // Memoized second read (range-only fast path) returns the identical chunk and hash
+                let again = read_file(&ws, None, &req).await.unwrap();
+                assert_eq!(again.hash, res.hash);
+                let again_bytes = base64::engine::general_purpose::STANDARD
+                    .decode(again.content_base64.unwrap())
+                    .unwrap();
+                assert_eq!(again_bytes, payload[200..210]);
+            })
+            .await;
     }
 
     /// `maxBytes` is server-capped at [`MAX_READ_BYTES`]: a caller-supplied huge budget cannot make the workspace buffer the whole file.
     #[tokio::test]
     async fn read_file_server_caps_max_bytes() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        let payload = vec![0u8; (MAX_READ_BYTES + 100) as usize];
-        std::fs::write(root.join("big.bin"), &payload).unwrap();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                let payload = vec![0u8; (MAX_READ_BYTES + 100) as usize];
+                std::fs::write(root.join("big.bin"), &payload).unwrap();
 
-        let res = read_file(
-            &ws,
-            None,
-            &FsReadFileReq {
-                path: "big.bin".into(),
-                offset: None,
-                length: None,
-                max_bytes: u64::MAX,
-                encoding: FsReadEncoding::Base64,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(res.size, payload.len() as u64);
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(res.content_base64.unwrap())
-            .unwrap();
-        assert_eq!(
-            bytes.len() as u64,
-            MAX_READ_BYTES,
-            "clamped to the server cap"
-        );
+                let res = read_file(
+                    &ws,
+                    None,
+                    &FsReadFileReq {
+                        path: "big.bin".into(),
+                        offset: None,
+                        length: None,
+                        max_bytes: u64::MAX,
+                        encoding: FsReadEncoding::Base64,
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(res.size, payload.len() as u64);
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(res.content_base64.unwrap())
+                    .unwrap();
+                assert_eq!(
+                    bytes.len() as u64,
+                    MAX_READ_BYTES,
+                    "clamped to the server cap"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]
     async fn read_file_utf8_default_and_binary_fallback() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        std::fs::write(root.join("text.txt"), "héllo").unwrap();
-        std::fs::write(root.join("bin.dat"), [0xff, 0xfe, 0x00]).unwrap();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                std::fs::write(root.join("text.txt"), "héllo").unwrap();
+                std::fs::write(root.join("bin.dat"), [0xff, 0xfe, 0x00]).unwrap();
 
-        let text = read_file(
-            &ws,
-            None,
-            &FsReadFileReq {
-                path: "text.txt".into(),
-                offset: None,
-                length: None,
-                max_bytes: 1_048_576,
-                encoding: FsReadEncoding::Utf8,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(text.content.as_deref(), Some("héllo"));
-        assert_eq!(text.content_base64, None);
-        assert_eq!(text.content_type, FsContentType::Text);
+                let text = read_file(
+                    &ws,
+                    None,
+                    &FsReadFileReq {
+                        path: "text.txt".into(),
+                        offset: None,
+                        length: None,
+                        max_bytes: 1_048_576,
+                        encoding: FsReadEncoding::Utf8,
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(text.content.as_deref(), Some("héllo"));
+                assert_eq!(text.content_base64, None);
+                assert_eq!(text.content_type, FsContentType::Text);
 
-        // Invalid UTF-8 under the utf8 default degrades to base64.
-        let bin = read_file(
-            &ws,
-            None,
-            &FsReadFileReq {
-                path: "bin.dat".into(),
-                offset: None,
-                length: None,
-                max_bytes: 1_048_576,
-                encoding: FsReadEncoding::Utf8,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(bin.content, None);
-        assert_eq!(bin.content_type, FsContentType::Binary);
-        let bytes = base64::engine::general_purpose::STANDARD
-            .decode(bin.content_base64.unwrap())
-            .unwrap();
-        assert_eq!(bytes, [0xff, 0xfe, 0x00]);
+                // Invalid UTF-8 under the utf8 default degrades to base64.
+                let bin = read_file(
+                    &ws,
+                    None,
+                    &FsReadFileReq {
+                        path: "bin.dat".into(),
+                        offset: None,
+                        length: None,
+                        max_bytes: 1_048_576,
+                        encoding: FsReadEncoding::Utf8,
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(bin.content, None);
+                assert_eq!(bin.content_type, FsContentType::Binary);
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(bin.content_base64.unwrap())
+                    .unwrap();
+                assert_eq!(bytes, [0xff, 0xfe, 0x00]);
+            })
+            .await;
     }
 
     #[tokio::test]
     async fn resolve_rejects_escapes() {
-        let ws = make_handle();
-        for path in ["/etc/passwd", "../escape.txt"] {
-            let err = stat(
-                &ws,
-                None,
-                &FsStatReq {
-                    path: path.to_owned(),
-                },
-            )
-            .await
-            .expect_err("escape must be rejected");
-            assert!(matches!(err, WorkspaceError::HubError(_)), "{err:?}");
-        }
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                for path in ["/etc/passwd", "../escape.txt"] {
+                    let err = stat(
+                        &ws,
+                        None,
+                        &FsStatReq {
+                            path: path.to_owned(),
+                        },
+                    )
+                    .await
+                    .expect_err("escape must be rejected");
+                    assert!(matches!(err, WorkspaceError::HubError(_)), "{err:?}");
+                }
+            })
+            .await;
     }
 
     /// An absolute path *inside* the workspace root is accepted and stats the same file as its root-relative form.
     #[tokio::test]
     async fn resolve_accepts_absolute_within_root() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        std::fs::write(root.join("data.txt"), b"hello").unwrap();
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                std::fs::write(root.join("data.txt"), b"hello").unwrap();
 
-        let rel = stat(
-            &ws,
-            None,
-            &FsStatReq {
-                path: "data.txt".into(),
-            },
-        )
-        .await
-        .unwrap();
-        assert!(rel.exists);
+                let rel = stat(
+                    &ws,
+                    None,
+                    &FsStatReq {
+                        path: "data.txt".into(),
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(rel.exists);
 
-        let abs_path = root.join("data.txt").to_string_lossy().into_owned();
-        let abs = stat(&ws, None, &FsStatReq { path: abs_path })
-            .await
-            .unwrap();
-        assert!(abs.exists);
-        assert_eq!(abs.node_type, rel.node_type);
-        assert_eq!(abs.size, rel.size);
-        assert_eq!(abs.hash, rel.hash);
+                let abs_path = root.join("data.txt").to_string_lossy().into_owned();
+                let abs = stat(&ws, None, &FsStatReq { path: abs_path })
+                    .await
+                    .unwrap();
+                assert!(abs.exists);
+                assert_eq!(abs.node_type, rel.node_type);
+                assert_eq!(abs.size, rel.size);
+                assert_eq!(abs.hash, rel.hash);
+            })
+            .await;
     }
 
     #[tokio::test]
@@ -751,112 +791,132 @@ mod tests {
 
     #[tokio::test]
     async fn list_empty_path_lists_root() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        std::fs::write(root.join("rooted.txt"), b"x").unwrap();
-        let res = list(&ws, None, &list_req("")).await.unwrap();
-        assert!(res.nodes.iter().any(|n| n.name == "rooted.txt"));
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                std::fs::write(root.join("rooted.txt"), b"x").unwrap();
+                let res = list(&ws, None, &list_req("")).await.unwrap();
+                assert!(res.nodes.iter().any(|n| n.name == "rooted.txt"));
+            })
+            .await;
     }
 
     /// A session cwd that extends the root rebases the client-fs surface: paths are cwd-relative and root-level files are unreachable.
     #[tokio::test]
     async fn session_cwd_rebases_client_fs_surface() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        std::fs::create_dir(root.join("artifacts")).unwrap();
-        std::fs::write(root.join("rooted.txt"), b"r").unwrap();
-        std::fs::write(root.join("artifacts").join("out.txt"), b"out").unwrap();
-        ws.create_session_with_cwd("cwd-session", Some(root.join("artifacts")))
-            .unwrap();
-        let session = Some("cwd-session");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                std::fs::create_dir(root.join("artifacts")).unwrap();
+                std::fs::write(root.join("rooted.txt"), b"r").unwrap();
+                std::fs::write(root.join("artifacts").join("out.txt"), b"out").unwrap();
+                ws.create_session_with_cwd("cwd-session", Some(root.join("artifacts")))
+                    .unwrap();
+                let session = Some("cwd-session");
 
-        let res = list(&ws, session, &list_req("")).await.unwrap();
-        let names: Vec<&str> = res.nodes.iter().map(|n| n.name.as_str()).collect();
-        assert_eq!(names, ["out.txt"]);
-        assert_eq!(res.nodes[0].path, "out.txt");
+                let res = list(&ws, session, &list_req("")).await.unwrap();
+                let names: Vec<&str> = res.nodes.iter().map(|n| n.name.as_str()).collect();
+                assert_eq!(names, ["out.txt"]);
+                assert_eq!(res.nodes[0].path, "out.txt");
 
-        let hit = stat(
-            &ws,
-            session,
-            &FsStatReq {
-                path: "out.txt".into(),
-            },
-        )
-        .await
-        .unwrap();
-        assert!(hit.exists);
-        assert_eq!(hit.size, Some(3));
+                let hit = stat(
+                    &ws,
+                    session,
+                    &FsStatReq {
+                        path: "out.txt".into(),
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(hit.exists);
+                assert_eq!(hit.size, Some(3));
 
-        let read = read_file(
-            &ws,
-            session,
-            &FsReadFileReq {
-                path: "out.txt".into(),
-                offset: None,
-                length: None,
-                max_bytes: 1_048_576,
-                encoding: FsReadEncoding::Utf8,
-            },
-        )
-        .await
-        .unwrap();
-        assert_eq!(read.content.as_deref(), Some("out"));
+                let read = read_file(
+                    &ws,
+                    session,
+                    &FsReadFileReq {
+                        path: "out.txt".into(),
+                        offset: None,
+                        length: None,
+                        max_bytes: 1_048_576,
+                        encoding: FsReadEncoding::Utf8,
+                    },
+                )
+                .await
+                .unwrap();
+                assert_eq!(read.content.as_deref(), Some("out"));
 
-        let miss = stat(
-            &ws,
-            session,
-            &FsStatReq {
-                path: "rooted.txt".into(),
-            },
-        )
-        .await
-        .unwrap();
-        assert!(!miss.exists, "root files are not visible under the cwd");
-        let err = stat(
-            &ws,
-            session,
-            &FsStatReq {
-                path: "../rooted.txt".into(),
-            },
-        )
-        .await
-        .expect_err("escape above the session cwd must be rejected");
-        assert!(matches!(err, WorkspaceError::HubError(_)), "{err:?}");
+                let miss = stat(
+                    &ws,
+                    session,
+                    &FsStatReq {
+                        path: "rooted.txt".into(),
+                    },
+                )
+                .await
+                .unwrap();
+                assert!(!miss.exists, "root files are not visible under the cwd");
+                let err = stat(
+                    &ws,
+                    session,
+                    &FsStatReq {
+                        path: "../rooted.txt".into(),
+                    },
+                )
+                .await
+                .expect_err("escape above the session cwd must be rejected");
+                assert!(matches!(err, WorkspaceError::HubError(_)), "{err:?}");
+            })
+            .await;
     }
 
     /// Root-cwd and unknown sessions keep the workspace-root base.
     #[tokio::test]
     async fn root_and_unknown_sessions_keep_root_base() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        std::fs::write(root.join("rooted.txt"), b"x").unwrap();
-        for session in [Some("main"), Some("never-bound")] {
-            let res = list(&ws, session, &list_req("")).await.unwrap();
-            assert!(
-                res.nodes.iter().any(|n| n.name == "rooted.txt"),
-                "{session:?} must list the workspace root"
-            );
-        }
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                std::fs::write(root.join("rooted.txt"), b"x").unwrap();
+                for session in [Some("main"), Some("never-bound")] {
+                    let res = list(&ws, session, &list_req("")).await.unwrap();
+                    assert!(
+                        res.nodes.iter().any(|n| n.name == "rooted.txt"),
+                        "{session:?} must list the workspace root"
+                    );
+                }
+            })
+            .await;
     }
 
     /// Unusable session cwds fall back to the root base instead of failing every op.
     /// The two cases here are a directory missing on disk (an artifacts mount not yet established) and a cwd containing `..`.
     #[tokio::test]
     async fn unusable_session_cwds_fall_back_to_root_base() {
-        let ws = make_handle();
-        let root = ws.root_cwd().unwrap();
-        std::fs::write(root.join("rooted.txt"), b"x").unwrap();
-        ws.create_session_with_cwd("missing-dir", Some(root.join("artifacts")))
-            .unwrap();
-        ws.create_session_with_cwd("dot-dot", Some(root.join("..")))
-            .unwrap();
-        for session in [Some("missing-dir"), Some("dot-dot")] {
-            let res = list(&ws, session, &list_req("")).await.unwrap();
-            assert!(
-                res.nodes.iter().any(|n| n.name == "rooted.txt"),
-                "{session:?} must fall back to the workspace root"
-            );
-        }
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = make_handle();
+                let root = ws.root_cwd().unwrap();
+                std::fs::write(root.join("rooted.txt"), b"x").unwrap();
+                ws.create_session_with_cwd("missing-dir", Some(root.join("artifacts")))
+                    .unwrap();
+                ws.create_session_with_cwd("dot-dot", Some(root.join("..")))
+                    .unwrap();
+                for session in [Some("missing-dir"), Some("dot-dot")] {
+                    let res = list(&ws, session, &list_req("")).await.unwrap();
+                    assert!(
+                        res.nodes.iter().any(|n| n.name == "rooted.txt"),
+                        "{session:?} must fall back to the workspace root"
+                    );
+                }
+            })
+            .await;
     }
 
     /// A session cwd whose suffix is a symlink out of the root falls back to the root base (rebasing there would widen confinement).

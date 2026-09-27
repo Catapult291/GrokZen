@@ -729,63 +729,78 @@ mod tests {
     }
     #[tokio::test]
     async fn handler_construction_rejects_invalid_tool_name_without_panic() {
-        let handle = crate::handle::tests::make_handle();
-        let err = SessionRoutedToolHandler::new(
-            "not a tool id!".to_owned(),
-            ToolDescription::new("not a tool id!".to_owned(), String::new()),
-            None,
-            None,
-            handle.clone(),
-        );
-        assert!(
-            err.is_err(),
-            "invalid name must be rejected at construction"
-        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let err = SessionRoutedToolHandler::new(
+                    "not a tool id!".to_owned(),
+                    ToolDescription::new("not a tool id!".to_owned(), String::new()),
+                    None,
+                    None,
+                    handle.clone(),
+                );
+                assert!(
+                    err.is_err(),
+                    "invalid name must be rejected at construction"
+                );
+            })
+            .await;
     }
     #[tokio::test]
     async fn renamed_active_message_handler_keeps_semantic_hitl_classification() {
-        let handle = crate::handle::tests::make_handle();
-        let mut config = xai_grok_tools::registry::types::ToolConfig::for_tool::<
-            xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
-        >();
-        config.name_override = Some("relay_to_subagent".to_owned());
-        assert_eq!(
-            config.kind,
-            Some(xai_grok_tools::types::tool::ToolKind::ActiveAgentMessage)
-        );
-        let model_name = config.name_override.clone().expect("name override");
-        let desc = ToolDescription::new(model_name.clone(), "relay");
-        let handler = SessionRoutedToolHandler::new(
-            model_name,
-            desc,
-            Some(ToolKind::ActiveAgentMessage),
-            None,
-            handle,
-        )
-        .expect("renamed handler");
-        let args = serde_json::json!({
-            "subagent_id": "sub-1",
-            "text": "private follow-up",
-        });
-        let access = handler
-            .permission_access(&args)
-            .expect("renamed semantic handler must remain guarded");
-        let crate::permission::AccessKind::AgentMessage { subagent_id } = &access else {
-            panic!("renamed semantic handler must use agent-message access")
-        };
-        assert_eq!(subagent_id, "sub-1");
-        assert!(!subagent_id.contains("private follow-up"));
-        let payload = crate::permission::build_permission_payload_for_test(&access, "tc");
-        assert_eq!(payload["tool_name"], "send_subagent_message");
-        assert_eq!(payload["subagent_id"], "sub-1");
-        assert!(payload.get("text").is_none());
-        assert!(payload.get("edit_file_paths").is_none());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let mut config = xai_grok_tools::registry::types::ToolConfig::for_tool::<
+                    xai_grok_tools::implementations::grok_build::SendSubagentMessageTool,
+                >();
+                config.name_override = Some("relay_to_subagent".to_owned());
+                assert_eq!(
+                    config.kind,
+                    Some(xai_grok_tools::types::tool::ToolKind::ActiveAgentMessage)
+                );
+                let model_name = config.name_override.clone().expect("name override");
+                let desc = ToolDescription::new(model_name.clone(), "relay");
+                let handler = SessionRoutedToolHandler::new(
+                    model_name,
+                    desc,
+                    Some(ToolKind::ActiveAgentMessage),
+                    None,
+                    handle,
+                )
+                .expect("renamed handler");
+                let args = serde_json::json!({
+                    "subagent_id": "sub-1",
+                    "text": "private follow-up",
+                });
+                let access = handler
+                    .permission_access(&args)
+                    .expect("renamed semantic handler must remain guarded");
+                let crate::permission::AccessKind::AgentMessage { subagent_id } = &access else {
+                    panic!("renamed semantic handler must use agent-message access")
+                };
+                assert_eq!(subagent_id, "sub-1");
+                assert!(!subagent_id.contains("private follow-up"));
+                let payload = crate::permission::build_permission_payload_for_test(&access, "tc");
+                assert_eq!(payload["tool_name"], "send_subagent_message");
+                assert_eq!(payload["subagent_id"], "sub-1");
+                assert!(payload.get("text").is_none());
+                assert!(payload.get("edit_file_paths").is_none());
+            })
+            .await;
     }
     #[tokio::test]
     async fn handler_tool_id_round_trips_the_validated_name() {
-        let handle = crate::handle::tests::make_handle();
-        let handler = make_handler(&handle, "read_file");
-        assert_eq!(handler.tool_id().as_str(), "read_file");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let handler = make_handler(&handle, "read_file");
+                assert_eq!(handler.tool_id().as_str(), "read_file");
+            })
+            .await;
     }
     #[test]
     fn parse_server_id_maps_invalid_id_to_invalid_config_error() {
@@ -805,30 +820,39 @@ mod tests {
     }
     #[tokio::test]
     async fn handle_call_is_passthrough_zero_progress_one_terminal() {
-        let handle = crate::handle::tests::make_handle();
-        let handler = make_handler(&handle, "read_file");
-        let (ctx, _call_id) = make_ctx("main");
-        let stream = handler
-            .handle_call(
-                ctx,
-                serde_json::json!({ "target_file": "does-not-exist.txt" }),
-            )
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let handler = make_handler(&handle, "read_file");
+                let (ctx, _call_id) = make_ctx("main");
+                let stream = handler
+                    .handle_call(
+                        ctx,
+                        serde_json::json!({ "target_file": "does-not-exist.txt" }),
+                    )
+                    .await;
+                let items: Vec<_> = stream.collect().await;
+                let progress = items
+                    .iter()
+                    .filter(|i| matches!(i, ToolStreamItem::Progress(_)))
+                    .count();
+                let terminal = items
+                    .iter()
+                    .filter(|i| matches!(i, ToolStreamItem::Terminal(_)))
+                    .count();
+                assert_eq!(progress, 0, "gate-off pass-through must emit zero Progress");
+                assert_eq!(terminal, 1, "must emit exactly one Terminal");
+                assert!(matches!(items.last(), Some(ToolStreamItem::Terminal(_))));
+            })
             .await;
-        let items: Vec<_> = stream.collect().await;
-        let progress = items
-            .iter()
-            .filter(|i| matches!(i, ToolStreamItem::Progress(_)))
-            .count();
-        let terminal = items
-            .iter()
-            .filter(|i| matches!(i, ToolStreamItem::Terminal(_)))
-            .count();
-        assert_eq!(progress, 0, "gate-off pass-through must emit zero Progress");
-        assert_eq!(terminal, 1, "must emit exactly one Terminal");
-        assert!(matches!(items.last(), Some(ToolStreamItem::Terminal(_))));
     }
     #[tokio::test]
     async fn handle_call_terminal_matches_non_streaming_call() {
+        let _bg_env = crate::handle::tests::isolated_background_task_dir("hub_terminal_matches");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
         let handle = crate::handle::tests::make_handle();
         let session = handle.session("main").expect("main session present");
         let toolset = session.toolset();
@@ -870,54 +894,66 @@ mod tests {
                 );
             }
         }
+            })
+            .await;
     }
     #[tokio::test]
     async fn handle_call_draining_returns_single_terminal_error() {
-        let handle = crate::handle::tests::make_handle();
-        let tracker = handle.activity_tracker().clone();
-        tracker.set_draining();
-        let handler = make_handler(&handle, "read_file");
-        let (ctx, _call_id) = make_ctx("main");
-        let stream = handler
-            .handle_call(ctx, serde_json::json!({ "target_file": "x.txt" }))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let tracker = handle.activity_tracker().clone();
+                tracker.set_draining();
+                let handler = make_handler(&handle, "read_file");
+                let (ctx, _call_id) = make_ctx("main");
+                let stream = handler
+                    .handle_call(ctx, serde_json::json!({ "target_file": "x.txt" }))
+                    .await;
+                let items: Vec<_> = stream.collect().await;
+                assert_eq!(items.len(), 1, "draining yields exactly one item");
+                match &items[0] {
+                    ToolStreamItem::Terminal(Err(e)) => {
+                        assert!(e.to_string().contains("draining"), "got: {e}");
+                    }
+                    ToolStreamItem::Terminal(Ok(_)) => {
+                        panic!("expected Terminal(Err), got Terminal(Ok)")
+                    }
+                    ToolStreamItem::Progress(_) => panic!("expected Terminal(Err), got Progress"),
+                }
+                assert_eq!(
+                    tracker.snapshot().active_tool_calls,
+                    0,
+                    "draining must not start a tool call"
+                );
+            })
             .await;
-        let items: Vec<_> = stream.collect().await;
-        assert_eq!(items.len(), 1, "draining yields exactly one item");
-        match &items[0] {
-            ToolStreamItem::Terminal(Err(e)) => {
-                assert!(e.to_string().contains("draining"), "got: {e}");
-            }
-            ToolStreamItem::Terminal(Ok(_)) => {
-                panic!("expected Terminal(Err), got Terminal(Ok)")
-            }
-            ToolStreamItem::Progress(_) => panic!("expected Terminal(Err), got Progress"),
-        }
-        assert_eq!(
-            tracker.snapshot().active_tool_calls,
-            0,
-            "draining must not start a tool call"
-        );
     }
     #[tokio::test]
     async fn handle_call_guard_completes_on_early_drop() {
-        let handle = crate::handle::tests::make_handle();
-        let tracker = handle.activity_tracker().clone();
-        let handler = make_handler(&handle, "read_file");
-        let (ctx, _call_id) = make_ctx("main");
-        let stream = handler
-            .handle_call(ctx, serde_json::json!({ "target_file": "x.txt" }))
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let tracker = handle.activity_tracker().clone();
+                let handler = make_handler(&handle, "read_file");
+                let (ctx, _call_id) = make_ctx("main");
+                let stream = handler
+                    .handle_call(ctx, serde_json::json!({ "target_file": "x.txt" }))
+                    .await;
+                assert_eq!(
+                    tracker.snapshot().active_tool_calls,
+                    1,
+                    "tool_call_started fires at stream construction"
+                );
+                drop(stream);
+                assert_eq!(
+                    tracker.snapshot().active_tool_calls,
+                    0,
+                    "dropping the stream must run the RAII completion guard"
+                );
+            })
             .await;
-        assert_eq!(
-            tracker.snapshot().active_tool_calls,
-            1,
-            "tool_call_started fires at stream construction"
-        );
-        drop(stream);
-        assert_eq!(
-            tracker.snapshot().active_tool_calls,
-            0,
-            "dropping the stream must run the RAII completion guard"
-        );
     }
     use xai_grok_tools::types::tool_metadata::ToolMetadata as XaiToolMetadata;
     #[derive(Debug)]
@@ -1000,28 +1036,38 @@ mod tests {
     }
     #[tokio::test]
     async fn handle_call_forwards_inner_streaming_tool_progress() {
-        let handle = crate::handle::tests::make_handle();
-        register_gate_stub(&handle, "gate_streamer_forward");
-        let handler = make_handler(&handle, "gate_streamer_forward");
-        let (ctx, _call_id) = make_ctx("main");
-        let stream = handler.handle_call(ctx, serde_json::json!({})).await;
-        let (progress, terminal, last_is_terminal) = drain_counts(stream).await;
-        assert_eq!(
-            progress, 2,
-            "workspace must forward both stub Progress items end-to-end"
-        );
-        assert_eq!(terminal, 1, "exactly one Terminal");
-        assert!(last_is_terminal, "Terminal must be the final item");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                register_gate_stub(&handle, "gate_streamer_forward");
+                let handler = make_handler(&handle, "gate_streamer_forward");
+                let (ctx, _call_id) = make_ctx("main");
+                let stream = handler.handle_call(ctx, serde_json::json!({})).await;
+                let (progress, terminal, last_is_terminal) = drain_counts(stream).await;
+                assert_eq!(
+                    progress, 2,
+                    "workspace must forward both stub Progress items end-to-end"
+                );
+                assert_eq!(terminal, 1, "exactly one Terminal");
+                assert!(last_is_terminal, "Terminal must be the final item");
+            })
+            .await;
     }
     #[tokio::test]
     async fn handle_call_preserves_bash_chat_completion_output() {
-        let handle = crate::handle::tests::make_handle();
-        crate::handle::tests::register_bash_cco_stub(&handle);
-        let handler = make_handler(&handle, crate::handle::tests::BASH_CCO_STUB_NAME);
-        let (ctx, _call_id) = make_ctx("main");
-        let stream = handler.handle_call(ctx, serde_json::json!({})).await;
-        let typed = crate::handle::tests::drain_terminal_ok(stream).await;
-        crate::handle::tests::assert_bash_cco_terminal(&typed);
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                crate::handle::tests::register_bash_cco_stub(&handle);
+                let handler = make_handler(&handle, crate::handle::tests::BASH_CCO_STUB_NAME);
+                let (ctx, _call_id) = make_ctx("main");
+                let stream = handler.handle_call(ctx, serde_json::json!({})).await;
+                let typed = crate::handle::tests::drain_terminal_ok(stream).await;
+                crate::handle::tests::assert_bash_cco_terminal(&typed);
+            })
+            .await;
     }
     use crate::capability::CapabilityMode;
     use crate::session::tool_config::test_support::tc;
@@ -1141,6 +1187,13 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn backgrounded_bash_increments_then_decrements_through_real_wiring() {
+        let Some(_bg_env) = crate::handle::tests::live_background_worker_env("bg_tracker_bash")
+        else {
+            return;
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
         run_tool_in_session(
@@ -1172,80 +1225,100 @@ mod tests {
             idle.idle_since_ms.is_some(),
             "idle restored when nothing runs"
         );
+            })
+            .await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn auto_background_on_timeout_increments_then_decrements_through_real_wiring() {
-        let mut cfg = bg_config();
-        cfg.tools[0].params = serde_json::json!({
-            "enabled_background": true,
-            "auto_background_on_timeout": true,
-        })
-        .as_object()
-        .cloned();
-        let handle = make_bg_handle_with_config(cfg);
-        let tracker = handle.activity_tracker().clone();
-        run_tool_in_session(
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut cfg = bg_config();
+                cfg.tools[0].params = serde_json::json!({
+                    "enabled_background": true,
+                    "auto_background_on_timeout": true,
+                })
+                .as_object()
+                .cloned();
+                let handle = make_bg_handle_with_config(cfg);
+                let tracker = handle.activity_tracker().clone();
+                run_tool_in_session(
             &handle,
             "main",
             "run_terminal_cmd",
             serde_json::json!({ "command": "sleep 2", "description": "test", "timeout": 300 }),
         )
         .await;
-        let busy = wait_until(
-            &tracker,
-            |s| s.background_tasks == 1 && s.idle_since_ms.is_none(),
-            Duration::from_secs(5),
-        )
-        .await;
-        assert_eq!(
-            busy.background_tasks, 1,
-            "auto-backgrounded task must increment"
-        );
-        assert!(busy.idle_since_ms.is_none());
-        let idle = wait_until(
-            &tracker,
-            |s| s.background_tasks == 0 && s.idle_since_ms.is_some(),
-            Duration::from_secs(15),
-        )
-        .await;
-        assert_eq!(
-            idle.background_tasks, 0,
-            "auto-bg completion must decrement (matching task_id)"
-        );
-        assert!(idle.idle_since_ms.is_some());
+                let busy = wait_until(
+                    &tracker,
+                    |s| s.background_tasks == 1 && s.idle_since_ms.is_none(),
+                    Duration::from_secs(5),
+                )
+                .await;
+                assert_eq!(
+                    busy.background_tasks, 1,
+                    "auto-backgrounded task must increment"
+                );
+                assert!(busy.idle_since_ms.is_none());
+                let idle = wait_until(
+                    &tracker,
+                    |s| s.background_tasks == 0 && s.idle_since_ms.is_some(),
+                    Duration::from_secs(15),
+                )
+                .await;
+                assert_eq!(
+                    idle.background_tasks, 0,
+                    "auto-bg completion must decrement (matching task_id)"
+                );
+                assert!(idle.idle_since_ms.is_some());
+            })
+            .await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn monitor_increments_then_decrements_through_real_wiring() {
-        let handle = make_bg_tracking_handle();
-        let tracker = handle.activity_tracker().clone();
-        run_tool_in_session(
-            &handle,
-            "main",
-            "monitor",
-            serde_json::json!({ "command": "sleep 2", "description": "test monitor" }),
-        )
-        .await;
-        let busy = wait_until(
-            &tracker,
-            |s| s.background_tasks == 1,
-            Duration::from_secs(5),
-        )
-        .await;
-        assert_eq!(busy.background_tasks, 1, "a started monitor must increment");
-        let idle = wait_until(
-            &tracker,
-            |s| s.background_tasks == 0 && s.idle_since_ms.is_some(),
-            Duration::from_secs(15),
-        )
-        .await;
-        assert_eq!(
-            idle.background_tasks, 0,
-            "monitor completion must decrement (the previously-lost decrement)"
-        );
-        assert!(idle.idle_since_ms.is_some());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_bg_tracking_handle();
+                let tracker = handle.activity_tracker().clone();
+                run_tool_in_session(
+                    &handle,
+                    "main",
+                    "monitor",
+                    serde_json::json!({ "command": "sleep 2", "description": "test monitor" }),
+                )
+                .await;
+                let busy = wait_until(
+                    &tracker,
+                    |s| s.background_tasks == 1,
+                    Duration::from_secs(5),
+                )
+                .await;
+                assert_eq!(busy.background_tasks, 1, "a started monitor must increment");
+                let idle = wait_until(
+                    &tracker,
+                    |s| s.background_tasks == 0 && s.idle_since_ms.is_some(),
+                    Duration::from_secs(15),
+                )
+                .await;
+                assert_eq!(
+                    idle.background_tasks, 0,
+                    "monitor completion must decrement (the previously-lost decrement)"
+                );
+                assert!(idle.idle_since_ms.is_some());
+            })
+            .await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn concurrent_background_tasks_track_independently() {
+        let Some(_bg_env) =
+            crate::handle::tests::live_background_worker_env("bg_tracker_concurrent")
+        else {
+            return;
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
         run_tool_in_session(
@@ -1298,9 +1371,18 @@ mod tests {
             zero.idle_since_ms.is_some(),
             "idle restored only after the last ends"
         );
+            })
+            .await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn forked_child_background_task_feeds_tracker() {
+        let Some(_bg_env) = crate::handle::tests::live_background_worker_env("bg_tracker_forked")
+        else {
+            return;
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
         let mut cfg = crate::config::AgentSessionConfig::new("child");
@@ -1335,6 +1417,8 @@ mod tests {
             zero.background_tasks, 0,
             "the fork's bg task must decrement on completion"
         );
+            })
+            .await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn compose_session_notification_handle_covers_all_branches() {
@@ -1413,6 +1497,14 @@ mod tests {
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn update_tool_config_preserves_tracker_feed() {
+        let Some(_bg_env) =
+            crate::handle::tests::live_background_worker_env("bg_tracker_update_config")
+        else {
+            return;
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
         handle
@@ -1436,9 +1528,18 @@ mod tests {
             busy.background_tasks, 1,
             "a bg task after update_tool_config must still feed the tracker"
         );
+            })
+            .await;
     }
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn re_resolve_all_sessions_preserves_tracker_feed() {
+        let Some(_bg_env) = crate::handle::tests::live_background_worker_env("bg_tracker_resolve")
+        else {
+            return;
+        };
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
         let handle = make_bg_tracking_handle();
         let tracker = handle.activity_tracker().clone();
         let rebuilt = handle
@@ -1463,6 +1564,8 @@ mod tests {
             busy.background_tasks, 1,
             "a bg task after re_resolve_all_sessions must still feed the tracker"
         );
+            })
+            .await;
     }
     #[derive(Clone, Debug)]
     struct PathEchoStub {
@@ -1560,240 +1663,270 @@ mod tests {
     }
     #[tokio::test]
     async fn handle_call_virtualizes_inbound_outbound_and_progress() {
-        let handle = crate::handle::tests::make_handle();
-        let session = handle
-            .create_session_with_cwd("virt", None)
-            .expect("create virt session");
-        session.set_path_virtualization(
-            crate::path_virtualization::PathVirtualization::try_from_session_root(
-                "/workspace/conv-abc",
-            )
-            .expect("valid session root"),
-        );
-        let received = register_path_echo(&handle, "virt");
-        let handler = make_handler(&handle, "path_echo");
-        let (ctx, _call_id) = make_ctx("virt");
-        let (progress, out) = drain_terminal(
-            handler
-                .handle_call(ctx, serde_json::json!({ "path": "/workspace/foo.txt" }))
-                .await,
-        )
-        .await;
-        let inbound = received.lock().expect("lock");
-        assert_eq!(
-            inbound.as_ref().and_then(|v| v.get("path")),
-            Some(&serde_json::json!("/workspace/conv-abc/foo.txt")),
-            "inbound /workspace must resolve to the session root"
-        );
-        let dumped = out.value.to_string();
-        assert!(
-            dumped.contains("/workspace/out.txt"),
-            "outbound must rewrite the guest path: {dumped}"
-        );
-        assert!(
-            !dumped.contains("/workspace/conv-abc/"),
-            "outbound must not leak the real root: {dumped}"
-        );
-        match progress.first() {
-            Some(xai_tool_runtime::ToolProgress::Text { text }) => {
-                assert_eq!(text, "wrote /workspace/out.txt");
-            }
-            other => panic!("expected rewritten progress, got {other:?}"),
-        }
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let session = handle
+                    .create_session_with_cwd("virt", None)
+                    .expect("create virt session");
+                session.set_path_virtualization(
+                    crate::path_virtualization::PathVirtualization::try_from_session_root(
+                        "/workspace/conv-abc",
+                    )
+                    .expect("valid session root"),
+                );
+                let received = register_path_echo(&handle, "virt");
+                let handler = make_handler(&handle, "path_echo");
+                let (ctx, _call_id) = make_ctx("virt");
+                let (progress, out) = drain_terminal(
+                    handler
+                        .handle_call(ctx, serde_json::json!({ "path": "/workspace/foo.txt" }))
+                        .await,
+                )
+                .await;
+                let inbound = received.lock().expect("lock");
+                assert_eq!(
+                    inbound.as_ref().and_then(|v| v.get("path")),
+                    Some(&serde_json::json!("/workspace/conv-abc/foo.txt")),
+                    "inbound /workspace must resolve to the session root"
+                );
+                let dumped = out.value.to_string();
+                assert!(
+                    dumped.contains("/workspace/out.txt"),
+                    "outbound must rewrite the guest path: {dumped}"
+                );
+                assert!(
+                    !dumped.contains("/workspace/conv-abc/"),
+                    "outbound must not leak the real root: {dumped}"
+                );
+                match progress.first() {
+                    Some(xai_tool_runtime::ToolProgress::Text { text }) => {
+                        assert_eq!(text, "wrote /workspace/out.txt");
+                    }
+                    other => panic!("expected rewritten progress, got {other:?}"),
+                }
+            })
+            .await;
     }
     #[tokio::test]
     async fn handle_call_virtualizes_inbound_artifacts_alias() {
-        let handle = crate::handle::tests::make_handle();
-        let session = handle
-            .create_session_with_cwd("virt-art", None)
-            .expect("create session");
-        session.set_path_virtualization(
-            crate::path_virtualization::PathVirtualization::try_from_session_root(
-                "/workspace/conv-abc",
-            )
-            .expect("valid session root"),
-        );
-        let received = register_path_echo(&handle, "virt-art");
-        let handler = make_handler(&handle, "path_echo");
-        let (ctx, _call_id) = make_ctx("virt-art");
-        let (_progress, _out) = drain_terminal(
-            handler
-                .handle_call(
-                    ctx,
-                    serde_json::json!({ "path": "/workspace/artifacts/legacy.rs" }),
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let session = handle
+                    .create_session_with_cwd("virt-art", None)
+                    .expect("create session");
+                session.set_path_virtualization(
+                    crate::path_virtualization::PathVirtualization::try_from_session_root(
+                        "/workspace/conv-abc",
+                    )
+                    .expect("valid session root"),
+                );
+                let received = register_path_echo(&handle, "virt-art");
+                let handler = make_handler(&handle, "path_echo");
+                let (ctx, _call_id) = make_ctx("virt-art");
+                let (_progress, _out) = drain_terminal(
+                    handler
+                        .handle_call(
+                            ctx,
+                            serde_json::json!({ "path": "/workspace/artifacts/legacy.rs" }),
+                        )
+                        .await,
                 )
-                .await,
-        )
-        .await;
-        assert_eq!(
-            received
-                .lock()
-                .expect("lock")
-                .as_ref()
-                .and_then(|v| v.get("path")),
-            Some(&serde_json::json!("/workspace/conv-abc/legacy.rs")),
-            "inbound /workspace/artifacts must alias the session root"
-        );
+                .await;
+                assert_eq!(
+                    received
+                        .lock()
+                        .expect("lock")
+                        .as_ref()
+                        .and_then(|v| v.get("path")),
+                    Some(&serde_json::json!("/workspace/conv-abc/legacy.rs")),
+                    "inbound /workspace/artifacts must alias the session root"
+                );
+            })
+            .await;
     }
     #[tokio::test]
     async fn handle_call_leaves_outside_paths_unchanged() {
-        let handle = crate::handle::tests::make_handle();
-        let session = handle
-            .create_session_with_cwd("virt-out", None)
-            .expect("create session");
-        session.set_path_virtualization(
-            crate::path_virtualization::PathVirtualization::try_from_session_root(
-                "/workspace/conv-abc",
-            )
-            .expect("valid session root"),
-        );
-        let received = register_path_echo(&handle, "virt-out");
-        let handler = make_handler(&handle, "path_echo");
-        let (ctx, _call_id) = make_ctx("virt-out");
-        let (_progress, out) = drain_terminal(
-            handler
-                .handle_call(ctx, serde_json::json!({ "path": "/tmp/secret" }))
-                .await,
-        )
-        .await;
-        assert_eq!(
-            received
-                .lock()
-                .expect("lock")
-                .as_ref()
-                .and_then(|v| v.get("path")),
-            Some(&serde_json::json!("/tmp/secret")),
-            "paths outside the session root must not be rewritten inbound"
-        );
-        let dumped = out.value.to_string();
-        assert!(
-            dumped.contains("/workspace/out.txt"),
-            "outbound still rewrites the in-root guest path: {dumped}"
-        );
-        assert!(
-            !dumped.contains("/workspace/conv-abc/"),
-            "outbound must not leak the real root: {dumped}"
-        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let session = handle
+                    .create_session_with_cwd("virt-out", None)
+                    .expect("create session");
+                session.set_path_virtualization(
+                    crate::path_virtualization::PathVirtualization::try_from_session_root(
+                        "/workspace/conv-abc",
+                    )
+                    .expect("valid session root"),
+                );
+                let received = register_path_echo(&handle, "virt-out");
+                let handler = make_handler(&handle, "path_echo");
+                let (ctx, _call_id) = make_ctx("virt-out");
+                let (_progress, out) = drain_terminal(
+                    handler
+                        .handle_call(ctx, serde_json::json!({ "path": "/tmp/secret" }))
+                        .await,
+                )
+                .await;
+                assert_eq!(
+                    received
+                        .lock()
+                        .expect("lock")
+                        .as_ref()
+                        .and_then(|v| v.get("path")),
+                    Some(&serde_json::json!("/tmp/secret")),
+                    "paths outside the session root must not be rewritten inbound"
+                );
+                let dumped = out.value.to_string();
+                assert!(
+                    dumped.contains("/workspace/out.txt"),
+                    "outbound still rewrites the in-root guest path: {dumped}"
+                );
+                assert!(
+                    !dumped.contains("/workspace/conv-abc/"),
+                    "outbound must not leak the real root: {dumped}"
+                );
+            })
+            .await;
     }
     #[tokio::test]
     async fn handle_call_without_session_root_is_identity() {
-        let handle = crate::handle::tests::make_handle();
-        let received = register_path_echo(&handle, "main");
-        let handler = make_handler(&handle, "path_echo");
-        let (ctx, _call_id) = make_ctx("main");
-        let (_progress, out) = drain_terminal(
-            handler
-                .handle_call(ctx, serde_json::json!({ "path": "/workspace/foo.txt" }))
-                .await,
-        )
-        .await;
-        assert_eq!(
-            received
-                .lock()
-                .expect("lock")
-                .as_ref()
-                .and_then(|v| v.get("path")),
-            Some(&serde_json::json!("/workspace/foo.txt")),
-            "no session_root must not rewrite inbound"
-        );
-        let dumped = out.value.to_string();
-        assert!(
-            dumped.contains("/workspace/conv-abc/out.txt"),
-            "no session_root must not rewrite outbound: {dumped}"
-        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let received = register_path_echo(&handle, "main");
+                let handler = make_handler(&handle, "path_echo");
+                let (ctx, _call_id) = make_ctx("main");
+                let (_progress, out) = drain_terminal(
+                    handler
+                        .handle_call(ctx, serde_json::json!({ "path": "/workspace/foo.txt" }))
+                        .await,
+                )
+                .await;
+                assert_eq!(
+                    received
+                        .lock()
+                        .expect("lock")
+                        .as_ref()
+                        .and_then(|v| v.get("path")),
+                    Some(&serde_json::json!("/workspace/foo.txt")),
+                    "no session_root must not rewrite inbound"
+                );
+                let dumped = out.value.to_string();
+                assert!(
+                    dumped.contains("/workspace/conv-abc/out.txt"),
+                    "no session_root must not rewrite outbound: {dumped}"
+                );
+            })
+            .await;
     }
     #[tokio::test]
     async fn handle_call_clips_inbound_walk_outs_and_leaves_tmp() {
-        let handle = crate::handle::tests::make_handle();
-        let session = handle
-            .create_session_with_cwd("virt-walk", None)
-            .expect("create session");
-        session.set_path_virtualization(
-            crate::path_virtualization::PathVirtualization::try_from_session_root(
-                "/workspace/conv-abc",
-            )
-            .expect("valid session root"),
-        );
-        let received = register_path_echo(&handle, "virt-walk");
-        let handler = make_handler(&handle, "path_echo");
-        for (inbound, expected, why) in [
-            (
-                "/workspace/artifacts/../other-conv/secret",
-                "/workspace/conv-abc",
-                "artifacts .. walk-out must clip to real_root",
-            ),
-            (
-                "/workspace/conv-abc/../other",
-                "/workspace/conv-abc",
-                "already-guest .. walk-out must clip to real_root",
-            ),
-            (
-                "/workspace/../other-conv/secret",
-                "/workspace/conv-abc",
-                "visible-root .. walk-out must clip to real_root",
-            ),
-            (
-                "/tmp/../etc/passwd",
-                "/tmp/../etc/passwd",
-                "/tmp identity must stay unchanged",
-            ),
-            (
-                "/home/user/../other",
-                "/home/user/../other",
-                "/home identity must stay unchanged",
-            ),
-        ] {
-            let (ctx, _call_id) = make_ctx("virt-walk");
-            let (_progress, _out) = drain_terminal(
-                handler
-                    .handle_call(ctx, serde_json::json!({ "path": inbound }))
-                    .await,
-            )
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let session = handle
+                    .create_session_with_cwd("virt-walk", None)
+                    .expect("create session");
+                session.set_path_virtualization(
+                    crate::path_virtualization::PathVirtualization::try_from_session_root(
+                        "/workspace/conv-abc",
+                    )
+                    .expect("valid session root"),
+                );
+                let received = register_path_echo(&handle, "virt-walk");
+                let handler = make_handler(&handle, "path_echo");
+                for (inbound, expected, why) in [
+                    (
+                        "/workspace/artifacts/../other-conv/secret",
+                        "/workspace/conv-abc",
+                        "artifacts .. walk-out must clip to real_root",
+                    ),
+                    (
+                        "/workspace/conv-abc/../other",
+                        "/workspace/conv-abc",
+                        "already-guest .. walk-out must clip to real_root",
+                    ),
+                    (
+                        "/workspace/../other-conv/secret",
+                        "/workspace/conv-abc",
+                        "visible-root .. walk-out must clip to real_root",
+                    ),
+                    (
+                        "/tmp/../etc/passwd",
+                        "/tmp/../etc/passwd",
+                        "/tmp identity must stay unchanged",
+                    ),
+                    (
+                        "/home/user/../other",
+                        "/home/user/../other",
+                        "/home identity must stay unchanged",
+                    ),
+                ] {
+                    let (ctx, _call_id) = make_ctx("virt-walk");
+                    let (_progress, _out) = drain_terminal(
+                        handler
+                            .handle_call(ctx, serde_json::json!({ "path": inbound }))
+                            .await,
+                    )
+                    .await;
+                    assert_eq!(
+                        received
+                            .lock()
+                            .expect("lock")
+                            .as_ref()
+                            .and_then(|v| v.get("path")),
+                        Some(&serde_json::json!(expected)),
+                        "{why}"
+                    );
+                }
+            })
             .await;
-            assert_eq!(
-                received
-                    .lock()
-                    .expect("lock")
-                    .as_ref()
-                    .and_then(|v| v.get("path")),
-                Some(&serde_json::json!(expected)),
-                "{why}"
-            );
-        }
     }
     #[tokio::test]
     async fn handle_call_virtualizes_inbound_other_conv_under_visible_root() {
-        let handle = crate::handle::tests::make_handle();
-        let session = handle
-            .create_session_with_cwd("virt-other", None)
-            .expect("create session");
-        session.set_path_virtualization(
-            crate::path_virtualization::PathVirtualization::try_from_session_root(
-                "/workspace/conv-abc",
-            )
-            .expect("valid session root"),
-        );
-        let received = register_path_echo(&handle, "virt-other");
-        let handler = make_handler(&handle, "path_echo");
-        let (ctx, _call_id) = make_ctx("virt-other");
-        let (_progress, _out) = drain_terminal(
-            handler
-                .handle_call(
-                    ctx,
-                    serde_json::json!({ "path": "/workspace/other-conv/file" }),
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let session = handle
+                    .create_session_with_cwd("virt-other", None)
+                    .expect("create session");
+                session.set_path_virtualization(
+                    crate::path_virtualization::PathVirtualization::try_from_session_root(
+                        "/workspace/conv-abc",
+                    )
+                    .expect("valid session root"),
+                );
+                let received = register_path_echo(&handle, "virt-other");
+                let handler = make_handler(&handle, "path_echo");
+                let (ctx, _call_id) = make_ctx("virt-other");
+                let (_progress, _out) = drain_terminal(
+                    handler
+                        .handle_call(
+                            ctx,
+                            serde_json::json!({ "path": "/workspace/other-conv/file" }),
+                        )
+                        .await,
                 )
-                .await,
-        )
-        .await;
-        assert_eq!(
-            received
-                .lock()
-                .expect("lock")
-                .as_ref()
-                .and_then(|v| v.get("path")),
-            Some(&serde_json::json!("/workspace/conv-abc/other-conv/file")),
-            "inbound /workspace/other-conv must map into this session root"
-        );
+                .await;
+                assert_eq!(
+                    received
+                        .lock()
+                        .expect("lock")
+                        .as_ref()
+                        .and_then(|v| v.get("path")),
+                    Some(&serde_json::json!("/workspace/conv-abc/other-conv/file")),
+                    "inbound /workspace/other-conv must map into this session root"
+                );
+            })
+            .await;
     }
     #[derive(Debug)]
     struct PathErrorStub;
@@ -1836,44 +1969,49 @@ mod tests {
     }
     #[tokio::test]
     async fn handle_call_rewrites_tool_error_paths() {
-        use futures::StreamExt;
-        let handle = crate::handle::tests::make_handle();
-        let session = handle
-            .create_session_with_cwd("virt-err", None)
-            .expect("create session");
-        session.set_path_virtualization(
-            crate::path_virtualization::PathVirtualization::try_from_session_root(
-                "/workspace/conv-abc",
-            )
-            .expect("valid session root"),
-        );
-        session
-            .toolset()
-            .register_tool(
-                "path_error".to_owned(),
-                PathErrorStub,
-                Some(serde_json::json!({"type": "object", "properties": {}})),
-            )
-            .expect("register path_error");
-        let handler = make_handler(&handle, "path_error");
-        let (ctx, _call_id) = make_ctx("virt-err");
-        let stream = handler.handle_call(ctx, serde_json::json!({})).await;
-        let mut inner = stream;
-        let err = loop {
-            match inner.next().await {
-                Some(ToolStreamItem::Terminal(Err(e))) => break e,
-                Some(ToolStreamItem::Progress(_)) => {}
-                Some(ToolStreamItem::Terminal(Ok(_))) => {
-                    panic!("expected error terminal")
-                }
-                None => panic!("stream ended"),
-            }
-        };
-        assert_eq!(err.detail, "missing /workspace/gone.txt");
-        assert_eq!(
-            err.details.as_ref().and_then(|d| d.get("path")),
-            Some(&serde_json::json!("/workspace/gone.txt"))
-        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                use futures::StreamExt;
+                let handle = crate::handle::tests::make_handle();
+                let session = handle
+                    .create_session_with_cwd("virt-err", None)
+                    .expect("create session");
+                session.set_path_virtualization(
+                    crate::path_virtualization::PathVirtualization::try_from_session_root(
+                        "/workspace/conv-abc",
+                    )
+                    .expect("valid session root"),
+                );
+                session
+                    .toolset()
+                    .register_tool(
+                        "path_error".to_owned(),
+                        PathErrorStub,
+                        Some(serde_json::json!({"type": "object", "properties": {}})),
+                    )
+                    .expect("register path_error");
+                let handler = make_handler(&handle, "path_error");
+                let (ctx, _call_id) = make_ctx("virt-err");
+                let stream = handler.handle_call(ctx, serde_json::json!({})).await;
+                let mut inner = stream;
+                let err = loop {
+                    match inner.next().await {
+                        Some(ToolStreamItem::Terminal(Err(e))) => break e,
+                        Some(ToolStreamItem::Progress(_)) => {}
+                        Some(ToolStreamItem::Terminal(Ok(_))) => {
+                            panic!("expected error terminal")
+                        }
+                        None => panic!("stream ended"),
+                    }
+                };
+                assert_eq!(err.detail, "missing /workspace/gone.txt");
+                assert_eq!(
+                    err.details.as_ref().and_then(|d| d.get("path")),
+                    Some(&serde_json::json!("/workspace/gone.txt"))
+                );
+            })
+            .await;
     }
     #[derive(Debug)]
     struct BashCcoPathStub;
@@ -1929,46 +2067,51 @@ mod tests {
     }
     #[tokio::test]
     async fn handle_call_rewrites_bash_cco_paths() {
-        let handle = crate::handle::tests::make_handle();
-        let session = handle
-            .create_session_with_cwd("virt-cco", None)
-            .expect("create session");
-        session.set_path_virtualization(
-            crate::path_virtualization::PathVirtualization::try_from_session_root(
-                "/workspace/conv-abc",
-            )
-            .expect("valid session root"),
-        );
-        session
-            .toolset()
-            .register_tool(
-                "bash_cco_path".to_owned(),
-                BashCcoPathStub,
-                Some(serde_json::json!({"type": "object", "properties": {}})),
-            )
-            .expect("register bash_cco_path");
-        let handler = make_handler(&handle, "bash_cco_path");
-        let (ctx, _call_id) = make_ctx("virt-cco");
-        let stream = handler.handle_call(ctx, serde_json::json!({})).await;
-        let typed = crate::handle::tests::drain_terminal_ok(stream).await;
-        let resp = typed
-            .chat_completion_output
-            .as_ref()
-            .expect("bash CCO must be present");
-        let cer = resp
-            .result
-            .as_ref()
-            .and_then(|r| r.code_execution_result.as_ref())
-            .expect("code_execution_result");
-        assert_eq!(cer.stdout, "/workspace/out.txt");
-        assert!(
-            !cer.stdout.contains("/workspace/conv-abc"),
-            "CCO stdout must not leak the real root"
-        );
-        let dumped = typed.value.to_string();
-        assert!(
-            !dumped.contains("/workspace/conv-abc"),
-            "CCO value JSON must not leak the real root: {dumped}"
-        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = crate::handle::tests::make_handle();
+                let session = handle
+                    .create_session_with_cwd("virt-cco", None)
+                    .expect("create session");
+                session.set_path_virtualization(
+                    crate::path_virtualization::PathVirtualization::try_from_session_root(
+                        "/workspace/conv-abc",
+                    )
+                    .expect("valid session root"),
+                );
+                session
+                    .toolset()
+                    .register_tool(
+                        "bash_cco_path".to_owned(),
+                        BashCcoPathStub,
+                        Some(serde_json::json!({"type": "object", "properties": {}})),
+                    )
+                    .expect("register bash_cco_path");
+                let handler = make_handler(&handle, "bash_cco_path");
+                let (ctx, _call_id) = make_ctx("virt-cco");
+                let stream = handler.handle_call(ctx, serde_json::json!({})).await;
+                let typed = crate::handle::tests::drain_terminal_ok(stream).await;
+                let resp = typed
+                    .chat_completion_output
+                    .as_ref()
+                    .expect("bash CCO must be present");
+                let cer = resp
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.code_execution_result.as_ref())
+                    .expect("code_execution_result");
+                assert_eq!(cer.stdout, "/workspace/out.txt");
+                assert!(
+                    !cer.stdout.contains("/workspace/conv-abc"),
+                    "CCO stdout must not leak the real root"
+                );
+                let dumped = typed.value.to_string();
+                assert!(
+                    !dumped.contains("/workspace/conv-abc"),
+                    "CCO value JSON must not leak the real root: {dumped}"
+                );
+            })
+            .await;
     }
 }

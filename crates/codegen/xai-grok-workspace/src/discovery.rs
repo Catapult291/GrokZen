@@ -339,12 +339,17 @@ mod tests {
         .unwrap();
 
         let files = discover_agents_md(tmp.path()).await;
+        // Compare path components: the product reports the native separator on
+        // Windows, so a hardcoded `/`-joined suffix would never match there.
+        let suffix = Path::new(".cursor")
+            .join("rules")
+            .join("xyzzy-discover-agents-md-test.md");
         let rule = files
             .iter()
             .find(|f| {
                 f["file_path"]
                     .as_str()
-                    .is_some_and(|p| p.ends_with("/.cursor/rules/xyzzy-discover-agents-md-test.md"))
+                    .is_some_and(|p| Path::new(p).ends_with(&suffix))
             })
             .expect("should discover the rules file");
         let content = rule["content"].as_str().unwrap();

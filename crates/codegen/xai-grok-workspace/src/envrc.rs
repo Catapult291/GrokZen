@@ -595,6 +595,7 @@ mod tests {
     use std::fs;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
     #[test]
     fn test_simple_export() {
         let dir = TempDir::new().unwrap();
@@ -610,6 +611,7 @@ mod tests {
         assert!(load_envrc_with_timeout(dir.path(), Duration::from_secs(10)).is_none());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_path_add() {
         let dir = TempDir::new().unwrap();

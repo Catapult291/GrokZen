@@ -384,49 +384,59 @@ mod tests {
 
     #[tokio::test]
     async fn read_write_within_root_ok() {
-        let ws = crate::handle::tests::make_confining_handle();
-        let root = ws.root_cwd().unwrap();
-        FsWriteFileReq {
-            path: "sub/data.txt".into(),
-            cwd: Some(root.clone()),
-            content: "hello".into(),
-            create_dirs: true,
-        }
-        .execute(&ws, None)
-        .await
-        .expect("in-root write must succeed");
-        let data = FsReadFileReq {
-            path: "sub/data.txt".into(),
-            cwd: Some(root.clone()),
-            offset: None,
-            length: None,
-            max_bytes: 1 << 20,
-            encoding: FsReadEncoding::Utf8,
-        }
-        .execute(&ws, None)
-        .await
-        .expect("in-root read must succeed");
-        assert_eq!(data.content, "hello");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = crate::handle::tests::make_confining_handle();
+                let root = ws.root_cwd().unwrap();
+                FsWriteFileReq {
+                    path: "sub/data.txt".into(),
+                    cwd: Some(root.clone()),
+                    content: "hello".into(),
+                    create_dirs: true,
+                }
+                .execute(&ws, None)
+                .await
+                .expect("in-root write must succeed");
+                let data = FsReadFileReq {
+                    path: "sub/data.txt".into(),
+                    cwd: Some(root.clone()),
+                    offset: None,
+                    length: None,
+                    max_bytes: 1 << 20,
+                    encoding: FsReadEncoding::Utf8,
+                }
+                .execute(&ws, None)
+                .await
+                .expect("in-root read must succeed");
+                assert_eq!(data.content, "hello");
+            })
+            .await;
     }
 
     #[tokio::test]
     async fn read_file_rejects_absolute_escape() {
-        let ws = crate::handle::tests::make_confining_handle();
-        let err = FsReadFileReq {
-            path: "/etc/passwd".into(),
-            cwd: None,
-            offset: None,
-            length: None,
-            max_bytes: 1 << 20,
-            encoding: FsReadEncoding::Utf8,
-        }
-        .execute(&ws, None)
-        .await
-        .expect_err("absolute escape must be rejected");
-        assert!(
-            err.to_string().contains("workspace root"),
-            "unexpected error: {err}"
-        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ws = crate::handle::tests::make_confining_handle();
+                let err = FsReadFileReq {
+                    path: "/etc/passwd".into(),
+                    cwd: None,
+                    offset: None,
+                    length: None,
+                    max_bytes: 1 << 20,
+                    encoding: FsReadEncoding::Utf8,
+                }
+                .execute(&ws, None)
+                .await
+                .expect_err("absolute escape must be rejected");
+                assert!(
+                    err.to_string().contains("workspace root"),
+                    "unexpected error: {err}"
+                );
+            })
+            .await;
     }
 
     #[tokio::test]

@@ -1916,6 +1916,10 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = crate::TestEnvGuard::set("HOME", home.path());
+        // Windows resolves the home directory from USERPROFILE, not HOME, so
+        // redirecting only HOME would leave the real profile in play.
+        #[cfg(windows)]
+        let _profile = crate::TestEnvGuard::set("USERPROFILE", home.path());
         let _unset_grok = crate::TestEnvGuard::unset("GROK_HOME");
         let start = home.path().join("src").join("org").join("app");
         let dirs = repos_manifest_search_dirs(&start);
@@ -1935,6 +1939,9 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = crate::TestEnvGuard::set("HOME", home.path());
+        // See `repos_manifest_search_dirs_skips_user_global_grok_home`.
+        #[cfg(windows)]
+        let _profile = crate::TestEnvGuard::set("USERPROFILE", home.path());
         let _unset_grok = crate::TestEnvGuard::unset("GROK_HOME");
         let global = RepoManifest::new(vec![ProvisionedRepo {
             name: "global".into(),
@@ -1969,37 +1976,42 @@ mod tests {
     /// Without `end_local_session` that session (and everything it holds) leaks for the life of the process.
     #[tokio::test]
     async fn end_local_session_drops_bound_toolset() {
-        let ops = WorkspaceOps::for_test();
-        let WorkspaceOps::Local { handle } = &ops else {
-            unreachable!("for_test builds a local handle");
-        };
-        let sid = "sess-teardown";
-        let toolset = std::sync::Arc::new(
-            xai_grok_tools::registry::types::FinalizedToolset::empty_for_test(),
-        );
-        let weak = std::sync::Arc::downgrade(&toolset);
-        ops.bind_local_session(
-            sid,
-            handle.root_cwd().unwrap(),
-            xai_hunk_tracker::HunkTrackerHandle::noop(),
-            toolset,
-            None,
-        )
-        .expect("bind should succeed");
-        assert!(handle.session(sid).is_some(), "session must be bound");
-        assert!(
-            weak.upgrade().is_some(),
-            "workspace session must hold the toolset"
-        );
-        ops.end_local_session(sid);
-        assert!(
-            handle.session(sid).is_none(),
-            "end_local_session must remove the workspace session"
-        );
-        assert!(
-            weak.upgrade().is_none(),
-            "end_local_session must drop the toolset (no leaked holder)"
-        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let ops = WorkspaceOps::for_test();
+                let WorkspaceOps::Local { handle } = &ops else {
+                    unreachable!("for_test builds a local handle");
+                };
+                let sid = "sess-teardown";
+                let toolset = std::sync::Arc::new(
+                    xai_grok_tools::registry::types::FinalizedToolset::empty_for_test(),
+                );
+                let weak = std::sync::Arc::downgrade(&toolset);
+                ops.bind_local_session(
+                    sid,
+                    handle.root_cwd().unwrap(),
+                    xai_hunk_tracker::HunkTrackerHandle::noop(),
+                    toolset,
+                    None,
+                )
+                .expect("bind should succeed");
+                assert!(handle.session(sid).is_some(), "session must be bound");
+                assert!(
+                    weak.upgrade().is_some(),
+                    "workspace session must hold the toolset"
+                );
+                ops.end_local_session(sid);
+                assert!(
+                    handle.session(sid).is_none(),
+                    "end_local_session must remove the workspace session"
+                );
+                assert!(
+                    weak.upgrade().is_none(),
+                    "end_local_session must drop the toolset (no leaked holder)"
+                );
+            })
+            .await;
     }
     #[test]
     fn hunk_action_response_round_trip() {
@@ -2290,59 +2302,89 @@ mod tests {
     use crate::handle::tests::make_handle;
     #[tokio::test]
     async fn execute_hunk_get_all_file_contents_returns_empty_for_fresh_tracker() {
-        let handle = make_handle();
-        let op_result = HunkGetAllFileContentsReq {}
-            .execute(&handle, Some("main"))
-            .await
-            .expect("execute should succeed");
-        assert!(op_result.is_empty());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let op_result = HunkGetAllFileContentsReq {}
+                    .execute(&handle, Some("main"))
+                    .await
+                    .expect("execute should succeed");
+                assert!(op_result.is_empty());
+            })
+            .await;
     }
     #[tokio::test]
     async fn execute_hunk_get_session_summary_returns_value() {
-        let handle = make_handle();
-        let op_result = HunkGetSessionSummaryReq {}
-            .execute(&handle, Some("main"))
-            .await
-            .expect("execute should succeed");
-        let json = serde_json::to_value(&op_result).unwrap();
-        assert!(json.is_object() || json.is_null());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let op_result = HunkGetSessionSummaryReq {}
+                    .execute(&handle, Some("main"))
+                    .await
+                    .expect("execute should succeed");
+                let json = serde_json::to_value(&op_result).unwrap();
+                assert!(json.is_object() || json.is_null());
+            })
+            .await;
     }
     #[tokio::test]
     async fn execute_hunk_get_all_hunks_returns_empty_for_fresh_tracker() {
-        let handle = make_handle();
-        let op_result = HunkGetAllHunksReq {}
-            .execute(&handle, Some("main"))
-            .await
-            .expect("execute should succeed");
-        assert!(op_result.is_empty());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let op_result = HunkGetAllHunksReq {}
+                    .execute(&handle, Some("main"))
+                    .await
+                    .expect("execute should succeed");
+                assert!(op_result.is_empty());
+            })
+            .await;
     }
     #[tokio::test]
     async fn execute_hunk_get_staged_files_returns_empty_for_fresh_tracker() {
-        let handle = make_handle();
-        let op_result = HunkGetStagedFilesReq {}
-            .execute(&handle, Some("main"))
-            .await
-            .expect("execute should succeed");
-        assert!(op_result.is_empty());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let op_result = HunkGetStagedFilesReq {}
+                    .execute(&handle, Some("main"))
+                    .await
+                    .expect("execute should succeed");
+                assert!(op_result.is_empty());
+            })
+            .await;
     }
     #[tokio::test]
     async fn execute_hunk_get_filtered_hunks_returns_empty_for_fresh_tracker() {
-        let handle = make_handle();
-        let op_result = HunkGetFilteredHunksReq::default()
-            .execute(&handle, Some("main"))
-            .await
-            .expect("execute should succeed");
-        assert!(op_result.hunks.is_empty());
-        assert_eq!(op_result.total, 0);
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let op_result = HunkGetFilteredHunksReq::default()
+                    .execute(&handle, Some("main"))
+                    .await
+                    .expect("execute should succeed");
+                assert!(op_result.hunks.is_empty());
+                assert_eq!(op_result.total, 0);
+            })
+            .await;
     }
     #[tokio::test]
     async fn execute_hunk_get_file_summaries_returns_empty_for_fresh_tracker() {
-        let handle = make_handle();
-        let op_result = HunkGetFileSummariesReq {}
-            .execute(&handle, Some("main"))
-            .await
-            .expect("execute should succeed");
-        assert!(op_result.is_empty());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let op_result = HunkGetFileSummariesReq {}
+                    .execute(&handle, Some("main"))
+                    .await
+                    .expect("execute should succeed");
+                assert!(op_result.is_empty());
+            })
+            .await;
     }
     fn test_fuzzy_open_req() -> FuzzyOpenReq {
         FuzzyOpenReq {
@@ -2355,57 +2397,77 @@ mod tests {
     }
     #[tokio::test]
     async fn execute_fuzzy_open_returns_search_id() {
-        let handle = make_handle();
-        let search_id = test_fuzzy_open_req()
-            .execute(&handle, None)
-            .await
-            .expect("execute should succeed");
-        assert!(!search_id.is_empty());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let search_id = test_fuzzy_open_req()
+                    .execute(&handle, None)
+                    .await
+                    .expect("execute should succeed");
+                assert!(!search_id.is_empty());
+            })
+            .await;
     }
     #[tokio::test]
     async fn execute_fuzzy_close_nonexistent_returns_false() {
-        let handle = make_handle();
-        let closed = FuzzyCloseReq {
-            search_id: "nonexistent".into(),
-        }
-        .execute(&handle, None)
-        .await
-        .expect("execute should succeed");
-        assert!(!closed);
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let closed = FuzzyCloseReq {
+                    search_id: "nonexistent".into(),
+                }
+                .execute(&handle, None)
+                .await
+                .expect("execute should succeed");
+                assert!(!closed);
+            })
+            .await;
     }
     #[tokio::test]
     async fn execute_fuzzy_open_close_parity() {
-        let handle = make_handle();
-        let search_id = test_fuzzy_open_req()
-            .execute(&handle, None)
-            .await
-            .expect("open");
-        let closed = FuzzyCloseReq {
-            search_id: search_id.clone(),
-        }
-        .execute(&handle, None)
-        .await
-        .expect("close");
-        assert!(closed, "search we just opened should close");
-        let closed_again = FuzzyCloseReq { search_id }
-            .execute(&handle, None)
-            .await
-            .expect("close2");
-        assert!(!closed_again, "second close should return false");
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let search_id = test_fuzzy_open_req()
+                    .execute(&handle, None)
+                    .await
+                    .expect("open");
+                let closed = FuzzyCloseReq {
+                    search_id: search_id.clone(),
+                }
+                .execute(&handle, None)
+                .await
+                .expect("close");
+                assert!(closed, "search we just opened should close");
+                let closed_again = FuzzyCloseReq { search_id }
+                    .execute(&handle, None)
+                    .await
+                    .expect("close2");
+                assert!(!closed_again, "second close should return false");
+            })
+            .await;
     }
     #[tokio::test]
     async fn execute_fuzzy_change_nonexistent_returns_false() {
-        let handle = make_handle();
-        let found = FuzzyChangeReq {
-            search_id: "nonexistent".into(),
-            query: "test".into(),
-            dirs_only: false,
-            limit: None,
-        }
-        .execute(&handle, None)
-        .await
-        .expect("execute should succeed");
-        assert!(!found);
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let found = FuzzyChangeReq {
+                    search_id: "nonexistent".into(),
+                    query: "test".into(),
+                    dirs_only: false,
+                    limit: None,
+                }
+                .execute(&handle, None)
+                .await
+                .expect("execute should succeed");
+                assert!(!found);
+            })
+            .await;
     }
     #[test]
     fn put_file_entry_defaults() {
@@ -2540,11 +2602,16 @@ mod tests {
     /// Otherwise a second window would query the first window's index.
     #[tokio::test]
     async fn index_root_for_uses_explicit_per_window_root() {
-        let handle = make_handle();
-        let window_a = std::path::Path::new("/nonexistent/window-a");
-        let window_b = std::path::Path::new("/nonexistent/window-b");
-        assert_eq!(index_root_for(&handle, Some(window_a)).unwrap(), window_a);
-        assert_eq!(index_root_for(&handle, Some(window_b)).unwrap(), window_b);
-        assert_ne!(index_root_for(&handle, None).unwrap(), window_a);
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let handle = make_handle();
+                let window_a = std::path::Path::new("/nonexistent/window-a");
+                let window_b = std::path::Path::new("/nonexistent/window-b");
+                assert_eq!(index_root_for(&handle, Some(window_a)).unwrap(), window_a);
+                assert_eq!(index_root_for(&handle, Some(window_b)).unwrap(), window_b);
+                assert_ne!(index_root_for(&handle, None).unwrap(), window_a);
+            })
+            .await;
     }
 }

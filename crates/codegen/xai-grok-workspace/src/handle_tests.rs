@@ -1064,6 +1064,18 @@ pub(crate) fn live_background_worker_env(tag: &str) -> Option<crate::LockedTestE
             .set("GROK_BACKGROUND_TASK_DIR", &root),
     )
 }
+/// Redirect the durable-task registry to a root private to `tag`, so the test
+/// never observes the machine's real `~/.grok/background-tasks`.
+///
+/// Unlike [`live_background_worker_env`] this needs no built worker binary: it
+/// is for tests that only *read* the registry (completed-task notifications
+/// injected into a session) rather than starting a background command.
+pub(crate) fn isolated_background_task_dir(tag: &str) -> crate::LockedTestEnv {
+    let root = std::env::temp_dir().join(format!("grok-background-{}-{tag}", std::process::id()));
+    let env = crate::LockedTestEnv::lock();
+    let _ = std::fs::remove_dir_all(&root);
+    env.set("GROK_BACKGROUND_TASK_DIR", &root)
+}
 /// A minimal bash-kind [`TerminalRunRequest`] for `command`, writing output under `out_dir`.
 ///
 /// [`TerminalRunRequest`]: xai_grok_tools::computer::types::TerminalRunRequest
