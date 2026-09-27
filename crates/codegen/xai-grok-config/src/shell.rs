@@ -946,7 +946,10 @@ mod tests {
     /// The default must stay Git Bash: niubash is opt-in and never assumed present.
     #[test]
     fn git_bash_remains_the_product_default() {
-        assert_eq!(WindowsShellPreference::default(), WindowsShellPreference::GitBash);
+        assert_eq!(
+            WindowsShellPreference::default(),
+            WindowsShellPreference::GitBash
+        );
         assert_eq!(WindowsShellPreference::default().as_canonical(), "git-bash");
     }
 
@@ -962,7 +965,11 @@ mod tests {
             WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()).path_guidance(),
             PathGuidance::DialectResolving
         );
-        for shell in [WindowsShell::Pwsh, WindowsShell::PowerShell, WindowsShell::Cmd] {
+        for shell in [
+            WindowsShell::Pwsh,
+            WindowsShell::PowerShell,
+            WindowsShell::Cmd,
+        ] {
             assert_eq!(shell.path_guidance(), PathGuidance::NoTranslationLayer);
         }
     }
@@ -1112,9 +1119,7 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn niubash_chains_with_double_ampersand() {
-        assert!(
-            WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()).supports_chain_operator()
-        );
+        assert!(WindowsShell::Niu("C:\\tools\\niubash\\niu.exe".into()).supports_chain_operator());
     }
 
     /// Every Windows shell variant, so env tests cover all of them without
@@ -1181,8 +1186,16 @@ mod tests {
             &WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into()),
             "echo hi",
         );
-        assert!(inv.remove_env.contains(&"MSYS_NO_PATHCONV"), "{:?}", inv.remove_env);
-        assert!(inv.remove_env.contains(&"MSYS2_ARG_CONV_EXCL"), "{:?}", inv.remove_env);
+        assert!(
+            inv.remove_env.contains(&"MSYS_NO_PATHCONV"),
+            "{:?}",
+            inv.remove_env
+        );
+        assert!(
+            inv.remove_env.contains(&"MSYS2_ARG_CONV_EXCL"),
+            "{:?}",
+            inv.remove_env
+        );
     }
 
     /// The Bash family runs one `-c <command>` argv node; niubash is invoked exactly
@@ -1269,7 +1282,10 @@ mod tests {
     #[cfg(not(unix))]
     fn staged_script_path(wrapper: &str) -> std::path::PathBuf {
         const MARKER: &str = "__grok_staged_cmd='";
-        let start = wrapper.find(MARKER).expect("wrapper assigns the script path") + MARKER.len();
+        let start = wrapper
+            .find(MARKER)
+            .expect("wrapper assigns the script path")
+            + MARKER.len();
         let end = start + wrapper[start..].find('\'').expect("assignment is closed");
         std::path::PathBuf::from(&wrapper[start..end])
     }
@@ -1282,9 +1298,16 @@ mod tests {
         let git_bash = WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into());
         assert!(inline_command_ceiling(&git_bash) < 8_192);
         assert!(inline_command_ceiling(&WindowsShell::Niu("C:\\tools\\niu.exe".into())) < 32_767);
-        for shell in [WindowsShell::Pwsh, WindowsShell::PowerShell, WindowsShell::Cmd] {
+        for shell in [
+            WindowsShell::Pwsh,
+            WindowsShell::PowerShell,
+            WindowsShell::Cmd,
+        ] {
             assert_eq!(inline_command_ceiling(&shell), usize::MAX, "{shell:?}");
-            assert!(stage_command_script(&shell, &"x".repeat(40_000)).is_none(), "{shell:?}");
+            assert!(
+                stage_command_script(&shell, &"x".repeat(40_000)).is_none(),
+                "{shell:?}"
+            );
         }
     }
 
@@ -1295,7 +1318,8 @@ mod tests {
     fn staged_wrapper_sources_and_removes_the_script() {
         let shell = WindowsShell::GitBash("C:\\Program Files\\Git\\bin\\bash.exe".into());
         let command = format!("echo BEGIN; echo {} TAIL", "x".repeat(9_000));
-        let wrapper = stage_command_script(&shell, &command).expect("Git Bash stages long commands");
+        let wrapper =
+            stage_command_script(&shell, &command).expect("Git Bash stages long commands");
 
         let script = staged_script_path(&wrapper);
         assert_eq!(
@@ -1338,7 +1362,10 @@ mod tests {
             return; // pwsh / cmd.exe arm: inline is the only form available
         }
         let inv = shell_command_argv(&format!("echo {}", "x".repeat(ceiling + 1)));
-        let staged = inv.args.last().expect("invocation ends with the command text");
+        let staged = inv
+            .args
+            .last()
+            .expect("invocation ends with the command text");
         assert!(staged.contains("__grok_staged_cmd"), "{shell:?}: {staged}");
         let _ = std::fs::remove_file(staged_script_path(staged));
     }
