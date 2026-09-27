@@ -465,7 +465,8 @@ impl SessionContextFactory for WorkspaceSessionContextFactory {
     }
     fn build_terminal_backend(&self) -> crate::config::SessionTerminalBackend {
         crate::config::SessionTerminalBackend::local_persistent(
-            xai_grok_tools::computer::local::LocalTerminalBackend::with_persistent_background_tasks(),
+            xai_grok_tools::computer::local::LocalTerminalBackend::with_persistent_background_tasks(
+            ),
         )
     }
     fn registry_builder(&self) -> ToolRegistryBuilder {
@@ -649,72 +650,83 @@ mod tests {
     }
     #[tokio::test]
     async fn resolve_session_toolset_empty_mcp_snapshot_is_noop_for_baseline() {
-        let factory = factory_for_test();
-        let cwd = PathBuf::from("/tmp");
-        let baseline = test_support::baseline_config();
-        let baseline_ids: Vec<String> = baseline.tools.iter().map(|t| t.id.clone()).collect();
-        let (eff, ts, _backend) = resolve_session_toolset(
-            baseline,
-            CapabilityMode::ReadWrite,
-            &[],
-            &[],
-            cwd,
-            empty_env(),
-            "main",
-            factory.as_ref(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("resolve");
-        assert_eq!(
-            eff.tools
-                .iter()
-                .map(|t| t.id.clone())
-                .collect::<Vec<String>>(),
-            baseline_ids
-        );
-        assert!(!ts.tool_definitions().is_empty());
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let factory = factory_for_test();
+                let cwd = PathBuf::from("/tmp");
+                let baseline = test_support::baseline_config();
+                let baseline_ids: Vec<String> =
+                    baseline.tools.iter().map(|t| t.id.clone()).collect();
+                let (eff, ts, _backend) = resolve_session_toolset(
+                    baseline,
+                    CapabilityMode::ReadWrite,
+                    &[],
+                    &[],
+                    cwd,
+                    empty_env(),
+                    "main",
+                    factory.as_ref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("resolve");
+                assert_eq!(
+                    eff.tools
+                        .iter()
+                        .map(|t| t.id.clone())
+                        .collect::<Vec<String>>(),
+                    baseline_ids
+                );
+                assert!(!ts.tool_definitions().is_empty());
+            })
+            .await;
     }
     #[tokio::test]
     async fn resolve_session_toolset_mcp_merge_dedup_by_id_baseline_wins() {
-        let factory = factory_for_test();
-        let baseline = ToolServerConfig {
-            tools: vec![test_support::tc(
-                "GrokBuild:read_file",
-                Some(ToolKind::Read),
-            )],
-            behavior_preset: None,
-        };
-        let mut mcp_dup = test_support::tc("GrokBuild:read_file", Some(ToolKind::Read));
-        mcp_dup.name_override = Some("mcp_read".into());
-        let snapshot = vec![mcp_dup];
-        let (_eff, ts, _backend) = resolve_session_toolset(
-            baseline,
-            CapabilityMode::ReadWrite,
-            &snapshot,
-            &[],
-            PathBuf::from("/tmp"),
-            empty_env(),
-            "main",
-            factory.as_ref(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("resolve");
-        let defs = ts.tool_definitions();
-        let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
-        assert!(
-            names.contains(&"read_file"),
-            "baseline read_file must survive: {names:?}"
-        );
-        assert!(
-            !names.contains(&"mcp_read"),
-            "MCP duplicate must be skipped: {names:?}"
-        );
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let factory = factory_for_test();
+                let baseline = ToolServerConfig {
+                    tools: vec![test_support::tc(
+                        "GrokBuild:read_file",
+                        Some(ToolKind::Read),
+                    )],
+                    behavior_preset: None,
+                };
+                let mut mcp_dup = test_support::tc("GrokBuild:read_file", Some(ToolKind::Read));
+                mcp_dup.name_override = Some("mcp_read".into());
+                let snapshot = vec![mcp_dup];
+                let (_eff, ts, _backend) = resolve_session_toolset(
+                    baseline,
+                    CapabilityMode::ReadWrite,
+                    &snapshot,
+                    &[],
+                    PathBuf::from("/tmp"),
+                    empty_env(),
+                    "main",
+                    factory.as_ref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("resolve");
+                let defs = ts.tool_definitions();
+                let names: Vec<&str> = defs.iter().map(|d| d.function.name.as_str()).collect();
+                assert!(
+                    names.contains(&"read_file"),
+                    "baseline read_file must survive: {names:?}"
+                );
+                assert!(
+                    !names.contains(&"mcp_read"),
+                    "MCP duplicate must be skipped: {names:?}"
+                );
+            })
+            .await;
     }
     #[test]
     fn backfill_tool_kinds_fills_known_kindless_ids_only() {
@@ -758,50 +770,55 @@ mod tests {
     /// The registry backfill must restore the filter.
     #[tokio::test]
     async fn resolve_session_toolset_readonly_filters_kindless_pinned_tools() {
-        let factory = factory_for_test();
-        let baseline = ToolServerConfig {
-            tools: vec![
-                test_support::tc("GrokBuild:read_file", None),
-                test_support::tc("GrokBuild:grep", None),
-                test_support::tc("GrokBuild:list_dir", None),
-                test_support::tc("GrokBuild:search_replace", None),
-                test_support::tc("GrokBuild:run_terminal_cmd", None),
-            ],
-            behavior_preset: None,
-        };
-        let (eff, ts, _backend) = resolve_session_toolset(
-            baseline,
-            CapabilityMode::ReadOnly,
-            &[],
-            &[],
-            PathBuf::from("/tmp"),
-            empty_env(),
-            "main",
-            factory.as_ref(),
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("resolve");
-        assert!(eff.tools.iter().all(|t| t.kind.is_none()));
-        let names: Vec<String> = ts
-            .tool_definitions()
-            .into_iter()
-            .map(|d| d.function.name)
-            .collect();
-        for kept in ["read_file", "grep", "list_dir"] {
-            assert!(
-                names.iter().any(|n| n == kept),
-                "{kept} must survive ReadOnly: {names:?}"
-            );
-        }
-        for dropped in ["search_replace", "run_terminal_cmd"] {
-            assert!(
-                !names.iter().any(|n| n == dropped),
-                "{dropped} must be dropped under ReadOnly: {names:?}"
-            );
-        }
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let factory = factory_for_test();
+                let baseline = ToolServerConfig {
+                    tools: vec![
+                        test_support::tc("GrokBuild:read_file", None),
+                        test_support::tc("GrokBuild:grep", None),
+                        test_support::tc("GrokBuild:list_dir", None),
+                        test_support::tc("GrokBuild:search_replace", None),
+                        test_support::tc("GrokBuild:run_terminal_cmd", None),
+                    ],
+                    behavior_preset: None,
+                };
+                let (eff, ts, _backend) = resolve_session_toolset(
+                    baseline,
+                    CapabilityMode::ReadOnly,
+                    &[],
+                    &[],
+                    PathBuf::from("/tmp"),
+                    empty_env(),
+                    "main",
+                    factory.as_ref(),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("resolve");
+                assert!(eff.tools.iter().all(|t| t.kind.is_none()));
+                let names: Vec<String> = ts
+                    .tool_definitions()
+                    .into_iter()
+                    .map(|d| d.function.name)
+                    .collect();
+                for kept in ["read_file", "grep", "list_dir"] {
+                    assert!(
+                        names.iter().any(|n| n == kept),
+                        "{kept} must survive ReadOnly: {names:?}"
+                    );
+                }
+                for dropped in ["search_replace", "run_terminal_cmd"] {
+                    assert!(
+                        !names.iter().any(|n| n == dropped),
+                        "{dropped} must be dropped under ReadOnly: {names:?}"
+                    );
+                }
+            })
+            .await;
     }
     #[test]
     fn resolve_session_toolset_mcp_edit_dropped_under_readonly() {
@@ -1132,82 +1149,87 @@ mod tests {
     /// A toolset rebuilt for the SAME session rehydrates persisted state from disk; a DIFFERENT session_id cold-starts with no cross-contamination.
     #[tokio::test]
     async fn tool_state_rehydrates_same_session_and_cold_starts_other() {
-        use xai_grok_tools::types::resources::{State, WebCitationCounter};
-        let factory = test_support::TestSessionContextFactory::new();
-        let cwd = PathBuf::from("/tmp");
-        let (_eff, ts_a, _backend_a) = resolve_session_toolset(
-            test_support::baseline_config(),
-            CapabilityMode::ReadWrite,
-            &[],
-            &[],
-            cwd.clone(),
-            empty_env(),
-            "sess-A",
-            &factory,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("build toolset A");
-        {
-            let mut res = ts_a.resources.lock().await;
-            let counter = res.get_or_default::<State<WebCitationCounter>>();
-            counter.counter = 123;
-        }
-        ts_a.save_and_flush_persistence()
-            .await
-            .expect("the test factory gives this session a state path");
-        drop(ts_a);
-        let (_eff, ts_b, _backend_b) = resolve_session_toolset(
-            test_support::baseline_config(),
-            CapabilityMode::ReadWrite,
-            &[],
-            &[],
-            cwd.clone(),
-            empty_env(),
-            "sess-A",
-            &factory,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("build toolset B");
-        {
-            let res = ts_b.resources.lock().await;
-            let counter = res
-                .get::<State<WebCitationCounter>>()
-                .expect("WebCitationCounter must be present after rehydration");
-            assert_eq!(
-                counter.counter, 123,
-                "tool state must survive a rebuild for the same session (rehydration)"
-            );
-        }
-        let (_eff, ts_c, _backend_c) = resolve_session_toolset(
-            test_support::baseline_config(),
-            CapabilityMode::ReadWrite,
-            &[],
-            &[],
-            cwd,
-            empty_env(),
-            "sess-B",
-            &factory,
-            None,
-            None,
-            None,
-            None,
-        )
-        .expect("build toolset C");
-        {
-            let res = ts_c.resources.lock().await;
-            let contaminated = res
-                .get::<State<WebCitationCounter>>()
-                .is_some_and(|c| c.counter == 123);
-            assert!(
-                !contaminated,
-                "a different session_id must cold-start, never inherit sess-A state"
-            );
-        }
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                use xai_grok_tools::types::resources::{State, WebCitationCounter};
+                let factory = test_support::TestSessionContextFactory::new();
+                let cwd = PathBuf::from("/tmp");
+                let (_eff, ts_a, _backend_a) = resolve_session_toolset(
+                    test_support::baseline_config(),
+                    CapabilityMode::ReadWrite,
+                    &[],
+                    &[],
+                    cwd.clone(),
+                    empty_env(),
+                    "sess-A",
+                    &factory,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("build toolset A");
+                {
+                    let mut res = ts_a.resources.lock().await;
+                    let counter = res.get_or_default::<State<WebCitationCounter>>();
+                    counter.counter = 123;
+                }
+                ts_a.save_and_flush_persistence()
+                    .await
+                    .expect("the test factory gives this session a state path");
+                drop(ts_a);
+                let (_eff, ts_b, _backend_b) = resolve_session_toolset(
+                    test_support::baseline_config(),
+                    CapabilityMode::ReadWrite,
+                    &[],
+                    &[],
+                    cwd.clone(),
+                    empty_env(),
+                    "sess-A",
+                    &factory,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("build toolset B");
+                {
+                    let res = ts_b.resources.lock().await;
+                    let counter = res
+                        .get::<State<WebCitationCounter>>()
+                        .expect("WebCitationCounter must be present after rehydration");
+                    assert_eq!(
+                        counter.counter, 123,
+                        "tool state must survive a rebuild for the same session (rehydration)"
+                    );
+                }
+                let (_eff, ts_c, _backend_c) = resolve_session_toolset(
+                    test_support::baseline_config(),
+                    CapabilityMode::ReadWrite,
+                    &[],
+                    &[],
+                    cwd,
+                    empty_env(),
+                    "sess-B",
+                    &factory,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .expect("build toolset C");
+                {
+                    let res = ts_c.resources.lock().await;
+                    let contaminated = res
+                        .get::<State<WebCitationCounter>>()
+                        .is_some_and(|c| c.counter == 123);
+                    assert!(
+                        !contaminated,
+                        "a different session_id must cold-start, never inherit sess-A state"
+                    );
+                }
+            })
+            .await;
     }
 }

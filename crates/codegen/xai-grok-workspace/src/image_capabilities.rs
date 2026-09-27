@@ -248,6 +248,8 @@ mod tests {
         touch(tmp.path(), "README");
         touch(tmp.path(), ".DS_Store");
         touch(tmp.path(), ".file.swp");
+        // Win32 strips a trailing dot, so this name is unrepresentable there.
+        #[cfg(unix)]
         touch(tmp.path(), "notes.txt.");
         touch(
             tmp.path(),

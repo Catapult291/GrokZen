@@ -92,6 +92,24 @@ impl FlexiblePath {
     }
 }
 
+/// Classify a path read back from session JSON.
+///
+/// A rooted path is absolute, even without a prefix: on Windows a legacy
+/// `/home/u/src/a.rs` has a root but is not `is_absolute()`, so
+/// `RelPathBuf::try_from` accepted it as relative and the absolute path was
+/// then re-joined onto the session cwd. On unix the two predicates agree, so
+/// this is a no-op there.
+fn from_serialized(s: String) -> FlexiblePath {
+    if Path::new(&s).has_root() {
+        return FlexiblePath::Absolute(PathBuf::from(s));
+    }
+    match RelPathBuf::try_from(s.clone()) {
+        Ok(rel_path) => FlexiblePath::Relative(rel_path),
+        // Fall back to PathBuf for absolute paths from older sessions
+        Err(_) => FlexiblePath::Absolute(PathBuf::from(s)),
+    }
+}
+
 impl From<RelPathBuf> for FlexiblePath {
     fn from(path: RelPathBuf) -> Self {
         Self::Relative(path)
@@ -147,11 +165,7 @@ mod flexible_path_serde {
         D: Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        match RelPathBuf::try_from(s.clone()) {
-            Ok(rel_path) => Ok(FlexiblePath::Relative(rel_path)),
-            // Fall back to PathBuf for absolute paths from older sessions
-            Err(_) => Ok(FlexiblePath::Absolute(PathBuf::from(s))),
-        }
+        Ok(from_serialized(s))
     }
 }
 
@@ -183,10 +197,7 @@ mod flexible_path_map_serde {
         let map: HashMap<String, FileSnapshot> = HashMap::deserialize(deserializer)?;
         let mut result = HashMap::with_capacity(map.len());
         for (k, v) in map {
-            let path = match RelPathBuf::try_from(k.clone()) {
-                Ok(rel_path) => FlexiblePath::Relative(rel_path),
-                Err(_) => FlexiblePath::Absolute(PathBuf::from(k)),
-            };
+            let path = from_serialized(k);
             result.insert(path, v);
         }
         Ok(result)
@@ -985,7 +996,9 @@ mod tests {
     #[tokio::test]
     async fn test_rewind_point_creation() {
         let tracker = FileStateTracker::new();
-        let cwd = AbsPathBuf::new(PathBuf::from("/test")).unwrap();
+        // `AbsPathBuf` requires a real absolute path, and `/test` is only a
+        // rooted path on Windows; MockFs never touches the disk.
+        let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
         let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
         let fs_wrapper = crate::file_system::AsyncFsWrapper::new(fs);
         let ctx = ToolContext::new_local_context(cwd.to_path_buf(), fs_wrapper, Arc::new(()));
@@ -1006,7 +1019,9 @@ mod tests {
     #[tokio::test]
     async fn test_truncate_from() {
         let tracker = FileStateTracker::new();
-        let cwd = AbsPathBuf::new(PathBuf::from("/test")).unwrap();
+        // `AbsPathBuf` requires a real absolute path, and `/test` is only a
+        // rooted path on Windows; MockFs never touches the disk.
+        let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
         let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
         let fs_wrapper = crate::file_system::AsyncFsWrapper::new(fs);
         let ctx = ToolContext::new_local_context(cwd.to_path_buf(), fs_wrapper, Arc::new(()));

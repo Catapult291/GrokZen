@@ -438,15 +438,19 @@ fn collapse_home_for_test(path: &Path) -> String {
 
 #[test]
 fn collapse_home_path_requires_whole_component() {
-    let home = Path::new("/Users/u");
+    // Native paths so the expected separator matches the platform: `…\u` must not
+    // match `…\user\xai`, because matching is per component, not by string prefix.
+    let root = std::env::temp_dir();
+    let home = root.join("u");
+    let sibling = root.join("user").join("xai");
     assert_eq!(
-        collapse_home_path(Path::new("/Users/user/xai"), Some(home)),
-        "/Users/user/xai"
+        collapse_home_path(&sibling, Some(&home)),
+        sibling.display().to_string()
     );
-    assert_eq!(
-        collapse_home_path(Path::new("/Users/u/src/repo"), Some(home)),
-        "~/src/repo"
-    );
+    // A genuine nested path collapses, keeping the platform separator.
+    let nested = home.join("src").join("repo");
+    let expected = format!("~/{}", Path::new("src").join("repo").display());
+    assert_eq!(collapse_home_path(&nested, Some(&home)), expected);
 }
 
 #[tokio::test]
@@ -726,21 +730,27 @@ fn test_effective_worktree_cwd_empty_offset() {
 
 #[test]
 fn test_effective_worktree_cwd_single_level_offset() {
-    let result =
-        effective_worktree_cwd("/home/user/.grok/worktrees/repo/ab-123-a", Path::new("src"));
-    assert_eq!(result, "/home/user/.grok/worktrees/repo/ab-123-a/src");
+    let root = "/home/user/.grok/worktrees/repo/ab-123-a";
+    let result = effective_worktree_cwd(root, Path::new("src"));
+    // The join uses native separators, so build the expectation the same way.
+    let expected = PathBuf::from(root)
+        .join("src")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(result, expected);
 }
 
 #[test]
 fn test_effective_worktree_cwd_nested_offset() {
-    let result = effective_worktree_cwd(
-        "/home/user/.grok/worktrees/repo/ab-123-b",
-        Path::new("packages/frontend/src"),
-    );
-    assert_eq!(
-        result,
-        "/home/user/.grok/worktrees/repo/ab-123-b/packages/frontend/src"
-    );
+    let root = "/home/user/.grok/worktrees/repo/ab-123-b";
+    let offset = Path::new("packages/frontend/src");
+    let result = effective_worktree_cwd(root, offset);
+    // Mirror the implementation: the whole offset is joined as one component.
+    let expected = PathBuf::from(root)
+        .join(offset)
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(result, expected);
 }
 
 #[test]
@@ -827,7 +837,12 @@ fn test_effective_cwd_roundtrip_with_compute_offset() {
 
     let worktree_root = "/home/user/.grok/worktrees/myrepo/ab-test-a";
     let effective = effective_worktree_cwd(worktree_root, &offset);
-    assert_eq!(effective, format!("{}/src/lib", worktree_root));
+    let expected = PathBuf::from(worktree_root)
+        .join("src")
+        .join("lib")
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(effective, expected);
 }
 
 // Tests for find_git_root_from_path, the function new_session uses to populate isGitRepo / gitRoot in the session metadata
