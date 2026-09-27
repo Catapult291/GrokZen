@@ -116,6 +116,7 @@ fn make_task_snapshot(task_id: &str, kind: TaskKind) -> TaskSnapshot {
         kill_result_delivered: false,
         owner_session_id: None,
         description: None,
+        output_encoding: None,
         is_backgrounded: false,
         output_total_bytes: 0,
     }
@@ -1730,6 +1731,7 @@ fn make_large_bash_snapshot(task_id: &str, output_file: PathBuf) -> TaskSnapshot
         kill_result_delivered: false,
         owner_session_id: None,
         description: None,
+        output_encoding: None,
         is_backgrounded: false,
         output_total_bytes: 0,
     }

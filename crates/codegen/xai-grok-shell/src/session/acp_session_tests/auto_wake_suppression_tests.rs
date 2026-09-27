@@ -562,6 +562,7 @@ async fn genuine_user_start_consumes_deferred_completions_without_notification_t
                     kill_result_delivered: false,
                     owner_session_id: None,
                     description: None,
+                    output_encoding: None,
                     is_backgrounded: false,
                     output_total_bytes: 0,
                 },
@@ -1649,6 +1650,7 @@ fn completed_bash_task(id: &str) -> xai_grok_tools::computer::types::TaskSnapsho
         kill_result_delivered: false,
         owner_session_id: None,
         description: None,
+        output_encoding: None,
         is_backgrounded: false,
         output_total_bytes: 0,
     }

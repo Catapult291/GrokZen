@@ -3412,6 +3412,8 @@ mod plan_mode_edit_gate_tests {
                     timeout: None,
                     description: "write via bash".into(),
                     is_background: false,
+                    encoding: None,
+                    detach: false,
                 })
             ),
             PlanEditGate::Allow,
