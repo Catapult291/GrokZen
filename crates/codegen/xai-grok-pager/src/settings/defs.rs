@@ -317,6 +317,11 @@ const DEFAULT_SHELL_CHOICES: &[EnumChoice] = &[
         description: "Use Git Bash as the default command shell. Includes Unix utilities.",
     },
     EnumChoice {
+        canonical: "niubash",
+        display: "Niubash",
+        description: "Use niubash (niu.exe): native Bash with Unix utilities and no MSYS path translation. Requires niubash to be installed.",
+    },
+    EnumChoice {
         canonical: "pwsh",
         display: "PowerShell 7+",
         description: "Use pwsh.exe from the installed PowerShell 7 or newer release.",

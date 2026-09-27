@@ -88,8 +88,9 @@ fn open_default_shell_picker(harness: &mut PtyHarness) {
 fn choose_picker_row(harness: &mut PtyHarness, choice: &str) {
     let target_idx = match choice {
         "Git Bash" => 0,
-        "PowerShell 7+" => 1,
-        "Windows PowerShell 5.1" => 2,
+        "Niubash" => 1,
+        "PowerShell 7+" => 2,
+        "Windows PowerShell 5.1" => 3,
         other => panic!("unsupported shell choice {other}"),
     };
     for _ in 0..target_idx {

@@ -71,7 +71,8 @@ follow_up_behavior = "queue"           # 轮次中途跟进："queue"（等待�
                                        # 工具／模型安全间隙插话）。参见“键盘快捷键 → 活动轮次期间”。
 screen_mode = "fullscreen"             # 默认渲染模式："fullscreen" | "minimal"
 default_shell = "git-bash"             # Windows 默认命令 Shell："git-bash"（默认）|
-                                       # "pwsh"（PowerShell 7+）| "powershell"（Windows PowerShell 5.1）
+                                       # "niubash"（niu.exe，可选启用）| "pwsh"（PowerShell 7+）|
+                                       # "powershell"（Windows PowerShell 5.1）
                                        # GROK_SHELL 优先；需要重启
                                        #（未设置 → fullscreen）；可通过 /settings → 默认屏幕模式设置
 
@@ -160,10 +161,11 @@ default_shell = "git-bash"  # 默认值
 | 值 | Shell |
 |----|-------|
 | `"git-bash"` 或未设置 | Git Bash。这是产品默认值，并提供 `grep`、`sed` 等 Unix 工具。 |
+| `"niubash"` | niubash（`niu.exe`）：原生 Bash，自带同样的 Unix 工具，且没有 MSYS 路径转换层。属于可选启用、绝不随包分发——需先安装 niubash 并能在 `PATH` 上解析到，或用 `GROK_NIU`（`niu.exe` 的绝对路径）指定。找不到时会回退到 Git Bash。 |
 | `"pwsh"` | 已安装的 PowerShell 7 或更新版本提供的 `pwsh.exe`。配置保存的是可执行程序族而非主版本号，因此未来兼容版本无需迁移配置。 |
 | `"powershell"` | Windows PowerShell 5.1（`powershell.exe`）。 |
 
-`GROK_SHELL` 仍是优先级更高的显式进程级覆盖设置。支持的值包括 `git-bash`、`pwsh`、`powershell`，以及仅供内部兼容的 `cmd`。修改设置后需要重启 Grok Build；使用 leader 模式时也需重启 leader，使模型工具、钩子和终端会话统一使用所选 Shell。
+`GROK_SHELL` 仍是优先级更高的显式进程级覆盖设置。支持的值包括 `git-bash`、`niubash`（别名 `niu`、`niu.exe`）、`pwsh`、`powershell`，以及仅供内部兼容的 `cmd`。修改设置后需要重启 Grok Build；使用 leader 模式时也需重启 leader，使模型工具、钩子和终端会话统一使用所选 Shell。
 
 #### 屏幕模式
 

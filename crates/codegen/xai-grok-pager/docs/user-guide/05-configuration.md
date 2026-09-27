@@ -87,7 +87,8 @@ follow_up_behavior = "queue"           # mid-turn follow-ups: "queue" (wait for 
 screen_mode = "fullscreen"             # default render mode: "fullscreen" | "minimal"
                                        # (unset → fullscreen); set via /settings → Default screen mode
 default_shell = "git-bash"             # Windows default command shell: "git-bash" (default) |
-                                       # "pwsh" (PowerShell 7+) | "powershell" (Windows PowerShell 5.1)
+                                       # "niubash" (niu.exe, opt-in) | "pwsh" (PowerShell 7+) |
+                                       # "powershell" (Windows PowerShell 5.1)
                                        # GROK_SHELL overrides this; restart required
 
 [features]
@@ -181,10 +182,11 @@ default_shell = "git-bash"  # default
 | Value | Shell |
 |-------|-------|
 | `"git-bash"` or unset | Git Bash. This is the product default and provides Unix utilities such as `grep` and `sed`. |
+| `"niubash"` | niubash (`niu.exe`): native Bash with the same Unix utilities and no MSYS path translation layer. Opt-in and never bundled — niubash must be installed and resolve on `PATH`, or be named by `GROK_NIU` (absolute path to `niu.exe`). When it cannot be found, the resolver falls back to Git Bash. |
 | `"pwsh"` | The installed `pwsh.exe` from PowerShell 7 or newer. The executable name is stored instead of a major version, so future compatible releases are supported without migration. |
 | `"powershell"` | Windows PowerShell 5.1 (`powershell.exe`). |
 
-`GROK_SHELL` remains an explicit process-level override and takes precedence. Its recognized values include `git-bash`, `pwsh`, `powershell`, and the internal compatibility value `cmd`. A setting change applies after restarting Grok Build; when leader mode is active, restart the leader as well so model tools, hooks, and terminal sessions use the same shell.
+`GROK_SHELL` remains an explicit process-level override and takes precedence. Its recognized values include `git-bash`, `niubash` (aliases `niu`, `niu.exe`), `pwsh`, `powershell`, and the internal compatibility value `cmd`. A setting change applies after restarting Grok Build; when leader mode is active, restart the leader as well so model tools, hooks, and terminal sessions use the same shell.
 
 #### Screen mode
 
