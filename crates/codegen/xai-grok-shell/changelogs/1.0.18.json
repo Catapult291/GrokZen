@@ -1,0 +1,72 @@
+[
+  {
+    "category": "features",
+    "description": "**The default Shell setting now offers niubash** — the picker provides `niubash` (native Windows Bash with no MSYS emulation layer), with matching Chinese UI strings and both-language install docs. Git Bash remains the default; niubash is opt-in.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Git Bash regains MSYS path conversion** — the bundled Git Bash once more translates `/c/...` to Windows paths, and inherited `MSYS_NO_PATHCONV` / `MSYS2_ARG_CONV_EXCL` switches are cleared. This reverses the previous release's no-conversion behavior, and the tool description now says so.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Over-long commands go through a staged script** — commands beyond the inline length ceiling are written to a staging script and executed from there, fixing silent truncation on Git Bash and the niubash CreateProcess limit.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Windows Bash-family commands merge stdout and stderr** — Git Bash, niubash and the rest merge both streams as expected, so diagnostics no longer land after the line they match.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Persisted background tasks re-send completion notices** — when the task record is durable but notice publication failed, the background worker retries instead of exiting.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Config identity uses real filesystem IDs** — parent directories and source files are identified by filesystem identity rather than path strings, so renaming or moving a file still resolves to the same config.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Mandatory confirmation for detach and hook is no longer auto-answered** — `detach` (a process that outlives the session) and hook triggers that require the user's confirmation are not swallowed by the client's yolo auto-answer.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Hook subprocesses no longer inherit GROK_SESSION_ID when there is no session** — a child process is no longer mistaken for belonging to a session and attached to the wrong session state.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Rooted prefix-less paths count as absolute on Windows** — Git Bash-style `/work/...` is no longer treated as relative and joined onto the current directory, so a typo can no longer slip past path rules such as `/etc/**`.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Background workers no longer exit when publishing the task record fails** — the task is kept and processing continues instead of being silently dropped.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Unix targets compile again** — a parameter reference in the non-Windows branch of the shell state dump routine is corrected, so Linux and macOS builds compile once more.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Three pre-existing Windows defects fixed** — 79 tests that had never run on Windows are now passing; the real product issues behind them cover worktree lookup by ID versus path for labels containing slashes, hash memoization in file stat, and path matching in a discovery rule.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Cross-platform implementations and test fixtures completed** — Windows gains a `process_not_running` implementation plus cross-platform test fixtures, and a batch of existing tests that had never run on Windows are now exercised.",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**This is an independent community build** — it includes the privacy hardening and Windows adaptations; it does not yet merge the official 1.0.25–1.0.35 UI changes, and the version number follows this repository's own series.",
+    "breaking_change": false
+  }
+]
