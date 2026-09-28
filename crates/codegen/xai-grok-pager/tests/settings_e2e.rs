@@ -6030,7 +6030,7 @@ fn default_shell_picker_enter_dispatches_set_commit() {
     let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
     match outcome {
         SettingsKeyOutcome::Action(Action::SetDefaultShell(shell)) => {
-            assert_eq!(shell, "pwsh");
+            assert_eq!(shell, "niubash");
         }
         other => panic!("expected Action::SetDefaultShell commit, got {other:?}"),
     }
@@ -6045,7 +6045,10 @@ fn default_shell_choices_use_canonical_strings() {
         SettingKind::Enum { choices, .. } => choices.iter().map(|c| c.canonical).collect(),
         _ => panic!("default_shell must be Enum"),
     };
-    assert_eq!(canonicals, vec!["git-bash", "pwsh", "powershell"]);
+    assert_eq!(
+        canonicals,
+        vec!["git-bash", "niubash", "pwsh", "powershell"]
+    );
     assert!(meta.restart_required);
     assert!(matches!(
         meta.kind,
