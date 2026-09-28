@@ -51,6 +51,10 @@ $script:OnlinePackageFiles = @(
     'licenses/project/NOTICE'
 )
 $script:OnlineUtf8 = [Text.UTF8Encoding]::new($false, $true)
+# grok-zh 的 --version 恒以 UTF-8 字节写出（隐私构建还会追加中文标记）。捕获子进程
+# 输出时若不固定编码，.NET 会按控制台代码页解码，在 936 等代码页下把中文标记读成
+# 乱码，导致版本校验失败。
+$script:OnlineChildUtf8 = [Text.UTF8Encoding]::new($false)
 
 function Get-OnlineProperty {
     param($Object, [string]$Name)
@@ -517,6 +521,7 @@ function Get-OnlineExecutableVersion {
     $info.FileName = $Executable; $info.Arguments = '--version'
     $info.UseShellExecute = $false; $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true; $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = $script:OnlineChildUtf8
     $process = [Diagnostics.Process]::new(); $process.StartInfo = $info
     try {
         if (!$process.Start()) { throw '无法启动版本检查。' }
@@ -529,7 +534,7 @@ function Get-OnlineExecutableVersion {
         $text = $stdout.GetAwaiter().GetResult().Trim()
         $null = $stderr.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0 -or $text.Length -gt 4096 -or
-            $text -cnotmatch '^grok-zh (\S+)(?: \([^()\r\n]{1,128}\))?(?: \[[^\[\]\r\n]{1,32}\])?$') {
+            $text -cnotmatch '^grok-zh (\S+)(?: \([^()\r\n]{1,128}\))?(?: \[[^\[\]\r\n]{1,32}\])?(?:（隐私构建）)?$') {
             throw '程序没有返回有效的 grok-zh 版本。'
         }
         return ConvertTo-OnlineVersion $matches[1]
