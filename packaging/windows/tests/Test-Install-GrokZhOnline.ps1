@@ -20,6 +20,16 @@ function Get-TestDigest([byte[]]$Bytes) {
     try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
     finally { $sha.Dispose() }
 }
+function Get-TestVersionOutput([string]$Executable) {
+    # 与安装器同样固定 UTF-8 解码，避免结果随控制台代码页漂移。
+    $info = [Diagnostics.ProcessStartInfo]::new()
+    $info.FileName = $Executable; $info.Arguments = '--version'
+    $info.UseShellExecute = $false; $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true; $info.StandardOutputEncoding = $utf8
+    $process = [Diagnostics.Process]::Start($info)
+    try { return $process.StandardOutput.ReadToEnd().Trim() }
+    finally { $process.WaitForExit(); $process.Dispose() }
+}
 
 # Validate names as strings only: never attempt to open reserved DOS devices.
 foreach ($prefix in @('COM', 'LPT', 'com', 'lpt')) {
@@ -170,7 +180,15 @@ using System;
 class Program {
     static int Main(string[] args) {
         Console.OutputEncoding = new System.Text.UTF8Encoding(false);
-        if (args.Length == 1 && args[0] == "--version") { Console.Write("grok-zh 1.0.13 (abc1234) [stable]"); return 0; }
+        if (args.Length == 1 && args[0] == "--version") {
+            // \uFF08\u9690\u79C1\u6784\u5EFA\uFF09 is the privacy-build marker that
+            // PRIVACY_BUILD appends. Escapes keep this source ASCII so csc's default
+            // code page cannot mangle the literal.
+            string suffix = Environment.GetEnvironmentVariable("GROK_ZH_FIXTURE_NO_PRIVACY") == "1"
+                ? "" : "\uFF08\u9690\u79C1\u6784\u5EFA\uFF09";
+            Console.Write("grok-zh 1.0.13 (abc1234) [stable]" + suffix);
+            return 0;
+        }
         Console.WriteLine("cwd=" + Environment.CurrentDirectory);
         Console.WriteLine("args=" + String.Join("|", args));
         Console.Error.WriteLine("fixture-stderr");
@@ -266,6 +284,13 @@ class Program {
     $package = Expand-VerifiedOnlinePackage -ArchivePath $zipPath -Destination (Join-Path $testRoot 'extract') -Contract $contract
     Assert-True (@(Get-ChildItem -LiteralPath (Split-Path -Parent $package)).Count -eq 1) '现代包保留唯一顶层目录'
     Assert-True ((Get-OnlineExecutableVersion (Join-Path $package 'grok-zh.exe')).Text -ceq '1.0.13') '真实子进程版本检查'
+    Assert-True ((Get-TestVersionOutput (Join-Path $package 'grok-zh.exe')) -ceq 'grok-zh 1.0.13 (abc1234) [stable]（隐私构建）') '版本夹具复刻隐私构建的完整输出'
+    Assert-True ((Get-OnlineExecutableVersion (Join-Path $package 'grok-zh.exe')).Text -ceq '1.0.13') '隐私构建标记不影响版本解析'
+    $env:GROK_ZH_FIXTURE_NO_PRIVACY = '1'
+    try {
+        Assert-True ((Get-TestVersionOutput (Join-Path $package 'grok-zh.exe')) -ceq 'grok-zh 1.0.13 (abc1234) [stable]') '无隐私标记的旧输出保持原样'
+        Assert-True ((Get-OnlineExecutableVersion (Join-Path $package 'grok-zh.exe')).Text -ceq '1.0.13') '无隐私标记的历史输出仍可解析'
+    } finally { Remove-Item Env:GROK_ZH_FIXTURE_NO_PRIVACY -ErrorAction SilentlyContinue }
     foreach ($case in @('extra', 'traversal', 'duplicate', 'missing', 'hash', 'blank', 'symlink')) {
         $parameters = @{ Name = "invalid-$case" }
         switch ($case) {
