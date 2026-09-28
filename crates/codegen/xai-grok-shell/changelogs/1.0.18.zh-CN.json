@@ -1,0 +1,72 @@
+[
+  {
+    "category": "features",
+    "description": "**默认 Shell 新增 niubash 选项** —— 设置中的「默认 Shell」现在提供 `niubash`（原生 Windows Bash，无 MSYS 仿真层），并补齐对应的中文界面文案与中英文安装文档。默认仍是 Git Bash，niubash 需显式选择。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Git Bash 恢复 MSYS 路径转换** —— 内置 Git Bash 重新启用 `/c/...` 到 Windows 路径的自动转换，并清除了从父进程继承的 `MSYS_NO_PATHCONV`、`MSYS2_ARG_CONV_EXCL` 等开关；这与上一版「关闭转换」的行为不同，工具描述已同步说明。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**超长命令改走暂存脚本** —— 超过内联长度上限的命令会写入暂存脚本再执行，修掉 Git Bash 侧的静默截断与 niubash 的 CreateProcess 上限。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Windows Bash 家族命令补上 stdout/stderr 合并** —— Git Bash、niubash 等 Shell 的命令执行会按预期合并两个输出流，诊断信息不再错落到模式匹配行之后。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**持久化后台任务在退出后补发完成通知** —— 任务记录已落盘但通知发布失败时，后台 worker 会重试补发，不再因发布失败而直接退出。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**配置文件身份改用文件系统真实 ID** —— 父目录与源文件的身份判定不再依赖路径字符串，重命名或移动后仍能正确识别同一份配置。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**detach 与 hook 的强制确认不再被客户端自动应答吞掉** —— 需要用户确认的 `detach`（跨会话常驻）与 hook 触发不会被客户端 yolo 模式的自动应答绕过。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**无会话时 hook 子进程不再继承 GROK_SESSION_ID** —— 避免子进程被误认为属于某个会话而串到错误的会话状态上。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Windows 上有根无前缀路径按绝对路径处理** —— Git Bash 风格的 `/work/...` 不再被当作相对路径与当前目录拼接，拼写错误无法再借此绕过 `/etc/**` 一类的路径规则。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**后台 worker 不再因任务记录发布失败而自杀** —— 记录发布失败时保留任务并继续运行，避免后台任务被静默丢弃。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Unix 平台恢复可编译** —— 修正 shell 状态转储函数在非 Windows 分支的参数引用，Linux 与 macOS 目标重新可以通过编译。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**修掉三处 Windows 上的既有缺陷** —— 关闭了 79 项在 Windows 上从未跑通的既有测试，其中的真实产品问题包括工作树按 ID 或路径查找时对含斜杠标签的处理、文件 stat 的哈希记忆化判定，以及一处发现规则的路径匹配。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**补齐跨平台实现与测试夹具** —— 为 Windows 补上 `process_not_running` 实现与跨平台测试夹具，并解封了一批在 Windows 上从未运行过的既有测试。",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**本版为社区独立构建** —— 包含隐私加固与 Windows 适配；未合并官方 1.0.25–1.0.35 的界面改动，版本号沿用本仓库自身序列。",
+    "breaking_change": false
+  }
+]
