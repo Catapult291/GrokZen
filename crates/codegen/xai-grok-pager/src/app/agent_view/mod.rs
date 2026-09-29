@@ -185,6 +185,8 @@ mod session;
 mod shell_completion;
 #[cfg(test)]
 mod task_status_tests;
+#[cfg(test)]
+mod tasks_pane_input_tests;
 mod viewer;
 mod workflows_overlay;
 use super::actions;

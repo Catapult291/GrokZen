@@ -561,6 +561,15 @@ pub trait TerminalBackend: Send + Sync {
         Vec::new()
     }
 
+    /// Remove a finished background task's durable record.
+    ///
+    /// `false` when there is no such record, the task is still running, or the
+    /// backend keeps no durable directory (remote/ACP). Callers use this as the
+    /// cleanup affordance for terminal rows, never as a way to stop a process.
+    async fn delete_task(&self, _task_id: &str) -> bool {
+        false
+    }
+
     /// Return the persistent shell's current working directory, if persistent
     /// shell state is enabled. Returns `None` when persistence is off or the
     /// backend doesn't support it (e.g. ACP/remote).

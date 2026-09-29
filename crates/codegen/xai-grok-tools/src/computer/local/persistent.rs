@@ -417,6 +417,30 @@ impl TaskRegistry {
         }
     }
 
+    /// Delete a task's whole record directory.
+    ///
+    /// Restricted to finished tasks: a live worker would keep writing into a
+    /// directory that no longer exists. Worker liveness is deliberately not
+    /// consulted — the published exit is what makes a record removable, and a
+    /// finished task's `worker_pid` may already belong to an unrelated process by
+    /// the time a later session looks at it. A record still marked running is
+    /// reconciled to completed by the listing once its worker is gone, so a
+    /// crashed task cannot strand its own record here. A record whose state
+    /// cannot be read at all is removed: nothing else can consume it, and the
+    /// caller asked for the row to go away.
+    pub(crate) async fn delete_task(&self, task_id: &str) -> bool {
+        let directory = self.job_dir(task_id);
+        if directory.as_os_str().is_empty() || !directory.exists() {
+            return false;
+        }
+        let unfinished = read_state(&directory.join("state.json"))
+            .is_some_and(|state| !state.snapshot.completed);
+        if unfinished {
+            return false;
+        }
+        std::fs::remove_dir_all(&directory).is_ok()
+    }
+
     /// Whether a task was explicitly detached from its session.
     ///
     /// Read from the durable spec rather than the snapshot: this flag decides
@@ -1341,6 +1365,48 @@ mod tests {
         state.snapshot.end_time = end_time;
         state.snapshot.owner_session_id = Some("owner-session".into());
         write_state(&directory, &state).unwrap();
+    }
+
+    /// Clearing a row must only ever remove a record that has finished: a live
+    /// worker would keep writing into a directory that is no longer there. The
+    /// finished probe carries a live `worker_pid` (this test process), which is
+    /// how a recycled pid would otherwise strand a completed record forever.
+    #[tokio::test]
+    async fn delete_task_removes_only_finished_records() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("tasks");
+        let registry = TaskRegistry::with_root(root.clone());
+        write_late_delivery_probe(
+            &root,
+            "finished",
+            true,
+            true,
+            Some(std::time::SystemTime::now()),
+        );
+        write_late_delivery_probe(&root, "running", true, false, None);
+
+        assert!(
+            !registry.delete_task("running").await,
+            "a record whose worker never reported an exit must survive"
+        );
+        assert!(
+            root.join("running").exists(),
+            "the running record is untouched"
+        );
+
+        assert!(
+            registry.delete_task("finished").await,
+            "a finished record is removable"
+        );
+        assert!(
+            !root.join("finished").exists(),
+            "its directory must be gone"
+        );
+
+        assert!(
+            !registry.delete_task("never-existed").await,
+            "an unknown id reports that nothing was deleted"
+        );
     }
 
     /// A detached task's completion is handed to exactly one later session:

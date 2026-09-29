@@ -650,6 +650,12 @@ impl AgentView {
                     {
                         return InputOutcome::Action(Action::KillBgTask(task_id));
                     }
+                    // A cross-session row is not in `bg_tasks` — this key must
+                    // still reach it: the dispatch stops it while running and
+                    // clears the record once it has finished.
+                    if self.foreign_tasks.contains_key(&task_id) {
+                        return InputOutcome::Action(Action::KillBgTask(task_id));
+                    }
                 }
                 Some(TaskEntry::Agent { subagent_id, .. }) => {
                     let subagent_id = subagent_id.clone();

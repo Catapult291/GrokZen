@@ -51,7 +51,9 @@ use super::transcript::{
     handle_hooks_list_loaded, handle_marketplace_list_loaded, handle_marketplace_updates_available,
     handle_mcp_toggle_done, handle_plugins_list_loaded, handle_skills_toggle_done,
 };
-use super::turn::{handle_bg_task_killed, handle_foreign_tasks_listed};
+use super::turn::{
+    handle_bg_task_killed, handle_foreign_task_deleted, handle_foreign_tasks_listed,
+};
 use crate::app::actions::{
     ClipboardPasteCompletion, ClipboardPasteContext, ClipboardPasteFailure, ClipboardPasteTarget,
     DoctorFixTarget, DoctorPlanningOutcome, Effect, ProbedAttachment, SubagentKillOutcome,
@@ -850,6 +852,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::ForeignTasksListed { session_id, tasks } => {
             handle_foreign_tasks_listed(app, session_id, tasks)
         }
+        TaskResult::ForeignTaskDeleted {
+            session_id,
+            task_id,
+            deleted,
+        } => handle_foreign_task_deleted(app, session_id, task_id, deleted),
         TaskResult::BgTaskKillFailed {
             session_id,
             task_id,

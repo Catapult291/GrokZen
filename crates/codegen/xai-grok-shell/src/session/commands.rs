@@ -618,6 +618,12 @@ pub enum SessionCommand {
         source: xai_grok_tools::types::KillSource,
         respond_to: oneshot::Sender<Result<xai_grok_tools::types::KillOutcome, String>>,
     },
+    /// Drop a finished task's durable record. Routes through the ToolBridge's
+    /// TerminalBackend; `false` means the record was missing or still running.
+    DeleteBackgroundTask {
+        task_id: String,
+        respond_to: oneshot::Sender<bool>,
+    },
     DeleteScheduledTask {
         task_id: String,
         respond_to: oneshot::Sender<Result<bool, String>>,

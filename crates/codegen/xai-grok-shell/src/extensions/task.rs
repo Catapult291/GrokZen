@@ -83,6 +83,25 @@ pub struct ListTasksResponse {
     pub tasks: Vec<TaskSnapshot>,
 }
 
+/// Wire DTO for the `x.ai/task/delete` ext request.
+///
+/// Drops a finished task's durable record only — stopping a process is
+/// [`KillTaskRequest`]'s job, so a running task reports `deleted: false`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteTaskRequest {
+    pub session_id: String,
+    pub task_id: String,
+}
+
+/// Wire DTO for the `x.ai/task/delete` ext response payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteTaskResponse {
+    pub task_id: String,
+    pub deleted: bool,
+}
+
 /// Wire DTO for the `x.ai/subagent/cancel` ext request.
 ///
 /// `pub` (with both serde directions) so ACP clients (xai-grok-pager) build the request from the same type the agent parses.
@@ -401,6 +420,17 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
                     .ok_or_else(|| "session not found or no terminal backend".to_string())
                     .map(|tasks| ListTasksResponse { tasks })
             };
+            respond(result)
+        }
+        "x.ai/task/delete" => {
+            let req: DeleteTaskRequest = parse(args)?;
+            let result = agent
+                .delete_background_task(&req.session_id, &req.task_id)
+                .await
+                .map(|deleted| DeleteTaskResponse {
+                    task_id: req.task_id,
+                    deleted,
+                });
             respond(result)
         }
         _ => Err(acp::Error::method_not_found()),

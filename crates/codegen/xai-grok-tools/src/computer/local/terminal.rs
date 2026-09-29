@@ -2774,6 +2774,15 @@ impl TerminalBackend for LocalTerminalBackend {
         reply_rx.await.unwrap_or(KillOutcome::NotFound)
     }
 
+    /// Durable records only: an in-process task has no record to delete, and its
+    /// row disappears with the session that owns it.
+    async fn delete_task(&self, task_id: &str) -> bool {
+        match &self.persistent_task_registry {
+            Some(registry) => registry.delete_task(task_id).await,
+            None => false,
+        }
+    }
+
     async fn wait_for_completion(
         &self,
         task_id: &str,

@@ -5964,6 +5964,11 @@ impl AppView {
                 {
                     return TickDemand::Slow;
                 }
+                // An open tasks pane refreshes its cross-session rows on a timer;
+                // that is low-frequency by construction, so it must not spin fps.
+                if agent.tasks.foreign_poll_due() {
+                    return TickDemand::Slow;
+                }
                 TickDemand::None
             }
             ActiveView::AgentDashboard => {

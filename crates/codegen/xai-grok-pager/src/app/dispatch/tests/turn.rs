@@ -2491,6 +2491,214 @@ fn foreign_task_list_failure_keeps_existing_rows() {
     );
 }
 
+/// Put a cross-session row into the pane's map, built the way a listing builds it.
+fn insert_foreign_row(app: &mut AppView, task_id: &str, completed: bool) {
+    use crate::app::agent::ForeignTaskState;
+    let now = std::time::SystemTime::now();
+    let snapshot = listed_snapshot(
+        task_id,
+        Some("01a0e7b8-dead"),
+        completed,
+        true,
+        std::time::Duration::ZERO,
+        now,
+    );
+    let row = ForeignTaskState::from_listed(&snapshot, Some("test-session")).expect("foreign row");
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .foreign_tasks
+        .insert(task_id.into(), row);
+}
+
+/// A cross-session row that is still running must be reachable by `x` even
+/// though it is not in `bg_tasks`, and the row itself carries the pending state
+/// — the completion notification goes to the owning session, not this one.
+#[test]
+fn kill_on_running_foreign_row_asks_and_marks_the_row() {
+    let mut app = test_app_with_agent();
+    insert_foreign_row(&mut app, "fg-run", false);
+
+    let effects = dispatch(Action::KillBgTask("fg-run".into()), &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::KillBgTask { task_id, .. }] if task_id == "fg-run"
+        ),
+        "the kill must still be sent, got {effects:?}"
+    );
+    let agent = &app.agents[&AgentId(0)];
+    assert!(agent.foreign_tasks["fg-run"].task.pending_kill);
+    assert!(
+        agent.foreign_tasks["fg-run"]
+            .task
+            .kill_requested_at
+            .is_some()
+    );
+}
+
+/// A finished cross-session row has nothing left to stop, so the same gesture
+/// clears the durable record instead.
+#[test]
+fn kill_on_finished_foreign_row_deletes_the_record() {
+    let mut app = test_app_with_agent();
+    insert_foreign_row(&mut app, "fg-done", true);
+
+    let effects = dispatch(Action::KillBgTask("fg-done".into()), &mut app);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::DeleteForeignTask { task_id, .. }] if task_id == "fg-done"
+        ),
+        "a finished row must clear the record, got {effects:?}"
+    );
+    assert!(
+        !app.agents[&AgentId(0)].foreign_tasks["fg-done"]
+            .task
+            .pending_kill,
+        "a record delete has no pending state to show"
+    );
+}
+
+#[test]
+fn deleted_foreign_record_drops_the_row() {
+    let mut app = test_app_with_agent();
+    insert_foreign_row(&mut app, "fg-done", true);
+
+    dispatch(
+        Action::TaskComplete(TaskResult::ForeignTaskDeleted {
+            session_id: "test-session".into(),
+            task_id: "fg-done".into(),
+            deleted: true,
+        }),
+        &mut app,
+    );
+    assert!(
+        !app.agents[&AgentId(0)]
+            .foreign_tasks
+            .contains_key("fg-done")
+    );
+}
+
+#[test]
+fn failed_foreign_delete_keeps_the_row() {
+    let mut app = test_app_with_agent();
+    insert_foreign_row(&mut app, "fg-done", true);
+
+    dispatch(
+        Action::TaskComplete(TaskResult::ForeignTaskDeleted {
+            session_id: "test-session".into(),
+            task_id: "fg-done".into(),
+            deleted: false,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&AgentId(0)]
+            .foreign_tasks
+            .contains_key("fg-done"),
+        "the next refresh reads the truth; this answer does not prove the row is gone"
+    );
+}
+
+/// A `not_found` kill means the row is stale — no owning session will ever
+/// report it, so it goes immediately rather than sitting there spinning.
+#[test]
+fn not_found_kill_drops_the_foreign_row() {
+    let mut app = test_app_with_agent();
+    insert_foreign_row(&mut app, "fg-run", false);
+
+    dispatch(
+        Action::TaskComplete(TaskResult::BgTaskKilled {
+            session_id: "test-session".into(),
+            task_id: "fg-run".into(),
+            outcome: Some(xai_grok_tools::types::KillOutcome::NotFound),
+        }),
+        &mut app,
+    );
+    assert!(!app.agents[&AgentId(0)].foreign_tasks.contains_key("fg-run"));
+}
+
+#[test]
+fn killed_foreign_row_stays_pending_until_the_next_refresh() {
+    let mut app = test_app_with_agent();
+    insert_foreign_row(&mut app, "fg-run", false);
+    dispatch(Action::KillBgTask("fg-run".into()), &mut app);
+
+    dispatch(
+        Action::TaskComplete(TaskResult::BgTaskKilled {
+            session_id: "test-session".into(),
+            task_id: "fg-run".into(),
+            outcome: Some(xai_grok_tools::types::KillOutcome::Killed),
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&AgentId(0)].foreign_tasks["fg-run"]
+            .task
+            .pending_kill,
+        "the record is written by the worker; only a refresh can show it finished"
+    );
+}
+
+/// A refresh must not erase the kill this session asked for.
+#[test]
+fn foreign_refresh_keeps_a_pending_kill() {
+    let mut app = test_app_with_agent();
+    insert_foreign_row(&mut app, "fg-run", false);
+    dispatch(Action::KillBgTask("fg-run".into()), &mut app);
+
+    let now = std::time::SystemTime::now();
+    let tasks = vec![listed_snapshot(
+        "fg-run",
+        Some("01a0e7b8-dead"),
+        false,
+        true,
+        std::time::Duration::ZERO,
+        now,
+    )];
+    dispatch(
+        Action::TaskComplete(TaskResult::ForeignTasksListed {
+            session_id: "test-session".into(),
+            tasks: Some(tasks),
+        }),
+        &mut app,
+    );
+    assert!(
+        app.agents[&AgentId(0)].foreign_tasks["fg-run"]
+            .task
+            .pending_kill,
+        "the row is still running on disk, but the kill this session asked for must stay visible"
+    );
+}
+
+/// The rows fetched for other sessions have no live stream behind them, so an
+/// open pane re-reads them on a timer instead of freezing at open-time.
+#[test]
+fn foreign_rows_poll_while_the_pane_is_open() {
+    let mut app = test_app_with_agent();
+    assert!(
+        reconcile_stale_foreign_tasks(&mut app).is_none(),
+        "a closed pane must not poll"
+    );
+
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .tasks
+        .overlay
+        .show();
+    let effects = reconcile_stale_foreign_tasks(&mut app);
+    assert!(
+        matches!(effects.as_deref(), Some([Effect::ListForeignTasks { .. }])),
+        "an open pane that never fetched is due, got {effects:?}"
+    );
+    assert!(
+        reconcile_stale_foreign_tasks(&mut app).is_none(),
+        "the fetch restarts the timer"
+    );
+}
+
 #[test]
 fn kill_bg_task_action_emits_client_ui_source() {
     use xai_grok_shell::extensions::task::TaskKillSource;

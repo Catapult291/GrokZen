@@ -1651,6 +1651,18 @@ pub(super) fn parse_listed_tasks(
         .and_then(|envelope| envelope.result)
         .map(|payload| payload.tasks)
 }
+/// Extract the `deleted` flag from an `x.ai/task/delete` ext response.
+///
+/// `false` covers both "the record was already gone or still running" and an
+/// error envelope, so the dispatcher keeps the row rather than dropping it blind.
+pub(super) fn parse_task_deleted(resp: &str) -> bool {
+    use xai_grok_shell::extensions::task::DeleteTaskResponse;
+    use xai_grok_shell::session::result::ExtMethodResult;
+    serde_json::from_str::<ExtMethodResult<DeleteTaskResponse>>(resp)
+        .ok()
+        .and_then(|envelope| envelope.result)
+        .is_some_and(|payload| payload.deleted)
+}
 /// Map an `x.ai/subagent/cancel` response (payload under `result`) to a kill outcome.
 /// Prefers the typed `outcome`; falls back to the legacy `cancelled` bool for an older shell or an unknown future `kind`.
 /// An error/unparseable body is `RpcFailed` (the subagent may still be running, so leave the row alone).

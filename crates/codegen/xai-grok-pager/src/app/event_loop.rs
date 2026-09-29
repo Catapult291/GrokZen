@@ -2890,6 +2890,11 @@ pub(crate) async fn run(
                         break;
                     }
                     presenter.request(false);
+                } else if let Some(poll) = dispatch::reconcile_stale_foreign_tasks(&mut app) {
+                    if process_effects(poll, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
+                    presenter.request(false);
                 } else if app.tick() {
                     presenter.request(false);
                 }
