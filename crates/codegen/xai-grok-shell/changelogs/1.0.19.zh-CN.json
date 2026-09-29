@@ -1,0 +1,32 @@
+[
+  {
+    "category": "features",
+    "description": "**任务面板标出「跨会话」任务** —— 用户确认过会活过会话的 `detach` 任务，现在行尾带 `跨会话` 标签，与 teardown 会一并回收的普通行区分开。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**任务面板列出其他会话的任务** —— 通过 `x.ai/task/list` 取回的行会与本会话自己的任务并列显示，每行注明它属于哪个会话，并可直接从面板终止。其他会话的行不提供「查看」按钮：本客户端没有它的滚动记录与输出缓冲。列表是有界的——运行中按开始时间由旧到新，已结束按由新到旧并截断——所以机器上积了几百条持久记录也能很快打开。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**迟到完成投给下一个打开的会话** —— detach 任务在启动它的会话消失之后才完成时，完成记录留在磁盘上，下一个交互式会话在首个用户轮次开始时认领一次，不会自己开启新一轮。提醒里带任务名、启动它的会话、运行时长、完成时刻与磁盘上的日志路径；输出本身不内联，因为跑在几小时前的任务到这时通常已无意义。超过 24 小时的完成记录静默消费，不打扰。",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**任务列表可跳过输出水合** —— `x.ai/task/list` 新增可选 `hydrate` 字段。面板枚举全部持久记录时传 `false`，因为逐条读任务输出日志正是完整列表慢的原因；缺省仍是 `true`，既有调用方不受影响。",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**迟到完成用原子方式认领** —— 交付标记是 `create_new` 写出的 `delivery.json`，会话内的完成 watcher 与下一个会话启动时的扫描会抢同一个标记，只有一个投递成功。",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**本版为社区独立构建** —— 包含隐私加固与 Windows 适配，版本号沿用本仓库自身序列。",
+    "breaking_change": false
+  }
+]
