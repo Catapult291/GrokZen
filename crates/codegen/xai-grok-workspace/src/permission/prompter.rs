@@ -68,6 +68,7 @@ fn client_supports_enable_always_approve(client_type: ClientType) -> bool {
 
 /// Prepend the "enable always-approve mode" option at position 0 for client types that can act on it.
 /// [`AcpPrompter::build_options`] calls this at the tail of every branch so the option lands first regardless of the base map.
+/// The one exception is an access carrying [`AccessKind::requires_user_confirmation`], which drops it again.
 fn prepend_enable_always_approve(
     client_type: ClientType,
     base: IndexMap<acp::PermissionOptionId, acp::PermissionOption>,
@@ -528,6 +529,11 @@ impl AcpPrompter {
                 base.shift_remove(&acp::PermissionOptionId::new(*id));
             }
         }
+        // The always-approve row promises prompts stop coming, and at a gate that no grant can
+        // silence it promises what it cannot deliver: YOLO is usually already on when this fires.
+        if access.requires_user_confirmation() {
+            return base;
+        }
         // Prepend the "enable always-approve mode" option at position 0 for client types that wire the id through to their YOLO toggle
         // See `ENABLE_ALWAYS_APPROVE_OPTION_ID` for the full client/shell split
         prepend_enable_always_approve(self.client_type, base)
@@ -753,6 +759,14 @@ impl AcpPrompter {
                     | ClientType::Nebula
                     | ClientType::Extension => self.fallback_options.clone(),
                 }
+            }
+            AccessKind::DetachBackground { .. } => {
+                // Same rows as the fallback minus the persistent allow: `requires_user_confirmation`
+                // feeds `pre_classifier_forced_prompt`, which gates the session-grant short-circuit,
+                // and the manager's catch-all arm persists nothing for a non-MCP `AllowAlways`.
+                let mut options = self.fallback_options.clone();
+                options.shift_remove(&acp::PermissionOptionId::new("always-allow"));
+                options
             }
             _ => self.fallback_options.clone(),
         }
@@ -1850,6 +1864,40 @@ mod tests {
         );
         let outcome = outcome_for(&opts, "always-allow", None, &access);
         assert!(matches!(outcome, PromptOutcome::AllowAlways));
+    }
+
+    /// Pins the detach card to the two rows that can actually be honored.
+    /// No grant silences that gate, so a persistent-allow row there saves nothing, and the
+    /// always-approve row promises an end to prompts that keep coming anyway.
+    #[test]
+    fn detach_gate_offers_only_allow_once_and_reject_once() {
+        let detach = AccessKind::DetachBackground {
+            command: "npm run dev".to_owned(),
+        };
+        for client_type in [
+            ClientType::GrokTUI,
+            ClientType::GrokPager,
+            ClientType::Desktop,
+            ClientType::Generic,
+        ] {
+            let opts = prompter(client_type).build_options(&detach);
+            assert!(
+                has_option(&opts, "allow-once") && has_option(&opts, "reject-once"),
+                "{client_type:?} detach card must keep the one-shot rows"
+            );
+            assert!(
+                !has_option(&opts, "always-allow")
+                    && !has_option(&opts, ENABLE_ALWAYS_APPROVE_OPTION_ID),
+                "{client_type:?} detach card must not offer rows the gate cannot honor"
+            );
+        }
+        // The drop keys off `requires_user_confirmation`, not off the shared tool name
+        let bash = AccessKind::Bash("npm run dev".to_owned());
+        let opts = prompter(ClientType::GrokTUI).build_options(&bash);
+        assert!(
+            has_option(&opts, ENABLE_ALWAYS_APPROVE_OPTION_ID),
+            "a plain bash prompt must keep the always-approve row"
+        );
     }
 
     #[test]
