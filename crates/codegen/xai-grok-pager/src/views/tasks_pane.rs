@@ -37,6 +37,11 @@ use super::overlay::OverlayState;
 
 const SPINNER_DIVISOR: u64 = 4;
 
+/// How long cross-session rows may stay on screen before the pane re-fetches
+/// them. They have no live notification stream in this client, so a refresh
+/// timer is the only way a finished task stops looking like a running one.
+const FOREIGN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn tasks_static(
     locale: Option<&crate::locale::LocaleContext>,
     id: &str,
@@ -921,6 +926,9 @@ pub struct TasksPane {
     pub hovered_view: Option<TaskEntryId>,
     prev_running_count: usize,
     opened_by_auto: bool,
+    /// When the cross-session rows go stale and should be re-fetched, while the
+    /// pane is open. `None` until the pane has been opened at least once.
+    foreign_poll_at: Option<std::time::Instant>,
     highlight_cache: HashMap<String, Vec<Span<'static>>>,
     last_theme: ThemeKind,
     workflow_runs: Vec<crate::views::workflows::WorkflowRunSnapshot>,
@@ -1018,6 +1026,7 @@ impl TasksPane {
             hovered_view: None,
             prev_running_count: 0,
             opened_by_auto: false,
+            foreign_poll_at: None,
             highlight_cache: HashMap::new(),
             last_theme: Theme::current_kind(),
             workflow_runs: Vec::new(),
@@ -1372,6 +1381,22 @@ impl TasksPane {
 
     pub fn needs_tick(&self) -> bool {
         self.entries.iter().any(|e| e.is_running())
+    }
+
+    /// Restart the cross-session refresh timer. Called on every fetch, so a
+    /// listing already in flight does not become the next one's due date.
+    pub fn note_foreign_fetch(&mut self) {
+        self.foreign_poll_at = Some(std::time::Instant::now() + FOREIGN_POLL_INTERVAL);
+    }
+
+    /// Whether the pane is open and its cross-session rows have gone stale.
+    /// A pane that never fetched (opened by clicking the status line) is due at
+    /// once, so every way of opening it ends up showing the same rows.
+    pub fn foreign_poll_due(&self) -> bool {
+        self.overlay.visible
+            && self
+                .foreign_poll_at
+                .is_none_or(|due| std::time::Instant::now() >= due)
     }
 
     // -- Input handling ------------------------------------------------------
@@ -1839,7 +1864,7 @@ impl TasksPane {
 
         // Clear overlay area to prevent label text bleeding through.
         let right_text_w = right_text.width() as u16;
-        let bg_kill_w: u16 = if task.status == BgTaskStatus::Running {
+        let bg_kill_w: u16 = if task.status == BgTaskStatus::Running || is_foreign {
             3
         } else {
             0
@@ -1853,7 +1878,9 @@ impl TasksPane {
         let mut rx = area.x + area.width;
 
         // Kill button (visible even during pending_kill so the user can retry)
-        if task.status == BgTaskStatus::Running {
+        // A foreign row keeps it once finished: there the same gesture clears the
+        // durable record, which is the only action left on a row nobody owns.
+        if task.status == BgTaskStatus::Running || is_foreign {
             rx = rx.saturating_sub(3);
             let is_hovered = matches!(
                 &self.hovered_kill,
@@ -2323,6 +2350,82 @@ mod tests {
             entry.group_kind(),
             GroupKind::Tasks,
             "an ordinary foreign bash task stays in the Tasks group"
+        );
+    }
+
+    /// A finished cross-session row keeps the action button: there is nothing to
+    /// stop any more, so the same gesture clears the durable record.
+    #[test]
+    fn finished_foreign_row_keeps_the_action_button() {
+        let mut pane = TasksPane::new();
+        pane.overlay.show();
+        pane.show_done = true;
+        let foreign = crate::app::agent::ForeignTaskState {
+            task: make_bg_task("t-done", "cargo build --release", BgTaskStatus::Done),
+            owner_short: "01a0e7b8".into(),
+        };
+        let mut foreigns = BTreeMap::new();
+        foreigns.insert("t-done".to_string(), foreign);
+
+        pane.sync(
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            &HashSet::new(),
+            &[],
+            &foreigns,
+        );
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        let layout = crate::appearance::LayoutConfig::default();
+        pane.render(
+            area,
+            &mut buf,
+            false,
+            &layout,
+            &BTreeMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &foreigns,
+        );
+
+        assert!(
+            pane.kill_button_rects.iter().any(|(id, _)| matches!(
+                id,
+                TaskEntryId::BgTask(t) if t == "t-done"
+            )),
+            "a finished foreign row must offer the clear action: {:?}",
+            pane.kill_button_rects
+        );
+    }
+
+    /// Cross-session rows go stale on a timer, and only while the pane is open:
+    /// a closed pane must not keep waking the event loop for them.
+    #[test]
+    fn foreign_poll_is_due_only_while_open_and_stale() {
+        let mut pane = TasksPane::new();
+        assert!(
+            !pane.foreign_poll_due(),
+            "a hidden pane must not ask for refreshes"
+        );
+
+        pane.overlay.show();
+        assert!(
+            pane.foreign_poll_due(),
+            "a pane that never fetched (opened from the status line) is due at once"
+        );
+
+        pane.note_foreign_fetch();
+        assert!(
+            !pane.foreign_poll_due(),
+            "a fetch just made must not be due again on the next tick"
+        );
+
+        pane.overlay.hide();
+        assert!(
+            !pane.foreign_poll_due(),
+            "closing the pane takes the refresh timer out of play"
         );
     }
 

@@ -819,6 +819,12 @@ pub(super) async fn run_session(
                                 .map_err(|e| e.to_string());
                             let _ = respond_to.send(result);
                         }
+                        SessionCommand::DeleteBackgroundTask { task_id, respond_to } => {
+                            let deleted = session.agent.borrow().tool_bridge()
+                                .delete_background_task(&task_id)
+                                .await;
+                            let _ = respond_to.send(deleted);
+                        }
                         SessionCommand::DeleteScheduledTask { task_id, respond_to } => {
                             let result = session.agent.borrow().tool_bridge()
                                 .delete_scheduled_task(&task_id)

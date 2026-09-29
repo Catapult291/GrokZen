@@ -2771,6 +2771,18 @@ impl MvpAgent {
             Err("session not found".to_string())
         }
     }
+    pub(crate) async fn delete_background_task(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<bool, String> {
+        let sid = acp::SessionId::new(session_id);
+        if let Some(handle) = self.get_session_handle(&sid) {
+            Ok(handle.delete_background_task(task_id).await)
+        } else {
+            Err("session not found".to_string())
+        }
+    }
     pub(crate) async fn delete_scheduled_task(
         &self,
         session_id: &str,

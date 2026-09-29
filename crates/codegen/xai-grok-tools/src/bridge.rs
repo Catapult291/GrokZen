@@ -698,6 +698,17 @@ impl ToolBridge {
         }
     }
 
+    /// Remove a finished background task's durable record.
+    ///
+    /// `false` when the record is missing, still running, or the backend has no
+    /// durable directory (remote/ACP).
+    pub async fn delete_background_task(&self, task_id: &str) -> bool {
+        match &self.terminal {
+            Some(terminal) => terminal.delete_task(task_id).await,
+            None => false,
+        }
+    }
+
     /// Drain newly-completed bash background tasks not yet reported.
     /// Marks returned tasks in [`ReportedTaskCompletions`] to prevent
     /// duplicate reminders from [`TaskCompletionReminder`]. Reserved IDs stay

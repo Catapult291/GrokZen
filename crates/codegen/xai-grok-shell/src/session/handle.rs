@@ -217,6 +217,22 @@ impl SessionHandle {
         }
         rx.await.unwrap_or(Err("session actor died".to_string()))
     }
+    /// Drop a finished task's durable record. `false` when the record was
+    /// missing or the task is still running.
+    pub(crate) async fn delete_background_task(&self, task_id: &str) -> bool {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(SessionCommand::DeleteBackgroundTask {
+                task_id: task_id.to_string(),
+                respond_to: tx,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
     pub(crate) async fn delete_scheduled_task(&self, task_id: &str) -> Result<bool, String> {
         let (tx, rx) = oneshot::channel();
         if self

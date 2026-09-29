@@ -1894,6 +1894,37 @@ pub(crate) fn execute(
                 }
             });
         }
+        Effect::DeleteForeignTask { session_id, task_id } => {
+            let tx = acp_tx.clone();
+            let sid = session_id.0.to_string();
+            tasks.spawn(async move {
+                let params = xai_grok_shell::extensions::task::DeleteTaskRequest {
+                    session_id: sid.clone(),
+                    task_id: task_id.clone(),
+                };
+                let req = acp::ExtRequest::new(
+                    "x.ai/task/delete",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize delete params")
+                        .into(),
+                );
+                match acp_send(req, &tx).await {
+                    Ok(resp) => TaskResult::ForeignTaskDeleted {
+                        session_id: sid,
+                        task_id,
+                        deleted: parse_task_deleted(resp.0.get()),
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to delete background task record: {e}");
+                        TaskResult::ForeignTaskDeleted {
+                            session_id: sid,
+                            task_id,
+                            deleted: false,
+                        }
+                    }
+                }
+            });
+        }
         Effect::KillSubagent { session_id, subagent_id } => {
             let tx = acp_tx.clone();
             tasks

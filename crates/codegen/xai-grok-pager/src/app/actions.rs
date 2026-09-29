@@ -1546,6 +1546,11 @@ pub enum Effect {
     /// List background tasks from every session (`x.ai/task/list`, no output
     /// hydration) so the tasks pane can show the ones this session does not own.
     ListForeignTasks { session_id: acp::SessionId },
+    /// Drop a finished cross-session task's durable record (`x.ai/task/delete`).
+    DeleteForeignTask {
+        session_id: acp::SessionId,
+        task_id: String,
+    },
     DeleteScheduledTask {
         session_id: acp::SessionId,
         task_id: String,
@@ -2505,6 +2510,13 @@ pub enum TaskResult {
     ForeignTasksListed {
         session_id: String,
         tasks: Option<Vec<xai_grok_tools::types::TaskSnapshot>>,
+    },
+    /// `x.ai/task/delete` answered for a finished cross-session row. `deleted`
+    /// is false when the record was already gone or turned out to be running.
+    ForeignTaskDeleted {
+        session_id: String,
+        task_id: String,
+        deleted: bool,
     },
     /// Model switch completed (effort, if any, was applied in the same request).
     SwitchModelComplete {

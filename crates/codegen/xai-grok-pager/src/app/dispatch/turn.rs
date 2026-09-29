@@ -707,6 +707,26 @@ pub(super) fn dispatch_kill_bg_task(app: &mut AppView, task_id: String) -> Vec<E
         return vec![];
     };
 
+    // A cross-session row is work this session does not own. While it runs the
+    // action stops it; once finished there is nothing to stop, so the same
+    // gesture clears the durable record. The row carries its own feedback
+    // because completion notifications for it go to the owning session.
+    if let Some(foreign) = agent.foreign_tasks.get_mut(&task_id) {
+        if foreign.task.status != crate::app::agent::BgTaskStatus::Running {
+            return vec![Effect::DeleteForeignTask {
+                session_id,
+                task_id,
+            }];
+        }
+        foreign.task.pending_kill = true;
+        foreign.task.kill_requested_at = Some(Instant::now());
+        return vec![Effect::KillBgTask {
+            session_id,
+            task_id,
+            source: xai_grok_shell::extensions::task::TaskKillSource::ClientUi,
+        }];
+    }
+
     // Mark as pending_kill for UI feedback
     if let Some(task) = agent.session.bg_tasks.get_mut(&task_id) {
         task.pending_kill = true;
@@ -724,12 +744,15 @@ pub(super) fn dispatch_list_foreign_tasks(app: &mut AppView) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let Some(agent) = app.agents.get(&id) else {
+    let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
     let Some(session_id) = agent.session.session_id.clone() else {
         return vec![];
     };
+    // Every fetch path (pane open, poll) restarts the timer here, so a fetch
+    // already in flight is not double-counted as the next one's due date.
+    agent.tasks.note_foreign_fetch();
     vec![Effect::ListForeignTasks { session_id }]
 }
 
@@ -826,6 +849,9 @@ pub(super) fn handle_foreign_tasks_listed(
         .map(|sid| sid.0.to_string());
 
     let now = std::time::SystemTime::now();
+    // A kill asked for from this session stays visible until the record itself
+    // reports otherwise; the fresh listing only knows about the worker.
+    let previous = std::mem::take(&mut agent.foreign_tasks);
     let mut running = Vec::new();
     let mut completed = Vec::new();
     for snapshot in &tasks {
@@ -868,9 +894,53 @@ pub(super) fn handle_foreign_tasks_listed(
     );
     agent.foreign_tasks = running
         .into_iter()
-        .map(|row| (row.task.task_id.clone(), row))
+        .map(|mut row| {
+            if row.task.status == crate::app::agent::BgTaskStatus::Running
+                && let Some(was) = previous.get(&row.task.task_id)
+            {
+                row.task.pending_kill = was.task.pending_kill;
+                row.task.kill_requested_at = was.task.kill_requested_at;
+            }
+            (row.task.task_id.clone(), row)
+        })
         .collect();
     vec![]
+}
+
+/// A cross-session record this session just cleared. The row goes at once: the
+/// directory is gone, so the next poll cannot bring it back. A failed delete
+/// leaves the row alone and the poll re-reads its true state.
+pub(super) fn handle_foreign_task_deleted(
+    app: &mut AppView,
+    session_id: String,
+    task_id: String,
+    deleted: bool,
+) -> Vec<Effect> {
+    if !deleted {
+        tracing::warn!(task_id = %task_id, "Task record still present after delete request");
+        return vec![];
+    }
+    if let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id) {
+        agent.foreign_tasks.remove(&task_id);
+    }
+    vec![]
+}
+
+/// Re-fetch the cross-session rows while the tasks pane stays open.
+///
+/// The pane used to fetch once on open, so it kept showing a frozen list while
+/// work in another session finished. Returns `None` when no refresh is due.
+pub(crate) fn reconcile_stale_foreign_tasks(app: &mut AppView) -> Option<Vec<Effect>> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return None;
+    };
+    let agent = app.agents.get_mut(&id)?;
+    if !agent.tasks.foreign_poll_due() {
+        return None;
+    }
+    let session_id = agent.session.session_id.clone()?;
+    agent.tasks.note_foreign_fetch();
+    Some(vec![Effect::ListForeignTasks { session_id }])
 }
 
 pub(super) fn handle_bg_task_killed(
@@ -881,6 +951,23 @@ pub(super) fn handle_bg_task_killed(
 ) -> Vec<Effect> {
     use xai_grok_tools::types::KillOutcome;
     if let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id) {
+        if agent.foreign_tasks.contains_key(&task_id) {
+            match outcome {
+                Some(KillOutcome::NotFound) => {
+                    agent.foreign_tasks.remove(&task_id);
+                }
+                // Killed: stay pending — the owning session is the one that would
+                // report completion, so the next poll lands the truth.
+                Some(KillOutcome::Killed) => {}
+                _ => {
+                    if let Some(foreign) = agent.foreign_tasks.get_mut(&task_id) {
+                        foreign.task.pending_kill = false;
+                        foreign.task.kill_requested_at = None;
+                    }
+                }
+            }
+            return vec![];
+        }
         match outcome {
             Some(KillOutcome::Killed) => {
                 // Stay in pending_kill state; task_completed notification will arrive and clear it
