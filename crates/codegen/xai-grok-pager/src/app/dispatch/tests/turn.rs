@@ -2279,6 +2279,7 @@ fn listed_snapshot(
     task_id: &str,
     owner: Option<&str>,
     completed: bool,
+    detach: bool,
     age: std::time::Duration,
     now: std::time::SystemTime,
 ) -> xai_grok_tools::types::TaskSnapshot {
@@ -2304,13 +2305,14 @@ fn listed_snapshot(
         description: None,
         output_encoding: None,
         is_backgrounded: true,
-        detach: false,
+        detach,
     }
 }
 
 /// The cross-session listing is filtered and labelled: this session's own tasks
 /// and tasks this client already tracks live are dropped (they are rendered from
-/// the live notification stream), stale completed rows are dropped, and every
+/// the live notification stream), stale completed rows are dropped, rows the
+/// user never confirmed to outlive their session are dropped, and every
 /// surviving row carries the owner's short id.
 #[test]
 fn foreign_task_list_filters_own_and_stale_rows_and_labels_owners() {
@@ -2328,11 +2330,19 @@ fn foreign_task_list_filters_own_and_stale_rows_and_labels_owners() {
     }
 
     let tasks = vec![
-        listed_snapshot("own-live", Some("test-session"), false, Duration::ZERO, now),
+        listed_snapshot(
+            "own-live",
+            Some("test-session"),
+            false,
+            true,
+            Duration::ZERO,
+            now,
+        ),
         listed_snapshot(
             "other-run",
             Some("01a0e7b8-dead"),
             false,
+            true,
             Duration::ZERO,
             now,
         ),
@@ -2340,15 +2350,25 @@ fn foreign_task_list_filters_own_and_stale_rows_and_labels_owners() {
             "other-fresh",
             Some("01a0e7b8-dead"),
             true,
+            true,
             Duration::from_secs(60),
             now,
         ),
-        listed_snapshot("other-old", Some("01a0e7b8-dead"), true, day * 2, now),
-        listed_snapshot("no-owner", None, true, Duration::from_secs(60), now),
+        listed_snapshot("other-old", Some("01a0e7b8-dead"), true, true, day * 2, now),
+        listed_snapshot("no-owner", None, true, true, Duration::from_secs(60), now),
+        listed_snapshot(
+            "other-plain",
+            Some("01a0e7b8-dead"),
+            false,
+            false,
+            Duration::ZERO,
+            now,
+        ),
         listed_snapshot(
             "tracked-live",
             Some("01a0e7b8-dead"),
             false,
+            true,
             Duration::ZERO,
             now,
         ),
@@ -2367,6 +2387,10 @@ fn foreign_task_list_filters_own_and_stale_rows_and_labels_owners() {
         ids,
         ["no-owner", "other-fresh", "other-run"],
         "own/stale/already-tracked rows must be dropped"
+    );
+    assert!(
+        !agent.foreign_tasks.contains_key("other-plain"),
+        "a row that was never detached stays out — its own session still owns it"
     );
     assert_eq!(
         agent.foreign_tasks["other-run"].owner_short, "01a0e7b8",
@@ -2399,6 +2423,7 @@ fn foreign_task_list_caps_completed_rows() {
             listed_snapshot(
                 &format!("task-{i:02}"),
                 Some("01a0e7b8-dead"),
+                true,
                 true,
                 Duration::from_secs(60 + i),
                 now,
@@ -2439,6 +2464,7 @@ fn foreign_task_list_failure_keeps_existing_rows() {
         "keep-me",
         Some("01a0e7b8-dead"),
         false,
+        true,
         std::time::Duration::ZERO,
         now,
     );

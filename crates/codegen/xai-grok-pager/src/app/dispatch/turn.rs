@@ -800,8 +800,10 @@ const FOREIGN_MAX_RUNNING: usize = 20;
 /// Store the cross-session rows the tasks pane asked for.
 ///
 /// Rows are filtered to *other* sessions (this session's own tasks arrive as
-/// live notifications) and to ids this client is not already tracking, so the
-/// pane never shows the same task twice from two sources.
+/// live notifications), to ids this client is not already tracking, and to the
+/// ones the user confirmed may outlive their session, so the pane shows only
+/// work that can still run without its session and never shows the same task
+/// twice from two sources.
 pub(super) fn handle_foreign_tasks_listed(
     app: &mut AppView,
     session_id: String,
@@ -828,6 +830,13 @@ pub(super) fn handle_foreign_tasks_listed(
     let mut completed = Vec::new();
     for snapshot in &tasks {
         if agent.session.bg_tasks.contains_key(&snapshot.task_id) {
+            continue;
+        }
+        // Every explicit background command is durable, so the listing also
+        // carries other sessions' ordinary tasks — those belong to a session
+        // that is still alive to report them. A record predating the wire field
+        // reads as not detached and stays out.
+        if !snapshot.detach {
             continue;
         }
         let Some(row) = ForeignTaskState::from_listed(snapshot, current.as_deref()) else {
