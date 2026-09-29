@@ -117,6 +117,7 @@ fn active_to_paused_stays_visible_without_ticks_then_terminal_closes() {
         None,
         &HashSet::new(),
         &active,
+        &BTreeMap::new(),
     );
     assert!(pane.is_visible());
     assert!(pane.needs_tick());
@@ -130,6 +131,7 @@ fn active_to_paused_stays_visible_without_ticks_then_terminal_closes() {
         None,
         &HashSet::new(),
         &paused,
+        &BTreeMap::new(),
     );
     assert!(pane.is_visible());
     assert!(!pane.needs_tick());
@@ -140,6 +142,7 @@ fn active_to_paused_stays_visible_without_ticks_then_terminal_closes() {
         None,
         &HashSet::new(),
         &paused,
+        &BTreeMap::new(),
     );
     assert!(pane.is_visible(), "paused-only syncs must not auto-close");
 
@@ -151,6 +154,7 @@ fn active_to_paused_stays_visible_without_ticks_then_terminal_closes() {
         None,
         &HashSet::new(),
         &terminal,
+        &BTreeMap::new(),
     );
     assert!(!pane.is_visible());
 }

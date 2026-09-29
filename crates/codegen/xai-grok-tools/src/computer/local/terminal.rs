@@ -424,6 +424,9 @@ struct ProcessState {
     /// Scopes kill operations so subagent teardown only kills its own tasks.
     owner_session_id: Option<String>,
     description: Option<String>,
+    /// Carried into [`TaskSnapshot::detach`] so the UI can mark a task the user
+    /// confirmed as outliving the session.
+    detach: bool,
     output_encoding: Option<crate::computer::types::OutputEncoding>,
     /// Streaming source decoder. stdout and stderr have independent decoder
     /// state because a multibyte character may be split across reads on one
@@ -557,6 +560,7 @@ impl ProcessState {
             description: self.description.clone(),
             output_encoding: self.output_encoding.clone(),
             is_backgrounded: self.bg_status.is_backgrounded(),
+            detach: self.detach,
         }
     }
 
@@ -1272,6 +1276,7 @@ impl LocalTerminalActor {
             state_dump_handle,
             owner_session_id: request.owner_session_id.clone(),
             description: request.description.filter(|d| !d.trim().is_empty()),
+            detach: request.detach,
             output_encoding: request.output_encoding.clone(),
             output_decoder: request
                 .output_encoding
@@ -1432,6 +1437,7 @@ impl LocalTerminalActor {
             },
             owner_session_id: request.owner_session_id.clone(),
             description: request.description.filter(|d| !d.trim().is_empty()),
+            detach: request.detach,
             output_encoding: request.output_encoding.clone(),
             output_decoder: request
                 .output_encoding
@@ -1809,6 +1815,7 @@ impl LocalTerminalActor {
                     output_encoding: p.output_encoding.clone(),
                     is_backgrounded: true,
                     output_total_bytes: p.total_bytes,
+                    detach: p.detach,
                 };
                 self.completed_task_snapshots.insert(id.clone(), snapshot);
             }
@@ -2147,6 +2154,7 @@ impl LocalTerminalActor {
                 task_id: process.tool_call_id.clone(),
                 monitor_description: None,
                 description: process.description.clone().filter(|d| !d.trim().is_empty()),
+                detach: process.detach,
             },
         );
     }
@@ -2308,6 +2316,7 @@ impl LocalTerminalActor {
                     task_id: task_id.clone(),
                     monitor_description: recovered_monitor_description,
                     description: effective_description.clone(),
+                    detach: process.detach,
                 });
 
                 // The old monitor pipeline died with the child session; re-spawn it.
@@ -2392,6 +2401,32 @@ impl Default for LocalTerminalConfig {
 impl LocalTerminalBackend {
     pub fn new() -> Self {
         Self::new_inner(LocalTerminalConfig::default())
+    }
+
+    /// Shared body of [`TerminalBackend::list_tasks`] and its light variant.
+    ///
+    /// `hydrate` only affects durable records: the actor-held ones are built
+    /// from in-memory state, so there is nothing to skip for them.
+    async fn list_tasks_inner(&self, hydrate: bool) -> Vec<TaskSnapshot> {
+        let mut tasks = Vec::new();
+        if let Some(registry) = &self.persistent_task_registry {
+            tasks.extend(if hydrate {
+                registry.list_tasks().await
+            } else {
+                registry.list_tasks_light().await
+            });
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(TerminalCommand::ListTasks { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            return tasks;
+        }
+        tasks.extend(reply_rx.await.unwrap_or_default());
+        tasks
     }
 
     /// Local terminal backend whose explicit background commands are hosted
@@ -2762,21 +2797,27 @@ impl TerminalBackend for LocalTerminalBackend {
     }
 
     async fn list_tasks(&self) -> Vec<TaskSnapshot> {
-        let mut tasks = Vec::new();
-        if let Some(registry) = &self.persistent_task_registry {
-            tasks.extend(registry.list_tasks().await);
+        self.list_tasks_inner(true).await
+    }
+
+    /// [`Self::list_tasks`] without hydrating output: durable records are the
+    /// expensive half (one file read each), actor-held ones are already in
+    /// memory either way.
+    async fn list_tasks_light(&self) -> Vec<TaskSnapshot> {
+        self.list_tasks_inner(false).await
+    }
+
+    /// Durable records are the only ones that can outlive their session, so the
+    /// in-process actor's tasks are deliberately not consulted.
+    async fn claim_late_deliveries(
+        &self,
+        window: Duration,
+        claimed_by: Option<&str>,
+    ) -> Vec<TaskSnapshot> {
+        match &self.persistent_task_registry {
+            Some(registry) => registry.claim_late_deliveries(window, claimed_by),
+            None => Vec::new(),
         }
-        let (reply_tx, reply_rx) = oneshot::channel();
-        if self
-            .cmd_tx
-            .send(TerminalCommand::ListTasks { reply: reply_tx })
-            .await
-            .is_err()
-        {
-            return tasks;
-        }
-        tasks.extend(reply_rx.await.unwrap_or_default());
-        tasks
     }
 
     async fn get_shell_cwd(&self) -> Option<PathBuf> {

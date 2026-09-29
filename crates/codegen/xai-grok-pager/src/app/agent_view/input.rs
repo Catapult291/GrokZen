@@ -1198,6 +1198,9 @@ impl AgentView {
             self.tasks.on_state_change();
             if self.tasks.overlay.focused {
                 self.set_active_pane(AgentPane::Tasks, false);
+                // Opening the pane also refreshes the rows owned by other
+                // sessions; they are only fetched on demand.
+                return InputOutcome::Action(Action::ListForeignTasks);
             } else if self.active_pane == AgentPane::Tasks {
                 self.set_active_pane(AgentPane::Scrollback, false);
             }

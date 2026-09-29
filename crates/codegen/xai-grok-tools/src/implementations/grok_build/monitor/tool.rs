@@ -165,6 +165,8 @@ impl xai_tool_runtime::Tool for MonitorTool {
             task_id: task_id.clone(),
             monitor_description: tray_description.clone(),
             description: tray_description,
+            // A monitor is session-scoped by construction; it has no `detach`.
+            detach: false,
         });
 
         // Spawn the stdout processing pipeline.

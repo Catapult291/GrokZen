@@ -699,6 +699,7 @@
   "tasks.group.watchers": "监视器",
   "tasks.toast.toggle_hint": "提示：按 Ctrl+G 可切换任务面板",
   "tasks.kind.monitor": "监视器",
+  "tasks.kind.detached": "跨会话",
   "tasks.kind.task_prefix": "任务 ",
   "tasks.kind.general": "通用",
   "tasks.kind.workflow_prefix": "工作流 ",

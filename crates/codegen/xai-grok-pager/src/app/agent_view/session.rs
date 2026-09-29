@@ -116,6 +116,7 @@ impl AgentView {
             tasks: TasksPane::new(),
             catalog: SubagentCatalogPane::new(),
             queue: QueuePane::new(),
+            foreign_tasks: std::collections::BTreeMap::new(),
             shared_queue: Vec::new(),
             attached_as_viewer: false,
             self_originated_prompt_ids: VecDeque::new(),
@@ -1870,6 +1871,7 @@ mod resolve_turn_activity_tests {
                 scrollback_entry_id: None,
                 is_monitor: false,
                 restored_from_replay: false,
+                detach: false,
             },
         );
         let meta = NotificationMeta::default();
@@ -1944,6 +1946,7 @@ mod resolve_turn_activity_tests {
                 scrollback_entry_id: None,
                 is_monitor: false,
                 restored_from_replay: false,
+                detach: false,
             },
         );
         let meta = NotificationMeta::default();
@@ -1999,6 +2002,7 @@ mod resolve_turn_activity_tests {
                 scrollback_entry_id: None,
                 is_monitor: false,
                 restored_from_replay: false,
+                detach: false,
             },
         );
         let meta = NotificationMeta::default();
@@ -2063,6 +2067,7 @@ mod resolve_turn_activity_tests {
                 scrollback_entry_id: None,
                 is_monitor: false,
                 restored_from_replay: false,
+                detach: false,
             },
         );
         let meta = NotificationMeta::default();
@@ -2213,6 +2218,7 @@ mod resolve_turn_activity_tests {
                 scrollback_entry_id: None,
                 is_monitor: false,
                 restored_from_replay: false,
+                detach: false,
             },
         );
         let meta = NotificationMeta::default();

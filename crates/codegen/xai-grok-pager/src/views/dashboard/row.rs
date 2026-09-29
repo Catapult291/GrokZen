@@ -2091,6 +2091,7 @@ mod tests {
             scrollback_entry_id: None,
             is_monitor: false,
             restored_from_replay: false,
+            detach: false,
         };
         for (status, expect_badge) in [
             (BgTaskStatus::Running, true),
@@ -2132,6 +2133,7 @@ mod tests {
             scrollback_entry_id: None,
             is_monitor,
             restored_from_replay: false,
+            detach: false,
         }
     }
     /// An active scheduled `/loop` task.

@@ -245,10 +245,24 @@ impl SessionHandle {
     /// List all background tasks.
     /// Routes through the session actor to the ToolBridge's TerminalBackend.
     pub async fn list_tasks(&self) -> Option<Vec<xai_grok_tools::types::TaskSnapshot>> {
+        self.list_tasks_inner(false).await
+    }
+    /// [`Self::list_tasks`] without per-task output hydration.
+    /// Used by clients that enumerate every durable record.
+    pub async fn list_tasks_light(&self) -> Option<Vec<xai_grok_tools::types::TaskSnapshot>> {
+        self.list_tasks_inner(true).await
+    }
+    async fn list_tasks_inner(
+        &self,
+        light: bool,
+    ) -> Option<Vec<xai_grok_tools::types::TaskSnapshot>> {
         let (tx, rx) = oneshot::channel();
         if self
             .cmd_tx
-            .send(SessionCommand::ListTasks { respond_to: tx })
+            .send(SessionCommand::ListTasks {
+                light,
+                respond_to: tx,
+            })
             .is_err()
         {
             return None;

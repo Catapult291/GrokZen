@@ -2103,6 +2103,7 @@ impl xai_tool_runtime::Tool for BashTool {
                 task_id: task_id.clone(),
                 monitor_description: None,
                 description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
+                detach: input.detach,
             });
 
             let retrieval_hint = Self::background_retrieval_hint(&resources, &task_id).await?;
@@ -2202,6 +2203,10 @@ impl xai_tool_runtime::Tool for BashTool {
                     task_id: tool_call_id.as_str().to_owned(),
                     monitor_description: None,
                     description: Some(input.description.clone()).filter(|d| !d.trim().is_empty()),
+                    // A foreground run is never detached (the request forced
+                    // `detach: false`), so a timeout-demoted one must not
+                    // acquire the flag the user was never asked about.
+                    detach: false,
                 });
 
                 let retrieval_hint =

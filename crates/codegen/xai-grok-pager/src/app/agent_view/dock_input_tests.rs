@@ -30,6 +30,7 @@ fn insert_running_task(agent: &mut AgentView, task_id: &str) {
             scrollback_entry_id: None,
             is_monitor: false,
             restored_from_replay: false,
+            detach: false,
         },
     );
 }

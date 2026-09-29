@@ -565,6 +565,7 @@ async fn genuine_user_start_consumes_deferred_completions_without_notification_t
                     output_encoding: None,
                     is_backgrounded: false,
                     output_total_bytes: 0,
+                    detach: false,
                 },
                 Some("get_command_or_subagent_output"),
             );
@@ -1653,6 +1654,7 @@ fn completed_bash_task(id: &str) -> xai_grok_tools::computer::types::TaskSnapsho
         output_encoding: None,
         is_backgrounded: false,
         output_total_bytes: 0,
+        detach: false,
     }
 }
 /// It exercises the production computation the leader's idle-unload decision depends on, rather than the test fake actor.

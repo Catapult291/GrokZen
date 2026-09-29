@@ -826,10 +826,15 @@ pub(super) async fn run_session(
                                 .map_err(|e| e.to_string());
                             let _ = respond_to.send(result);
                         }
-                        SessionCommand::ListTasks { respond_to } => {
-                            let result = session.agent.borrow().tool_bridge()
-                                .list_tasks()
-                                .await;
+                        SessionCommand::ListTasks { light, respond_to } => {
+                            // Clone the Arc rather than holding the agent `Ref`
+                            // across the await.
+                            let bridge = session.tool_bridge_handle();
+                            let result = if light {
+                                bridge.list_tasks_light().await
+                            } else {
+                                bridge.list_tasks().await
+                            };
                             let _ = respond_to.send(result);
                         }
                         SessionCommand::GetHooksList { respond_to } => {

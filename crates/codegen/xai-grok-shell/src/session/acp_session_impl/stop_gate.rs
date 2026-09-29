@@ -414,6 +414,7 @@ mod stop_gate_snapshot_tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         }
     }
 

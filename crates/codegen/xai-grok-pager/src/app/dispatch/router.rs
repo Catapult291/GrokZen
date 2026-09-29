@@ -115,6 +115,7 @@ use super::transcript::{
 use super::turn::{
     dispatch_cancel_scheduled_task, dispatch_cancel_turn, dispatch_cancel_turn_choice,
     dispatch_demote_to_background, dispatch_kill_bg_task, dispatch_kill_subagent,
+    dispatch_list_foreign_tasks,
 };
 use super::voice::{dispatch_enable_voice_mode, dispatch_voice_stop, dispatch_voice_toggle};
 use crate::app::actions::{Action, Effect};
@@ -1019,6 +1020,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CancelTurn => dispatch_cancel_turn(app),
         Action::CancelTurnChoice(choice) => dispatch_cancel_turn_choice(app, choice),
         Action::KillBgTask(task_id) => dispatch_kill_bg_task(app, task_id),
+        Action::ListForeignTasks => dispatch_list_foreign_tasks(app),
         Action::KillSubagent(subagent_id) => dispatch_kill_subagent(app, subagent_id),
         Action::CancelScheduledTask(task_id) => dispatch_cancel_scheduled_task(app, task_id),
         Action::DemoteToBackground => dispatch_demote_to_background(app),

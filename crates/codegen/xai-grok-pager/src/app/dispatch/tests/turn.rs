@@ -2274,6 +2274,197 @@ fn bg_task_killed_keeps_pending_kill_on_killed_outcome() {
     assert!(task.pending_kill);
 }
 
+/// Snapshot fixture for the cross-session listing tests.
+fn listed_snapshot(
+    task_id: &str,
+    owner: Option<&str>,
+    completed: bool,
+    age: std::time::Duration,
+    now: std::time::SystemTime,
+) -> xai_grok_tools::types::TaskSnapshot {
+    xai_grok_tools::types::TaskSnapshot {
+        task_id: task_id.into(),
+        command: "cargo build --release".into(),
+        display_command: None,
+        cwd: "/tmp".into(),
+        start_time: now - age,
+        end_time: completed.then(|| now - age),
+        output: String::new(),
+        output_file: "/tmp/out.log".into(),
+        truncated: false,
+        output_total_bytes: 0,
+        exit_code: completed.then_some(0),
+        signal: None,
+        completed,
+        kind: Default::default(),
+        block_waited: false,
+        explicitly_killed: false,
+        kill_result_delivered: false,
+        owner_session_id: owner.map(str::to_string),
+        description: None,
+        output_encoding: None,
+        is_backgrounded: true,
+        detach: false,
+    }
+}
+
+/// The cross-session listing is filtered and labelled: this session's own tasks
+/// and tasks this client already tracks live are dropped (they are rendered from
+/// the live notification stream), stale completed rows are dropped, and every
+/// surviving row carries the owner's short id.
+#[test]
+fn foreign_task_list_filters_own_and_stale_rows_and_labels_owners() {
+    use std::time::Duration;
+
+    let mut app = test_app_with_agent();
+    let now = std::time::SystemTime::now();
+    let day = Duration::from_secs(24 * 60 * 60);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent
+            .session
+            .bg_tasks
+            .insert("tracked-live".into(), super::make_bg_task("tracked-live"));
+    }
+
+    let tasks = vec![
+        listed_snapshot("own-live", Some("test-session"), false, Duration::ZERO, now),
+        listed_snapshot(
+            "other-run",
+            Some("01a0e7b8-dead"),
+            false,
+            Duration::ZERO,
+            now,
+        ),
+        listed_snapshot(
+            "other-fresh",
+            Some("01a0e7b8-dead"),
+            true,
+            Duration::from_secs(60),
+            now,
+        ),
+        listed_snapshot("other-old", Some("01a0e7b8-dead"), true, day * 2, now),
+        listed_snapshot("no-owner", None, true, Duration::from_secs(60), now),
+        listed_snapshot(
+            "tracked-live",
+            Some("01a0e7b8-dead"),
+            false,
+            Duration::ZERO,
+            now,
+        ),
+    ];
+    dispatch(
+        Action::TaskComplete(TaskResult::ForeignTasksListed {
+            session_id: "test-session".into(),
+            tasks: Some(tasks),
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&AgentId(0)];
+    let ids: Vec<&str> = agent.foreign_tasks.keys().map(String::as_str).collect();
+    assert_eq!(
+        ids,
+        ["no-owner", "other-fresh", "other-run"],
+        "own/stale/already-tracked rows must be dropped"
+    );
+    assert_eq!(
+        agent.foreign_tasks["other-run"].owner_short, "01a0e7b8",
+        "the row names the owner session's short id"
+    );
+    assert_eq!(
+        agent.foreign_tasks["no-owner"].owner_short, "unknown",
+        "a task with no recorded owner is still listed"
+    );
+    assert_eq!(
+        agent.foreign_tasks["other-run"].task.status,
+        crate::app::agent::BgTaskStatus::Running
+    );
+    assert!(
+        agent.foreign_tasks["other-fresh"].task.end_time.is_some(),
+        "a finished row keeps its end time"
+    );
+}
+
+/// Completed rows from other sessions are capped: a long-lived machine keeps
+/// hundreds of finished records, and the pane is for work still worth acting on.
+#[test]
+fn foreign_task_list_caps_completed_rows() {
+    use std::time::Duration;
+
+    let mut app = test_app_with_agent();
+    let now = std::time::SystemTime::now();
+    let tasks = (0..30)
+        .map(|i| {
+            listed_snapshot(
+                &format!("task-{i:02}"),
+                Some("01a0e7b8-dead"),
+                true,
+                Duration::from_secs(60 + i),
+                now,
+            )
+        })
+        .collect();
+    dispatch(
+        Action::TaskComplete(TaskResult::ForeignTasksListed {
+            session_id: "test-session".into(),
+            tasks: Some(tasks),
+        }),
+        &mut app,
+    );
+
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(
+        agent.foreign_tasks.len(),
+        20,
+        "completed rows are capped at 20"
+    );
+    assert!(
+        agent.foreign_tasks.contains_key("task-00"),
+        "the most recent rows are the ones kept"
+    );
+    assert!(
+        !agent.foreign_tasks.contains_key("task-29"),
+        "older rows fall off"
+    );
+}
+
+/// An unavailable listing (error envelope, unknown session, no terminal backend)
+/// must not wipe the rows the pane already shows.
+#[test]
+fn foreign_task_list_failure_keeps_existing_rows() {
+    let mut app = test_app_with_agent();
+    let now = std::time::SystemTime::now();
+    let row = listed_snapshot(
+        "keep-me",
+        Some("01a0e7b8-dead"),
+        false,
+        std::time::Duration::ZERO,
+        now,
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::ForeignTasksListed {
+            session_id: "test-session".into(),
+            tasks: Some(vec![row]),
+        }),
+        &mut app,
+    );
+    assert_eq!(app.agents[&AgentId(0)].foreign_tasks.len(), 1);
+
+    dispatch(
+        Action::TaskComplete(TaskResult::ForeignTasksListed {
+            session_id: "test-session".into(),
+            tasks: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.agents[&AgentId(0)].foreign_tasks.len(),
+        1,
+        "a failed listing leaves the pane as it was"
+    );
+}
+
 #[test]
 fn kill_bg_task_action_emits_client_ui_source() {
     use xai_grok_shell::extensions::task::TaskKillSource;

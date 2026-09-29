@@ -66,6 +66,7 @@ pub(crate) static TASK_BACKGROUNDED: LazyLock<String> = LazyLock::new(|| {
         output_file: String::new(),
         monitor_description: None,
         description: None,
+        detach: false,
     })
 });
 
@@ -93,6 +94,7 @@ pub(crate) static TASK_COMPLETED: LazyLock<String> = LazyLock::new(|| {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         },
         will_wake: false,
     })

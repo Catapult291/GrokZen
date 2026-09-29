@@ -623,7 +623,10 @@ pub enum SessionCommand {
         respond_to: oneshot::Sender<Result<bool, String>>,
     },
     /// Routes through the ToolBridge's TerminalBackend.
+    /// `light` skips per-task output hydration (a UI listing every record wants
+    /// ids/owners/state, not hundreds of log reads).
     ListTasks {
+        light: bool,
         respond_to: oneshot::Sender<Option<Vec<xai_grok_tools::types::TaskSnapshot>>>,
     },
     /// Query whether the session has work in flight: a running turn (`running_task.is_some()`) **or** queued inputs (`pending_inputs` non-empty).

@@ -582,6 +582,87 @@ impl SessionActor {
             reported.mark_reported(id);
         }
     }
+    /// How long a completion may sit undelivered and still be handed to a later
+    /// session. Older ones are consumed silently, so a machine with hundreds of
+    /// stale records does not replay them all at once when a session opens.
+    pub(super) const LATE_TASK_DELIVERY_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
+    /// Budget for naming the polling/read tools in a late-delivery reminder.
+    /// They only decorate the text; a registry that is still warming up at
+    /// session start must not hold the delivery back.
+    pub(super) const LATE_DELIVERY_NAME_LOOKUP_TIMEOUT: Duration = Duration::from_secs(3);
+
+    /// The delivery window in force, overridable per machine through
+    /// `GROK_LATE_DELIVERY_WINDOW_SECS`. A value of `0` consumes every
+    /// completion silently, which turns late delivery off.
+    pub(super) fn late_delivery_window() -> Duration {
+        std::env::var("GROK_LATE_DELIVERY_WINDOW_SECS")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Self::LATE_TASK_DELIVERY_WINDOW)
+    }
+
+    /// Hand detached background-task completions from dead sessions to this
+    /// one, exactly once.
+    ///
+    /// A detached task outlives the session that started it, so the in-session
+    /// completion watcher is gone by the time it finishes and nothing reports
+    /// the result. Called from the start of the first prompt's turn — the same
+    /// place the other session-opening reminders are injected, so it lands in
+    /// the conversation the model is about to read. It claims pending
+    /// completions from the durable task directory through the shared one-shot
+    /// delivery claim (see `xai_grok_tools::computer::local::persistent`), so a
+    /// completion is never handed to two sessions.
+    pub(super) async fn deliver_late_task_completions(&self) {
+        if self.late_delivery_claimed.replace(true) {
+            return;
+        }
+        // A subagent is not a conversation anyone opens, and a non-interactive
+        // run would swallow the claim without a user ever reading it.
+        if self.startup_hints.is_subagent || self.startup_hints.non_interactive {
+            return;
+        }
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let claimed_by = self.session_info.id.0.to_string();
+        let claimed = bridge
+            .claim_late_deliveries(Self::late_delivery_window(), Some(&claimed_by))
+            .await;
+        if claimed.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = claimed.len(),
+            "claimed detached background-task completions left by earlier sessions"
+        );
+        // Tool names only decorate the reminder; the delivery itself must not
+        // wait on a registry that is still warming up at session start.
+        let task_output_name = tokio::time::timeout(
+            Self::LATE_DELIVERY_NAME_LOOKUP_TIMEOUT,
+            xai_grok_tools::reminders::task_completion::resolve_task_output_tool_name(&bridge),
+        )
+        .await
+        .ok()
+        .flatten();
+        let read_tool_name = tokio::time::timeout(
+            Self::LATE_DELIVERY_NAME_LOOKUP_TIMEOUT,
+            xai_grok_tools::reminders::task_completion::resolve_read_tool_name(&bridge),
+        )
+        .await
+        .ok()
+        .flatten();
+        let reminder = xai_grok_tools::reminders::task_completion::format_late_task_completions(
+            &claimed,
+            task_output_name.as_deref(),
+            read_tool_name.as_deref(),
+        );
+        tracing::info!(
+            count = claimed.len(),
+            "delivering detached background-task completions claimed from earlier sessions"
+        );
+        self.push_system_reminder(&reminder);
+    }
+
     pub(super) async fn drain_between_turn_completions(&self) {
         let goal_loop_active = self.goal_loop_active();
         let bridge = self.agent.borrow().tool_bridge().clone();

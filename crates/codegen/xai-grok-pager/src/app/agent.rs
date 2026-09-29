@@ -219,6 +219,10 @@ pub struct BgTaskState {
     /// Restored tasks are historical context: the tasks pane must not auto-open for them.
     /// On a cold resume they are dead and reconciled away within the same load; on a warm reconnect they are ambient, not new activity.
     pub restored_from_replay: bool,
+    /// The user confirmed this task may outlive the session (the bash tool's
+    /// `detach` flag). Drives the "活过会话" marker in the tasks pane and the
+    /// scrollback block; it does not change how the row is killed.
+    pub detach: bool,
 }
 impl BgTaskState {
     /// Elapsed duration (from start to end, or start to now if running).
@@ -300,6 +304,7 @@ impl BgTaskState {
             scrollback_entry_id: None,
             is_monitor,
             restored_from_replay,
+            detach: snapshot.detach,
         };
         if !snapshot.output.is_empty() {
             let end = crate::render::line_utils::floor_char_boundary(
@@ -328,6 +333,9 @@ impl BgTaskState {
             self.description = fresh.description;
         }
         self.is_monitor |= fresh.is_monitor;
+        // The completion/backgrounded race can deliver the flag on either side;
+        // a confirmed detach is sticky (it describes the task, not the event).
+        self.detach |= fresh.detach;
         if self.stdout.is_empty() && !fresh.stdout.is_empty() {
             self.stdout = fresh.stdout;
             self.stdout_line_count = fresh.stdout_line_count;
@@ -338,6 +346,88 @@ impl BgTaskState {
         }
     }
 }
+/// A background task owned by a *different* session, listed on demand for the
+/// tasks pane.
+///
+/// The row state wraps a [`BgTaskState`] so the pane's overlay renderer (status
+/// icon, elapsed time, kill button) works unchanged, while the owner id rides
+/// alongside for the row tag.
+///
+/// Deliberately not inserted into `session.bg_tasks`: that map holds this
+/// session's own live tasks and is read by the status line, the dashboard's
+/// stop-all sweep and the auto-open logic. A foreign task must not enter any of
+/// those paths — the pane only renders it, and the kill request it offers is the
+/// same ext method (which does not check ownership).
+#[derive(Debug, Clone)]
+pub struct ForeignTaskState {
+    pub task: BgTaskState,
+    /// Short form of the owning session id, shown on the row.
+    pub owner_short: String,
+}
+
+impl ForeignTaskState {
+    /// Display form of a session id: its first 8 characters.
+    ///
+    /// Session ids are uuid v7, so the prefix is the time-ordered part and is
+    /// what a user can match against an entry in the session picker.
+    pub fn short_session_id(session_id: &str) -> String {
+        session_id.chars().take(8).collect()
+    }
+
+    /// Build the row for a task listed by `x.ai/task/list`, or `None` when the
+    /// task belongs to the current session (those are rendered from the live
+    /// notification stream instead) or arrives unusable.
+    pub fn from_listed(
+        snapshot: &xai_grok_tools::types::TaskSnapshot,
+        current_session_id: Option<&str>,
+    ) -> Option<Self> {
+        if snapshot.task_id.is_empty() {
+            return None;
+        }
+        let owner = snapshot
+            .owner_session_id
+            .as_deref()
+            .filter(|s| !s.is_empty());
+        if let (Some(owner), Some(current)) = (owner, current_session_id)
+            && owner == current
+        {
+            return None;
+        }
+
+        let status = if !snapshot.completed {
+            BgTaskStatus::Running
+        } else if snapshot.exit_code == Some(0) {
+            BgTaskStatus::Done
+        } else {
+            BgTaskStatus::Failed
+        };
+        let description = snapshot
+            .description
+            .clone()
+            .filter(|d| !d.trim().is_empty());
+        // Reuses the completion-tombstone field mapping, then undoes the two
+        // tombstone defaults that do not hold for a task still running.
+        let mut task = BgTaskState::tombstone_from_snapshot(
+            snapshot,
+            status,
+            description,
+            // Historical context: this client did not start it, so the pane must
+            // not auto-open for it (same rule as a replayed task).
+            true,
+        );
+        if status == BgTaskStatus::Running {
+            task.end_time = None;
+        }
+
+        Some(Self {
+            task,
+            owner_short: owner
+                .map(Self::short_session_id)
+                .unwrap_or_else(|| "unknown".to_string()),
+        })
+    }
+}
+
 /// State for a scheduled (loop) task, displayed in the tasks pane.
 #[derive(Debug, Clone)]
 pub struct ScheduledTaskInfo {
@@ -1836,6 +1926,7 @@ mod tests {
             description: None,
             is_backgrounded: true,
             output_total_bytes: 0,
+            detach: false,
         };
         let mut tombstone =
             BgTaskState::tombstone_from_snapshot(&snapshot, BgTaskStatus::Done, None, false);

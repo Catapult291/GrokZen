@@ -47,6 +47,16 @@ const PUBLISH_FINAL_ATTEMPTS: u32 = 3_000;
 /// cannot fill the task directory.
 const MAX_WORKER_LOG_LINES: u32 = 20;
 
+/// Marker written into a task directory once that task's completion has been
+/// delivered, so it is delivered exactly once.
+///
+/// Absence means "not delivered yet" — that is the whole `pending` state, and
+/// it needs no writer: a detached task that finishes while nobody is listening
+/// is pending by construction. Creation is O_EXCL, so two sessions racing for
+/// the same completion (or a session racing the dying-of-old-age case) produce
+/// exactly one claim.
+const DELIVERY_MARKER: &str = "delivery.json";
+
 /// Shared handle used by a local terminal backend to manage durable jobs.
 #[derive(Clone)]
 pub struct TaskRegistry {
@@ -187,6 +197,7 @@ impl TaskRegistry {
                     directory.clone(),
                     task_id.clone(),
                     worker_pid,
+                    spec.detach,
                     notification_handle,
                 );
                 return Ok(BackgroundHandle {
@@ -243,6 +254,19 @@ impl TaskRegistry {
     }
 
     pub(crate) async fn list_tasks(&self) -> Vec<TaskSnapshot> {
+        self.list_tasks_inner(true).await
+    }
+
+    /// [`Self::list_tasks`] without reading each task's output log.
+    ///
+    /// The full list hydrates every record from disk; a UI enumerating the whole
+    /// durable directory cannot afford that, and it only needs ids, owners and
+    /// completion state.
+    pub(crate) async fn list_tasks_light(&self) -> Vec<TaskSnapshot> {
+        self.list_tasks_inner(false).await
+    }
+
+    async fn list_tasks_inner(&self, hydrate: bool) -> Vec<TaskSnapshot> {
         let Ok(entries) = std::fs::read_dir(self.root.as_ref()) else {
             return Vec::new();
         };
@@ -254,13 +278,72 @@ impl TaskRegistry {
                     reconcile_worker_state(&mut state);
                 }
                 if state.ready {
-                    hydrate_output(&mut state.snapshot).await;
+                    if hydrate {
+                        hydrate_output(&mut state.snapshot).await;
+                    }
                     tasks.push(state.snapshot);
                 }
             }
         }
         tasks.sort_by_key(|task| task.start_time);
         tasks
+    }
+
+    /// Claim completions of detached tasks that no session has delivered yet.
+    ///
+    /// A detached task is confirmed to outlive its session, so the completion
+    /// watcher that would have reported it in-session is gone once that session
+    /// ends; without this pass the result is lost. The claiming session gets
+    /// the recent ones back as plain snapshots (no output hydration — the log
+    /// is still on disk) and marks the rest delivered silently, so the window
+    /// only rations attention: a task that finished longer ago than `window` is
+    /// consumed without being reported, never reported later.
+    ///
+    /// `claimed_by` names the claiming session in the marker for diagnostics.
+    pub(crate) fn claim_late_deliveries(
+        &self,
+        window: Duration,
+        claimed_by: Option<&str>,
+    ) -> Vec<TaskSnapshot> {
+        let Ok(entries) = std::fs::read_dir(self.root.as_ref()) else {
+            return Vec::new();
+        };
+        let now = std::time::SystemTime::now();
+        let mut claimed = Vec::new();
+        for entry in entries.flatten() {
+            let directory = entry.path();
+            if directory.join(DELIVERY_MARKER).exists() {
+                continue;
+            }
+            // The durable spec is the authority on `detach` (see `is_detached`).
+            let Some(spec) = read_spec(&directory.join("spec.json")) else {
+                continue;
+            };
+            if !spec.detach {
+                continue;
+            }
+            let Some(state) = read_state(&directory.join("state.json")) else {
+                continue;
+            };
+            // Persisted state only: completion is written by the worker itself,
+            // and a record that was never published is not a result to deliver.
+            if !state.ready || !state.snapshot.completed {
+                continue;
+            }
+            let ended = state.snapshot.end_time.unwrap_or(now);
+            let recent = now
+                .duration_since(ended)
+                .map(|age| age <= window)
+                .unwrap_or(true);
+            if !claim_delivery(&directory, true, claimed_by) {
+                continue;
+            }
+            if recent {
+                claimed.push(state.snapshot);
+            }
+        }
+        claimed.sort_by_key(|task| task.end_time);
+        claimed
     }
 
     pub(crate) async fn wait_for_completion(
@@ -344,10 +427,7 @@ impl TaskRegistry {
         if directory.as_os_str().is_empty() {
             return false;
         }
-        std::fs::read(directory.join("spec.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<PersistentTaskSpec>(&bytes).ok())
-            .is_some_and(|spec| spec.detach)
+        read_spec(&directory.join("spec.json")).is_some_and(|spec| spec.detach)
     }
 
     pub(crate) async fn kill_all_by_owner(&self, owner: Option<&str>) {
@@ -522,6 +602,40 @@ fn read_state(path: &Path) -> Option<PersistentTaskState> {
     serde_json::from_slice(&bytes).ok()
 }
 
+fn read_spec(path: &Path) -> Option<PersistentTaskSpec> {
+    let bytes = std::fs::read(path).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// Atomically claim a task's completion for delivery.
+///
+/// `true` means this caller owns the one delivery; `false` means it already
+/// happened, or a concurrent session won the race. The body is written for
+/// whoever inspects a directory later — existence alone is the signal
+/// (see [`DELIVERY_MARKER`]) — so it records whether the completion was
+/// reported to a later session (`late`) and by whom.
+fn claim_delivery(directory: &Path, late: bool, claimed_by: Option<&str>) -> bool {
+    use std::io::Write as _;
+
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(directory.join(DELIVERY_MARKER))
+    else {
+        return false;
+    };
+    let body = serde_json::json!({
+        "state": "delivered",
+        "late": late,
+        "claimed_by": claimed_by,
+        "claimed_at": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Ok(bytes) = serde_json::to_vec(&body) {
+        let _ = file.write_all(&bytes);
+    }
+    true
+}
+
 fn reconcile_worker_state(state: &mut PersistentTaskState) {
     if state.snapshot.completed {
         return;
@@ -547,10 +661,16 @@ fn reconcile_worker_state(state: &mut PersistentTaskState) {
 /// watcher nothing ever emits `TaskCompleted`, so the pager's task row stays
 /// running until the session ends. The handle lives in this process on purpose:
 /// a task re-discovered by a later session must not notify again.
+///
+/// A detached task additionally has the cross-session path, because the watcher
+/// dies with its session: see [`TaskRegistry::claim_late_deliveries`]. Both
+/// paths take the same one-shot delivery claim, so whichever reaches the
+/// completion first is the only one that reports it.
 fn spawn_completion_watcher(
     directory: PathBuf,
     task_id: String,
     worker_pid: u32,
+    detach: bool,
     notification_handle: ToolNotificationHandle,
 ) {
     tokio::spawn(async move {
@@ -565,6 +685,17 @@ fn spawn_completion_watcher(
         }
         reconcile_worker_state(&mut state);
         if !state.snapshot.completed {
+            return;
+        }
+        if detach
+            && !claim_delivery(
+                &directory,
+                false,
+                state.snapshot.owner_session_id.as_deref(),
+            )
+        {
+            // A later session already claimed this completion as a late
+            // delivery; reporting it here too would double-report it.
             return;
         }
         hydrate_output(&mut state.snapshot).await;
@@ -936,6 +1067,7 @@ mod tests {
                 description: None,
                 output_encoding: Some(encoding),
                 is_backgrounded: true,
+                detach: false,
             },
         };
         write_state(&root.join(task_id), &state).unwrap();
@@ -976,6 +1108,7 @@ mod tests {
                 description: None,
                 output_encoding: None,
                 is_backgrounded: true,
+                detach: false,
             },
         }
     }
@@ -1170,6 +1303,7 @@ mod tests {
                         description: None,
                         output_encoding: None,
                         is_backgrounded: true,
+                        detach: false,
                     },
                 },
             )
@@ -1185,6 +1319,167 @@ mod tests {
         assert!(
             !registry.is_detached("detach-no"),
             "an ordinary background task is still session-scoped and must be reaped"
+        );
+    }
+
+    /// Build a durable record for the late-delivery tests: `completed` decides
+    /// whether the worker had already published an exit when the session died.
+    fn write_late_delivery_probe(
+        root: &Path,
+        task_id: &str,
+        detach: bool,
+        completed: bool,
+        end_time: Option<std::time::SystemTime>,
+    ) {
+        let directory = root.join(task_id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut spec = spec_for_detach(detach);
+        spec.task_id = task_id.to_string();
+        write_json(&directory.join("spec.json"), &spec).unwrap();
+        let mut state = probe_state(completed);
+        state.snapshot.task_id = task_id.to_string();
+        state.snapshot.end_time = end_time;
+        state.snapshot.owner_session_id = Some("owner-session".into());
+        write_state(&directory, &state).unwrap();
+    }
+
+    /// A detached task's completion is handed to exactly one later session:
+    /// ordinary tasks die with their session and running tasks have no result
+    /// yet, and a second claim must find nothing.
+    #[tokio::test]
+    async fn late_delivery_claims_detached_completions_exactly_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("tasks");
+        let registry = TaskRegistry::with_root(root.clone());
+        let window = Duration::from_secs(3600);
+        let now = std::time::SystemTime::now();
+
+        write_late_delivery_probe(&root, "detached-finished", true, true, Some(now));
+        write_late_delivery_probe(&root, "ordinary-finished", false, true, Some(now));
+        write_late_delivery_probe(&root, "detached-running", true, false, None);
+
+        let first = registry.claim_late_deliveries(window, Some("claimer"));
+        let ids: Vec<&str> = first.iter().map(|task| task.task_id.as_str()).collect();
+        assert_eq!(ids, vec!["detached-finished"], "only the detached exit");
+        assert_eq!(
+            first[0].owner_session_id.as_deref(),
+            Some("owner-session"),
+            "the late report must carry the session that started the task"
+        );
+
+        let second = registry.claim_late_deliveries(window, Some("other"));
+        assert!(second.is_empty(), "the claim is one-shot: {second:?}");
+    }
+
+    /// A completion older than the window is consumed without being reported,
+    /// and stays consumed: widening the window later must not replay it.
+    #[tokio::test]
+    async fn late_delivery_consumes_stale_completions_silently() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("tasks");
+        let registry = TaskRegistry::with_root(root.clone());
+        let long_ago = std::time::SystemTime::now() - Duration::from_secs(48 * 3600);
+        write_late_delivery_probe(&root, "stale", true, true, Some(long_ago));
+
+        assert!(
+            registry
+                .claim_late_deliveries(Duration::from_secs(3600), None)
+                .is_empty(),
+            "an out-of-window completion is not reported"
+        );
+        assert!(
+            registry
+                .claim_late_deliveries(Duration::from_secs(10 * 24 * 3600), None)
+                .is_empty(),
+            "a silent consumption must not become a delivery when the window grows"
+        );
+    }
+
+    /// The delivery claim is exclusive, so a session racing the dying-of-old-age
+    /// scan (or a second session) cannot report the same completion twice.
+    #[test]
+    fn delivery_claim_is_exclusive() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(claim_delivery(temp.path(), false, Some("first")));
+        assert!(!claim_delivery(temp.path(), true, Some("second")));
+        let marker: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(temp.path().join(DELIVERY_MARKER)).unwrap())
+                .unwrap();
+        assert_eq!(marker["state"], "delivered");
+        assert_eq!(
+            marker["late"], false,
+            "the marker records the winning claim's provenance"
+        );
+        assert_eq!(marker["claimed_by"], "first");
+    }
+
+    /// The light list must return the same records as the full one while
+    /// skipping the per-task log read: a UI enumerating every durable record
+    /// cannot pay one file read each, and it only needs ids/owners/state.
+    #[tokio::test]
+    async fn light_list_keeps_every_record_and_skips_the_log_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("tasks");
+        let registry = TaskRegistry::with_root(root.clone());
+
+        let directory = root.join("task-logged");
+        std::fs::create_dir_all(&directory).unwrap();
+        let log = directory.join("task.log");
+        std::fs::write(&log, b"hello from the log").unwrap();
+        write_state(
+            &directory,
+            &PersistentTaskState {
+                ready: true,
+                worker_pid: None,
+                snapshot: TaskSnapshot {
+                    task_id: "task-logged".into(),
+                    command: "echo hello".into(),
+                    display_command: None,
+                    cwd: ".".into(),
+                    start_time: std::time::SystemTime::now(),
+                    end_time: Some(std::time::SystemTime::now()),
+                    output: String::new(),
+                    output_file: log.clone(),
+                    truncated: false,
+                    output_total_bytes: 0,
+                    exit_code: Some(0),
+                    signal: None,
+                    completed: true,
+                    kind: TaskKind::Bash,
+                    block_waited: false,
+                    explicitly_killed: false,
+                    kill_result_delivered: false,
+                    owner_session_id: Some("session-other".into()),
+                    description: None,
+                    output_encoding: None,
+                    is_backgrounded: true,
+                    detach: true,
+                },
+            },
+        )
+        .unwrap();
+
+        let full = registry.list_tasks().await;
+        assert_eq!(full.len(), 1, "the full list must see the record");
+        assert_eq!(
+            full[0].output, "hello from the log",
+            "the full list hydrates from the log file"
+        );
+
+        let light = registry.list_tasks_light().await;
+        assert_eq!(light.len(), 1, "the light list must see the same record");
+        assert_eq!(light[0].task_id, full[0].task_id);
+        assert_eq!(light[0].owner_session_id, full[0].owner_session_id);
+        assert_eq!(light[0].completed, full[0].completed);
+        assert_eq!(light[0].detach, full[0].detach);
+        assert!(
+            light[0].output.is_empty(),
+            "the light list must not read the log: {:?}",
+            light[0].output
+        );
+        assert_eq!(
+            light[0].output_file, log,
+            "the log path stays so a caller can read it on demand"
         );
     }
 

@@ -344,6 +344,12 @@ pub struct TaskSnapshot {
     /// True after explicit/user/auto backgrounding; false for pure foreground runs.
     #[serde(default)]
     pub is_backgrounded: bool,
+    /// The user confirmed this task may outlive the session (the bash tool's
+    /// `detach` flag), so teardown leaves it running.
+    /// Display/telemetry only — teardown reads the durable spec instead, and
+    /// a missing flag must never be read as "detached".
+    #[serde(default)]
+    pub detach: bool,
 }
 
 impl TaskSnapshot {
@@ -528,6 +534,33 @@ pub trait TerminalBackend: Send + Sync {
     /// Used for context compaction to include task state in summaries.
     async fn list_tasks(&self) -> Vec<TaskSnapshot>;
 
+    /// List all known background tasks without reading their output logs.
+    ///
+    /// [`Self::list_tasks`] hydrates every snapshot from its output file, which
+    /// is right for a status query and wasteful for a UI that enumerates every
+    /// durable record — a long-lived machine keeps hundreds. The snapshots are
+    /// otherwise identical: same ids, same owners, same completion state, just
+    /// an empty `output` (the log file still holds it).
+    async fn list_tasks_light(&self) -> Vec<TaskSnapshot> {
+        self.list_tasks().await
+    }
+
+    /// Claim completions of detached background tasks that no session has
+    /// delivered yet, so a session that just opened can report them exactly
+    /// once.
+    ///
+    /// Only detached tasks qualify: an ordinary task dies with its session, so
+    /// its completion can never arrive late. Completions older than `window`
+    /// are consumed silently rather than reported. Backends without a durable
+    /// task directory (remote/ACP) have nothing to claim.
+    async fn claim_late_deliveries(
+        &self,
+        _window: Duration,
+        _claimed_by: Option<&str>,
+    ) -> Vec<TaskSnapshot> {
+        Vec::new()
+    }
+
     /// Return the persistent shell's current working directory, if persistent
     /// shell state is enabled. Returns `None` when persistence is off or the
     /// backend doesn't support it (e.g. ACP/remote).
@@ -670,6 +703,7 @@ mod tests {
             description: None,
             output_encoding: None,
             is_backgrounded: false,
+            detach: false,
         };
         assert!(!snap.is_auto_wake_suppressed());
 
@@ -718,6 +752,7 @@ mod tests {
             description: None,
             output_encoding: None,
             is_backgrounded: false,
+            detach: false,
         };
         let mut value = serde_json::to_value(&snap).expect("serialize");
         value

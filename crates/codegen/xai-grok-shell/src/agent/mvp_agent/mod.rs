@@ -1424,6 +1424,8 @@ pub(crate) struct OrphanedTask {
     task_id: String,
     command: String,
     cwd: String,
+    /// Carried so the reconciled row keeps its "outlives the session" marker.
+    detach: bool,
 }
 impl MvpAgent {
     /// Scan persisted updates for `task_backgrounded` entries that have no matching `task_completed`.
@@ -1466,6 +1468,7 @@ impl MvpAgent {
                                         .unwrap_or_default()
                                         .to_string(),
                                     cwd: update["cwd"].as_str().unwrap_or_default().to_string(),
+                                    detach: update["detach"].as_bool().unwrap_or(false),
                                 },
                             );
                     }
@@ -1518,6 +1521,7 @@ impl MvpAgent {
                 output_encoding: None,
                 is_backgrounded: true,
                 output_total_bytes: 0,
+                detach: task.detach,
             };
             let mut notification = crate::extensions::notification::SessionNotification {
                 session_id: session_id.clone(),

@@ -119,6 +119,7 @@ fn make_task_snapshot(task_id: &str, kind: TaskKind) -> TaskSnapshot {
         output_encoding: None,
         is_backgrounded: false,
         output_total_bytes: 0,
+        detach: false,
     }
 }
 
@@ -1068,6 +1069,7 @@ async fn task_backgrounded_persisted_line_is_stamped() {
             task_id: "task-bg".into(),
             monitor_description: None,
             description: None,
+            detach: false,
         },
     );
     let mut offsets = HashMap::new();
@@ -1079,6 +1081,49 @@ async fn task_backgrounded_persisted_line_is_stamped() {
             assert!(xai_persisted_event_id(&notif).is_some());
         }
         _ => panic!("expected Xai update"),
+    }
+}
+
+/// The `detach` flag the user confirmed must reach the client (and the persisted
+/// line) unchanged, and an ordinary backgrounded task must not carry it: the
+/// tasks pane keys its "outlives the session" tag off exactly this field.
+#[tokio::test]
+async fn task_backgrounded_wire_carries_detach() {
+    for detach in [true, false] {
+        let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+        let notification = ToolNotification::BashExecutionBackgrounded(
+            xai_grok_tools::notification::types::BashExecutionBackgrounded {
+                base: xai_grok_tools::notification::types::BashNotificationBase {
+                    tool_call_id: "call-bg".into(),
+                    command: "sleep 100".into(),
+                    output: Vec::new(),
+                    total_bytes: 0,
+                    truncated: false,
+                    cwd: PathBuf::from("/tmp"),
+                },
+                output_file: PathBuf::from("/tmp/out.log"),
+                task_id: "task-bg".into(),
+                monitor_description: None,
+                description: None,
+                detach,
+            },
+        );
+        let mut offsets = HashMap::new();
+
+        handle_notification(&config, notification, &mut offsets).await;
+
+        match persistence_rx.try_recv().expect("must persist") {
+            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
+                match notif.update {
+                    crate::extensions::notification::SessionUpdate::TaskBackgrounded {
+                        detach: carried,
+                        ..
+                    } => assert_eq!(carried, detach, "the bridge must forward `detach` verbatim"),
+                    _ => panic!("expected a TaskBackgrounded update"),
+                }
+            }
+            _ => panic!("expected Xai update"),
+        }
     }
 }
 
@@ -1734,6 +1779,7 @@ fn make_large_bash_snapshot(task_id: &str, output_file: PathBuf) -> TaskSnapshot
         output_encoding: None,
         is_backgrounded: false,
         output_total_bytes: 0,
+        detach: false,
     }
 }
 

@@ -55,16 +55,32 @@ pub struct KillTaskResponse {
     pub outcome: KillOutcome,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+/// Wire DTO for the `x.ai/task/list` ext request.
+///
+/// `pub` (with both serde directions) so ACP clients build the request from the
+/// same type the agent parses, like the kill DTOs above.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ListTasksRequest {
-    session_id: String,
+pub struct ListTasksRequest {
+    pub session_id: String,
+    /// Read each task's output log into its snapshot. Defaults to `true` so a
+    /// client written before this field keeps the documented behavior; a client
+    /// enumerating every durable record passes `false` (one file read per task
+    /// is what makes a full directory listing slow).
+    #[serde(default = "default_true")]
+    pub hydrate: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+fn default_true() -> bool {
+    true
+}
+
+/// Wire DTO for the `x.ai/task/list` ext response payload
+/// (nested under `result` in the `ExtMethodResult` envelope).
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ListTasksResponse {
-    tasks: Vec<TaskSnapshot>,
+pub struct ListTasksResponse {
+    pub tasks: Vec<TaskSnapshot>,
 }
 
 /// Wire DTO for the `x.ai/subagent/cancel` ext request.
@@ -375,11 +391,16 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         }
         "x.ai/task/list" => {
             let req: ListTasksRequest = parse(args)?;
-            let result = agent
-                .list_tasks(&req.session_id)
-                .await
-                .ok_or_else(|| "session not found or no terminal backend".to_string())
-                .map(|tasks| ListTasksResponse { tasks });
+            let result = {
+                let listed = if req.hydrate {
+                    agent.list_tasks(&req.session_id).await
+                } else {
+                    agent.list_tasks_light(&req.session_id).await
+                };
+                listed
+                    .ok_or_else(|| "session not found or no terminal backend".to_string())
+                    .map(|tasks| ListTasksResponse { tasks })
+            };
             respond(result)
         }
         _ => Err(acp::Error::method_not_found()),

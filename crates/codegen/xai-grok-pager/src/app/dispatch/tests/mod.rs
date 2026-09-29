@@ -753,6 +753,7 @@ fn make_bg_task(task_id: &str) -> crate::app::agent::BgTaskState {
         scrollback_entry_id: None,
         is_monitor: false,
         restored_from_replay: false,
+        detach: false,
     }
 }
 /// Set up a two-agent app: agent 0 is active with "sess-A", agent 1 is inactive with "sess-B" and a bg task.
