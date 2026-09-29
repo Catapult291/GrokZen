@@ -39,6 +39,27 @@ fn wait_for_reject_row(harness: &mut PtyHarness, timeout: Duration) -> Result<()
     }
 }
 
+/// Text of the permission card's allow-once row, in the locale the pager renders.
+/// The row label is `allow once` on the wire and the localizer may render either
+/// spelling, so the shorter needle covers both.
+fn allow_once_row_visible(screen: &str) -> bool {
+    screen.contains("allow once") || screen.contains("是，仅允许一次")
+}
+
+/// Rows a detach card must not offer: no grant can silence this gate, so a
+/// persistent-allow row saves nothing and the always-approve row promises an
+/// end to prompts that keep coming anyway.
+const FORBIDDEN_DETACH_ROWS: [(&str, &str); 2] = [
+    (
+        "Yes, and don't ask again for bash commands",
+        "是，不再询问 Bash 命令",
+    ),
+    (
+        "Yes, and don't ask again for anything (always-approve mode)",
+        "是，不再询问任何操作（始终批准模式）",
+    ),
+];
+
 /// Marker a rejected detach must never create.
 fn marker_path(content: &ContentController, name: &str) -> PathBuf {
     content.home().join(name)
@@ -140,6 +161,20 @@ async fn bash_detach_prompts_under_always_approve_and_reject_does_not_run() {
             harness.screen_contents()
         )
     });
+
+    // What is on the card: exactly the two one-shot rows. The reject row is what
+    // `wait_for_reject_row` above already proved is on screen.
+    let card = harness.screen_contents();
+    assert!(
+        allow_once_row_visible(&card),
+        "the detach card must keep its allow-once row; screen:\n{card}"
+    );
+    for (en, zh) in FORBIDDEN_DETACH_ROWS {
+        assert!(
+            !card.contains(en) && !card.contains(zh),
+            "the detach card must not offer {en:?} / {zh:?}; screen:\n{card}"
+        );
+    }
 
     // Ctrl+C is the card's only cancel. The request resolves as `Cancelled`,
     // which the session turns into a cancelled turn, so nothing further is
