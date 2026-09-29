@@ -162,7 +162,12 @@ fn toggle_tasks_still_toggles_legacy_pane_when_dock_off() {
         &Event::Key(key(KeyCode::Char('g'), KeyModifiers::CONTROL)),
         &registry,
     );
-    assert!(matches!(outcome, InputOutcome::Changed));
+    // The dock is off, so Ctrl+G opens the legacy pane — and opening it asks for
+    // the rows owned by other sessions.
+    assert!(matches!(
+        outcome,
+        InputOutcome::Action(Action::ListForeignTasks)
+    ));
     assert!(agent.tasks.overlay.visible);
     assert_eq!(agent.active_pane, AgentPane::Tasks);
 }
