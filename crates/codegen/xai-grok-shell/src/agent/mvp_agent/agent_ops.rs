@@ -2872,9 +2872,28 @@ impl MvpAgent {
         &self,
         session_id: &str,
     ) -> Option<Vec<xai_grok_tools::types::TaskSnapshot>> {
+        self.list_tasks_inner(session_id, false).await
+    }
+    /// [`Self::list_tasks`] without per-task output hydration.
+    /// Backs `x.ai/task/list?hydrate=false` for a client enumerating every durable record.
+    pub async fn list_tasks_light(
+        &self,
+        session_id: &str,
+    ) -> Option<Vec<xai_grok_tools::types::TaskSnapshot>> {
+        self.list_tasks_inner(session_id, true).await
+    }
+    async fn list_tasks_inner(
+        &self,
+        session_id: &str,
+        light: bool,
+    ) -> Option<Vec<xai_grok_tools::types::TaskSnapshot>> {
         let sid = acp::SessionId::new(session_id);
         if let Some(handle) = self.get_session_handle(&sid) {
-            handle.list_tasks().await
+            if light {
+                handle.list_tasks_light().await
+            } else {
+                handle.list_tasks().await
+            }
         } else {
             None
         }

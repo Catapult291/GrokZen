@@ -112,6 +112,8 @@ impl TrackedTask {
             // ACP tracked tasks are only registered via run_background.
             is_backgrounded: true,
             output_total_bytes: 0,
+            // This adapter has no detach flow: every tracked task is session-scoped.
+            detach: false,
         }
     }
 }

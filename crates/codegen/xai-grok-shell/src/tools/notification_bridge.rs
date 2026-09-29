@@ -308,6 +308,7 @@ async fn handle_notification(
                     output_file: bg.output_file.to_string_lossy().to_string(),
                     monitor_description: bg.monitor_description.clone(),
                     description: bg.description.clone(),
+                    detach: bg.detach,
                 },
                 meta: None,
             };

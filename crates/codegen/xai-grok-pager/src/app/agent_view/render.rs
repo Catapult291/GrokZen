@@ -1447,6 +1447,7 @@ impl AgentView {
             self.cron_task_id.as_deref(),
             &queued_cron_ids,
             &self.workflow_runs,
+            &self.foreign_tasks,
             locale,
         );
         if self.active_pane == ActivePane::Tasks && !self.tasks.is_visible() {
@@ -2304,6 +2305,7 @@ impl AgentView {
                 &self.session.bg_tasks,
                 &self.subagent_sessions,
                 &self.session.scheduled_tasks,
+                &self.foreign_tasks,
                 locale,
             );
             let close_rect = agent::render_todo_chrome(

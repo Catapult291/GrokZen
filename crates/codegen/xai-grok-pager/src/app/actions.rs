@@ -399,6 +399,10 @@ pub enum Action {
     CancelTurnChoice(crate::views::modal::CancelTurnChoice),
     /// Kill a background task by task_id.
     KillBgTask(String),
+    /// Fetch this session's background tasks *including other sessions'*
+    /// (`x.ai/task/list` with `hydrate: false`), for the tasks pane's
+    /// cross-session rows. Fired when that pane opens.
+    ListForeignTasks,
     /// Kill (cancel) a subagent by subagent_id.
     KillSubagent(String),
     CancelScheduledTask(String),
@@ -1539,6 +1543,9 @@ pub enum Effect {
         session_id: acp::SessionId,
         subagent_id: String,
     },
+    /// List background tasks from every session (`x.ai/task/list`, no output
+    /// hydration) so the tasks pane can show the ones this session does not own.
+    ListForeignTasks { session_id: acp::SessionId },
     DeleteScheduledTask {
         session_id: acp::SessionId,
         task_id: String,
@@ -2491,6 +2498,13 @@ pub enum TaskResult {
         session_id: String,
         task_id: String,
         error: String,
+    },
+    /// `x.ai/task/list` answered for the tasks pane.
+    /// `None` when the agent returned an error envelope (unknown session or no
+    /// terminal backend): the pane keeps whatever rows it already had.
+    ForeignTasksListed {
+        session_id: String,
+        tasks: Option<Vec<xai_grok_tools::types::TaskSnapshot>>,
     },
     /// Model switch completed (effort, if any, was applied in the same request).
     SwitchModelComplete {

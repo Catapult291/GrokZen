@@ -1635,6 +1635,22 @@ pub(super) fn parse_kill_outcome(
         .and_then(|envelope| envelope.result)
         .map(|payload| payload.outcome)
 }
+/// Extract the task list from an `x.ai/task/list` ext response.
+///
+/// The agent serializes `ExtMethodResult<ListTasksResponse>`, so the tasks live
+/// at `result.tasks`. `None` means "nothing to show" (error envelope, unknown
+/// session, no terminal backend) and the dispatcher keeps the rows it has,
+/// matching the kill path's contract.
+pub(super) fn parse_listed_tasks(
+    resp: &str,
+) -> Option<Vec<xai_grok_tools::types::TaskSnapshot>> {
+    use xai_grok_shell::extensions::task::ListTasksResponse;
+    use xai_grok_shell::session::result::ExtMethodResult;
+    serde_json::from_str::<ExtMethodResult<ListTasksResponse>>(resp)
+        .ok()
+        .and_then(|envelope| envelope.result)
+        .map(|payload| payload.tasks)
+}
 /// Map an `x.ai/subagent/cancel` response (payload under `result`) to a kill outcome.
 /// Prefers the typed `outcome`; falls back to the legacy `cancelled` bool for an older shell or an unknown future `kind`.
 /// An error/unparseable body is `RpcFailed` (the subagent may still be running, so leave the row alone).

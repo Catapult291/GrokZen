@@ -308,6 +308,7 @@ async fn create_test_actor_inner(
     );
     chat_state_handle.record_token_usage(total_tokens);
     let actor = SessionActor {
+        late_delivery_claimed: std::cell::Cell::new(false),
         repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
         ),
         transient_retry_enabled: true,

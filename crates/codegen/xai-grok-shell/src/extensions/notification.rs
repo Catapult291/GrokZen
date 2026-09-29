@@ -780,6 +780,11 @@ pub enum SessionUpdate {
         /// The pager prefers it over the raw `command` in its "Task started" line and tasks pane. `None` when omitted.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        /// The user confirmed this task may outlive the session, so teardown
+        /// leaves it running. Display-only: the pager marks the row, it never
+        /// changes kill semantics. Missing reads as `false`.
+        #[serde(default)]
+        detach: bool,
     },
     ScheduledTaskCreated {
         task_id: String,

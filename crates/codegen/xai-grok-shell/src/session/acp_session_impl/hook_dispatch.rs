@@ -564,6 +564,7 @@ mod notification_hook_filter_tests {
                 output_encoding: None,
                 is_backgrounded: false,
                 output_total_bytes: 0,
+                detach: false,
             },
             will_wake: false,
         };

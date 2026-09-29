@@ -149,6 +149,12 @@ pub struct BashExecutionBackgrounded {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub description: Option<String>,
+
+    /// The user confirmed this background task may outlive the session (the
+    /// bash tool's `detach` flag). Consumers mark the row so a task that will
+    /// survive teardown is distinguishable from an ordinary session-scoped one.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub detach: bool,
 }
 
 /// Notification that a bash command failed to execute.

@@ -1012,6 +1012,11 @@ pub(crate) struct SessionActor {
     /// True when the render-failure fallback stamped a date into a date-free template's prefix.
     /// [`SessionActor::maybe_inject_date_rollover_reminder`] then still rolls it over.
     pub(crate) prefix_carries_fallback_date: std::cell::Cell<bool>,
+    /// Set once the session has looked for completions left behind by dead
+    /// sessions. The claim itself is one-shot, so this only spares every later
+    /// turn a scan of the durable task directory.
+    /// Drives [`SessionActor::deliver_late_task_completions`].
+    pub(crate) late_delivery_claimed: std::cell::Cell<bool>,
     /// Prompt index when search_tool last ran; -1 means never.
     /// Used for turns_since_last_search.
     pub(crate) last_search_prompt_index: std::sync::atomic::AtomicI64,

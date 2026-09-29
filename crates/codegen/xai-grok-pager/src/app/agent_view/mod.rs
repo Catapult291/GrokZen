@@ -869,6 +869,12 @@ pub struct AgentView {
     pub tasks: TasksPane,
     pub catalog: SubagentCatalogPane,
     pub queue: QueuePane,
+    /// Background tasks owned by other sessions, listed on demand from
+    /// `x.ai/task/list` when the tasks pane opens, keyed by task id. Kept out
+    /// of `session.bg_tasks` on purpose: that map drives the status line, the
+    /// dashboard sweep and the pane's auto-open, none of which should react to
+    /// another session's work.
+    pub foreign_tasks: std::collections::BTreeMap<String, crate::app::agent::ForeignTaskState>,
     /// Per-agent mirror of the server-authoritative shared prompt queue
     /// (`AppView::shared_prompt_queues[sid]`), kept in sync by
     /// `handle_queue_changed` and the immediate-send path. The queue
@@ -2773,6 +2779,7 @@ pub(crate) mod test_fixtures {
                 scrollback_entry_id: None,
                 is_monitor: false,
                 restored_from_replay: false,
+                detach: false,
             },
         );
         agent.tasks.sync(
@@ -2782,6 +2789,7 @@ pub(crate) mod test_fixtures {
             None,
             &std::collections::HashSet::new(),
             &agent.workflow_runs,
+            &agent.foreign_tasks,
         );
     }
     pub fn add_running_execute(agent: &mut AgentView) {

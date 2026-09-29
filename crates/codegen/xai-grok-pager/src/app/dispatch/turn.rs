@@ -720,6 +720,19 @@ pub(super) fn dispatch_kill_bg_task(app: &mut AppView, task_id: String) -> Vec<E
     }]
 }
 
+pub(super) fn dispatch_list_foreign_tasks(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get(&id) else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    vec![Effect::ListForeignTasks { session_id }]
+}
+
 pub(super) fn dispatch_kill_subagent(app: &mut AppView, subagent_id: String) -> Vec<Effect> {
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -776,6 +789,80 @@ pub(super) fn dispatch_demote_to_background(app: &mut AppView) -> Vec<Effect> {
 }
 
 // TaskResult handlers.
+
+/// Completed cross-session rows are bounded: a long-lived machine keeps
+/// hundreds of finished records (reaping them is a separate concern), and the
+/// pane is for work the user may still act on.
+const FOREIGN_COMPLETED_WINDOW: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+const FOREIGN_MAX_COMPLETED: usize = 20;
+const FOREIGN_MAX_RUNNING: usize = 20;
+
+/// Store the cross-session rows the tasks pane asked for.
+///
+/// Rows are filtered to *other* sessions (this session's own tasks arrive as
+/// live notifications) and to ids this client is not already tracking, so the
+/// pane never shows the same task twice from two sources.
+pub(super) fn handle_foreign_tasks_listed(
+    app: &mut AppView,
+    session_id: String,
+    tasks: Option<Vec<xai_grok_tools::types::TaskSnapshot>>,
+) -> Vec<Effect> {
+    use crate::app::agent::ForeignTaskState;
+
+    let Some(tasks) = tasks else {
+        // Error envelope / no terminal backend: keep the rows we already have.
+        tracing::warn!(%session_id, "Task list unavailable");
+        return vec![];
+    };
+    let Some(agent) = find_agent_by_session_id(&mut app.agents, &session_id) else {
+        return vec![];
+    };
+    let current = agent
+        .session
+        .session_id
+        .as_ref()
+        .map(|sid| sid.0.to_string());
+
+    let now = std::time::SystemTime::now();
+    let mut running = Vec::new();
+    let mut completed = Vec::new();
+    for snapshot in &tasks {
+        if agent.session.bg_tasks.contains_key(&snapshot.task_id) {
+            continue;
+        }
+        let Some(row) = ForeignTaskState::from_listed(snapshot, current.as_deref()) else {
+            continue;
+        };
+        if row.task.status == crate::app::agent::BgTaskStatus::Running {
+            running.push(row);
+        } else {
+            let ended = row.task.end_time.unwrap_or(row.task.start_time);
+            let fresh = now
+                .duration_since(ended)
+                .is_ok_and(|age| age <= FOREIGN_COMPLETED_WINDOW);
+            if fresh {
+                completed.push(row);
+            }
+        }
+    }
+    // Running oldest-first (the order work started); finished newest-first, capped.
+    running.sort_by_key(|row| row.task.start_time);
+    running.truncate(FOREIGN_MAX_RUNNING);
+    completed.sort_by(|a, b| b.task.start_time.cmp(&a.task.start_time));
+    completed.truncate(FOREIGN_MAX_COMPLETED);
+    running.extend(completed);
+
+    tracing::debug!(
+        %session_id,
+        shown = running.len(),
+        "Cross-session task rows refreshed"
+    );
+    agent.foreign_tasks = running
+        .into_iter()
+        .map(|row| (row.task.task_id.clone(), row))
+        .collect();
+    vec![]
+}
 
 pub(super) fn handle_bg_task_killed(
     app: &mut AppView,

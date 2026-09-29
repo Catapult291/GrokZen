@@ -238,6 +238,7 @@ pub(super) fn insert_running_task(agent: &mut AgentView, task_id: &str, command:
                 scrollback_entry_id: None,
                 is_monitor: false,
                 restored_from_replay: false,
+                detach: false,
             },
         );
 }
@@ -1901,6 +1902,17 @@ pub(super) fn make_task_backgrounded_notif(
     task_id: &str,
     command: &str,
 ) -> acp::ExtNotification {
+    make_task_backgrounded_notif_with_detach(session_id, tool_call_id, task_id, command, false)
+}
+/// [`make_task_backgrounded_notif`] with an explicit `detach` flag.
+/// `detach: true` is what the shell sends after the user confirmed the task may outlive the session.
+pub(super) fn make_task_backgrounded_notif_with_detach(
+    session_id: &str,
+    tool_call_id: &str,
+    task_id: &str,
+    command: &str,
+    detach: bool,
+) -> acp::ExtNotification {
     let notif = SessionNotification {
         session_id: acp::SessionId::new(session_id),
         update: XaiSessionUpdate::TaskBackgrounded {
@@ -1911,6 +1923,7 @@ pub(super) fn make_task_backgrounded_notif(
             output_file: "/tmp/output.log".into(),
             monitor_description: None,
             description: None,
+            detach,
         },
         meta: None,
     };
@@ -1935,6 +1948,7 @@ pub(super) fn make_replayed_task_backgrounded_notif(
             output_file: "/tmp/output.log".into(),
             monitor_description: None,
             description: None,
+            detach: false,
         },
         meta: Some(crate::acp::meta::ReplayMetaStamp::replayed()),
     };
@@ -2068,6 +2082,7 @@ pub(super) fn task_completed_notif(
                 description: None,
                 is_backgrounded: false,
                 output_total_bytes: 0,
+                detach: false,
             },
             will_wake,
         },

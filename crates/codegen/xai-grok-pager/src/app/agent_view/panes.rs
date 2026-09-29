@@ -578,7 +578,8 @@ impl AgentView {
             if !self.tasks.overlay.focused {
                 return InputOutcome::Action(Action::FocusScrollback);
             }
-            return InputOutcome::Changed;
+            // Opening the pane also refreshes the rows owned by other sessions.
+            return InputOutcome::Action(Action::ListForeignTasks);
         }
         if self.tasks.list_state.input_mode().is_none()
             && let Some(group) = self.tasks.selected_header_group()

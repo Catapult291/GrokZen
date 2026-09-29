@@ -580,6 +580,86 @@ pub fn format_between_turn_bash_completions(
     }
     buf
 }
+/// Short owner tag for a task handed to a session it did not start.
+fn owner_short_id(task: &TaskSnapshot) -> Option<String> {
+    task.owner_session_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(|id| id.chars().take(8).collect())
+}
+/// Render a `SystemTime` as local `YYYY-MM-DD HH:MM`, or `unknown` outside the
+/// representable range (a clock set before the epoch, say).
+fn format_local_finish_time(time: Option<std::time::SystemTime>) -> String {
+    let Some(time) = time else {
+        return "unknown".to_string();
+    };
+    let Ok(duration) = time.duration_since(std::time::UNIX_EPOCH) else {
+        return "unknown".to_string();
+    };
+    chrono::DateTime::<chrono::Local>::from(std::time::UNIX_EPOCH + duration)
+        .format("%Y-%m-%d %H:%M")
+        .to_string()
+}
+/// Format detached background-task completions that arrived after the session
+/// which started them was gone.
+///
+/// These are handed to a later session, so each entry carries its provenance —
+/// the original session and finish time — since the model has no memory of
+/// launching it. The output is deliberately not inlined: a task that ran hours
+/// ago is usually irrelevant by the time it lands, and the log is on disk.
+pub fn format_late_task_completions(
+    tasks: &[TaskSnapshot],
+    task_output_name: Option<&str>,
+    read_tool_name: Option<&str>,
+) -> String {
+    use std::fmt::Write as _;
+    let n = tasks.len();
+    let label = if n == 1 {
+        "detached background task"
+    } else {
+        "detached background tasks"
+    };
+    let mut buf = format!(
+        "{n} {label} finished after the session that started {} ended, \
+         and {} handed to this session:\n",
+        if n == 1 { "it" } else { "them" },
+        if n == 1 { "was" } else { "were" },
+    );
+    let tool = task_output_name.unwrap_or(DEFAULT_TASK_OUTPUT_TOOL);
+    for task in tasks {
+        let status = match task.signal.as_deref() {
+            Some(sig) => format!("terminated by signal {sig}"),
+            None => match task.exit_code {
+                Some(code) => format!("exit code: {code}"),
+                None => "exit code unknown".to_string(),
+            },
+        };
+        let command = task.display_command.as_deref().unwrap_or(&task.command);
+        let _ = write!(
+            buf,
+            "- \"{}\" ({status}, ran {:.1}s, finished {})",
+            task.task_id,
+            task.duration_secs(),
+            format_local_finish_time(task.end_time),
+        );
+        match owner_short_id(task) {
+            Some(owner) => {
+                let _ = writeln!(buf, " started by session {owner}\n  {command}");
+            }
+            None => {
+                let _ = writeln!(buf, "\n  {command}");
+            }
+        }
+        let _ = write!(buf, "  Use {tool}(\"{}\") for full output", task.task_id);
+        if let Some(read) = read_tool_name {
+            let _ = write!(buf, ", or {read} on {}", task.output_file.display());
+        } else if !task.output_file.as_os_str().is_empty() {
+            let _ = write!(buf, "; log: {}", task.output_file.display());
+        }
+        buf.push('\n');
+    }
+    buf
+}
 /// Extract task / subagent IDs whose completion the model already
 /// learned about from this tool result. Used by:
 /// - `TaskCompletionReminder::collect_reminders` to suppress the
@@ -891,6 +971,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("abc-123"));
@@ -926,6 +1007,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: true,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(
@@ -963,6 +1045,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_monitor_completion(&task, Some("get_command_or_subagent_output"));
         assert!(
@@ -1000,6 +1083,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_monitor_completion(&task, None);
         assert!(
@@ -1032,6 +1116,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: true,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_monitor_completion(&task, None);
         assert!(
@@ -1069,6 +1154,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("cargo test"));
@@ -1098,6 +1184,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("exit code: unknown"));
@@ -1130,6 +1217,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(
@@ -1173,6 +1261,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(
@@ -1215,6 +1304,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         };
         let msg = format_bash_completion(&task, Some("get_command_or_subagent_output"), None);
         assert!(msg.contains("exit code: 0"));
@@ -1380,6 +1470,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         }
     }
     /// A log that cannot be read produces an empty snapshot with a
@@ -1407,6 +1498,30 @@ mod tests {
         let msg = format_bash_completion(&task, None, Some("read_file"));
         assert!(msg.contains("5000000 bytes total"), "{msg}");
     }
+    /// A completion handed to a session that never launched it has to carry
+    /// enough provenance for the model to judge it without guessing, and point
+    /// at the log on disk rather than inlining an hours-old output.
+    #[test]
+    fn late_task_completion_reminder_carries_provenance_and_a_log_pointer() {
+        let mut task = make_completed("t-late");
+        task.display_command = Some("cargo build --release".into());
+        task.owner_session_id = Some("01a0e7b8-dead-beef".into());
+        task.output_file = std::path::PathBuf::from("/tmp/t-late.log");
+        task.exit_code = Some(7);
+
+        let msg = format_late_task_completions(&[task], Some("get_task_output"), Some("read_file"));
+        assert!(msg.contains("1 detached background task finished"), "{msg}");
+        assert!(msg.contains("\"t-late\""), "{msg}");
+        assert!(msg.contains("exit code: 7"), "{msg}");
+        assert!(msg.contains("cargo build --release"), "{msg}");
+        assert!(
+            msg.contains("started by session 01a0e7b8"),
+            "the original session is how the model knows where the task came from: {msg}"
+        );
+        assert!(msg.contains("get_task_output(\"t-late\")"), "{msg}");
+        assert!(msg.contains("/tmp/t-late.log"), "{msg}");
+    }
+
     fn make_running(id: &str) -> TaskSnapshot {
         TaskSnapshot {
             task_id: id.into(),
@@ -1430,6 +1545,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         }
     }
     fn make_bg_started(id: &str) -> crate::types::output::BackgroundTaskStarted {

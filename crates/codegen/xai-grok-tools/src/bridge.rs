@@ -671,6 +671,33 @@ impl ToolBridge {
         }
     }
 
+    /// Like [`Self::list_tasks`], but skips per-task output hydration.
+    /// Used by callers that enumerate every durable record rather than inspect one.
+    pub async fn list_tasks_light(&self) -> Option<Vec<TaskSnapshot>> {
+        if let Some(terminal) = &self.terminal {
+            Some(terminal.list_tasks_light().await)
+        } else {
+            None
+        }
+    }
+
+    /// Claim detached background-task completions that no session has reported
+    /// yet, for a session that has just opened.
+    ///
+    /// An empty result means there was nothing to hand over — either no
+    /// detached task finished while its session was gone, or another session
+    /// claimed it first.
+    pub async fn claim_late_deliveries(
+        &self,
+        window: std::time::Duration,
+        claimed_by: Option<&str>,
+    ) -> Vec<TaskSnapshot> {
+        match &self.terminal {
+            Some(terminal) => terminal.claim_late_deliveries(window, claimed_by).await,
+            None => Vec::new(),
+        }
+    }
+
     /// Drain newly-completed bash background tasks not yet reported.
     /// Marks returned tasks in [`ReportedTaskCompletions`] to prevent
     /// duplicate reminders from [`TaskCompletionReminder`]. Reserved IDs stay
@@ -879,6 +906,7 @@ mod tests {
             output_encoding: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         }
     }
 

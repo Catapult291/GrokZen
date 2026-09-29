@@ -1260,6 +1260,7 @@ mod tests {
             scrollback_entry_id: None,
             is_monitor: false,
             restored_from_replay: false,
+            detach: false,
         }
     }
 

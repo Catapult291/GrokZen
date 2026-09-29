@@ -1864,6 +1864,36 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::ListForeignTasks { session_id } => {
+            let tx = acp_tx.clone();
+            let sid = session_id.0.to_string();
+            tasks.spawn(async move {
+                let params = xai_grok_shell::extensions::task::ListTasksRequest {
+                    session_id: sid.clone(),
+                    // The pane wants ids/owners/state, not one log read per record.
+                    hydrate: false,
+                };
+                let req = acp::ExtRequest::new(
+                    "x.ai/task/list",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize list params")
+                        .into(),
+                );
+                match acp_send(req, &tx).await {
+                    Ok(resp) => TaskResult::ForeignTasksListed {
+                        session_id: sid,
+                        tasks: parse_listed_tasks(resp.0.get()),
+                    },
+                    Err(e) => {
+                        tracing::warn!("Failed to list background tasks: {e}");
+                        TaskResult::ForeignTasksListed {
+                            session_id: sid,
+                            tasks: None,
+                        }
+                    }
+                }
+            });
+        }
         Effect::KillSubagent { session_id, subagent_id } => {
             let tx = acp_tx.clone();
             tasks

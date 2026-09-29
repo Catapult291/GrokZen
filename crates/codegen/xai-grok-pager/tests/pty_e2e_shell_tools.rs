@@ -10,6 +10,8 @@ mod common;
 #[path = "pty_e2e/scroll.rs"]
 mod scroll;
 
+#[path = "pty_e2e/bash_detach_late_delivery_to_next_session_pty.rs"]
+mod bash_detach_late_delivery_to_next_session_pty;
 #[path = "pty_e2e/bash_detach_requires_confirmation_pty.rs"]
 mod bash_detach_requires_confirmation_pty;
 #[path = "pty_e2e/bash_encoding_decodes_gbk_output_pty.rs"]

@@ -1151,6 +1151,7 @@ mod tests {
             task_id: task_id.to_owned(),
             monitor_description: None,
             description: None,
+            detach: false,
         })
     }
     fn task_completed_notif(task_id: &str) -> ToolNotification {
@@ -1177,6 +1178,7 @@ mod tests {
             description: None,
             is_backgrounded: false,
             output_total_bytes: 0,
+            detach: false,
         })
     }
     fn started_id(n: &ToolNotification) -> &str {

@@ -20,6 +20,7 @@
             output_file: "/tmp/mon-1.log".into(),
             monitor_description: Some("errors in deploy.log".into()),
             description: None,
+            detach: false,
         };
         handle(
             make_ext_session_notification_with_method("sess-1", "x.ai/session/update", update),
@@ -115,6 +116,65 @@
         assert!(agent.session.tracker.pending_tool_entry_id(tc_id).is_none());
     }
 
+    /// The user-confirmed `detach` flag must land on the bg task row, and an
+    /// ordinary background task must stay unmarked: the pane renders the first
+    /// with a tag because teardown will leave it running.
+    #[test]
+    fn task_backgrounded_carries_detach_onto_the_bg_task() {
+        let mut app = make_app_with_agent("sess-1");
+        let id = AgentId(0);
+
+        let detached = make_task_backgrounded_notif_with_detach(
+            "sess-1",
+            "tc-det",
+            "task-det",
+            "cargo build --release",
+            true,
+        );
+        assert!(handle_task_backgrounded(&detached, &mut app));
+        assert!(
+            app.agents[&id].session.bg_tasks["task-det"].detach,
+            "a confirmed detach must mark the row"
+        );
+
+        let plain =
+            make_task_backgrounded_notif("sess-1", "tc-plain", "task-plain", "cargo build");
+        assert!(handle_task_backgrounded(&plain, &mut app));
+        assert!(
+            !app.agents[&id].session.bg_tasks["task-plain"].detach,
+            "an ordinary background task must not acquire the flag"
+        );
+    }
+
+    /// Wire/back-compat: a `task_backgrounded` line persisted before `detach`
+    /// existed (or sent by an older shell) must still parse, and must read as
+    /// NOT detached — an unknown flag can never be taken as "outlives session".
+    #[test]
+    fn task_backgrounded_without_detach_field_reads_as_not_detached() {
+        let mut app = make_app_with_agent("sess-1");
+
+        let notif = make_task_backgrounded_notif("sess-1", "tc-legacy", "task-legacy", "sleep 600");
+        let mut wire: serde_json::Value = serde_json::from_str(notif.params.get()).unwrap();
+        wire["update"]
+            .as_object_mut()
+            .expect("update object")
+            .remove("detach");
+
+        let legacy = acp::ExtNotification::new(
+            "x.ai/task_backgrounded",
+            serde_json::value::to_raw_value(&wire).unwrap().into(),
+        );
+        assert!(handle_task_backgrounded(&legacy, &mut app));
+
+        let id = AgentId(0);
+        let task = app.agents[&id]
+            .session
+            .bg_tasks
+            .get("task-legacy")
+            .expect("a line without `detach` must still restore");
+        assert!(!task.detach, "a missing flag must read as not detached");
+    }
+
     /// Regression: late-detected is_background=true means raw_input arrives after the Execute block exists.
     /// The task_backgrounded that follows must demote the existing Execute block, not create a duplicate BgTask.
     #[test]
@@ -167,6 +227,7 @@
                 output_file: "/tmp/output.log".into(),
                 monitor_description: None,
                 description: Some("Wait a while".into()),
+                detach: false,
             },
             meta: None,
         };
@@ -219,6 +280,7 @@
                 output_file: "/tmp/output.log".into(),
                 monitor_description: None,
                 description: Some("   ".into()),
+                detach: false,
             },
             meta: None,
         };
@@ -648,6 +710,7 @@
             description: None,
             is_backgrounded: true,
             output_total_bytes: 0,
+            detach: false,
         }
     }
 
@@ -706,6 +769,7 @@
                 output_file: "/tmp/output.log".into(),
                 monitor_description: None,
                 description: Some("wait for build".into()),
+                detach: false,
             },
             meta: None,
         };

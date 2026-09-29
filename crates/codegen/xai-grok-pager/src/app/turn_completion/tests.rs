@@ -1324,6 +1324,7 @@ fn insert_bg_task(agent: &mut AgentView, task_id: &str, is_monitor: bool) {
             scrollback_entry_id: None,
             is_monitor,
             restored_from_replay: false,
+            detach: false,
         },
     );
 }

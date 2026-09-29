@@ -946,6 +946,7 @@ impl SessionActor {
             self.maybe_inject_date_rollover_reminder().await;
             self.inject_plan_mode_reminders().await;
             self.inject_resumed_tasks_reminder();
+            self.deliver_late_task_completions().await;
             if policy.authority.is_human_intent() {
                 if let Some(gate) = &self.tool_context.task_wake_suppressed {
                     gate.set(false);

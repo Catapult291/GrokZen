@@ -248,6 +248,11 @@ pub enum TaskEntry {
         start_time: SystemTime,
         /// True for `monitor` tool tasks, which sort into their own contiguous group (separate from one-shot bg commands).
         is_monitor: bool,
+        /// Short id of the owning session when this row belongs to *another*
+        /// session (`x.ai/task/list`), `None` for this session's own tasks.
+        /// Doubles as the "no view button" marker: a foreign task has no
+        /// scrollback entry or stdout buffer to open here.
+        owner_short: Option<String>,
     },
     Agent {
         id: u64,
@@ -373,6 +378,23 @@ impl TaskEntry {
             (label, Line::from(spans))
         };
 
+        // The user confirmed this task outlives the session, so tag the row:
+        // teardown will reap the ordinary rows beside it and leave this one.
+        // Suffixed (not prefixed) so it cannot be confused with the kind tag
+        // that opens monitor/Task rows.
+        let (label, styled) = if task.detach {
+            let theme = Theme::current();
+            let tag = tasks_static(locale, "tasks.kind.detached", "Detached");
+            let mut spans = styled.spans;
+            spans.push(Span::styled(
+                format!(" {tag}"),
+                Style::default().fg(theme.accent_system),
+            ));
+            (format!("{label} {tag}"), Line::from(spans))
+        } else {
+            (label, styled)
+        };
+
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         task.task_id.hash(&mut hasher);
         let id = hasher.finish();
@@ -385,7 +407,38 @@ impl TaskEntry {
             running,
             start_time: task.start_time,
             is_monitor: task.is_monitor,
+            owner_short: None,
         }
+    }
+
+    /// Row for a task owned by another session: the same row as a live one, plus
+    /// a suffix naming the owner so the user can tell whose work it is.
+    fn from_foreign_task_with_locale(
+        foreign: &crate::app::agent::ForeignTaskState,
+        highlight_cache: &mut HashMap<String, Vec<Span<'static>>>,
+        locale: Option<&crate::locale::LocaleContext>,
+    ) -> Self {
+        let mut entry = Self::from_bg_task_with_locale(&foreign.task, highlight_cache, locale);
+        if let TaskEntry::BgTask {
+            label,
+            styled,
+            owner_short,
+            ..
+        } = &mut entry
+        {
+            let theme = Theme::current();
+            let tag = format!("@{}", foreign.owner_short);
+            let mut spans = std::mem::take(&mut styled.spans);
+            spans.push(Span::styled(
+                format!(" {tag}"),
+                Style::default().fg(theme.gray_bright),
+            ));
+            *styled = Line::from(spans);
+            label.push(' ');
+            label.push_str(&tag);
+            *owner_short = Some(foreign.owner_short.clone());
+        }
+        entry
     }
 
     #[cfg(test)]
@@ -981,6 +1034,7 @@ impl TasksPane {
         current_cron_task_id: Option<&str>,
         queued_cron_ids: &std::collections::HashSet<&str>,
         workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+        foreign_tasks: &std::collections::BTreeMap<String, crate::app::agent::ForeignTaskState>,
     ) {
         self.sync_with_locale(
             bg_tasks,
@@ -989,6 +1043,7 @@ impl TasksPane {
             current_cron_task_id,
             queued_cron_ids,
             workflow_runs,
+            foreign_tasks,
             None,
         );
     }
@@ -1002,6 +1057,7 @@ impl TasksPane {
         current_cron_task_id: Option<&str>,
         queued_cron_ids: &std::collections::HashSet<&str>,
         workflow_runs: &[crate::views::workflows::WorkflowRunSnapshot],
+        foreign_tasks: &std::collections::BTreeMap<String, crate::app::agent::ForeignTaskState>,
         locale: Option<&crate::locale::LocaleContext>,
     ) {
         self.ui_locale = locale.cloned().unwrap_or_default();
@@ -1023,6 +1079,19 @@ impl TasksPane {
             if self.show_done || task.status == BgTaskStatus::Running {
                 self.items.push(TaskEntry::from_bg_task_with_locale(
                     task,
+                    &mut self.highlight_cache,
+                    locale,
+                ));
+            }
+        }
+
+        // Rows owned by other sessions, fetched on demand when this pane opens.
+        // Same `show_done` gate as this session's tasks: a hidden completed row
+        // should stay hidden wherever it came from.
+        for foreign in foreign_tasks.values() {
+            if self.show_done || foreign.task.status == BgTaskStatus::Running {
+                self.items.push(TaskEntry::from_foreign_task_with_locale(
+                    foreign,
                     &mut self.highlight_cache,
                     locale,
                 ));
@@ -1395,9 +1464,18 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
+        foreign_tasks: &std::collections::BTreeMap<String, crate::app::agent::ForeignTaskState>,
     ) {
         self.render_with_locale(
-            area, buf, focused, layout_cfg, bg_tasks, subagents, scheduled, None,
+            area,
+            buf,
+            focused,
+            layout_cfg,
+            bg_tasks,
+            subagents,
+            scheduled,
+            foreign_tasks,
+            None,
         );
     }
 
@@ -1411,6 +1489,7 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         scheduled: &HashMap<String, ScheduledTaskInfo>,
+        foreign_tasks: &std::collections::BTreeMap<String, crate::app::agent::ForeignTaskState>,
         locale: Option<&crate::locale::LocaleContext>,
     ) {
         let inner = Self::content_area(area, layout_cfg);
@@ -1522,7 +1601,15 @@ impl TasksPane {
             height: list_area.height.saturating_sub(bar_height),
             ..list_area
         };
-        self.render_overlay(overlay_area, buf, bg_tasks, subagents, scheduled, locale);
+        self.render_overlay(
+            overlay_area,
+            buf,
+            bg_tasks,
+            subagents,
+            scheduled,
+            foreign_tasks,
+            locale,
+        );
     }
 
     fn render_overlay(
@@ -1532,6 +1619,7 @@ impl TasksPane {
         bg_tasks: &std::collections::BTreeMap<String, BgTaskState>,
         subagents: &HashMap<String, SubagentInfo>,
         _scheduled: &HashMap<String, ScheduledTaskInfo>,
+        foreign_tasks: &std::collections::BTreeMap<String, crate::app::agent::ForeignTaskState>,
         locale: Option<&crate::locale::LocaleContext>,
     ) {
         let theme = Theme::current();
@@ -1572,10 +1660,17 @@ impl TasksPane {
         for (y, data) in visible {
             match data {
                 OverlayEntryData::BgTask(ref task_id) => {
-                    let Some(task) = bg_tasks.get(task_id) else {
-                        continue;
-                    };
-                    self.render_bg_task_overlay(area, buf, y, task_id, task, &theme, locale);
+                    // This session's live task wins; a row fetched from another
+                    // session is resolved from the cross-session map instead.
+                    let (task, is_foreign) =
+                        match (bg_tasks.get(task_id), foreign_tasks.get(task_id)) {
+                            (Some(task), _) => (task, false),
+                            (None, Some(foreign)) => (&foreign.task, true),
+                            (None, None) => continue,
+                        };
+                    self.render_bg_task_overlay(
+                        area, buf, y, task_id, task, &theme, locale, is_foreign,
+                    );
                 }
                 OverlayEntryData::Agent(ref subagent_id, ref child_session_id) => {
                     let Some(info) = subagents.get(child_session_id) else {
@@ -1682,6 +1777,7 @@ impl TasksPane {
         task: &BgTaskState,
         theme: &Theme,
         locale: Option<&crate::locale::LocaleContext>,
+        is_foreign: bool,
     ) {
         let (icon, icon_style, right_text, right_style) = if task.pending_kill {
             let frames = crate::glyphs::dot_spinner_frames();
@@ -1748,7 +1844,10 @@ impl TasksPane {
         } else {
             0
         };
-        let bg_overlay_w = bg_kill_w + 3 + right_text_w + lines_w + 1;
+        // A foreign row has no scrollback entry in this client, so it gets no
+        // view button — and no gap where one would have been.
+        let bg_view_w: u16 = if is_foreign { 0 } else { 3 };
+        let bg_overlay_w = bg_kill_w + bg_view_w + right_text_w + lines_w + 1;
         clear_overlay_area(buf, area, y, bg_overlay_w);
 
         let mut rx = area.x + area.width;
@@ -1778,26 +1877,28 @@ impl TasksPane {
         }
 
         // View button
-        rx = rx.saturating_sub(3);
-        let is_view_hovered = matches!(
-            &self.hovered_view,
-            Some(TaskEntryId::BgTask(tid)) if tid == task_id
-        );
-        let view_style = if is_view_hovered {
-            Style::default().fg(theme.text_primary)
-        } else {
-            Style::default().fg(theme.gray)
-        };
-        buf.set_span(
-            rx,
-            y,
-            &Span::styled(crate::glyphs::enlarge_button(), view_style),
-            3,
-        );
-        self.view_button_rects.push((
-            TaskEntryId::BgTask(task_id.to_string()),
-            Rect::new(rx, y, 3, 1),
-        ));
+        if !is_foreign {
+            rx = rx.saturating_sub(3);
+            let is_view_hovered = matches!(
+                &self.hovered_view,
+                Some(TaskEntryId::BgTask(tid)) if tid == task_id
+            );
+            let view_style = if is_view_hovered {
+                Style::default().fg(theme.text_primary)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_span(
+                rx,
+                y,
+                &Span::styled(crate::glyphs::enlarge_button(), view_style),
+                3,
+            );
+            self.view_button_rects.push((
+                TaskEntryId::BgTask(task_id.to_string()),
+                Rect::new(rx, y, 3, 1),
+            ));
+        }
 
         // Time/status text
         let right_width = right_text.width() as u16;
@@ -2117,6 +2218,7 @@ mod tests {
             scrollback_entry_id: None,
             is_monitor: false,
             restored_from_replay: false,
+            detach: false,
         }
     }
 
@@ -2184,6 +2286,86 @@ mod tests {
             _ => panic!("expected BgTask variant"),
         };
         assert_eq!(label, "cargo test --release");
+    }
+
+    /// A row fetched from another session carries its owner's short id, and is
+    /// marked foreign so the overlay drops the view button (there is no
+    /// scrollback entry or stdout buffer for it in this client).
+    #[test]
+    fn foreign_bg_task_is_tagged_with_its_owner() {
+        let foreign = crate::app::agent::ForeignTaskState {
+            task: make_bg_task("t-foreign", "cargo build --release", BgTaskStatus::Running),
+            owner_short: "01a0e7b8".into(),
+        };
+        let mut cache = HashMap::new();
+        let entry = TaskEntry::from_foreign_task_with_locale(&foreign, &mut cache, None);
+        let (label, spans, owner) = match &entry {
+            TaskEntry::BgTask {
+                label,
+                styled,
+                owner_short,
+                ..
+            } => (label.clone(), styled.spans.clone(), owner_short.clone()),
+            _ => panic!("expected BgTask variant"),
+        };
+        assert!(label.ends_with("@01a0e7b8"), "label: {label}");
+        assert_eq!(
+            spans.last().map(|span| span.content.as_ref()),
+            Some(" @01a0e7b8"),
+            "the owner tag must render as its own trailing span: {spans:?}"
+        );
+        assert_eq!(
+            owner.as_deref(),
+            Some("01a0e7b8"),
+            "the entry must mark itself foreign"
+        );
+        assert_eq!(
+            entry.group_kind(),
+            GroupKind::Tasks,
+            "an ordinary foreign bash task stays in the Tasks group"
+        );
+    }
+
+    /// A task the user confirmed as outliving the session is tagged, so it is
+    /// distinguishable from the rows teardown will reap. The tag is a suffix:
+    /// a leading tag is reserved for the kind (Monitor / Task ).
+    #[test]
+    fn detached_bg_task_is_tagged() {
+        let mut detached = make_bg_task("t-det", "cargo build --release", BgTaskStatus::Running);
+        detached.detach = true;
+        let mut cache = HashMap::new();
+        let entry = TaskEntry::from_bg_task(&detached, &mut cache);
+        let (label, spans, group) = match &entry {
+            TaskEntry::BgTask { label, styled, .. } => {
+                (label.clone(), styled.spans.clone(), entry.group_kind())
+            }
+            _ => panic!("expected BgTask variant"),
+        };
+        assert!(
+            label.ends_with("Detached"),
+            "the tag must be searchable in the label: {label}"
+        );
+        assert_eq!(
+            spans.last().map(|span| span.content.as_ref()),
+            Some(" Detached"),
+            "the tag must render as its own trailing span: {spans:?}"
+        );
+        assert_eq!(
+            group,
+            GroupKind::Tasks,
+            "detach is a state tag, not a group of its own"
+        );
+
+        let plain = make_bg_task("t-plain", "cargo build --release", BgTaskStatus::Running);
+        let entry = TaskEntry::from_bg_task(&plain, &mut cache);
+        let label = match &entry {
+            TaskEntry::BgTask { label, .. } => label.as_str(),
+            _ => panic!("expected BgTask variant"),
+        };
+        assert_eq!(
+            label, "cargo build --release",
+            "an ordinary task must stay untagged"
+        );
     }
 
     #[test]
@@ -2351,6 +2533,7 @@ mod tests {
             bg_tasks,
             &HashMap::new(),
             &HashMap::new(),
+            &BTreeMap::new(),
         );
         (0..height)
             .map(|y| {
@@ -2383,6 +2566,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // 12+ rows so `desired_height` is non-zero; wide enough that the overlay isn't clipped
@@ -2413,6 +2597,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert!(
             !pane.is_visible(),
@@ -2431,6 +2616,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert!(
             pane.is_visible(),
@@ -2457,6 +2643,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         let lines = render_pane_to_strings(&mut pane, &bg_tasks, 80, 16);
@@ -2485,6 +2672,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         let lines = render_pane_to_strings(&mut pane, &bg_tasks, 80, 16);
@@ -2523,6 +2711,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Press `/` to open the search bar.
@@ -2580,6 +2769,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Tall enough that all entries fit without scrolling.
@@ -2632,6 +2822,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // One header and one loop row in a tall pane: not scrollable
@@ -2646,6 +2837,7 @@ mod tests {
             &BTreeMap::new(),
             &HashMap::new(),
             &scheduled,
+            &BTreeMap::new(),
         );
 
         // Locate the `✗` kill glyph; every cell past the closing `]` must be blank (no scrollbar when not scrollable, no leaked label text)
@@ -2694,6 +2886,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // A short panel forces the list to overflow; at the top of the list a centered ▼ appears on the reserved bottom row
@@ -2725,6 +2918,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Establish the viewport, then scroll to the very bottom.
@@ -2766,6 +2960,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         assert!(pane.items.len() >= 2);
@@ -2794,6 +2989,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         assert_eq!(pane.items.len(), 2);
@@ -2829,6 +3025,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         assert_eq!(pane.items.len(), 3);
@@ -2882,6 +3079,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // items: monitor first, then loop.
@@ -2937,6 +3135,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         assert_eq!(pane.items.len(), 1, "only running tasks shown by default");
@@ -2958,6 +3157,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Display list interleaves a header before each group's items: [Header(Subagents), Agent, Header(Tasks), BgTask]
@@ -3002,6 +3202,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Expanded: header and item
@@ -3039,6 +3240,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert_eq!(pane.entries.len(), 2);
 
@@ -3072,6 +3274,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         pane.toggle_group(GroupKind::Subagents);
@@ -3085,6 +3288,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert!(!pane.collapsed_groups.contains(&GroupKind::Subagents));
 
@@ -3101,6 +3305,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         assert_eq!(pane.entries.len(), 2);
         assert!(matches!(&pane.entries[1], TaskEntry::Agent { .. }));
@@ -3127,6 +3332,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
 
         // Ordered by agent type alphabetically: Explore before Plan.
@@ -3298,6 +3504,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3324,6 +3531,7 @@ mod tests {
             Some("cron1"),
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3350,6 +3558,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3378,6 +3587,7 @@ mod tests {
             None,
             &queued,
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3405,6 +3615,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3432,6 +3643,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let entry = &pane.items[0];
         let label = match entry {
@@ -3460,6 +3672,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3490,6 +3703,7 @@ mod tests {
             None,
             &HashSet::new(),
             &[],
+            &BTreeMap::new(),
         );
         let label = match &pane.items[0] {
             TaskEntry::Scheduled { label, .. } => label,
@@ -3539,6 +3753,7 @@ mod tests {
             None,
             &HashSet::new(),
             &runs,
+            &BTreeMap::new(),
         );
 
         let labels: Vec<&str> = pane.entries.iter().map(|e| e.search_text()).collect();
@@ -3576,6 +3791,7 @@ mod tests {
             None,
             &HashSet::new(),
             &runs,
+            &BTreeMap::new(),
         );
         assert!(
             pane.items

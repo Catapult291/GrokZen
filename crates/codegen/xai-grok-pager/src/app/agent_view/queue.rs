@@ -1874,6 +1874,7 @@ mod watcher_tests {
                 scrollback_entry_id: None,
                 is_monitor,
                 restored_from_replay: false,
+                detach: false,
             },
         );
     }

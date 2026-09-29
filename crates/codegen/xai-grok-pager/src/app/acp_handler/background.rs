@@ -67,27 +67,37 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         return false;
     };
 
-    let (tool_call_id, task_id, command, cwd, output_file, monitor_description, notif_description) =
-        match session_notif.update {
-            XaiSessionUpdate::TaskBackgrounded {
-                tool_call_id,
-                task_id,
-                command,
-                cwd,
-                output_file,
-                monitor_description,
-                description,
-            } => (
-                tool_call_id,
-                task_id,
-                command,
-                cwd,
-                output_file,
-                monitor_description,
-                description,
-            ),
-            _ => return false,
-        };
+    let (
+        tool_call_id,
+        task_id,
+        command,
+        cwd,
+        output_file,
+        monitor_description,
+        notif_description,
+        detach,
+    ) = match session_notif.update {
+        XaiSessionUpdate::TaskBackgrounded {
+            tool_call_id,
+            task_id,
+            command,
+            cwd,
+            output_file,
+            monitor_description,
+            description,
+            detach,
+        } => (
+            tool_call_id,
+            task_id,
+            command,
+            cwd,
+            output_file,
+            monitor_description,
+            description,
+            detach,
+        ),
+        _ => return false,
+    };
 
     // Replayed (`session/load`) restores are historical context, not new activity: mark them so the tasks pane doesn't auto-open on resume
     let meta = NotificationMeta::from_json(session_notif.meta.as_ref().and_then(|v| v.as_object()));
@@ -165,6 +175,7 @@ pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut A
         scrollback_entry_id: None,
         is_monitor,
         restored_from_replay,
+        detach,
     };
 
     let entry_id = if let Some(eid) = demotion_eid {
