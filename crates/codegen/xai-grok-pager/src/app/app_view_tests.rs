@@ -1944,7 +1944,11 @@ fn minimal_ctrl_g_edits_prompt_while_full_tui_keeps_tasks() {
     let mut full = test_app_with_agent();
     full.screen_mode = ScreenMode::Fullscreen;
     let out = full.handle_input(&event);
-    assert!(matches!(out, InputOutcome::Changed));
+    // The full TUI opens the tasks pane, which also asks for the cross-session rows.
+    assert!(matches!(
+        out,
+        InputOutcome::Action(Action::ListForeignTasks)
+    ));
     assert!(full.agents[&id].tasks.overlay.visible);
     assert!(full.agents[&id].tasks.overlay.focused);
     assert!(full.pending_editor.is_none());

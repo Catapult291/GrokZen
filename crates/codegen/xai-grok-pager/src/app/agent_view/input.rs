@@ -1789,7 +1789,12 @@ mod background_and_tasks_shortcut_tests {
         agent.set_active_pane(AgentPane::Prompt, true);
         add_running_execute(&mut agent);
         let first = agent.handle_input(&ctrl('g'), &registry);
-        assert!(matches!(first, InputOutcome::Changed));
+        // Opening the pane also asks for the rows owned by other sessions, so the
+        // first press answers with that request instead of a bare repaint.
+        assert!(matches!(
+            first,
+            InputOutcome::Action(Action::ListForeignTasks)
+        ));
         assert_eq!(agent.active_pane, AgentPane::Tasks);
         assert!(agent.tasks.overlay.visible);
         assert!(agent.tasks.overlay.focused);
