@@ -284,9 +284,13 @@ pub struct BashToolInput {
     pub timeout: Option<u64>,
 
     /// One sentence explanation as to why this command needs to be run and how it contributes to the goal.
+    // The JSON schema marks only `command` as required; models routinely omit
+    // `description`. A hard-required field here turns that into a whole-call
+    // parse failure (`missing field \`description\``).
     #[schemars(
         description = "One sentence explanation as to why this command needs to be run and how it contributes to the goal."
     )]
+    #[serde(default)]
     pub description: String,
 
     /// Set to true for long-running commands that should run in the background (e.g., dev servers, long builds).

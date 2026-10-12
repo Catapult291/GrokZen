@@ -505,6 +505,11 @@ pub struct ToolCallResponse {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ToolCallFunction {
     pub name: String,
+    /// Some OpenAI-compatible upstreams omit `arguments` entirely on a tool call
+    /// (observed with cline-pass). Defaulting to empty lets the tool-input layer
+    /// surface a per-call parse error instead of failing the whole response with
+    /// `missing field \`arguments\``.
+    #[serde(default)]
     pub arguments: String,
 }
 
