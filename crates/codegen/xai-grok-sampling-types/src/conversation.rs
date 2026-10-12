@@ -463,6 +463,10 @@ impl ReasoningContent {
 // Tool Definitions and Calls
 // ============================================================================
 
+fn default_tool_call_arguments() -> Arc<str> {
+    Arc::from("")
+}
+
 /// A tool call made by the assistant that the client must execute locally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -471,6 +475,11 @@ pub struct ToolCall {
     /// Name of the function to call
     pub name: String,
     /// JSON-encoded arguments
+    ///
+    /// Upstreams that omit the field (observed with cline-pass) deserialize to
+    /// empty instead of failing the whole response with `missing field
+    /// \`arguments\``; the tool-input layer then surfaces a per-call parse error.
+    #[serde(default = "default_tool_call_arguments")]
     pub arguments: Arc<str>,
 }
 

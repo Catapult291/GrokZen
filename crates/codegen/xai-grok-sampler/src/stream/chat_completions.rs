@@ -65,6 +65,12 @@ pub fn stream_chat_completions<'a>(
         // Tool call deltas keyed by positional index; each entry is (id, name, arguments_buffer)
         // The first chunk for an index carries the id and name and starts the arguments buffer; later chunks append to arguments only
         let mut tool_call_acc: BTreeMap<u32, (String, String, String)> = BTreeMap::new();
+        // Wire `index` → accumulator slot. Usually identity; remapped when an upstream
+        // reuses one wire index for a second parallel call (new id on the same index).
+        let mut wire_slot_map: BTreeMap<u32, u32> = BTreeMap::new();
+        // Slots for calls whose upstream reused another call's wire `index`.
+        // Starts past any plausible wire index so rotated entries never collide.
+        let mut next_rotated_slot: u32 = u32::MAX / 2;
 
         // Index counter spanning text and reasoning chunks (matches the shell's chunk_index used for notification correlation)
         let mut chunk_index: u64 = 0;
@@ -182,8 +188,39 @@ pub fn stream_chat_completions<'a>(
                 for tc_delta in delta.tool_calls.into_iter() {
                     chunk_has_content = true;
 
+                    // Some OpenAI-compatible upstreams (observed with cline-pass / mimo)
+                    // reuse the same positional `index` for parallel tool calls: a new
+                    // call's first chunk (carrying a fresh `id`) lands on an index whose
+                    // slot already holds a different call, and the naive append splices
+                    // both calls' argument JSON into one unparseable blob. Detect the
+                    // id change, rotate the second call to a fresh slot, and remember
+                    // the remap so that its later id-less fragments follow along.
+                    let wire_index = tc_delta.index;
+                    if let Some(new_id) = tc_delta.id.as_deref() {
+                        let slot_for_id = wire_slot_map
+                            .entry(wire_index)
+                            .or_insert(wire_index);
+                        if let Some((existing_id, _, _)) = tool_call_acc.get(slot_for_id)
+                            && !existing_id.is_empty()
+                            && existing_id != new_id
+                        {
+                            let rotated = next_rotated_slot;
+                            next_rotated_slot += 1;
+                            tracing::warn!(
+                                request_id = %request_id,
+                                wire_index,
+                                rotated_slot = rotated,
+                                old_id = %existing_id,
+                                new_id = %new_id,
+                                "tool-call index reused by a second call id; rotating accumulator slot"
+                            );
+                            *slot_for_id = rotated;
+                        }
+                    }
+                    let slot = *wire_slot_map.get(&wire_index).unwrap_or(&wire_index);
+
                     let entry = tool_call_acc
-                        .entry(tc_delta.index)
+                        .entry(slot)
                         .or_insert_with(|| (String::new(), String::new(), String::new()));
 
                     let mut id_for_event: Option<String> = None;
@@ -207,7 +244,7 @@ pub fn stream_chat_completions<'a>(
 
                     yield SamplingEvent::ToolCallDelta {
                         request_id: request_id.clone(),
-                        tool_index: tc_delta.index,
+                        tool_index: slot,
                         id: id_for_event,
                         name: name_for_event,
                         arguments_delta: args_for_event,
@@ -635,6 +672,81 @@ mod tests {
                 assert_eq!(calls[0].name, "do_thing");
                 assert_eq!(calls[0].arguments.as_ref(), "{\"x\":1}");
                 assert_eq!(response.stop_reason, Some(StopReason::ToolCalls));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// cline-pass / mimo reuse wire `index: 0` for a second parallel call.
+    /// Without slot rotation the two calls' argument fragments splice into one
+    /// unparseable blob (`{"path": {"glob": ` in production). Rotation must keep
+    /// each call's JSON intact and route the second call's id-less follow-up
+    /// fragments to its own slot.
+    #[tokio::test]
+    async fn reused_index_with_new_id_rotates_accumulator_slot() {
+        let tc =
+            |index: u32, id: Option<&str>, name: Option<&str>, args: Option<&str>| ChatChunkDelta {
+                role: None,
+                content: None,
+                reasoning_content: None,
+                tool_calls: vec![ChunkToolCallDelta {
+                    index,
+                    id: id.map(Into::into),
+                    kind: Some("function".into()),
+                    function: Some(ToolCallFunctionDelta {
+                        name: name.map(Into::into),
+                        arguments: args.map(Into::into),
+                    }),
+                }],
+                tool_call_id: None,
+            };
+
+        let chunks: Vec<Result<ChatCompletionChunk, SamplingError>> = vec![
+            // Call A on wire index 0
+            Ok(make_chunk(vec![tc(
+                0,
+                Some("call_a"),
+                Some("grep"),
+                Some("{\"pattern\":"),
+            )])),
+            Ok(make_chunk(vec![tc(0, None, None, Some("\"x\"}"))])),
+            // Call B reuses wire index 0 with a new id, then an id-less fragment
+            Ok(make_chunk(vec![tc(
+                0,
+                Some("call_b"),
+                Some("grep"),
+                Some("{\"path\":"),
+            )])),
+            Ok(make_chunk(vec![tc(0, None, None, Some("\":src\"}"))])),
+            Ok(final_chunk(FinishReason::ToolCalls)),
+        ];
+        let raw = stream::iter(chunks).boxed();
+        let events = collect(stream_chat_completions(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(60),
+        ))
+        .await;
+
+        match events.last().unwrap() {
+            SamplingEvent::Completed { response, .. } => {
+                let calls = response.tool_calls();
+                assert_eq!(
+                    calls.len(),
+                    2,
+                    "both parallel calls must survive: {calls:?}"
+                );
+                assert_eq!(calls[0].id.as_ref(), "call_a");
+                assert_eq!(calls[0].arguments.as_ref(), "{\"pattern\":\"x\"}");
+                assert_eq!(calls[1].id.as_ref(), "call_b");
+                assert_eq!(calls[1].arguments.as_ref(), "{\"path\":\":src\"}");
+                assert!(
+                    serde_json::from_str::<serde_json::Value>(calls[0].arguments.as_ref()).is_ok()
+                );
+                assert!(
+                    serde_json::from_str::<serde_json::Value>(calls[1].arguments.as_ref()).is_ok()
+                );
             }
             other => panic!("expected Completed, got {other:?}"),
         }

@@ -1472,6 +1472,18 @@ impl SessionActor {
                         concatenated_json_count = total_count;
                         best_match
                     }
+                } else if let Some(repaired) =
+                    crate::session::helpers::tool_input_parsing::try_repair_truncated_json(
+                        &call.function.arguments,
+                    ) {
+                    tracing::warn!(
+                        tool_name = %call.function.name,
+                        call_id = %call.id,
+                        original = %call.function.arguments,
+                        repaired = %repaired,
+                        "Repaired EOF-truncated tool arguments by dropping the incomplete trailing member"
+                    );
+                    repaired
                 } else {
                     tracing::warn!(
                         "Failed to parse arguments as JSON ({}), wrapping in 'raw' field",

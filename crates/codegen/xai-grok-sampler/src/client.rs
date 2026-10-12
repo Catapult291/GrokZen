@@ -1089,12 +1089,17 @@ impl SamplingClient {
         // Uses `scan` so that `[DONE]` and transport errors both terminate the stream (`None`)
         // The first transport error is emitted to the consumer, then subsequent polls return `None`
         // This prevents an infinite busy-loop when the HTTP/2 connection drops and h2 keeps producing errors
+        //
+        // EOF-category deserialization failures (a `data:` line truncated mid-JSON, e.g. by an
+        // unescaped newline inside a tool-argument string) skip that one chunk instead of failing
+        // the whole response: the lost fragment degrades to a per-tool-call parse error the model
+        // can retry, while the rest of the turn's text and tool calls survive.
         let chunks = event_stream
             .scan(false, |had_transport_error, event_res| {
                 if *had_transport_error {
                     return std::future::ready(None);
                 }
-                let item = match event_res {
+                let item: Option<Result<Option<ChatCompletionChunk>>> = match event_res {
                     Ok(event) => {
                         let data = &event.data;
                         if data == "[DONE]" {
@@ -1111,16 +1116,25 @@ impl SamplingClient {
                         if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Err(stream_error))
                         } else {
-                            Some(
-                                serde_json::from_str::<ChatCompletionChunk>(data).map_err(|e| {
+                            match serde_json::from_str::<ChatCompletionChunk>(data) {
+                                Ok(chunk) => Some(Ok(Some(chunk))),
+                                Err(e) if e.classify() == serde_json::error::Category::Eof => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        raw_data = %data,
+                                        "skipping EOF-truncated ChatCompletionChunk from stream"
+                                    );
+                                    Some(Ok(None))
+                                }
+                                Err(e) => {
                                     tracing::error!(
                                         error = %e,
                                         raw_data = %data,
                                         "Failed to deserialize ChatCompletionChunk from stream"
                                     );
-                                    SamplingError::Serialization(e)
-                                }),
-                            )
+                                    Some(Err(SamplingError::Serialization(e)))
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -1129,6 +1143,13 @@ impl SamplingClient {
                     }
                 };
                 std::future::ready(item)
+            })
+            .filter_map(|item| async move {
+                match item {
+                    Ok(Some(chunk)) => Some(Ok(chunk)),
+                    Ok(None) => None,
+                    Err(e) => Some(Err(e)),
+                }
             })
             .boxed();
 
