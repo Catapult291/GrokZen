@@ -1,10 +1,14 @@
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use xai_grok_tools::implementations::grok_build::workflow::WorkflowControl;
 use xai_workflow::{PauseKind, PhaseMeta, WorkflowOutcome};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::AsRefStr, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum WorkflowRunStatus {
     Active,
     UserPaused,
@@ -20,22 +24,6 @@ pub enum WorkflowRunStatus {
 }
 
 impl WorkflowRunStatus {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Active => "active",
-            Self::UserPaused => "user_paused",
-            Self::BackOffPaused => "back_off_paused",
-            Self::NoProgressPaused => "no_progress_paused",
-            Self::InfraPaused => "infra_paused",
-            Self::Blocked => "blocked",
-            Self::BudgetLimited => "budget_limited",
-            Self::Interrupted => "interrupted",
-            Self::Complete => "complete",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
-
     pub fn is_terminal(self) -> bool {
         matches!(
             self,
@@ -62,6 +50,17 @@ impl WorkflowRunStatus {
     pub(crate) fn is_resumable(self) -> bool {
         // Cancelled (`/workflow stop`) keeps the journal; resume continues it the same way a pause does
         self.is_paused() || self == Self::Failed || self == Self::Cancelled
+    }
+
+    /// Whether `control` applies to a run in this status. A user pause only
+    /// interrupts a running engine; engine-paused runs already have nothing to
+    /// pause. A budget-limited run has likewise already stopped, and its status
+    /// is what enforces the raise-the-cap rule on resume, so stop leaves it alone.
+    pub(crate) fn accepts(self, control: WorkflowControl) -> bool {
+        match control {
+            WorkflowControl::Pause => self == Self::Active,
+            WorkflowControl::Stop => !self.is_completion_reportable(),
+        }
     }
 
     fn from_pause(kind: PauseKind) -> Self {
@@ -509,7 +508,7 @@ impl WorkflowTracker {
                 Some(format!(
                     "ignored {} while status is {}",
                     outcome_kind(outcome),
-                    run.state.status.as_str()
+                    run.state.status.as_ref()
                 )),
             );
             return Some(run.state.clone());
@@ -524,7 +523,7 @@ impl WorkflowTracker {
                 run.state.status = WorkflowRunStatus::from_pause(*kind);
                 run.state.pause_message = Some(capped_pause_message(message.clone()));
                 run.state
-                    .record_event("workflow_paused", Some(kind.as_str().to_string()));
+                    .record_event("workflow_paused", Some(kind.as_ref().to_string()));
             }
             WorkflowOutcome::BudgetExceeded { message } => {
                 run.state.status = WorkflowRunStatus::BudgetLimited;
@@ -569,6 +568,14 @@ impl WorkflowTracker {
 
     pub(crate) fn list(&self) -> Vec<WorkflowRunState> {
         self.runs.iter().map(|r| r.state.clone()).collect()
+    }
+
+    /// Resolve a run id or session-unique display name to the run id.
+    pub(crate) fn find_run_id(&self, key: &str) -> Option<String> {
+        self.runs
+            .iter()
+            .find(|r| r.state.run_id == key || r.state.name == key)
+            .map(|r| r.state.run_id.clone())
     }
 
     pub(crate) fn elapsed_ms(&self, run_id: &str) -> u64 {
@@ -634,6 +641,12 @@ impl WorkflowTracker {
             terminal_at_restore_run_ids,
             status_reported_revisions: std::collections::HashMap::new(),
         }
+    }
+
+    /// Skip the completion wake and reminder for a run whose outcome the model
+    /// already received directly (it stopped the run itself).
+    pub(crate) fn mark_completion_reported(&mut self, run_id: &str) {
+        self.reported_terminal_run_ids.insert(run_id.to_owned());
     }
 
     pub(crate) fn is_unreported_completion(&self, run_id: &str, revision: u64) -> bool {
@@ -755,7 +768,7 @@ fn summarize_result(result: &serde_json::Value) -> String {
         while !text.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}…", &text[..end])
+        format!("{}…", text.get(..end).unwrap_or(""))
     } else {
         text
     }
@@ -829,13 +842,19 @@ mod tests {
         t.rebind_agent_id(&id, "child-attempt-1", "child-attempt-2");
         let run = t.get(&id).unwrap();
         assert_eq!(run.agents.len(), 1);
-        assert_eq!(run.agents[0].agent_id, "child-attempt-2");
-        assert_eq!(run.agents[0].label, "worker");
-        assert_eq!(run.agents[0].state, "running");
+        let Some(agent) = run.agents.first() else {
+            panic!("expected an agent row: {:?}", run.agents);
+        };
+        assert_eq!(agent.agent_id, "child-attempt-2");
+        assert_eq!(agent.label, "worker");
+        assert_eq!(agent.state, "running");
         assert!(run.revision > before);
 
         t.agent_finished(&id, "child-attempt-2", "done", 42, 1_000);
-        assert_eq!(t.get(&id).unwrap().agents[0].state, "done");
+        assert_eq!(
+            t.get(&id).unwrap().agents.first().map(|a| a.state.as_str()),
+            Some("done")
+        );
     }
 
     #[test]
@@ -866,7 +885,10 @@ mod tests {
         let run = restored.get(&id).unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Interrupted);
         assert!(!run.status.is_paused());
-        assert_eq!(run.agents[0].state, "cancelled");
+        assert_eq!(
+            run.agents.first().map(|a| a.state.as_str()),
+            Some("cancelled")
+        );
     }
 
     #[test]
@@ -924,7 +946,8 @@ mod tests {
         assert_eq!(resumed.status, WorkflowRunStatus::Active);
         assert!(resumed.pause_message.is_none());
         assert_eq!(
-            resumed.agents[0].state, "cancelled",
+            resumed.agents.first().map(|a| a.state.as_str()),
+            Some("cancelled"),
             "ghost running agent rows must be cancelled on resume"
         );
         assert_eq!(t.execution_epoch(&id), Some(1));
@@ -1124,7 +1147,10 @@ mod tests {
         assert_eq!(state.agent_budget, Some(1024));
         let resumed_status = t.take_status_report();
         assert_eq!(resumed_status.len(), 1);
-        assert_eq!(resumed_status[0].revision, state.revision);
+        assert_eq!(
+            resumed_status.first().map(|s| s.revision),
+            Some(state.revision)
+        );
         t.apply_outcome(
             &id,
             &WorkflowOutcome::Completed {
@@ -1148,7 +1174,10 @@ mod tests {
         let mut restored = WorkflowTracker::from_snapshot(t.snapshot());
         let (pre_resume, fresh) = restored.take_unreported_terminal_runs();
         assert_eq!(pre_resume.len(), 1);
-        assert_eq!(pre_resume[0].run_id, id);
+        assert_eq!(
+            pre_resume.first().map(|s| s.run_id.as_str()),
+            Some(id.as_str())
+        );
         assert!(fresh.is_empty());
         assert!(restored.take_status_report().is_empty());
 
@@ -1174,7 +1203,7 @@ mod tests {
 
         let report = t.take_status_report();
         assert_eq!(report.len(), 1);
-        assert!(report[0].elapsed_ms_floor >= 7_000);
+        assert!(report.first().is_some_and(|s| s.elapsed_ms_floor >= 7_000));
         assert_eq!(t.get(&id).unwrap().elapsed_ms_floor, 2_000);
     }
 
@@ -1258,7 +1287,10 @@ mod tests {
     fn restore_charges_unresolved_lease_and_preserves_cap() {
         let (mut t, id) = tracker_with_run();
         let mut snapshot = t.snapshot();
-        snapshot[0].token_leases.push(WorkflowTokenLease {
+        let Some(first) = snapshot.get_mut(0) else {
+            panic!("expected a snapshot run: {snapshot:?}");
+        };
+        first.token_leases.push(WorkflowTokenLease {
             lease_id: "lease_legacy".into(),
             grant: 400,
         });

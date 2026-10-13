@@ -8,6 +8,7 @@ mod fork_picker;
 mod lifecycle;
 mod load;
 mod modal;
+mod optimistic_home;
 mod take_deferred;
 
 fn content_hit(id: &str) -> xai_grok_shell::extensions::session_search::SearchSessionHit {

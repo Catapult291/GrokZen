@@ -41,6 +41,16 @@ fn make_test_config() -> (
     (config, session_cmd_rx)
 }
 
+fn assert_emit_background_tasks_snapshot(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) {
+    match cmd_rx
+        .try_recv()
+        .expect("expected EmitBackgroundTasksSnapshot")
+    {
+        SessionCommand::EmitBackgroundTasksSnapshot { .. } => {}
+        _ => panic!("expected EmitBackgroundTasksSnapshot"),
+    }
+}
+
 #[allow(clippy::type_complexity)]
 fn make_test_config_full() -> (
     NotificationBridgeConfig,
@@ -92,6 +102,8 @@ fn make_test_config_full_raw() -> (
         auto_wake_enabled: true,
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         goal_loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        background_tasks_snapshot_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        emit_local_background_tasks: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     };
     (config, gateway_rx, persistence_rx, session_cmd_rx)
 }
@@ -147,7 +159,10 @@ async fn bash_task_completed_injects_bash_task_completed_source() {
         } => {
             assert!(prompt_id.starts_with("task-completed-"));
             assert!(verbatim);
-            let text = match &prompt_blocks[0] {
+            let Some(block) = prompt_blocks.first() else {
+                panic!("expected a prompt block: {prompt_blocks:?}");
+            };
+            let text = match block {
                 acp::ContentBlock::Text(t) => &t.text,
                 _ => panic!("expected text block"),
             };
@@ -178,10 +193,8 @@ async fn bash_task_completed_injects_bash_task_completed_source() {
     }
 }
 
-/// While a goal loop is active, a completed background bash task must NOT fire the synthetic auto-wake prompt.
-/// An async "task completed" wake mid-goal derails a weak model.
-/// It must also NOT be marked reserved (so the `TaskCompletionReminder` is free to drain it).
-/// The pager's `x.ai/task_completed` notification still fires.
+/// While a goal loop is active, a completed background bash task must NOT fire the synthetic auto-wake prompt. An async "task completed" wake mid-goal derails a weak model.
+/// It must also NOT be marked reserved (so the `TaskCompletionReminder` is free to drain it). The pager's `x.ai/task_completed` notification still fires.
 #[tokio::test]
 async fn bash_task_completed_suppresses_auto_wake_during_goal_loop() {
     let (config, mut gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
@@ -212,6 +225,7 @@ async fn bash_task_completed_suppresses_auto_wake_during_goal_loop() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "goal-loop-active bash completion must not inject auto-wake commands"
@@ -265,6 +279,7 @@ async fn bash_task_completed_auto_wakes_and_reserves_without_goal_loop() {
         cmd_rx.try_recv(),
         Ok(SessionCommand::DispatchNotificationHook { .. })
     ));
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert_eq!(
         config.task_completion_reservations.snapshot(),
         vec!["bg-normal".to_string()],
@@ -279,7 +294,10 @@ fn task_completed_will_wake(
             && args.request.method.as_ref() == "x.ai/task_completed"
         {
             let v: serde_json::Value = serde_json::from_str(args.request.params.get()).ok()?;
-            return v["update"]["will_wake"].as_bool();
+            return v
+                .get("update")
+                .and_then(|u| u.get("will_wake"))
+                .and_then(|w| w.as_bool());
         }
     }
     None
@@ -362,6 +380,7 @@ async fn task_completed_notification_stamps_will_wake() {
         cmd_rx.try_recv(),
         Ok(SessionCommand::DispatchNotificationHook { .. })
     ));
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     let mut persisted = false;
     while let Ok(message) = persistence_rx.try_recv() {
         if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(update)) = message
@@ -470,6 +489,7 @@ async fn timed_out_monitor_admission_queues_one_fallback_and_late_actor_drops_pr
         cmd_rx.try_recv(),
         Ok(SessionCommand::DispatchNotificationHook { .. })
     ));
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(cmd_rx.try_recv().is_err());
     assert_eq!(task_completed_will_wake(&mut gateway_rx), Some(false));
     assert!(
@@ -536,6 +556,7 @@ async fn bash_task_completed_auto_wake_disabled_still_suppressed_during_goal_loo
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "goal-loop-active completion must not InjectNotification with auto-wake disabled"
@@ -577,7 +598,10 @@ async fn monitor_task_completed_auto_wakes_with_monitor_ended_message() {
         } => {
             assert_eq!(prompt_id, "task-completed-mon-456");
             assert!(verbatim);
-            let text = match &prompt_blocks[0] {
+            let Some(block) = prompt_blocks.first() else {
+                panic!("expected a prompt block: {prompt_blocks:?}");
+            };
+            let text = match block {
                 acp::ContentBlock::Text(t) => t.text.as_str(),
                 _ => panic!("expected text block"),
             };
@@ -609,6 +633,7 @@ async fn monitor_task_completed_auto_wakes_with_monitor_ended_message() {
         cmd_rx.try_recv(),
         Ok(SessionCommand::DispatchNotificationHook { .. })
     ));
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert_eq!(
         config.task_completion_reservations.snapshot(),
         vec!["mon-456".to_string()],
@@ -641,6 +666,7 @@ async fn declined_quiet_monitor_wake_queues_canonical_deferred_completion() {
         cmd_rx.try_recv(),
         Ok(SessionCommand::DispatchNotificationHook { .. })
     ));
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(cmd_rx.try_recv().is_err());
     let mut persisted_completion = false;
     while let Ok(message) = persistence_rx.try_recv() {
@@ -713,6 +739,7 @@ async fn monitor_explicitly_killed_skips_auto_wake() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "model-tool-killed monitor must not auto-wake"
@@ -750,7 +777,10 @@ async fn ui_killed_monitor_auto_wakes_and_tells_model_not_to_restart() {
     let command = cmd_rx.try_recv().expect("expected Prompt");
     match command {
         SessionCommand::Prompt { prompt_blocks, .. } => {
-            let text = match &prompt_blocks[0] {
+            let Some(block) = prompt_blocks.first() else {
+                panic!("expected a prompt block: {prompt_blocks:?}");
+            };
+            let text = match block {
                 acp::ContentBlock::Text(t) => &t.text,
                 _ => panic!("expected text block"),
             };
@@ -794,6 +824,7 @@ async fn monitor_task_completed_suppressed_during_goal_loop() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "goal-loop-active monitor completion must not auto-wake"
@@ -830,8 +861,15 @@ async fn scheduled_task_created_is_persisted() {
                 crate::extensions::notification::SessionUpdate::ScheduledTaskCreated { .. }
             ));
             let meta = notif.meta.as_ref().expect("scheduler metadata");
-            assert_eq!(meta["x.ai/schedulerGeneration"], "generation-a");
-            assert_eq!(meta["x.ai/schedulerRevision"], 1);
+            assert_eq!(
+                meta.get("x.ai/schedulerGeneration")
+                    .and_then(|v| v.as_str()),
+                Some("generation-a")
+            );
+            assert_eq!(
+                meta.get("x.ai/schedulerRevision").and_then(|v| v.as_u64()),
+                Some(1)
+            );
             assert!(
                 notif
                     .meta
@@ -993,8 +1031,15 @@ async fn scheduled_task_removed_is_persisted() {
                 "the persisted deletion line must be stamped"
             );
             let meta = notif.meta.as_ref().expect("scheduler metadata");
-            assert_eq!(meta["x.ai/schedulerGeneration"], "generation-a");
-            assert_eq!(meta["x.ai/schedulerRevision"], 2);
+            assert_eq!(
+                meta.get("x.ai/schedulerGeneration")
+                    .and_then(|v| v.as_str()),
+                Some("generation-a")
+            );
+            assert_eq!(
+                meta.get("x.ai/schedulerRevision").and_then(|v| v.as_u64()),
+                Some(2)
+            );
         }
         _ => panic!("expected PersistenceMsg::Update(Xai(ScheduledTaskDeleted))"),
     }
@@ -1018,7 +1063,14 @@ async fn acknowledged_scheduler_removal_appends_before_ack_and_broadcast() {
         else {
             panic!("expected durable scheduler tombstone");
         };
-        assert_eq!(notification.meta.unwrap()["x.ai/schedulerRevision"], 17);
+        assert_eq!(
+            notification
+                .meta
+                .as_ref()
+                .and_then(|m| m.get("x.ai/schedulerRevision"))
+                .and_then(|v| v.as_u64()),
+            Some(17)
+        );
         assert!(gateway_rx.try_recv().is_err());
         assert!(matches!(
             receipt.try_recv(),
@@ -1128,6 +1180,140 @@ async fn task_backgrounded_wire_carries_detach() {
 }
 
 #[tokio::test]
+async fn task_backgrounded_requests_background_tasks_snapshot() {
+    let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
+    let notification = ToolNotification::BashExecutionBackgrounded(
+        xai_grok_tools::notification::types::BashExecutionBackgrounded {
+            base: xai_grok_tools::notification::types::BashNotificationBase {
+                tool_call_id: "call-bg-list".into(),
+                command: "sleep 100".into(),
+                output: Vec::new(),
+                total_bytes: 0,
+                truncated: false,
+                cwd: PathBuf::from("/tmp"),
+            },
+            output_file: PathBuf::from("/tmp/out.log"),
+            task_id: "task-bg-list".into(),
+            monitor_description: None,
+            description: None,
+            detach: false,
+        },
+    );
+    let mut offsets = HashMap::new();
+
+    handle_notification(&config, notification, &mut offsets).await;
+
+    match persistence_rx.try_recv().expect("must persist incremental") {
+        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
+            assert!(matches!(
+                notif.update,
+                crate::extensions::notification::SessionUpdate::TaskBackgrounded { .. }
+            ));
+        }
+        _ => panic!("expected incremental TaskBackgrounded persist"),
+    }
+    let mut found_incremental = false;
+    while let Ok(msg) = gateway_rx.try_recv() {
+        if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg
+            && args.request.method.as_ref() == "x.ai/task_backgrounded"
+        {
+            found_incremental = true;
+        }
+    }
+    assert!(found_incremental);
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
+    assert!(cmd_rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn task_completed_requests_background_tasks_snapshot() {
+    let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
+    let snapshot = make_task_snapshot("mon-list", TaskKind::Monitor);
+    let mut offsets = HashMap::new();
+
+    handle_notification(
+        &config,
+        ToolNotification::TaskCompleted(snapshot),
+        &mut offsets,
+    )
+    .await;
+
+    match persistence_rx.try_recv().expect("must persist incremental") {
+        PersistenceMsg::Update(crate::session::storage::SessionUpdate::Xai(notif)) => {
+            assert!(matches!(
+                notif.update,
+                crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
+            ));
+        }
+        _ => panic!("expected incremental TaskCompleted persist"),
+    }
+    let mut found_incremental = false;
+    while let Ok(msg) = gateway_rx.try_recv() {
+        if let xai_acp_lib::AcpClientMessage::ExtNotification(args) = msg
+            && args.request.method.as_ref() == "x.ai/task_completed"
+        {
+            found_incremental = true;
+        }
+    }
+    assert!(found_incremental);
+    let mut saw_hook = false;
+    let mut saw_snapshot = false;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        match cmd {
+            SessionCommand::DispatchNotificationHook {
+                notification_type, ..
+            } => {
+                assert_eq!(notification_type, "task_complete");
+                saw_hook = true;
+            }
+            SessionCommand::EmitBackgroundTasksSnapshot { .. } => saw_snapshot = true,
+            SessionCommand::Prompt { .. }
+            | SessionCommand::DropMonitorNotifications { .. }
+            | SessionCommand::InjectNotification { .. }
+            | SessionCommand::CopyFile { .. } => {}
+            _ => panic!("unexpected session command alongside completion snapshot"),
+        }
+    }
+    assert!(saw_hook);
+    assert!(saw_snapshot);
+}
+
+fn backgrounded_notification(task_id: &str) -> ToolNotification {
+    ToolNotification::BashExecutionBackgrounded(
+        xai_grok_tools::notification::types::BashExecutionBackgrounded {
+            base: xai_grok_tools::notification::types::BashNotificationBase {
+                tool_call_id: format!("call-{task_id}"),
+                command: "sleep 100".into(),
+                output: Vec::new(),
+                total_bytes: 0,
+                truncated: false,
+                cwd: PathBuf::from("/tmp"),
+            },
+            output_file: PathBuf::from("/tmp/out.log"),
+            task_id: task_id.into(),
+            monitor_description: None,
+            description: None,
+            detach: false,
+        },
+    )
+}
+
+#[tokio::test]
+async fn burst_of_backgrounded_events_requests_one_snapshot() {
+    let (config, _gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
+    let mut offsets = HashMap::new();
+
+    handle_notification(&config, backgrounded_notification("a"), &mut offsets).await;
+    handle_notification(&config, backgrounded_notification("b"), &mut offsets).await;
+
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
+    assert!(
+        cmd_rx.try_recv().is_err(),
+        "last-wins list should coalesce a burst to one emit"
+    );
+}
+
+#[tokio::test]
 async fn task_completed_persisted_line_is_stamped() {
     let (config, _gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
     // Monitor kind: persists without the bash auto-wake side effects.
@@ -1222,8 +1408,20 @@ async fn scheduled_task_fired_is_not_persisted() {
         panic!("expected scheduler fire notification");
     };
     let value: serde_json::Value = serde_json::from_str(fired.request.params.get()).unwrap();
-    assert_eq!(value["_meta"]["x.ai/schedulerGeneration"], "generation-a");
-    assert_eq!(value["_meta"]["x.ai/schedulerRevision"], 3);
+    assert_eq!(
+        value
+            .get("_meta")
+            .and_then(|m| m.get("x.ai/schedulerGeneration"))
+            .and_then(|v| v.as_str()),
+        Some("generation-a")
+    );
+    assert_eq!(
+        value
+            .get("_meta")
+            .and_then(|m| m.get("x.ai/schedulerRevision"))
+            .and_then(|v| v.as_u64()),
+        Some(3)
+    );
 }
 
 fn make_monitor_event_notification(task_id: &str, owner: Option<&str>) -> ToolNotification {
@@ -1326,6 +1524,7 @@ async fn block_waited_task_skips_auto_wake_prompt() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "block_waited completion should not send Prompt or InjectNotification"
@@ -1367,6 +1566,7 @@ async fn explicitly_killed_task_skips_auto_wake_prompt() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "delivered kill completion should not send Prompt or InjectNotification"
@@ -1402,6 +1602,7 @@ async fn teardown_killed_task_skips_auto_wake_prompt() {
         } => assert_eq!(notification_type, "task_complete"),
         _ => panic!("unexpected session command"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
     assert!(
         cmd_rx.try_recv().is_err(),
         "teardown kill with no waiter must not enqueue Prompt"
@@ -1437,7 +1638,10 @@ async fn ui_killed_task_auto_wakes_and_tells_model_not_to_restart() {
     let command = cmd_rx.try_recv().expect("expected Prompt");
     match command {
         SessionCommand::Prompt { prompt_blocks, .. } => {
-            let text = match &prompt_blocks[0] {
+            let Some(block) = prompt_blocks.first() else {
+                panic!("expected a prompt block: {prompt_blocks:?}");
+            };
+            let text = match block {
                 acp::ContentBlock::Text(t) => &t.text,
                 _ => panic!("expected text block"),
             };
@@ -1520,7 +1724,10 @@ async fn bash_task_completed_falls_back_when_auto_wake_disabled() {
                 source,
                 NotificationSource::BashTaskCompleted { ref task_id } if task_id == "bg-disabled"
             ));
-            let text = match &prompt_blocks[0] {
+            let Some(block) = prompt_blocks.first() else {
+                panic!("expected a prompt block: {prompt_blocks:?}");
+            };
+            let text = match block {
                 acp::ContentBlock::Text(t) => &t.text,
                 _ => panic!("expected text block"),
             };
@@ -1548,6 +1755,7 @@ async fn bash_task_completed_falls_back_when_auto_wake_disabled() {
         }
         _ => panic!("expected DispatchNotificationHook"),
     }
+    assert_emit_background_tasks_snapshot(&mut cmd_rx);
 }
 
 #[tokio::test]
@@ -1787,9 +1995,9 @@ fn make_large_bash_snapshot(task_id: &str, output_file: PathBuf) -> TaskSnapshot
 fn auto_wake_prompt_text(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) -> String {
     let cmd = cmd_rx.try_recv().expect("expected Prompt");
     match cmd {
-        SessionCommand::Prompt { prompt_blocks, .. } => match &prompt_blocks[0] {
-            acp::ContentBlock::Text(t) => t.text.clone(),
-            _ => panic!("expected text block"),
+        SessionCommand::Prompt { prompt_blocks, .. } => match prompt_blocks.first() {
+            Some(acp::ContentBlock::Text(t)) => t.text.clone(),
+            other => panic!("expected text block: {other:?}"),
         },
         _ => panic!("expected Prompt"),
     }
@@ -1799,9 +2007,9 @@ fn auto_wake_prompt_text(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) -
 fn inject_notification_prompt_text(cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>) -> String {
     let cmd = cmd_rx.try_recv().expect("expected InjectNotification");
     match cmd {
-        SessionCommand::InjectNotification { prompt_blocks, .. } => match &prompt_blocks[0] {
-            acp::ContentBlock::Text(t) => t.text.clone(),
-            _ => panic!("expected text block"),
+        SessionCommand::InjectNotification { prompt_blocks, .. } => match prompt_blocks.first() {
+            Some(acp::ContentBlock::Text(t)) => t.text.clone(),
+            other => panic!("expected text block: {other:?}"),
         },
         _ => panic!("expected InjectNotification"),
     }
@@ -1925,5 +2133,50 @@ async fn task_completed_notification_is_frame_bounded() {
     assert_eq!(
         persisted.expect("the completion must be persisted"),
         serde_json::from_str::<serde_json::Value>(&params).unwrap(),
+    );
+}
+
+#[tokio::test]
+async fn request_background_tasks_snapshot_skipped_when_emit_local_disabled() {
+    let (config, _gateway_rx, _persistence_rx, mut cmd_rx) = make_test_config_full();
+    config
+        .emit_local_background_tasks
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    let notification = ToolNotification::BashExecutionBackgrounded(
+        xai_grok_tools::notification::types::BashExecutionBackgrounded {
+            base: xai_grok_tools::notification::types::BashNotificationBase {
+                tool_call_id: "call-bg-skip".into(),
+                command: "sleep 100".into(),
+                output: Vec::new(),
+                total_bytes: 0,
+                truncated: false,
+                cwd: PathBuf::from("/tmp"),
+            },
+            output_file: PathBuf::from("/tmp/out.log"),
+            task_id: "task-bg-skip".into(),
+            monitor_description: None,
+            description: None,
+            detach: false,
+        },
+    );
+    let mut offsets = HashMap::new();
+    handle_notification(&config, notification, &mut offsets).await;
+
+    let mut saw_snapshot = false;
+    while let Ok(cmd) = cmd_rx.try_recv() {
+        if matches!(cmd, SessionCommand::EmitBackgroundTasksSnapshot { .. }) {
+            saw_snapshot = true;
+        }
+    }
+    assert!(
+        !saw_snapshot,
+        "gateway-backed sessions must not request local background_tasks snapshots"
+    );
+    assert!(
+        !config
+            .background_tasks_snapshot_pending
+            .load(std::sync::atomic::Ordering::Acquire),
+        "skipped request must not leave pending stuck true"
     );
 }

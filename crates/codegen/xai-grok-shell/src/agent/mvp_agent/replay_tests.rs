@@ -73,8 +73,16 @@ fn recorded_completion(output: String) -> Value {
         meta: None,
     };
     let mut record = serde_json::to_value(&notification).expect("serialize");
-    record["update"]["task_snapshot"]["a_field_from_another_build"] =
-        Value::String("keep me".to_string());
+    if let Some(snap) = record
+        .get_mut("update")
+        .and_then(|u| u.get_mut("task_snapshot"))
+        .and_then(|s| s.as_object_mut())
+    {
+        snap.insert(
+            "a_field_from_another_build".into(),
+            Value::String("keep me".to_string()),
+        );
+    }
     record
 }
 
@@ -111,7 +119,16 @@ async fn a_marked_replay_is_fitted_after_its_metadata_is_added() {
 async fn replay_drops_a_completion_nothing_can_shrink() {
     let (agent, mut rx) = build_agent_with_gateway();
     let mut record = recorded_completion(String::new());
-    record["update"]["task_snapshot"]["task_id"] = Value::String("t".repeat(2 * FRAME_MAX_BYTES));
+    if let Some(snap) = record
+        .get_mut("update")
+        .and_then(|u| u.get_mut("task_snapshot"))
+        .and_then(|s| s.as_object_mut())
+    {
+        snap.insert(
+            "task_id".into(),
+            Value::String("t".repeat(2 * FRAME_MAX_BYTES)),
+        );
+    }
     let line = replay_line(&record);
 
     agent.forward_raw_replay_line(
@@ -202,12 +219,56 @@ async fn a_stale_task_completion_is_frame_bounded() {
     assert!(params.contains("session_restart"));
 }
 
+#[tokio::test]
+async fn stale_task_reconcile_keeps_incrementals_without_list() {
+    let (agent, mut rx) = build_agent_with_gateway();
+    let dir = tempfile::tempdir().unwrap();
+    let line = r#"{"timestamp":1,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"task_backgrounded","task_id":"stale-1","command":"sleep 1","cwd":"/tmp"}}}"#;
+    let path = dir.path().join("updates.jsonl");
+    std::fs::write(&path, line).unwrap();
+
+    agent.reconcile_stale_background_tasks(&acp::SessionId::new("s"), &Some(path));
+
+    let notifs = drain_ext_notifications(&mut rx);
+    assert!(
+        notifs.iter().any(|(method, params)| {
+            method == "x.ai/task_completed" && params.contains("session_restart")
+        }),
+        "incremental completion must stay: {notifs:?}"
+    );
+    assert!(
+        !notifs.iter().any(|(method, params)| {
+            method == "x.ai/session_notification"
+                && params.contains("\"sessionUpdate\":\"background_tasks\"")
+        }),
+        "reconcile is not the last-wins list writer: {notifs:?}"
+    );
+}
+
+#[tokio::test]
+async fn cold_load_with_no_orphans_emits_no_reconcile_notifications() {
+    let (agent, mut rx) = build_agent_with_gateway();
+    let dir = tempfile::tempdir().unwrap();
+    let line = r#"{"timestamp":1,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"task_backgrounded","task_id":"done-1","command":"sleep 1","cwd":"/tmp"}}}
+{"timestamp":2,"method":"_x.ai/session/update","params":{"sessionId":"s","update":{"sessionUpdate":"task_completed","task_snapshot":{"task_id":"done-1"}}}}"#;
+    let path = dir.path().join("updates.jsonl");
+    std::fs::write(&path, line).unwrap();
+
+    agent.reconcile_stale_background_tasks(&acp::SessionId::new("s"), &Some(path));
+
+    let notifs = drain_ext_notifications(&mut rx);
+    assert!(
+        notifs.is_empty(),
+        "paired tasks must not emit reconcile traffic: {notifs:?}"
+    );
+}
+
 fn build_agent_with_gateway() -> (
     MvpAgent,
     tokio::sync::mpsc::UnboundedReceiver<AcpClientMessage>,
 ) {
     use crate::agent::config::Config as AgentConfig;
-    use crate::auth::{AuthManager, GrokComConfig};
+    use xai_grok_login::{AuthManager, GrokComConfig};
 
     let temp_dir = tempfile::tempdir().unwrap();
     let auth_manager =
@@ -218,6 +279,7 @@ fn build_agent_with_gateway() -> (
         &AgentConfig::default(),
         auth_manager,
         None,
+        None,
     )
     .expect("valid test config");
     (agent, rx)
@@ -226,12 +288,24 @@ fn build_agent_with_gateway() -> (
 fn next_ext_notification_params(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AcpClientMessage>,
 ) -> Option<String> {
-    let mut params = None;
+    drain_ext_notifications(rx)
+        .into_iter()
+        .next()
+        .map(|(_, params)| params)
+}
+
+fn drain_ext_notifications(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AcpClientMessage>,
+) -> Vec<(String, String)> {
+    let mut notifs = Vec::new();
     while let Ok(msg) = rx.try_recv() {
         if let AcpClientMessage::ExtNotification(args) = msg {
-            params.get_or_insert_with(|| args.request.params.get().to_string());
+            notifs.push((
+                args.request.method.as_ref().to_string(),
+                args.request.params.get().to_string(),
+            ));
             let _ = args.response_tx.send(Ok(()));
         }
     }
-    params
+    notifs
 }

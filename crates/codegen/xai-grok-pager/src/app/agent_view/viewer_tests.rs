@@ -2,7 +2,9 @@
 //! A press on the track was previously also treated as a comment-gutter anchor (the hit test was row-only).
 //! Dragging the thumb then selected plan lines for a comment instead of scrolling.
 
-use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::Rect;
 
 use crate::actions::ActionRegistry;
@@ -515,4 +517,635 @@ fn wheel_on_border_column_scrolls_plan() {
         off_after < off,
         "wheel-up on the border column must scroll up ({off} -> {off_after})"
     );
+}
+
+fn enter_key() -> KeyEvent {
+    KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+}
+
+fn agent_with_markdown_viewer(text: &str) -> AgentView {
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(crate::scrollback::block::RenderBlock::agent_message(text));
+    let mut viewer = {
+        let entry = agent.scrollback.get_by_id(id).expect("just pushed");
+        crate::views::block_viewer::BlockViewerPane::for_markdown(id, entry)
+            .expect("markdown viewer")
+    };
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    agent.block_viewer = Some(viewer);
+    agent
+}
+
+fn agent_with_running_markdown_viewer(text: &str) -> AgentView {
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(crate::scrollback::block::RenderBlock::agent_message(text));
+    agent
+        .scrollback
+        .get_by_id_mut(id)
+        .expect("just pushed")
+        .is_running = true;
+    let mut viewer = {
+        let entry = agent.scrollback.get_by_id(id).expect("just pushed");
+        crate::views::block_viewer::BlockViewerPane::for_markdown(id, entry)
+            .expect("markdown viewer")
+    };
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    agent.block_viewer = Some(viewer);
+    agent
+}
+
+#[test]
+fn block_viewer_enter_quotes_current_line_and_closes() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    let outcome = agent.handle_block_viewer_key(&enter_key());
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(agent.block_viewer.is_none());
+    assert_eq!(agent.active_pane, crate::app::agent_view::AgentPane::Prompt);
+    let text = agent.prompt.text();
+    assert!(
+        text.contains("> hello world"),
+        "quoted line missing from prompt: {text:?}"
+    );
+    assert!(
+        text.ends_with("\n\n"),
+        "quote should end with a blank line, got {text:?}"
+    );
+    assert!(agent.block_viewer_resume.is_some());
+}
+
+#[test]
+fn block_viewer_enter_starts_quote_on_its_own_line() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("draft");
+    agent.prompt.set_cursor(agent.prompt.text().len());
+    agent.handle_block_viewer_key(&enter_key());
+    assert_eq!(agent.prompt.text(), "draft\n> hello world\n\n");
+}
+
+#[test]
+fn block_viewer_enter_delimit_uses_selection_start() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("prefix\nmore");
+    agent.prompt.textarea.set_selection(3, 7);
+    agent.handle_block_viewer_key(&enter_key());
+    assert_eq!(agent.prompt.text(), "pre\n> hello world\n\nmore");
+}
+
+#[test]
+fn block_viewer_enter_quotes_last_line_while_following() {
+    let mut agent = agent_with_running_markdown_viewer("hello\n\nworld");
+    assert!(agent.block_viewer.as_ref().unwrap().list_state.follow_mode);
+    assert_eq!(
+        agent
+            .block_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .selected_index(),
+        None
+    );
+    let outcome = agent.handle_block_viewer_key(&enter_key());
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(agent.block_viewer.is_none());
+    let text = agent.prompt.text();
+    assert!(
+        text.contains("> world"),
+        "follow-mode Enter should quote the last line, got {text:?}"
+    );
+}
+
+#[test]
+fn block_viewer_enter_pastes_chip_for_four_lines() {
+    use crate::views::block_viewer::{TextDrag, TextEndpoint};
+    use crate::views::prompt_widget::KIND_PASTE;
+
+    let mut agent = make_agent();
+    let mut viewer =
+        crate::views::block_viewer::BlockViewerPane::for_plain_text("t", "one\ntwo\nthree\nfour");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    viewer.text_drag = Some(TextDrag {
+        anchor: TextEndpoint {
+            item_idx: 2,
+            col: 0,
+        },
+        head: TextEndpoint {
+            item_idx: 5,
+            col: 3,
+        },
+        active: false,
+    });
+    agent.block_viewer = Some(viewer);
+
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(agent.block_viewer.is_none());
+    assert!(
+        agent
+            .prompt
+            .textarea
+            .elements()
+            .iter()
+            .any(|e| e.kind == KIND_PASTE),
+        "4-line quote should become a paste chip"
+    );
+    let text = agent.prompt.text();
+    assert!(text.contains("> one"));
+    assert!(text.contains("> four"));
+    assert!(
+        text.ends_with("\n\n"),
+        "quote should end with a blank line, got {text:?}"
+    );
+}
+
+#[test]
+fn block_viewer_search_enter_does_not_quote() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.handle_block_viewer_key(&KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+    assert!(
+        agent
+            .block_viewer
+            .as_ref()
+            .unwrap()
+            .list_state
+            .input_mode()
+            .is_some()
+    );
+    agent.handle_block_viewer_key(&KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(
+        agent.block_viewer.is_some(),
+        "search-bar Enter must keep the viewer open"
+    );
+    assert!(
+        agent.prompt.text().is_empty(),
+        "search-bar Enter must not quote into the prompt"
+    );
+}
+
+#[test]
+fn block_viewer_enter_on_empty_selection_keeps_viewer_open() {
+    let mut agent = make_agent();
+    let mut viewer =
+        crate::views::block_viewer::BlockViewerPane::for_plain_text("t", "hello\n\nworld");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    viewer.select_body_line_for_test(3);
+    agent.block_viewer = Some(viewer);
+
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(
+        agent.block_viewer.is_some(),
+        "Enter with nothing to quote must keep the viewer open"
+    );
+    assert!(
+        agent.prompt.text().is_empty(),
+        "Enter with nothing to quote must not insert into the prompt"
+    );
+}
+
+#[test]
+fn block_viewer_esc_clears_sticky_then_closes() {
+    use crate::views::block_viewer::{TextDrag, TextEndpoint};
+
+    let mut agent = agent_with_markdown_viewer("hello world");
+    {
+        let viewer = agent.block_viewer.as_mut().unwrap();
+        viewer.text_drag = Some(TextDrag {
+            anchor: TextEndpoint {
+                item_idx: 0,
+                col: 0,
+            },
+            head: TextEndpoint {
+                item_idx: 0,
+                col: 5,
+            },
+            active: false,
+        });
+    }
+    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+    agent.handle_block_viewer_key(&esc);
+    assert!(
+        agent.block_viewer.is_some(),
+        "first Esc should clear the highlight, not close"
+    );
+    assert!(agent.block_viewer.as_ref().unwrap().text_drag.is_none());
+    agent.handle_block_viewer_key(&esc);
+    assert!(agent.block_viewer.is_none());
+    assert!(agent.block_viewer_resume.is_some());
+}
+
+#[test]
+fn block_viewer_enter_from_fullscreen_child_quotes_into_parent() {
+    let mut child = agent_with_markdown_viewer("hello world");
+    child.prompt.set_text("child-draft");
+    let mut parent = make_agent();
+    parent.prompt.set_text("parent-draft");
+    parent.prompt.set_cursor(parent.prompt.text().len());
+    parent.insert_test_child("child-sid".into(), Box::new(child));
+    parent.open_subagent_fullscreen("child-sid".into());
+    let registry = ActionRegistry::defaults();
+    let outcome = parent.handle_input(&Event::Key(enter_key()), &registry);
+    assert!(matches!(
+        outcome,
+        crate::app::app_view::InputOutcome::Changed
+    ));
+    assert!(parent.active_subagent.is_none());
+    assert_eq!(parent.prompt.text(), "parent-draft\n> hello world\n\n");
+    assert_eq!(
+        parent.active_pane,
+        crate::app::agent_view::AgentPane::Prompt
+    );
+    if let Some(child) = parent.subagent_views.get("child-sid") {
+        assert!(child.block_viewer.is_none());
+        assert_eq!(child.prompt.text(), "child-draft");
+    }
+}
+
+#[test]
+fn install_block_viewer_ignores_missing_resume_id() {
+    use crate::app::agent_view::BlockViewerResume;
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::block_viewer::BlockViewerPane;
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("hello\n\nworld"));
+    agent.block_viewer_resume = Some(BlockViewerResume {
+        entry_id: id,
+        kind: crate::views::block_viewer::ViewerKind::Markdown,
+        selected_id: Some(99_999),
+        scroll_offset: 0,
+        follow_mode: false,
+    });
+    let pane = {
+        let entry = agent.scrollback.get_by_id(id).expect("entry");
+        BlockViewerPane::for_markdown(id, entry).expect("markdown")
+    };
+    agent.install_block_viewer(pane);
+    let viewer = agent.block_viewer.as_mut().expect("installed");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    assert_eq!(viewer.selected_plain_text(), "hello");
+}
+
+#[test]
+fn block_viewer_enter_quotes_preamble_line() {
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::block_viewer::BlockViewerPane;
+    use ratatui::text::Line;
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("hello"));
+    let mut viewer = {
+        let entry = agent.scrollback.get_by_id(id).expect("entry");
+        BlockViewerPane::for_markdown(id, entry).expect("markdown")
+    };
+    viewer.install_prepend_lines(&[Line::from("Read src/main.rs")]);
+    viewer.list_state.select_by_id(u64::MAX);
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    agent.block_viewer = Some(viewer);
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(agent.block_viewer.is_none());
+    assert!(
+        agent.prompt.text().contains("> Read src/main.rs"),
+        "header line should quote, got {:?}",
+        agent.prompt.text()
+    );
+}
+
+#[test]
+fn insert_quoted_reply_clears_bash_mode() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt_input_mode = crate::app::agent_view::PromptInputMode::Bash;
+    agent.prompt.set_text("draft");
+    agent.handle_block_viewer_key(&enter_key());
+    assert_eq!(
+        agent.prompt_input_mode,
+        crate::app::agent_view::PromptInputMode::Normal
+    );
+    assert!(agent.prompt.text().contains("> hello world"));
+}
+
+#[test]
+fn insert_quoted_reply_is_one_undo() {
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("draft");
+    agent.prompt.set_cursor(5);
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(agent.prompt.textarea.undo());
+    assert_eq!(agent.prompt.text(), "draft");
+
+    let mut agent = agent_with_markdown_viewer("hello world");
+    agent.prompt.set_text("pre\nmore");
+    agent.prompt.textarea.set_selection(0, 4);
+    agent.handle_block_viewer_key(&enter_key());
+    assert!(agent.prompt.textarea.undo());
+    assert_eq!(agent.prompt.text(), "pre\nmore");
+}
+
+#[test]
+fn install_block_viewer_ignores_mismatched_kind() {
+    use crate::app::agent_view::BlockViewerResume;
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::block_viewer::{BlockViewerPane, ViewerKind};
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("hello\n\nworld"));
+    agent.block_viewer_resume = Some(BlockViewerResume {
+        entry_id: id,
+        kind: ViewerKind::PlainText,
+        selected_id: Some(0),
+        scroll_offset: 99,
+        follow_mode: false,
+    });
+    let pane = {
+        let entry = agent.scrollback.get_by_id(id).expect("entry");
+        BlockViewerPane::for_markdown(id, entry).expect("markdown")
+    };
+    agent.install_block_viewer(pane);
+    let viewer = agent.block_viewer.as_mut().expect("installed");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    assert_eq!(viewer.selected_plain_text(), "hello");
+    assert_ne!(viewer.list_state.scroll_offset(), 99);
+}
+
+#[test]
+fn install_block_viewer_restores_live_preamble_id() {
+    use crate::app::agent_view::BlockViewerResume;
+    use crate::scrollback::block::RenderBlock;
+    use crate::views::block_viewer::BlockViewerPane;
+    use ratatui::text::Line;
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("hello\n\nworld"));
+    agent.block_viewer_resume = Some(BlockViewerResume {
+        entry_id: id,
+        kind: crate::views::block_viewer::ViewerKind::Markdown,
+        selected_id: Some(u64::MAX),
+        scroll_offset: 0,
+        follow_mode: false,
+    });
+    let pane = {
+        let entry = agent.scrollback.get_by_id(id).expect("entry");
+        BlockViewerPane::for_markdown(id, entry).expect("markdown")
+    };
+    agent.install_block_viewer(pane);
+    let viewer = agent.block_viewer.as_mut().expect("installed");
+    viewer.install_prepend_lines(&[Line::from("header")]);
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    assert_eq!(viewer.list_state.selected_id(), Some(u64::MAX));
+    assert_eq!(viewer.selected_plain_text(), "header");
+}
+
+fn test_bg_task(
+    task_id: &str,
+    stdout: &str,
+    scrollback_entry_id: Option<crate::scrollback::entry::EntryId>,
+) -> crate::app::agent::BgTaskState {
+    let mut task = crate::app::agent::BgTaskState {
+        task_id: task_id.into(),
+        tool_call_id: format!("call-{task_id}"),
+        command: "echo".into(),
+        description: None,
+        cwd: "/tmp".into(),
+        output_file: "/tmp/out".into(),
+        status: crate::app::agent::BgTaskStatus::Done,
+        start_time: std::time::SystemTime::now(),
+        end_time: None,
+        exit_code: Some(0),
+        signal: None,
+        stdout: String::new(),
+        stdout_line_count: 0,
+        truncated: false,
+        pending_kill: false,
+        kill_requested_at: None,
+        scrollback_entry_id,
+        is_monitor: false,
+        restored_from_replay: false,
+        detach: false,
+    };
+    task.set_stdout(stdout.to_string());
+    task
+}
+
+/// A task with no scrollback anchor (completed-early race, scrollback swap)
+/// still opens its viewer from the task's own stdout, on the sentinel anchor.
+#[test]
+fn show_bg_task_viewer_opens_unattached() {
+    let mut agent = make_agent();
+    agent
+        .session
+        .bg_tasks
+        .insert("orphan".into(), test_bg_task("orphan", "out", None));
+    assert!(agent.show_bg_task_viewer("orphan"));
+    let viewer = agent.block_viewer.as_ref().expect("opened");
+    assert_eq!(viewer.entry_id, crate::scrollback::entry::EntryId::new(0));
+    assert_eq!(viewer.bg_task_id.as_deref(), Some("orphan"));
+}
+
+#[test]
+fn show_bg_task_viewer_restores_resume() {
+    use crate::scrollback::block::RenderBlock;
+
+    let mut agent = make_agent();
+    let id = agent
+        .scrollback
+        .push_block(RenderBlock::agent_message("task body"));
+    agent
+        .session
+        .bg_tasks
+        .insert("t1".into(), test_bg_task("t1", "one\ntwo\nthree", Some(id)));
+    assert!(agent.show_bg_task_viewer("t1"));
+    let selected_id = {
+        let viewer = agent.block_viewer.as_mut().expect("opened");
+        assert_eq!(viewer.entry_id, id);
+        assert_ne!(viewer.entry_id, crate::scrollback::entry::EntryId::new(0));
+        viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+        viewer.select_body_line_for_test(1);
+        viewer.list_state.selected_id()
+    };
+    agent.dismiss_block_viewer();
+    assert!(agent.show_bg_task_viewer("t1"));
+    let viewer = agent.block_viewer.as_mut().expect("reopened");
+    viewer.prepare_for_test(Rect::new(0, 0, 80, 24));
+    assert_eq!(viewer.list_state.selected_id(), selected_id);
+    assert_eq!(viewer.selected_plain_text(), "two");
+}
+
+#[test]
+fn hovering_a_comment_row_reveals_its_close_button() {
+    let mut agent = agent_with_casual_commented_plan();
+    let registry = ActionRegistry::defaults();
+
+    assert!(
+        close_button_areas(&agent).is_empty(),
+        "no `[✗]` while the comment is neither hovered nor selected"
+    );
+
+    hover_comment_row(&mut agent, &registry);
+
+    let buf = render_plan_viewer(&mut agent);
+    let [(id, rect)] = close_button_areas(&agent)[..] else {
+        panic!("hover must cache exactly one `[✗]` rect");
+    };
+    assert_eq!((id, rect.y), (0, comment_screen_row(&agent)));
+
+    let drawn: String = (rect.x..rect.x + rect.width)
+        .map(|x| {
+            buf.cell((x, rect.y))
+                .map(|c| c.symbol().to_owned())
+                .unwrap_or_default()
+        })
+        .collect();
+    assert_eq!(drawn, crate::glyphs::ballot_x_button());
+}
+
+#[test]
+fn clicking_the_close_button_deletes_without_starting_an_edit() {
+    let mut agent = agent_with_casual_commented_plan();
+    let registry = ActionRegistry::defaults();
+
+    hover_comment_row(&mut agent, &registry);
+    render_plan_viewer(&mut agent);
+    let (_, rect) = *close_button_areas(&agent)
+        .first()
+        .expect("cached `[✗]` rect");
+
+    let _ = agent.handle_input(
+        &mouse(MouseEventKind::Down(MouseButton::Left), rect.x + 1, rect.y),
+        &registry,
+    );
+
+    assert!(
+        agent.plan_comments.is_empty(),
+        "clicking `[✗]` must delete the comment"
+    );
+    assert!(
+        agent.casual_commenting_range.is_none(),
+        "the `[✗]` click must not fall through to click-to-edit"
+    );
+}
+
+#[test]
+fn deleting_the_comment_being_edited_cancels_the_edit() {
+    let mut agent = agent_with_casual_commented_plan();
+    agent.casual_editing_comment_id = Some(0);
+    agent.casual_commenting_range = Some(2..3);
+
+    let _ = agent.delete_plan_comment_by_id(0);
+
+    assert_eq!(agent.casual_editing_comment_id, None);
+    assert!(agent.casual_commenting_range.is_none());
+}
+
+#[test]
+fn deleting_the_approval_comment_being_edited_cancels_the_edit_and_restores_the_prompt() {
+    let mut agent = agent_with_scrollable_plan();
+    {
+        let pav = agent.plan_approval_view.as_mut().expect("approval mounted");
+        pav.comments
+            .push(crate::views::plan_approval_view::PlanComment {
+                id: 7,
+                line_range: 2..3,
+                text: "tighten this".into(),
+            });
+        pav.editing_comment_id = Some(7);
+        pav.commenting_range = Some(2..3);
+        pav.focus = PlanApprovalFocus::Commenting;
+        pav.stashed_feedback_prompt = Some(agent.prompt.stash());
+    }
+    agent.prompt.set_text("edited draft");
+
+    let _ = agent.delete_plan_comment_by_id(7);
+
+    let pav = agent.plan_approval_view.as_ref().expect("approval stays");
+    assert!(pav.comments.is_empty(), "the comment must be deleted");
+    assert_eq!(pav.focus, PlanApprovalFocus::Preview);
+    assert_eq!(
+        agent.prompt.text(),
+        "",
+        "the pre-edit prompt must be restored, not the abandoned draft"
+    );
+}
+
+/// A casual plan preview with one comment.
+/// The final render caches the mouse hit-test rects.
+fn agent_with_casual_commented_plan() -> AgentView {
+    let mut agent = make_agent();
+    let mut viewer =
+        crate::views::file_search::line_viewer::LineViewerState::open_markdown_content(
+            "plan.md",
+            "alpha\nbravo\ncharlie\ndelta\n".to_owned(),
+            None,
+        )
+        .expect("plan content opens the viewer");
+    viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+    viewer.fullscreen = true;
+
+    agent
+        .plan_comments
+        .push(crate::views::plan_approval_view::PlanComment {
+            id: 0,
+            line_range: 2..3,
+            text: "tighten this".into(),
+        });
+    viewer.prepare_layout(POPUP.width, POPUP.height);
+    viewer.rebuild_with_comments(&agent.plan_comments);
+    agent.line_viewer = Some(viewer);
+
+    render_plan_viewer(&mut agent);
+    agent
+}
+
+fn render_plan_viewer(agent: &mut AgentView) -> ratatui::buffer::Buffer {
+    let area = Rect::new(0, 0, 80, 16);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let comment_count = agent.plan_comments.len();
+
+    crate::views::file_search::line_viewer::render_line_viewer(
+        &mut buf,
+        area,
+        agent.line_viewer.as_mut().expect("viewer open"),
+        std::path::Path::new("/tmp"),
+        &crate::theme::Theme::current(),
+        comment_count,
+        Some(agent.scrollback.locale()),
+    );
+    buf
+}
+
+fn close_button_areas(agent: &AgentView) -> Vec<(u64, Rect)> {
+    agent
+        .line_viewer
+        .as_ref()
+        .and_then(|v| v.plan_ref())
+        .map(|p| p.comment_close_areas.clone())
+        .unwrap_or_default()
+}
+
+fn hover_comment_row(agent: &mut AgentView, registry: &ActionRegistry) {
+    let row = comment_screen_row(agent);
+    let _ = agent.handle_input(&mouse(MouseEventKind::Moved, 10, row), registry);
+}
+
+fn comment_screen_row(agent: &AgentView) -> u16 {
+    let viewer = agent.line_viewer.as_ref().expect("viewer open");
+    let area = viewer.last_popup_area.expect("render caches popup area");
+    (area.y..area.y + area.height)
+        .find(|&row| viewer.comment_id_at_screen_row(row, area) == Some(0))
+        .expect("comment row is visible")
 }

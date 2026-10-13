@@ -2,9 +2,8 @@
 use agent_client_protocol as acp;
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
-use xai_grok_tools::implementations::grok_build::LoopFireMode;
 use xai_grok_tools::implementations::skills::skill::format_skill_name;
-use xai_grok_tools::implementations::skills::types::SkillInfo;
+use xai_grok_tools::implementations::skills::types::{SkillInfo, SkillScope};
 pub(crate) struct BuiltinCommand {
     pub name: &'static str,
     pub description: &'static str,
@@ -30,15 +29,8 @@ enum WorkflowProjection {
     ExactName,
 }
 /// Capability gate that decides whether a `BuiltinCommand` is advertised and resolvable in a given session.
-///
-/// Each variant maps to a feature/tool the agent must actually have:
-/// - `Memory`: a memory backend is configured (`SessionMemory::is_enabled`).
-/// - `Scheduler`: `scheduler_create` is registered.
-/// - `Hooks`: a hook registry is loaded.
-/// - `Plugins`: a plugin registry is loaded.
-/// - `Feedback`: the feedback manager is enabled.
-/// - `MemoryConfigured`: memory backend params exist (may be currently disabled).
-///   Used for `/memory` so the user can re-enable via toggle.
+/// Each variant maps to a feature/tool the agent must actually have.
+/// Used for `/memory` so the user can re-enable via toggle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum BuiltinGate {
     AlwaysOn,
@@ -53,26 +45,17 @@ pub(crate) enum BuiltinGate {
     WorkflowLaunches,
     WorkflowManagement,
 }
-fn resolve_compact(args: &str) -> BuiltinAction {
-    BuiltinAction::Compact {
-        user_context: if args.is_empty() {
-            None
-        } else {
-            Some(args.to_string())
-        },
-    }
-}
 /// Order here is the display order in autocomplete.
 pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "compact",
         description: "Compress conversation history to save context window",
-        argument_hint: Some("optional context about what to preserve"),
+        argument_hint: None,
         aliases: &[],
         model_authored_eligibility: ModelAuthoredEligibility::ExactCanonical,
         gate: BuiltinGate::AlwaysOn,
         workflow_projection: WorkflowProjection::None,
-        resolve: resolve_compact,
+        resolve: |_args| BuiltinAction::Compact,
     },
     BuiltinCommand {
         name: "always-approve",
@@ -112,19 +95,12 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "memory",
         description: "Browse, view, and manage your memories",
-        argument_hint: Some("on|off"),
+        argument_hint: None,
         aliases: &["mem"],
         model_authored_eligibility: ModelAuthoredEligibility::Denied,
         gate: BuiltinGate::MemoryConfigured,
         workflow_projection: WorkflowProjection::None,
-        resolve: |args| {
-            let trimmed = args.trim().to_lowercase();
-            match trimmed.as_str() {
-                "on" | "enable" => BuiltinAction::MemoryToggle { enabled: true },
-                "off" | "disable" => BuiltinAction::MemoryToggle { enabled: false },
-                _ => BuiltinAction::MemoryBrowse,
-            }
-        },
+        resolve: |_args| BuiltinAction::MemoryBrowse,
     },
     BuiltinCommand {
         name: "context",
@@ -311,7 +287,11 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
                 let (op, run_id) = if first_is_op {
                     (
                         first.to_lowercase(),
-                        trimmed[first.len()..].trim_start().to_string(),
+                        trimmed
+                            .get(first.len()..)
+                            .unwrap_or("")
+                            .trim_start()
+                            .to_string(),
                     )
                 } else if first_is_runs {
                     ("runs".to_string(), String::new())
@@ -324,7 +304,11 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
             } else {
                 BuiltinAction::WorkflowLaunch {
                     name: first.to_string(),
-                    input: trimmed[first.len()..].trim_start().to_string(),
+                    input: trimmed
+                        .get(first.len()..)
+                        .unwrap_or("")
+                        .trim_start()
+                        .to_string(),
                 }
             }
         },
@@ -356,7 +340,6 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     },
 ];
 /// Split a trailing `--budget <tokens>` flag off a `/goal` objective.
-///
 /// Only a TRAILING, standalone flag is consumed: the flag must be its own whitespace-separated token and the value a final all-digit positive token.
 /// Anything else stays part of the objective so a goal text that merely mentions the flag is never silently mangled.
 fn parse_goal_budget(trimmed: &str) -> (String, Option<i64>) {
@@ -388,20 +371,16 @@ const PROMPT_COMMANDS: &[BuiltinCommand] = &[BuiltinCommand {
     workflow_projection: WorkflowProjection::None,
     resolve: |_| unreachable!("/loop is dispatched via the PROMPT_COMMANDS path in resolve()"),
 }];
-/// Per-session capability snapshot used to gate which built-in slash commands the shell advertises and resolves.
-///
 /// Each field corresponds to a `BuiltinGate` variant.
-/// Build it from a live `SessionActor` (see the call site in `acp_session.rs`).
-///
 /// `Default` returns every gate disabled (fail-closed) so a forgotten initialization advertises only `BuiltinGate::AlwaysOn` commands.
 /// In test code, prefer `all_enabled()` when the gating itself isn't under test; otherwise the test silently loses coverage of any gated builtin.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct CommandAvailability {
     pub feedback: bool,
-    /// Memory backend is enabled AND the active toolset includes `memory_search`/`memory_get`.
+    /// Memory is enabled with v2 filesystem access or legacy `memory_search`/`memory_get` tools.
     /// `/flush` and `/dream` only make sense when the model can later read back what they wrote.
     pub memory: bool,
-    /// Memory backend is configured (has `backend_params`) but not necessarily currently enabled.
+    /// A legacy backend or v2 storage layout is configured, but not necessarily currently enabled.
     /// Gates `/memory` (browse and toggle) so the user can re-enable memory after toggling it off.
     pub memory_configured: bool,
     pub scheduler: bool,
@@ -443,7 +422,6 @@ impl CommandAvailability {
     }
 }
 /// Build the JSON value for `AvailableCommandsUpdate.meta` containing the agent's currently-registered tool names.
-///
 /// Pager clients drain this and call `CommandRegistry::set_available_tools` to gate tool-dependent commands like `/loop`.
 /// Takes `&[String]` rather than `&[&str]` because serde_json copies each entry into the `Value` regardless.
 pub(crate) fn build_tools_meta(tool_names: &[String]) -> acp::Meta {
@@ -453,9 +431,7 @@ pub(crate) fn build_tools_meta(tool_names: &[String]) -> acp::Meta {
 }
 /// Pager-owned slash trigger keys (canonical and aliases) plus shell command names the pager never offers (`hooks-add`, `reload-plugins`, …).
 /// Reserved when advertising skills so a colliding skill ships qualified (`acme:login`, `local:hooks-add`) instead of a bare name the pager drops.
-///
 /// Synced by pager contract tests (`pager_builtin_triggers_are_reserved_in_shell`, `pager_blocked_acp_names_are_reserved_in_shell`).
-/// Add names here when adding a pager builtin or a pager-blocked shell command.
 pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "agents",
     "agents-dashboard",
@@ -473,6 +449,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "config",
     "config-agents",
     "context",
+    "context-window",
     "copy",
     "cost",
     "dashboard",
@@ -480,6 +457,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "delete",
     "docs",
     "doctor",
+    "dream",
     "edit-prompt",
     "effort",
     "exit",
@@ -487,6 +465,7 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "export",
     "feedback",
     "find",
+    "flush",
     "fork",
     "full",
     "fullscreen",
@@ -513,6 +492,8 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "m",
     "marketplace",
     "mcps",
+    "mem",
+    "memory",
     "minimal",
     "ml",
     "model",
@@ -536,7 +517,6 @@ pub const PAGER_COMMAND_KEYS: &[&str] = &[
     "rename",
     "resume",
     "rewind",
-    "scroll-debug",
     "session-info",
     "sessions",
     "settings",
@@ -750,8 +730,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
     }
 }
 /// Build the ACP `AvailableCommand` list for the client autocomplete menu.
-///
-/// Skills include `scope` and `path` in `_meta` so the client can show where the command comes from (e.g. "project" vs "global").
+/// Skills include `scope` and `path` in `_meta` so the client can show where the command comes from.
 /// The `path` also lets the client link to the SKILL.md source.
 pub(super) fn available_commands(
     skills: &[SkillInfo],
@@ -763,12 +742,7 @@ pub(super) fn available_commands(
         catalog.builtins.len() + catalog.skills.commands.len() + catalog.workflows.len(),
     );
     commands.extend(catalog.builtins.iter().map(|builtin| {
-        acp::AvailableCommand::new(builtin.name.to_string(), builtin.description.to_string())
-            .input(builtin.argument_hint.map(|hint| {
-                acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
-                    hint.to_string(),
-                ))
-            }))
+        available_command(builtin)
             .meta(exact_workflow_projection(builtin, workflows).map(workflow_meta))
     }));
     commands.extend(catalog.skills.commands.iter().map(|command| {
@@ -830,24 +804,31 @@ pub(super) fn available_commands(
     commands
 }
 /// Pre-session builtin commands for `InitializeResponse._meta`.
-///
-/// Pre-session, only config-derived gates (e.g. `goal`, driven by the `resolve_goal()` feature flag) can be evaluated.
+/// Pre-session, only config-derived gates` feature flag) can be evaluated.
 /// Runtime/tool-dependent gates stay closed because there's no session context yet.
-/// See `MvpAgent::command_availability` for how the pre-session snapshot is built.
 pub(crate) fn builtin_commands(availability: CommandAvailability) -> Vec<acp::AvailableCommand> {
     BUILTIN_COMMANDS
         .iter()
         .filter(|cmd| availability.allows(cmd.gate))
-        .map(|cmd| {
-            acp::AvailableCommand::new(cmd.name.to_string(), cmd.description.to_string()).input(
-                cmd.argument_hint.map(|hint| {
-                    acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
-                        hint.to_string(),
-                    ))
-                }),
-            )
-        })
+        .map(available_command)
         .collect()
+}
+/// One builtin by name, as `builtin_commands` would advertise it. For backends that serve a
+/// subset of the shell's commands and must describe them identically.
+pub fn builtin_command(name: &str) -> Option<acp::AvailableCommand> {
+    BUILTIN_COMMANDS
+        .iter()
+        .find(|cmd| cmd.name == name)
+        .map(available_command)
+}
+fn available_command(cmd: &BuiltinCommand) -> acp::AvailableCommand {
+    acp::AvailableCommand::new(cmd.name.to_string(), cmd.description.to_string()).input(
+        cmd.argument_hint.map(|hint| {
+            acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new(
+                hint.to_string(),
+            ))
+        }),
+    )
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -916,7 +897,7 @@ fn product_skills_identity_matches(
     user_id: &str,
     team_id: &Option<String>,
     organization_id: &Option<String>,
-    auth: &crate::auth::GrokAuth,
+    auth: &xai_grok_login::GrokAuth,
 ) -> bool {
     if team_id != &auth.team_id || organization_id != &auth.organization_id {
         return false;
@@ -931,7 +912,7 @@ fn product_skills_identity_matches(
 }
 fn product_skills_cache_matches(
     entry: &ProductSkillsCacheEntry,
-    auth: &crate::auth::GrokAuth,
+    auth: &xai_grok_login::GrokAuth,
 ) -> bool {
     product_skills_identity_matches(
         &entry.auth_key,
@@ -943,7 +924,7 @@ fn product_skills_cache_matches(
 }
 fn product_skills_negative_matches(
     entry: &ProductSkillsIdentityStamp,
-    auth: &crate::auth::GrokAuth,
+    auth: &xai_grok_login::GrokAuth,
 ) -> bool {
     product_skills_identity_matches(
         &entry.auth_key,
@@ -954,7 +935,7 @@ fn product_skills_negative_matches(
     )
 }
 fn product_skills_cache_entry(
-    auth: &crate::auth::GrokAuth,
+    auth: &xai_grok_login::GrokAuth,
     skills: Vec<SkillInfo>,
 ) -> ProductSkillsCacheEntry {
     ProductSkillsCacheEntry {
@@ -967,18 +948,16 @@ fn product_skills_cache_entry(
     }
 }
 /// Success-cache write after a catalog fetch.
-///
-/// Always keys by the **primary** auth identity (user and team/org), even when the HTTP request succeeded via an untagged recovery credential.
-/// That lets the same team primary hit TTL without re-running the 403 ladder.
+/// Always keys by the primary auth identity (user and team/org), even when the HTTP request succeeded via an untagged recovery credential.
 /// Personal (empty team/org) primaries cannot match a team-keyed entry.
 fn product_skills_cache_entry_after_fetch(
-    primary: &crate::auth::GrokAuth,
+    primary: &xai_grok_login::GrokAuth,
     skills: Vec<SkillInfo>,
     _used_untagged_recovery: bool,
 ) -> ProductSkillsCacheEntry {
     product_skills_cache_entry(primary, skills)
 }
-fn product_skills_negative_stamp(auth: &crate::auth::GrokAuth) -> ProductSkillsIdentityStamp {
+fn product_skills_negative_stamp(auth: &xai_grok_login::GrokAuth) -> ProductSkillsIdentityStamp {
     ProductSkillsIdentityStamp {
         auth_key: auth.key.clone(),
         user_id: auth.user_id.clone(),
@@ -987,7 +966,7 @@ fn product_skills_negative_stamp(auth: &crate::auth::GrokAuth) -> ProductSkillsI
         fetched_at: std::time::Instant::now(),
     }
 }
-fn clear_degraded_cache_for_auth(auth: &crate::auth::GrokAuth) {
+fn clear_degraded_cache_for_auth(auth: &xai_grok_login::GrokAuth) {
     let mut guard = PRODUCT_SKILLS_DEGRADED_CACHE.lock();
     if let Some(entry) = guard.as_ref()
         && product_skills_cache_matches(entry, auth)
@@ -995,7 +974,7 @@ fn clear_degraded_cache_for_auth(auth: &crate::auth::GrokAuth) {
         *guard = None;
     }
 }
-fn clear_negative_cache_for_auth(auth: &crate::auth::GrokAuth) {
+fn clear_negative_cache_for_auth(auth: &xai_grok_login::GrokAuth) {
     let mut guard = PRODUCT_SKILLS_NEGATIVE_CACHE.lock();
     if let Some(entry) = guard.as_ref()
         && product_skills_negative_matches(entry, auth)
@@ -1012,19 +991,11 @@ pub(crate) fn clear_product_skills_cache_for_test() {
     *PRODUCT_SKILLS_DEGRADED_CACHE.lock() = None;
     *PRODUCT_SKILLS_NEGATIVE_CACHE.lock() = None;
 }
-/// Product (grok.com) Skills catalog as SkillInfo rows for slash advertising and chat-kind slash resolve / skill expansion.
-///
 /// Shared by `list_commands(kind=chat)`, chat-session `available_commands_update`, and turn/interjection skill resolution.
 /// Never substitutes Build disk skills.
-///
-/// Catalog source is product Skills REST (see `remote::skills_client`), not gateway `conversation.commands.updated`.
 /// ACU and shell-side resolve share one process-local source without a gateway bridge.
-///
-/// - `Some(skills)`: REST succeeded (possibly empty; empty 200 is authoritative), a fresh in-TTL success cache hit,
-///   a short-TTL degraded (user-list failed) hit, or a prior successful catalog for **this** auth identity reused after a transient failure
-/// - `None`: no auth, REST failed with no matching cached catalog, or logout
 pub(crate) async fn product_skill_infos(
-    auth: Option<std::sync::Arc<crate::auth::AuthManager>>,
+    auth: Option<std::sync::Arc<xai_grok_login::AuthManager>>,
 ) -> Option<Vec<SkillInfo>> {
     let Some(auth) = auth else {
         tracing::warn!("product skills: no auth — catalog unavailable");
@@ -1037,6 +1008,7 @@ pub(crate) async fn product_skill_infos(
             return None;
         }
     };
+    xai_grok_locale::dynamic::Domain::Skills.notify_load();
     if let Some(skills) = product_skills_cache_lookup(&grok_auth) {
         return skills;
     }
@@ -1107,7 +1079,7 @@ pub(crate) async fn product_skill_infos(
 }
 /// `Some(Some(skills))` success/degraded hit, `Some(None)` negative hit, `None` miss.
 fn product_skills_cache_lookup(
-    grok_auth: &crate::auth::GrokAuth,
+    grok_auth: &xai_grok_login::GrokAuth,
 ) -> Option<Option<Vec<SkillInfo>>> {
     {
         let guard = PRODUCT_SKILLS_CACHE.lock();
@@ -1153,12 +1125,9 @@ pub(crate) fn acu_skill_source(is_chat_kind: bool) -> AcuSkillSource {
         AcuSkillSource::Disk
     }
 }
-/// Build the available commands list, optionally scoped to a working directory.
-/// - `Some(cwd)`: full skill discovery (Local, Repo, and User) plus builtins.
-/// - `None`: builtins plus global (User-scoped) skills only.
-/// - `kind == Some("chat")` (feature `chat` only): **product Skills REST catalog** (same as grok-web) plus builtins, not Build disk skills.
-///   Without the feature, returns `Err` (invalid params).
-///   Product REST failure still advertises builtins only (empty product skills).
+/// `None`: builtins plus global (User-scoped) skills only.
+/// `kind == Some("chat")` (feature `chat` only): product Skills REST catalog (same as grok-web) plus builtins, not Build disk skills.
+/// Product REST failure still advertises builtins only (empty product skills).
 pub(crate) async fn list_commands(
     cwd: Option<&str>,
     skills_config: &xai_grok_agent::prompt::skills::SkillsConfig,
@@ -1167,7 +1136,7 @@ pub(crate) async fn list_commands(
     compat: xai_grok_tools::types::compat::CompatConfig,
     include_project_workflows: bool,
     kind: Option<&str>,
-    auth: Option<std::sync::Arc<crate::auth::AuthManager>>,
+    auth: Option<std::sync::Arc<xai_grok_login::AuthManager>>,
 ) -> Result<ListCommandsResponse, acp::Error> {
     if kind == Some("chat") {
         {
@@ -1180,11 +1149,15 @@ pub(crate) async fn list_commands(
             tools: None,
         });
     }
+    let project_trusted = cwd
+        .map(std::path::Path::new)
+        .is_some_and(crate::agent::folder_trust::project_scope_allowed);
     let skills = xai_grok_agent::prompt::skills::list_skills_with_plugins(
         cwd,
         skills_config,
         plugin_registry,
         compat,
+        project_trusted,
     )
     .await;
     let workflows = crate::session::workflow::registry::list_workflows(
@@ -1211,16 +1184,17 @@ pub(crate) struct ParsedSkillRef {
     pub qualified_name: String,
     /// Plugin name if this is a plugin skill.
     pub plugin_name: Option<String>,
+    pub scope: SkillScope,
+    /// Validated frontmatter `origin` slug, used for telemetry.
+    pub origin: Option<String>,
 }
 #[derive(Debug)]
 pub(super) enum SlashCommandOutcome {
     /// Execute directly, no model round-trip.
     Builtin(BuiltinAction),
     /// One or more skills detected in user input.
-    ///
     /// The original prompt `blocks` are preserved verbatim, not rewritten.
     /// The shell's prompt assembly layer will read each skill's SKILL.md and apply substitutions.
-    /// It builds the `<skill_information>` envelope alongside the `<user_query>` block.
     InvokeSkill {
         blocks: Vec<acp::ContentBlock>,
         /// Parsed skill references (one per detected `/{skill}` token).
@@ -1229,9 +1203,7 @@ pub(super) enum SlashCommandOutcome {
 }
 #[derive(Debug)]
 pub(super) enum BuiltinAction {
-    Compact {
-        user_context: Option<String>,
-    },
+    Compact,
     SetYolo {
         enabled: bool,
     },
@@ -1272,9 +1244,6 @@ pub(super) enum BuiltinAction {
         text: String,
     },
     MemoryBrowse,
-    MemoryToggle {
-        enabled: bool,
-    },
     GoalSet {
         objective: String,
         token_budget: Option<i64>,
@@ -1298,7 +1267,7 @@ pub(super) enum BuiltinAction {
 impl BuiltinAction {
     pub(crate) fn command_name(&self) -> &'static str {
         match self {
-            BuiltinAction::Compact { .. } => "compact",
+            BuiltinAction::Compact => "compact",
             BuiltinAction::SetYolo { .. } => "yolo",
             BuiltinAction::FlushMemory => "flush",
             BuiltinAction::Dream => "dream",
@@ -1319,7 +1288,6 @@ impl BuiltinAction {
             BuiltinAction::PluginsUpdate { .. } => "plugins-update",
             BuiltinAction::Feedback { .. } => "feedback",
             BuiltinAction::MemoryBrowse => "memory",
-            BuiltinAction::MemoryToggle { .. } => "memory",
             BuiltinAction::GoalSet { .. }
             | BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
@@ -1332,7 +1300,7 @@ impl BuiltinAction {
     }
     pub(crate) fn args_provided(&self) -> bool {
         match self {
-            BuiltinAction::Compact { user_context } => user_context.is_some(),
+            BuiltinAction::Compact => false,
             BuiltinAction::SetYolo { .. } => true,
             BuiltinAction::FlushMemory => false,
             BuiltinAction::Dream => false,
@@ -1353,7 +1321,6 @@ impl BuiltinAction {
             BuiltinAction::PluginsUpdate { name } => name.is_some(),
             BuiltinAction::Feedback { text } => !text.is_empty(),
             BuiltinAction::MemoryBrowse => false,
-            BuiltinAction::MemoryToggle { .. } => true,
             BuiltinAction::GoalSet { .. } => true,
             BuiltinAction::GoalStatus
             | BuiltinAction::GoalPause
@@ -1365,24 +1332,18 @@ impl BuiltinAction {
         }
     }
 }
-/// How to rewrite the user's prompt when a slash command resolves to a skill.
-///
-/// - `RewriteToRun` (default): replace `/foo args` with `"run /foo args"`, matching today's Grok Build flow that calls our dedicated `skill` tool.
-/// - `Passthrough`: leave the prompt verbatim.
-///   Some templates use this: the model is trained to spot a leading `/<name>` and look it up in the `<agent_skills>` listing.
-///   It then calls the Read tool on `fullPath`.
+/// `RewriteToRun` (default): replace `/foo args` with `"run /foo args"`, matching today's Grok Build flow that calls our dedicated `skill` tool.
+/// `Passthrough`: leave the prompt verbatim.
+/// Some templates use this: the model is trained to spot a leading `/<name>` and look it up in the `<agent_skills>` listing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum SkillSlashRewrite {
     #[default]
     RewriteToRun,
     Passthrough,
 }
-/// Scan user input left-to-right for `/{word}` tokens where `word` matches a **known registered skill name** (bare or qualified).
-///
+/// Scan user input left-to-right for `/{word}` tokens where `word` matches a known registered skill name (bare or qualified).
 /// Unknown `/words` (like `/api/v2/users`, `/tmp/file`) are NOT treated as skill references; only tokens that resolve to a known skill count.
-///
 /// Returns `None` when no known skill references are found.
-/// Otherwise returns the list of `ParsedSkillRef` entries with each skill's args (the text between one skill token and the next, or end-of-input).
 pub(crate) fn parse_skill_references(
     text: &str,
     skills: &[SkillInfo],
@@ -1408,11 +1369,18 @@ fn parse_skill_references_with_catalog(
     let bytes = trimmed.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] != b'/' {
+        let Some(&b) = bytes.get(i) else {
+            break;
+        };
+        if b != b'/' {
             i += 1;
             continue;
         }
-        if i > 0 && !bytes[i - 1].is_ascii_whitespace() {
+        if i > 0
+            && i.checked_sub(1)
+                .and_then(|j| bytes.get(j))
+                .is_some_and(|prev| !prev.is_ascii_whitespace())
+        {
             i += 1;
             continue;
         }
@@ -1420,11 +1388,14 @@ fn parse_skill_references_with_catalog(
         if start >= bytes.len() {
             break;
         }
-        let end = trimmed[start..]
-            .find(|c: char| c.is_whitespace())
+        let end = trimmed
+            .get(start..)
+            .and_then(|s| s.find(|c: char| c.is_whitespace()))
             .map(|relative| start + relative)
             .unwrap_or(trimmed.len());
-        let word = &trimmed[start..end];
+        let Some(word) = trimmed.get(start..end) else {
+            break;
+        };
         let hit = if i == 0 {
             catalog.skill_resolvable(word)
         } else {
@@ -1453,19 +1424,23 @@ fn parse_skill_references_with_catalog(
                     .unwrap_or(trimmed.len());
                 ParsedSkillRef {
                     name: hit.typed_name.clone(),
-                    args: trimmed[word_end..args_end].trim().to_string(),
+                    args: trimmed
+                        .get(word_end..args_end)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string(),
                     skill_path: hit.skill.path.clone(),
                     qualified_name: format_skill_name(hit.skill),
                     plugin_name: hit.skill.plugin_name.clone(),
+                    scope: hit.skill.scope,
+                    origin: hit.skill.origin.clone(),
                 }
             })
             .collect(),
     )
 }
 /// Load each parsed skill's SKILL.md, apply substitutions, and build the `<skill_information>` envelope.
-///
 /// Shared by turn start (prompt assembly in `process_conversation_turn`) and the mid-turn interjection drain.
-/// So a skill delivers identically whether it starts a turn or is force-sent into a running one.
 /// Returns `None` when no skill content loads (missing files are logged and skipped; the `<skills_referenced>` index still lists every parsed ref).
 pub(super) async fn build_skill_information_for_refs(
     parsed_skills: &[ParsedSkillRef],
@@ -1474,7 +1449,7 @@ pub(super) async fn build_skill_information_for_refs(
 ) -> Option<String> {
     use xai_grok_tools::implementations::skills::skill::{
         SkillRef, SubstitutionContext, apply_substitutions, build_skill_block,
-        build_skill_information, load_skill_content,
+        build_skill_information, cap_skill_body, load_skill_content,
     };
     let mut skill_blocks: Vec<String> = Vec::new();
     for sk in parsed_skills {
@@ -1483,6 +1458,13 @@ pub(super) async fn build_skill_information_for_refs(
         };
         match load_skill_content(info).await {
             Ok(mut content) => {
+                if cap_skill_body(&mut content) {
+                    tracing::info!(
+                        skill = %sk.name,
+                        path = %info.path,
+                        "skill body truncated at read cap"
+                    );
+                }
                 let skill_dir = std::path::Path::new(&info.path)
                     .parent()
                     .and_then(|p| p.to_str());
@@ -1535,7 +1517,6 @@ pub(super) async fn build_skill_information_for_refs(
     Some(build_skill_information(&skill_blocks, &refs))
 }
 /// Resolve one exact leading slash against only the child-visible skill catalog.
-///
 /// The caller must supply the same local availability snapshot used by child advertisement and prove the child can load skill content.
 /// No builtin, alias, workflow, or other dynamic command is dispatched here.
 pub(super) fn resolve_model_authored_skill(
@@ -1566,6 +1547,8 @@ pub(super) fn resolve_model_authored_skill(
             skill_path: skill.path.clone(),
             qualified_name: format_skill_name(skill),
             plugin_name: skill.plugin_name.clone(),
+            scope: skill.scope,
+            origin: skill.origin.clone(),
         }],
     })
 }
@@ -1577,14 +1560,9 @@ pub(super) fn resolve_human_intent(
     availability: CommandAvailability,
     _skill_rewrite: SkillSlashRewrite,
     workflows: &[crate::session::workflow::registry::WorkflowListing],
-    loop_fire_mode: LoopFireMode,
 ) -> Result<Vec<acp::ContentBlock>, SlashCommandOutcome> {
-    let crate::session::slash_authority::AuthorityResolution::HumanIntent { command_name, args } =
-        crate::session::slash_authority::resolve(
-            crate::session::InputAuthority::HumanIntent,
-            &prompt_blocks,
-            BUILTIN_COMMANDS,
-        )
+    let Some((command_name, args)) =
+        crate::session::slash_authority::parse_slash_prefix(&prompt_blocks)
     else {
         return Ok(prompt_blocks);
     };
@@ -1595,7 +1573,7 @@ pub(super) fn resolve_human_intent(
         && availability.allows(prompt_cmd.gate)
     {
         let mut blocks = match prompt_cmd.name {
-            "loop" => build_loop_prompt_blocks(args, loop_fire_mode),
+            "loop" => build_loop_prompt_blocks(args),
             other => {
                 unreachable!("prompt-only command /{other} has no resolver wired in resolve()")
             }
@@ -1660,14 +1638,14 @@ pub(super) fn resolve_human_intent(
 /// The wording (usage hint and scheduling instruction) is sourced from `xai-grok-tools`.
 /// It stays identical to the pager's `LoopCommand`, so the two front-ends can't drift.
 /// Like the pager, there is no host-side interval default: the model derives the cadence from the request and asks when none is given.
-fn build_loop_prompt_blocks(args: &str, mode: LoopFireMode) -> Vec<acp::ContentBlock> {
+fn build_loop_prompt_blocks(args: &str) -> Vec<acp::ContentBlock> {
     use xai_grok_tools::implementations::grok_build::{
         loop_schedule_instruction, loop_usage_message,
     };
     let text = if args.trim().is_empty() {
         loop_usage_message().to_string()
     } else {
-        loop_schedule_instruction(args, mode)
+        loop_schedule_instruction(args)
     };
     vec![acp::ContentBlock::Text(acp::TextContent::new(text))]
 }

@@ -15,33 +15,50 @@
 //!
 //! Use [`WithAuth::with_auth`] at every shell-side upload call site that has an `AuthManager` in scope.
 //! Call it immediately before passing the config to an `xai_file_utils::gcs::*` helper.
-use crate::auth::AuthManager;
-use crate::auth::credential_provider::{
-    ShellAuthCredentialProvider, StorageClientAttributionBridge,
-};
 use std::sync::Arc;
 use xai_file_utils::gcs::StorageConfig;
 use xai_file_utils::storage_client::Auth401AttributionCallback;
 use xai_file_utils::{TraceExportConfig, UploadMethod};
 use xai_grok_auth::AuthCredentialProvider;
+use xai_grok_login::AuthManager;
+use xai_grok_login::credential_provider::{
+    ShellAuthCredentialProvider, StorageClientAttributionBridge,
+};
 /// See the module docs for why this exists.
-///
 /// `auth_manager == None` is supported (for tests, direct-mode upload, and a few sites without an `AuthManager` in scope).
 /// It degrades to the pre-existing snapshot-based behavior.
 #[derive(Clone)]
 pub(crate) struct TraceExportConfigWithAuth {
     inner: TraceExportConfig,
     auth_manager: Option<Arc<AuthManager>>,
+    explicit_session_share: bool,
 }
 impl TraceExportConfigWithAuth {
     pub(crate) fn new(inner: TraceExportConfig, auth_manager: Option<Arc<AuthManager>>) -> Self {
         Self {
             inner,
             auth_manager,
+            explicit_session_share: false,
+        }
+    }
+
+    /// Only the explicit `x.ai/share_session` handler may opt into this purpose.
+    /// Keeping it separate prevents a share from enabling background trace uploads.
+    pub(crate) fn for_session_share(
+        inner: TraceExportConfig,
+        auth_manager: Arc<AuthManager>,
+    ) -> Self {
+        Self {
+            inner,
+            auth_manager: Some(auth_manager),
+            explicit_session_share: true,
         }
     }
 }
 impl StorageConfig for TraceExportConfigWithAuth {
+    fn uploads_allowed(&self) -> bool {
+        self.explicit_session_share || self.inner.uploads_allowed()
+    }
     fn bucket_url(&self) -> &str {
         self.inner.bucket_url()
     }
@@ -58,11 +75,14 @@ impl StorageConfig for TraceExportConfigWithAuth {
         else {
             return None;
         };
-        Some(Arc::new(ShellAuthCredentialProvider::new(
-            am.clone(),
-            deployment_key.clone(),
-            alpha_test_key.clone(),
-        )))
+        Some(Arc::new(
+            ShellAuthCredentialProvider::with_deployment_id_resolver(
+                am.clone(),
+                deployment_key.clone(),
+                alpha_test_key.clone(),
+                std::sync::Arc::new(xai_grok_cloud_config::managed_config::resolve_deployment_id),
+            ),
+        ))
     }
     fn proxy_attribution(&self) -> Option<Arc<dyn Auth401AttributionCallback>> {
         let am = self.auth_manager.as_ref()?;
@@ -78,16 +98,7 @@ impl StorageConfig for TraceExportConfigWithAuth {
         Some(crate::http::shared_upload_client())
     }
 }
-/// Convenience trait for wrapping a `TraceExportConfig` at upload call sites. Pattern:
-///
-/// ```ignore
-/// xai_file_utils::gcs::upload_bytes(
-///     &gcs_config.with_auth(Some(auth_manager.clone())),
-///     ...,
-/// ).await
-/// ```
-///
-/// At sites without an `AuthManager` in scope, pass `None` (degrades to snapshot behavior; same as calling the helper with the bare config).
+/// Convenience trait for wrapping a `TraceExportConfig` at upload call sites. Pattern: At sites without an `AuthManager` in scope, pass `None` (degrades to snapshot behavior; same as calling the helper with the bare config).
 pub(crate) trait WithAuth {
     fn with_auth(&self, auth_manager: Option<Arc<AuthManager>>) -> TraceExportConfigWithAuth;
 }
@@ -105,7 +116,7 @@ pub(crate) async fn upload_to_auth_diagnostics(
     log_bytes: &[u8],
     user_id: &str,
     upload_method: &crate::session::repo_changes::UploadMethod,
-    auth_manager: Arc<crate::auth::AuthManager>,
+    auth_manager: Arc<xai_grok_login::AuthManager>,
 ) {
     let user_id = user_id.replace('/', "_");
     let ts = chrono::Utc::now().timestamp_millis();

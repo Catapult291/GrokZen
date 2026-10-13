@@ -18,8 +18,6 @@ use super::render_mermaid::RenderMermaid;
 use super::scroll_mode::ScrollMode;
 use super::text_selection::TextSelection;
 
-// -- Defaults (asserted in tests to match UiConfig::default()) --------------
-
 const COMPACT_DEFAULT: bool = false;
 const TIMESTAMPS_DEFAULT: bool = true;
 /// Aliased rather than hardcoded so [`UiConfig::SHOW_TIMELINE_DEFAULT`] stays the single source of truth.
@@ -49,8 +47,6 @@ const SCROLL_LINES_UNSET: u8 = 0;
 const SCROLL_LINES_MIN: u8 = 1;
 const SCROLL_LINES_MAX: u8 = 10;
 
-// -- Compact mode ------------------------------------------------------------
-
 thread_local! {
     static COMPACT_CURRENT: Cell<bool> = const { Cell::new(COMPACT_DEFAULT) };
     static COMPACT_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -78,8 +74,6 @@ pub fn set(enabled: bool) {
     COMPACT_LOADED.with(|l| l.set(true));
 }
 
-// -- Timestamps --------------------------------------------------------------
-
 thread_local! {
     static TIMESTAMPS_CURRENT: Cell<bool> = const { Cell::new(TIMESTAMPS_DEFAULT) };
     static TIMESTAMPS_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -104,8 +98,6 @@ pub fn set_timestamps(enabled: bool) {
     TIMESTAMPS_CURRENT.with(|c| c.set(enabled));
     TIMESTAMPS_LOADED.with(|l| l.set(true));
 }
-
-// -- Timeline sidebar ----------------------------------------------------------
 
 thread_local! {
     static TIMELINE_CURRENT: Cell<bool> = const { Cell::new(TIMELINE_DEFAULT) };
@@ -132,8 +124,6 @@ pub fn set_show_timeline(enabled: bool) {
     TIMELINE_LOADED.with(|l| l.set(true));
 }
 
-// -- Page-flip on send ---------------------------------------------------------
-
 thread_local! {
     static PAGE_FLIP_ON_SEND_CURRENT: Cell<bool> = const { Cell::new(PAGE_FLIP_ON_SEND_DEFAULT) };
     static PAGE_FLIP_ON_SEND_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -159,8 +149,6 @@ pub fn set_page_flip_on_send(enabled: bool) {
     PAGE_FLIP_ON_SEND_CURRENT.with(|c| c.set(enabled));
     PAGE_FLIP_ON_SEND_LOADED.with(|l| l.set(true));
 }
-
-// -- Combine queued prompts ---------------------------------------------------
 
 thread_local! {
     static COMBINE_QUEUED_PROMPTS_CURRENT: Cell<bool> =
@@ -221,8 +209,6 @@ pub fn set_follow_up_behavior(value: FollowUpBehavior) {
     FOLLOW_UP_BEHAVIOR_LOADED.with(|l| l.set(true));
 }
 
-// -- Simple mode --------------------------------------------------------------
-
 thread_local! {
     static SIMPLE_MODE_CURRENT: Cell<bool> = const { Cell::new(SIMPLE_MODE_DEFAULT) };
     static SIMPLE_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -248,17 +234,12 @@ pub fn set_simple_mode(enabled: bool) {
     SIMPLE_MODE_LOADED.with(|l| l.set(true));
 }
 
-// -- Vim mode (scrollback) ---------------------------------------------------
-
 thread_local! {
     static VIM_MODE_CURRENT: Cell<bool> = const { Cell::new(VIM_MODE_DEFAULT) };
     static VIM_MODE_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read cached `vim_mode`, seeding from disk on first call.
-///
-/// `vim_mode` is ephemeral: this cache is the process-wide source of truth and no `Effect` writes it back to disk.
-/// The first read still seeds from `[ui].vim_mode` so historical configs keep working.
+/// Ephemeral process-wide source of truth; no Effect writes it back. First read seeds from `[ui].vim_mode`.
 pub fn load_vim_mode() -> bool {
     VIM_MODE_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -279,8 +260,6 @@ pub fn set_vim_mode(enabled: bool) {
     VIM_MODE_CURRENT.with(|c| c.set(enabled));
     VIM_MODE_LOADED.with(|l| l.set(true));
 }
-
-// -- Show thinking blocks ----------------------------------------------------
 
 thread_local! {
     static SHOW_THINKING_BLOCKS_CURRENT: Cell<bool> =
@@ -311,8 +290,6 @@ pub fn set_show_thinking_blocks(enabled: bool) {
     SHOW_THINKING_BLOCKS_LOADED.with(|l| l.set(true));
 }
 
-// -- Group tool verbs ---------------------------------------------------------
-
 thread_local! {
     static GROUP_TOOL_VERBS_CURRENT: Cell<bool> =
         const { Cell::new(GROUP_TOOL_VERBS_DEFAULT) };
@@ -342,8 +319,6 @@ pub fn set_group_tool_verbs(enabled: bool) {
     GROUP_TOOL_VERBS_LOADED.with(|l| l.set(true));
 }
 
-// -- Collapsed edit blocks -----------------------------------------------------
-
 thread_local! {
     static COLLAPSED_EDIT_BLOCKS_CURRENT: Cell<bool> =
         const { Cell::new(COLLAPSED_EDIT_BLOCKS_DEFAULT) };
@@ -352,8 +327,6 @@ thread_local! {
 
 /// Read cached `collapsed_edit_blocks`, seeding from `[ui]` on first call.
 /// Settings resolution at startup may override the seeded value.
-/// This is consulted only when the pager.toml `[scrollback.blocks.edit]` shape keys are unset.
-/// See `EditBlockConfig::effective_expanded` and `effective_line_summary`.
 pub fn load_collapsed_edit_blocks() -> bool {
     COLLAPSED_EDIT_BLOCKS_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -374,8 +347,6 @@ pub fn set_collapsed_edit_blocks(enabled: bool) {
     COLLAPSED_EDIT_BLOCKS_CURRENT.with(|c| c.set(enabled));
     COLLAPSED_EDIT_BLOCKS_LOADED.with(|l| l.set(true));
 }
-
-// -- Prompt suggestions (tab autocomplete) -----------------------------------
 
 thread_local! {
     static PROMPT_SUGGESTIONS_CURRENT: Cell<Option<bool>> = const { Cell::new(None) };
@@ -404,8 +375,6 @@ pub fn set_prompt_suggestions(enabled: bool) {
     PROMPT_SUGGESTIONS_CURRENT.with(|c| c.set(Some(enabled)));
     PROMPT_SUGGESTIONS_LOADED.with(|l| l.set(true));
 }
-
-// -- keep_text_selection (`flash` | `hold`) ----------------------------------
 
 thread_local! {
     static KEEP_TEXT_SELECTION_CURRENT: Cell<TextSelection> =
@@ -447,8 +416,6 @@ pub fn apply_remote_keep_text_selection_default(remote_default: Option<&str>, ui
     set_keep_text_selection(value);
 }
 
-// -- Scroll speed ------------------------------------------------------------
-
 thread_local! {
     static SCROLL_SPEED_CURRENT: Cell<u8> = const { Cell::new(SCROLL_SPEED_DEFAULT) };
     static SCROLL_SPEED_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -477,8 +444,6 @@ pub fn set_scroll_speed(speed: u8) {
     SCROLL_SPEED_CURRENT.with(|c| c.set(speed.clamp(SCROLL_SPEED_MIN, SCROLL_SPEED_MAX)));
     SCROLL_SPEED_LOADED.with(|l| l.set(true));
 }
-
-// -- Scroll mode (auto | wheel | trackpad) -----------------------------------
 
 thread_local! {
     static SCROLL_MODE_CURRENT: Cell<ScrollMode> = const { Cell::new(SCROLL_MODE_DEFAULT) };
@@ -512,8 +477,6 @@ pub fn set_scroll_mode(value: ScrollMode) {
     SCROLL_MODE_LOADED.with(|l| l.set(true));
 }
 
-// -- Invert scroll ------------------------------------------------------------
-
 thread_local! {
     static INVERT_SCROLL_CURRENT: Cell<bool> = const { Cell::new(INVERT_SCROLL_DEFAULT) };
     static INVERT_SCROLL_LOADED: Cell<bool> = const { Cell::new(false) };
@@ -546,8 +509,6 @@ pub fn set_invert_scroll(enabled: bool) {
     INVERT_SCROLL_CURRENT.with(|c| c.set(enabled));
     INVERT_SCROLL_LOADED.with(|l| l.set(true));
 }
-
-// -- Scroll lines ------------------------------------------------------------
 
 thread_local! {
     static SCROLL_LINES_CURRENT: Cell<u8> = const { Cell::new(SCROLL_LINES_UNSET) };
@@ -587,17 +548,13 @@ pub fn set_scroll_lines(lines: u8) {
     SCROLL_LINES_LOADED.with(|l| l.set(true));
 }
 
-// -- Render mermaid (auto | on | off) ---------------------------------------
-
 thread_local! {
     static RENDER_MERMAID_CURRENT: Cell<RenderMermaid> = const { Cell::new(RenderMermaid::Auto) };
     static RENDER_MERMAID_LOADED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Read the cached `render_mermaid` preference, seeding from `[ui].render_mermaid` on first call.
-///
-/// The cache is the render path's source of truth: the settings modal updates it optimistically and `PersistSetting` writes it to disk.
-/// Render and dispatch share the one main thread (see the module docs); a render on another thread would seed from disk and miss modal overrides.
+/// Render-path source of truth: the modal updates it optimistically, `PersistSetting` writes disk.
+/// Must stay on the main thread; another thread would seed from disk and miss modal overrides.
 pub fn load_render_mermaid() -> RenderMermaid {
     RENDER_MERMAID_LOADED.with(|loaded| {
         if !loaded.get() {
@@ -623,8 +580,6 @@ pub fn set_render_mermaid(value: RenderMermaid) {
     RENDER_MERMAID_CURRENT.with(|c| c.set(value));
     RENDER_MERMAID_LOADED.with(|l| l.set(true));
 }
-
-// -- Prime + read path ------------------------------------------------------
 
 /// Seed all caches from the live `UiConfig` at startup so subsequent `load*()` calls never hit disk on the render hot path.
 pub fn prime(ui: &UiConfig) {
@@ -672,11 +627,8 @@ fn load_bool_option_from_effective_config(key: &str) -> Option<bool> {
         .and_then(|v| v.as_bool())
 }
 
-/// Resolve the unified text-selection mode from a parsed `UiConfig`.
-///
-/// An explicit `[ui].keep_text_selection` always wins, so Settings and hand-edits stick even when a retired `double_click_action` key is on disk.
-/// `double_click_action` is retired; it survives only in configs that predate the unified key, and Settings clears it on any write.
-/// The remote soft default is layered on top at startup via [`apply_remote_keep_text_selection_default`]; it does not change this resolution.
+/// Explicit `keep_text_selection` wins over a retired on-disk `double_click_action`.
+/// The remote soft default is applied at startup and does not change this resolution.
 fn text_selection_from_ui(ui: &UiConfig) -> TextSelection {
     if let Some(kind) = ui
         .keep_text_selection
@@ -731,8 +683,6 @@ fn load_str_from_effective_config(key: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(str::to_string)
 }
-
-// -- Tests -------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -1031,7 +981,6 @@ mod tests {
     #[test]
     fn caches_are_independent() {
         std::thread::spawn(|| {
-            // ── compact independent (the other two stay true) ──
             set(false);
             set_timestamps(true);
             set_simple_mode(true);
@@ -1045,7 +994,6 @@ mod tests {
                 "simple_mode must NOT toggle when compact changed"
             );
 
-            // ── timestamps independent ──
             set(true);
             set_timestamps(false);
             set_simple_mode(true);
@@ -1056,7 +1004,6 @@ mod tests {
                 "simple_mode must NOT toggle when timestamps changed"
             );
 
-            // ── simple_mode independent ──
             set(true);
             set_timestamps(true);
             set_simple_mode(false);

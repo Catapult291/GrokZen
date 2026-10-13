@@ -26,10 +26,8 @@ pub(crate) fn read_config_document_for_edit(path: &Path) -> Option<toml_edit::Do
     }
 }
 
-/// Set `[hints].<key>` to `value` in `~/.grok/config.toml`, preserving every other key and table.
-/// Creates the file and parent dir when missing.
-/// No-ops when the existing file is non-blank but unparseable, so a malformed config is never clobbered.
-/// Performs blocking I/O.
+/// Set `[hints].<key>` to `value` in `~/.grok/config.toml`, preserving every other key and table. No-ops when the
+/// existing file is non-blank but unparseable, so a malformed config is never clobbered.
 pub(crate) fn set_hint(key: &str, value: impl Into<toml_edit::Value>) -> std::io::Result<()> {
     let path =
         xai_grok_tools::util::grok_home::grok_home().join(xai_grok_config::USER_CONFIG_FILENAME);
@@ -44,7 +42,13 @@ fn set_hint_at(path: &Path, key: &str, value: impl Into<toml_edit::Value>) -> st
     let Some(mut doc) = read_config_document_for_edit(path) else {
         return Ok(());
     };
-    doc["hints"][key] = toml_edit::value(value);
+    if let Some(table) = doc
+        .entry("hints")
+        .or_insert(toml_edit::table())
+        .as_table_mut()
+    {
+        table.insert(key, toml_edit::value(value));
+    }
     std::fs::write(path, doc.to_string())
 }
 
@@ -65,7 +69,9 @@ mod tests {
         .unwrap();
 
         let mut doc = read_config_document_for_edit(&path).expect("parse");
-        doc["ui"]["show_timestamps"] = toml_edit::value(false);
+        if let Some(ui) = doc.get_mut("ui").and_then(|i| i.as_table_mut()) {
+            ui.insert("show_timestamps", toml_edit::value(false));
+        }
         fs::write(&path, doc.to_string()).unwrap();
 
         let body = fs::read_to_string(&path).unwrap();
@@ -177,7 +183,9 @@ mod tests {
         fs::write(&path, "[ui]\ncompact_mode = false\n").unwrap();
 
         let mut doc = read_config_document_for_edit(&path).expect("parse");
-        doc["ui"]["vim_mode"] = toml_edit::value(true);
+        if let Some(ui) = doc.get_mut("ui").and_then(|i| i.as_table_mut()) {
+            ui.insert("vim_mode", toml_edit::value(true));
+        }
         fs::write(&path, doc.to_string()).unwrap();
 
         let doc2 = read_config_document_for_edit(&path).expect("reparse");

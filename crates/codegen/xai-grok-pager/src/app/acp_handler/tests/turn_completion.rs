@@ -291,7 +291,7 @@
     fn silent_wake_turn_completed_is_markerless() {
         let mut app = make_app_with_agent("sess-wake");
         seed_two_bg_tasks(&mut app, "sess-wake");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let affected = handle_ext_notification(
             &xai_wake_turn_completed_notif(
@@ -303,20 +303,26 @@
         );
         assert!(affected, "the wake back-to-idle point still redraws");
 
-        let agent = app.agents.get(&AgentId(0)).unwrap();
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                agent.session.state.is_idle(),
+                "a wake turn is never adopted — the pager stays idle around it"
+            );
+            assert_eq!(
+                agent.scrollback.len(),
+                len_before,
+                "a silent wake turn pushes no marker"
+            );
+            assert_eq!(
+                agent.watchers().commands,
+                2,
+                "the running commands stay on the status-row watchers cue"
+            );
+        }
         assert!(
-            agent.session.state.is_idle(),
-            "a wake turn is never adopted — the pager stays idle around it"
-        );
-        assert_eq!(
-            agent.scrollback.len(),
-            len_before,
-            "a silent wake turn pushes no marker"
-        );
-        assert_eq!(
-            agent.watchers().commands,
-            2,
-            "the running commands stay on the status-row watchers cue"
+            app.deferred_notification.is_none(),
+            "a silent wake must not queue TurnComplete"
         );
     }
 
@@ -329,7 +335,7 @@
             make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
             &mut app,
         );
-        assert_eq!(count_turn_markers(&app.agents[&AgentId(0)]), 0);
+        assert_eq!(count_turn_markers(app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"))), 0);
 
         let affected = handle_ext_notification(
             &xai_wake_turn_completed_notif("sess-wake", "task-completed-bg1", None),
@@ -337,16 +343,24 @@
         );
         assert!(affected);
 
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            count_turn_markers(agent),
-            1,
-            "a chatty wake closes with exactly one marker"
-        );
-        assert!(matches!(
-            last_session_event(&agent.scrollback),
-            Some(SessionEvent::TurnCompleted { .. })
-        ));
+        {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                count_turn_markers(agent),
+                1,
+                "a chatty wake closes with exactly one marker"
+            );
+            assert!(matches!(
+                last_session_event(&agent.scrollback),
+                Some(SessionEvent::TurnCompleted { .. })
+            ));
+        }
+        let (event, ticks) = app
+            .deferred_notification
+            .as_ref()
+            .expect("chatty wake EndTurn must queue TurnComplete");
+        assert_eq!(event.kind, crate::notifications::NotificationEventKind::TurnComplete);
+        assert_eq!(*ticks, 3);
     }
 
     #[test]
@@ -363,14 +377,14 @@
             &xai_wake_turn_completed_notif("sess-wake", "task-completed-bg1", None),
             &mut app,
         );
-        assert_eq!(count_turn_markers(&app.agents[&AgentId(0)]), 1);
+        assert_eq!(count_turn_markers(app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"))), 1);
 
         let _ = handle_ext_notification(
             &xai_wake_turn_completed_notif("sess-wake", "task-completed-bg1", None),
             &mut app,
         );
         assert_eq!(
-            count_turn_markers(&app.agents[&AgentId(0)]),
+            count_turn_markers(app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry"))),
             1,
             "a duplicate wake terminal must not push a second marker"
         );
@@ -427,7 +441,7 @@
             &mut app,
         );
         assert!(
-            app.agents[&AgentId(0)].running_wake_turn.is_none(),
+            app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).running_wake_turn.is_none(),
             "a late delta after the terminal must not revive the stop affordance"
         );
 
@@ -445,7 +459,7 @@
             &mut app,
         );
         assert!(
-            app.agents[&AgentId(0)].running_wake_turn.is_none(),
+            app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).running_wake_turn.is_none(),
             "an earlier finished wake stays finished after later terminals"
         );
     }
@@ -477,7 +491,7 @@
             app.pending_effects
         );
         assert!(
-            app.agents[&AgentId(0)].session.pending_prompts.is_empty(),
+            app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).session.pending_prompts.is_empty(),
             "the parked row must leave the local queue"
         );
     }
@@ -510,7 +524,7 @@
             app.pending_effects
         );
         assert_eq!(
-            app.agents[&AgentId(0)].session.pending_prompts.len(),
+            app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).session.pending_prompts.len(),
             1,
             "the parked row must stay queued until reconnect drains"
         );
@@ -525,7 +539,7 @@
             &mut app,
         );
         assert!(
-            app.agents[&AgentId(0)].scrollback.has_running_entries(),
+            app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.has_running_entries(),
             "the streamed wake chunk opens a live entry"
         );
 
@@ -534,7 +548,7 @@
             &mut app,
         );
         assert!(
-            !app.agents[&AgentId(0)].scrollback.has_running_entries(),
+            !app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.has_running_entries(),
             "the wake terminal must finish the streamed entry"
         );
     }
@@ -549,8 +563,8 @@
             make_replay_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
             &mut app,
         );
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
-        let started_at = app.agents[&AgentId(0)].turn_started_at;
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
+        let started_at = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).turn_started_at;
 
         let affected = handle_ext_notification(
             &xai_turn_completed_replay(
@@ -584,7 +598,7 @@
     fn scheduler_fired_turn_completed_keeps_adopted_path() {
         // `/loop` turns are client-driven with a real finalize path, never the wake shortcut
         let mut app = make_app_with_agent("sess-cron");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let affected = handle_ext_notification(
             &xai_wake_turn_completed_notif("sess-cron", "scheduler-fired-abc", Some(1_000)),
@@ -593,68 +607,49 @@
 
         assert!(!affected);
         assert_eq!(
-            app.agents[&AgentId(0)].scrollback.len(),
+            app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len(),
             len_before,
             "a scheduler-fired terminal must not push a wake marker"
         );
     }
 
     #[test]
-    fn silent_errored_wake_pushes_failure_marker() {
-        // Failures are shown even when the wake is invisible: the standing instruction silently stopped
+    fn silent_errored_wake_closes_without_marker() {
+        // An errored wake closes like a success: no row, state cleared, duplicates deduped per pid
         let mut app = make_app_with_agent("sess-wake");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        seed_two_bg_tasks(&mut app, "sess-wake");
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
-        let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(agent.scrollback.len(), len_before + 1);
-        assert!(matches!(
-            last_session_event(&agent.scrollback),
-            Some(SessionEvent::TurnFailed { .. })
-        ));
-    }
-
-    #[test]
-    fn errored_wake_error_kind_renders_truncation_copy() {
-        let mut app = make_app_with_agent("sess-wake");
-
-        let _ = handle_ext_notification(
-            &xai_turn_completed_failed_with_error_kind(
-                "sess-wake",
-                "task-completed-bg1",
-                "turn ended early",
-                "max_tokens_truncation",
-                false,
-            ),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        match last_session_event(&agent.scrollback) {
-            Some(SessionEvent::TurnFailed { error, .. }) => {
-                assert_eq!(error, "Response truncated: turn ended early")
-            }
-            other => panic!("expected TurnFailed, got {other:?}"),
+        for _ in 0..2 {
+            let _ = handle_ext_notification(
+                &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
+                &mut app,
+            );
         }
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.scrollback.len(), len_before, "an errored wake pushes no marker");
+        assert!(agent.session.state.is_idle());
+        assert!(agent.running_wake_turn.is_none());
+        assert!(agent.finished_wake_prompts.contains("task-completed-bg1"));
+        assert_eq!(
+            agent.failed_wake_marker_for.as_deref(),
+            Some("task-completed-bg1")
+        );
+        assert_eq!(agent.watchers().commands, 2);
     }
 
     #[test]
-    fn errored_wake_during_local_turn_error_kind_renders_truncation_copy() {
-        // The busy-wake pierce arm reads the typed kind itself (it never reaches `finish_wake_turn`)
-        use crate::app::agent::AgentState;
-
+    fn errored_wake_with_error_kind_closes_without_marker() {
+        // The typed kind used to pick failure copy; an errored wake now paints nothing regardless of kind
         let mut app = make_app_with_agent("sess-wake");
-        app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let _ = handle_ext_notification(
             &xai_turn_completed_failed_with_error_kind(
                 "sess-wake",
                 "task-completed-bg1",
-                "turn ended early",
+                "[unknown] Premature close",
                 "max_tokens_truncation",
                 false,
             ),
@@ -662,9 +657,46 @@
         );
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert_eq!(agent.scrollback.len(), len_before);
+        assert!(agent.session.state.is_idle());
+    }
+
+    #[test]
+    fn errored_user_prompt_terminal_still_pushes_turn_failed() {
+        // Only wake pids close silently; a viewer's adopted user turn keeps the failure banner
+        let mut app = make_app_with_agent("sess-view");
+        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
+        let _ = handle(
+            make_agent_chunk_message_with_prompt("sess-view", "chunk", "pid-driver", false),
+            &mut app,
+        );
+
+        let payload = SessionNotification {
+            session_id: acp::SessionId::new("sess-view"),
+            update: XaiSessionUpdate::TurnCompleted {
+                prompt_id: "pid-driver".into(),
+                stop_reason: "error".into(),
+                agent_result: Some("[unknown] Premature close".into()),
+                error_kind: None,
+                usage: None,
+                elapsed_ms: None,
+            },
+            meta: Some(serde_json::json!({ "isReplay": false })),
+        };
+        let notif = acp::ExtNotification::new(
+            "x.ai/session/update",
+            std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+        );
+        let _ = handle_ext_notification(&notif, &mut app);
+
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.session.state.is_idle());
         match last_session_event(&agent.scrollback) {
             Some(SessionEvent::TurnFailed { error, .. }) => {
-                assert_eq!(error, "Response truncated: turn ended early")
+                assert_eq!(
+                    error,
+                    "Request failed: [unknown] Premature close. Try sending again."
+                );
             }
             other => panic!("expected TurnFailed, got {other:?}"),
         }
@@ -710,9 +742,9 @@
     }
 
     #[test]
-    fn errored_wake_skips_marker_when_banner_already_on_screen() {
+    fn errored_wake_with_banner_on_screen_still_records_pid() {
         // The retry-state rail already pushed the formatted RequestFailed banner for this failure
-        // The wake rail must not add a second near-identical warning line (same dedupe as the local rails)
+        // The wake rail paints nothing either way; the pid still records so the other rail stays quiet
         let mut app = make_app_with_agent("sess-wake");
         {
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
@@ -726,7 +758,7 @@
                     },
                 ));
         }
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let _ = handle_ext_notification(
             &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
@@ -734,21 +766,16 @@
         );
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent.scrollback.len(),
-            len_before,
-            "banner already covers the failure; no TurnFailed marker"
-        );
-        // The failure is still recorded, so the other wake rail stays quiet too.
+        assert_eq!(agent.scrollback.len(), len_before);
         assert_eq!(
             agent.failed_wake_marker_for.as_deref(),
             Some("task-completed-bg1")
         );
     }
 
-    /// Same dedupe on the busy-wake rail (a local turn is running, so the terminal takes the `is_busy` branch instead of `finish_wake_turn`).
+    /// Same on the busy-wake rail (a local turn is running, so the terminal takes the `is_busy` branch instead of `finish_wake_turn`).
     #[test]
-    fn errored_wake_during_local_turn_skips_marker_when_banner_on_screen() {
+    fn errored_wake_during_local_turn_with_banner_on_screen_still_records_pid() {
         use crate::app::agent::AgentState;
 
         let mut app = make_app_with_agent("sess-wake");
@@ -765,7 +792,7 @@
                     },
                 ));
         }
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let _ = handle_ext_notification(
             &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
@@ -773,34 +800,11 @@
         );
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent.scrollback.len(),
-            len_before,
-            "banner already covers the failure; no TurnFailed marker"
-        );
+        assert_eq!(agent.scrollback.len(), len_before);
         assert_eq!(
             agent.failed_wake_marker_for.as_deref(),
             Some("task-completed-bg1")
         );
-    }
-
-    #[test]
-    fn silent_errored_wake_ignores_stale_turn_start_ms() {
-        // A silent wake streamed no deltas, so the stored `turn_start_ms` is an earlier turn's.
-        let mut app = make_app_with_agent("sess-wake");
-        app.agents.get_mut(&AgentId(0)).unwrap().turn_start_ms =
-            Some(chrono::Utc::now().timestamp_millis() - 600_000);
-
-        let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(matches!(
-            last_session_event(&agent.scrollback),
-            Some(SessionEvent::TurnFailed { elapsed: None, .. })
-        ));
     }
 
     #[test]
@@ -817,7 +821,7 @@
             &xai_turn_completed_notif("sess-wake", "goal-summary-g1", "end_turn", false),
             &mut app,
         );
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let _ = handle_ext_notification(
             &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "end_turn", false),
@@ -834,27 +838,30 @@
     }
 
     #[test]
-    fn errored_wake_terminal_during_local_turn_still_pushes_failure() {
-        // Failure visibility survives the busy skip: no tracker finish, no elapsed (the anchor is the local turn's), but the row must land
+    fn errored_wake_terminal_during_local_turn_pushes_nothing() {
+        // The busy arm never touches the local turn's tracker; an errored wake leaves no row under the local prompt either
         use crate::app::agent::AgentState;
 
         let mut app = make_app_with_agent("sess-wake");
         app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         for _ in 0..2 {
-            let _ = handle_ext_notification(
+            let affected = handle_ext_notification(
                 &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
                 &mut app,
             );
+            assert!(!affected);
         }
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(agent.scrollback.len(), len_before + 1, "one row, deduped");
-        assert!(matches!(
-            last_session_event(&agent.scrollback),
-            Some(SessionEvent::TurnFailed { elapsed: None, .. })
-        ));
+        assert_eq!(agent.scrollback.len(), len_before);
+        assert!(agent.session.state.is_turn_running(), "the local turn is untouched");
+        assert!(agent.finished_wake_prompts.contains("task-completed-bg1"));
+        assert_eq!(
+            agent.failed_wake_marker_for.as_deref(),
+            Some("task-completed-bg1")
+        );
     }
 
     #[test]
@@ -878,7 +885,7 @@
             &mut app,
         );
         app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::Idle;
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let _ = handle_ext_notification(
             &xai_turn_completed_notif("sess-wake", "task-completed-bg2", "end_turn", false),
@@ -915,55 +922,12 @@
         ));
     }
 
-    #[test]
-    fn silent_errored_wake_after_goal_turn_has_no_elapsed() {
-        let mut app = make_app_with_agent("sess-wake");
-        let _ = handle(
-            make_viewer_chunk_with_turn_start("sess-wake", "goal-summary-g1", 5_000),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-wake", "goal-summary-g1", "end_turn", false),
-            &mut app,
-        );
-
-        let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(matches!(
-            last_session_event(&agent.scrollback),
-            Some(SessionEvent::TurnFailed { elapsed: None, .. })
-        ));
-    }
-
-    #[test]
-    fn duplicate_errored_wake_terminal_pushes_one_failure_marker() {
-        // Failures bypass the output-epoch dedupe, so duplicates are deduped by prompt id.
-        let mut app = make_app_with_agent("sess-wake");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
-
-        for _ in 0..2 {
-            let _ = handle_ext_notification(
-                &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
-                &mut app,
-            );
-        }
-
-        assert_eq!(
-            app.agents[&AgentId(0)].scrollback.len(),
-            len_before + 1,
-            "one failure marker for the wake, duplicates dropped"
-        );
-    }
 
     #[test]
     fn silent_cancelled_or_rate_limited_wake_stays_markerless() {
         // Rate limits arrive through the retry notifications instead, matching the real-turn rails
         let mut app = make_app_with_agent("sess-wake");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         for stop_reason in ["cancelled", "rate_limit"] {
             let _ = handle_ext_notification(
@@ -973,7 +937,7 @@
         }
 
         assert_eq!(
-            app.agents[&AgentId(0)].scrollback.len(),
+            app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len(),
             len_before,
             "cancelled/rate-limited silent wake terminals push nothing"
         );
@@ -989,7 +953,7 @@
             make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
             &mut app,
         );
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let _ = handle_ext_notification(
             &xai_turn_completed_notif_with_cancel_trigger(
@@ -1089,30 +1053,38 @@
     }
 
     #[test]
-    fn chatty_errored_wake_pushes_failure_marker_not_worked_for() {
+    fn chatty_errored_wake_closes_without_marker_and_clears_wake_state() {
+        // Streamed output does not earn an errored wake a row: no "Worked for", no failure; the tracker still finishes
+        use crate::app::agent_view::test_fixtures::count_turn_markers;
+
         let mut app = make_app_with_agent("sess-wake");
         let _ = handle(
             make_viewer_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
             &mut app,
         );
+        assert!(app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).running_wake_turn.is_some());
 
-        let _ = handle_ext_notification(
+        let affected = handle_ext_notification(
             &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "error", false),
             &mut app,
         );
+        assert!(affected, "the wake back-to-idle point still redraws");
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(matches!(
-            last_session_event(&agent.scrollback),
-            Some(SessionEvent::TurnFailed { .. })
-        ));
+        assert_eq!(count_turn_markers(agent), 0);
+        assert!(agent.running_wake_turn.is_none());
+        assert!(agent.session.state.is_idle());
+        assert!(
+            !agent.session.tracker.output_since_last_finish(),
+            "the errored wake's output must not leak into the next silent wake"
+        );
     }
 
     #[test]
     fn dead_wake_pushes_no_status_line() {
         let mut app = make_app_with_agent("sess-wake");
         seed_two_bg_tasks(&mut app, "sess-wake");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let _ = handle_ext_notification(
             &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "cancelled", false),
@@ -1146,7 +1118,7 @@
             agent.session.start_turn(&mut agent.scrollback);
             agent.session.current_prompt_id = Some("pid-local".into());
         }
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
 
         let affected = handle_ext_notification(
             &xai_wake_turn_completed_notif("sess-wake", "task-completed-bg1", Some(6_000)),
@@ -1167,435 +1139,11 @@
     }
 
     #[test]
-    fn wake_terminal_leaves_real_turn_stash_pending() {
-        use crate::scrollback::blocks::tool::{HookRunEntry, HookRunStatus};
-        let mut app = make_app_with_agent("sess-wake");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.pending_stop_hooks = Some(crate::app::agent_view::PendingStopHooks {
-                prompt_id: Some("pid-real".into()),
-                groups: vec![(
-                    "stop".to_string(),
-                    vec![HookRunEntry {
-                        name: "global/notify".into(),
-                        status: HookRunStatus::Success {
-                            elapsed: std::time::Duration::from_millis(12),
-                        },
-                        output: None,
-                    }],
-                )],
-            });
-        }
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
-
-        let _ = handle_ext_notification(
-            &xai_wake_turn_completed_notif("sess-wake", "task-completed-bg1", None),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent.scrollback.len(),
-            len_before,
-            "a wake terminal pushes nothing (no marker, no stash flush)"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-        assert!(
-            agent.pending_stop_hooks.is_some(),
-            "the stash stays pending for its own turn's marker"
-        );
-    }
-
-    #[test]
-    fn live_stop_hooks_during_turn_stash_instead_of_standalone_block() {
-        // Driver order: the batch lands while the turn is still running (before the PromptResponse) and is held for the turn marker
-        let mut app = make_app_with_agent("sess-stop");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-1".into());
-        }
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
-
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-stop", "stop", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            agent.scrollback.len(),
-            len_before,
-            "live stop hooks mid-turn must not push a standalone block"
-        );
-        let pending = agent
-            .pending_stop_hooks
-            .as_ref()
-            .expect("stop hooks must be stashed for the marker");
-        assert_eq!(pending.prompt_id.as_deref(), Some("pid-1"));
-        assert_eq!(pending.groups.len(), 1);
-        assert_eq!(pending.groups[0].0, "stop");
-    }
-
-    #[test]
-    fn replayed_stop_hooks_render_as_standalone_block() {
-        // Replay keeps stop hooks standalone: the reconstructed marker is pushed with empty hook groups and must not fold the stash
-        let mut app = make_app_with_agent("sess-replay");
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .session
-            .loading_replay = true;
-
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-replay", "stop", true),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "replayed stop hooks keep the standalone lifecycle block"
-        );
-        assert!(agent.pending_stop_hooks.is_none());
-    }
-
-    /// The wire `blocked` flag splits a failed run.
-    /// A stop-gate block maps to `HookRunStatus::Blocked` (a decision, not a failure); a plain failure stays `Failed`.
-    #[test]
-    fn blocked_wire_flag_maps_to_blocked_status() {
-        use crate::scrollback::blocks::tool::HookRunStatus;
-        use xai_grok_shell::extensions::notification::{HookRunEntryDto, HookRunStatusDto};
-
-        let mut app = make_app_with_agent("sess-blocked");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-1".into());
-        }
-
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_with_runs(
-                "sess-blocked",
-                "stop",
-                Some("pid-1"),
-                false,
-                vec![
-                    HookRunEntryDto {
-                        name: "gate".into(),
-                        status: HookRunStatusDto::Failed {
-                            error: "blocked stop: run the tests".into(),
-                            elapsed_ms: 7,
-                            blocked: true,
-                        },
-                        output: None,
-                    },
-                    HookRunEntryDto {
-                        name: "broken".into(),
-                        status: HookRunStatusDto::Failed {
-                            error: "exit code 1".into(),
-                            elapsed_ms: 3,
-                            blocked: false,
-                        },
-                        output: None,
-                    },
-                ],
-            ),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let pending = agent
-            .pending_stop_hooks
-            .as_ref()
-            .expect("stop hooks must be stashed for the marker");
-        let runs = &pending.groups[0].1;
-        assert!(
-            matches!(&runs[0].status, HookRunStatus::Blocked { detail, .. }
-                if detail == "blocked stop: run the tests"),
-            "blocked: true must map to Blocked, got {:?}",
-            runs[0].status
-        );
-        assert!(
-            matches!(&runs[1].status, HookRunStatus::Failed { .. }),
-            "blocked: false must stay Failed, got {:?}",
-            runs[1].status
-        );
-    }
-
-    #[test]
-    fn foreign_turn_stop_hooks_never_stash_under_running_turn() {
-        // A delayed batch from an ended turn (pid-old) lands while a later turn (pid-new) runs: a queued-prompt drain
-        // It renders standalone, not on pid-new's marker
-        let mut app = make_app_with_agent("sess-foreign");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-new".into());
-        }
-
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt("sess-foreign", "stop", Some("pid-old"), false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(
-            agent.pending_stop_hooks.is_none(),
-            "a foreign turn's batch must not stash under the running turn"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-
-        // The running turn's own batch (matching wire pid) still stashes.
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt("sess-foreign", "stop", Some("pid-new"), false),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let pending = agent
-            .pending_stop_hooks
-            .as_ref()
-            .expect("own-turn batch stashes");
-        assert_eq!(pending.prompt_id.as_deref(), Some("pid-new"));
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "own-turn batch must not add a standalone block"
-        );
-    }
-
-    #[test]
-    fn foreign_stop_hooks_refused_at_idle_tail_marker() {
-        // The delayed foreign batch lands after the later turn also ended: no turn is running, so only the marker's pid stamp keeps the batch off it
-        // A fresh event name proves the refusal is the pid check, not the same-name dedup
-        let mut app = make_app_with_agent("sess-idle-foreign");
-        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
-        let _ = handle(
-            make_agent_chunk_message_with_prompt("sess-idle-foreign", "chunk", "pid-new", false),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-idle-foreign", "pid-new", "end_turn", false),
-            &mut app,
-        );
-
-        // The marker's own batch (matching pid) merges…
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt(
-                "sess-idle-foreign",
-                "stop",
-                Some("pid-new"),
-                false,
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(1),
-            "the marker's own batch (matching pid) merges"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-
-        // …a foreign-pid batch is refused even with a fresh event name.
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt(
-                "sess-idle-foreign",
-                "stop_failure",
-                Some("pid-old"),
-                false,
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(1),
-            "a foreign-pid batch must not merge into another turn's marker"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-    }
-
-    #[test]
-    fn stop_cancelled_hooks_fold_into_the_cancelled_marker() {
-        // The report is dispatched off the command loop, so it races the terminal in both directions
-        // The terminal first folds onto an existing marker, the batch first stashes
-        for terminal_first in [true, false] {
-            let mut app = make_app_with_agent("sess-cancelled-hooks");
-            app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
-            let _ = handle(
-                make_agent_chunk_message_with_prompt(
-                    "sess-cancelled-hooks",
-                    "chunk",
-                    "pid-c",
-                    false,
-                ),
-                &mut app,
-            );
-            let terminal =
-                xai_turn_completed_notif("sess-cancelled-hooks", "pid-c", "cancelled", false);
-            let batch = xai_hook_execution_notif_for_prompt(
-                "sess-cancelled-hooks",
-                "stop_cancelled",
-                Some("pid-c"),
-                false,
-            );
-            for notif in if terminal_first {
-                [&terminal, &batch]
-            } else {
-                [&batch, &terminal]
-            } {
-                let _ = handle_ext_notification(notif, &mut app);
-            }
-
-            let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                last_marker_stop_hook_groups(&agent.scrollback),
-                Some(1),
-                "the cancelled turn's hook batch must render inside its marker \
-                 (terminal_first={terminal_first})"
-            );
-            assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-        }
-    }
-
-    #[test]
-    fn stamped_stop_hooks_merge_past_interleaved_tail_block() {
-        // Viewer/race order with a block (compaction, recap, …) landing between the marker and the batch
-        // An exact pid match still merges into the marker instead of degrading to the standalone block
-        let mut app = make_app_with_agent("sess-interleaved");
-        app.agents.get_mut(&AgentId(0)).unwrap().attached_as_viewer = true;
-        let _ = handle(
-            make_agent_chunk_message_with_prompt("sess-interleaved", "chunk", "pid-new", false),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &xai_turn_completed_notif("sess-interleaved", "pid-new", "end_turn", false),
-            &mut app,
-        );
-        app.agents
-            .get_mut(&AgentId(0))
-            .unwrap()
-            .scrollback
-            .push_block(RenderBlock::session_event(
-                crate::scrollback::blocks::SessionEvent::CompactionCompleted {
-                    tokens_before: Some(100),
-                    tokens_after: 10,
-                    elapsed_ms: Some(5),
-                },
-            ));
-
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt(
-                "sess-interleaved",
-                "stop",
-                Some("pid-new"),
-                false,
-            ),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            last_marker_stop_hook_groups(&agent.scrollback),
-            Some(1),
-            "the stamped batch merges into its marker across the interleaved block"
-        );
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 0);
-    }
-
-    #[test]
-    fn same_name_stash_repeat_goes_standalone() {
-        // A second batch with an already-stashed event name (a session-end `stop` landing mid-turn) renders standalone
-        // It must not duplicate the marker's `stop` group
-        let mut app = make_app_with_agent("sess-stash-dup");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-1".into());
-        }
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-stash-dup", "stop", false),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-stash-dup", "stop", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let pending = agent
-            .pending_stop_hooks
-            .as_ref()
-            .expect("first batch stays");
-        assert_eq!(pending.groups.len(), 1, "no duplicate group in the stash");
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "the repeat renders as the standalone block"
-        );
-    }
-
-    #[test]
-    fn stash_key_prefers_wire_prompt_id() {
-        // A stamped batch stashed while the client-side pid is missing keys the stash by the wire pid
-        // The marker-push stale check can then still tell whether the stash belongs to the ending turn
-        let mut app = make_app_with_agent("sess-wire-key");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = None;
-        }
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt("sess-wire-key", "stop", Some("pid-a"), false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        let pending = agent.pending_stop_hooks.as_ref().expect("batch stashes");
-        assert_eq!(pending.prompt_id.as_deref(), Some("pid-a"));
-    }
-
-    #[test]
-    fn session_end_stop_hooks_without_live_turn_stay_standalone() {
-        // The session-end Stop batch fires with no turn running and no fresh marker in the tail: legacy standalone block
-        let mut app = make_app_with_agent("sess-end");
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-end", "stop", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-        assert!(agent.pending_stop_hooks.is_none());
-    }
-
-    #[test]
-    fn non_stop_lifecycle_hooks_keep_standalone_block() {
-        // session_start and the other hook events are untouched by the stop-hook inlining
-        let mut app = make_app_with_agent("sess-ls");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-1".into());
-        }
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif("sess-ls", "session_start", false),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 1);
-        assert!(agent.pending_stop_hooks.is_none());
-    }
-
-    #[test]
     fn between_turns_completion_pushes_chip_only() {
         let mut app = make_app_with_agent("sess-chip-only");
         seed_two_bg_tasks(&mut app, "sess-chip-only");
-        assert!(app.agents[&AgentId(0)].session.state.is_idle());
-        assert_eq!(app.agents[&AgentId(0)].watchers().commands, 2);
+        assert!(app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).session.state.is_idle());
+        assert_eq!(app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).watchers().commands, 2);
 
         let _ = handle_ext_notification(
             &make_task_completed_notif("sess-chip-only", "task-1", "sleep 98", Some(0)),
@@ -1636,7 +1184,7 @@
             &mut app,
         );
         assert!(
-            work_status_lines(&app.agents[&AgentId(0)].scrollback).is_empty(),
+            work_status_lines(&app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback).is_empty(),
             "a completion inside an active turn pushes its chip only"
         );
     }
@@ -1697,7 +1245,7 @@
             &make_task_backgrounded_notif("child-1", "tc-c2", "task-c2", "sleep 98"),
             &mut app,
         );
-        assert!(app.agents[&AgentId(0)].session.state.is_idle());
+        assert!(app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).session.state.is_idle());
 
         let _ = handle_ext_notification(
             &make_task_completed_notif("child-1", "task-c1", "sleep 97", Some(0)),
@@ -1725,13 +1273,12 @@
             &mut app,
         );
         assert!(
-            work_status_lines(&app.agents[&AgentId(0)].scrollback).is_empty(),
+            work_status_lines(&app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback).is_empty(),
             "nested subagent traffic must not spawn root status lines"
         );
     }
 
     /// The core reattach-finalization: a `TurnCompleted` seen during a load's replay window records its prompt id.
-    /// (The running turn isn't adopted yet.)
     /// The post-replay `SessionLoaded` adoption then SKIPS that same id.
     /// A viewer that re-attached after the turn ended does not re-strand on "Waiting…".
     #[test]
@@ -1752,7 +1299,7 @@
             "a replayed terminal records adoption state, not a redraw"
         );
         assert!(
-            app.agents[&id].replayed_terminal_prompts.contains("p-run"),
+            app.agents.get(&id).unwrap_or_else(|| panic!("missing map entry")).replayed_terminal_prompts.contains("p-run"),
             "a replayed TurnCompleted must record its prompt id"
         );
 
@@ -1761,16 +1308,16 @@
                 agent_id: id,
                 session_id: acp::SessionId::new("sess-1"),
                 models: None,
+                modes: None,
                 code_restored: false,
                 restore_summary: None,
                 restore_degree: None,
                 running_prompt_id: Some("p-run".to_string()),
-                scheduler_background_loops: None,
             }),
             &mut app,
         );
 
-        let agent = &app.agents[&id];
+        let agent = &app.agents.get(&id).unwrap_or_else(|| panic!("missing map entry"));
         assert!(
             agent.session.current_prompt_id.is_none(),
             "a terminal-in-replay prompt must NOT be adopted on load"
@@ -1781,11 +1328,9 @@
         );
     }
 
-    /// Regression pin for a BACKGROUND-tab driver (`is_active == false`).
     /// Arming the lost-RPC reconcile from a live `TurnCompleted` must STILL report a change.
     /// Otherwise `event_loop` skips `schedule_tick` and `reconcile_overdue_turn_ends` never fires, stranding the turn on "Waiting…".
     /// The reconcile-arm return must NOT be gated on `is_active`.
-    /// (This test fails if the live arm routes the arm through `changed && is_active`.)
     #[test]
     fn background_driver_live_turn_completed_arms_reconcile_and_reports_change() {
         let mut app = make_app_with_agent("sess-bg");
@@ -1837,7 +1382,7 @@
             &mut app,
         );
         assert!(
-            app.agents[&id]
+            app.agents.get(&id).unwrap_or_else(|| panic!("missing map entry"))
                 .replayed_terminal_prompts
                 .contains("p-first")
         );
@@ -1851,10 +1396,10 @@
                 attempts: 1,
                 confirmed: false,
                 cancel_subagents: true,
-                trigger: crate::app::actions::CancelTrigger::Esc,
+                trigger: crate::app::actions::CancelTrigger::DashboardStop,
             });
         app.agents.get_mut(&id).unwrap().begin_session_reload(1);
-        let agent = &app.agents[&id];
+        let agent = &app.agents.get(&id).unwrap_or_else(|| panic!("missing map entry"));
         assert!(
             agent.replayed_terminal_prompts.is_empty(),
             "the second load must not inherit the first load's terminal set"
@@ -1870,78 +1415,6 @@
         assert!(agent.session.loading_replay);
     }
 
-    #[test]
-    fn wake_stop_hooks_render_standalone_at_arrival() {
-        // Never stashed: a stash keyed to a wake pid could wait for a marker that never comes.
-        let mut app = make_app_with_agent("sess-wake-idle");
-
-        // Hook beats the wake terminal.
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt(
-                "sess-wake-idle",
-                "stop",
-                Some("notifications-019f-abc"),
-                false,
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "a wake stop batch renders standalone at arrival"
-        );
-        assert!(agent.pending_stop_hooks.is_none(), "never stashed");
-
-        // Hook trails the wake terminal: same standalone shape
-        let _ = handle_ext_notification(
-            &xai_wake_turn_completed_notif("sess-wake-idle", "task-completed-bg1", None),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt(
-                "sess-wake-idle",
-                "stop",
-                Some("task-completed-bg1"),
-                false,
-            ),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 2);
-        assert!(agent.pending_stop_hooks.is_none());
-    }
-
-    #[test]
-    fn wake_stop_hooks_never_stash_under_local_turn() {
-        let mut app = make_app_with_agent("sess-wake-local");
-        {
-            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-            agent.session.start_turn(&mut agent.scrollback);
-            agent.session.current_prompt_id = Some("pid-main".into());
-        }
-
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt(
-                "sess-wake-local",
-                "stop",
-                Some("task-completed-bg1"),
-                false,
-            ),
-            &mut app,
-        );
-
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(
-            count_lifecycle_blocks(&agent.scrollback),
-            1,
-            "the wake batch renders standalone under the running local turn"
-        );
-        assert!(
-            agent.pending_stop_hooks.is_none(),
-            "it must not stash onto the running local turn"
-        );
-    }
 
     fn begin_replay(app: &mut AppView) {
         app.agents
@@ -2013,8 +1486,38 @@
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(matches!(
             last_session_event(&agent.scrollback),
-            Some(SessionEvent::TurnCancelled { .. })
+            Some(SessionEvent::TurnCancelled {
+                cause: crate::scrollback::blocks::CancelledBy::Unspecified,
+                ..
+            })
         ));
+    }
+
+    #[test]
+    fn replay_session_close_names_session_closed() {
+        let mut app = make_app_with_agent("sess-1");
+        begin_replay(&mut app);
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-1",
+                "p1",
+                "cancelled",
+                Some(800),
+                None,
+                serde_json::json!({ "cancelTrigger": "session_close" }),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        match last_session_event(&agent.scrollback) {
+            Some(ev @ SessionEvent::TurnCancelled { .. }) => {
+                assert_eq!(
+                    ev.message(),
+                    "Turn cancelled because the session closed in 0.8s."
+                );
+            }
+            other => panic!("expected named session-close cancel, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2098,7 +1601,7 @@
             );
         }
         begin_replay(&mut app);
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-1",
@@ -2119,7 +1622,7 @@
     fn replay_rate_limit_records_pid_no_marker() {
         let mut app = make_app_with_agent("sess-1");
         begin_replay(&mut app);
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-1",
@@ -2145,7 +1648,7 @@
             make_replay_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
             &mut app,
         );
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-wake",
@@ -2174,7 +1677,7 @@
     fn replay_silent_rate_limited_wake_stays_markerless() {
         let mut app = make_app_with_agent("sess-wake");
         begin_replay(&mut app);
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "rate_limit", true),
             &mut app,
@@ -2189,7 +1692,7 @@
     fn replay_send_now_records_pid_no_marker() {
         let mut app = make_app_with_agent("sess-1");
         begin_replay(&mut app);
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-1",
@@ -2289,7 +1792,7 @@
     fn replay_silent_wake_records_pid_no_marker() {
         let mut app = make_app_with_agent("sess-wake");
         begin_replay(&mut app);
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_notif("sess-wake", "task-completed-bg1", "end_turn", true),
             &mut app,
@@ -2300,43 +1803,11 @@
     }
 
     #[test]
-    fn replay_stop_hooks_stay_standalone() {
-        let mut app = make_app_with_agent("sess-1");
-        begin_replay(&mut app);
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt("sess-1", "stop", Some("p1"), true),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &xai_turn_completed_replay(
-                "sess-1",
-                "p1",
-                "end_turn",
-                Some(10),
-                None,
-                serde_json::json!({}),
-            ),
-            &mut app,
-        );
-        let _ = handle_ext_notification(
-            &xai_hook_execution_notif_for_prompt("sess-1", "stop", Some("p1"), true),
-            &mut app,
-        );
-        let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert_eq!(count_lifecycle_blocks(&agent.scrollback), 2);
-        assert!(agent.pending_stop_hooks.is_none());
-        match last_session_event(&agent.scrollback) {
-            Some(SessionEvent::TurnCompleted { .. }) => {}
-            other => panic!("expected completed marker, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn replay_wake_suppressed_tool_only_records_pid_no_marker() {
         let mut app = make_app_with_agent("sess-wake");
         begin_replay(&mut app);
         send_replay_suppressed_tool_call(&mut app, "sess-wake", "task-completed-bg1");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-wake",
@@ -2358,10 +1829,41 @@
     }
 
     #[test]
+    fn replay_chatty_errored_wake_records_pid_no_marker() {
+        // Visible output earns a replayed wake a "Worked for"; an errored one closes silently like live
+        let mut app = make_app_with_agent("sess-wake");
+        begin_replay(&mut app);
+        let _ = handle(
+            make_replay_chunk_with_turn_start("sess-wake", "task-completed-bg1", 5_000),
+            &mut app,
+        );
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
+        let _ = handle_ext_notification(
+            &xai_turn_completed_replay(
+                "sess-wake",
+                "task-completed-bg1",
+                "error",
+                Some(100),
+                Some("[unknown] Premature close"),
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        let agent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(agent.replayed_terminal_prompts.contains("task-completed-bg1"));
+        assert!(agent.replayed_visible_prompts.contains("task-completed-bg1"));
+        assert_eq!(agent.scrollback.len(), len_before);
+        assert_eq!(
+            agent.failed_wake_marker_for.as_deref(),
+            Some("task-completed-bg1")
+        );
+    }
+
+    #[test]
     fn replay_goal_summary_error_stays_markerless() {
         let mut app = make_app_with_agent("sess-1");
         begin_replay(&mut app);
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-1",
@@ -2383,7 +1885,7 @@
         let mut app = make_app_with_agent("sess-1");
         begin_replay(&mut app);
         send_replay_bash_tool_call(&mut app, "sess-1", "p-bash");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-1",
@@ -2410,7 +1912,7 @@
         let mut app = make_app_with_agent("sess-1");
         begin_replay(&mut app);
         send_replay_bash_tool_call(&mut app, "sess-1", "p-bash");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-1",
@@ -2441,7 +1943,7 @@
         let mut app = make_app_with_agent("sess-1");
         begin_replay(&mut app);
         send_replay_bash_tool_call(&mut app, "sess-1", "p-bash");
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-1",
@@ -2471,7 +1973,7 @@
     fn replay_empty_prompt_id_records_no_marker() {
         let mut app = make_app_with_agent("sess-1");
         begin_replay(&mut app);
-        let len_before = app.agents[&AgentId(0)].scrollback.len();
+        let len_before = app.agents.get(&AgentId(0)).unwrap_or_else(|| panic!("missing map entry")).scrollback.len();
         let _ = handle_ext_notification(
             &xai_turn_completed_replay(
                 "sess-1",
@@ -2569,4 +2071,1669 @@
             app.agents.get(&AgentId(0)).unwrap().last_turn_summary.as_deref(),
             Some("Did the next thing")
         );
+    }
+
+    fn insert_cancelling_child(app: &mut AppView, child_sid: &str) {
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::TurnCancelling;
+        assert!(child.session.current_prompt_id.is_none());
+        assert!(!child.attached_as_viewer);
+        child.pending_cancel_resend = Some(crate::app::agent_view::PendingCancelResend {
+            prompt_id: None,
+            sent_at: std::time::Instant::now() - crate::app::dispatch::CANCEL_RESEND_GRACE,
+            attempts: 1,
+            confirmed: false,
+            cancel_subagents: true,
+            trigger: crate::app::actions::CancelTrigger::CtrlC,
+        });
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+    }
+
+    fn assert_child_idle_with_turn_cancelled(app: &AppView, child_sid: &str) {
+        let child = app.agents.get(&AgentId(0)).unwrap()
+            .subagent_views
+            .get(child_sid)
+            .expect("child view");
+        assert!(
+            matches!(child.session.state, AgentState::Idle),
+            "child terminal must clear the Cancelling spinner, not leave or restart a running turn, got {:?}",
+            child.session.state
+        );
+        assert!(!child.any_cancel_pending());
+        assert!(!child.attached_as_viewer);
+        assert!(child.pending_turn_end_reconcile.is_none());
+        assert_eq!(child.scrollback.len(), 1, "one marker, not a second spinner block");
+        assert!(!child.scrollback.needs_animation());
+        match last_session_event(&child.scrollback) {
+            Some(SessionEvent::TurnCancelled { .. }) => {}
+            other => panic!("expected TurnCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_turn_completed_cancelled_clears_turn_cancelling() {
+        let mut app = make_app_with_agent("sess-parent");
+        {
+            let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+            parent.session.start_turn(&mut parent.scrollback);
+            parent.session.current_prompt_id = Some("pid-child".into());
+        }
+        let child_sid = "child-cancel";
+        insert_cancelling_child(&mut app, child_sid);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .current_prompt_id = Some("pid-child".into());
+        let parent_len = app.agents.get(&AgentId(0)).unwrap().scrollback.len();
+
+        let affected = handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-child", "cancelled", false),
+            &mut app,
+        );
+        assert!(affected, "finalizing the open child view must redraw");
+        assert_child_idle_with_turn_cancelled(&app, child_sid);
+        {
+            let parent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                matches!(parent.session.state, AgentState::TurnRunning),
+                "child TurnCompleted must not finish the parent turn"
+            );
+            assert_eq!(parent.session.current_prompt_id.as_deref(), Some("pid-child"));
+            assert!(
+                parent.pending_turn_end_reconcile.is_none(),
+                "child TurnCompleted must not arm the parent reconcile"
+            );
+            assert_eq!(parent.scrollback.len(), parent_len);
+        }
+        assert!(
+            crate::app::dispatch::reconcile_overdue_cancels(&mut app).is_none(),
+            "leaving TurnCancelling must stop the cancel resend"
+        );
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap()
+                .pending_cancel_resend
+                .is_none()
+        );
+
+        let len_before = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap().scrollback.len();
+        let affected = handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-child", "cancelled", false),
+            &mut app,
+        );
+        assert!(!affected, "a duplicate child TurnCompleted must be a no-op");
+        assert_eq!(
+            app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap().scrollback.len(),
+            len_before,
+            "a duplicate child TurnCompleted must not push another marker"
+        );
+        assert_child_idle_with_turn_cancelled(&app, child_sid);
+    }
+
+    #[test]
+    fn child_turn_completed_on_idle_view_pushes_no_marker() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-idle";
+        let child = make_agent(Some(child_sid));
+        assert!(child.session.state.is_idle());
+        assert!(child.session.current_prompt_id.is_none());
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        let affected = handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-late", "cancelled", false),
+            &mut app,
+        );
+        assert!(!affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(child.session.state.is_idle());
+        assert_eq!(child.scrollback.len(), 0);
+        assert!(last_session_event(&child.scrollback).is_none());
+    }
+
+    #[test]
+    fn child_turn_completed_during_replay_does_not_finalize() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-replay";
+        insert_cancelling_child(&mut app, child_sid);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .loading_replay = true;
+
+        let affected = handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-child", "cancelled", false),
+            &mut app,
+        );
+        assert!(!affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(
+            matches!(child.session.state, AgentState::TurnCancelling),
+            "replay must not apply a live child terminal"
+        );
+        assert_eq!(child.scrollback.len(), 0);
+    }
+
+    #[test]
+    fn child_turn_completed_does_not_tear_down_in_flight_command() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-cmd";
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::CommandRunning {
+            command: crate::app::agent::AgentCommand::Compact,
+            started_at: std::time::Instant::now(),
+        };
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        let affected = handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-child", "cancelled", false),
+            &mut app,
+        );
+        assert!(!affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(child.session.state.command_in_flight().is_some());
+        assert_eq!(child.scrollback.len(), 0);
+    }
+
+    #[test]
+    fn child_prompt_complete_cancelled_clears_turn_cancelling() {
+        let mut app = make_app_with_agent("sess-parent");
+        {
+            let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+            parent.session.start_turn(&mut parent.scrollback);
+            parent.session.current_prompt_id = Some("parent-pid".into());
+        }
+        let child_sid = "child-prompt-complete";
+        insert_cancelling_child(&mut app, child_sid);
+
+        let affected = handle_ext_notification(
+            &prompt_complete_ext_with_reason(child_sid, "cancelled", None),
+            &mut app,
+        );
+        assert!(affected, "child prompt_complete must clear TurnCancelling");
+        {
+            let parent = app.agents.get(&AgentId(0)).unwrap();
+            assert!(
+                matches!(parent.session.state, AgentState::TurnRunning),
+                "child prompt_complete must not finish or reconcile the parent turn"
+            );
+            assert_eq!(parent.session.current_prompt_id.as_deref(), Some("parent-pid"));
+            assert!(parent.pending_turn_end_reconcile.is_none());
+        }
+        assert_child_idle_with_turn_cancelled(&app, child_sid);
+        assert!(crate::app::dispatch::reconcile_overdue_cancels(&mut app).is_none());
+
+        let len_before = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap().scrollback.len();
+        let affected = handle_ext_notification(
+            &prompt_complete_ext_with_reason(child_sid, "cancelled", None),
+            &mut app,
+        );
+        assert!(!affected);
+        assert_eq!(
+            app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap().scrollback.len(),
+            len_before
+        );
+    }
+
+    fn live_child_turn_completed(
+        session_id: &str,
+        prompt_id: &str,
+        stop_reason: &str,
+        elapsed_ms: Option<u64>,
+        agent_result: Option<&str>,
+        error_kind: Option<&str>,
+        extra_meta: serde_json::Value,
+    ) -> acp::ExtNotification {
+        let mut meta = serde_json::json!({ "isReplay": false });
+        if let Some(meta_obj) = meta.as_object_mut()
+            && let Some(extra) = extra_meta.as_object()
+        {
+            for (k, v) in extra {
+                meta_obj.insert(k.clone(), v.clone());
+            }
+        }
+        let payload = SessionNotification {
+            session_id: acp::SessionId::new(session_id),
+            update: XaiSessionUpdate::TurnCompleted {
+                prompt_id: prompt_id.into(),
+                stop_reason: stop_reason.into(),
+                agent_result: agent_result.map(str::to_string),
+                error_kind: error_kind.map(str::to_string),
+                usage: None,
+                elapsed_ms,
+            },
+            meta: Some(meta),
+        };
+        acp::ExtNotification::new(
+            "x.ai/session/update",
+            std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+        )
+    }
+
+    fn start_parent_turn(app: &mut AppView, prompt_id: &str) {
+        let parent = app.agents.get_mut(&AgentId(0)).unwrap();
+        parent.session.start_turn(&mut parent.scrollback);
+        parent.session.current_prompt_id = Some(prompt_id.into());
+    }
+
+    fn assert_parent_turn_untouched(app: &AppView, prompt_id: &str) {
+        let parent = app.agents.get(&AgentId(0)).unwrap();
+        assert!(
+            matches!(parent.session.state, AgentState::TurnRunning),
+            "child terminal must not finish the parent turn, got {:?}",
+            parent.session.state
+        );
+        assert_eq!(parent.session.current_prompt_id.as_deref(), Some(prompt_id));
+        assert!(parent.pending_turn_end_reconcile.is_none());
+    }
+
+    #[test]
+    fn child_turn_completed_end_turn_from_turn_running() {
+        let mut app = make_app_with_agent("sess-parent");
+        start_parent_turn(&mut app, "parent-pid");
+        let child_sid = "child-end";
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::TurnRunning;
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        let affected = handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-end", "end_turn", false),
+            &mut app,
+        );
+        assert!(affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(child.session.state.is_idle());
+        assert!(!child.attached_as_viewer);
+        assert_eq!(child.scrollback.len(), 1);
+        assert!(matches!(
+            last_session_event(&child.scrollback),
+            Some(SessionEvent::TurnCompleted { .. })
+        ));
+        assert_parent_turn_untouched(&app, "parent-pid");
+    }
+
+    #[test]
+    fn child_prompt_complete_end_turn_from_turn_running() {
+        let mut app = make_app_with_agent("sess-parent");
+        start_parent_turn(&mut app, "parent-pid");
+        let child_sid = "child-pc-end";
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::TurnRunning;
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        let affected = handle_ext_notification(
+            &prompt_complete_ext_with_reason(child_sid, "end_turn", None),
+            &mut app,
+        );
+        assert!(affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(child.session.state.is_idle());
+        assert!(matches!(
+            last_session_event(&child.scrollback),
+            Some(SessionEvent::TurnCompleted { .. })
+        ));
+        assert_parent_turn_untouched(&app, "parent-pid");
+    }
+
+    #[test]
+    fn child_turn_completed_send_now_suppresses_cancelled_marker() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-send-now";
+        insert_cancelling_child(&mut app, child_sid);
+
+        let affected = handle_ext_notification(
+            &xai_turn_completed_notif_with_cancel_trigger(
+                child_sid,
+                "pid-send-now",
+                "cancelled",
+                "send_now",
+            ),
+            &mut app,
+        );
+        assert!(affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(child.session.state.is_idle());
+        assert!(
+            last_session_event(&child.scrollback).is_none(),
+            "send_now must not push TurnCancelled, got {:?}",
+            last_session_event(&child.scrollback)
+        );
+    }
+
+    #[test]
+    fn child_turn_completed_hook_denied_does_not_requeue() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-hook";
+        insert_cancelling_child(&mut app, child_sid);
+        {
+            let child = app
+                .agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .subagent_views
+                .get_mut(child_sid)
+                .unwrap();
+            child
+                .self_originated_prompt_ids
+                .push_back("pid-hook".into());
+            child.session.in_flight_prompt = Some(InFlightPrompt {
+                text: "secret prompt".into(),
+                images: Vec::new(),
+                scrollback_entry: EntryId::new(1),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+        }
+
+        let affected = handle_ext_notification(
+            &live_child_turn_completed(
+                child_sid,
+                "pid-hook",
+                "cancelled",
+                None,
+                None,
+                None,
+                serde_json::json!({ "cancellationCategory": "HookDenied" }),
+            ),
+            &mut app,
+        );
+        assert!(affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(child.session.state.is_idle());
+        assert!(matches!(
+            last_session_event(&child.scrollback),
+            Some(SessionEvent::TurnBlockedByHook { .. })
+        ));
+        assert!(
+            child.session.pending_prompts.is_empty(),
+            "a child hook deny must not requeue in_flight_prompt"
+        );
+    }
+
+    #[test]
+    fn child_turn_completed_error_kind_renders_typed_copy() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-fail";
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::TurnRunning;
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        let affected = handle_ext_notification(
+            &xai_turn_completed_failed_with_error_kind(
+                child_sid,
+                "pid-fail",
+                "turn ended early",
+                "max_tokens_truncation",
+                false,
+            ),
+            &mut app,
+        );
+        assert!(affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(child.session.state.is_idle());
+        match last_session_event(&child.scrollback) {
+            Some(SessionEvent::TurnFailed { error, .. }) => {
+                assert_eq!(error, "Response truncated: turn ended early");
+            }
+            other => panic!("expected typed TurnFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_turn_completed_uses_wire_elapsed_when_clock_unset() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-elapsed";
+        insert_cancelling_child(&mut app, child_sid);
+
+        let affected = handle_ext_notification(
+            &live_child_turn_completed(
+                child_sid,
+                "pid-elapsed",
+                "cancelled",
+                Some(4200),
+                None,
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        assert!(affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        match last_session_event(&child.scrollback) {
+            Some(ev @ SessionEvent::TurnCancelled { elapsed: Some(d), .. }) => {
+                assert_eq!(d, std::time::Duration::from_millis(4200));
+                assert!(!ev.message().contains("0.0s"));
+            }
+            other => panic!("expected wire elapsed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_turn_completed_without_clock_does_not_render_zero() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-no-clock";
+        insert_cancelling_child(&mut app, child_sid);
+
+        let affected = handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-none", "cancelled", false),
+            &mut app,
+        );
+        assert!(affected);
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        match last_session_event(&child.scrollback) {
+            Some(ev @ SessionEvent::TurnCancelled { elapsed: None, .. }) => {
+                assert_eq!(ev.message(), "Turn cancelled.");
+                assert!(!ev.message().contains("0.0s"));
+            }
+            other => panic!("unset clock must not render 0.0s, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn child_follow_up_prompt_reenters_turn_running_and_keeps_clock() {
+        let mut app = make_app_with_agent("sess-parent");
+        start_parent_turn(&mut app, "parent-pid");
+        let child_sid = "child-follow";
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::TurnRunning;
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        assert!(handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-1", "end_turn", false),
+            &mut app,
+        ));
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(child.session.state.is_idle());
+            assert!(child.ended_child_prompt_ids.contains("pid-1"));
+        }
+
+        let _ = handle(
+            make_replay_chunk_with_turn_start(child_sid, "pid-replay", 1_000),
+            &mut app,
+        );
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(
+                child.session.state.is_idle(),
+                "a replayed chunk must not re-enter TurnRunning"
+            );
+        }
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "parent-message-msg-1", 8_000),
+            &mut app,
+        );
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(
+                matches!(child.session.state, AgentState::TurnRunning),
+                "a parent-message follow-up must re-enter TurnRunning, got {:?}",
+                child.session.state
+            );
+            assert_eq!(
+                child.session.current_prompt_id.as_deref(),
+                Some("parent-message-msg-1")
+            );
+            assert!(child.turn_started_at.is_some());
+            assert!(!child.attached_as_viewer);
+        }
+
+        let len = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap().scrollback.len();
+        assert!(!handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-1", "cancelled", false),
+            &mut app,
+        ));
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-1", 9_000),
+            &mut app,
+        );
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(matches!(child.session.state, AgentState::TurnRunning));
+            assert_eq!(
+                child.session.current_prompt_id.as_deref(),
+                Some("parent-message-msg-1")
+            );
+            assert_eq!(child.scrollback.len(), len);
+        }
+
+        assert!(handle_ext_notification(
+            &prompt_complete_ext_with_prompt_id(child_sid, "parent-message-msg-1", "cancelled"),
+            &mut app,
+        ));
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(child.session.state.is_idle());
+        match last_session_event(&child.scrollback) {
+            Some(SessionEvent::TurnCancelled { elapsed: Some(d), .. }) => {
+                assert!(
+                    d > std::time::Duration::from_secs(1),
+                    "prompt_complete must use the back-dated clock, got {d:?}"
+                );
+            }
+            other => panic!("expected back-dated TurnCancelled, got {other:?}"),
+        }
+        assert_parent_turn_untouched(&app, "parent-pid");
+    }
+
+    #[test]
+    fn child_live_chunk_while_cancelling_same_id_stays_cancelling() {
+        let mut app = make_app_with_agent("sess-parent");
+        start_parent_turn(&mut app, "parent-pid");
+        let child_sid = "child-cancel-same";
+        insert_cancelling_child(&mut app, child_sid);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .current_prompt_id = Some("pid-cancel".into());
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-cancel", 3_000),
+            &mut app,
+        );
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(
+                matches!(child.session.state, AgentState::TurnCancelling),
+                "a live chunk of the cancelling prompt must stay TurnCancelling, got {:?}",
+                child.session.state
+            );
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-cancel"));
+            assert!(child.turn_started_at.is_some());
+            assert!(!child.attached_as_viewer);
+            assert!(child.any_cancel_pending());
+            assert!(child.pending_cancel_resend.is_some());
+        }
+        assert!(
+            crate::app::dispatch::reconcile_overdue_cancels(&mut app).is_some(),
+            "staying TurnCancelling must keep the cancel resend"
+        );
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap()
+                .pending_cancel_resend
+                .is_some()
+        );
+        assert_parent_turn_untouched(&app, "parent-pid");
+    }
+
+    #[test]
+    fn child_live_chunk_while_cancelling_without_prompt_id_stays_cancelling() {
+        let mut app = make_app_with_agent("sess-parent");
+        start_parent_turn(&mut app, "parent-pid");
+        let child_sid = "child-cancel-none";
+        insert_cancelling_child(&mut app, child_sid);
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap()
+                .session
+                .current_prompt_id
+                .is_none()
+        );
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-first", 3_000),
+            &mut app,
+        );
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(
+                matches!(child.session.state, AgentState::TurnCancelling),
+                "adopting the first chunk's id must not leave TurnCancelling, got {:?}",
+                child.session.state
+            );
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-first"));
+            assert!(child.turn_started_at.is_some());
+            assert!(!child.attached_as_viewer);
+            assert!(child.any_cancel_pending());
+            assert!(child.pending_cancel_resend.is_some());
+        }
+        assert!(
+            crate::app::dispatch::reconcile_overdue_cancels(&mut app).is_some(),
+            "staying TurnCancelling must keep the cancel resend"
+        );
+        assert!(
+            app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap()
+                .pending_cancel_resend
+                .is_some()
+        );
+        assert_parent_turn_untouched(&app, "parent-pid");
+    }
+
+    #[test]
+    fn child_live_chunk_of_different_prompt_replaces_cancelling_turn() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-cancel-replace";
+        insert_cancelling_child(&mut app, child_sid);
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut(child_sid)
+            .unwrap()
+            .session
+            .current_prompt_id = Some("pid-old".into());
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-new", 2_000),
+            &mut app,
+        );
+        let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+        assert!(
+            matches!(child.session.state, AgentState::TurnRunning),
+            "a different not-yet-ended prompt must replace TurnCancelling, got {:?}",
+            child.session.state
+        );
+        assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-new"));
+        assert!(!child.attached_as_viewer);
+        assert!(
+            child.superseded_child_prompt_ids.contains("pid-old"),
+            "the id left behind must not be adoptable again"
+        );
+        assert!(
+            !child.ended_child_prompt_ids.contains("pid-old"),
+            "leaving an id is not the same as its terminal having marked"
+        );
+    }
+
+    #[test]
+    fn child_old_chunk_after_new_prompt_cannot_steal_current_prompt_id() {
+        let mut app = make_app_with_agent("sess-parent");
+        start_parent_turn(&mut app, "parent-pid");
+        let child_sid = "child-steal";
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::TurnRunning;
+        child.session.current_prompt_id = Some("pid-old".into());
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-new", 2_000),
+            &mut app,
+        );
+        let started = {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(matches!(child.session.state, AgentState::TurnRunning));
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-new"));
+            assert!(child.superseded_child_prompt_ids.contains("pid-old"));
+            assert!(!child.ended_child_prompt_ids.contains("pid-old"));
+            child.turn_started_at
+        };
+        let len = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap().scrollback.len();
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-old", 9_000),
+            &mut app,
+        );
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(
+                matches!(child.session.state, AgentState::TurnRunning),
+                "the old chunk must not finish or replace the live turn, got {:?}",
+                child.session.state
+            );
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-new"));
+            assert_eq!(child.turn_started_at, started);
+            assert_eq!(child.scrollback.len(), len);
+            assert!(!child.attached_as_viewer);
+        }
+
+        let affected = handle_ext_notification(
+            &live_child_turn_completed(
+                child_sid,
+                "pid-old",
+                "end_turn",
+                Some(50),
+                None,
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        assert!(affected, "the old terminal must still push its marker");
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(
+                matches!(child.session.state, AgentState::TurnRunning),
+                "the old terminal must not finish the live turn, got {:?}",
+                child.session.state
+            );
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-new"));
+            assert_eq!(child.turn_started_at, started);
+            assert!(child.ended_child_prompt_ids.contains("pid-old"));
+            assert!(!child.ended_child_prompt_ids.contains("pid-new"));
+            assert!(!child.attached_as_viewer);
+            assert!(child.pending_turn_end_reconcile.is_none());
+            match last_session_event(&child.scrollback) {
+                Some(SessionEvent::TurnCompleted { elapsed: Some(d) }) => {
+                    assert_eq!(d, std::time::Duration::from_millis(50));
+                }
+                other => panic!("expected the old prompt's marker, got {other:?}"),
+            }
+        }
+        assert_parent_turn_untouched(&app, "parent-pid");
+    }
+
+    #[test]
+    fn adopting_newer_child_prompt_finishes_superseded_running_rows() {
+        let mut app = make_app_with_agent("sess-parent");
+        start_parent_turn(&mut app, "parent-pid");
+        let child_sid = "child-supersede-rows";
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::TurnRunning;
+        child.session.current_prompt_id = Some("pid-old".into());
+        seed_pending_tool(&mut child, "tc-old", "bash");
+        // Resumed transcript: the tracker never saw this row, so finish_turn alone would leave it spinning.
+        child.scrollback.push_block(RenderBlock::thinking_streaming());
+        child.scrollback.set_last_running(true);
+        assert!(matches!(
+            child.session.turn_activity(),
+            Some(crate::acp::tracker::TurnActivity::ToolRunning { .. })
+        ));
+        assert!(scrollback_has_running_tool_or_thinking(&child.scrollback));
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-new", 2_000),
+            &mut app,
+        );
+        let len = {
+            let child = child_at(&app, child_sid);
+            assert!(matches!(child.session.state, AgentState::TurnRunning));
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-new"));
+            assert!(child.superseded_child_prompt_ids.contains("pid-old"));
+            assert!(
+                !child.ended_child_prompt_ids.contains("pid-old"),
+                "leaving an id is not the same as its terminal having marked"
+            );
+            assert!(
+                !scrollback_has_running_tool_or_thinking(&child.scrollback),
+                "superseded tools and thinking must stop before the follow-up ends"
+            );
+            assert!(
+                matches!(
+                    child.session.turn_activity(),
+                    Some(crate::acp::tracker::TurnActivity::Responding)
+                ),
+                "the follow-up chunk must own activity, got {:?}",
+                child.session.turn_activity()
+            );
+            child.scrollback.len()
+        };
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-old", 9_000),
+            &mut app,
+        );
+        {
+            let child = child_at(&app, child_sid);
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-new"));
+            assert!(matches!(child.session.state, AgentState::TurnRunning));
+            assert_eq!(child.scrollback.len(), len);
+            assert!(!scrollback_has_running_tool_or_thinking(&child.scrollback));
+        }
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let _ = handle(
+            AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+                request: acp::SessionNotification::new(
+                    acp::SessionId::new(child_sid),
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(
+                            acp::ToolCallId::new(std::sync::Arc::from("tc-new")),
+                            "read".to_owned(),
+                        )
+                        .kind(acp::ToolKind::Other)
+                        .status(acp::ToolCallStatus::Pending)
+                        .content(vec![])
+                        .locations(vec![]),
+                    ),
+                )
+                .meta(
+                    serde_json::json!({
+                        "promptId": "pid-new",
+                        "isReplay": false,
+                    })
+                    .as_object()
+                    .cloned(),
+                ),
+                response_tx: tx,
+            }),
+            &mut app,
+        );
+        {
+            let child = child_at(&app, child_sid);
+            assert!(matches!(child.session.state, AgentState::TurnRunning));
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-new"));
+            assert!(
+                (0..child.scrollback.len()).any(|i| {
+                    child.scrollback.entry(i).is_some_and(|e| {
+                        e.is_running && matches!(e.block, RenderBlock::ToolCall(_))
+                    })
+                }),
+                "the follow-up's own tool must still run"
+            );
+        }
+        assert_parent_turn_untouched(&app, "parent-pid");
+    }
+
+    fn scrollback_has_running_tool_or_thinking(
+        scrollback: &crate::scrollback::state::ScrollbackState,
+    ) -> bool {
+        (0..scrollback.len()).any(|i| {
+            scrollback.entry(i).is_some_and(|e| {
+                e.is_running && matches!(e.block, RenderBlock::ToolCall(_) | RenderBlock::Thinking(_))
+            })
+        })
+    }
+
+    #[test]
+    fn child_previous_prompt_terminal_after_next_update_records_ended_id() {
+        let mut app = make_app_with_agent("sess-parent");
+        start_parent_turn(&mut app, "parent-pid");
+        let child_sid = "child-reorder";
+        let child = make_agent(Some(child_sid));
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-next", 2_000),
+            &mut app,
+        );
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(matches!(child.session.state, AgentState::TurnRunning));
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-next"));
+            assert!(child.turn_started_at.is_some());
+        }
+        let started = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap().turn_started_at;
+
+        let affected = handle_ext_notification(
+            &live_child_turn_completed(
+                child_sid,
+                "pid-prev",
+                "end_turn",
+                Some(50),
+                None,
+                None,
+                serde_json::json!({}),
+            ),
+            &mut app,
+        );
+        assert!(affected, "the previous prompt's terminal must still push its marker");
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(
+                matches!(child.session.state, AgentState::TurnRunning),
+                "a late terminal for the previous prompt must not finish the live turn, got {:?}",
+                child.session.state
+            );
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-next"));
+            assert!(child.ended_child_prompt_ids.contains("pid-prev"));
+            assert!(!child.ended_child_prompt_ids.contains("pid-next"));
+            assert_eq!(child.turn_started_at, started);
+            assert!(!child.attached_as_viewer);
+            assert!(child.pending_turn_end_reconcile.is_none());
+            match last_session_event(&child.scrollback) {
+                Some(SessionEvent::TurnCompleted { elapsed: Some(d) }) => {
+                    assert_eq!(d, std::time::Duration::from_millis(50));
+                }
+                other => panic!("expected the previous prompt's marker, got {other:?}"),
+            }
+        }
+
+        let len = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap().scrollback.len();
+        assert!(!handle_ext_notification(
+            &xai_turn_completed_notif(child_sid, "pid-prev", "end_turn", false),
+            &mut app,
+        ));
+        assert_eq!(
+            app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap().scrollback.len(),
+            len,
+            "a duplicate terminal for the ended id must not mark again"
+        );
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-prev", 9_000),
+            &mut app,
+        );
+        {
+            let child = app.agents.get(&AgentId(0)).unwrap().subagent_views.get(child_sid).unwrap();
+            assert!(matches!(child.session.state, AgentState::TurnRunning));
+            assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-next"));
+            assert_eq!(child.turn_started_at, started);
+            assert_eq!(child.scrollback.len(), len);
+        }
+        assert_parent_turn_untouched(&app, "parent-pid");
+    }
+
+    #[test]
+    fn child_turn_completed_hydrates_resumed_transcript_before_marker() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-resume-turn-end";
+            write_child_updates_jsonl(home, child_sid, &(pending_child_tool_line(child_sid) + "\n"));
+            let mut app = make_app_with_agent("sess-parent");
+            // Parent still in a turn: replay must not sweep running rows, so the child terminal has to.
+            start_parent_turn(&mut app, "parent-pid");
+            let mut spawned = test_subagent_spawned("sess-parent", child_sid);
+            let XaiSessionUpdate::SubagentSpawned { resumed_from, .. } = &mut spawned else {
+                unreachable!();
+            };
+            *resumed_from = Some("orig-child".into());
+            let _ = handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    spawned,
+                ),
+                &mut app,
+            );
+            assert_eq!(
+                child_scrollback_tool_call_count(app.agents.get(&AgentId(0)).unwrap(), child_sid),
+                0
+            );
+
+            assert!(handle_ext_notification(
+                &xai_turn_completed_notif(child_sid, "pid-resume", "end_turn", false),
+                &mut app,
+            ));
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(child_scrollback_tool_call_count(agent, child_sid), 1);
+            let child = agent.subagent_views.get(child_sid).unwrap();
+            assert!(child.session.state.is_idle());
+            let mut tool_idx = None;
+            let mut marker_idx = None;
+            for i in 0..child.scrollback.len() {
+                match child.scrollback.entry(i).map(|e| &e.block) {
+                    Some(RenderBlock::ToolCall(_)) if tool_idx.is_none() => tool_idx = Some(i),
+                    Some(RenderBlock::SessionEvent(b)) if b.event.is_turn_terminal() => {
+                        marker_idx = Some(i);
+                    }
+                    _ => {}
+                }
+            }
+            assert!(
+                tool_idx.zip(marker_idx).is_some_and(|(t, m)| t < m),
+                "inherited tool call must precede the terminal marker, tool={tool_idx:?} marker={marker_idx:?}"
+            );
+            assert!(
+                (0..child.scrollback.len())
+                    .all(|i| child.scrollback.entry(i).is_some_and(|e| !e.is_running)),
+                "a resumed turn-end must finish replayed rows the tracker never saw"
+            );
+        });
+    }
+
+    #[test]
+    fn child_prompt_complete_hydrates_resumed_transcript_before_marker() {
+        with_replay_disk_home(|home| {
+            let child_sid = "child-resume-prompt-complete";
+            write_child_updates_jsonl(home, child_sid, &(pending_child_tool_line(child_sid) + "\n"));
+            let mut app = make_app_with_agent("sess-parent");
+            start_parent_turn(&mut app, "parent-pid");
+            let mut spawned = test_subagent_spawned("sess-parent", child_sid);
+            let XaiSessionUpdate::SubagentSpawned { resumed_from, .. } = &mut spawned else {
+                unreachable!();
+            };
+            *resumed_from = Some("orig-child".into());
+            let _ = handle(
+                make_ext_session_notification_with_method(
+                    "sess-parent",
+                    "x.ai/session/update",
+                    spawned,
+                ),
+                &mut app,
+            );
+
+            assert!(handle_ext_notification(
+                &prompt_complete_ext_with_reason(child_sid, "end_turn", None),
+                &mut app,
+            ));
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            assert_eq!(
+                child_scrollback_tool_call_count(agent, child_sid),
+                1,
+                "prompt_complete must hydrate through child_view_for_live_update_mut"
+            );
+            let child = agent.subagent_views.get(child_sid).unwrap();
+            assert!(matches!(
+                last_session_event(&child.scrollback),
+                Some(SessionEvent::TurnCompleted { .. })
+            ));
+            assert!(
+                (0..child.scrollback.len())
+                    .all(|i| child.scrollback.entry(i).is_some_and(|e| !e.is_running)),
+                "prompt_complete on a resumed child must finish replayed running rows"
+            );
+        });
+    }
+
+    fn pending_child_tool_line(child_sid: &str) -> String {
+        format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","status":"pending","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn child_live_chunk_during_command_does_not_clobber_command() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-compact";
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::CommandRunning {
+            command: crate::app::agent::AgentCommand::Compact,
+            started_at: std::time::Instant::now(),
+        };
+        child.session.current_prompt_id = Some("pid-cmd".into());
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-chunk", 1_000),
+            &mut app,
+        );
+        let child = app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get(child_sid)
+            .unwrap();
+        assert!(
+            matches!(
+                child.session.state,
+                AgentState::CommandRunning {
+                    command: crate::app::agent::AgentCommand::Compact,
+                    ..
+                }
+            ),
+            "a live chunk must not replace an in-flight command, got {:?}",
+            child.session.state
+        );
+        assert_eq!(child.session.current_prompt_id.as_deref(), Some("pid-cmd"));
+    }
+
+    // Nov 2023, so a follow-up after this start is still before wall-clock now.
+    const CLOSED_TURN_START_MS: i64 = 1_700_000_000_000;
+
+    fn close_nameless_child(
+        app: &mut AppView,
+        child_sid: &str,
+        start_ms: Option<i64>,
+        prompt_id: Option<&str>,
+    ) {
+        insert_cancelling_child(app, child_sid);
+        {
+            let child = app
+                .agents
+                .get_mut(&AgentId(0))
+                .unwrap()
+                .subagent_views
+                .get_mut(child_sid)
+                .unwrap();
+            child.turn_start_ms = start_ms;
+            child.turn_start_ms_prompt = prompt_id.map(ToOwned::to_owned);
+        }
+        assert!(handle_ext_notification(
+            &prompt_complete_ext_with_reason(child_sid, "cancelled", None),
+            app,
+        ));
+        assert_child_idle_with_turn_cancelled(app, child_sid);
+    }
+
+    fn child_chunk(
+        session_id: &str,
+        prompt_id: Option<&str>,
+        turn_start_ms: i64,
+    ) -> AcpClientMessage {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let mut meta = serde_json::json!({
+            "isReplay": false,
+            "turnStartMs": turn_start_ms,
+        });
+        if let Some(pid) = prompt_id {
+            json_set(&mut meta, "promptId", serde_json::json!(pid));
+        }
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new(session_id),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new("driver chunk"),
+            ))),
+        )
+        .meta(meta.as_object().cloned());
+        AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
+            request,
+            response_tx: tx,
+        })
+    }
+
+    fn child_at<'a>(app: &'a AppView, child_sid: &str) -> &'a AgentView {
+        app.agents
+            .get(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get(child_sid)
+            .unwrap()
+    }
+
+    #[test]
+    fn late_chunk_after_unidentified_cancel_does_not_restart() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-late-noid";
+        close_nameless_child(&mut app, child_sid, Some(CLOSED_TURN_START_MS), None);
+        assert_eq!(
+            Some(CLOSED_TURN_START_MS),
+            child_at(&app, child_sid).unidentified_child_turn_closed_ms
+        );
+        let len = child_at(&app, child_sid).scrollback.len();
+
+        let _ = handle(child_chunk(child_sid, None, CLOSED_TURN_START_MS), &mut app);
+        {
+            let child = child_at(&app, child_sid);
+            assert!(
+                child.session.state.is_idle(),
+                "a chunk with the closed turn's start and no id must not re-enter TurnRunning, got {:?}",
+                child.session.state
+            );
+            assert!(child.session.current_prompt_id.is_none());
+            assert_eq!(len, child.scrollback.len());
+            assert!(!child.scrollback.needs_animation());
+        }
+
+        let follow_start = CLOSED_TURN_START_MS + 30_000;
+        let _ = handle(
+            child_chunk(child_sid, Some("parent-message-msg-9"), follow_start),
+            &mut app,
+        );
+        {
+            let child = child_at(&app, child_sid);
+            assert!(
+                matches!(child.session.state, AgentState::TurnRunning),
+                "a parent-message whose start is after the closed turn must re-enter TurnRunning, got {:?}",
+                child.session.state
+            );
+            assert_eq!(
+                Some("parent-message-msg-9"),
+                child.session.current_prompt_id.as_deref()
+            );
+            assert!(!child.ended_child_prompt_ids.contains("parent-message-msg-9"));
+            assert_eq!(Some(follow_start), child.turn_start_ms);
+            assert_eq!(
+                Some("parent-message-msg-9"),
+                child.turn_start_ms_prompt.as_deref()
+            );
+        }
+
+        let started = child_at(&app, child_sid).turn_started_at;
+        let _ = handle(child_chunk(child_sid, None, CLOSED_TURN_START_MS), &mut app);
+        let child = child_at(&app, child_sid);
+        assert!(
+            matches!(child.session.state, AgentState::TurnRunning),
+            "a later chunk of the closed start must not replace the follow-up, got {:?}",
+            child.session.state
+        );
+        assert_eq!(
+            Some("parent-message-msg-9"),
+            child.session.current_prompt_id.as_deref()
+        );
+        assert_eq!(Some(follow_start), child.turn_start_ms);
+        assert_eq!(
+            Some("parent-message-msg-9"),
+            child.turn_start_ms_prompt.as_deref()
+        );
+        assert_eq!(started, child.turn_started_at);
+        assert!(!child.ended_child_prompt_ids.contains("parent-message-msg-9"));
+    }
+
+    #[test]
+    fn child_nameless_cancel_without_start_leaves_bound_unset() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-no-start";
+        close_nameless_child(&mut app, child_sid, None, None);
+        let child = child_at(&app, child_sid);
+        assert_eq!(None, child.unidentified_child_turn_closed_ms);
+        assert_eq!(None, child.unidentified_child_turn_closed_prompt);
+    }
+
+    #[test]
+    fn child_rejected_chunk_does_not_overwrite_live_clock() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-clock";
+        close_nameless_child(
+            &mut app,
+            child_sid,
+            Some(CLOSED_TURN_START_MS),
+            Some("pid-closed"),
+        );
+        let follow_start = CLOSED_TURN_START_MS + 30_000;
+        let _ = handle(
+            child_chunk(child_sid, Some("parent-message-msg-1"), follow_start),
+            &mut app,
+        );
+        let (start_ms, start_prompt, started) = {
+            let child = child_at(&app, child_sid);
+            assert!(matches!(child.session.state, AgentState::TurnRunning));
+            (
+                child.turn_start_ms,
+                child.turn_start_ms_prompt.clone(),
+                child.turn_started_at,
+            )
+        };
+        assert_eq!(Some(follow_start), start_ms);
+        assert_eq!(Some("parent-message-msg-1"), start_prompt.as_deref());
+
+        let _ = handle(
+            child_chunk(child_sid, Some("pid-closed"), CLOSED_TURN_START_MS),
+            &mut app,
+        );
+        {
+            let child = child_at(&app, child_sid);
+            assert!(
+                matches!(child.session.state, AgentState::TurnRunning),
+                "the closed id must not replace the live turn, got {:?}",
+                child.session.state
+            );
+            assert_eq!(
+                Some("parent-message-msg-1"),
+                child.session.current_prompt_id.as_deref()
+            );
+            assert_eq!(start_ms, child.turn_start_ms);
+            assert_eq!(start_prompt, child.turn_start_ms_prompt);
+            assert_eq!(started, child.turn_started_at);
+            assert!(child.ended_child_prompt_ids.contains("pid-closed"));
+        }
+
+        let _ = handle(
+            child_chunk(child_sid, Some("pid-closed"), follow_start + 5_000),
+            &mut app,
+        );
+        let _ = handle(child_chunk(child_sid, None, CLOSED_TURN_START_MS), &mut app);
+        let child = child_at(&app, child_sid);
+        assert_eq!(start_ms, child.turn_start_ms);
+        assert_eq!(start_prompt, child.turn_start_ms_prompt);
+        assert_eq!(started, child.turn_started_at);
+        assert_eq!(
+            Some("parent-message-msg-1"),
+            child.session.current_prompt_id.as_deref()
+        );
+    }
+
+    #[test]
+    fn child_parent_message_after_nameless_cancel_reenters() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-parent-msg";
+        close_nameless_child(
+            &mut app,
+            child_sid,
+            Some(CLOSED_TURN_START_MS),
+            Some("pid-closed"),
+        );
+        {
+            let child = child_at(&app, child_sid);
+            assert_eq!(Some(CLOSED_TURN_START_MS), child.unidentified_child_turn_closed_ms);
+            assert_eq!(None, child.turn_start_ms);
+            assert_eq!(
+                Some("pid-closed"),
+                child.unidentified_child_turn_closed_prompt.as_deref()
+            );
+        }
+
+        let follow_start = CLOSED_TURN_START_MS + 30_000;
+        assert!(follow_start < chrono::Utc::now().timestamp_millis());
+        let _ = handle(
+            child_chunk(child_sid, Some("parent-message-msg-1"), follow_start),
+            &mut app,
+        );
+        {
+            let child = child_at(&app, child_sid);
+            assert!(
+                matches!(child.session.state, AgentState::TurnRunning),
+                "a parent-message after the closed start, still before now, must re-enter TurnRunning, got {:?}",
+                child.session.state
+            );
+            assert_eq!(
+                Some("parent-message-msg-1"),
+                child.session.current_prompt_id.as_deref()
+            );
+            assert!(!child.ended_child_prompt_ids.contains("parent-message-msg-1"));
+            assert_eq!(Some(CLOSED_TURN_START_MS), child.unidentified_child_turn_closed_ms);
+        }
+
+        let early_sid = "child-before-start";
+        close_nameless_child(
+            &mut app,
+            early_sid,
+            Some(CLOSED_TURN_START_MS),
+            Some("pid-closed"),
+        );
+        let _ = handle(
+            child_chunk(
+                early_sid,
+                Some("parent-message-msg-early"),
+                CLOSED_TURN_START_MS - 30_000,
+            ),
+            &mut app,
+        );
+        let child = child_at(&app, early_sid);
+        assert!(
+            matches!(child.session.state, AgentState::TurnRunning),
+            "a different id before the closed start is a new turn, got {:?}",
+            child.session.state
+        );
+        assert_eq!(
+            Some("parent-message-msg-early"),
+            child.session.current_prompt_id.as_deref()
+        );
+        assert!(!child.ended_child_prompt_ids.contains("parent-message-msg-early"));
+    }
+
+    #[test]
+    fn child_closed_turn_start_chunk_is_dropped() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-drop-closed";
+        close_nameless_child(
+            &mut app,
+            child_sid,
+            Some(CLOSED_TURN_START_MS),
+            Some("pid-closed"),
+        );
+        let len = child_at(&app, child_sid).scrollback.len();
+
+        let _ = handle(child_chunk(child_sid, None, CLOSED_TURN_START_MS), &mut app);
+        {
+            let child = child_at(&app, child_sid);
+            assert!(
+                child.session.state.is_idle(),
+                "no id and the closed start must stay idle, got {:?}",
+                child.session.state
+            );
+            assert!(child.session.current_prompt_id.is_none());
+            assert_eq!(len, child.scrollback.len());
+        }
+
+        let _ = handle(
+            child_chunk(child_sid, Some("pid-closed"), CLOSED_TURN_START_MS),
+            &mut app,
+        );
+        {
+            let child = child_at(&app, child_sid);
+            assert!(
+                child.session.state.is_idle(),
+                "the closed id and the closed start must stay idle, got {:?}",
+                child.session.state
+            );
+            assert!(child.session.current_prompt_id.is_none());
+            assert_eq!(len, child.scrollback.len());
+            assert!(child.ended_child_prompt_ids.contains("pid-closed"));
+        }
+
+        let same_start_sid = "child-same-start-other-id";
+        close_nameless_child(
+            &mut app,
+            same_start_sid,
+            Some(CLOSED_TURN_START_MS),
+            Some("pid-closed"),
+        );
+        let _ = handle(
+            child_chunk(
+                same_start_sid,
+                Some("parent-message-msg-2"),
+                CLOSED_TURN_START_MS,
+            ),
+            &mut app,
+        );
+        let child = child_at(&app, same_start_sid);
+        assert!(
+            matches!(child.session.state, AgentState::TurnRunning),
+            "a different id sharing the closed start is a new turn, got {:?}",
+            child.session.state
+        );
+        assert!(!child.ended_child_prompt_ids.contains("parent-message-msg-2"));
+        assert_eq!(
+            Some("parent-message-msg-2"),
+            child.session.current_prompt_id.as_deref()
+        );
+    }
+
+    #[test]
+    fn nameless_prompt_complete_finishes_cancelling_turn_after_id_adopted() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-adopt-then-pc";
+        insert_cancelling_child(&mut app, child_sid);
+        let _ = handle(
+            make_viewer_chunk_with_turn_start(child_sid, "pid-adopted", 1_000),
+            &mut app,
+        );
+        {
+            let child = child_at(&app, child_sid);
+            assert!(matches!(child.session.state, AgentState::TurnCancelling));
+            assert_eq!(Some("pid-adopted"), child.session.current_prompt_id.as_deref());
+        }
+        assert!(handle_ext_notification(
+            &prompt_complete_ext_with_reason(child_sid, "cancelled", None),
+            &mut app,
+        ));
+        let child = child_at(&app, child_sid);
+        assert!(
+            matches!(child.session.state, AgentState::Idle),
+            "a nameless prompt_complete must finish the cancelling turn after its id was adopted, got {:?}",
+            child.session.state
+        );
+        assert!(child.ended_child_prompt_ids.contains("pid-adopted"));
+        assert!(!child.any_cancel_pending());
+        match last_session_event(&child.scrollback) {
+            Some(SessionEvent::TurnCancelled { .. }) => {}
+            other => panic!("expected TurnCancelled, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn follow_up_end_keeps_nameless_close_bound() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-keep-bound";
+        close_nameless_child(
+            &mut app,
+            child_sid,
+            Some(CLOSED_TURN_START_MS),
+            Some("pid-closed"),
+        );
+        let _ = handle(
+            child_chunk(
+                child_sid,
+                Some("parent-message-msg-9"),
+                CLOSED_TURN_START_MS + 30_000,
+            ),
+            &mut app,
+        );
+        assert!(handle_ext_notification(
+            &prompt_complete_ext_with_prompt_id(child_sid, "parent-message-msg-9", "end_turn"),
+            &mut app,
+        ));
+        {
+            let child = child_at(&app, child_sid);
+            assert!(child.session.state.is_idle());
+            assert_eq!(Some(CLOSED_TURN_START_MS), child.unidentified_child_turn_closed_ms);
+            assert_eq!(
+                Some("pid-closed"),
+                child.unidentified_child_turn_closed_prompt.as_deref()
+            );
+        }
+        let _ = handle(
+            child_chunk(child_sid, Some("pid-closed"), CLOSED_TURN_START_MS),
+            &mut app,
+        );
+        let child = child_at(&app, child_sid);
+        assert!(
+            child.session.state.is_idle(),
+            "a late chunk of the closed turn must not restart after the follow-up ends, got {:?}",
+            child.session.state
+        );
+        assert!(child.ended_child_prompt_ids.contains("pid-closed"));
+    }
+
+    #[test]
+    fn child_turn_end_clears_parent_activity_label() {
+        fn label_of(app: &AppView, child_sid: &str) -> Option<String> {
+            app.agents
+                .get(&AgentId(0))
+                .unwrap()
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .attempt
+                .activity_label
+                .clone()
+        }
+        fn block_label(app: &AppView, child_sid: &str) -> Option<String> {
+            let agent = app.agents.get(&AgentId(0)).unwrap();
+            let entry_id = agent
+                .subagent_sessions
+                .get(child_sid)
+                .unwrap()
+                .attempt
+                .scrollback_entry_id
+                .unwrap();
+            let entry = agent.scrollback.get_by_id(entry_id).unwrap();
+            let crate::scrollback::block::RenderBlock::Subagent(sb) = &entry.block else {
+                panic!("expected Subagent block");
+            };
+            sb.activity_label.clone()
+        }
+
+        let mut app = make_app_with_agent("sess-parent");
+        let turn_sid = "child-activity-turn";
+        let _ = handle(
+            make_ext_session_notification(
+                "sess-parent",
+                test_subagent_spawned("sess-parent", turn_sid),
+            ),
+            &mut app,
+        );
+        let _ = handle(make_agent_chunk_with_event(turn_sid, "hi", "p-child", None), &mut app);
+        assert_eq!(Some("Responding"), label_of(&app, turn_sid).as_deref());
+        assert!(handle_ext_notification(
+            &xai_turn_completed_notif(turn_sid, "p-child", "end_turn", false),
+            &mut app,
+        ));
+        assert!(
+            label_of(&app, turn_sid).is_none(),
+            "TurnCompleted must clear the tasks-pane label"
+        );
+        assert!(
+            block_label(&app, turn_sid).is_none(),
+            "TurnCompleted must clear the collapsed block label"
+        );
+
+        let pc_sid = "child-activity-pc";
+        let _ = handle(
+            make_ext_session_notification("sess-parent", test_subagent_spawned("sess-parent", pc_sid)),
+            &mut app,
+        );
+        let _ = handle(make_agent_chunk_with_event(pc_sid, "hi", "p-pc", None), &mut app);
+        assert_eq!(Some("Responding"), label_of(&app, pc_sid).as_deref());
+        assert!(handle_ext_notification(
+            &prompt_complete_ext_with_prompt_id(pc_sid, "p-pc", "end_turn"),
+            &mut app,
+        ));
+        assert!(
+            label_of(&app, pc_sid).is_none(),
+            "prompt_complete must clear the tasks-pane label"
+        );
+        assert!(
+            block_label(&app, pc_sid).is_none(),
+            "prompt_complete must clear the collapsed block label"
+        );
+    }
+
+    #[test]
+    fn prompt_complete_without_id_does_not_finish_named_follow_up() {
+        let mut app = make_app_with_agent("sess-parent");
+        let child_sid = "child-stale-pc";
+        let mut child = make_agent(Some(child_sid));
+        child.session.state = AgentState::TurnRunning;
+        child.session.current_prompt_id = Some("parent-message-msg-2".into());
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+        let len = app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get(child_sid)
+            .unwrap()
+            .scrollback
+            .len();
+
+        assert!(!handle_ext_notification(
+            &prompt_complete_ext(child_sid),
+            &mut app,
+        ));
+        let child = app
+            .agents
+            .get(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get(child_sid)
+            .unwrap();
+        assert!(
+            matches!(child.session.state, AgentState::TurnRunning),
+            "a nameless prompt_complete must not finish a turn that already has an id, got {:?}",
+            child.session.state
+        );
+        assert_eq!(
+            child.session.current_prompt_id.as_deref(),
+            Some("parent-message-msg-2")
+        );
+        assert_eq!(child.scrollback.len(), len);
     }

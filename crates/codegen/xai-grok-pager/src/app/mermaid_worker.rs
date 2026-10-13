@@ -22,7 +22,7 @@
 //!    The subcommand is intercepted at the very top of `main`, before any TUI/agent/runtime init.
 //!    The child reads the source from stdin and the theme/width/height from argv.
 //!    It renders the source to SVG then PNG, writes the PNG atomically to the out-path, and exits 0; any error exits non-zero.
-//! 2. The worker spawns that child with a wall-clock budget ([`RENDER_TIMEOUT`]) via [`xai_grok_mermaid::run_with_timeout`].
+//! 2. The worker spawns that child with a wall-clock budget ([`timeout_for`]) via [`xai_grok_mermaid::run_with_timeout`].
 //!    On timeout it **kills and reaps** the child (a real process kill, not a soft signal).
 //!    A child panic (abort), non-zero exit, or timeout is contained to the child and becomes `Failed`, the existing code-block fallback.
 //!    The pager survives.
@@ -79,10 +79,21 @@ const OPEN_MIN_WIDTH_PX: u32 = 2560;
 /// Open-tier height headroom before the crate-wide megapixel/axis caps apply.
 const OPEN_MAX_HEIGHT_PX: u32 = 8192;
 
-/// Wall-clock budget per render.
+/// Wall-clock budget for a terminal-tier render.
 /// Enforced against the out-of-process child: on timeout the worker kills and reaps the child (a real process kill) and reports `Failed`.
 /// One pathological diagram thus neither stalls the worker nor leaks work.
 const RENDER_TIMEOUT: Duration = Duration::from_millis(3000);
+/// Open Image rasters at 2× / min-width 2560; a tall flowchart can take ~10s (the 3s terminal budget kills it).
+const OPEN_RENDER_TIMEOUT: Duration = Duration::from_secs(20);
+/// `show_toast` expires at ~3s; mermaid_tick re-shows this while a render is still pending.
+const RENDERING_TOAST: &str = "Rendering diagram\u{2026}";
+
+fn timeout_for(quality: MermaidRenderQuality) -> Duration {
+    match quality {
+        MermaidRenderQuality::Terminal => RENDER_TIMEOUT,
+        MermaidRenderQuality::Open => OPEN_RENDER_TIMEOUT,
+    }
+}
 
 /// Re-sweep the per-session on-disk cache after this many fresh PNG writes.
 /// A long session that keeps generating diagrams thus stays bounded between loads (complements the at-load sweep).
@@ -109,10 +120,8 @@ impl MermaidClickAction {
 }
 
 /// An on-click render the user requested whose worker result hasn't arrived yet.
-///
 /// Recorded when a click misses the disk cache and dispatches a render.
 /// The tick completes the `action` when a result for `key` arrives (mirroring the inline video `mpsc` and poll pattern).
-/// The painter also consults the keys to show the transient `rendering…` hint on the matching diagram's row.
 struct PendingMermaidAction {
     /// Cache key of the in-flight render (matched against the worker result).
     key: MermaidCacheKey,
@@ -120,14 +129,9 @@ struct PendingMermaidAction {
     action: MermaidClickAction,
 }
 
-/// A unit of work for the render worker.
-///
 /// Carries owned data so the worker thread is self-contained.
-/// The pager-local render parameters (`theme_dark`, `target_width_px`) become [`RenderParams`] inside the worker.
 /// The channel types thus stay independent of the engine crate's API.
 /// The worker coalesces queued jobs by [`key`], so a burst of identical requests renders once.
-///
-/// [`key`]: MermaidJob::key
 pub struct MermaidJob {
     /// Cache key being rendered (the coalescing key, echoed back on the result so the tick can match it to the pending action that requested it).
     pub key: MermaidCacheKey,
@@ -163,10 +167,7 @@ pub struct MermaidResult {
     pub outcome: MermaidOutcome,
 }
 
-/// How the worker turns one job's source into an on-disk PNG at `job.out_path`.
-///
 /// Returns `Ok(())` when a fresh, decodable PNG was written; `Err(reason)` with a source-free category otherwise.
-/// In production this is the out-of-process child ([`render_via_subprocess`]).
 /// The worker's own unit tests swap in an in-process renderer (a child re-exec can't work under the test harness binary).
 /// The cargo-`test` build therefore resolves [`default_render_fn`] to that.
 type RenderFn = dyn Fn(&MermaidJob, Duration) -> Result<(), &'static str> + Send + Sync;
@@ -202,11 +203,8 @@ fn default_render_fn() -> Arc<RenderFn> {
 }
 
 /// Spawn the single render worker thread and return its job/result channels.
-///
 /// One thread (not a pool) keeps the receiver lock-free, matching the "avoid locks unless necessary" guidance.
-/// The worker coalesces any queued burst by [`MermaidCacheKey`] (latest wins) before rendering.
 /// Duplicate requests for the same diagram thus never pile up.
-/// Each render runs in a short-lived child process (out-of-process crash isolation; see the module docs).
 pub fn spawn_worker() -> (Sender<MermaidJob>, Receiver<MermaidResult>) {
     let (job_tx, job_rx) = std::sync::mpsc::channel::<MermaidJob>();
     let (result_tx, result_rx) = std::sync::mpsc::channel::<MermaidResult>();
@@ -221,7 +219,8 @@ pub fn spawn_worker() -> (Sender<MermaidJob>, Receiver<MermaidResult>) {
                 // Coalesce the whole queued burst by cache key so duplicate requests for the same diagram render once
                 let pending = drain_coalesced(first, &job_rx);
                 for (_, job) in pending {
-                    let (outcome, wrote) = render_job(render.as_ref(), &job, RENDER_TIMEOUT);
+                    let (outcome, wrote) =
+                        render_job(render.as_ref(), &job, timeout_for(job.quality));
                     if wrote {
                         writes_since_sweep += 1;
                         if writes_since_sweep >= SWEEP_EVERY_N_WRITES {
@@ -262,7 +261,6 @@ fn drain_coalesced(
 }
 
 /// Whether `path` holds a valid cached diagram PNG (a disk-cache hit).
-///
 /// Refuses a symlinked final component (a model-predictable per-session path shouldn't be followed through a symlink).
 /// Requires the file to actually decode as an image, so a short/corrupt file is treated as a miss and re-rendered, mirroring prompt-image handling.
 fn read_cached_png(path: &Path) -> bool {
@@ -279,12 +277,8 @@ fn read_cached_png(path: &Path) -> bool {
 }
 
 /// Render one job's source to its `out_path` PNG in a short-lived child process.
-///
-/// Re-execs `exe` (the running pager) as `exe __mermaid-render …`.
-/// The theme/quality/width and the wall-clock deadline travel on argv, the source on stdin.
 /// On timeout the child (and its group) is killed and reaped, a real process kill, so a panic (abort) or runaway render is contained.
 /// Returns `Ok(())` only when the child exits 0 and a decodable PNG is present; otherwise a source-free failure category.
-/// Shared by the worker (production) and the end-to-end subprocess integration test.
 pub fn render_via_subprocess(
     exe: &Path,
     source: &str,
@@ -316,13 +310,8 @@ pub fn render_via_subprocess(
         .stderr(Stdio::null())
         .envs(xai_tty_utils::pager_env());
     // The child runs under an `RLIMIT_AS` cap (see `cap_child_address_space`)
-    // jemalloc (the default global allocator) pre-reserves virtual address space that scales with its arena count (default ~4×ncpus)
     // On a many-core box that reservation can approach the cap at startup and abort every render
-    // The child is short-lived and allocates from one thread
     // Pinning it to a single arena thus keeps the reservation well under the cap regardless of host core count
-    // Scoped to the child; the parent pager keeps default arenas
-    // `_RJEM_MALLOC_CONF` matches tikv-jemalloc-sys's `_rjem_` symbol prefix and `MALLOC_CONF` its unprefixed build; both are inert if unread
-    // Linux-gated like the cap; the Linux e2e lane is the runtime gate
     #[cfg(target_os = "linux")]
     {
         cmd.env("_RJEM_MALLOC_CONF", "narenas:1")
@@ -372,11 +361,7 @@ fn map_run_result(
 
 /// If this process was re-exec'd as the hidden mermaid render child, render the requested diagram and return `Some(exit_code)`.
 /// Otherwise `None` (it is a normal pager invocation).
-///
-/// Intercepted at the very top of `main`, before any TUI/agent/tokio/sentry init.
 /// The child thus stays minimal, and a panic (abort) or runaway render is contained to this short-lived process.
-/// Reads the source from stdin and the theme/width/height from argv.
-/// Renders the source to SVG then PNG, writes the PNG atomically to the out-path, and exits 0; any error exits non-zero.
 pub fn maybe_run_render_subprocess() -> Option<i32> {
     let argv: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if !is_render_subcommand(&argv) {
@@ -397,7 +382,6 @@ fn is_render_subcommand(argv: &[std::ffi::OsString]) -> bool {
 }
 
 /// Slack added to the parent's forwarded wall-clock budget for the render child's self-watchdog.
-/// The parent's kill normally fires first.
 /// The watchdog only matters when the parent died abruptly (SIGKILL, `panic = "abort"`, quit) and so cannot kill the child itself.
 /// Generous enough that a healthy render (well under the budget) never trips it.
 const CHILD_WATCHDOG_SLACK: Duration = Duration::from_secs(3);
@@ -414,23 +398,15 @@ fn child_watchdog_deadline(forwarded_budget: Duration) -> Duration {
     forwarded_budget + CHILD_WATCHDOG_SLACK
 }
 
-/// Upper bound on the render child's address space (Linux).
 /// Bounds a pathological dagre dummy-node explosion over a crafted flowchart of at most 64 KiB.
 /// It cannot spike host memory inside the wall-clock window: hitting the cap aborts on allocation failure instead of growing toward host OOM.
 /// Generous vs the real ceiling (a 32 MP pixmap is ~128 MB) so a legitimate large diagram never trips it.
-/// The cap measures *virtual* address space, which jemalloc over-reserves in proportion to its arena count.
-/// [`render_via_subprocess`] therefore pins the child to one arena, keeping this cap safe regardless of host core count.
 #[cfg(target_os = "linux")]
 const CHILD_ADDRESS_SPACE_CAP_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Install the render child's containment backstops, starting the watchdog for the `forwarded_budget` (the parent's wall-clock kill deadline).
 /// Called only from [`render_child`] (itself reached only via the real subcommand entry [`maybe_run_render_subprocess`]).
 /// The worker/child unit tests drive the smaller pieces ([`parse_render_args`], [`render_and_write`]) directly, so they never start the watchdog.
-///
-/// Backstops behind the parent's wall-clock kill:
-///  * a portable watchdog thread that hard-exits if a render outlives [`child_watchdog_deadline`]
-///    (so an abruptly-dead parent cannot leave a CPU-spinning orphan);
-///  * on Linux, an address-space cap (bounds a memory-explosion render) and a parent-death signal (the child dies with the parent immediately).
+/// (so an abruptly-dead parent cannot leave a CPU-spinning orphan);
 fn install_child_backstops(forwarded_budget: Duration) {
     #[cfg(target_os = "linux")]
     {
@@ -453,7 +429,6 @@ fn install_child_backstops(forwarded_budget: Duration) {
 /// Cap the child's address space so a memory-explosion render aborts instead of growing toward host OOM.
 /// Best-effort and only ever *lowers* the soft limit (raising the hard limit needs privilege).
 /// Linux-only: macOS over-reserves virtual address space, so an `RLIMIT_AS` this size would false-positive on a normal process.
-/// Windows has no equivalent here; both rely on the wall-clock kill plus the watchdog above.
 #[cfg(target_os = "linux")]
 fn cap_child_address_space() {
     let mut lim = libc::rlimit {
@@ -566,7 +541,6 @@ fn render_child(args: impl Iterator<Item = std::ffi::OsString>) -> Result<(), St
     // We ARE the short-lived render child: start the containment backstops before reading the untrusted source
     // The watchdog deadline derives from the forwarded parent budget
     // A runaway render or an abruptly-dead parent then can't leave a CPU-spinning orphan
-    // The parent's wall-clock kill is the primary bound; these cover the parent-died / abrupt-exit cases
     install_child_backstops(parsed.deadline);
     let source = read_stdin_capped(RenderLimits::default().max_source_bytes)?;
     render_and_write(&parsed, &source)
@@ -804,17 +778,8 @@ pub fn sweep_session_cache(dir: &Path, max_bytes: u64) {
 pub struct MermaidRuntime {
     tx: Sender<MermaidJob>,
     rx: Receiver<MermaidResult>,
-    /// On-click renders whose result hasn't arrived yet.
-    /// The tick runs each action when its key lands; the painter consults these keys for the transient `rendering…` hint.
-    /// A short `Vec` (clicks are human-paced) keeps the worker lock-free; no map or mutex needed.
-    ///
-    /// No independent timeout is needed.
-    /// The worker coalesces queued jobs by `MermaidCacheKey`.
-    /// A burst for one diagram (e.g. an `[Open]` and a `[Copy path]` on the same key) collapses to a single `MermaidResult`, not one result per job.
-    /// When it lands, [`poll_mermaid_results`] drains *every* pending action awaiting that key via [`take_pending_for`].
     /// A render that times out or fails in its child process becomes `Failed`, so no pending entry is ever stranded.
     /// The worker only stops sending if its own thread dies.
-    /// Under the shipped `panic = "abort"` profile that aborts the whole pager rather than leaking a pending entry.
     /// The render itself runs out of process, so a diagram that aborts only kills its short-lived child.
     pending: Vec<PendingMermaidAction>,
     /// Whether the per-session disk-cap sweep has run (once per view, off the render path, the first time a render is dispatched).
@@ -877,14 +842,8 @@ fn take_pending_for(
 
 #[cfg(test)]
 thread_local! {
-    /// Per-test override for the session `mermaid/` cache dir. View-side tests
-    /// set this to a private tempdir so [`AgentView::mermaid_out_path`] resolves
-    /// a hermetic, writable cache dir *without* mutating the process-global
-    /// `GROK_HOME` (whose `grok_home()` value is cached first-write-wins, an
-    /// isolation hazard under the full parallel suite; PNGs could land in the
-    /// real `~/.grok`). Thread-local, so each parallel test is independent; the
-    /// `TempDir` guard lives here so the dir outlives the view. Mirrors the
-    /// `subagent::REPLAY_GROK_HOME` test override. Production never sets this.
+    /// Per-test override for the session `mermaid/` cache dir. View-side tests set this to a private tempdir so [`AgentView::mermaid_out_path`] resolves a hermetic, writable cache dir *without* mutating the process-global
+    /// `GROK_HOME` (whose `grok_home()` value is cached first-write-wins, an isolation hazard under the full parallel suite; PNGs could land in the real `~/.grok`). Thread-local, so each parallel test is independent; the `TempDir` guard lives here so the dir outlives the view. Mirrors the `subagent::REPLAY_GROK_HOME` test override. Production never sets this.
     static TEST_MERMAID_DIR: std::cell::RefCell<Option<tempfile::TempDir>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -907,7 +866,12 @@ impl AgentView {
     /// Drive the lazy mermaid work for one tick: poll the worker for finished on-click renders and run each requesting action.
     /// Returns `true` when a redraw is warranted. A no-op until a click is in flight.
     pub fn mermaid_tick(&mut self) -> bool {
-        self.poll_mermaid_results()
+        let changed = self.poll_mermaid_results();
+        if self.mermaid_needs_tick() && self.toast.is_none() {
+            self.show_toast(RENDERING_TOAST);
+            return true;
+        }
+        changed
     }
 
     /// Lazily create the render runtime (and spawn the worker) on first need.
@@ -953,7 +917,6 @@ impl AgentView {
     /// Whether the diagram with `source` currently has an on-click render in flight; drives the affordance row's transient `rendering…` hint.
     /// Matched by the source hash (not the full cache key), so the hint survives a mid-render theme/width change.
     /// The in-flight render still targets its click-time key.
-    /// Cheap: short-circuits before hashing when nothing is pending.
     pub(crate) fn mermaid_is_rendering(&self, source: &str) -> bool {
         let Some(rt) = self.mermaid.as_ref() else {
             return false;
@@ -987,12 +950,7 @@ impl AgentView {
     }
 
     /// Handle a click on a Mermaid `[Open]`/`[Copy path]` button.
-    /// If the diagram isn't cached, render it at the *live* theme and open-tier auto-scale, then run `action`.
-    /// The open tier gives sharp OS-viewer PNGs, independent of terminal width.
-    ///
-    /// A disk hit at the current theme/quality tier runs the action immediately.
     /// A miss dispatches a render job and records a [`PendingMermaidAction`] so the tick runs the action when the result lands.
-    /// A brief `rendering…` toast covers the gap; a failed render shows an error toast.
     /// `source` is moved into the job, never cloned.
     pub(crate) fn request_mermaid_render(&mut self, source: String, action: MermaidClickAction) {
         let theme = crate::theme::cache::current_kind();
@@ -1020,7 +978,7 @@ impl AgentView {
             .as_ref()
             .is_some_and(|rt| rt.has_pending(&key, action))
         {
-            self.show_toast("Rendering diagram\u{2026}");
+            self.show_toast(RENDERING_TOAST);
             return;
         }
 
@@ -1057,7 +1015,7 @@ impl AgentView {
             if let Some(rt) = self.mermaid.as_mut() {
                 rt.pending.push(PendingMermaidAction { key, action });
             }
-            self.show_toast("Rendering diagram\u{2026}");
+            self.show_toast(RENDERING_TOAST);
         } else {
             tracing::warn!(
                 target: MERMAID_TRACING_TARGET,
@@ -1138,6 +1096,17 @@ mod tests {
     use super::*;
     use crate::theme::ThemeKind;
 
+    #[test]
+    fn open_quality_gets_a_longer_timeout_than_terminal() {
+        assert!(
+            timeout_for(MermaidRenderQuality::Open) > timeout_for(MermaidRenderQuality::Terminal)
+        );
+        assert!(
+            timeout_for(MermaidRenderQuality::Open) >= Duration::from_secs(15),
+            "Open Image must outlive a ~10s 30MP raster"
+        );
+    }
+
     fn key(source: &str) -> MermaidCacheKey {
         MermaidCacheKey::derive(
             source,
@@ -1170,12 +1139,12 @@ mod tests {
         assert_eq!(pending.len(), 2, "two distinct cache keys");
         // The repeated key coalesced to its latest job (newest out_path wins).
         assert_eq!(
-            pending[&key("same")].out_path,
-            PathBuf::from("/tmp/new.png")
+            pending.get(&key("same")).map(|j| &j.out_path),
+            Some(&PathBuf::from("/tmp/new.png"))
         );
         assert_eq!(
-            pending[&key("other")].out_path,
-            PathBuf::from("/tmp/other.png")
+            pending.get(&key("other")).map(|j| &j.out_path),
+            Some(&PathBuf::from("/tmp/other.png"))
         );
     }
 
@@ -1204,7 +1173,7 @@ mod tests {
             vec![MermaidClickAction::Open, MermaidClickAction::CopyPath]
         );
         assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].key, k2);
+        assert_eq!(pending.first().map(|p| &p.key), Some(&k2));
         // A key with nothing pending takes nothing and leaves the list intact.
         assert!(take_pending_for(&mut pending, &key("absent")).is_empty());
         assert_eq!(pending.len(), 1);
@@ -1723,7 +1692,6 @@ mod tests {
     }
 
     /// A non-zero exit is split so a containment event is observable.
-    /// A signal-terminated child, the watchdog's exit code, and an ordinary render failure each map to a distinct reason.
     /// (Signal termination is the `RLIMIT_AS` abort / panic-under-abort shape.)
     /// Drives real stub children so the `ExitStatus` is genuine (a signal carries no exit code; an `exit n` does).
     #[cfg(unix)]
@@ -1973,8 +1941,7 @@ mod tests {
         assert_ne!(dark_out, light_out, "distinct per-theme files");
     }
 
-    // -- View-side lazy glue (hermetic per-test cache dir) -------------------
-    //
+    // View side lazy glue (hermetic per test cache dir)
     // These drive the click, render, poll, action path through a real `AgentView` whose on-disk cache dir is a private tempdir
     // The unit tests above (pure helpers) and the `make_agent`-based view tests (no session dir) can't do that
 
@@ -2033,8 +2000,9 @@ mod tests {
             agent.mermaid_needs_tick(),
             "a miss records a pending action"
         );
-        assert!(
-            toast_of(&agent).contains("Rendering"),
+        assert_eq!(
+            RENDERING_TOAST,
+            toast_of(&agent),
             "a miss shows the transient rendering toast",
         );
 
@@ -2064,6 +2032,30 @@ mod tests {
         assert!(
             out_path.exists(),
             "the on-click render wrote the PNG to the session cache",
+        );
+    }
+
+    #[test]
+    fn mermaid_rendering_toast_is_restored_until_settle() {
+        let mut agent = agent_with_session("toast-hold");
+        let src = "flowchart LR\nA-->B\n".to_string();
+        agent.request_mermaid_render(src, MermaidClickAction::CopyPath);
+        assert_eq!(RENDERING_TOAST, toast_of(&agent));
+
+        agent.toast = None;
+        assert!(
+            agent.mermaid_tick(),
+            "restoring the in-progress toast must request a redraw"
+        );
+        assert_eq!(RENDERING_TOAST, toast_of(&agent));
+
+        pump_until(&mut agent, |a| !a.mermaid_needs_tick());
+        agent.toast = None;
+        assert!(!agent.mermaid_tick());
+        assert!(
+            toast_of(&agent).is_empty(),
+            "must not resurrect Rendering after settle: {}",
+            toast_of(&agent)
         );
     }
 
@@ -2159,7 +2151,6 @@ mod tests {
         );
     }
 
-    /// Regression: the transient `rendering…` hint matches a pending render by SOURCE hash, not the full click-time cache key.
     /// It thus survives a theme/width switch that happens mid-render.
     /// The in-flight render still targets its click-time key, but the hint must stay on the diagram.
     /// A regression to full-key matching would fail the persistence assertion.

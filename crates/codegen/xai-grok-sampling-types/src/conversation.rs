@@ -28,7 +28,10 @@ pub fn truncate_bytes(s: &str, max_bytes: usize) -> &str {
     while !s.is_char_boundary(end) {
         end -= 1;
     }
-    &s[..end]
+    let Some(prefix) = s.get(..end) else {
+        return "";
+    };
+    prefix
 }
 
 /// A provider that validates `function.arguments` rejects the whole request, so one malformed call from an earlier turn breaks every turn after it.
@@ -74,19 +77,11 @@ pub enum ConversationItem {
     Assistant(AssistantItem),
     /// Tool/function result
     ToolResult(ToolResultItem),
-    /// A tool call executed server-side by the backend agentic sampler (e.g. web search, X search, code interpreter).
+    /// A tool call executed server-side by the backend agentic sampler.
     /// The client does not execute these; the server already ran them and fed results into the model's context.
-    /// Stored so they can be:
-    /// 1. Persisted to chat_history.jsonl for session replay/fork
-    /// 2. Sent back to the Responses API as input items for context continuity
-    /// 3. Rendered by the pager (search queries, sources, etc.)
+    /// Persisted to chat_history.jsonl for session replay/fork; Sent back to the Responses API as input items for context continuity; Rendered by the pager (search queries, sources, etc.).
     BackendToolCall(BackendToolCallItem),
-    /// A reasoning item from the Responses API, stored as a sibling of the assistant message so that:
-    ///
-    /// 1. N parallel `tco_*` reasoning items (one per backend tool call) round-trip losslessly without last-write-wins clobbering.
-    /// 2. The interleaved order of `[reasoning, tool_call, reasoning, ..., message]` produced by the model stays byte-stable across turns.
-    ///    That stability is what lets the server-side prefix KV-cache hit.
-    ///
+    /// A reasoning item from the Responses API, stored as a sibling of the assistant message so that: N parallel `tco_*` reasoning items (one per backend tool call) round-trip losslessly without last-write-wins clobbering; The interleaved order of `[reasoning, tool_call, reasoning, ..., message]` produced by the model stays byte-stable across turns. That stability is what lets the server-side prefix KV-cache hit.
     /// Wraps `rs::ReasoningItem` directly so no field is dropped on the way through.
     Reasoning(rs::ReasoningItem),
 }
@@ -95,17 +90,26 @@ pub enum ConversationItem {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemItem {
     pub content: Arc<str>,
+    /// `Primary` is omitted on write and filled in when absent, so the leading prompt serializes as it did before this field existed.
+    #[serde(
+        default = "SyntheticReason::primary",
+        skip_serializing_if = "SyntheticReason::is_primary"
+    )]
+    pub synthetic_reason: SyntheticReason,
 }
 
-/// Reason why a `UserItem` was synthesized by the runtime rather than typed by a real user.
+/// Origin of a `UserItem` or `SystemItem`: typed by the user, the request's system prompt, or synthesized by the runtime for one of the listed reasons.
 /// Stored so downstream code (pruning, replay, analytics) can tell synthetic injections from real input without parsing message text.
-///
-/// Serialized as a lowercase string (e.g. `"auto_continue"`).
-/// Unknown variants (from future clients or removed historical tags such as `"doom_loop_warning"`) deserialize as [`SyntheticReason::Unknown`].
-/// Old clients can then still read sessions written by newer versions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The two non-synthetic origins ([`Self::Human`], [`Self::Primary`]) live here so the field is never optional; each item type defaults to its own when the field is absent.
+/// The wire field name stays `synthetic_reason` so old clients keep reading new sessions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyntheticReason {
+    /// Typed by the user.
+    #[default]
+    Human,
+    /// The system prompt that opens the conversation, ahead of every other item.
+    Primary,
     /// Metadata injected by the compaction pipeline (e.g., re-read file contents).
     CompactionMeta,
     /// Runtime-injected `<system-reminder>` message.
@@ -151,31 +155,56 @@ pub enum SyntheticReason {
     /// Working-directory switch context appended after a session relocation.
     /// Carries a generation marker so recovery can detect an existing append.
     WorkingDirectorySwitch,
+    /// Human-authored text relayed from a parent session. Stays a `User` item.
+    /// Reserved ahead of its producer so shipped readers classify it before anything writes it; today it shares [`Self::AgentMessage`].
+    ParentHumanMessage,
+    /// The startup `<user_info>` / rules / VCS-status prefix inserted after the primary prompt.
+    /// Reserved ahead of its producer; today the prefix is an untagged `Human` item that the legacy turn walkers skip by position.
+    SessionPrefix,
+    /// The direct-bash (`!cmd`) command-and-output history message.
+    /// Reserved ahead of its producer; today it is an untagged `Human` item.
+    DirectBash,
+    /// The goal rules and tracking policy that accompany a `/goal` objective.
+    /// Reserved ahead of its producer; today rules and objective share one untagged `Human` item.
+    GoalSetup,
     /// Catch-all for unknown/future variants.
     #[serde(other)]
     Unknown,
 }
 
 impl SyntheticReason {
-    /// Whether a user item with this reason **starts a prompt turn**, meaning the turn pipeline pushed it while consuming a `prompt_index` slot.
-    /// That covers auto-wake and other server-initiated turns, as opposed to a mid-turn injection that never incremented the index.
-    ///
-    /// Used by [`conversation_truncate_for_prompt`]'s counting fallback for items persisted before [`UserItem::prompt_index`] existed.
-    /// The match is exhaustive so adding a variant forces an explicit decision here.
-    ///
-    /// `GoalSummary` is deliberately `false`.
-    /// The same reason tags both the legacy goal-continuation *turn* (index-consuming) and the in-turn goal directive (mid-turn).
+    /// Serde default for `SystemItem.synthetic_reason`; `#[serde(default = "...")]` takes a function path, not a variant.
+    pub fn primary() -> Self {
+        Self::Primary
+    }
+
+    pub fn is_human(&self) -> bool {
+        *self == Self::Human
+    }
+
+    pub fn is_primary(&self) -> bool {
+        *self == Self::Primary
+    }
+
+    /// Whether an item with this reason **starts a prompt turn**, meaning the turn pipeline pushed it while consuming a `prompt_index` slot.
+    /// That covers real prompts, auto-wake and other server-initiated turns, as opposed to a mid-turn injection that never incremented the index.
     /// Unknown future reasons fail safe as boundaries so older readers cannot merge a newer conversational origin into a prior turn.
     pub fn starts_prompt_turn(&self) -> bool {
         match self {
-            Self::AgentMessage
+            Self::Human
+            | Self::AgentMessage
+            | Self::ParentHumanMessage
+            | Self::DirectBash
+            | Self::GoalSetup
             | Self::Unknown
             | Self::TaskCompleted
             | Self::SubagentCompleted
             | Self::NotificationDrain
             | Self::GoalClassifierNudge
             | Self::SchedulerFired => true,
-            Self::CompactionMeta
+            Self::Primary
+            | Self::SessionPrefix
+            | Self::CompactionMeta
             | Self::SystemReminder
             | Self::LengthContinue
             | Self::ProjectInstructions
@@ -190,16 +219,8 @@ impl SyntheticReason {
 }
 
 /// How the user *fatally* interrupted (cancelled) the turn immediately preceding this *real* user message.
-/// Set only on genuine user messages (`synthetic_reason == None`) that directly follow a cancelled turn.
-/// Downstream code (replay, analytics, the model itself) can then see that the user redirected after stopping work without parsing message text.
-///
-/// Reserved for the *fatal* user-interrupt causes that end the turn: `mid_turn_abort` (ESC / Ctrl+C), `permission_rejected`, `permission_cancelled`.
-/// A mid-turn *interjection* is deliberately not represented here; it does not cancel the turn.
-/// It is captured on its own message via [`SyntheticReason::Interjection`] (and the `interjected` telemetry event).
+/// Set only on genuine user messages (`synthetic_reason == Human`) that directly follow a cancelled turn.
 /// Automatic terminations (hook-denied, max-turns) are not user interrupts and never set this.
-///
-/// Serialized as a lowercase string.
-/// Unknown variants from future writers deserialize as [`PriorTurnInterrupt::Unknown`] for forward compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PriorTurnInterrupt {
@@ -218,12 +239,9 @@ pub enum PriorTurnInterrupt {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserItem {
     pub content: Vec<ContentPart>,
-    /// Set when this item was synthesized by the runtime rather than typed by a real user.
-    /// `None` for all genuine user messages.
-    ///
-    /// Uses `skip_serializing_if` so old JSONL sessions that lack this field deserialize correctly (`serde(default)` fills in `None`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub synthetic_reason: Option<SyntheticReason>,
+    /// `Human` is omitted on write and filled in when absent, so real user turns serialize as they did when this field was optional.
+    #[serde(default, skip_serializing_if = "SyntheticReason::is_human")]
+    pub synthetic_reason: SyntheticReason,
     /// Relocation generation for a working-directory switch reminder.
     /// Structural metadata keeps recovery dedup independent of reminder text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -234,26 +252,14 @@ pub struct UserItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prior_turn_interrupt: Option<PriorTurnInterrupt>,
     /// Prompt-turn index this user item started, recorded at push time.
-    /// Same coordinate space as the session's `prompt_index` / rewind targets and the `promptIndex` meta on `UserMessageChunk` updates.
-    /// Every `handle_prompt` turn counts, synthetic-origin turns included.
-    ///
     /// `None` for items that do not start a turn and for items persisted before this field existed.
-    /// That covers the `<user_info>` preamble, mid-turn synthetic injections, and freshly rebuilt compaction messages.
-    /// Tail messages cloned into a compacted history keep their markers.
-    /// Rewind truncation prefers a present value over counting ([`conversation_truncate_for_prompt`]).
-    ///
-    /// Caveat: session resume recounts `prompt_index` from `updates.jsonl`.
     /// The recount can drift from this coordinate (interjection echoes, image-only prompts).
-    /// Markers stamped before and after a restart may disagree.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_index: Option<usize>,
 }
 
 /// Assistant response with tool calls.
-///
 /// Reasoning items, when present, sit beside this item as `ConversationItem::Reasoning(_)` siblings preceding the assistant turn, not bundled here.
-/// That keeps N parallel reasoning items (`tco_*` blobs from parallel backend tool calls) lossless.
-/// It also preserves the interleaved order the model emits.
 /// Old sessions on disk may still carry a `reasoning` field; serde silently ignores it on read (no `deny_unknown_fields`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantItem {
@@ -337,7 +343,7 @@ impl BackendToolCallItem {
                     .as_deref()
                     .map(|c| {
                         if c.len() > 100 {
-                            format!("{}...", &c[..100])
+                            format!("{}...", truncate_bytes(c, 100))
                         } else {
                             c.to_string()
                         }
@@ -558,8 +564,7 @@ impl From<ToolDefinition> for ToolSpec {
 // ============================================================================
 
 /// What the sampler does with a completed response whose stop reason is `Length` (max_tokens truncation).
-///
-/// `Length` can arrive far below any client budget (e.g. an engine-side window clamp after a runaway generation).
+/// `Length` can arrive far below any client budget.
 /// Callers that can use partial text opt into `CompletePartial`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LengthPolicy {
@@ -567,7 +572,6 @@ pub enum LengthPolicy {
     Fail,
     /// Complete a response whose tool calls all carry complete arguments; text-only and empty `Length` still fail.
     /// `Length` is usually context exhaustion (the output budget is the window minus the prompt), so retrying cannot succeed.
-    /// Executing the calls advances the turn toward compaction.
     /// The default: a caller that does not choose gets its tool calls run and its text-only truncation failed.
     #[default]
     CompleteToolCalls,
@@ -590,14 +594,7 @@ pub enum LengthVerdict {
 
 impl LengthPolicy {
     /// The fail-vs-salvage decision for a completed response, including the `Length` stop-reason check.
-    /// Pure; the sampler's `apply_length_policy` wraps it with the error mapping and salvage breadcrumb.
-    /// That keeps the actor path (`drive_l2`) and the direct-collect path from diverging.
-    ///
-    /// Tool calls salvage under every policy except `Fail`, but only with complete arguments.
     /// The xAI server never emits a completed `tool_calls` entry for a truncated call.
-    /// The JSON check guards providers that close a block they cut mid-arguments.
-    /// Empty Length fails regardless of policy (the outcome is deterministic under a fixed cap; the Empty resample family would retry endlessly).
-    /// In practice the tool-call arm guards the Messages backend only.
     /// ChatCompletions and Responses rewrite Length-with-tools to `ToolCalls` at the stream layer, so those never reach it.
     pub fn verdict(self, response: &ConversationResponse) -> LengthVerdict {
         if response.stop_reason != Some(StopReason::Length) {
@@ -663,6 +660,9 @@ pub struct ConversationRequest {
     /// Optional opaque tracing context (e.g., where to persist the finalized request payload).
     /// Consumers downcast via `trace.as_ref().unwrap().as_any().downcast_ref::<T>()`.
     pub trace: Option<Box<dyn TraceContext>>,
+    /// Caller span's W3C `traceparent`; the sampler parents its streaming HTTP span under it.
+    /// Non-streaming calls ignore it.
+    pub traceparent: Option<String>,
     /// Reasoning effort level for reasoning models.
     pub reasoning_effort: Option<crate::ReasoningEffort>,
     /// JSON Schema for structured output (strict mode).
@@ -681,11 +681,7 @@ impl ConversationRequest {
 }
 
 /// Strip only `urls`.
-/// Unlisted images (compaction, newer turns) stay.
-/// Returns the number of stripped occurrences (one per replaced part, so a URL stored twice counts twice).
-///
 /// Invariant: replaces parts in place, never adds or removes a `ConversationItem` (the `&mut [_]` signature cannot resize).
-/// Chat-state relies on this to skip turn-capture rebasing.
 pub fn strip_images_by_url(items: &mut [ConversationItem], urls: &[Arc<str>]) -> usize {
     strip_images_where(items, |url| urls.iter().any(|u| u.as_ref() == url)).len()
 }
@@ -755,8 +751,11 @@ pub enum ConversationToolChoice {
 // ============================================================================
 
 /// Why the model stopped generating.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, strum::AsRefStr, strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum StopReason {
     /// Model finished naturally
     Stop,
@@ -767,19 +766,6 @@ pub enum StopReason {
     /// Content was filtered
     ContentFilter,
 }
-
-impl StopReason {
-    /// Stable lowercase string matching the `#[serde(rename_all = "snake_case")]` output.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            StopReason::Stop => "stop",
-            StopReason::Length => "length",
-            StopReason::ToolCalls => "tool_calls",
-            StopReason::ContentFilter => "content_filter",
-        }
-    }
-}
-
 impl From<FinishReason> for StopReason {
     fn from(fr: FinishReason) -> Self {
         match fr {
@@ -794,7 +780,7 @@ impl From<FinishReason> for StopReason {
 /// Token usage statistics, normalized across OpenAI Chat Completions, OpenAI Responses, and
 /// Anthropic Messages backends. `prompt_tokens` is always the FULL prompt size (uncached + cache
 /// reads + cache writes) and `cached_prompt_tokens` is only the cache-hit subset; do not subtract.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenUsage {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
@@ -840,10 +826,6 @@ impl From<Usage> for TokenUsage {
 }
 
 /// Response from a conversation turn.
-///
-/// `items` is a flat ordered list mirroring the Responses API's `output: Vec<OutputItem>`.
-/// It interleaves `Reasoning`, `BackendToolCall`, and a single trailing `Assistant` item.
-/// The Assistant item carries the assistant text and any client-executable `FunctionCall`s as `tool_calls`.
 /// Helpers (`assistant()`, `empty_reason()`, etc.) treat the trailing Assistant as "the response message" for backwards-compatible call sites.
 #[derive(Debug, Clone)]
 pub struct ConversationResponse {
@@ -860,8 +842,7 @@ pub struct ConversationResponse {
     pub cost_usd_ticks: Option<i64>,
     /// Number of `AgentMessageChunk` (text-only) streaming events emitted during this response.
     /// Reasoning/thought chunks are **not** counted.
-    /// When this is zero but the response contains text, the streaming events were lost (e.g. after an empty-response retry).
-    /// The caller should then emit a fallback `AgentMessageChunk` so downstream consumers (e.g. the TUI) see the turn as complete.
+    /// The caller should then emit a fallback `AgentMessageChunk` so downstream consumers see the turn as complete.
     pub message_chunks_emitted: u64,
     /// Server-reported doom-loop triggers for this response (Responses API only, opt-in via the `x-grok-doom-loop-check` header).
     /// Empty when the check is disabled or nothing was reported; deduplicated by raw label.
@@ -873,11 +854,8 @@ pub struct ConversationResponse {
     pub stop_message: Option<String>,
     /// Provider message id (Messages `message.id`); `None` on backends that do not carry one (OAI Chat Completions / Responses).
     pub message_id: Option<String>,
-    /// Wire stop reason before it collapses into [`StopReason`]: verbatim on the Messages backend (e.g. `end_turn`, `tool_use`, `pause_turn`).
+    /// Wire stop reason before it collapses into [`StopReason`]: verbatim on the Messages backend.
     /// On the Responses backend only length cuts on tool-less turns are carried.
-    /// Those map from `incomplete_details.reason` to `max_tokens` (output cap) or `model_context_window_exceeded` (context window).
-    /// The Messages strings are reused for one client vocabulary, not backend parity.
-    /// The xAI Messages API reports a context cut as `max_tokens`, while the Responses mapping distinguishes it.
     /// `None` when unreported.
     pub raw_stop_reason: Option<String>,
     /// The provider's matched stop sequence (Messages API `message_delta.stop_sequence`).
@@ -887,7 +865,6 @@ pub struct ConversationResponse {
 }
 
 /// Normalize a wire cost-ticks value at capture.
-///
 /// The REST layer backfills `0` for unreported cost, and negative ticks are never valid, so both become `None` ("unreported", never "free").
 /// Every ingestion path must route through this before storing [`ConversationResponse::cost_usd_ticks`].
 pub fn reported_cost_ticks(raw: Option<i64>) -> Option<i64> {
@@ -993,36 +970,33 @@ impl ConversationResponse {
 // ============================================================================
 
 impl ConversationItem {
-    /// Create a system message
+    /// Create the request's system prompt, tagged [`SyntheticReason::Primary`].
     pub fn system(content: impl Into<String>) -> Self {
         Self::System(SystemItem {
             content: Arc::<str>::from(content.into()),
+            synthetic_reason: SyntheticReason::Primary,
         })
     }
 
-    /// Create a user message with text content.
-    ///
-    /// `synthetic_reason` is `None`; this represents real user input.
+    /// Create a user message with text content, tagged [`SyntheticReason::Human`] for real user input.
     /// For synthetic injections, use a dedicated constructor such as [`ConversationItem::user_meta`] or [`ConversationItem::system_reminder`].
     pub fn user(content: impl Into<String>) -> Self {
         Self::User(UserItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: None,
+            synthetic_reason: SyntheticReason::Human,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
         })
     }
 
-    /// Create a user message with multiple content parts.
-    ///
-    /// `synthetic_reason` is `None`; this represents real user input.
+    /// Create a user message with multiple content parts, tagged [`SyntheticReason::Human`] for real user input.
     pub fn user_with_parts(parts: Vec<ContentPart>) -> Self {
         Self::User(UserItem {
             content: parts,
-            synthetic_reason: None,
+            synthetic_reason: SyntheticReason::Human,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1030,7 +1004,6 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for metadata injection.
-    ///
     /// Used by the compaction pipeline to inject file contents as plain-text user messages.
     /// Tagged with [`SyntheticReason::CompactionMeta`] so downstream code (pruning, compaction helpers) skips it.
     pub fn user_meta(content: impl Into<String>) -> Self {
@@ -1038,7 +1011,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::CompactionMeta),
+            synthetic_reason: SyntheticReason::CompactionMeta,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1046,7 +1019,6 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for a runtime system reminder.
-    ///
     /// Used for injected `<system-reminder>` content such as skill discovery updates and plan-mode reminders.
     /// Tagged with [`SyntheticReason::SystemReminder`] so downstream code can skip it when counting real user prompts.
     pub fn system_reminder(content: impl Into<String>) -> Self {
@@ -1054,7 +1026,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::SystemReminder),
+            synthetic_reason: SyntheticReason::SystemReminder,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1067,7 +1039,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::LengthContinue),
+            synthetic_reason: SyntheticReason::LengthContinue,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1078,8 +1050,7 @@ impl ConversationItem {
     pub fn working_directory_switch_generation(&self) -> Option<u64> {
         match self {
             Self::User(user)
-                if user.synthetic_reason.as_ref()
-                    == Some(&SyntheticReason::WorkingDirectorySwitch) =>
+                if user.synthetic_reason == SyntheticReason::WorkingDirectorySwitch =>
             {
                 user.cwd_generation
             }
@@ -1095,7 +1066,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::ProjectInstructions),
+            synthetic_reason: SyntheticReason::ProjectInstructions,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1108,7 +1079,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::WorkingDirectorySwitch),
+            synthetic_reason: SyntheticReason::WorkingDirectorySwitch,
             cwd_generation: Some(cwd_generation),
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1121,7 +1092,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::AgentMessage),
+            synthetic_reason: SyntheticReason::AgentMessage,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1129,7 +1100,6 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for an auto-continue prompt.
-    ///
     /// Used after compaction to tell the agent to keep working.
     /// Tagged with [`SyntheticReason::AutoContinue`] so it is not counted as a real user prompt by truncation / rewind logic.
     pub fn auto_continue(content: impl Into<String>) -> Self {
@@ -1137,7 +1107,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::AutoContinue),
+            synthetic_reason: SyntheticReason::AutoContinue,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1145,7 +1115,6 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for an auto-recovery retry prompt.
-    ///
     /// Used by the auto-recovery loop after a transient tool failure.
     /// Tagged with [`SyntheticReason::AutoRecovery`] so it is not counted as a real user prompt by truncation / rewind logic.
     pub fn auto_recovery(content: impl Into<String>) -> Self {
@@ -1153,7 +1122,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::AutoRecovery),
+            synthetic_reason: SyntheticReason::AutoRecovery,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1161,16 +1130,13 @@ impl ConversationItem {
     }
 
     /// Create a synthetic user message for a mid-turn interjection.
-    ///
-    /// Used when the user sends text via Ctrl+Enter while the model is running.
-    /// Tagged with [`SyntheticReason::Interjection`].
     /// Compaction, replay, and analytics can then distinguish it from real prompts and other synthetic injections.
     pub fn interjection(content: impl Into<String>) -> Self {
         Self::User(UserItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::Interjection),
+            synthetic_reason: SyntheticReason::Interjection,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1183,7 +1149,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::TaskCompleted),
+            synthetic_reason: SyntheticReason::TaskCompleted,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1196,7 +1162,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::SubagentCompleted),
+            synthetic_reason: SyntheticReason::SubagentCompleted,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1209,7 +1175,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::NotificationDrain),
+            synthetic_reason: SyntheticReason::NotificationDrain,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1222,7 +1188,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::GoalSummary),
+            synthetic_reason: SyntheticReason::GoalSummary,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1237,7 +1203,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::GoalClassifierNudge),
+            synthetic_reason: SyntheticReason::GoalClassifierNudge,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1250,7 +1216,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::SchedulerFired),
+            synthetic_reason: SyntheticReason::SchedulerFired,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1263,7 +1229,7 @@ impl ConversationItem {
             content: vec![ContentPart::Text {
                 text: Arc::<str>::from(content.into()),
             }],
-            synthetic_reason: Some(SyntheticReason::StopHookFeedback),
+            synthetic_reason: SyntheticReason::StopHookFeedback,
             cwd_generation: None,
             prior_turn_interrupt: None,
             prompt_index: None,
@@ -1282,7 +1248,6 @@ impl ConversationItem {
     }
 
     /// Create an assistant message with a model ID.
-    ///
     /// Reasoning, when present, lives as a separate sibling `ConversationItem::Reasoning(_)` placed before this item.
     /// Callers should push that item to the conversation list separately.
     pub fn assistant_with_model(content: impl Into<String>, model_id: impl Into<String>) -> Self {
@@ -1343,6 +1308,28 @@ impl ConversationItem {
         }
     }
 
+    /// Origin of this item. `None` for Assistant, ToolResult, Reasoning, and BackendToolCall items, which have no origin metadata.
+    pub fn synthetic_reason(&self) -> Option<&SyntheticReason> {
+        match self {
+            Self::User(u) => Some(&u.synthetic_reason),
+            Self::System(s) => Some(&s.synthetic_reason),
+            Self::Assistant(_)
+            | Self::ToolResult(_)
+            | Self::Reasoning(_)
+            | Self::BackendToolCall(_) => None,
+        }
+    }
+
+    /// Whether this is a `User` item typed by the user rather than synthesized by the runtime.
+    pub fn is_human_user_turn(&self) -> bool {
+        matches!(self, Self::User(u) if u.synthetic_reason.is_human())
+    }
+
+    /// Whether this is the system prompt that opens the conversation rather than a runtime-injected `System` item.
+    pub fn is_primary_system_turn(&self) -> bool {
+        matches!(self, Self::System(s) if s.synthetic_reason.is_primary())
+    }
+
     /// Add an image to a user message. No-op for other message types.
     pub fn add_image(&mut self, url: impl Into<String>) {
         if let Self::User(user) = self {
@@ -1373,19 +1360,8 @@ impl ConversationItem {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Shared-compaction L1 bridge: `CompactionItem` / `CompactionItemFactory`
-// for `ConversationItem`
-// ---------------------------------------------------------------------------
-//
 // Lets the shared engine in `crates/common/xai-grok-compaction` operate over grok-build's `ConversationItem` without depending on this crate
-// The orphan rule forces the impls to live here, next to the type
-// Mirrors the harness's `impl CompactionItem` for its own turn type
-//
-// `CompactionItem` is the read half (role/text/tool classification)
-// `CompactionItemFactory` is the write half
-// The full-replace assembler (`apply_full_replace_compaction` / `assemble_compacted_history`) uses it to rebuild the compacted history
-// Each factory constructor maps to the matching `ConversationItem` constructor
 // That preserves the `SyntheticReason` tags the replay / spawn-time idempotence guards rely on
 impl xai_grok_compaction::CompactionItem for ConversationItem {
     fn role(&self) -> xai_grok_compaction::CompactionRole {
@@ -1411,7 +1387,6 @@ impl xai_grok_compaction::CompactionItem for ConversationItem {
 
     fn is_compaction_summary(&self) -> bool {
         // grok-build has no structural marker that uniquely identifies a prior compaction summary
-        // The carrier is a `user_meta` item whose `SyntheticReason::CompactionMeta` is also used for re-injected file contents
         // Returning `false` is safe for the full-replace path, which does not consult this (it summarizes the whole conversation)
         // Revisit (add a dedicated marker) before routing grok-build history through the shared `history`/`inter` filter
         false
@@ -1444,12 +1419,7 @@ impl xai_grok_compaction::CompactionItemFactory for ConversationItem {
 }
 
 /// Extract human-readable text from a Responses-API reasoning item by joining its `summary` parts (in order) followed by its `content` blocks.
-/// Both fields are optional.
-/// Encrypted-only reasoning items (e.g. `tco_*` backend-tool blobs) return an empty string since their text is not user-visible.
-///
-/// Ordering contract: summary parts come first, then content blocks.
-/// Streaming consumers and the Anthropic `Thinking` emitter rely on
-/// this ordering to round-trip display text consistently.
+/// Encrypted-only reasoning items return an empty string since their text is not user-visible.
 pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
     let mut parts: Vec<String> = Vec::new();
     for sp in &r.summary {
@@ -1466,12 +1436,8 @@ pub fn reasoning_item_text(r: &rs::ReasoningItem) -> String {
 }
 
 /// Construct an `rs::ReasoningItem` carrying a single `SummaryText` part.
-/// Every non-Responses-API streaming consumer (`stream/chat_completions`, `stream/messages`, `stream/responses` fallback) synthesizes this shape.
-/// They use it when adapting a non-typed reasoning string to the sibling-`Reasoning` data model.
-///
 /// `id` is left empty because none of the synthesizing paths carry a stable upstream id.
 /// `encrypted_content` is `None` because its only source is the Responses API itself.
-/// The Responses API hits the typed-`OutputItem::Reasoning` path, not this helper.
 pub fn synthesized_reasoning_item(text: impl Into<String>) -> rs::ReasoningItem {
     rs::ReasoningItem {
         id: String::new(),
@@ -1485,14 +1451,7 @@ pub fn synthesized_reasoning_item(text: impl Into<String>) -> rs::ReasoningItem 
 }
 
 /// Splice a streaming-fallback reasoning text into a `Vec<ConversationItem>` produced by `response_to_conversation_items`.
-///
-/// Called by `stream_responses` when reasoning deltas were observed mid-stream.
-/// The final non-streaming `Response` arrived without `content` / `summary` populated.
-/// Behavior:
-///
-/// - If any existing `Reasoning` sibling already carries text, leave `items` untouched (the deltas are redundant).
-/// - Otherwise, if there is a `Reasoning` sibling with no text, append a `SummaryText` part to it (avoids introducing a phantom sibling).
-/// - Otherwise, insert a new `Reasoning(synthesized_reasoning_item(text))` immediately before the trailing `Assistant`.
+/// If any existing `Reasoning` sibling already carries text, leave `items` untouched (the deltas are redundant); Otherwise, if there is a `Reasoning` sibling with no text, append a `SummaryText` part to it (avoids introducing a phantom sibling); Otherwise, insert a new `Reasoning(synthesized_reasoning_item(text))` immediately before the trailing `Assistant`.
 pub fn inject_streaming_reasoning_fallback(items: &mut Vec<ConversationItem>, text: String) {
     if text.is_empty() {
         return;
@@ -1506,16 +1465,14 @@ pub fn inject_streaming_reasoning_fallback(items: &mut Vec<ConversationItem>, te
     if any_with_text {
         return;
     }
-    if let Some(idx) = items
-        .iter()
-        .position(|i| matches!(i, ConversationItem::Reasoning(_)))
+    if let Some(ConversationItem::Reasoning(r)) = items
+        .iter_mut()
+        .find(|i| matches!(i, ConversationItem::Reasoning(_)))
     {
-        if let ConversationItem::Reasoning(r) = &mut items[idx] {
-            r.summary
-                .push(rs::SummaryPart::SummaryText(rs::SummaryTextContent {
-                    text,
-                }));
-        }
+        r.summary
+            .push(rs::SummaryPart::SummaryText(rs::SummaryTextContent {
+                text,
+            }));
         return;
     }
     let pos = items
@@ -1529,38 +1486,8 @@ pub fn inject_streaming_reasoning_fallback(items: &mut Vec<ConversationItem>, te
 }
 
 /// Reconstruct sibling `Reasoning` and `BackendToolCall` items from a legacy chat-history row's raw JSON.
-///
-/// Legacy sessions stored reasoning inline on the assistant item (`AssistantItem.reasoning: Option<ReasoningContent>`).
-/// Earlier backend-search sessions stored it in `AssistantItem.raw_output: Option<Vec<serde_json::Value>>` instead.
-/// That is the full ordered Responses-API output list including N parallel `tco_*` blobs.
-/// In the current format those fields no longer exist on `AssistantItem`, so serde silently drops them on deserialize.
-/// This function recovers them as sibling `ConversationItem::Reasoning(_)` / `BackendToolCall(_)` items.
-/// Insert them immediately *before* the resulting assistant in the loaded conversation.
-/// That matches the order `response_to_conversation_items` would emit if the new binary had captured the original response.
-///
-/// Returns an empty `Vec` for non-assistant rows, already-current-format rows, and rows with no recoverable reasoning data.
-///
-/// ## Dedup with sibling `BackendToolCall` rows
-///
-/// `BackendToolCall` was already a sibling variant in legacy rows.
-/// The same web-search / x-search / code-interpreter call can appear *both* as a sibling line *and* inside the following assistant's `raw_output`.
-/// The caller threads `sibling_btc_ids_seen` across calls (updating it when it sees a `BackendToolCall` row in the JSONL stream).
-/// That prevents double-emitting.
 /// We also write any newly-emitted ids back into the set so subsequent assistants don't re-emit.
-///
-/// ## Lossless fields preserved
-///
-/// `raw_output` path: the entry is the literal `rs::OutputItem` JSON, so we round-trip it through `serde_json::from_value::<rs::OutputItem>`.
-/// `id`, `summary`, `content`, `encrypted_content`, `status` all survive.
-///
-/// Singular `reasoning` path: builds a synthetic `rs::ReasoningItem`
-/// from the legacy `ReasoningContent { text, encrypted, id }`. `id` is
-/// preserved when present; Anthropic Thinking blocks never carried one
-/// ([stream/messages.rs:340](crates/codegen/xai-grok-sampler/src/stream/messages.rs))
-/// so the synthesized id is the empty string in that case.
-///
-/// v0 `ChatRequestMessage` path: top-level `reasoning_content: String` becomes a single `SummaryText`-only sibling.
-/// It carries no id and no encrypted content.
+/// Singular `reasoning` path: builds a synthetic `rs::ReasoningItem` from the legacy `ReasoningContent { text, encrypted, id }`. `id` is preserved when present; some thinking blocks never carried one
 pub fn upgrade_legacy_reasoning(
     raw: &serde_json::Value,
     sibling_btc_ids_seen: &mut std::collections::HashSet<String>,
@@ -1799,17 +1726,7 @@ impl ConversationRequest {
 }
 
 /// Calculate how many conversation items to keep so that everything from prompt-turn `target_prompt_index` onward is dropped.
-/// The cut lands on the user item that **started** that turn.
-///
-/// Counting is progressive:
-/// - **Before the first** [`UserItem::prompt_index`]: legacy rules apply.
-///   The first marker-less non-synthetic is the `<user_info>` preamble.
-///   Later non-synthetics and [`SyntheticReason::starts_prompt_turn`] synthetics are turns.
-/// - **From the first marker onward**: only marked rows open turns; unmarked mid-turn phantoms (bash / permission followup) never open a cut.
-///
-/// Exception: when the first marker's absolute index is **not** contiguous with the unmarked prefix turn count, fall back to pure marker mode.
-/// That happens on post-compaction rebuilds with high absolute indices.
-/// Pure marker mode keeps structural unmarked rows in the rebuild prefix from being treated as historic turns.
+/// **Before the first** [`UserItem::prompt_index`]: legacy rules apply. The first marker-less non-synthetic is the `<user_info>` preamble. Later non-synthetics and [`SyntheticReason::starts_prompt_turn`] synthetics are turns; **From the first marker onward**: only marked rows open turns; unmarked mid-turn phantoms (bash / permission followup) never open a cut.
 pub fn conversation_truncate_for_prompt(
     conversation: &[ConversationItem],
     target_prompt_index: usize,
@@ -1861,13 +1778,13 @@ fn conversation_truncate_legacy(
         };
 
         let effective_index = match &user.synthetic_reason {
-            None if !seen_unmarked_preamble => {
+            SyntheticReason::Human if !seen_unmarked_preamble => {
                 seen_unmarked_preamble = true;
                 None
             }
-            None => Some(next_unmarked_index),
-            Some(reason) if reason.starts_prompt_turn() => Some(next_unmarked_index),
-            Some(_) => None,
+            SyntheticReason::Human => Some(next_unmarked_index),
+            reason if reason.starts_prompt_turn() => Some(next_unmarked_index),
+            _ => None,
         };
 
         if let Some(idx) = effective_index {
@@ -1894,12 +1811,12 @@ fn count_legacy_turns_until_marker(conversation: &[ConversationItem]) -> usize {
             break;
         }
         match &user.synthetic_reason {
-            None if !seen_unmarked_preamble => {
+            SyntheticReason::Human if !seen_unmarked_preamble => {
                 seen_unmarked_preamble = true;
             }
-            None => turns += 1,
-            Some(reason) if reason.starts_prompt_turn() => turns += 1,
-            Some(_) => {}
+            SyntheticReason::Human => turns += 1,
+            reason if reason.starts_prompt_turn() => turns += 1,
+            _ => {}
         }
     }
     turns
@@ -1925,13 +1842,13 @@ fn conversation_truncate_progressive(
             None
         } else {
             match &user.synthetic_reason {
-                None if !seen_unmarked_preamble => {
+                SyntheticReason::Human if !seen_unmarked_preamble => {
                     seen_unmarked_preamble = true;
                     None
                 }
-                None => Some(next_unmarked_index),
-                Some(reason) if reason.starts_prompt_turn() => Some(next_unmarked_index),
-                Some(_) => None,
+                SyntheticReason::Human => Some(next_unmarked_index),
+                reason if reason.starts_prompt_turn() => Some(next_unmarked_index),
+                _ => None,
             }
         };
 
@@ -1976,11 +1893,8 @@ pub fn transform_conversation_cwd(
                     a.content = Arc::<str>::from(a.content.replace(source_cwd, target_cwd));
                 }
                 // Tool call arguments contain file paths that must also be rewritten.
-                // The arguments field is a JSON-encoded string
-                // source_cwd appears as a literal substring (serde_json does not escape `/`), so str::replace is safe
-                // This is needed in both directions:
-                //   Forward (root to worktree): so the fork session's history uses worktree paths
-                //   Reverse (worktree to root): so the synced-back session doesn't reference a deleted worktree directory on the next turn
+                // The arguments field is a JSON-encoded string source_cwd appears as a literal substring (serde_json does not escape `/`), so str::replace is safe
+                // Reverse (worktree to root): so the synced-back session doesn't reference a deleted worktree directory on the next turn
                 for tc in &mut a.tool_calls {
                     if tc.arguments.contains(source_cwd) {
                         tc.arguments =
@@ -2022,14 +1936,8 @@ pub fn transform_conversation_cwd(
 // Conversation Repair
 // ============================================================================
 
-/// Why a tool call ended up dangling; controls the synthetic-result wording.
-///
 /// Each variant maps to a distinct synthetic `ToolResult` body produced by [`repair_dangling_tool_calls`].
-/// The wording tells the model whether to retry, switch strategy, or treat the failure as terminal.
-///
 /// An earlier revision had a `PostProcessingFailed` variant; it is intentionally absent now.
-/// No path returns `Err` between `tool_completed` and `push_tool_result`; every error mode is degraded inline.
-/// If such an error path is added, add a fresh variant here so [`synthetic_dangling_result_text`]'s exhaustive match flags every renderer.
 #[derive(Debug, Clone, Copy)]
 pub enum DanglingToolCallReason {
     /// User pressed Ctrl+C / aborted, or the cause cannot be determined.
@@ -2037,28 +1945,27 @@ pub enum DanglingToolCallReason {
     /// Default fallback when no more specific reason is plumbed through.
     UserCancelled,
     /// Harness halted the turn (internal error, policy guard, etc.).
-    ///
     /// `class` is a stable taxonomy tag used by metrics and the synthetic message.
     /// It is `&'static str` because every call site is known at compile time.
     HarnessHalted { class: &'static str },
 }
 
 /// Insert synthetic `ToolResult` items for any tool calls that lack a result.
-///
-/// When a turn is cancelled mid-tool-execution, the conversation can have an assistant message with `tool_calls` but no matching `ToolResult`.
 /// The API rejects this with "No tool output found for function call …".
-///
-/// Scans the entire conversation front-to-back.
-/// For every assistant message that has `tool_calls`, it checks which calls are answered by the immediately following `ToolResult` items.
-/// It inserts synthetic results for any that are missing, preserving the original call order.
-/// `reason` controls the wording of those synthetic results.
-///
-/// Old sessions and sessions that switched API providers may have dangling tool calls anywhere in the history, not just at the tail.
-///
-/// Returns the number of synthetic tool results inserted.
 pub fn repair_dangling_tool_calls(
     conversation: &mut Vec<ConversationItem>,
     reason: DanglingToolCallReason,
+) -> usize {
+    repair_dangling_tool_calls_with(conversation, |_, name| {
+        synthetic_dangling_result_text(name, reason)
+    })
+}
+
+/// `resolve(tool_call_id, tool_name)` is only asked for tool calls that still
+/// have no result; answered calls keep their existing result.
+pub fn repair_dangling_tool_calls_with(
+    conversation: &mut Vec<ConversationItem>,
+    mut resolve: impl FnMut(&str, &str) -> String,
 ) -> usize {
     // Phase 1: forward scan to find every assistant with unanswered tool calls.
     // We record (insert_position, synthetic_items) for each repair site.
@@ -2066,7 +1973,7 @@ pub fn repair_dangling_tool_calls(
     let mut i = 0;
 
     while i < conversation.len() {
-        if let ConversationItem::Assistant(a) = &conversation[i]
+        if let Some(ConversationItem::Assistant(a)) = conversation.get(i)
             && !a.tool_calls.is_empty()
         {
             // Snapshot the call metadata we need (avoids borrowing `conversation`).
@@ -2080,7 +1987,7 @@ pub fn repair_dangling_tool_calls(
             let mut answered = std::collections::HashSet::new();
             let mut j = i + 1;
             while j < conversation.len() {
-                if let ConversationItem::ToolResult(tr) = &conversation[j] {
+                if let Some(ConversationItem::ToolResult(tr)) = conversation.get(j) {
                     answered.insert(tr.tool_call_id.clone());
                     j += 1;
                 } else {
@@ -2093,10 +2000,7 @@ pub fn repair_dangling_tool_calls(
                 .iter()
                 .filter(|(id, _)| !answered.contains(id.as_ref()))
                 .map(|(id, name)| {
-                    ConversationItem::tool_result(
-                        id.as_ref(),
-                        synthetic_dangling_result_text(name, reason),
-                    )
+                    ConversationItem::tool_result(id.as_ref(), resolve(id.as_ref(), name))
                 })
                 .collect();
 
@@ -2119,22 +2023,18 @@ pub fn repair_dangling_tool_calls(
 }
 
 /// Read-only counterpart to [`repair_dangling_tool_calls`].
-/// Returns `true` if any assistant message has a tool call that is not answered by a `ToolResult` in the immediately-following run of results.
-///
 /// Lets callers decide whether the repair *would* fire (and therefore already signal a cancellation to the model) without mutating the conversation.
-/// Uses the same forward-scan / immediately-following-results logic as [`repair_dangling_tool_calls`].
-/// Short-circuits on the first unanswered call.
 pub fn has_dangling_tool_calls(conversation: &[ConversationItem]) -> bool {
     let mut i = 0;
     while i < conversation.len() {
-        if let ConversationItem::Assistant(a) = &conversation[i]
+        if let Some(ConversationItem::Assistant(a)) = conversation.get(i)
             && !a.tool_calls.is_empty()
         {
             // Collect answered IDs from the immediately following ToolResults.
             let mut answered = std::collections::HashSet::new();
             let mut j = i + 1;
             while j < conversation.len() {
-                if let ConversationItem::ToolResult(tr) = &conversation[j] {
+                if let Some(ConversationItem::ToolResult(tr)) = conversation.get(j) {
                     answered.insert(tr.tool_call_id.clone());
                     j += 1;
                 } else {
@@ -2155,7 +2055,7 @@ pub fn has_dangling_tool_calls(conversation: &[ConversationItem]) -> bool {
     false
 }
 
-fn synthetic_dangling_result_text(name: &str, reason: DanglingToolCallReason) -> String {
+pub fn synthetic_dangling_result_text(name: &str, reason: DanglingToolCallReason) -> String {
     // Exhaustive match (no `_ =>` guard) so adding a new variant is a compile-time error at every call site that renders these messages
     match reason {
         DanglingToolCallReason::UserCancelled => {
@@ -2168,29 +2068,25 @@ fn synthetic_dangling_result_text(name: &str, reason: DanglingToolCallReason) ->
 }
 
 /// Remove duplicate `ToolResult` entries for the same `tool_call_id`.
-///
-/// A tool call can be cancelled (e.g. Ctrl-C or crash) and its real result can still arrive later.
-/// The conversation then has two `ToolResult` entries sharing the same `tool_call_id`.
 /// The LLM API rejects this with "each tool_use must have a single result".
-///
-/// This function scans the `ToolResult` items immediately following each assistant message.
 /// If a `tool_call_id` appears more than once, only the **last** occurrence is kept (the real result), and earlier duplicates are removed.
-///
-/// Returns the number of duplicate entries removed.
 pub fn dedup_duplicate_tool_results(conversation: &mut Vec<ConversationItem>) -> usize {
     let mut total_removed = 0;
     let mut i = 0;
 
     while i < conversation.len() {
         // Look for assistant messages with tool calls.
-        if let ConversationItem::Assistant(a) = &conversation[i]
+        if let Some(ConversationItem::Assistant(a)) = conversation.get(i)
             && !a.tool_calls.is_empty()
         {
             // Scan the run of ToolResult items immediately after.
             let start = i + 1;
             let mut end = start;
             while end < conversation.len() {
-                if matches!(&conversation[end], ConversationItem::ToolResult(_)) {
+                if conversation
+                    .get(end)
+                    .is_some_and(|item| matches!(item, ConversationItem::ToolResult(_)))
+                {
                     end += 1;
                 } else {
                     break;
@@ -2331,24 +2227,24 @@ mod compaction_item_bridge_tests {
     #[test]
     fn factory_constructors_preserve_synthetic_reason_tags() {
         let plain = <ConversationItem as CompactionItemFactory>::new_user("q".into());
-        assert_matches_user_reason(&plain, None);
+        assert_matches_user_reason(&plain, SyntheticReason::Human);
 
         let meta = <ConversationItem as CompactionItemFactory>::new_user_meta("m".into());
-        assert_matches_user_reason(&meta, Some(SyntheticReason::CompactionMeta));
+        assert_matches_user_reason(&meta, SyntheticReason::CompactionMeta);
 
         let proj =
             <ConversationItem as CompactionItemFactory>::new_project_instructions("p".into());
-        assert_matches_user_reason(&proj, Some(SyntheticReason::ProjectInstructions));
+        assert_matches_user_reason(&proj, SyntheticReason::ProjectInstructions);
 
         let reminder = <ConversationItem as CompactionItemFactory>::new_system_reminder("r".into());
-        assert_matches_user_reason(&reminder, Some(SyntheticReason::SystemReminder));
+        assert_matches_user_reason(&reminder, SyntheticReason::SystemReminder);
     }
 
-    fn assert_matches_user_reason(item: &ConversationItem, expected: Option<SyntheticReason>) {
+    fn assert_matches_user_reason(item: &ConversationItem, expected: SyntheticReason) {
         let ConversationItem::User(parts) = item else {
             panic!("factory must produce a User item, got {item:?}");
         };
-        assert_eq!(parts.synthetic_reason, expected);
+        assert_eq!(expected, parts.synthetic_reason);
     }
 }
 
@@ -2610,10 +2506,19 @@ mod tests {
         // Chat Completions: json_schema becomes response_format
         let chat_req: ChatCompletionRequest = req.clone().into();
         let fmt = serde_json::to_value(chat_req.response_format.unwrap()).unwrap();
-        assert_eq!(fmt["type"], "json_schema");
-        assert_eq!(fmt["json_schema"]["name"], STRUCTURED_OUTPUT_SCHEMA_NAME);
-        assert_eq!(fmt["json_schema"]["strict"], true);
-        assert_eq!(fmt["json_schema"]["schema"], schema);
+        assert_eq!(fmt.get("type"), Some(&serde_json::json!("json_schema")));
+        assert_eq!(
+            fmt.get("json_schema").and_then(|v| v.get("name")),
+            Some(&serde_json::json!(STRUCTURED_OUTPUT_SCHEMA_NAME))
+        );
+        assert_eq!(
+            fmt.get("json_schema").and_then(|v| v.get("strict")),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            fmt.get("json_schema").and_then(|v| v.get("schema")),
+            Some(&schema)
+        );
 
         // Responses API: json_schema becomes text.format
         let resp: rs::CreateResponse = (&req).into();
@@ -2637,7 +2542,9 @@ mod tests {
     #[test]
     fn test_messages_request_cache_breakpoint_placement() {
         let json = agent_request(2);
-        let messages = json["messages"].as_array().unwrap();
+        let Some(messages) = json.get("messages").and_then(|v| v.as_array()) else {
+            panic!("expected messages array: {json:#}");
+        };
 
         assert_eq!(
             json.pointer("/system/0/cache_control/type")
@@ -2645,25 +2552,41 @@ mod tests {
             Some("ephemeral"),
             "{json:#}",
         );
+        let Some(last_msg) = messages.last() else {
+            panic!("expected last message: {json:#}");
+        };
         assert_eq!(
-            marker_on_last_block(messages.last().unwrap()),
+            marker_on_last_block(last_msg),
             Some("ephemeral"),
             "tip: {json:#}"
         );
         assert_eq!(
-            messages.last().unwrap()["content"]
-                .as_array()
+            last_msg
+                .get("content")
+                .and_then(|c| c.as_array())
                 .and_then(|b| b.last())
-                .and_then(|b| b["type"].as_str()),
+                .and_then(|b| b.get("type"))
+                .and_then(|t| t.as_str()),
             Some("tool_result"),
         );
 
-        let previous_user = messages[..messages.len() - 1]
-            .iter()
-            .rposition(|m| m["role"] == "user")
-            .unwrap();
+        let Some(previous_user) = messages
+            .len()
+            .checked_sub(1)
+            .and_then(|n| messages.get(..n))
+            .and_then(|prefix| {
+                prefix
+                    .iter()
+                    .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
+            })
+        else {
+            panic!("previous user: {json:#}");
+        };
+        let Some(prev) = messages.get(previous_user) else {
+            panic!("previous user index: {json:#}");
+        };
         assert_eq!(
-            marker_on_last_block(&messages[previous_user]),
+            marker_on_last_block(prev),
             Some("ephemeral"),
             "previous turn's tip: {json:#}",
         );
@@ -2897,7 +2820,10 @@ mod tests {
         // Unnumbered user rows do not open turns once markers exist (mid-turn phantoms omit prompt_index)
         // Rewind to 12 finds no marker at or above 12
         let mut mixed = conversation.clone();
-        mixed[6] = ConversationItem::user("mid-turn phantom");
+        let Some(slot) = mixed.get_mut(6) else {
+            panic!("expected mixed[6]: {mixed:?}");
+        };
+        *slot = ConversationItem::user("mid-turn phantom");
         assert_eq!(conversation_truncate_for_prompt(&mixed, 12), mixed.len());
         assert_eq!(conversation_truncate_for_prompt(&mixed, 11), 4);
     }
@@ -3007,15 +2933,16 @@ mod tests {
 
         transform_conversation_cwd(&mut items, "/old/path", "/new/path");
 
-        if let ConversationItem::User(u) = &items[0] {
-            if let ContentPart::Text { text } = &u.content[0] {
-                assert_eq!(text.as_ref(), "Look at /new/path/image.png");
-            }
-            // Image URLs are left untouched
-            if let ContentPart::Image { url } = &u.content[1] {
-                assert_eq!(url.as_ref(), "https://example.com/img.png");
-            }
-        }
+        let Some(ConversationItem::User(u)) = items.first() else {
+            panic!("expected user: {items:?}");
+        };
+        let [ContentPart::Text { text }, ContentPart::Image { url }, ..] = u.content.as_slice()
+        else {
+            panic!("expected text+image: {:?}", u.content);
+        };
+        assert_eq!(text.as_ref(), "Look at /new/path/image.png");
+        // Image URLs are left untouched
+        assert_eq!(url.as_ref(), "https://example.com/img.png");
     }
 
     // ============================================================================
@@ -3061,39 +2988,41 @@ mod tests {
 
         // Content is transformed
         assert_eq!(
-            items[0].text_content(),
-            format!("I'll read the file at {root}/src/main.rs")
+            items.first().map(|i| i.text_content()),
+            Some(format!("I'll read the file at {root}/src/main.rs"))
         );
 
         // Tool call arguments are also transformed
-        if let ConversationItem::Assistant(a) = &items[0] {
-            assert!(
-                a.tool_calls[0].arguments.contains(root),
-                "read_file arguments should contain root path"
-            );
-            assert!(
-                !a.tool_calls[0].arguments.contains(worktree),
-                "read_file arguments should not contain worktree path"
-            );
-            assert!(
-                a.tool_calls[1].arguments.contains(root),
-                "search_replace arguments should contain root path"
-            );
-            assert!(
-                !a.tool_calls[1].arguments.contains(worktree),
-                "search_replace arguments should not contain worktree path"
-            );
-            assert!(
-                a.tool_calls[2].arguments.contains(root),
-                "run_terminal_cmd arguments should contain root path"
-            );
-            assert!(
-                !a.tool_calls[2].arguments.contains(worktree),
-                "run_terminal_cmd arguments should not contain worktree path"
-            );
-        } else {
-            panic!("Expected Assistant item");
-        }
+        let Some(ConversationItem::Assistant(a)) = items.first() else {
+            panic!("Expected Assistant item: {items:?}");
+        };
+        let [tc0, tc1, tc2, ..] = a.tool_calls.as_slice() else {
+            panic!("expected three tool calls: {:?}", a.tool_calls);
+        };
+        assert!(
+            tc0.arguments.contains(root),
+            "read_file arguments should contain root path"
+        );
+        assert!(
+            !tc0.arguments.contains(worktree),
+            "read_file arguments should not contain worktree path"
+        );
+        assert!(
+            tc1.arguments.contains(root),
+            "search_replace arguments should contain root path"
+        );
+        assert!(
+            !tc1.arguments.contains(worktree),
+            "search_replace arguments should not contain worktree path"
+        );
+        assert!(
+            tc2.arguments.contains(root),
+            "run_terminal_cmd arguments should contain root path"
+        );
+        assert!(
+            !tc2.arguments.contains(worktree),
+            "run_terminal_cmd arguments should not contain worktree path"
+        );
     }
 
     #[test]
@@ -3138,29 +3067,65 @@ mod tests {
         transform_conversation_cwd(&mut items, worktree, root);
 
         // All text content should be transformed
-        assert!(items[0].text_content().contains(root));
-        assert!(!items[0].text_content().contains(worktree));
+        assert!(
+            items
+                .first()
+                .is_some_and(|i| i.text_content().contains(root))
+        );
+        assert!(
+            items
+                .first()
+                .is_some_and(|i| !i.text_content().contains(worktree))
+        );
 
-        assert!(items[2].text_content().contains(root));
-        assert!(!items[2].text_content().contains(worktree));
+        assert!(
+            items
+                .get(2)
+                .is_some_and(|i| i.text_content().contains(root))
+        );
+        assert!(
+            items
+                .get(2)
+                .is_some_and(|i| !i.text_content().contains(worktree))
+        );
 
-        assert!(items[3].text_content().contains(root));
-        assert!(!items[3].text_content().contains(worktree));
+        assert!(
+            items
+                .get(3)
+                .is_some_and(|i| i.text_content().contains(root))
+        );
+        assert!(
+            items
+                .get(3)
+                .is_some_and(|i| !i.text_content().contains(worktree))
+        );
 
-        assert!(items[4].text_content().contains(root));
-        assert!(!items[4].text_content().contains(worktree));
+        assert!(
+            items
+                .get(4)
+                .is_some_and(|i| i.text_content().contains(root))
+        );
+        assert!(
+            items
+                .get(4)
+                .is_some_and(|i| !i.text_content().contains(worktree))
+        );
 
         // Tool call arguments are also transformed (worktree to root)
-        if let ConversationItem::Assistant(a) = &items[4] {
-            assert!(
-                a.tool_calls[0].arguments.contains(root),
-                "tool_call arguments should contain root path after sync-back"
-            );
-            assert!(
-                !a.tool_calls[0].arguments.contains(worktree),
-                "tool_call arguments should not contain worktree path after sync-back"
-            );
-        }
+        let Some(ConversationItem::Assistant(a)) = items.get(4) else {
+            panic!("expected assistant at 4: {items:?}");
+        };
+        let Some(tc) = a.tool_calls.first() else {
+            panic!("expected tool call: {:?}", a.tool_calls);
+        };
+        assert!(
+            tc.arguments.contains(root),
+            "tool_call arguments should contain root path after sync-back"
+        );
+        assert!(
+            !tc.arguments.contains(worktree),
+            "tool_call arguments should not contain worktree path after sync-back"
+        );
     }
 
     #[test]
@@ -3188,19 +3153,27 @@ mod tests {
         transform_conversation_cwd(&mut items, root, worktree);
 
         // Text content transformed to worktree
-        assert!(items[0].text_content().contains(worktree));
+        assert!(
+            items
+                .first()
+                .is_some_and(|i| i.text_content().contains(worktree))
+        );
 
         // Tool calls also transformed to worktree
-        if let ConversationItem::Assistant(a) = &items[1] {
-            assert!(
-                a.tool_calls[0].arguments.contains(worktree),
-                "tool_call arguments should contain worktree path after forward fork"
-            );
-            assert!(
-                !a.tool_calls[0].arguments.contains(root),
-                "tool_call arguments should not contain root path after forward fork"
-            );
-        }
+        let Some(ConversationItem::Assistant(a)) = items.get(1) else {
+            panic!("expected assistant at 1: {items:?}");
+        };
+        let Some(tc) = a.tool_calls.first() else {
+            panic!("expected tool call: {:?}", a.tool_calls);
+        };
+        assert!(
+            tc.arguments.contains(worktree),
+            "tool_call arguments should contain worktree path after forward fork"
+        );
+        assert!(
+            !tc.arguments.contains(root),
+            "tool_call arguments should not contain root path after forward fork"
+        );
     }
 
     #[test]
@@ -3215,8 +3188,8 @@ mod tests {
         // Both paths get transformed because str::replace does substring matching.
         // "/home/user/myproject-extra" contains "/home/user/myproject" as a prefix, so it becomes "/new/path-extra" (a known false positive)
         assert_eq!(
-            items[0].text_content(),
-            "/new/path-extra/src/main.rs and /new/path/src/lib.rs"
+            items.first().map(|i| i.text_content()).as_deref(),
+            Some("/new/path-extra/src/main.rs and /new/path/src/lib.rs")
         );
     }
 
@@ -3243,26 +3216,37 @@ mod tests {
         transform_conversation_cwd(&mut items, src, dst);
 
         // System
-        assert_eq!(items[0].text_content(), format!("Workspace: {dst}"));
+        assert_eq!(
+            items.first().map(|i| i.text_content()),
+            Some(format!("Workspace: {dst}"))
+        );
 
         // User - both text parts
-        if let ConversationItem::User(u) = &items[1] {
-            if let ContentPart::Text { text } = &u.content[0] {
-                assert_eq!(text.as_ref(), format!("Edit {dst}/a.rs").as_str());
-            }
-            if let ContentPart::Text { text } = &u.content[1] {
-                assert_eq!(text.as_ref(), format!("And {dst}/b.rs").as_str());
-            }
-        }
+        let Some(ConversationItem::User(u)) = items.get(1) else {
+            panic!("expected user at 1: {items:?}");
+        };
+        let [
+            ContentPart::Text { text: t0 },
+            ContentPart::Text { text: t1 },
+            ..,
+        ] = u.content.as_slice()
+        else {
+            panic!("expected two text parts: {:?}", u.content);
+        };
+        assert_eq!(t0.as_ref(), format!("Edit {dst}/a.rs").as_str());
+        assert_eq!(t1.as_ref(), format!("And {dst}/b.rs").as_str());
 
         // Assistant text
         assert_eq!(
-            items[2].text_content(),
-            format!("Done with {dst}/a.rs and {dst}/b.rs")
+            items.get(2).map(|i| i.text_content()),
+            Some(format!("Done with {dst}/a.rs and {dst}/b.rs"))
         );
 
         // Tool result
-        assert_eq!(items[3].text_content(), format!("File {dst}/a.rs saved"));
+        assert_eq!(
+            items.get(3).map(|i| i.text_content()),
+            Some(format!("File {dst}/a.rs saved"))
+        );
     }
 
     #[test]
@@ -3287,27 +3271,31 @@ mod tests {
         transform_conversation_cwd(&mut items, worktree, root);
 
         // Content is empty, so no transform there
-        assert_eq!(items[0].text_content(), "");
+        assert_eq!(items.first().map(|i| i.text_content()).as_deref(), Some(""));
 
         // Tool call arguments are transformed
-        if let ConversationItem::Assistant(a) = &items[0] {
-            assert!(
-                a.tool_calls[0].arguments.contains(root),
-                "read_file arguments should contain root path"
-            );
-            assert!(
-                !a.tool_calls[0].arguments.contains(worktree),
-                "read_file arguments should not contain worktree path"
-            );
-            assert!(
-                a.tool_calls[1].arguments.contains(root),
-                "grep arguments should contain root path"
-            );
-            assert!(
-                !a.tool_calls[1].arguments.contains(worktree),
-                "grep arguments should not contain worktree path"
-            );
-        }
+        let Some(ConversationItem::Assistant(a)) = items.first() else {
+            panic!("expected assistant: {items:?}");
+        };
+        let [tc0, tc1, ..] = a.tool_calls.as_slice() else {
+            panic!("expected two tool calls: {:?}", a.tool_calls);
+        };
+        assert!(
+            tc0.arguments.contains(root),
+            "read_file arguments should contain root path"
+        );
+        assert!(
+            !tc0.arguments.contains(worktree),
+            "read_file arguments should not contain worktree path"
+        );
+        assert!(
+            tc1.arguments.contains(root),
+            "grep arguments should contain root path"
+        );
+        assert!(
+            !tc1.arguments.contains(worktree),
+            "grep arguments should not contain worktree path"
+        );
     }
 
     // ============================================================================
@@ -3489,7 +3477,7 @@ mod tests {
             1
         );
         assert_eq!(conv.len(), 3);
-        assert_matches!(&conv[2], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(2), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
             assert!(tr.content.contains("cancelled"));
             assert!(tr.content.contains("run_terminal_cmd"));
@@ -3536,7 +3524,7 @@ mod tests {
             1
         );
         assert_eq!(conv.len(), 3);
-        assert_matches!(&conv[2], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(2), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
             assert_eq!(
                 tr.content.as_ref(),
@@ -3565,12 +3553,12 @@ mod tests {
             2
         );
         assert_eq!(conv.len(), 3);
-        assert_matches!(&conv[1], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(1), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "read_call_1");
             assert!(tr.content.contains("`read_file`"));
             assert!(tr.content.contains("policy_guard"));
         });
-        assert_matches!(&conv[2], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(2), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "grep_call_2");
             assert!(tr.content.contains("`grep`"));
         });
@@ -3584,10 +3572,10 @@ mod tests {
             2
         );
         assert_eq!(conv.len(), 3);
-        assert_matches!(&conv[1], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(1), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
         });
-        assert_matches!(&conv[2], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(2), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c2");
         });
     }
@@ -3605,11 +3593,11 @@ mod tests {
         );
         assert_eq!(conv.len(), 3);
         // Existing result stays at index 1, synthetic inserted after it
-        assert_matches!(&conv[1], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(1), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
             assert_eq!(tr.content.as_ref(), "file contents");
         });
-        assert_matches!(&conv[2], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(2), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c2");
             assert!(tr.content.contains("cancelled"));
         });
@@ -3627,10 +3615,10 @@ mod tests {
         );
         assert_eq!(conv.len(), 3);
         // Synthetic result inserted right after the assistant, before the user message
-        assert_matches!(&conv[1], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(1), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
         });
-        assert_matches!(&conv[2], ConversationItem::User(_));
+        assert_matches!(conv.get(2), Some(ConversationItem::User(_)));
         // Second call: nothing to repair
         assert_eq!(
             repair_dangling_tool_calls(&mut conv, DanglingToolCallReason::UserCancelled),
@@ -3654,7 +3642,7 @@ mod tests {
             1
         );
         assert_eq!(conv.len(), 6);
-        assert_matches!(&conv[5], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(5), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c2");
         });
     }
@@ -3672,11 +3660,11 @@ mod tests {
             1
         );
         assert_eq!(conv.len(), 3);
-        assert_matches!(&conv[1], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(1), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
             assert!(tr.content.contains("cancelled"));
         });
-        assert_matches!(&conv[2], ConversationItem::Assistant(a) => {
+        assert_matches!(conv.get(2), Some(ConversationItem::Assistant(a)) => {
             assert!(a.tool_calls.is_empty());
         });
     }
@@ -3697,7 +3685,7 @@ mod tests {
         );
         assert_eq!(conv.len(), 4);
         // c1 result at index 1, c2 result at index 2, synthetic c3 at index 3
-        assert_matches!(&conv[3], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(3), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c3");
             assert!(tr.content.contains("cancelled"));
         });
@@ -3719,13 +3707,13 @@ mod tests {
         assert_eq!(conv.len(), 5);
         // Original: [user, assistant, user]
         // After:    [user, assistant, tool(c1), tool(c2), user]
-        assert_matches!(&conv[2], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(2), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
         });
-        assert_matches!(&conv[3], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(3), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c2");
         });
-        assert_matches!(&conv[4], ConversationItem::User(_));
+        assert_matches!(conv.get(4), Some(ConversationItem::User(_)));
     }
 
     #[test]
@@ -3755,29 +3743,16 @@ mod tests {
         );
         // The 10 original items plus the 3 synthetic results
         assert_eq!(conv.len(), 13);
-        // After repair the conversation should be:
-        //  0: user("hello")
-        //  1: assistant([c1])
-        //  2: tool_result(c1)  ← synthetic
-        //  3: user("no, the repo is already cloned")
-        //  4: assistant([c2])
-        //  5: tool_result(c2)
-        //  6: assistant("here's what I found")
-        //  7: user("now do something else")
-        //  8: assistant([c3])
-        //  9: tool_result(c3)  ← synthetic
-        // 10: user("actually never mind")
-        // 11: assistant([c4])
-        // 12: tool_result(c4)  ← synthetic
-        assert_matches!(&conv[2], ConversationItem::ToolResult(tr) => {
+        // After repair, each unanswered tool call has a synthetic result in place.
+        assert_matches!(conv.get(2), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
             assert!(tr.content.contains("cancelled"));
         });
-        assert_matches!(&conv[9], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(9), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c3");
             assert!(tr.content.contains("cancelled"));
         });
-        assert_matches!(&conv[12], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(12), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c4");
             assert!(tr.content.contains("cancelled"));
         });
@@ -3816,7 +3791,7 @@ mod tests {
         ];
         assert_eq!(dedup_duplicate_tool_results(&mut conv), 1);
         assert_eq!(conv.len(), 2); // the assistant and one tool_result
-        assert_matches!(&conv[1], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(1), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
             assert!(tr.content.contains("real output here"));
         });
@@ -3878,11 +3853,11 @@ mod tests {
         ];
         assert_eq!(dedup_duplicate_tool_results(&mut conv), 2);
         assert_eq!(conv.len(), 5); // Two assistants, two kept tool_results, and one user remain
-        assert_matches!(&conv[1], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(1), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c1");
             assert_eq!(tr.content.as_ref(), "new");
         });
-        assert_matches!(&conv[4], ConversationItem::ToolResult(tr) => {
+        assert_matches!(conv.get(4), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.tool_call_id, "c2");
             assert_eq!(tr.content.as_ref(), "fresh");
         });
@@ -3915,14 +3890,13 @@ mod tests {
         assert_eq!(stripped.len(), 1);
 
         // Verify image was replaced with placeholder text
-        if let ConversationItem::User(user) = &req.items[0] {
-            assert_eq!(user.content.len(), 2); // the original text and the replaced image
-            assert_matches!(&user.content[1], ContentPart::Text { text } => {
-                assert!(text.contains("image removed"));
-            });
-        } else {
-            panic!("Expected User item");
-        }
+        let Some(ConversationItem::User(user)) = req.items.first() else {
+            panic!("Expected User item: {:?}", req.items);
+        };
+        assert_eq!(user.content.len(), 2); // the original text and the replaced image
+        assert_matches!(user.content.get(1), Some(ContentPart::Text { text }) => {
+            assert!(text.contains("image removed"));
+        });
     }
 
     #[test]
@@ -3943,14 +3917,13 @@ mod tests {
 
         req.strip_images();
 
-        if let ConversationItem::User(user) = &req.items[0] {
-            assert_eq!(user.content.len(), 1);
-            assert_matches!(&user.content[0], ContentPart::Text { text } => {
-                assert_eq!(text.as_ref(), "hello world");
-            });
-        } else {
-            panic!("Expected User item");
-        }
+        let Some(ConversationItem::User(user)) = req.items.first() else {
+            panic!("Expected User item: {:?}", req.items);
+        };
+        assert_eq!(user.content.len(), 1);
+        assert_matches!(user.content.first(), Some(ContentPart::Text { text }) => {
+            assert_eq!(text.as_ref(), "hello world");
+        });
     }
 
     #[test]
@@ -3965,13 +3938,13 @@ mod tests {
         assert_eq!(stripped.len(), 0);
 
         // Verify nothing was modified
-        assert_matches!(&req.items[0], ConversationItem::System(s) => {
+        assert_matches!(req.items.first(), Some(ConversationItem::System(s)) => {
             assert_eq!(s.content.as_ref(), "system prompt");
         });
-        assert_matches!(&req.items[1], ConversationItem::Assistant(a) => {
+        assert_matches!(req.items.get(1), Some(ConversationItem::Assistant(a)) => {
             assert_eq!(a.content.as_ref(), "response");
         });
-        assert_matches!(&req.items[2], ConversationItem::ToolResult(tr) => {
+        assert_matches!(req.items.get(2), Some(ConversationItem::ToolResult(tr)) => {
             assert_eq!(tr.content.as_ref(), "result text");
         });
     }
@@ -3985,19 +3958,18 @@ mod tests {
 
         req.strip_images();
 
-        if let ConversationItem::User(user) = &req.items[0] {
-            assert_eq!(user.content.len(), 2);
-            // Text part preserved
-            assert_matches!(&user.content[0], ContentPart::Text { text } => {
-                assert_eq!(text.as_ref(), "look at these");
-            });
-            // Image part replaced
-            assert_matches!(&user.content[1], ContentPart::Text { text } => {
-                assert!(text.contains("image removed"));
-            });
-        } else {
-            panic!("Expected User item");
-        }
+        let Some(ConversationItem::User(user)) = req.items.first() else {
+            panic!("Expected User item: {:?}", req.items);
+        };
+        assert_eq!(user.content.len(), 2);
+        // Text part preserved
+        assert_matches!(user.content.first(), Some(ContentPart::Text { text }) => {
+            assert_eq!(text.as_ref(), "look at these");
+        });
+        // Image part replaced
+        assert_matches!(user.content.get(1), Some(ContentPart::Text { text }) => {
+            assert!(text.contains("image removed"));
+        });
     }
 
     #[test]
@@ -4038,16 +4010,15 @@ mod tests {
         let stripped = req.strip_images();
         assert_eq!(stripped.len(), 2);
 
-        if let ConversationItem::ToolResult(t) = &req.items[0] {
-            assert!(t.images.is_empty(), "images should be cleared after strip");
-            assert_eq!(
-                t.content.as_ref(),
-                "Read image file: photo.png",
-                "text content preserved"
-            );
-        } else {
-            panic!("Expected ToolResult");
-        }
+        let Some(ConversationItem::ToolResult(t)) = req.items.first() else {
+            panic!("Expected ToolResult: {:?}", req.items);
+        };
+        assert!(t.images.is_empty(), "images should be cleared after strip");
+        assert_eq!(
+            t.content.as_ref(),
+            "Read image file: photo.png",
+            "text content preserved"
+        );
     }
 
     /// The URL-scoped strip: listed URLs are stripped from both part kinds (User images become the placeholder, ToolResult images are removed).
@@ -4079,8 +4050,8 @@ mod tests {
         // The whole safety case for persisting via `replace_history`: an in-place strip never changes item count or ordering
         assert_eq!(items.len(), 2, "strip must never add or remove items");
 
-        let ConversationItem::User(u) = &items[0] else {
-            panic!("expected User");
+        let Some(ConversationItem::User(u)) = items.first() else {
+            panic!("expected User: {items:?}");
         };
         assert!(
             u.content.iter().any(|p| matches!(
@@ -4103,11 +4074,11 @@ mod tests {
             ["data:image/png;base64,unlisted"],
             "listed user image replaced, unlisted survives"
         );
-        let ConversationItem::ToolResult(t) = &items[1] else {
-            panic!("expected ToolResult");
+        let Some(ConversationItem::ToolResult(t)) = items.get(1) else {
+            panic!("expected ToolResult: {items:?}");
         };
         assert!(
-            matches!(&t.images[..], [ContentPart::Image { url }] if url.contains("unlisted")),
+            matches!(t.images.as_slice(), [ContentPart::Image { url }] if url.contains("unlisted")),
             "listed tool image removed, unlisted survives: {:?}",
             t.images
         );
@@ -4127,7 +4098,9 @@ mod tests {
 
         if let ConversationItem::ToolResult(t) = &back {
             assert_eq!(t.images.len(), 1);
-            assert!(matches!(&t.images[0], ContentPart::Image { url } if url.contains("iVBOR")));
+            assert!(
+                matches!(t.images.first(), Some(ContentPart::Image { url }) if url.contains("iVBOR"))
+            );
         } else {
             panic!("Expected ToolResult");
         }
@@ -4162,7 +4135,7 @@ mod tests {
         });
         let item: ConversationItem = serde_json::from_value(json).expect("deserialize");
         if let ConversationItem::User(u) = item {
-            assert_eq!(u.synthetic_reason, Some(SyntheticReason::Unknown));
+            assert_eq!(SyntheticReason::Unknown, u.synthetic_reason);
         } else {
             panic!("expected User variant");
         }
@@ -4172,8 +4145,11 @@ mod tests {
     fn working_directory_switch_round_trips_generation() {
         let item = ConversationItem::working_directory_switch("moved", 7);
         let json = serde_json::to_value(&item).expect("serialize");
-        assert_eq!(json["synthetic_reason"], "working_directory_switch");
-        assert_eq!(json["cwd_generation"], 7);
+        assert_eq!(
+            json.get("synthetic_reason").and_then(|v| v.as_str()),
+            Some("working_directory_switch")
+        );
+        assert_eq!(json.get("cwd_generation"), Some(&serde_json::json!(7)));
         let back: ConversationItem = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back.working_directory_switch_generation(), Some(7));
     }
@@ -4193,41 +4169,37 @@ mod tests {
     }
 
     /// `synthetic_reason` round-trips through JSON.
-    /// Old sessions that omit the field entirely deserialize as `None` (via `#[serde(default)]`); sessions with the field preserve the value.
+    /// Old sessions that omit the field entirely deserialize as `Human` (via the serde default); sessions with the field preserve the value.
     #[test]
     fn synthetic_reason_json_roundtrip() {
         // New: has synthetic_reason.
         let item = ConversationItem::system_reminder("test");
         let json = serde_json::to_value(&item).expect("serialize");
         assert_eq!(
-            json["synthetic_reason"],
-            serde_json::json!("system_reminder"),
+            json.get("synthetic_reason"),
+            Some(&serde_json::json!("system_reminder")),
             "synthetic_reason must serialize as snake_case string"
         );
         let back: ConversationItem = serde_json::from_value(json).expect("deserialize");
         if let ConversationItem::User(u) = back {
-            assert_eq!(u.synthetic_reason, Some(SyntheticReason::SystemReminder));
+            assert_eq!(SyntheticReason::SystemReminder, u.synthetic_reason);
         } else {
             panic!("expected User variant after round-trip");
         }
 
-        // Old JSONL without the field must deserialize as None.
+        // Old JSONL without the field must deserialize as Human.
         let old_json = serde_json::json!({
             "type": "user",
             "content": [{"type": "text", "text": "hello"}]
         });
         let old: ConversationItem = serde_json::from_value(old_json).expect("deserialize old");
-        if let ConversationItem::User(u) = old {
-            assert!(
-                u.synthetic_reason.is_none(),
-                "old sessions without synthetic_reason must deserialize as None"
-            );
-        } else {
-            panic!("expected User variant for old JSON");
-        }
+        assert!(
+            old.is_human_user_turn(),
+            "old sessions without synthetic_reason must deserialize as Human"
+        );
     }
 
-    /// Real user messages must NOT serialize the `synthetic_reason` key at all (ensured by `skip_serializing_if = "Option::is_none"`).
+    /// Real user messages must NOT serialize the `synthetic_reason` key at all (ensured by `skip_serializing_if = "SyntheticReason::is_human"`).
     #[test]
     fn real_user_message_omits_synthetic_reason_key() {
         let item = ConversationItem::user("hello");
@@ -4236,6 +4208,27 @@ mod tests {
             json.get("synthetic_reason").is_none(),
             "real user messages must not include synthetic_reason in JSON"
         );
+    }
+
+    /// `Primary` is the absent state on the wire: the leading prompt writes no key and reads back from none, while a tagged System item round-trips its tag.
+    #[test]
+    fn system_item_synthetic_reason_serde() {
+        let primary = serde_json::json!({"type": "system", "content": "prompt"});
+        assert_eq!(
+            primary,
+            serde_json::to_value(ConversationItem::system("prompt")).unwrap()
+        );
+        let item: ConversationItem = serde_json::from_value(primary).unwrap();
+        assert!(item.is_primary_system_turn());
+
+        let tagged = serde_json::json!({
+            "type": "system",
+            "content": "reminder",
+            "synthetic_reason": "system_reminder"
+        });
+        let item: ConversationItem = serde_json::from_value(tagged.clone()).unwrap();
+        assert!(!item.is_primary_system_turn());
+        assert_eq!(tagged, serde_json::to_value(&item).unwrap());
     }
 
     #[test]
@@ -4250,14 +4243,14 @@ mod tests {
         assert!(matches!(
             item,
             ConversationItem::User(UserItem {
-                synthetic_reason: Some(SyntheticReason::AgentMessage),
+                synthetic_reason: SyntheticReason::AgentMessage,
                 ..
             })
         ));
     }
 
     /// Forward-compat regression guard for the `#[serde(other)]` arm.
-    /// Payloads from newer clients with an unknown `synthetic_reason` value must deserialize as `Some(SyntheticReason::Unknown)` rather than failing.
+    /// Payloads from newer clients with an unknown `synthetic_reason` value must deserialize as `SyntheticReason::Unknown` rather than failing.
     #[test]
     fn unknown_synthetic_reason_deserializes_for_forward_compat() {
         let payload = serde_json::json!({
@@ -4268,8 +4261,8 @@ mod tests {
         let item: ConversationItem =
             serde_json::from_value(payload).expect("deserialize forward-compat payload");
         if let ConversationItem::User(u) = item {
-            assert_eq!(u.synthetic_reason, Some(SyntheticReason::Unknown));
-            assert!(u.synthetic_reason.as_ref().unwrap().starts_prompt_turn());
+            assert_eq!(SyntheticReason::Unknown, u.synthetic_reason);
+            assert!(u.synthetic_reason.starts_prompt_turn());
         } else {
             panic!("expected User variant");
         }
@@ -4404,29 +4397,13 @@ mod tests {
 
     #[test]
     fn stop_reason_as_str_matches_serde() {
-        assert_eq!(StopReason::Stop.as_str(), "stop");
-        assert_eq!(StopReason::Length.as_str(), "length");
-        assert_eq!(StopReason::ToolCalls.as_str(), "tool_calls");
-        assert_eq!(StopReason::ContentFilter.as_str(), "content_filter");
+        assert_eq!(StopReason::Stop.as_ref(), "stop");
+        assert_eq!(StopReason::Length.as_ref(), "length");
+        assert_eq!(StopReason::ToolCalls.as_ref(), "tool_calls");
+        assert_eq!(StopReason::ContentFilter.as_ref(), "content_filter");
     }
 
-    // ============================================================================
-    // Reasoning-as-sibling regression tests
-    //
-    // These pin the invariants of the sibling-reasoning data model:
-    //
-    // 1. `tco_*` reasoning items from parallel backend tool calls round-trip losslessly as N sibling `Reasoning` items.
-    //    (A prior data-loss bug: `AssistantItem.reasoning` was last-write-wins.)
-    //
-    // 2. Multi-turn conversations preserve emission order `[Sys, U1, R, BTC*, A1, U2, R, BTC*, A2, ...]` rather than `[Sys, U1, ..., UN, R*, A*]`.
-    //    (A prior ordering bug defeated the server-side prefix cache.)
-    //
-    // 3. `conversation_to_chat_messages` folds preceding Reasoning siblings into the next assistant's `reasoning_content`.
-    //    This is the chat-completions wire path
-    //
-    // 4. `patch_reasoning_text_types` injects the `type: "reasoning_text"` discriminator on nested `content[]` items.
-    //    async-openai's derived Serialize omits it
-    // ============================================================================
+    // `tco_*` reasoning items from parallel backend tool calls round-trip losslessly as N sibling `Reasoning` items. (A prior data-loss bug: `AssistantItem.reasoning` was last-write-wins.); Multi-turn conversations preserve emission order `[Sys, U1, R, BTC*, A1, U2, R, BTC*, A2, ...]` rather than `[Sys, U1, ..., UN, R*, A*]`. (A prior ordering bug defeated the server-side prefix cache.); `conversation_to_chat_messages` folds preceding Reasoning siblings into the next assistant's `reasoning_content`. This is the chat-completions wire path; `patch_reasoning_text_types` injects the `type: "reasoning_text"` discriminator on nested `content[]` items. async-openai's derived Serialize omits it.
 
     #[test]
     fn multi_tco_reasoning_items_round_trip_as_siblings() {
@@ -4567,12 +4544,14 @@ mod tests {
         ];
 
         let msgs = conversation_to_chat_messages(items);
-        assert_eq!(msgs.len(), 2, "user + assistant; reasoning items folded");
-        assert_eq!(msgs[0].role, Role::User);
-        assert_eq!(msgs[1].role, Role::Assistant);
-        assert_eq!(msgs[1].text_content(), "answer");
+        let [user, assistant] = msgs.as_slice() else {
+            panic!("expected user + assistant: {msgs:?}");
+        };
+        assert_eq!(user.role, Role::User);
+        assert_eq!(assistant.role, Role::Assistant);
+        assert_eq!(assistant.text_content(), "answer");
         assert_eq!(
-            msgs[1].reasoning_content.as_deref(),
+            assistant.reasoning_content.as_deref(),
             Some("thinking step 1\nthinking step 2"),
             "reasoning text joined and attached to the assistant"
         );
@@ -4598,15 +4577,13 @@ mod tests {
             1,
             "trailing reasoning has no assistant to attach to"
         );
-        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs.first().map(|m| m.role), Some(Role::User));
     }
 
     #[test]
     fn conversation_to_chat_messages_folds_reasoning_across_backend_tool_call() {
-        // The canonical post-tool-call ordering is `[..., Reasoning, BackendToolCall, Assistant]` (e.g. a web_search turn).
+        // The canonical post-tool-call ordering is `[..., Reasoning, BackendToolCall, Assistant]`.
         // The BackendToolCall is emitted as its own synthetic assistant message, but it must NOT drop the pending reasoning
-        // The reasoning belongs to the same turn and folds onto the following assistant's `reasoning_content`
-        // That matches the Responses API path (`build_responses_input_preserves_multi_turn_ordering`)
         let items = vec![
             ConversationItem::user("hi"),
             reasoning_sibling("r1", "thinking before search", None),
@@ -4625,24 +4602,23 @@ mod tests {
 
         let msgs = conversation_to_chat_messages(items);
 
-        assert_eq!(msgs.len(), 3, "user + synthetic BTC assistant + assistant");
-        assert_eq!(msgs[0].role, Role::User);
+        let [user, btc, assistant] = msgs.as_slice() else {
+            panic!("expected user + synthetic BTC assistant + assistant: {msgs:?}");
+        };
+        assert_eq!(user.role, Role::User);
         // BackendToolCall becomes a synthetic assistant carrying its summary; it does not itself carry the reasoning
-        assert_eq!(msgs[1].role, Role::Assistant);
+        assert_eq!(btc.role, Role::Assistant);
+        assert_eq!(btc.text_content(), "[backend web_search] search: capybaras");
         assert_eq!(
-            msgs[1].text_content(),
-            "[backend web_search] search: capybaras"
-        );
-        assert_eq!(
-            msgs[1].reasoning_content.as_deref(),
+            btc.reasoning_content.as_deref(),
             None,
             "reasoning lands on the real assistant, not the synthetic BTC message"
         );
         // The real assistant turn keeps the reasoning that preceded the backend tool call
-        assert_eq!(msgs[2].role, Role::Assistant);
-        assert_eq!(msgs[2].text_content(), "answer");
+        assert_eq!(assistant.role, Role::Assistant);
+        assert_eq!(assistant.text_content(), "answer");
         assert_eq!(
-            msgs[2].reasoning_content.as_deref(),
+            assistant.reasoning_content.as_deref(),
             Some("thinking before search"),
             "reasoning preceding a BackendToolCall folds onto the following \
              assistant rather than being dropped"
@@ -4675,16 +4651,8 @@ mod tests {
         assert_eq!(msg.reasoning_content.as_deref(), None);
     }
 
-    // ========================================================================
     // upgrade_legacy_reasoning: legacy in-memory reconstruction
-    // ========================================================================
-    //
-    // Three legacy on-disk shapes that the on-read upgrader must lift to sibling Reasoning / BackendToolCall items:
-    //
-    //   1. v1 assistant with `raw_output: Vec<OutputItem>` (backend-search era)
-    //   2. v1 assistant with singular `reasoning: ReasoningContent` (earlier grok-build / chat-completions written as v1)
-    //   3. v0 `ChatRequestMessage` with top-level `reasoning_content`
-    //
+    // Three legacy on-disk shapes that the on-read upgrader must lift to sibling Reasoning / BackendToolCall items: v1 assistant with `raw_output: Vec<OutputItem>` (backend-search era); v1 assistant with singular `reasoning: ReasoningContent` (earlier grok-build / chat-completions written as v1); v0 `ChatRequestMessage` with top-level `reasoning_content`.
     // Idempotent (current-format rows produce zero siblings); verified by `upgrade_is_idempotent_on_post_pr_rows`
 
     #[test]
@@ -4705,12 +4673,13 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         let siblings = upgrade_legacy_reasoning(&raw, &mut seen);
         assert_eq!(siblings.len(), 1, "exactly one sibling Reasoning emitted");
-        let ConversationItem::Reasoning(r) = &siblings[0] else {
-            panic!("expected Reasoning sibling, got {:?}", siblings[0]);
+        let Some(ConversationItem::Reasoning(r)) = siblings.first() else {
+            panic!("expected Reasoning sibling, got {siblings:?}");
         };
         assert_eq!(r.id, "rs_00000000-0000-4000-8000-000000000001");
-        assert_eq!(r.summary.len(), 1);
-        let rs::SummaryPart::SummaryText(s) = &r.summary[0];
+        let [rs::SummaryPart::SummaryText(s)] = r.summary.as_slice() else {
+            panic!("expected one summary text: {:?}", r.summary);
+        };
         assert_eq!(
             s.text,
             "The web search results for cats and dogs are mostly about"
@@ -4901,8 +4870,6 @@ mod tests {
     }
 
     /// Canary for `serde_json`'s `preserve_order` feature.
-    ///
-    /// With `preserve_order` (Cargo.toml), `serde_json::Map` is backed by `IndexMap` which preserves insertion (struct-declaration) order.
     /// Without it, `BTreeMap` is used which alphabetizes keys.
     /// This test serializes once and verifies that a known field ordering matches the struct declaration order (not alphabetical).
     #[test]
@@ -4924,7 +4891,10 @@ mod tests {
         // The wire JSON must emit `type` before `role` before `content`
         // With BTreeMap (no preserve_order) these would be alphabetized to content, role, type
         let input = input_items_json(&req);
-        let first_item_str = serde_json::to_string(&input[0]).unwrap();
+        let Some(first_item) = input.first() else {
+            panic!("expected input item: {input:?}");
+        };
+        let first_item_str = serde_json::to_string(first_item).unwrap();
         let type_pos = first_item_str
             .find("\"type\"")
             .expect("type field must exist");
@@ -4957,16 +4927,11 @@ mod tests {
         let summary = summarise_input(&input);
 
         assert_eq!(summary.len(), 4);
-        assert_eq!(summary[2], "reasoning:r1");
+        assert_eq!(summary.get(2).map(String::as_str), Some("reasoning:r1"));
 
         // Encrypted content absent on the wire.
-        assert!(
-            input[2].get("encrypted_content").is_none()
-                || input[2]
-                    .get("encrypted_content")
-                    .and_then(|v| v.as_str())
-                    .is_none(),
-        );
+        let enc = input.get(2).and_then(|v| v.get("encrypted_content"));
+        assert!(enc.is_none() || enc.and_then(|v| v.as_str()).is_none());
 
         // The legacy placeholder sentinel must not appear
         let body_str = serde_json::to_string(&input).unwrap();

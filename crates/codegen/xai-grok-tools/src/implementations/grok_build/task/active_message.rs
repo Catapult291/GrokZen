@@ -9,17 +9,57 @@ use xai_tool_types::is_not_sentinel;
 /// Maximum UTF-8 byte length of one in-memory V0 agent message.
 pub const MAX_ACTIVE_AGENT_MESSAGE_BYTES: usize = 32 * 1024;
 
+pub use xai_message_delivery_core::AgentAddress;
+
+/// Coordinator target vocabulary; sender authority remains server-bound outside this value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveMessageTarget {
+    ChildId(String),
+    Address(AgentAddress),
+    Parent,
+    Agent {
+        agent_id: xai_message_delivery_core::AgentId,
+    },
+}
+
+/// Coordinator-classified relationship between sender and resolved target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveMessageRoute {
+    ParentToOwnedDescendant,
+    DescendantToParent,
+    Peer,
+}
+
 /// Closed delivery operation. No bool below the model adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveAgentMessageOperation {
     Queue,
     Steer,
+    Interject,
 }
 
-/// Bounded caller request for the internal active-descendant route.
+impl From<ActiveAgentMessageOperation> for xai_message_delivery_core::Operation {
+    fn from(operation: ActiveAgentMessageOperation) -> Self {
+        match operation {
+            ActiveAgentMessageOperation::Queue => xai_message_delivery_core::Operation::Queue,
+            ActiveAgentMessageOperation::Steer => xai_message_delivery_core::Operation::Steer,
+            ActiveAgentMessageOperation::Interject => {
+                xai_message_delivery_core::Operation::Interject
+            }
+        }
+    }
+}
+
+/// Principal that caused the coordinator to mint an active-child delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveAgentMessageSource {
+    Agent,
+    Human,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveAgentMessageRequest {
-    subagent_id: String,
+    target: ActiveMessageTarget,
     text: Arc<str>,
     operation: ActiveAgentMessageOperation,
 }
@@ -41,6 +81,29 @@ impl ActiveAgentMessageRequest {
         if !is_not_sentinel(&subagent_id) {
             return Err(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
         }
+        Self::try_from_parts(
+            ActiveMessageTarget::ChildId(subagent_id.trim().to_owned()),
+            text,
+            operation,
+        )
+    }
+
+    pub fn try_new_from_human(
+        address: impl AsRef<str>,
+        text: impl Into<Arc<str>>,
+        operation: ActiveAgentMessageOperation,
+    ) -> Result<Self, ActiveAgentMessageOutcome> {
+        let Some(address) = AgentAddress::parse(address.as_ref()) else {
+            return Err(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
+        };
+        Self::try_from_parts(ActiveMessageTarget::Address(address), text, operation)
+    }
+
+    pub(crate) fn try_from_parts(
+        target: ActiveMessageTarget,
+        text: impl Into<Arc<str>>,
+        operation: ActiveAgentMessageOperation,
+    ) -> Result<Self, ActiveAgentMessageOutcome> {
         let text = text.into();
         if text.is_empty() {
             return Err(ActiveAgentMessageOutcome::Limit {
@@ -55,7 +118,7 @@ impl ActiveAgentMessageRequest {
             });
         }
         Ok(Self {
-            subagent_id: subagent_id.trim().to_owned(),
+            target,
             text,
             operation,
         })
@@ -68,14 +131,14 @@ impl ActiveAgentMessageRequest {
 
     fn placeholder() -> Self {
         Self {
-            subagent_id: String::new(),
+            target: ActiveMessageTarget::ChildId(String::new()),
             text: Arc::from(""),
             operation: ActiveAgentMessageOperation::Queue,
         }
     }
 
-    pub fn subagent_id(&self) -> &str {
-        &self.subagent_id
+    pub fn target(&self) -> &ActiveMessageTarget {
+        &self.target
     }
 
     pub fn text(&self) -> &Arc<str> {
@@ -100,6 +163,8 @@ pub struct ActiveAgentMessage {
 pub struct ActiveAgentMessageDelivery {
     message: ActiveAgentMessage,
     operation: ActiveAgentMessageOperation,
+    source: ActiveAgentMessageSource,
+    route: ActiveMessageRoute,
     admission_lease: Arc<ActiveMessageAdmissionLease>,
 }
 
@@ -107,11 +172,15 @@ impl ActiveAgentMessageDelivery {
     pub(crate) fn new(
         message: ActiveAgentMessage,
         operation: ActiveAgentMessageOperation,
+        source: ActiveAgentMessageSource,
+        route: ActiveMessageRoute,
         admission_lease: Arc<ActiveMessageAdmissionLease>,
     ) -> Self {
         Self {
             message,
             operation,
+            source,
+            route,
             admission_lease,
         }
     }
@@ -122,6 +191,14 @@ impl ActiveAgentMessageDelivery {
 
     pub fn operation(&self) -> ActiveAgentMessageOperation {
         self.operation
+    }
+
+    pub fn source(&self) -> ActiveAgentMessageSource {
+        self.source
+    }
+
+    pub fn route(&self) -> ActiveMessageRoute {
+        self.route
     }
 
     /// Run synchronous protected-row insertion only while admission is open.
@@ -257,7 +334,16 @@ impl ActiveMessageAdmissionLease {
     }
 }
 
-/// Closed result of the internal active-descendant route.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[non_exhaustive]
+#[serde(rename_all = "snake_case")]
+pub enum ActiveAgentMessageQuotaKind {
+    SenderTargetInFlight,
+    AttemptOutbound,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ActiveAgentMessageOutcome {
@@ -268,6 +354,10 @@ pub enum ActiveAgentMessageOutcome {
     NotActiveOrFinalizing,
     Saturated {
         max_in_flight: usize,
+    },
+    QuotaExceeded {
+        kind: ActiveAgentMessageQuotaKind,
+        limit: usize,
     },
     /// A claimed or committed admission could not be resolved conclusively.
     AdmissionUncertain,
@@ -281,12 +371,26 @@ pub enum ActiveAgentMessageOutcome {
     ChannelClosed,
 }
 
+/// Sole server-bound principal for an active-message request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActiveMessageSenderContext {
+    RootSession {
+        session_id: Arc<str>,
+    },
+    GrantedChild {
+        holder: super::agent_message_sender::AgentMessageHolder,
+    },
+    HumanRoot {
+        session_id: Arc<str>,
+    },
+}
+
 /// Coordinator command envelope with server-bound sender identity.
 #[derive(Educe)]
 #[educe(Debug)]
 pub struct SubagentActiveMessageRequest {
     pub request: ActiveAgentMessageRequest,
-    pub parent_session_id: String,
+    pub sender_context: ActiveMessageSenderContext,
     #[educe(Debug(ignore))]
     pub respond_to: oneshot::Sender<ActiveAgentMessageOutcome>,
 }

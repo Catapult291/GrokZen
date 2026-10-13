@@ -1,6 +1,6 @@
 //! Handle to communicate with ChatStateActor.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use tokio::sync::{mpsc, oneshot};
 use xai_grok_sampling_types::{
@@ -227,9 +227,9 @@ impl ChatStateHandle {
 
     /// Update the sampling config (e.g., model switch).
     pub fn update_sampling_config(&self, config: SamplingConfig) {
-        let _ = self
-            .cmd_tx
-            .send(ChatStateCommand::UpdateSamplingConfig { config });
+        let _ = self.cmd_tx.send(ChatStateCommand::UpdateSamplingConfig {
+            config: Box::new(config),
+        });
     }
 
     /// Track that the agent edited a file path.
@@ -271,10 +271,8 @@ impl ChatStateHandle {
         });
     }
 
-    /// See [`ChatStateCommand::StripConversationImages`]. The outcome is
-    /// typed and disk-acknowledged: `Applied` means the backup and the
-    /// rewrite both reached disk; a dead actor reads as `ActorUnavailable`,
-    /// never as a successful no-op.
+    /// See [`ChatStateCommand::StripConversationImages`]. Outcome is typed and disk-acknowledged.
+    /// `Applied` means backup and rewrite both reached disk; a dead actor is `ActorUnavailable`, never a no-op.
     pub async fn strip_conversation_images(
         &self,
         urls: Vec<std::sync::Arc<str>>,
@@ -302,10 +300,9 @@ impl ChatStateHandle {
         .await
     }
 
-    /// Atomically align the leading `System` message with `prompt` (insert one
-    /// if absent), persisting when changed. Serializes with turn pushes inside
-    /// the actor, so a mid-turn reconnect can't drop concurrent updates.
-    /// Returns `Some(changed)`, or `None` if the actor is dead.
+    /// Atomically align the leading `System` message with `prompt`, persisting when changed.
+    /// Serializes with turn pushes so a mid-turn reconnect cannot drop concurrent updates.
+    /// `Some(changed)`, or `None` if the actor is dead.
     pub async fn replace_system_head(&self, prompt: &str) -> Option<bool> {
         let prompt = prompt.to_owned();
         self.query("ReplaceSystemHead", |reply| {
@@ -351,11 +348,8 @@ impl ChatStateHandle {
         let _ = self.cmd_tx.send(ChatStateCommand::BeginTurnCapture);
     }
 
-    /// Append synthetic `task` pairs for a harness-spawned subagent (goal
-    /// planner / verifier skeptic) to the in-progress harness trace phase. They
-    /// are sealed into a standalone trace turn by [`Self::flush_harness_trace_turn`]
-    /// and never enter the live `conversation` sent to the model. No-op on
-    /// empty input.
+    /// Append synthetic `task` pairs for a harness-spawned subagent to the in-progress trace phase.
+    /// Sealed into a standalone trace turn; never enter the live `conversation`. No-op on empty input.
     pub fn append_harness_trace_items(&self, items: Vec<ConversationItem>) {
         if items.is_empty() {
             return;
@@ -365,19 +359,23 @@ impl ChatStateHandle {
             .send(ChatStateCommand::AppendHarnessTraceItems { items });
     }
 
-    /// Seal the harness items accumulated since the last flush into one trace
-    /// turn. Call once per harness phase (after the planner, after a verifier
-    /// panel) so each phase becomes its own uploaded `turn_{N}` artifact. No-op
-    /// when nothing was recorded since the last flush.
+    /// Seal harness items accumulated since the last flush into one trace turn.
+    /// Call once per harness phase so each becomes its own uploaded `turn_{N}` artifact.
+    /// No-op when nothing was recorded since the last flush.
     pub fn flush_harness_trace_turn(&self) {
         let _ = self.cmd_tx.send(ChatStateCommand::FlushHarnessTraceTurn);
     }
 
-    /// Repair dangling tool calls after a harness-initiated halt.
-    pub fn repair_dangling_after_harness_halt(&self, class: &'static str) {
+    /// Repair dangling tool calls after a harness-initiated halt. `answers` are
+    /// written only for ids still dangling; the rest are dropped.
+    pub fn repair_dangling_after_harness_halt(
+        &self,
+        class: &'static str,
+        answers: HashMap<String, String>,
+    ) {
         let _ = self
             .cmd_tx
-            .send(ChatStateCommand::RepairDanglingAfterHarnessHalt { class });
+            .send(ChatStateCommand::RepairDanglingAfterHarnessHalt { class, answers });
     }
 
     /// Drop a trailing continue reminder whose continuation will never
@@ -392,10 +390,7 @@ impl ChatStateHandle {
     // ═══ Async queries (via oneshot) ═══
 
     /// Send a query to the actor and await the reply.
-    ///
-    /// Returns `None` when the actor is dead (channel send failure or reply
-    /// dropped due to panic/cancellation). Both failure modes are logged at
-    /// `error` level with `cmd_name` for post-mortem diagnostics.
+    /// `None` when the actor is dead (send failure or dropped reply). Both modes are logged at `error`.
     async fn query<T>(
         &self,
         cmd_name: &str,
@@ -489,9 +484,8 @@ impl ChatStateHandle {
     }
 
     /// Fail-closed prompt bill read.
-    /// `Ok(None)` means the actor answered "no ledger"; `Err(())` means it did
-    /// not answer at all. Never collapse `Err` to `None`: an unreadable bill
-    /// must not be mistaken for a free prompt.
+    /// `Ok(None)` means the actor answered "no ledger"; `Err(())` means it did not answer.
+    /// Never collapse `Err` to `None`: an unreadable bill must not be mistaken for a free prompt.
     pub async fn try_get_prompt_usage(&self) -> Result<Option<crate::usage::UsageLedger>, ()> {
         self.query("GetPromptUsage", |reply| ChatStateCommand::GetPromptUsage {
             reply,
@@ -540,6 +534,39 @@ impl ChatStateHandle {
             ChatStateCommand::GetSamplingConfig { reply }
         })
         .await
+    }
+
+    /// Apply the same tool-result prune a turn request uses (`total_tokens` over half the window).
+    /// Returns `items` unchanged when the mailbox is closed. If the actor dies after
+    /// accepting the command, returns empty.
+    pub async fn apply_turn_request_pruning(
+        &self,
+        items: Vec<ConversationItem>,
+    ) -> Vec<ConversationItem> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(error) = self
+            .cmd_tx
+            .send(ChatStateCommand::ApplyTurnRequestPruning { items, reply: tx })
+        {
+            tracing::error!(
+                cmd_name = "ApplyTurnRequestPruning",
+                "ChatStateActor dead: send failed"
+            );
+            return match error.0 {
+                ChatStateCommand::ApplyTurnRequestPruning { items, .. } => items,
+                _ => unreachable!("sent ApplyTurnRequestPruning"),
+            };
+        }
+        match rx.await {
+            Ok(pruned) => pruned,
+            Err(_) => {
+                tracing::error!(
+                    cmd_name = "ApplyTurnRequestPruning",
+                    "ChatStateActor dead: reply dropped"
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// Get the set of agent-edited file paths.
@@ -603,11 +630,9 @@ impl ChatStateHandle {
         .flatten()
     }
 
-    /// Drain the sealed harness trace turns (goal planner + verifier panels).
-    /// Each returned `Vec` is one turn's worth of synthetic `task` pairs,
-    /// destined to be uploaded as its own sibling `turn_{N}` artifact. A
-    /// trailing un-flushed accumulator is sealed defensively before draining.
-    /// Returns empty when nothing was recorded (the common, non-goal case).
+    /// Drain the sealed harness trace turns. Each `Vec` is one turn's synthetic `task` pairs.
+    /// A trailing un-flushed accumulator is sealed defensively before draining.
+    /// Empty when nothing was recorded.
     pub async fn take_harness_trace_turns(&self) -> Vec<Vec<ConversationItem>> {
         self.query("TakeHarnessTraceTurns", |reply| {
             ChatStateCommand::TakeHarnessTraceTurns { reply }
@@ -634,9 +659,7 @@ impl ChatStateHandle {
     // ═══ Narrow targeted queries ═══
 
     /// Get the number of items in the conversation.
-    ///
-    /// Cheaper than [`get_conversation`] when only the length is needed —
-    /// the actor returns a single `usize` without cloning any items.
+    /// Cheaper than [`get_conversation`]: the actor returns a `usize` without cloning items.
     pub async fn get_conversation_len(&self) -> usize {
         self.query("GetConversationLen", |reply| {
             ChatStateCommand::GetConversationLen { reply }
@@ -645,11 +668,8 @@ impl ChatStateHandle {
         .unwrap_or(0)
     }
 
-    /// Whether any assistant tool call lacks a matching `ToolResult` (the
-    /// dangling-tool-call repair would fire on the next request build).
-    ///
-    /// Returns `false` if the actor is dead. Cheaper than [`get_conversation`]
-    /// — the actor scans in place and returns a single `bool`.
+    /// Whether any assistant tool call lacks a matching `ToolResult`.
+    /// Returns `false` if the actor is dead. The actor scans in place and returns a single `bool`.
     pub async fn has_dangling_tool_calls(&self) -> bool {
         self.query("HasDanglingToolCalls", |reply| {
             ChatStateCommand::HasDanglingToolCalls { reply }
@@ -658,11 +678,8 @@ impl ChatStateHandle {
         .unwrap_or(false)
     }
 
-    /// Get the text content of the last assistant message with non-empty text.
-    ///
-    /// Returns `None` if no such message exists or the actor is dead.
-    /// Cheaper than [`get_conversation`] when only the final assistant
-    /// response text is needed.
+    /// Get the text of the last assistant message with non-empty text.
+    /// `None` if none exists or the actor is dead. Cheaper than cloning the conversation.
     pub async fn get_last_assistant_text(&self) -> Option<String> {
         self.query("GetLastAssistantText", |reply| {
             ChatStateCommand::GetLastAssistantText { reply }
@@ -671,12 +688,9 @@ impl ChatStateHandle {
         .flatten()
     }
 
-    /// Joins trailing assistant segments: the seek for the last assistant
-    /// text walks past mid-turn synthetics (old-query semantics); the join
-    /// then crosses only `SyntheticReason::LengthContinue` user items and
-    /// `Reasoning` — anything else bounds it. `None` when no trailing text
-    /// or the actor is dead; equals [`Self::get_last_assistant_text`] for a
-    /// normal turn.
+    /// Joins trailing assistant segments, walking past mid-turn synthetics.
+    /// The join crosses only `LengthContinue` user items and `Reasoning`; anything else bounds it.
+    /// `None` when no trailing text or the actor is dead.
     pub async fn get_trailing_assistant_report(&self) -> Option<String> {
         self.query("GetTrailingAssistantReport", |reply| {
             ChatStateCommand::GetTrailingAssistantReport { reply }
@@ -685,12 +699,8 @@ impl ChatStateHandle {
         .flatten()
     }
 
-    /// Get the current turn's last assistant message text, or `None` when the
-    /// turn produced none (or the actor is dead). Turn-scoped, unlike
-    /// [`get_last_assistant_text`], and cheaper than [`get_conversation`].
-    ///
-    /// [`get_conversation`]: Self::get_conversation
-    /// [`get_last_assistant_text`]: Self::get_last_assistant_text
+    /// Get the current turn's last assistant message text.
+    /// Turn-scoped, unlike [`get_last_assistant_text`]. `None` if the turn produced none or the actor is dead.
     pub async fn get_last_assistant_text_in_turn(&self) -> Option<String> {
         self.query("GetLastAssistantTextInTurn", |reply| {
             ChatStateCommand::GetLastAssistantTextInTurn { reply }
@@ -699,11 +709,8 @@ impl ChatStateHandle {
         .flatten()
     }
 
-    /// Concatenate every non-empty assistant message in the current turn
-    /// (`"\n"`-joined), or `None` when the turn produced none (or the actor is
-    /// dead). Same turn boundary as [`get_last_assistant_text_in_turn`].
-    ///
-    /// [`get_last_assistant_text_in_turn`]: Self::get_last_assistant_text_in_turn
+    /// Concatenate every non-empty assistant message in the current turn (`"\n"`-joined).
+    /// Same turn boundary as [`get_last_assistant_text_in_turn`]. `None` if none or the actor is dead.
     pub async fn get_assistant_text_in_turn(&self) -> Option<String> {
         self.query("GetAssistantTextInTurn", |reply| {
             ChatStateCommand::GetAssistantTextInTurn { reply }
@@ -712,11 +719,8 @@ impl ChatStateHandle {
         .flatten()
     }
 
-    /// Get the text of the first `Text` content part in the first `User` message.
-    ///
-    /// Returns `None` if no user message with text content exists or the actor
-    /// is dead. Cheaper than [`get_conversation`] when only the initial user
-    /// query text is needed (e.g. for memory context search).
+    /// Get the text of the first `Text` part in the first `User` message.
+    /// `None` if none exists or the actor is dead. Cheaper than cloning the conversation.
     pub async fn get_first_user_text(&self) -> Option<String> {
         self.query("GetFirstUserText", |reply| {
             ChatStateCommand::GetFirstUserText { reply }
@@ -726,10 +730,7 @@ impl ChatStateHandle {
     }
 
     /// Get a single conversation item by index (0-based).
-    ///
-    /// Returns `None` if the index is out of bounds or the actor is dead.
-    /// Cheaper than [`get_conversation`] when only one specific item is needed
-    /// (e.g. item[1] for the original user-info block after compaction).
+    /// `None` if out of bounds or the actor is dead. Cheaper than cloning the conversation.
     pub async fn get_conversation_item_at(&self, index: usize) -> Option<ConversationItem> {
         self.query("GetConversationItemAt", |reply| {
             ChatStateCommand::GetConversationItemAt { index, reply }
@@ -739,10 +740,7 @@ impl ChatStateHandle {
     }
 
     /// Get the processed text of the last user query (metadata tags stripped).
-    ///
-    /// Equivalent to `extract_last_user_query(&full_conv)` but without cloning
-    /// the full conversation. Returns `None` if there are no user messages or
-    /// the last user message is empty after processing.
+    /// Equivalent to `extract_last_user_query` without cloning the full conversation.
     pub async fn get_last_user_query_text(&self) -> Option<String> {
         self.query("GetLastUserQueryText", |reply| {
             ChatStateCommand::GetLastUserQueryText { reply }
@@ -752,9 +750,7 @@ impl ChatStateHandle {
     }
 
     /// Get item counts for the conversation by role.
-    ///
-    /// Returns a [`ConversationCounts`] struct without cloning any items.
-    /// Suitable for telemetry / logging that only needs totals.
+    /// Returns [`ConversationCounts`] without cloning any items.
     pub async fn get_conversation_counts(&self) -> ConversationCounts {
         self.query("GetConversationCounts", |reply| {
             ChatStateCommand::GetConversationCounts { reply }
@@ -764,9 +760,7 @@ impl ChatStateHandle {
     }
 
     /// Get the first `System` message in the conversation, if any.
-    ///
-    /// Cheaper than [`get_conversation`] when only the system prompt is needed
-    /// (e.g. for compaction setup or error validation).
+    /// Cheaper than [`get_conversation`] when only the system prompt is needed.
     pub async fn get_system_message(&self) -> Option<ConversationItem> {
         self.query("GetSystemMessage", |reply| {
             ChatStateCommand::GetSystemMessage { reply }

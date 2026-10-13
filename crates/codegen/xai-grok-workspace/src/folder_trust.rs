@@ -1,85 +1,60 @@
-//! Folder-trust DECISION side ("do you trust this folder?").
-//!
-//! This is the client/workspace half of the folder-trust gate: it scans a
-//! workspace for repo-local code-exec configs, resolves the pure trust
-//! [`decide`] precedence, prompts (MVP stderr), and reads/writes the durable
-//! [`crate::trust::TrustStore`] (`~/.grok/trusted_folders.toml`). The
-//! consume/gating half (the `DECISIONS` cache, `resolve_and_record`,
-//! `project_scope_allowed`, the loader filters) lives in `xai-grok-shell`.
-//!
-//! ## Precedence (canonical; see [`decide`])
-//! 1. Feature flag OFF  → trusted (no gating).
-//! 2. Store (this workspace recorded trusted) → trusted.
-//!    An explicit `--trust` grant is persisted to the store up front (see [`grant_folder_trust`]), so it is honored here.
-//! 3. Key unrecordable (the user's own `$HOME`, the filesystem root, or a non-absolute path) → trusted.
-//!    The store refuses to persist such an over-broad root, so gating would re-prompt forever on a key that can never persist.
-//!    See [`crate::trust::is_unsafe_trust_root`].
-//! 4. No repo-local code-exec configs present → trusted (nothing to gate).
-//! 5. Interactive TTY   → prompt the user (y/N).
-//! 6. Otherwise (headless) → untrusted.
-//!
-//! How the consume side caches this verdict is a `xai-grok-shell` concern, documented there.
-//! (For example, the rule-4 allow is provisional and re-checked rather than cached.)
-
 use std::collections::HashMap;
-use std::io::IsTerminal;
+use std::fmt;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use parking_lot::Mutex;
 
 use toml::Value as TomlValue;
-use xai_grok_config_types::{BoolFlag, RemoteSettings};
 
 use crate::trust::{TrustStore, workspace_key};
 
-/// The pure trust outcome for a set of inputs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustOutcome {
-    /// Repo-local servers allowed.
-    Trusted,
-    /// Repo-local servers blocked.
-    Untrusted,
-    /// Interactive: ask the user.
-    Prompt,
+pub use xai_grok_permission_rules::folder_trust::{
+    DecideInputs, PromptPolicy, TrustDecision, TrustDurability, TrustLevel, TrustOutcome,
+    TrustResolution, decide, feature_enabled, folder_trust_inert, resolve_trust,
+};
+
+pub fn finish_prompt(key: &Path, accepted: bool) -> TrustDecision {
+    if !accepted {
+        return TrustDecision {
+            level: TrustLevel::Untrusted,
+            durability: TrustDurability::Durable,
+        };
+    }
+    decision_for_grant(grant_folder_trust_key(key))
 }
 
-/// Inputs to the pure [`decide`] precedence function.
-#[derive(Debug, Clone, Copy)]
-pub struct DecideInputs {
-    pub store_trusted: bool,
-    pub repo_configs_present: bool,
-    pub is_interactive: bool,
-    /// False when the workspace key is an over-broad root the store refuses to record (home, filesystem root, non-absolute).
-    /// See [`crate::trust::is_unsafe_trust_root`].
-    pub key_recordable: bool,
+fn decision_for_grant(outcome: GrantOutcome) -> TrustDecision {
+    if outcome.dismisses_gate() {
+        return TrustDecision {
+            level: TrustLevel::Trusted,
+            durability: TrustDurability::Durable,
+        };
+    }
+    match outcome {
+        GrantOutcome::Granted {
+            persist: PersistStatus::ProcessLocalOnly { error },
+            ..
+        } => {
+            tracing::warn!(
+                error = %error,
+                "folder trust: grant is process-local only and will not survive restart"
+            );
+            TrustDecision {
+                level: TrustLevel::Untrusted,
+                durability: TrustDurability::Provisional,
+            }
+        }
+        GrantOutcome::Refused { .. }
+        | GrantOutcome::Granted { .. }
+        | GrantOutcome::AlreadyDurable { .. } => TrustDecision {
+            level: TrustLevel::Untrusted,
+            durability: TrustDurability::Durable,
+        },
+    }
 }
 
-/// Pure trust-decision precedence. No I/O; unit-tested directly.
-/// See the module docs for the ordered precedence.
-pub fn decide(feature_enabled: bool, i: &DecideInputs) -> TrustOutcome {
-    if !feature_enabled {
-        return TrustOutcome::Trusted;
-    }
-    if i.store_trusted {
-        return TrustOutcome::Trusted;
-    }
-    // An over-broad root the store can't record (the user's own $HOME or fs-root, never a fetched repo) can't be durably gated
-    // Trust it instead of prompting on a key that can never persist (mirrors the feature-off default)
-    if !i.key_recordable {
-        return TrustOutcome::Trusted;
-    }
-    if !i.repo_configs_present {
-        return TrustOutcome::Trusted;
-    }
-    if i.is_interactive {
-        return TrustOutcome::Prompt;
-    }
-    TrustOutcome::Untrusted
-}
-
-/// Gather the [`DecideInputs`] for `cwd` (store trust, repo configs, interactivity), keyed by `key`.
-/// The shell's `compute` and the launch-dir resolve both gather through here, so the store read and repo-config scan cannot drift across callers.
 pub fn decide_inputs(cwd: &Path, key: &Path) -> DecideInputs {
     decide_inputs_with_interactive(cwd, key, is_interactive())
 }
@@ -106,57 +81,6 @@ pub fn decide_inputs_with_interactive(
     }
 }
 
-/// Whether the whole folder-trust system is inert (auto-trusts everything) for this binary: true on a local/dev build (no `GROK_VERSION` stamp).
-/// Every trust auto-grant site calls this; when true grok never prompts, never gates repo-local configs, and does no `trusted_folders.toml` I/O.
-pub fn folder_trust_inert() -> bool {
-    is_local_build()
-}
-
-/// Whether this binary was built without a release version stamp (`GROK_VERSION` unset at compile time), i.e. a local/dev build.
-/// Kept local rather than in `xai-grok-version`: adding a symbol to that near-universal crate widens the rebuild/test fan-out for unrelated targets.
-/// `option_env!` resolves the same in any crate. Cross-crate callers use [`folder_trust_inert`].
-fn is_local_build() -> bool {
-    // Runtime escape hatch: a pinned GROK_TEST_VERSION simulates a release build
-    // Tests/CI run unstamped, so they look like local builds; this lets them exercise the gate
-    if std::env::var(xai_grok_version::TEST_VERSION_ENV).is_ok() {
-        return false;
-    }
-    option_env!("GROK_VERSION").is_none()
-}
-
-/// Resolve whether the folder-trust gate is enabled.
-///
-/// On a local/dev build (no `GROK_VERSION` release stamp) the feature is OFF regardless of env/config/remote: a self-built grok auto-trusts.
-/// Folder-trust applies only to shipped, release-stamped binaries.
-///
-/// On a release-stamped build, normal precedence (via `BoolFlag`):
-/// env `GROK_FOLDER_TRUST` > `[folder_trust] enabled` (user) > managed > remote `folder_trust_enabled` > default **true**.
-/// The remote kill-switch or a `[folder_trust] enabled = false` opt-out turns it back off.
-pub fn feature_enabled(remote: Option<&RemoteSettings>) -> bool {
-    feature_enabled_for_build(remote, is_local_build())
-}
-
-/// `feature_enabled` with the local-build flag fed in so both arms are unit-testable.
-fn feature_enabled_for_build(remote: Option<&RemoteSettings>, is_local_build: bool) -> bool {
-    // Local/dev builds never gate (auto-trust): folder-trust applies only to shipped, release-stamped binaries
-    // Even an explicit GROK_FOLDER_TRUST/config opt-in is ignored here so a self-built grok never prompts
-    if is_local_build {
-        return false;
-    }
-    fn from_toml(v: Option<&TomlValue>) -> Option<bool> {
-        v?.get("folder_trust")?.get("enabled")?.as_bool()
-    }
-    let user = xai_grok_config::load_from_disk().ok();
-    let managed = xai_grok_config::load_managed_config().ok();
-    BoolFlag::env("GROK_FOLDER_TRUST")
-        .config(from_toml(user.as_ref()))
-        .managed(from_toml(managed.as_ref()))
-        .feature_flag(remote.and_then(|r| r.folder_trust_enabled))
-        .default(true)
-        .resolve()
-        .value
-}
-
 /// Process-local explicit grant/deny, separate from [`TrustStore`] durability.
 /// When the sandbox denies the store write, this process still honors the latest user decision.
 /// The consume side reads it via [`is_trusted_this_process`].
@@ -175,29 +99,174 @@ pub fn is_trusted_this_process(key: &Path) -> bool {
     TrustStore::load().is_trusted(key)
 }
 
-/// Persist an explicit `--trust` grant.
-/// Best-effort on disk; a process-local grant is always recorded so this session honors the user decision.
-pub fn grant_folder_trust(cwd: &Path) {
-    // Local/dev builds never gate, so there is nothing to grant: `--trust` is a no-op and the store is left untouched (the whole feature is inert)
+/// Why a grant was refused before any store write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantRefuse {
+    /// Local/dev build: folder-trust is inert.
+    InertBuild,
+    /// Home, filesystem root, or non-absolute key.
+    UnsafeRoot,
+    /// No user home, or a relative store home (would be a cwd store).
+    NoHome,
+    /// Existing store could not be read; nothing recorded.
+    Unreadable,
+    /// Canonical form of the shown key no longer equals it.
+    KeyMoved,
+}
+
+impl fmt::Display for GrantRefuse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InertBuild => write!(f, "folder trust is off in this build"),
+            Self::UnsafeRoot => write!(f, "folder trust is not recorded for this path"),
+            Self::NoHome => write!(
+                f,
+                "Couldn't save folder trust: no home directory for the trust store. \
+                 Set GROK_HOME to an absolute directory (or unset it), then start Grok again."
+            ),
+            Self::Unreadable => write!(
+                f,
+                "Couldn't save folder trust: the trust store could not be read. \
+                 Fix or delete ~/.grok/trusted_folders.toml, then start Grok again and press y."
+            ),
+            Self::KeyMoved => write!(
+                f,
+                "Couldn't save folder trust: the folder path changed. \
+                 Start Grok again from the folder you want to trust."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for GrantRefuse {}
+
+/// Disk result after a real insert was attempted.
+#[derive(Debug)]
+pub enum PersistStatus {
+    Durable,
+    /// Read (or missing) succeeded; lock, rename, or persist failed. No replacement published.
+    ProcessLocalOnly {
+        error: std::io::Error,
+    },
+}
+
+#[derive(Debug)]
+pub enum GrantOutcome {
+    Granted {
+        key: PathBuf,
+        persist: PersistStatus,
+    },
+    /// Exact key already durably trusted; store not rewritten.
+    AlreadyDurable {
+        key: PathBuf,
+    },
+    Refused {
+        reason: GrantRefuse,
+    },
+}
+
+impl fmt::Display for GrantOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Granted {
+                persist: PersistStatus::ProcessLocalOnly { .. },
+                ..
+            } => write!(
+                f,
+                "Couldn't save folder trust. Check that ~/.grok is writable, \
+                 then run `grok --trust` in this folder."
+            ),
+            Self::Refused { reason } => write!(f, "{reason}"),
+            Self::Granted { .. } | Self::AlreadyDurable { .. } => {
+                write!(f, "folder trust was saved")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GrantOutcome {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantResolution {
+    Trusted,
+    SessionLocal,
+    Unrecorded,
+}
+
+impl GrantOutcome {
+    #[must_use]
+    pub fn resolution(&self) -> GrantResolution {
+        match self {
+            Self::Granted {
+                persist: PersistStatus::Durable,
+                ..
+            }
+            | Self::AlreadyDurable { .. } => GrantResolution::Trusted,
+            Self::Granted {
+                persist: PersistStatus::ProcessLocalOnly { .. },
+                ..
+            } => GrantResolution::SessionLocal,
+            Self::Refused { reason } => match reason {
+                GrantRefuse::InertBuild | GrantRefuse::UnsafeRoot => GrantResolution::Trusted,
+                GrantRefuse::NoHome | GrantRefuse::Unreadable | GrantRefuse::KeyMoved => {
+                    GrantResolution::Unrecorded
+                }
+            },
+        }
+    }
+
+    #[must_use]
+    pub fn dismisses_gate(&self) -> bool {
+        matches!(self.resolution(), GrantResolution::Trusted)
+    }
+}
+
+/// Print `--trust` status. Durable and auto-trust outcomes are silent.
+/// Process-local and real refusals print; `reason` is bound on the refuse arm.
+pub fn report_cli_trust_grant(outcome: &GrantOutcome) {
+    if outcome.dismisses_gate() {
+        return;
+    }
+    tracing::warn!(error = %outcome, "--trust: folder trust was not saved");
+    let _ = writeln!(io::stderr(), "{outcome}");
+}
+
+/// Persist an explicit `--trust` grant for `workspace_key(cwd)`.
+pub fn grant_folder_trust(cwd: &Path) -> GrantOutcome {
     if folder_trust_inert() {
-        return;
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::InertBuild,
+        };
     }
-    let key = workspace_key(cwd);
-    if crate::trust::is_unsafe_trust_root(&key) {
-        return;
+    grant_folder_trust_key(&workspace_key(cwd))
+}
+
+/// Grant the shown key. Canonicalize only; do not re-run [`workspace_key`].
+pub fn grant_folder_trust_key(key: &Path) -> GrantOutcome {
+    checked_grant(crate::trust::trust_store_home().as_deref(), key)
+}
+
+/// Same as [`grant_folder_trust_key`], but the store file is `store_home.join(TRUST_FILE_NAME)`.
+pub fn grant_folder_trust_key_in(store_home: &Path, key: &Path) -> GrantOutcome {
+    checked_grant(Some(store_home), key)
+}
+
+/// Sole precheck owner: canonicalize / inert / unsafe-root once, then write.
+fn checked_grant(store_home: Option<&Path>, key: &Path) -> GrantOutcome {
+    if let Some(refused) = precheck_grant(key) {
+        return refused;
     }
-    let mut store = TrustStore::load();
-    if store.has_decision(&key) && store.is_trusted(&key) {
-        record_process_decision(&key, true);
-        return;
-    }
-    persist_trust(&mut store, &key);
+    let Some(store_home) = store_home.filter(|home| home.is_absolute()) else {
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::NoHome,
+        };
+    };
+    let mut store = TrustStore::load_from(store_home.join(crate::trust::TRUST_FILE_NAME));
+    apply_grant_to_store(&mut store, key)
 }
 
 /// Revoke trust for `cwd`'s workspace in the durable store and this process.
-///
 /// A never-trusted folder stays undecided: do not persist a decision the user did not make.
-/// Symmetric with [`grant_folder_trust`].
 pub fn revoke_folder_trust_store(cwd: &Path) -> bool {
     // Local/dev builds never wrote the store, so there is nothing to revoke.
     if folder_trust_inert() {
@@ -221,28 +290,108 @@ pub fn revoke_folder_trust_store(cwd: &Path) -> bool {
 }
 
 pub fn persist_trust(store: &mut TrustStore, key: &Path) {
-    if let Err(e) = store.set_trusted(key) {
-        tracing::warn!(
-            path = %key.display(),
-            error = %e,
-            "folder trust: failed to persist trust decision"
-        );
+    // Only a real grant records process-local trust. Unreadable stores must not.
+    match apply_grant_to_store(store, key) {
+        GrantOutcome::Granted {
+            persist: PersistStatus::Durable,
+            ..
+        }
+        | GrantOutcome::AlreadyDurable { .. } => {}
+        GrantOutcome::Granted {
+            persist: PersistStatus::ProcessLocalOnly { error },
+            ..
+        } => {
+            tracing::warn!(
+                path = %key.display(),
+                error = %error,
+                "folder trust: failed to persist trust decision"
+            );
+        }
+        GrantOutcome::Refused { reason } => {
+            tracing::warn!(
+                path = %key.display(),
+                ?reason,
+                "folder trust: grant refused; process-local trust not recorded"
+            );
+        }
     }
-    record_process_decision(key, true);
 }
 
-/// Whether any repo-local trust-sensitive config is present for `cwd`.
-/// When none are present there is nothing to gate, so we skip the prompt entirely.
-/// Thin wrapper over [`collect_repo_config_kinds`] with `first_only = true`, so this hot path short-circuits on the first hit.
-/// The gate and the display-only [`repo_config_kinds`] therefore enumerate the EXACT same markers and cannot drift.
+fn precheck_grant(key: &Path) -> Option<GrantOutcome> {
+    if folder_trust_inert() {
+        return Some(GrantOutcome::Refused {
+            reason: GrantRefuse::InertBuild,
+        });
+    }
+    // A failed canonicalize is not equality with the shown key (deleted or moved).
+    let Ok(canonical) = dunce::canonicalize(key) else {
+        return Some(GrantOutcome::Refused {
+            reason: GrantRefuse::KeyMoved,
+        });
+    };
+    if canonical != key {
+        return Some(GrantOutcome::Refused {
+            reason: GrantRefuse::KeyMoved,
+        });
+    }
+    if crate::trust::is_unsafe_trust_root(key) {
+        return Some(GrantOutcome::Refused {
+            reason: GrantRefuse::UnsafeRoot,
+        });
+    }
+    None
+}
+
+fn apply_grant_to_store(store: &mut TrustStore, key: &Path) -> GrantOutcome {
+    let key = key.to_path_buf();
+    if !store.disk_readable() {
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::Unreadable,
+        };
+    }
+    if !store.has_store_path() {
+        return GrantOutcome::Refused {
+            reason: GrantRefuse::NoHome,
+        };
+    }
+    // Already-durable requires a successful read and an exact trusted key. Missing is not already-durable.
+    if store.has_decision(&key) && store.is_trusted(&key) {
+        record_process_decision(&key, true);
+        return GrantOutcome::AlreadyDurable { key };
+    }
+    match store.record_decision_strict(&key, true) {
+        Ok(crate::trust::Recorded::Durable) => {
+            record_process_decision(&key, true);
+            GrantOutcome::Granted {
+                key,
+                persist: PersistStatus::Durable,
+            }
+        }
+        Ok(crate::trust::Recorded::Skipped) => GrantOutcome::Refused {
+            reason: GrantRefuse::UnsafeRoot,
+        },
+        Err(crate::trust::TrustPersistError::Unreadable(_)) => GrantOutcome::Refused {
+            reason: GrantRefuse::Unreadable,
+        },
+        Err(crate::trust::TrustPersistError::Publish(error)) => {
+            tracing::debug!(error = %error, "folder trust granted for this process only; durable write denied");
+            record_process_decision(&key, true);
+            GrantOutcome::Granted {
+                key,
+                persist: PersistStatus::ProcessLocalOnly { error },
+            }
+        }
+    }
+}
+
+/// Whether any repo-local trust-sensitive config is present. None means nothing to gate, so skip the prompt.
+/// Short-circuits on the first hit; shares markers with [`repo_config_kinds`] so the two cannot drift.
 pub fn repo_configs_present(cwd: &Path) -> bool {
     !collect_repo_config_kinds(cwd, true).is_empty()
 }
 
-/// Display-only (not itself the trust gate): the repo-local trust-sensitive config kinds present for `cwd`, deduped in cheap-to-expensive order.
-/// Kinds: `mcp`, `plugins`, `permission`, `lsp`, `envrc`, `claude`, `hooks`, `agents`, `roles`, `personas`, `workflows`.
-/// Single source with [`repo_configs_present`], which is `!repo_config_kinds(cwd).is_empty()`.
-/// A folder the gate fired on therefore always has a non-empty, accurate kind list.
+/// Display-only trust-sensitive config kinds for `cwd`, cheap-to-expensive. Not itself the gate.
+/// Single source with [`repo_configs_present`], so a folder the gate fired on always has a non-empty kind list.
 pub fn repo_config_kinds(cwd: &Path) -> Vec<&'static str> {
     collect_repo_config_kinds(cwd, false)
 }
@@ -271,14 +420,6 @@ fn config_toml_permission_contributes(permission_value: &TomlValue) -> bool {
         .is_some_and(|a| !a.is_empty())
 }
 
-fn path_present_or_uncertain(path: &Path) -> bool {
-    match std::fs::symlink_metadata(path) {
-        Ok(_) => true,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(_) => true,
-    }
-}
-
 fn directory_present_or_uncertain(path: &Path) -> bool {
     match std::fs::metadata(path) {
         Ok(metadata) => metadata.is_dir(),
@@ -290,12 +431,10 @@ fn directory_present_or_uncertain(path: &Path) -> bool {
 /// Shared scanner behind [`repo_configs_present`] and [`repo_config_kinds`].
 /// With `first_only` it returns immediately after the first marker (the gate's short-circuit); otherwise it collects every distinct kind.
 fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> {
-    // Resolve the git root and the cwd-to-root dir chain ONCE and reuse them across the git2-based marker checks below
-    // This gate then does one git2 discover and one git2 walk instead of one discover and walk per marker check
-    // On a non-git dir each discover walks to the filesystem root, and Windows taxes every such syscall 10-100x
-    // The `.claude` settings-compat check keeps its own cheap `.git`-existence walk on purpose; see that check
-    // Checks run cheap to expensive and short-circuit on the first hit when `first_only`
-    let chain = xai_grok_agent::repo::RepoDirChain::resolve(cwd);
+    // Resolve the git root and cwd-to-root chain once; a per-marker discover walks to the filesystem root on non-git dirs
+    // `.claude` keeps its own `.git`-existence walk on purpose. Checks run cheap to expensive and short-circuit when `first_only`
+    let project_sources = xai_grok_agent::repo::StartupProjectSources::resolve(cwd);
+    let chain = &project_sources.chain;
     let mut kinds: Vec<&'static str> = Vec::new();
     // Record a distinct kind; when `first_only`, return as soon as one is found
     macro_rules! hit {
@@ -317,7 +456,10 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     // Project `.grok/config.toml` markers: a non-empty `[mcp_servers]` table or `[plugins].paths` array, or a contributing `[permission]` section
     // `[plugins].paths` loads as auto-trusted ConfigPath plugins; `[permission]` allow/deny/ask rules auto-approve or block tools
     // A clone whose ONLY repo-local config is either must still be gated (else it resolves Trusted and the loader runs ungated)
-    for path in crate::project_config::find_project_configs_in(&chain.dirs) {
+    for path in crate::project_config::find_project_configs_in(
+        &chain.dirs,
+        xai_grok_config::user_grok_home().as_deref(),
+    ) {
         let Ok(root) = xai_grok_config::load_config_file(&path) else {
             continue;
         };
@@ -357,21 +499,17 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     if cwd.join(".envrc").is_file() {
         hit!("envrc");
     }
-    // Hook loading reads project `.claude/settings.json` and `settings.local.json` at the git root only
-    // The ENV and permission loaders walk EVERY dir from cwd to the repo root (`collect_project_claude_paths`)
-    // Detect along the SAME walk via the shared reader, else a `.claude` `env` in a subdir (injected into every spawned subprocess) loads ungated
-    // Keeps its own `.git`-existence walk (NOT the git2 chain) so detection stays identical to the loader, which bounds on a bare/empty `.git` too
+    // Detect `.claude` along the same cwd-to-root walk the env/permission loaders use, or a subdir `env` loads ungated
+    // Own `.git`-existence walk, not the git2 chain, so detection matches the loader on a bare or empty `.git`
     if crate::permission::claude_settings::project_claude_settings_present(cwd) {
         hit!("claude");
     }
-    // Other project HOOK sources are resolved from the git worktree root only (the chain's `git_root`), NOT cwd
-    // Hook discovery resolves from the same root via `workspace_key`, so root-level hooks are gated even when launched from a subdir
-    // A repo-local hook file/dir is repo-controlled code-exec that must be gated
-    // Otherwise a hooks-only clone (e.g. `.grok/hooks/evil.json`) would resolve trusted and run ungated.
-    // Presence mirrors discovery's "something to gate" check
+    // Hooks resolve from the git worktree root, not cwd, so a hooks-only clone
+    // must not resolve trusted. Presence is type-agnostic: a directory or
+    // symlink at a vendor hook path must gate too.
     let hook_root = chain.git_root.as_deref().unwrap_or(cwd);
-    if path_present_or_uncertain(&hook_root.join(".grok").join("hooks"))
-        || hook_root.join(".cursor").join("hooks.json").is_file()
+    if crate::util::path_present_or_uncertain(&hook_root.join(".grok").join("hooks"))
+        || crate::util::path_present_or_uncertain(&hook_root.join(".cursor").join("hooks.json"))
     {
         hit!("hooks");
     }
@@ -397,6 +535,14 @@ fn collect_repo_config_kinds(cwd: &Path, first_only: bool) -> Vec<&'static str> 
     }
     if directory_present_or_uncertain(&hook_root.join(".grok").join("workflows")) {
         hit!("workflows");
+    }
+    if xai_grok_agent::prompt::agents_md::has_project_instruction_markers_in(
+        project_sources.instruction_dirs(),
+    ) {
+        hit!("instructions");
+    }
+    if xai_grok_agent::prompt::skills::has_project_skill_dirs_in(project_sources.skill_dirs()) {
+        hit!("skills");
     }
     // `~/.claude.json` `projects.<cwd>.mcpServers`.
     if claude_project_mcp_present(cwd) {
@@ -430,98 +576,19 @@ fn is_interactive() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
 
-/// MVP trust prompt: a plain stderr warning and a stdin y/N read.
-/// Defaults to NO on empty input, EOF, or any non-yes answer.
-/// Deliberately minimal (no ACP modal).
-pub fn prompt_for_trust(key: &Path) -> bool {
-    use std::io::{BufRead, Write};
-
-    let mut err = std::io::stderr();
-    let _ = writeln!(err);
-    let _ = writeln!(
-        err,
-        "This folder contains repo-local config (.mcp.json / .grok/lsp.json / hooks) \
-         that can run commands on your machine."
-    );
-    let _ = writeln!(err, "  Folder: {}", key.display());
-    let _ = write!(
-        err,
-        "Trust the authors of this folder and allow these servers to start? [y/N] "
-    );
-    let _ = err.flush();
-
-    let mut line = String::new();
-    match std::io::stdin().lock().read_line(&mut line) {
-        Ok(0) | Err(_) => false,
-        Ok(_) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn inputs() -> DecideInputs {
-        DecideInputs {
-            store_trusted: false,
-            repo_configs_present: true,
-            is_interactive: false,
-            // Default: a normal (recordable) key, so the Case-2 rule doesn't fire and every `..inputs()` spread exercises the other rules
-            key_recordable: true,
-        }
-    }
-
     #[test]
-    fn feature_off_is_always_trusted() {
-        // Even with everything pointing to untrusted, feature off resolves trusted
-        assert_eq!(decide(false, &inputs()), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn store_trusted_is_trusted() {
-        let i = DecideInputs {
-            store_trusted: true,
-            ..inputs()
-        };
-        assert_eq!(decide(true, &i), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn no_repo_configs_is_trusted_without_prompt() {
-        let i = DecideInputs {
-            repo_configs_present: false,
-            is_interactive: true,
-            ..inputs()
-        };
-        // Nothing to gate resolves Trusted, never Prompt
-        assert_eq!(decide(true, &i), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn interactive_with_configs_prompts() {
-        let i = DecideInputs {
-            is_interactive: true,
-            ..inputs()
-        };
-        assert_eq!(decide(true, &i), TrustOutcome::Prompt);
-    }
-
-    #[test]
-    fn headless_with_configs_is_untrusted() {
-        assert_eq!(decide(true, &inputs()), TrustOutcome::Untrusted);
-    }
-
-    #[test]
-    fn unrecordable_key_is_trusted_even_with_configs_and_interactive() {
-        // Case 2: cwd == $HOME (or fs-root / non-absolute)
-        // The store can't record such a key, so gating would re-prompt forever; decide() trusts it, ahead of the repo-configs and interactive rules
-        let i = DecideInputs {
-            store_trusted: false,
-            repo_configs_present: true,
-            is_interactive: true,
-            key_recordable: false,
-        };
-        assert_eq!(decide(true, &i), TrustOutcome::Trusted);
+    fn rejected_prompt_is_a_durable_deny() {
+        assert_eq!(
+            TrustDecision {
+                level: TrustLevel::Untrusted,
+                durability: TrustDurability::Durable,
+            },
+            finish_prompt(Path::new("/unused"), false)
+        );
     }
 
     /// A `git init`'d temp dir, so repo discovery is bounded to it instead of any ancestor repo the system temp dir lives in.
@@ -579,6 +646,58 @@ mod tests {
         let tmp = repo_tmp();
         std::fs::write(tmp.path().join(".envrc"), "export FOO=bar\n").unwrap();
         assert!(repo_configs_present(tmp.path()));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_agents_md_from_subdir() {
+        let tmp = repo_tmp();
+        std::fs::write(tmp.path().join("AGENTS.md"), "# project\n").unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert_eq!(repo_config_kinds(&subdir), vec!["instructions"]);
+    }
+
+    #[test]
+    fn repo_configs_present_detects_project_rules_from_subdir() {
+        let tmp = repo_tmp();
+        let rules = tmp.path().join(".grok").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("style.md"), "# style\n").unwrap();
+        let subdir = tmp.path().join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert_eq!(repo_config_kinds(&subdir), vec!["instructions"]);
+    }
+
+    #[test]
+    fn repo_configs_present_detects_empty_skill_roots_only_in_project_chain() {
+        for config in [".grok", ".agents", ".claude", ".cursor"] {
+            for leaf in ["skills", "commands"] {
+                let tmp = repo_tmp();
+                let repo = tmp.path().join("repo");
+                std::fs::create_dir_all(&repo).unwrap();
+                git2::Repository::init(&repo).unwrap();
+                let outside = tmp.path().join(config).join(leaf);
+                std::fs::create_dir_all(outside).unwrap();
+                let subdir = repo.join("nested");
+                std::fs::create_dir_all(&subdir).unwrap();
+                let cwd = subdir.join("inner");
+                std::fs::create_dir_all(cwd.join("child").join(config).join(leaf)).unwrap();
+                assert!(repo_config_kinds(&cwd).is_empty());
+
+                for dir in [&repo, &subdir, &cwd] {
+                    let config_dir = dir.join(config);
+                    std::fs::create_dir_all(&config_dir).unwrap();
+                    assert!(repo_config_kinds(&cwd).is_empty());
+                    let marker = config_dir.join(leaf);
+                    std::fs::write(&marker, "not a directory").unwrap();
+                    assert!(repo_config_kinds(&cwd).is_empty());
+                    std::fs::remove_file(&marker).unwrap();
+                    std::fs::create_dir(&marker).unwrap();
+                    assert_eq!(repo_config_kinds(&cwd), vec!["skills"]);
+                    std::fs::remove_dir(&marker).unwrap();
+                }
+            }
+        }
     }
 
     #[test]
@@ -690,6 +809,14 @@ mod tests {
     }
 
     #[test]
+    fn repo_configs_present_detects_claude_settings_json_directory() {
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".claude").join("settings.json")).unwrap();
+        assert!(repo_configs_present(tmp.path()));
+        assert!(repo_config_kinds(tmp.path()).contains(&"claude"));
+    }
+
+    #[test]
     fn repo_configs_present_detects_project_hooks() {
         // A hooks-only repo (no MCP/LSP configs) must still be gated, so its project hooks don't run ungated when the folder is untrusted
         let tmp = repo_tmp();
@@ -704,6 +831,14 @@ mod tests {
         std::fs::create_dir_all(&grok).unwrap();
         std::fs::write(grok.join("hooks"), "{}").unwrap();
 
+        assert!(repo_configs_present(tmp.path()));
+        assert!(repo_config_kinds(tmp.path()).contains(&"hooks"));
+    }
+
+    #[test]
+    fn repo_configs_present_detects_cursor_hooks_json_directory() {
+        let tmp = repo_tmp();
+        std::fs::create_dir_all(tmp.path().join(".cursor").join("hooks.json")).unwrap();
         assert!(repo_configs_present(tmp.path()));
         assert!(repo_config_kinds(tmp.path()).contains(&"hooks"));
     }
@@ -823,10 +958,8 @@ mod tests {
 
     #[test]
     fn repo_config_kinds_matches_gate_and_reports_all_kinds() {
-        // Single-source guard: `repo_config_kinds` must agree with the gate (`repo_configs_present == !repo_config_kinds(..).is_empty()`)
-        // It must also report `plugins` via `[plugins].paths`, `claude` via `.claude/settings.json`, and `agents` via `.grok/agents`
-        // Even a SUBDIR launch must report them (the cwd-to-git-root walk that `first_only` shares)
-        // Guards against silent drift between the two
+        // `repo_config_kinds` must agree with the gate, including from a subdir, so the two cannot drift
+        // Must report `plugins`, `claude`, and `agents` via their markers
         let tmp = repo_tmp();
         let grok = tmp.path().join(".grok");
         std::fs::create_dir_all(grok.join("agents")).unwrap();
@@ -861,11 +994,8 @@ mod tests {
         );
     }
 
-    // GROK_HOME isolation mirrored from this crate's `permission::claude_compat` tests
-    // The workspace crate has no `serial_test` or `xai-grok-test-support` dev-dep
-    // nextest runs each test in its own process; `ENV_LOCK` serializes the rare in-process `cargo test` thread
-    // `EnvVarGuard` restores the prior value on drop so a panic can't leak state
-    // The crate-shared lock also serializes against other env-mutating test modules (e.g. `trust`, `worktree`) under `cargo test --lib`.
+    // Isolate `GROK_HOME`. No `serial_test` here; `ENV_LOCK` serializes in-process `cargo test` against other env-mutating modules
+    // `EnvVarGuard` restores on drop so a panic cannot leak state
     use crate::ENV_TEST_LOCK as ENV_LOCK;
 
     // The crate-shared env-var guard (one definition in `lib.rs`), aliased to the local `EnvVarGuard` name
@@ -878,99 +1008,9 @@ mod tests {
     }
 
     #[test]
-    fn local_build_ignores_remote_rollout() {
-        // A local/dev build never gates (auto-trust): even a remote rollout enable is ignored
-        // The feature stays off and resolves Trusted with repo configs present and interactive
-        // (Env/config isolated to unset so the remote flag is unambiguously the only enable being dropped here.)
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
-        let _flag = EnvVarGuard::unset("GROK_FOLDER_TRUST");
-
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        let feature = feature_enabled_for_build(Some(&remote), true);
-        assert!(!feature);
-        let i = DecideInputs {
-            is_interactive: true,
-            ..inputs()
-        };
-        assert_eq!(decide(feature, &i), TrustOutcome::Trusted);
-    }
-
-    #[test]
-    fn release_build_keeps_gate_when_enabled() {
-        // A release-stamped build (is_local_build=false) honors the remote enable
-        // Isolate config so neither on-disk user/managed config nor an ambient env flag can override it
-        // That means an empty GROK_HOME (no config.toml/managed_config.toml) and GROK_FOLDER_TRUST unset
-        // nextest's process-per-test makes grok_home()'s OnceLock pick up the temp dir
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
-        let _flag = EnvVarGuard::unset("GROK_FOLDER_TRUST");
-
-        let remote = RemoteSettings {
-            folder_trust_enabled: Some(true),
-            ..Default::default()
-        };
-        let feature = feature_enabled_for_build(Some(&remote), false);
-        assert!(feature);
-        let i = DecideInputs {
-            is_interactive: true,
-            ..inputs()
-        };
-        assert_eq!(decide(feature, &i), TrustOutcome::Prompt);
-    }
-
-    #[test]
-    fn local_build_ignores_explicit_env_optin() {
-        // Auto-trust is absolute on a local build: even an explicit GROK_FOLDER_TRUST=1 does NOT enable the feature
-        // A self-built grok therefore never prompts
-        // GROK_HOME is isolated so on-disk config can't influence it
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
-        let _flag = EnvVarGuard::set("GROK_FOLDER_TRUST", Path::new("1"));
-
-        assert!(!feature_enabled_for_build(None, true));
-    }
-
-    #[test]
-    fn release_build_defaults_on() {
-        // A release-stamped build with no env/config/managed/remote signal defaults the feature ON
-        // An empty GROK_HOME (no config.toml/managed config) and GROK_FOLDER_TRUST unset leave only the default
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
-        let _flag = EnvVarGuard::unset("GROK_FOLDER_TRUST");
-
-        assert!(feature_enabled_for_build(None, false));
-    }
-
-    #[test]
-    fn is_local_build_honors_test_version_override() {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // A pinned GROK_TEST_VERSION simulates a release build, so it is not a local build
-        {
-            let _sim = EnvVarGuard::set(xai_grok_version::TEST_VERSION_ENV, Path::new("0.0.0-sim"));
-            assert!(!is_local_build());
-        }
-        // With it unset, an unstamped build (no GROK_VERSION) is a local build.
-        // Guard to the unstamped case so a release-stamped test binary (CI release) doesn't spuriously fail this arm
-        let _unset = EnvVarGuard::unset(xai_grok_version::TEST_VERSION_ENV);
-        if option_env!("GROK_VERSION").is_none() {
-            assert!(is_local_build());
-        }
-    }
-
-    #[test]
     fn store_io_is_noop_on_local_build() {
-        // On a local/dev build the whole feature is inert
-        // Both halves pin a guard via a UNIQUE per-repo key (never store-file existence) so they hold under single-process `cargo test` too
-        // Assert ONLY when compiled unstamped (mirrors `is_local_build_honors_test_version_override`)
-        // GROK_HOME is isolated and ENV_LOCK held so toggling GROK_TEST_VERSION is race-safe
+        // On a local/dev build the feature is inert. Guards use a unique per-repo key so they hold under single-process `cargo test`
+        // Assert only when compiled unstamped. `GROK_HOME` isolated and `ENV_LOCK` held so toggling `GROK_TEST_VERSION` is race-safe
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = tempfile::tempdir().unwrap();
         let _home = EnvVarGuard::set("GROK_HOME", home.path());
@@ -1104,30 +1144,153 @@ mod tests {
         );
     }
 
+    fn require_strict_fixture_child(fixture: &Path, child: &Path) -> PathBuf {
+        let fixture = dunce::canonicalize(fixture).expect("fixture canonicalize");
+        assert!(child.is_absolute(), "store path must be absolute");
+        assert!(
+            !child
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir)),
+            "store path must not contain .."
+        );
+        let rel = child
+            .strip_prefix(&fixture)
+            .expect("store path must stay under the fixture");
+        assert!(
+            rel.components().next().is_some(),
+            "store path must be a strict child of the fixture"
+        );
+        if let Ok(canon) = dunce::canonicalize(child) {
+            assert!(
+                canon.starts_with(&fixture),
+                "canonical store path escaped the fixture"
+            );
+        }
+        child.to_path_buf()
+    }
+
     #[test]
-    fn grant_folder_trust_records_process_local_grant_when_persist_denied() {
+    fn resolution_classifies_each_grant_outcome() {
+        let key = PathBuf::from("/tmp/x");
+        assert_eq!(
+            GrantResolution::Trusted,
+            GrantOutcome::Granted {
+                key: key.clone(),
+                persist: PersistStatus::Durable,
+            }
+            .resolution()
+        );
+        assert_eq!(
+            GrantResolution::Trusted,
+            GrantOutcome::AlreadyDurable { key: key.clone() }.resolution()
+        );
+        assert_eq!(
+            GrantResolution::SessionLocal,
+            GrantOutcome::Granted {
+                key,
+                persist: PersistStatus::ProcessLocalOnly {
+                    error: std::io::Error::other("denied"),
+                },
+            }
+            .resolution()
+        );
+        for reason in [GrantRefuse::InertBuild, GrantRefuse::UnsafeRoot] {
+            assert_eq!(
+                GrantResolution::Trusted,
+                GrantOutcome::Refused { reason }.resolution()
+            );
+        }
+        for reason in [
+            GrantRefuse::NoHome,
+            GrantRefuse::Unreadable,
+            GrantRefuse::KeyMoved,
+        ] {
+            assert_eq!(
+                GrantResolution::Unrecorded,
+                GrantOutcome::Refused { reason }.resolution()
+            );
+        }
+    }
+
+    #[test]
+    fn refuse_display_includes_the_next_step() {
+        let unread = GrantOutcome::Refused {
+            reason: GrantRefuse::Unreadable,
+        };
+        let text = unread.to_string();
+        assert!(text.contains("trust store could not be read"), "{text}");
+        assert!(
+            text.contains("Fix or delete ~/.grok/trusted_folders.toml"),
+            "{text}"
+        );
+        let no_home = GrantOutcome::Refused {
+            reason: GrantRefuse::NoHome,
+        };
+        assert!(no_home.to_string().contains("no home directory"));
+    }
+
+    #[test]
+    fn workspace_key_is_dunce_canonical_when_path_exists() {
+        let tmp = repo_tmp();
+        let key = crate::trust::workspace_key(tmp.path());
+        let canon = dunce::canonicalize(&key).expect("existing workspace_key canonicalizes");
+        assert_eq!(
+            key, canon,
+            "workspace_key must be dunce-canonical so a live grant is not KeyMoved"
+        );
+    }
+
+    #[test]
+    fn grant_folder_trust_directory_dest_is_unreadable_not_process_local() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _sim = simulate_release_build();
         let home = tempfile::tempdir().unwrap();
-        let _home = EnvVarGuard::set("GROK_HOME", home.path());
-        // TrustStore writes through user_grok_home(), which reads the grok_home() OnceLock
-        // Bazel rust_test is one process, so the test denies persistence at the cached home
-        let store_home = xai_grok_config::user_grok_home().expect("GROK_HOME is set");
-        let deny_path = store_home.join(xai_grok_config::TRUSTED_FOLDERS_FILENAME);
-        if deny_path.is_file() {
-            std::fs::remove_file(&deny_path).unwrap();
-        }
+        let fixture = dunce::canonicalize(home.path()).unwrap();
+        let deny_path = require_strict_fixture_child(
+            &fixture,
+            &fixture.join(xai_grok_config::TRUSTED_FOLDERS_FILENAME),
+        );
         std::fs::create_dir_all(&deny_path).unwrap();
-        struct Restore(PathBuf);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_dir_all(&self.0);
-            }
-        }
-        let _restore = Restore(deny_path);
         let tmp = repo_tmp();
-        grant_folder_trust(tmp.path());
         let key = workspace_key(tmp.path());
+        let outcome = grant_folder_trust_key_in(&fixture, &key);
+        assert!(
+            matches!(
+                outcome,
+                GrantOutcome::Refused {
+                    reason: GrantRefuse::Unreadable
+                }
+            ),
+            "directory dest must not be treated as an empty document"
+        );
+        assert!(
+            !is_trusted_this_process(&key),
+            "unread store must not record process-local trust"
+        );
+    }
+
+    #[test]
+    fn grant_folder_trust_records_process_local_when_publish_fails() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _sim = simulate_release_build();
+        let home = tempfile::tempdir().unwrap();
+        let fixture = dunce::canonicalize(home.path()).unwrap();
+        let blocker = require_strict_fixture_child(&fixture, &fixture.join("not-a-dir"));
+        std::fs::write(&blocker, b"x").unwrap();
+        let tmp = repo_tmp();
+        let key = workspace_key(tmp.path());
+        let outcome = grant_folder_trust_key_in(&blocker, &key);
+        assert!(
+            matches!(
+                outcome,
+                GrantOutcome::Granted {
+                    persist: PersistStatus::ProcessLocalOnly { .. },
+                    ..
+                }
+            ),
+            "publish failure after a missing store is process-local only"
+        );
+        let _home = EnvVarGuard::set("GROK_HOME", &blocker);
         assert!(
             !TrustStore::load().is_trusted(&key),
             "durable store must stay ungranted when persist is denied"
@@ -1136,18 +1299,71 @@ mod tests {
             is_trusted_this_process(&key),
             "explicit grant must be visible in-process after persist failure"
         );
-
         assert!(
             revoke_folder_trust_store(tmp.path()),
             "untrust must see the process-local grant"
         );
+        assert!(!is_trusted_this_process(&key));
+    }
+
+    #[test]
+    fn grant_folder_trust_key_uses_shown_path_not_rederived_root() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _sim = simulate_release_build();
+        let home = tempfile::tempdir().unwrap();
+        let fixture = dunce::canonicalize(home.path()).unwrap();
+        let shown = fixture.join("shown-repo");
+        std::fs::create_dir_all(&shown).unwrap();
+        let shown = dunce::canonicalize(&shown).unwrap();
+        let other = fixture.join("other-root");
+        std::fs::create_dir_all(&other).unwrap();
+        git2::Repository::init(&other).unwrap();
+
+        let outcome = grant_folder_trust_key_in(&fixture, &shown);
+        assert!(matches!(
+            outcome,
+            GrantOutcome::Granted {
+                persist: PersistStatus::Durable,
+                ..
+            }
+        ));
+        let store = TrustStore::load_from(fixture.join(crate::trust::TRUST_FILE_NAME));
         assert!(
-            !is_trusted_this_process(&key),
-            "untrust must override the process-local grant even when persist is denied"
+            store.has_decision(&shown),
+            "shown key must be the stored key"
         );
         assert!(
-            !decide_inputs(tmp.path(), &key).store_trusted,
-            "reload/consume must not re-allow the revoked process-local grant"
+            !store.has_decision(&dunce::canonicalize(&other).unwrap()),
+            "a different workspace_key root must not be written"
+        );
+    }
+
+    #[test]
+    fn unreadable_store_grant_does_not_record_process_local() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _sim = simulate_release_build();
+        let home = tempfile::tempdir().unwrap();
+        let fixture = dunce::canonicalize(home.path()).unwrap();
+        let store_path = fixture.join(crate::trust::TRUST_FILE_NAME);
+        let before = b"folders = not-a-table
+";
+        std::fs::write(&store_path, before).unwrap();
+        let key_dir = fixture.join("repo");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        let key = dunce::canonicalize(&key_dir).unwrap();
+
+        let outcome = grant_folder_trust_key_in(&fixture, &key);
+        assert!(matches!(
+            outcome,
+            GrantOutcome::Refused {
+                reason: GrantRefuse::Unreadable
+            }
+        ));
+        assert_eq!(std::fs::read(&store_path).unwrap(), before);
+        let _home = EnvVarGuard::set("GROK_HOME", &fixture);
+        assert!(
+            !is_trusted_this_process(&key),
+            "unread store must not become process-local trusted"
         );
     }
 

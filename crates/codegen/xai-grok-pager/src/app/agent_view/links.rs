@@ -107,6 +107,28 @@ impl AgentView {
             self.push_cta_link_span(link_spans_out, self.hit_upgrade_cta.rect, url);
         }
     }
+    /// Append one OSC 8 span per painted row of the connectors URL inside the extensions modal's wait
+    /// overlay. The overlay is the topmost paint in that frame, so no occluder check applies; the
+    /// active-wait accessor already withholds rects while a message or pending action covers it.
+    pub(super) fn push_managed_connectors_wait_link_spans(
+        link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
+        modal_state: &crate::views::extensions_modal::ExtensionsModalState,
+    ) {
+        let Some(wait) = modal_state.active_managed_connectors_wait() else {
+            return;
+        };
+        link_spans_out.extend(
+            wait.url_rects
+                .iter()
+                .map(|rect| xai_ratatui_inline::LinkSpan {
+                    row: rect.y,
+                    col_start: rect.x,
+                    col_end: rect.x.saturating_add(rect.width),
+                    url: std::sync::Arc::clone(&wait.url),
+                    id: None,
+                }),
+        );
+    }
     /// Append the OSC 8 spans a `command` status row opened, in the screen columns the row was painted at, under the same occluder rule as the CTAs.
     pub(super) fn push_status_line_link_spans(
         &self,
@@ -188,11 +210,8 @@ impl AgentView {
     /// Any pointer movement, including the reflexive nudge people make before Cmd+clicking, restarts the window via the mouse event.
     #[cfg(target_os = "macos")]
     const LINK_MODIFIER_POLL_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
-    /// Whether macOS should keep ticking and polling Cmd for link hover.
     /// Covers scrollback (`hovered_entry`) and `/btw` panel links: releasing Cmd over the panel must not leave a stuck highlight.
-    ///
     /// `hovered_entry` is set whenever the pointer rests over content, so gating on it alone would poll as long as the mouse sits over the window.
-    /// Each poll tick runs a CoreGraphics modifier query at ~30fps, so the poll is instead bounded by recent pointer movement.
     /// An active link highlight (`hovered_link_idx`) keeps polling past the window so a held Cmd never strands a stuck underline.
     pub fn needs_link_modifier_poll(&self) -> bool {
         if has_native_link_hover() || self.visible_link_map.is_empty() {
@@ -634,7 +653,6 @@ mod link_click_tests {
         privacy_banner: bool,
     ) -> Buffer {
         let area = Rect::new(0, 0, cols, 30);
-        let bundle = crate::app::bundle::BundleState::default();
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
         agent.draw(
@@ -652,8 +670,6 @@ mod link_click_tests {
                 mouse_pos: None,
                 tip: None,
             },
-            &bundle,
-            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -959,10 +975,15 @@ mod link_click_tests {
         let mut parent = make_agent();
         let mut child = make_agent();
         super::test_fixtures::add_running_execute(&mut child);
-        parent
-            .subagent_views
-            .insert("child-sid".into(), Box::new(child));
-        assert!(!parent.subagent_views["child-sid"].is_subagent_view);
+        parent.insert_test_child("child-sid".into(), Box::new(child));
+        assert_eq!(
+            crate::app::agent_view::ViewSurface::ChildTakeover,
+            parent
+                .subagent_views
+                .get("child-sid")
+                .unwrap_or_else(|| panic!("missing map entry"))
+                .surface()
+        );
         parent.open_subagent_fullscreen("child-sid".into());
         let child = parent.subagent_views.get_mut("child-sid").unwrap();
         draw_banner_frame(child, &reg, &[], 0);
@@ -1214,6 +1235,39 @@ mod link_click_tests {
             InputOutcome::Action(Action::SetYoloMode(_))
         ));
     }
+    /// The header reserves the CTA's columns before the location is truncated, so a path that would fill the row still
+    /// leaves the button painted: the path gives way, not the CTA.
+    #[test]
+    fn header_upgrade_cta_survives_a_long_path() {
+        let reg = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        agent.last_terminal_size = (80, 30);
+        agent.session.cwd = std::path::PathBuf::from(format!("/{}", "x".repeat(200)));
+        let promo = [xai_grok_announcements::RemoteAnnouncement {
+            id: Some("promo-long".into()),
+            severity: Some("promo".into()),
+            message: Some("ZZPROMO".into()),
+            cta: Some(xai_grok_announcements::AnnouncementCta {
+                label: Some("Upgrade Account".into()),
+                url: Some("https://x.ai/promo".into()),
+                caption: None,
+            }),
+            ..Default::default()
+        }];
+        let buf = draw_frame_sized(&mut agent, &reg, &promo, 1, 80);
+        let rect = agent
+            .hit_upgrade_cta
+            .rect
+            .expect("the reserved columns must hold the CTA when the path overflows");
+        let row: String = (0..80)
+            .filter_map(|x| buf.cell((x, rect.y)).map(|c| c.symbol().to_string()))
+            .collect();
+        assert!(row.contains("[Upgrade Account]"), "row={row:?}");
+        assert!(
+            row.contains('…'),
+            "the path is the part that truncates; row={row:?}"
+        );
+    }
     /// A non-dismissible promo draws with the CTA armed but NO [hide] click target (`BannerHits.hide` is None, so the mouse hide path is dead).
     #[test]
     fn non_dismissible_promo_arms_cta_but_no_hide_rect() {
@@ -1244,8 +1298,6 @@ mod link_click_tests {
     }
     /// Second suppression layer: a frame occluder covering the banner row must swallow both button clicks and drop the promo OSC 8 span whole.
     /// (Goal-detail overlays register in `frame_occluder_rects`, not as dropdowns, so the banner rects stay armed.)
-    /// The next overlay-free frame re-enables all three.
-    /// The span half calls `push_promo_cta_link_span` directly.
     /// `draw` only reaches it behind the process-global `hyperlink_route().emit_osc8` gate, which is brand-dependent and unforceable per-test.
     #[test]
     fn frame_occluder_over_banner_swallows_clicks_and_drops_cta_link_span() {
@@ -1292,11 +1344,24 @@ mod link_click_tests {
         agent.push_promo_cta_link_span(&mut spans, &promo, &no_hidden);
         assert_eq!(spans.len(), 1, "overlay-free frame must emit the span");
         assert_eq!(
-            (spans[0].row, spans[0].col_start, spans[0].col_end),
+            (
+                spans.first().unwrap_or_else(|| panic!("missing index")).row,
+                spans
+                    .first()
+                    .unwrap_or_else(|| panic!("missing index"))
+                    .col_start,
+                spans
+                    .first()
+                    .unwrap_or_else(|| panic!("missing index"))
+                    .col_end
+            ),
             (cta.y, cta.x, cta.x + cta.width),
             "span must cover exactly the [label] button cells"
         );
-        assert_eq!(&*spans[0].url, "https://x.ai/promo");
+        assert_eq!(
+            &*spans.first().unwrap_or_else(|| panic!("missing index")).url,
+            "https://x.ai/promo"
+        );
         let outcome = agent.handle_input(&Event::Mouse(mouse_down(cta.x + 1, cta.y)), &reg);
         assert!(
             matches!(
@@ -1680,7 +1745,6 @@ mod link_click_tests {
     /// The Cmd link-hover poll is bounded by pointer activity.
     /// A pointer merely resting over content (hovered_entry set, no recent movement) must not demand ticks forever.
     /// It used to hold a permanent ~30fps loop with a CoreGraphics query per tick on macOS.
-    /// An active link highlight keeps polling regardless (so Cmd release is observed).
     #[test]
     #[cfg(target_os = "macos")]
     fn needs_link_modifier_poll_expires_without_recent_mouse_movement() {
@@ -1805,24 +1869,21 @@ mod link_click_tests {
         let style = Style::default().add_modifier(ratatui::style::Modifier::UNDERLINED);
         let mut buf = Buffer::empty(Rect::new(0, 0, 20, 8));
         agent.paint_link_highlights(&mut buf, style, 0..agent.visible_link_map.len());
-        assert!(
-            buf[(5, 4)]
-                .style()
+        assert!(buf.cell((5, 4)).is_some_and(|c| {
+            c.style()
                 .add_modifier
                 .contains(ratatui::style::Modifier::UNDERLINED)
-        );
-        assert!(
-            !buf[(5, 3)]
-                .style()
+        }));
+        assert!(!buf.cell((5, 3)).is_some_and(|c| {
+            c.style()
                 .add_modifier
                 .contains(ratatui::style::Modifier::UNDERLINED)
-        );
-        assert!(
-            !buf[(5, 5)]
-                .style()
+        }));
+        assert!(!buf.cell((5, 5)).is_some_and(|c| {
+            c.style()
                 .add_modifier
                 .contains(ratatui::style::Modifier::UNDERLINED)
-        );
+        }));
     }
     #[test]
     fn colliding_ids_modifier_click_opens_hit_url() {
@@ -1887,35 +1948,7 @@ mod link_click_tests {
             InputOutcome::Action(Action::OpenLink(_))
         ));
     }
-    /// Enter with a previous user prompt selected enters inline edit mode (edit-and-resubmit) instead of falling through to OpenBlockViewer.
-    #[test]
-    fn enter_on_selected_user_prompt_enters_inline_edit() {
-        let mut agent = make_agent();
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
-                "fix the bug",
-            ));
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::agent_message("done"));
-        agent.scrollback.prepare_layout(80, 40);
-        agent.scrollback.set_selected(Some(0));
-        let registry = ActionRegistry::defaults();
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let outcome = agent.handle_scrollback_key(&enter, &registry);
-        if crate::app::inline_edit::INLINE_EDIT_ENABLED {
-            assert!(matches!(outcome, InputOutcome::Changed), "got {outcome:?}");
-            assert!(agent.inline_edit.is_some(), "Enter must start inline edit");
-        } else {
-            assert!(agent.inline_edit.is_none(), "feature gated off: no edit");
-            assert!(
-                matches!(outcome, InputOutcome::Action(Action::OpenBlockViewer)),
-                "gated off: Enter must fall through to OpenBlockViewer, got {outcome:?}"
-            );
-        }
-    }
-    /// Bash prompts are not inline-editable: Enter falls through to the registry (OpenBlockViewer).
+    /// Enter on a selected bash prompt falls through to the block viewer.
     #[test]
     fn enter_on_selected_bash_prompt_falls_through() {
         let mut agent = make_agent();
@@ -1927,41 +1960,10 @@ mod link_click_tests {
         let registry = ActionRegistry::defaults();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let outcome = agent.handle_scrollback_key(&enter, &registry);
-        assert!(agent.inline_edit.is_none());
         assert!(
             matches!(outcome, InputOutcome::Action(Action::OpenBlockViewer)),
             "expected fall-through to OpenBlockViewer, got {outcome:?}"
         );
-    }
-    /// Double-click on a user prompt enters inline edit when the feature is enabled.
-    /// While gated off it does NOT edit (falls through to the fold arm), leaving the prompt free for text selection.
-    /// Written for both flag states so it stays valid when INLINE_EDIT_ENABLED is flipped back on.
-    #[test]
-    fn double_click_on_user_prompt_enters_inline_edit() {
-        let mut agent = make_agent();
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::user_prompt(
-                "fix the bug",
-            ));
-        agent
-            .scrollback
-            .push_block(crate::scrollback::block::RenderBlock::agent_message("done"));
-        agent.scrollback.prepare_layout(80, 40);
-        let now = std::time::Instant::now();
-        (agent.last_click, _) = agent.handle_scrollback_click(now, 0, false);
-        let _ = agent.handle_scrollback_click(now + std::time::Duration::from_millis(10), 0, false);
-        if crate::app::inline_edit::INLINE_EDIT_ENABLED {
-            assert!(
-                agent.inline_edit.is_some(),
-                "double-click must start inline edit"
-            );
-        } else {
-            assert!(
-                agent.inline_edit.is_none(),
-                "feature gated off: double-click must not edit"
-            );
-        }
     }
     #[test]
     fn enter_on_subagent_group_header_falls_through_to_group_toggle() {
@@ -1996,9 +1998,7 @@ mod link_click_tests {
                 e.display_mode = crate::scrollback::types::DisplayMode::Collapsed;
             }
         }
-        agent
-            .subagent_views
-            .insert("child-sid".into(), Box::new(make_agent()));
+        agent.insert_test_child("child-sid".into(), Box::new(make_agent()));
         agent.scrollback.prepare_layout(80, 40);
         agent.scrollback.set_selected(Some(0));
         assert!(agent.scrollback.is_selected_group_header());
@@ -2102,7 +2102,6 @@ mod link_click_tests {
         }
     }
     /// Wait for the daemon to publish the result of the most recent keystroke.
-    ///
     /// One keystroke is one atomic `Update`, so it bumps the snapshot exactly once; break on the first `poll` that observes it.
     /// Panics if the daemon never responds so a wedged daemon fails here rather than in a confusing downstream assertion.
     fn settle_search(agent: &mut AgentView) {
@@ -2429,16 +2428,6 @@ mod link_click_tests {
     fn render_agent(agent: &mut AgentView, area: Rect, reg: &ActionRegistry) -> Buffer {
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
-        let bundle = crate::app::bundle::BundleState {
-            has_cache: false,
-            version: String::new(),
-            personas: Vec::new(),
-            roles: Vec::new(),
-            agents: Vec::new(),
-            skills: Vec::new(),
-            persona_details: Vec::new(),
-            role_details: Vec::new(),
-        };
         agent.draw(
             area,
             &mut buf,
@@ -2447,8 +2436,6 @@ mod link_click_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &bundle,
-            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -2508,9 +2495,7 @@ mod link_click_tests {
             "tip is only hidden by precedence, not cleared"
         );
     }
-    /// Regression: an ephemeral tip that reserved the banner row must keep its own styling even when a session tip reaches `draw` in the same frame.
-    /// The session tip's bold `Tip: ` prefix used to underpaint the row.
-    /// `Cell::set_style` merges modifiers, so BOLD leaked into the first five cells of the ephemeral tip ("**Queue**d · Enter to send now").
+    /// `Cell::set_style` merges modifiers, so session-tip underpainting must not leak BOLD into ephemeral tips.
     #[test]
     fn ephemeral_tip_not_bolded_by_session_tip_underpaint() {
         use ratatui::style::Modifier;
@@ -2519,21 +2504,34 @@ mod link_click_tests {
         let tall = Rect::new(0, 0, 80, 30);
         let mut agent = make_agent();
         agent.last_terminal_size = (80, 30);
-        let _ =
-            agent.show_ephemeral_tip(crate::tips::send_now::send_now_tip(), &mut HashMap::new());
+        let theme = crate::theme::Theme::current();
+        let prefix = "Status · ";
+        let chord = "Enter";
+        let _ = agent.show_ephemeral_tip(
+            crate::tips::EphemeralTip::new(
+                "styled-tip",
+                ratatui::text::Line::from(vec![
+                    ratatui::text::Span::styled(
+                        prefix,
+                        ratatui::style::Style::default().fg(theme.gray),
+                    ),
+                    ratatui::text::Span::styled(
+                        chord,
+                        ratatui::style::Style::default()
+                            .fg(theme.text_secondary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    ratatui::text::Span::styled(
+                        " to continue",
+                        ratatui::style::Style::default().fg(theme.gray),
+                    ),
+                ]),
+            ),
+            &mut HashMap::new(),
+        );
         assert!(agent.ephemeral_tip.is_active());
         let mut buf = Buffer::empty(tall);
         let mut scratch = ScratchBuffer::new();
-        let bundle = crate::app::bundle::BundleState {
-            has_cache: false,
-            version: String::new(),
-            personas: Vec::new(),
-            roles: Vec::new(),
-            agents: Vec::new(),
-            skills: Vec::new(),
-            persona_details: Vec::new(),
-            role_details: Vec::new(),
-        };
         agent.draw(
             tall,
             &mut buf,
@@ -2545,21 +2543,24 @@ mod link_click_tests {
                 tip: Some("ZZSESSIONTIPZZ never shown in agent view"),
                 ..crate::app::agent_view::BannerSlotParams::none()
             },
-            &bundle,
-            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );
         let tip_y = (0..tall.height)
-            .find(|&y| buffer_row(&buf, tall.width, y).contains("Queued"))
+            .find(|&y| buffer_row(&buf, tall.width, y).contains("Status"))
             .expect("ephemeral tip must paint into the banner row");
         let row = buffer_row(&buf, tall.width, tip_y);
         assert!(
             !(0..tall.height).any(|y| buffer_row(&buf, tall.width, y).contains("ZZSESSIONTIPZZ")),
             "session tip must not remain visible in the agent view"
         );
-        let start = row[..row.find("Queued").expect("tip text")].chars().count() as u16;
+        let start = row
+            .find("Status")
+            .and_then(|i| row.get(..i))
+            .expect("tip text")
+            .chars()
+            .count() as u16;
         let bold_cols: Vec<u16> = (0..tall.width)
             .filter(|&x| {
                 buf.cell((x, tip_y))
@@ -2568,9 +2569,10 @@ mod link_click_tests {
                     .contains(Modifier::BOLD)
             })
             .collect();
+        let chord_start = start + prefix.chars().count() as u16;
         assert_eq!(
             bold_cols,
-            (start + 9..start + 14).collect::<Vec<u16>>(),
+            (chord_start..chord_start + chord.chars().count() as u16).collect::<Vec<u16>>(),
             "only the Enter chord may be bold, got row {row:?}"
         );
     }
@@ -2599,16 +2601,6 @@ mod link_click_tests {
         );
         let mut buf = Buffer::empty(tall);
         let mut scratch = ScratchBuffer::new();
-        let bundle = crate::app::bundle::BundleState {
-            has_cache: false,
-            version: String::new(),
-            personas: Vec::new(),
-            roles: Vec::new(),
-            agents: Vec::new(),
-            skills: Vec::new(),
-            persona_details: Vec::new(),
-            role_details: Vec::new(),
-        };
         agent.draw(
             tall,
             &mut buf,
@@ -2624,8 +2616,6 @@ mod link_click_tests {
                 mouse_pos: None,
                 tip: Some(long_tip.as_str()),
             },
-            &bundle,
-            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -2802,9 +2792,7 @@ mod link_click_tests {
         type_query(&mut child, &reg, "foo");
         assert!(child.scrollback_search.is_some());
         let child_sid = "child-sid".to_string();
-        parent
-            .subagent_views
-            .insert(child_sid.clone(), Box::new(child));
+        parent.insert_test_child(child_sid.clone(), Box::new(child));
         parent.active_subagent = Some(child_sid.clone());
         let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         parent.handle_input(&esc, &reg);
@@ -2813,7 +2801,10 @@ mod link_click_tests {
             "view stays open while the child's search is cancelled"
         );
         assert!(
-            parent.subagent_views[&child_sid]
+            parent
+                .subagent_views
+                .get(&child_sid)
+                .unwrap_or_else(|| panic!("missing map entry"))
                 .scrollback_search
                 .is_none(),
             "the forwarded Esc cancels the child's search"
@@ -2833,9 +2824,7 @@ mod link_click_tests {
         type_query(&mut child, &reg, "fo");
         assert!(child.scrollback_search.as_ref().unwrap().is_composing());
         let child_sid = "child-sid".to_string();
-        parent
-            .subagent_views
-            .insert(child_sid.clone(), Box::new(child));
+        parent.insert_test_child(child_sid.clone(), Box::new(child));
         parent.active_subagent = Some(child_sid.clone());
         let q = Event::Key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         parent.handle_input(&q, &reg);
@@ -2844,7 +2833,10 @@ mod link_click_tests {
             "view stays open while a search is composing"
         );
         assert_eq!(
-            parent.subagent_views[&child_sid]
+            parent
+                .subagent_views
+                .get(&child_sid)
+                .unwrap_or_else(|| panic!("missing map entry"))
                 .scrollback_search
                 .as_ref()
                 .unwrap()
@@ -2861,9 +2853,7 @@ mod link_click_tests {
         press(&mut child, &reg, KeyCode::Char('/'));
         assert!(child.scrollback_search.is_some());
         let child_sid = "child-sid".to_string();
-        parent
-            .subagent_views
-            .insert(child_sid.clone(), Box::new(child));
+        parent.insert_test_child(child_sid.clone(), Box::new(child));
         parent.active_subagent = Some(child_sid.clone());
         for c in "foo".chars() {
             parent.handle_input(
@@ -2885,7 +2875,10 @@ mod link_click_tests {
             }
             assert!(delivered, "child search daemon did not publish a result");
         }
-        let search = parent.subagent_views[&child_sid]
+        let search = parent
+            .subagent_views
+            .get(&child_sid)
+            .unwrap_or_else(|| panic!("missing map entry"))
             .scrollback_search
             .as_ref()
             .unwrap();
@@ -2924,7 +2917,12 @@ mod link_click_tests {
         use crate::app::app_view::AppView;
         use crate::app::dispatch::{SwitchCause, dispatch, switch_to_agent};
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+        let mut app = AppView::new(
+            tx.clone(),
+            ModelState::default(),
+            Vec::new(),
+            crate::render::draw::EscapeWriter::disconnected(),
+        );
         let id = AgentId(0);
         let mut agent = make_agent();
         add_multiple_links(&mut agent);

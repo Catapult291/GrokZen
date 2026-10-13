@@ -405,8 +405,6 @@ impl<'de> Deserialize<'de> for MapEntryCount {
 }
 
 /// Cheaply scan `rewind_points.jsonl` for per-point metadata, streaming without allocating file-content `String`s.
-/// `MapEntryCount` just counts `file_snapshots`; serde skips the other fields.
-/// `file_snapshots` is required, mirroring `RewindPoint`, so the picker rejects exactly the lines the on-rewind full load would.
 /// It never advertises a rewind target that won't materialize.
 fn scan_rewind_point_metas(path: &Path) -> io::Result<Vec<RewindPointMeta>> {
     #[derive(Deserialize)]
@@ -426,9 +424,6 @@ fn scan_rewind_point_metas(path: &Path) -> io::Result<Vec<RewindPointMeta>> {
 }
 
 /// Fold rewind points at indices `>= target_index` into the point at `target_index - 1`, drop the folded points, and return the survivors.
-/// Before-snapshots keep the earliest (via `or_insert`), after-snapshots the latest.
-/// `target_index == 0` clears everything (no predecessor).
-///
 /// Pure (no I/O), so the in-memory tracker and the persistence path that treats the disk as authoritative share it and can't diverge.
 pub fn merge_rewind_points_from(
     mut points: Vec<RewindPoint>,
@@ -462,17 +457,8 @@ pub fn merge_rewind_points_from(
     points
 }
 
-/// The tracker maintains a list of rewind points, one per user prompt.
-/// Each rewind point captures the state of files BEFORE they are read or modified during that prompt's processing.
-///
-/// A tracker built via [`with_lazy_source`] does NOT read the (potentially huge) persisted rewind points up front, so resuming a session is cheap.
-/// They load on demand the first time a rewind *operation* needs them (see [`ensure_historical_loaded`]).
-/// Live capture and persisting the current prompt's point (`get_rewind_point`) deliberately skip the load, so "resume then keep working" stays fast.
+/// The tracker maintains a list of rewind points, one per user prompt. A tracker built via [`with_lazy_source`] does NOT read the (potentially huge) persisted rewind points up front, so resuming a session is cheap.
 /// The picker uses the metadata-only [`get_rewind_point_metas`].
-///
-/// [`with_lazy_source`]: FileStateTracker::with_lazy_source
-/// [`ensure_historical_loaded`]: FileStateTracker::ensure_historical_loaded
-/// [`get_rewind_point_metas`]: FileStateTracker::get_rewind_point_metas
 #[derive(Debug)]
 pub struct FileStateTracker {
     /// All rewind points for this session, indexed by prompt_index
@@ -507,14 +493,8 @@ impl FileStateTracker {
         }
     }
 
-    /// Materialize the deferred historical rewind points (no-op if already loaded or no lazy source).
-    /// Triggered by rewind *operations* that need full file contents.
-    /// In-memory points win over disk via `or_insert`, so concurrent live captures are never lost.
-    ///
-    /// The `lazy_source` lock is held across the (large, blocking) read and merge.
-    /// Releasing it early would let a concurrent rewind observe `lazy_source == None` mid-merge and skip/truncate historical points.
+    /// Materialize the deferred historical rewind points (no-op if already loaded or no lazy source). In-memory points win over disk via `or_insert`, so concurrent live captures are never lost.
     /// The source is consumed only on a SUCCESSFUL read.
-    /// A transient error leaves it set to retry (never operating on or persisting a partial set).
     async fn ensure_historical_loaded(&self) {
         let mut source = self.lazy_source.lock().await;
         // Clone the path so we can clear `source` after a successful read.
@@ -595,14 +575,7 @@ impl FileStateTracker {
         }
     }
 
-    /// This should be called BEFORE reading or writing a file.
-    ///
-    /// `path` is the absolute path to the file. It will be converted to a `RelPathBuf` (using `cwd`) for storage.
-    /// Files outside the CWD are silently skipped (they don't need rewind tracking since the agent shouldn't modify them).
-    ///
-    /// NOTE: This method is similar to `capture_file_state_with_fs`.
-    /// They are kept separate due to type system constraints (`AsyncFileSystem` trait vs `AsyncFsWrapper` concrete type).
-    /// Keep them in sync when making changes.
+    /// This should be called BEFORE reading or writing a file. Files outside the CWD are silently skipped (they don't need rewind tracking since the agent shouldn't modify them).
     pub async fn capture_file_state<F: AsyncFileSystem + ?Sized>(
         &self,
         fs: &F,
@@ -638,13 +611,7 @@ impl FileStateTracker {
         Ok(())
     }
 
-    /// Capture a file's current state before an operation using `AsyncFsWrapper`.
-    ///
-    /// Files outside the CWD are silently skipped (they don't need rewind tracking).
-    ///
-    /// NOTE: This method is similar to `capture_file_state`.
-    /// They are kept separate due to type system constraints (`AsyncFsWrapper` concrete type vs generic `AsyncFileSystem` trait).
-    /// Keep them in sync when making changes.
+    /// Capture a file's current state before an operation using `AsyncFsWrapper`. Files outside the CWD are silently skipped (they don't need rewind tracking).
     pub async fn capture_file_state_with_fs(
         &self,
         fs: &AsyncFsWrapper,
@@ -680,11 +647,8 @@ impl FileStateTracker {
         Ok(())
     }
 
-    /// Unlike `capture_file_state`, this does NOT read from the filesystem.
-    /// The caller provides the content directly (e.g., from a `FileWritten` notification that already carries `previous_content`).
-    ///
-    /// `path` is the absolute path. `cwd` is used to convert it to a relative path.
-    /// Files outside the CWD are silently skipped.
+    /// Unlike `capture_file_state`, this does NOT read from the filesystem. The caller provides the content directly (e.g., from a `FileWritten` notification that already carries `previous_content`).
+    /// `path` is the absolute path.
     pub async fn add_before_snapshot_for_prompt(
         &self,
         prompt_index: usize,
@@ -715,14 +679,8 @@ impl FileStateTracker {
         result
     }
 
-    /// Lightweight metadata for every known rewind point, for the rewind picker.
-    /// Combines in-memory points with a metadata-only scan of the lazy disk source.
+    /// Lightweight metadata for every known rewind point, for the rewind picker. Combines in-memory points with a metadata-only scan of the lazy disk source.
     /// It never materializes file contents and never consumes the source, so a later rewind still does the full load.
-    /// In-memory points win on conflict.
-    ///
-    /// Lock order mirrors [`ensure_historical_loaded`] (`lazy_source` outer, `rewind_points` inner).
-    /// Holding `lazy_source` across both the in-memory snapshot and the disk scan stops a concurrent rewind's load from interleaving.
-    /// An interleaved load could make the picker miss points.
     pub async fn get_rewind_point_metas(&self) -> Vec<RewindPointMeta> {
         let source = self.lazy_source.lock().await;
         let mut metas: HashMap<usize, RewindPointMeta> = {
@@ -780,14 +738,7 @@ impl FileStateTracker {
     }
 
     /// Merge rewind points at indices >= `target_index` into the previous point (`target_index - 1`), then remove the merged points.
-    ///
-    /// Used by ConversationOnly rewind: the conversation is rewound but files are untouched.
     /// The file effects of the discarded prompts must therefore be folded into the last surviving prompt's rewind point.
-    /// This ensures:
-    /// - `/rewind 0` can still undo all file effects (merged into point N-1)
-    /// - A new prompt at `target_index` gets a fresh rewind point with correct before-snapshots (the current disk state)
-    ///
-    /// For `target_index == 0` there is no previous point to merge into, so all points are cleared.
     pub async fn merge_and_remove_from(&self, target_index: usize) {
         self.ensure_historical_loaded().await;
         let mut points = self.rewind_points.lock().await;
@@ -835,13 +786,8 @@ pub use xai_grok_workspace_types::rpc::session::{
     ConflictType, FileRewindConflict, FileRewindResponse,
 };
 
-/// Rewind files to the state before `target_prompt_index`.
-///
-/// Shared implementation used by both `hub_server.rs` (workspace-side) and potentially `acp_session.rs` (shell-side). Performs:
-/// 1. Gather earliest before-snapshot per file from points >= target
-/// 2. Detect conflicts (external modifications since the agent's writes)
-/// 3. Revert files to their before-snapshot state
-/// 4. Truncate rewind points from the target onward
+/// Rewind files to the state before `target_prompt_index`. Shared implementation used by both `hub_server.rs` (workspace-side) and potentially `acp_session.rs` (shell-side).
+/// Performs: 1.
 pub async fn rewind_files(
     tracker: &FileStateTracker,
     fs: &crate::file_system::AsyncFsWrapper,
@@ -954,10 +900,7 @@ impl FileStateHandle {
         Self { tracker }
     }
 
-    /// Capture file state before an operation.
-    ///
-    /// `path` is the absolute path to the file.
-    /// `cwd` is used to convert it to a relative path for portable storage.
+    /// Capture file state before an operation. `path` is the absolute path to the file. `cwd` is used to convert it to a relative path for portable storage.
     pub async fn capture<F: AsyncFileSystem + ?Sized>(
         &self,
         fs: &F,
@@ -967,10 +910,7 @@ impl FileStateHandle {
         self.tracker.capture_file_state(fs, path, cwd).await
     }
 
-    /// Capture file state before an operation using `AsyncFsWrapper`.
-    ///
-    /// `path` is the absolute path to the file.
-    /// `cwd` is used to convert it to a relative path for portable storage.
+    /// Capture file state before an operation using `AsyncFsWrapper`. `path` is the absolute path to the file. `cwd` is used to convert it to a relative path for portable storage.
     pub async fn capture_with_fs(
         &self,
         fs: &AsyncFsWrapper,
@@ -1349,8 +1289,20 @@ mod tests {
         // A plural query (a rewind operation) loads the full set.
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 2);
-        assert_eq!(points[0].prompt_index, 0);
-        assert_eq!(points[1].prompt_index, 1);
+        assert_eq!(
+            points
+                .first()
+                .unwrap_or_else(|| panic!("expected point 0"))
+                .prompt_index,
+            0
+        );
+        assert_eq!(
+            points
+                .get(1)
+                .unwrap_or_else(|| panic!("expected point 1"))
+                .prompt_index,
+            1
+        );
         // Now singular lookups see the loaded points.
         assert!(tracker.get_rewind_point(0).await.is_some());
     }
@@ -1366,17 +1318,43 @@ mod tests {
 
         let metas = tracker.get_rewind_point_metas().await;
         assert_eq!(metas.len(), 3);
-        assert_eq!(metas[0].prompt_index, 0);
-        assert_eq!(metas[0].num_file_snapshots, 2);
-        assert_eq!(metas[1].num_file_snapshots, 1);
-        assert_eq!(metas[2].num_file_snapshots, 0);
+        assert_eq!(
+            metas
+                .first()
+                .unwrap_or_else(|| panic!("expected meta 0"))
+                .prompt_index,
+            0
+        );
+        assert_eq!(
+            metas
+                .first()
+                .unwrap_or_else(|| panic!("expected meta 0"))
+                .num_file_snapshots,
+            2
+        );
+        assert_eq!(
+            metas
+                .get(1)
+                .unwrap_or_else(|| panic!("expected meta 1"))
+                .num_file_snapshots,
+            1
+        );
+        assert_eq!(
+            metas
+                .get(2)
+                .unwrap_or_else(|| panic!("expected meta 2"))
+                .num_file_snapshots,
+            0
+        );
 
         // The metadata scan must NOT consume the lazy source: a later rewind operation still gets the full file-content snapshots
         assert!(tracker.get_rewind_point(0).await.is_none());
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 3);
         assert_eq!(
-            points[0]
+            points
+                .first()
+                .unwrap_or_else(|| panic!("expected point 0"))
                 .get_snapshot_by_rel(&RelPathBuf::new("a.rs").unwrap())
                 .and_then(|s| s.content.clone()),
             Some("v0".to_string())
@@ -1413,9 +1391,17 @@ mod tests {
         tracker.truncate_from(1).await;
         let remaining = tracker.get_rewind_points().await;
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].prompt_index, 0);
         assert_eq!(
-            remaining[0]
+            remaining
+                .first()
+                .unwrap_or_else(|| panic!("expected remaining 0"))
+                .prompt_index,
+            0
+        );
+        assert_eq!(
+            remaining
+                .first()
+                .unwrap_or_else(|| panic!("expected remaining 0"))
                 .get_snapshot_by_rel(&RelPathBuf::new("a.rs").unwrap())
                 .and_then(|s| s.content.clone()),
             Some("h0".to_string())
@@ -1438,7 +1424,9 @@ mod tests {
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 1);
         assert_eq!(
-            points[0]
+            points
+                .first()
+                .unwrap_or_else(|| panic!("expected point 0"))
                 .get_snapshot_by_rel(&RelPathBuf::new("a.rs").unwrap())
                 .and_then(|s| s.content.clone()),
             Some("mem".to_string())
@@ -1458,10 +1446,34 @@ mod tests {
 
         let metas = tracker.get_rewind_point_metas().await;
         assert_eq!(metas.len(), 2);
-        assert_eq!(metas[0].prompt_index, 0); // from disk
-        assert_eq!(metas[0].num_file_snapshots, 1);
-        assert_eq!(metas[1].prompt_index, 1); // from memory
-        assert_eq!(metas[1].num_file_snapshots, 1);
+        assert_eq!(
+            metas
+                .first()
+                .unwrap_or_else(|| panic!("expected meta 0"))
+                .prompt_index,
+            0
+        ); // from disk
+        assert_eq!(
+            metas
+                .first()
+                .unwrap_or_else(|| panic!("expected meta 0"))
+                .num_file_snapshots,
+            1
+        );
+        assert_eq!(
+            metas
+                .get(1)
+                .unwrap_or_else(|| panic!("expected meta 1"))
+                .prompt_index,
+            1
+        ); // from memory
+        assert_eq!(
+            metas
+                .get(1)
+                .unwrap_or_else(|| panic!("expected meta 1"))
+                .num_file_snapshots,
+            1
+        );
     }
 
     #[tokio::test]
@@ -1486,15 +1498,25 @@ mod tests {
         tracker.merge_and_remove_from(1).await;
         let points = tracker.get_rewind_points().await;
         assert_eq!(points.len(), 1);
-        assert_eq!(points[0].prompt_index, 0);
+        assert_eq!(
+            points
+                .first()
+                .unwrap_or_else(|| panic!("expected point 0"))
+                .prompt_index,
+            0
+        );
         // Point 0 now also carries the merged files from points 1 and 2
         assert!(
-            points[0]
+            points
+                .first()
+                .unwrap_or_else(|| panic!("expected point 0"))
                 .get_snapshot_by_rel(&RelPathBuf::new("b.rs").unwrap())
                 .is_some()
         );
         assert!(
-            points[0]
+            points
+                .first()
+                .unwrap_or_else(|| panic!("expected point 0"))
                 .get_snapshot_by_rel(&RelPathBuf::new("c.rs").unwrap())
                 .is_some()
         );
@@ -1509,7 +1531,13 @@ mod tests {
             .get_rewind_points_normalized(Path::new("/repo"))
             .await;
         assert_eq!(normalized.len(), 1);
-        assert_eq!(normalized[0].prompt_index, 0);
+        assert_eq!(
+            normalized
+                .first()
+                .unwrap_or_else(|| panic!("expected normalized 0"))
+                .prompt_index,
+            0
+        );
     }
 
     /// `max_prompt_index` is a rewind op and must trigger the load.
@@ -1561,10 +1589,34 @@ mod tests {
         ]);
         let metas = scan_rewind_point_metas(file.path()).unwrap();
         assert_eq!(metas.len(), 2);
-        assert_eq!(metas[0].prompt_index, 0);
-        assert_eq!(metas[0].num_file_snapshots, 2);
-        assert_eq!(metas[1].prompt_index, 5);
-        assert_eq!(metas[1].num_file_snapshots, 1);
+        assert_eq!(
+            metas
+                .first()
+                .unwrap_or_else(|| panic!("expected meta 0"))
+                .prompt_index,
+            0
+        );
+        assert_eq!(
+            metas
+                .first()
+                .unwrap_or_else(|| panic!("expected meta 0"))
+                .num_file_snapshots,
+            2
+        );
+        assert_eq!(
+            metas
+                .get(1)
+                .unwrap_or_else(|| panic!("expected meta 1"))
+                .prompt_index,
+            5
+        );
+        assert_eq!(
+            metas
+                .get(1)
+                .unwrap_or_else(|| panic!("expected meta 1"))
+                .num_file_snapshots,
+            1
+        );
     }
 
     // ── pure merge_rewind_points_from branch coverage ────────────────────────
@@ -1606,7 +1658,9 @@ mod tests {
 
         let merged = merge_rewind_points_from(vec![p0, p1], 1);
         assert_eq!(merged.len(), 1);
-        let m0 = &merged[0];
+        let m0 = &merged
+            .first()
+            .unwrap_or_else(|| panic!("expected merged 0"));
         assert_eq!(m0.prompt_index, 0);
         // before-snapshot: earliest (p0) wins for shared.rs (or_insert keeps it).
         assert_eq!(
@@ -1639,9 +1693,17 @@ mod tests {
             3,
         );
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].prompt_index, 0);
+        assert_eq!(
+            merged
+                .first()
+                .unwrap_or_else(|| panic!("expected merged 0"))
+                .prompt_index,
+            0
+        );
         assert!(
-            merged[0]
+            merged
+                .first()
+                .unwrap_or_else(|| panic!("expected merged 0"))
                 .get_snapshot_by_rel(&RelPathBuf::new("b.rs").unwrap())
                 .is_none()
         );
@@ -1658,7 +1720,13 @@ mod tests {
             5,
         );
         assert_eq!(merged.len(), 1);
-        assert_eq!(merged[0].prompt_index, 0);
+        assert_eq!(
+            merged
+                .first()
+                .unwrap_or_else(|| panic!("expected merged 0"))
+                .prompt_index,
+            0
+        );
     }
 
     /// Blank/whitespace and malformed lines are skipped; both readers (full load and meta scan) recover exactly the valid points.

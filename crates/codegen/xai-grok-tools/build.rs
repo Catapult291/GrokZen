@@ -46,10 +46,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Download + embed fd as an optional vendored file-search binary, mirroring
-/// the ripgrep bundling
-/// (release-only or `GROK_TOOLS_BUNDLE_FD_PATH` override), plus pinned
-/// per-asset SHA-256 verification of the downloaded tarball.
+/// Download + embed fd as an optional vendored file-search binary, mirroring the ripgrep bundling
+/// (release-only or `GROK_TOOLS_BUNDLE_FD_PATH` override), plus pinned per-asset SHA-256
+/// verification of the downloaded tarball.
 fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-env-changed=GROK_TOOLS_BUNDLE_FD_PATH");
     println!("cargo:rustc-check-cfg=cfg(bundle_fd)");
@@ -152,7 +151,7 @@ fn bundle_fd() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let gz = flate2::read::GzDecoder::new(&bytes[..]);
+    let gz = flate2::read::GzDecoder::new(bytes.as_slice());
     let mut ar = tar::Archive::new(gz);
     let mut found = false;
     for entry in ar.entries()? {
@@ -199,7 +198,7 @@ fn compress_and_pin(
         hex_encode(&sha2::Sha256::digest(&bytes))
     };
 
-    let compressed = zstd::encode_all(&bytes[..], 19)?;
+    let compressed = zstd::encode_all(bytes.as_slice(), 19)?;
     let mut zst = dest.to_path_buf().into_os_string();
     zst.push(".zst");
     fs::write(&zst, &compressed)?;
@@ -208,15 +207,9 @@ fn compress_and_pin(
     Ok(())
 }
 
-/// Bundle a prebuilt **static** search-tool binary (`bfs`/`ugrep`) when
-/// `GROK_TOOLS_BUNDLE_<NAME>_PATH` points at one (supplied by the release
-/// pipeline). Emits
-/// `cfg(bundle_<name>)` so the crate's `include_bytes!` + self-extract engages.
-///
-/// No auto-download (unlike ripgrep): bfs/ugrep publish no prebuilt static
-/// release assets, so the release pipeline supplies the path. Unset → not
-/// bundled (the runtime resolver falls back to `~/.grok/vendor` / `$PATH`);
-/// never a hard failure, so an un-wired build still succeeds.
+/// Bundle a prebuilt **static** search-tool binary (`bfs`/`ugrep`) when `GROK_TOOLS_BUNDLE_<NAME>_PATH` points at one (supplied by the release
+/// pipeline). Emits `cfg(bundle_<name>)` so the crate's `include_bytes!` + self-extract engages. No auto-download (unlike ripgrep): bfs/ugrep
+/// publish no prebuilt static release assets, so the release pipeline supplies the path.
 fn bundle_search_tool(
     name: &str,
     name_uc: &str,
@@ -267,12 +260,9 @@ fn bundle_rg() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    // Skip auto-bundling on Windows: ripgrep ships .zip on Windows (not
-    // .tar.gz) and we have no zip-extraction path. Returning here BEFORE
-    // emitting `cargo:rustc-cfg=bundle_rg` keeps include_bytes! macros gated
-    // on cfg(bundle_rg) compiled-out, so the runtime falls back to `rg` on
-    // PATH. Users install ripgrep separately (winget / scoop). An explicit
-    // GROK_TOOLS_BUNDLE_RG_PATH still bundles regardless of target.
+    // Skip auto-bundling on Windows: ripgrep ships .zip on Windows (not .tar.gz) and we have no zip-extraction path. Returning here BEFORE
+    // emitting `cargo:rustc-cfg=bundle_rg` keeps include_bytes! macros gated on cfg(bundle_rg) compiled-out, so the runtime falls back to `rg` on
+    // PATH. Users install ripgrep separately (winget / scoop). An explicit GROK_TOOLS_BUNDLE_RG_PATH still bundles regardless of target.
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "windows" && path_override.is_none() {
         return Ok(());
@@ -340,7 +330,7 @@ fn bundle_rg() -> Result<(), Box<dyn std::error::Error>> {
         resp.bytes()?.to_vec()
     };
 
-    let gz = flate2::read::GzDecoder::new(&bytes[..]);
+    let gz = flate2::read::GzDecoder::new(bytes.as_slice());
     let mut ar = tar::Archive::new(gz);
     let mut found = false;
     for entry in ar.entries()? {

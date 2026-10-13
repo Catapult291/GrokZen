@@ -37,18 +37,23 @@ struct Harness {
     queue: Option<super::turn_end_hooks::TurnEndQueue>,
     /// Held only so the loop does not see its chat channel close.
     chat: Option<tokio::sync::mpsc::UnboundedSender<xai_chat_state::ChatStateEvent>>,
+    hook_workspace: Option<tempfile::TempDir>,
 }
 
 impl Harness {
     async fn new() -> Self {
-        Self::build(false).await
+        Self::build(false, None).await
     }
 
     async fn subagent() -> Self {
-        Self::build(true).await
+        Self::build(true, None).await
     }
 
-    async fn build(is_subagent: bool) -> Self {
+    async fn with_hook_workspace() -> Self {
+        Self::build(false, Some(tempfile::TempDir::new().expect("hook cwd"))).await
+    }
+
+    async fn build(is_subagent: bool, hook_workspace: Option<tempfile::TempDir>) -> Self {
         let (gateway_tx, gateway) = tokio::sync::mpsc::unbounded_channel();
         let (persistence_tx, mut persistence) =
             tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
@@ -57,6 +62,9 @@ impl Harness {
         tokio::task::spawn_local(async move { while persistence.recv().await.is_some() {} });
         let (mut actor, events) =
             create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+        if let Some(dir) = hook_workspace.as_ref() {
+            actor.hook_resolved_workspace_root = dir.path().to_string_lossy().into_owned();
+        }
         actor.startup_hints.is_subagent = is_subagent;
         if is_subagent {
             actor.startup_hints.subagent_type = Some("explore".into());
@@ -74,6 +82,7 @@ impl Harness {
             gateway: Some(gateway),
             events: Some(events),
             chat: None,
+            hook_workspace,
         }
     }
 
@@ -218,7 +227,7 @@ impl Harness {
     fn fired(&mut self) -> Vec<String> {
         self.fired_payloads()
             .iter()
-            .filter_map(|p| p["hookEventName"].as_str().map(str::to_string))
+            .filter_map(|p| j(p, "hookEventName").as_str().map(str::to_string))
             .collect()
     }
 
@@ -258,10 +267,10 @@ async fn interrupting_a_turn_reports_stop_cancelled_once() {
         h.drain_turn_ends().await;
         let fired = h.fired_payloads();
         assert_eq!(fired.len(), 1);
-        assert_eq!(fired[0]["hookEventName"], "stop_cancelled");
-        assert_eq!(fired[0]["reason"], "user_interrupt");
-        assert_eq!(fired[0]["cancelTrigger"], "ctrl_c");
-        assert_eq!(fired[0]["lastAssistantMessage"], "partway through");
+        assert_eq!(j(at(&fired, 0), "hookEventName"), "stop_cancelled");
+        assert_eq!(j(at(&fired, 0), "reason"), "user_interrupt");
+        assert_eq!(j(at(&fired, 0), "cancelTrigger"), "ctrl_c");
+        assert_eq!(j(at(&fired, 0), "lastAssistantMessage"), "partway through");
 
         let second = h.actor.claim_and_queue(
             "p1",
@@ -440,6 +449,131 @@ async fn a_turn_announces_its_abort_once() {
     .await;
 }
 
+#[cfg(target_os = "linux")]
+struct SubreaperGuard;
+
+#[cfg(target_os = "linux")]
+impl SubreaperGuard {
+    fn arm() -> Self {
+        unsafe {
+            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1);
+        }
+        Self
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for SubreaperGuard {
+    fn drop(&mut self) {
+        unsafe {
+            libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0);
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn session_end_cancels_in_flight_start_hook() {
+    run(async {
+        #[cfg(target_os = "linux")]
+        let _subreaper = SubreaperGuard::arm();
+        let mut h = Harness::with_hook_workspace().await;
+        let _cwd = h.hook_workspace.as_ref().expect("owned hook cwd");
+        h.listen(&[HookEventName::SessionStart, HookEventName::SessionEnd]);
+        let gate = tempfile::TempDir::new().unwrap();
+        let release = gate.path().join("release");
+        let marker = gate.path().join("grandchild_alive");
+        let leader_pid = gate.path().join("leader.pid");
+        let child_pid = gate.path().join("child.pid");
+        *h.actor.hook_registry.borrow_mut() = Some(Arc::new(
+            super::client_hooks_tests::file_registry_with_spec(
+                HookEventName::SessionStart,
+                &format!(
+                    "echo $$ > '{}'; sh -c 'echo $$ > \"{}\"; sleep 30; echo alive > \"{}\"' & while [ ! -f '{}' ]; do sleep 0.05; done",
+                    leader_pid.display(),
+                    child_pid.display(),
+                    marker.display(),
+                    release.display()
+                ),
+            ),
+        ));
+        let (cmd_tx, fired) = h.spawn_loop().await;
+        cmd_tx
+            .send(SessionCommand::DispatchSessionStartHook {
+                source: "new".into(),
+            })
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if child_pid.exists() {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("deferred start must spawn a grandchild before cancel");
+        drop(cmd_tx);
+
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let saw_end = fired
+                    .borrow()
+                    .iter()
+                    .any(|e| j(e, "hookEventName") == "session_end");
+                if saw_end {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("session-end must not wait out a gated start hook");
+
+        std::fs::write(&release, b"go").unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let names: Vec<String> = fired
+            .borrow()
+            .iter()
+            .filter_map(|e| j(e, "hookEventName").as_str().map(String::from))
+            .collect();
+        let end = names.iter().position(|n| n == "session_end");
+        assert!(end.is_some(), "session-end missing: {names:?}");
+        assert!(
+            !names
+                .iter()
+                .skip(end.unwrap())
+                .any(|n| n == "session_start"),
+            "cancelled start must not fire after session-end, got {names:?}"
+        );
+        assert!(
+            !marker.exists(),
+            "cancelled start grandchild wrote after session-end"
+        );
+        #[cfg(unix)]
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            for path in [&leader_pid, &child_pid] {
+                let pid: u32 = std::fs::read_to_string(path)
+                    .unwrap_or_default()
+                    .trim()
+                    .parse()
+                    .expect("hook pid");
+                let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+                while proc_path.exists() && std::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                assert!(
+                    !proc_path.exists(),
+                    "hook grandchild/leader pid {pid} from {} still present after session-end \
+                     (zombie or live; no external init reaped it)",
+                    path.display()
+                );
+            }
+        }
+    })
+    .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn a_subagent_session_end_names_the_child() {
     run(async {
@@ -448,21 +582,33 @@ async fn a_subagent_session_end_names_the_child() {
         let mut parent = Harness::new().await;
         parent.listen(&events);
         let timer = xai_grok_telemetry::session_end::SessionEndTimer::new_shared();
-        super::run_loop::fire_session_end_hooks(&parent.actor, "shutdown", &timer).await;
+        super::run_loop::fire_session_end_hooks(
+            &parent.actor,
+            "shutdown",
+            &timer,
+            &mut super::run_loop::DeferredStart::new(),
+        )
+        .await;
         assert_eq!(parent.fired(), vec!["session_end", "stop"]);
 
         let mut child = Harness::subagent().await;
         child.listen(&events);
         let child_timer = xai_grok_telemetry::session_end::SessionEndTimer::new_shared();
-        super::run_loop::fire_session_end_hooks(&child.actor, "shutdown", &child_timer).await;
+        super::run_loop::fire_session_end_hooks(
+            &child.actor,
+            "shutdown",
+            &child_timer,
+            &mut super::run_loop::DeferredStart::new(),
+        )
+        .await;
         let fired = child.fired_payloads();
         assert_eq!(
             fired.len(),
             1,
             "the session-end `Stop` stays subagent-guarded"
         );
-        assert_eq!(fired[0]["hookEventName"], "session_end");
-        assert_eq!(fired[0]["subagentType"], "explore");
+        assert_eq!(j(at(&fired, 0), "hookEventName"), "session_end");
+        assert_eq!(j(at(&fired, 0), "subagentType"), "explore");
     })
     .await;
 }
@@ -575,11 +721,11 @@ async fn a_subagent_reports_only_its_own_turn_ends() {
         h.drain_turn_ends().await;
 
         let fired = h.fired_payloads();
-        assert_eq!(fired[0]["reason"], "max_turns");
-        assert_eq!(fired[0]["subagentType"], "explore");
-        assert_eq!(fired[1]["hookEventName"], "stop_failure");
-        assert_eq!(fired[1]["subagentType"], "explore");
-        let details = fired[1]["errorDetails"].as_str().expect("a detail");
+        assert_eq!(j(at(&fired, 0), "reason"), "max_turns");
+        assert_eq!(j(at(&fired, 0), "subagentType"), "explore");
+        assert_eq!(j(at(&fired, 1), "hookEventName"), "stop_failure");
+        assert_eq!(j(at(&fired, 1), "subagentType"), "explore");
+        let details = j(at(&fired, 1), "errorDetails").as_str().expect("a detail");
         assert!(details.ends_with("… [+1000 chars]"), "{details}");
     })
     .await;
@@ -611,7 +757,7 @@ async fn the_loop_reports_and_settles_a_cancelled_turn() {
 
         let fired = fired.borrow();
         assert_eq!(fired.len(), 1, "the loop must dispatch the queued report");
-        assert_eq!(fired[0]["hookEventName"], "stop_cancelled");
+        assert_eq!(j(at(&fired, 0), "hookEventName"), "stop_cancelled");
         assert_eq!(h.lifecycle.idles.get(), 1, "the loop must settle the host");
     })
     .await;
@@ -721,7 +867,7 @@ async fn a_long_assistant_message_is_clipped() {
         h.drain_turn_ends().await;
         let fired = h.fired_payloads();
         assert_clipped(
-            fired[0]["lastAssistantMessage"]
+            j(at(&fired, 0), "lastAssistantMessage")
                 .as_str()
                 .expect("a last message"),
         );
@@ -782,7 +928,7 @@ async fn teardown_runs_queued_reports_before_the_session_end_hooks() {
             let names: Vec<String> = fired
                 .borrow()
                 .iter()
-                .filter_map(|p| p["hookEventName"].as_str().map(str::to_string))
+                .filter_map(|p| j(p, "hookEventName").as_str().map(str::to_string))
                 .collect();
             assert_eq!(
                 names,
@@ -944,9 +1090,9 @@ async fn a_completion_reports_its_own_cancel_reason() {
 
         let fired = h.fired_payloads();
         assert_eq!(fired.len(), 2);
-        assert_eq!(fired[0]["reason"], "max_turns");
-        assert_eq!(fired[0]["promptId"], "p1");
-        assert_eq!(fired[1]["reason"], "permission_rejected");
+        assert_eq!(j(at(&fired, 0), "reason"), "max_turns");
+        assert_eq!(j(at(&fired, 0), "promptId"), "p1");
+        assert_eq!(j(at(&fired, 1), "reason"), "permission_rejected");
         for (field, prefix, max) in [
             (
                 "cancelTrigger",
@@ -959,7 +1105,7 @@ async fn a_completion_reports_its_own_cancel_reason() {
                 xai_grok_hooks::event::MAX_STOP_ENTRY_TEXT_CHARS,
             ),
         ] {
-            let text = fired[1][field]
+            let text = j(at(&fired, 1), field)
                 .as_str()
                 .unwrap_or_else(|| panic!("{field}"));
             assert!(text.starts_with(prefix), "{field}: {text}");
@@ -985,8 +1131,8 @@ async fn a_flush_leaves_the_queue_open() {
         h.drain_turn_ends().await;
         let fired = h.fired_payloads();
         assert_eq!(fired.len(), 2);
-        assert_eq!(fired[0]["promptId"], "p1");
-        assert_eq!(fired[1]["promptId"], "p2");
+        assert_eq!(j(at(&fired, 0), "promptId"), "p1");
+        assert_eq!(j(at(&fired, 1), "promptId"), "p2");
     })
     .await;
 }

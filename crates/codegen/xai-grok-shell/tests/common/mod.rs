@@ -290,6 +290,8 @@ pub mod leader {
 
 #[allow(dead_code)]
 pub fn isolated_home() -> tempfile::TempDir {
+    xai_grok_shell::agent::remote_config::settings_get::reset_startup_settings_for_tests();
+    xai_grok_shell::managed_config::clear_startup_profile_for_tests();
     let home = tempfile::TempDir::new().expect("grok home tempdir");
     // SAFETY: single-test binary; no other thread reads or writes the environment.
     unsafe { xai_grok_test_support::isolate_grok_env(home.path()) };
@@ -313,12 +315,12 @@ pub async fn start_seeded_mock(
         .await
         .expect("start mock server");
     std::fs::write(home.join("agent_id"), "test-agent-id").expect("seed agent_id");
-    let scope = xai_grok_shell::auth::GrokComConfig::default().auth_scope();
+    let scope = xai_grok_login::GrokComConfig::default().auth_scope();
     let auth = serde_json::json!({
         scope: {
             "key": "test-session-token",
             "auth_mode": "oidc",
-            "oidc_issuer": xai_grok_shell::auth::xai_oauth2_issuer(),
+            "oidc_issuer": xai_grok_login::xai_oauth2_issuer(),
             "create_time": "2026-01-01T00:00:00Z",
             "expires_at": "2099-01-01T00:00:00Z",
             "user_id": "test-user",
@@ -380,33 +382,12 @@ pub fn test_sampler_config(
         model: "test-model".to_string(),
         max_completion_tokens: Some(1000),
         temperature: Some(0.7),
-        top_p: None,
         api_backend,
-        auth_scheme: Default::default(),
         extra_headers: extra_headers
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
-        extra_response_includes: Vec::new(),
-        query_params: Default::default(),
-        env_http_headers: Default::default(),
         context_window: 256_000,
-        client_version: None,
-        force_http1: false,
-        max_retries: None,
-        stream_tool_calls: false,
-        idle_timeout_secs: None,
-        client_identifier: None,
-        reasoning_effort: None,
-        deployment_id: None,
-        user_id: None,
-        origin_client: None,
-        attribution_callback: None,
-        bearer_resolver: None,
-        supports_backend_search: false,
-        compactions_remaining: None,
-        compaction_at_tokens: None,
-        doom_loop_recovery: None,
-        header_injector: None,
+        ..Default::default()
     }
 }

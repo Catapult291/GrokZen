@@ -2,10 +2,14 @@
 //! It deliberately does **not** alias `xai_grok_sampling_types::SamplingConfig`.
 //! Aliasing would pull transitive dependencies on shell-specific types (`xai-grok-tools`, etc.) into the sampler crate.
 
+use std::num::NonZeroU64;
+use std::path::PathBuf;
+
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use xai_grok_sampling_types::{
-    ApiBackend, CompactionAtTokens, CompactionsRemaining, DoomLoopRecoveryPolicy, ReasoningEffort,
+    ApiBackend, CompactionAtTokens, CompactionsRemaining, ConversationGroupId,
+    DoomLoopRecoveryPolicy, ReasoningEffort, ReasoningSummary,
 };
 
 use crate::attribution::SharedAttributionCallback;
@@ -19,23 +23,24 @@ pub enum AuthScheme {
     XApiKey,
 }
 
+/// Set by the shell: `Zstd` only toward the cli-chat-proxy that advertised it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RequestCompression {
+    #[default]
+    None,
+    Zstd,
+}
+
 /// All knobs that control a single sampling request.
-///
-/// The session typically owns one `SamplerConfig` per active model and passes it (or a per-request override) to the actor on every submit.
-///
-/// # Construction in `xai-grok-shell`
-///
-/// `SamplerConfig` is the single source of truth for sampler configuration.
-/// The shell builds it directly by composing chat-state's `xai_grok_sampling_types::SamplingConfig` with `Credentials` (api key, client version).
-/// See `agent::config::resolve_model_to_sampling_config` and `session::acp_session::SessionActor::reconstruct_full_config`.
-///
-/// URL-derived request headers (e.g. `X-XAI-Token-Auth` for the cli-chat-proxy) land in [`Self::extra_headers`].
-/// `agent::config::inject_url_derived_headers` folds them in before the `SamplerConfig` is handed to the actor.
 /// Auth is selected separately via `auth_scheme`, while `api_backend` controls only the request/response protocol shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SamplerConfig {
     pub api_key: Option<String>,
     pub base_url: String,
+    /// Resolved local directory for this model's mTLS client identity.
+    #[serde(default)]
+    pub mtls_cert_dir: Option<PathBuf>,
     pub model: String,
     pub max_completion_tokens: Option<u32>,
     pub temperature: Option<f32>,
@@ -43,6 +48,8 @@ pub struct SamplerConfig {
     pub api_backend: ApiBackend,
     #[serde(default)]
     pub auth_scheme: AuthScheme,
+    #[serde(default)]
+    pub request_compression: RequestCompression,
     /// Extra request headers applied verbatim. The sampler never inspects the URL to derive headers.
     /// Callers (the session) inject proxy auth and other access headers here before constructing the config.
     pub extra_headers: IndexMap<String, String>,
@@ -58,27 +65,37 @@ pub struct SamplerConfig {
     /// Total context window size in tokens.
     /// The sampler does not enforce it; the session uses it for compaction decisions.
     pub context_window: u64,
+    /// Provider request-body cap, already defaulted from `api_backend` by model resolution; `None` budgets to 50 MiB.
+    #[serde(default)]
+    pub max_request_bytes: Option<NonZeroU64>,
     pub force_http1: bool,
     pub max_retries: Option<u32>,
+    /// Total-attempt ceiling for rate-limited requests.
+    /// `None` keeps the actor's [`RetryPolicy::rate_limit_retry_threshold`].
+    #[serde(default)]
+    pub rate_limit_retry_threshold: Option<u32>,
     pub stream_tool_calls: bool,
     pub idle_timeout_secs: Option<u64>,
 
     // Reasoning effort
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// Overrides the Responses API `reasoning.summary` the request builder sets; `None` leaves it as built.
+    #[serde(default)]
+    pub reasoning_summary: Option<ReasoningSummary>,
 
     // Client identity
     pub origin_client: Option<OriginClientInfo>,
     pub client_identifier: Option<String>,
     pub deployment_id: Option<String>,
     pub user_id: Option<String>,
+    /// Stable root conversation identifier emitted as `x-grok-conv-group-id`.
+    #[serde(default)]
+    pub conversation_group_id: Option<ConversationGroupId>,
     pub client_version: Option<String>,
 
     /// Hook invoked on every 401 response with the bearer that was actually sent on the wire.
     /// Implementations typically compare it against a live credential source to tell a stale token from a server-rejected live one.
     /// `None` (default) is a no-op; the 401 arm still returns `SamplingError::Auth`.
-    ///
-    /// serde skips this field; round-tripping a config drops the callback.
-    /// Re-attach it before [`crate::SamplingClient::new`] when deserializing from disk, or 401 attribution is silently disabled.
     #[serde(skip)]
     pub attribution_callback: Option<SharedAttributionCallback>,
 
@@ -98,8 +115,6 @@ pub struct SamplerConfig {
     pub compaction_at_tokens: Option<CompactionAtTokens>,
 
     /// Server-side doom-loop check policy; `None` disables it.
-    /// When set, the client sends both reporting headers on streaming Responses API requests.
-    /// Those carry the configured tail window and the default exact-repetition minimum.
     /// It also absorbs the reported trigger events (unlike environment headers in [`Self::extra_headers`], this gates the client's decode behavior).
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoveryPolicy>,
@@ -115,26 +130,32 @@ impl Default for SamplerConfig {
         Self {
             api_key: None,
             base_url: String::new(),
+            mtls_cert_dir: None,
             model: String::new(),
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
             api_backend: ApiBackend::default(),
             auth_scheme: AuthScheme::default(),
+            request_compression: RequestCompression::default(),
             extra_headers: IndexMap::new(),
             extra_response_includes: Vec::new(),
             query_params: IndexMap::new(),
             env_http_headers: IndexMap::new(),
             context_window: 0,
+            max_request_bytes: None,
             force_http1: false,
             max_retries: None,
+            rate_limit_retry_threshold: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
             reasoning_effort: None,
+            reasoning_summary: None,
             origin_client: None,
             client_identifier: None,
             deployment_id: None,
             user_id: None,
+            conversation_group_id: None,
             client_version: None,
             attribution_callback: None,
             bearer_resolver: None,
@@ -150,13 +171,26 @@ impl Default for SamplerConfig {
 /// Cheap sync read of the current bearer for [`SamplerConfig::bearer_resolver`].
 pub trait BearerResolver: Send + Sync + std::fmt::Debug {
     fn current_bearer(&self) -> Option<String>;
+
+    /// Awaited by the client right before it stamps a request; [`Self::current_bearer`] is read afterwards.
+    /// A resolver that can renew its bearer does so here when the cached one would not survive the send, so the request never leaves with no credential.
+    /// Default: no-op.
+    fn prepare_for_send(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async {})
+    }
 }
 
 pub type SharedBearerResolver = std::sync::Arc<dyn BearerResolver>;
 
-/// Per-request header injection (e.g. OTel `traceparent`).
+/// Host trace hooks for the per-attempt HTTP span; the sampler has no OpenTelemetry dependency.
 pub trait HeaderInjector: Send + Sync + std::fmt::Debug {
     fn inject(&self, headers: &mut reqwest::header::HeaderMap);
+
+    /// Runs right after each streaming HTTP span is created and before it has children.
+    /// Default: no-op.
+    fn set_span_parent(&self, _span: &tracing::Span, _traceparent: &str) {}
 }
 
 pub type SharedHeaderInjector = std::sync::Arc<dyn HeaderInjector>;
@@ -165,7 +199,7 @@ pub type SharedHeaderInjector = std::sync::Arc<dyn HeaderInjector>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryPolicy {
     pub max_retries: u32,
-    /// After this many rate-limit (429) retries, escalate to the caller.
+    /// Total-attempt ceiling for rate-limited requests before escalating to the caller.
     /// Lower than `max_retries` because rate-limit waits can be long.
     pub rate_limit_retry_threshold: u32,
     #[serde(default)]
@@ -201,9 +235,13 @@ mod tests {
         let object = stripped.as_object_mut().unwrap();
         object.remove("doom_loop_recovery");
         object.remove("extra_response_includes");
+        object.remove("mtls_cert_dir");
+        object.remove("rate_limit_retry_threshold");
         let config: SamplerConfig = serde_json::from_value(stripped).unwrap();
         assert!(config.doom_loop_recovery.is_none());
         assert!(config.extra_response_includes.is_empty());
+        assert!(config.mtls_cert_dir.is_none());
+        assert!(config.rate_limit_retry_threshold.is_none());
 
         let with_policy = SamplerConfig {
             doom_loop_recovery: Some(DoomLoopRecoveryPolicy {

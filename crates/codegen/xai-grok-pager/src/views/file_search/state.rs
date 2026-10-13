@@ -62,6 +62,8 @@ pub struct FileSearchState {
     /// Test-only count of daemon builds, to prove reuse (no drop-and-rebuild).
     #[cfg(test)]
     daemon_builds: usize,
+    #[cfg(test)]
+    poll_calls: u64,
     /// Latest results snapshot from the daemon.
     results: FuzzyMatcherDaemonResults,
     /// Current @-context (if cursor is inside an @-token).
@@ -73,12 +75,8 @@ pub struct FileSearchState {
     hovered: Option<usize>,
     /// Scroll offset for the dropdown list.
     scroll_offset: usize,
-    /// Floor for accepted result generations: the stale-result fence.
-    ///
-    /// Rises monotonically and is never lowered.
-    /// Each new query bumps it (see `start_query`); the daemon paces its own per-tick `generation` independently.
-    /// So `poll` drops any snapshot whose `generation` predates the floor and, on accept, raises the floor to the accepted generation.
-    /// This keeps matches from a prior query from flickering in.
+    /// Floor for accepted result generations: the stale-result fence. Rises monotonically and is never
+    /// lowered.
     min_generation: usize,
     /// Directory being drilled into; keeps the @-token alive when its name has whitespace (`my dir`).
     /// Self-validating: applies only while the path matches.
@@ -93,6 +91,8 @@ impl FileSearchState {
             daemon: None,
             #[cfg(test)]
             daemon_builds: 0,
+            #[cfg(test)]
+            poll_calls: 0,
             results: FuzzyMatcherDaemonResults::default(),
             context: None,
             selected: 0,
@@ -147,8 +147,6 @@ impl FileSearchState {
         self.scroll_offset = 0;
     }
 
-    // ── Visibility ──────────────────────────────────────────────────────
-
     /// Whether the dropdown should be visible.
     pub fn is_visible(&self) -> bool {
         self.context.is_some() && !self.results.topk.is_empty()
@@ -191,8 +189,6 @@ impl FileSearchState {
     pub fn is_dir_mode(&self) -> bool {
         self.context.as_ref().is_some_and(|c| c.is_dir_mode())
     }
-
-    // ── Context updates ─────────────────────────────────────────────────
 
     /// Anchor (or clear) the drilled directory for whitespace-aware detection.
     pub fn set_drill_prefix(&mut self, prefix: Option<String>) {
@@ -260,12 +256,14 @@ impl FileSearchState {
         self.results = FuzzyMatcherDaemonResults::default();
     }
 
-    // ── Tick / polling ──────────────────────────────────────────────────
-
     /// Poll the daemon for new results. Returns `true` if results changed.
     ///
     /// Call this on every tick (~4ms) while the dropdown is potentially visible.
     pub fn poll(&mut self) -> bool {
+        #[cfg(test)]
+        {
+            self.poll_calls += 1;
+        }
         if self.context.is_none() {
             return false;
         }
@@ -296,8 +294,6 @@ impl FileSearchState {
         false
     }
 
-    // ── Navigation ──────────────────────────────────────────────────────
-
     /// Move selection by `delta` items (negative is up, positive is down).
     pub fn move_selection(&mut self, delta: isize) {
         let len = self.results.topk.len();
@@ -327,8 +323,6 @@ impl FileSearchState {
         }
     }
 
-    // ── Selection / replacement ─────────────────────────────────────────
-
     /// Select the hovered item (for click-to-accept).
     /// Returns `true` if there was a valid hovered item to select.
     pub fn select_hovered(&mut self) -> bool {
@@ -346,12 +340,8 @@ impl FileSearchState {
         self.results.topk.get(self.selected)
     }
 
-    /// Compute the text replacement for accepting the currently selected directory (drill-down acceptance).
-    ///
-    /// Pure query.
-    /// `dismiss` reports whether the caller should clear the context.
-    /// A directory whose `/`-append matches text already present is committed (dismiss); otherwise the caller drills in and stays open.
-    /// The `src` parameter is the full prompt text, needed to detect that no-op `/`-append.
+    /// A directory whose `/`-append matches text already present is committed (dismiss); otherwise the
+    /// caller drills in and stays open.
     pub fn try_replace(&self, src: &str) -> Option<FileSearchReplacement> {
         let ctx = self.context.as_ref()?;
         let res = self.results.topk.get(self.selected)?;
@@ -378,7 +368,10 @@ impl FileSearchState {
         // See `context::detect`
         // Step past that one char so typing resumes after the directory
         if no_op && !at_end {
-            cursor += src[range.end..].chars().next().map_or(1, char::len_utf8);
+            cursor += src
+                .get(range.end..)
+                .and_then(|s| s.chars().next())
+                .map_or(1, char::len_utf8);
         }
 
         Some(FileSearchReplacement {
@@ -430,6 +423,12 @@ impl FileSearchState {
     #[cfg(test)]
     pub(crate) fn daemon_build_count(&self) -> usize {
         self.daemon_builds
+    }
+
+    /// Test-only observable state: how many times [`Self::poll`] has run.
+    #[cfg(test)]
+    pub(crate) fn poll_calls(&self) -> u64 {
+        self.poll_calls
     }
 }
 

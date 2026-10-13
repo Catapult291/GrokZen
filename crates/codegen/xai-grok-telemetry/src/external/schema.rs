@@ -7,6 +7,9 @@
 //! They are this enum, the pinned [`EXTERNAL_ALLOWED_KEYS`] test, and the export-time validators in [`super::redact`].
 //! Telemetry-owner review gates this file (CODEOWNERS).
 
+use std::str::FromStr;
+
+use super::config::ContentGates;
 use crate::events;
 
 /// Wire schema version, exported as resource attr `grok_code.schema.version`.
@@ -21,56 +24,49 @@ pub const SCOPE_NAME: &str = "ai.xai.grok_code";
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// External event names (`event.name` on the OTLP log record); the set is closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount, strum::AsRefStr, strum::IntoStaticStr,
+)]
 pub enum ExternalEventName {
+    #[strum(serialize = "grok_code.session_start")]
     SessionStart,
+    #[strum(serialize = "grok_code.session_end")]
     SessionEnd,
+    #[strum(serialize = "grok_code.user_prompt")]
     UserPrompt,
+    #[strum(serialize = "grok_code.turn_completed")]
     TurnCompleted,
+    #[strum(serialize = "grok_code.api_request")]
     ApiRequest,
+    #[strum(serialize = "grok_code.api_error")]
     ApiError,
+    #[strum(serialize = "grok_code.tool_result")]
     ToolResult,
+    #[strum(serialize = "grok_code.tool_decision")]
     ToolDecision,
+    #[strum(serialize = "grok_code.mcp_server_connection")]
     McpServerConnection,
+    #[strum(serialize = "grok_code.permission_mode_changed")]
     PermissionModeChanged,
+    #[strum(serialize = "grok_code.skill_activated")]
     SkillActivated,
+    #[strum(serialize = "grok_code.plugin_loaded")]
     PluginLoaded,
+    #[strum(serialize = "grok_code.compaction")]
     Compaction,
+    #[strum(serialize = "grok_code.subagent")]
     Subagent,
+    #[strum(serialize = "grok_code.auth")]
     Auth,
+    #[strum(serialize = "grok_code.internal_error")]
     InternalError,
+    #[strum(serialize = "grok_code.model_switched")]
     ModelSwitched,
+    #[strum(serialize = "grok_code.contextual_tip")]
     ContextualTip,
+    #[strum(serialize = "grok_code.assistant_response")]
     AssistantResponse,
 }
-
-impl ExternalEventName {
-    /// These wire names are a public schema commitment (documented in the monitoring-usage page); renames require a `SCHEMA_VERSION` bump.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::SessionStart => "grok_code.session_start",
-            Self::SessionEnd => "grok_code.session_end",
-            Self::UserPrompt => "grok_code.user_prompt",
-            Self::TurnCompleted => "grok_code.turn_completed",
-            Self::ApiRequest => "grok_code.api_request",
-            Self::ApiError => "grok_code.api_error",
-            Self::ToolResult => "grok_code.tool_result",
-            Self::ToolDecision => "grok_code.tool_decision",
-            Self::McpServerConnection => "grok_code.mcp_server_connection",
-            Self::PermissionModeChanged => "grok_code.permission_mode_changed",
-            Self::SkillActivated => "grok_code.skill_activated",
-            Self::PluginLoaded => "grok_code.plugin_loaded",
-            Self::Compaction => "grok_code.compaction",
-            Self::Subagent => "grok_code.subagent",
-            Self::Auth => "grok_code.auth",
-            Self::InternalError => "grok_code.internal_error",
-            Self::ModelSwitched => "grok_code.model_switched",
-            Self::ContextualTip => "grok_code.contextual_tip",
-            Self::AssistantResponse => "grok_code.assistant_response",
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Attribute keys
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,18 +74,37 @@ impl ExternalEventName {
 /// Every attribute key the external stream can attach to a log record.
 /// You cannot attach an attribute the schema doesn't name.
 /// Adding a variant trips the [`EXTERNAL_ALLOWED_KEYS`] pin test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumCount)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    strum::VariantArray,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+    strum::EnumString,
+)]
+#[strum(serialize_all = "snake_case")]
 pub enum ExternalKey {
     // Context / correlation (injected by emit.rs)
+    #[strum(serialize = "session.id")]
     SessionId,
     TurnNumber,
+    #[strum(serialize = "prompt.id")]
     PromptId,
+    #[strum(serialize = "event.sequence")]
     EventSequence,
     // Identity (injected per-record from the identity snapshot)
+    #[strum(serialize = "user.id")]
     UserId,
+    #[strum(serialize = "user.email")]
     UserEmail,
+    #[strum(serialize = "organization.id")]
     OrganizationId,
+    #[strum(serialize = "team.id")]
     TeamId,
+    #[strum(serialize = "deployment.id")]
     DeploymentId,
     // Session lifecycle
     Model,
@@ -145,7 +160,9 @@ pub enum ExternalKey {
     ToolCount,
     ErrorType,
     ErrorMessage,
+    #[strum(serialize = "mcp_server.name")]
     McpServerName,
+    #[strum(serialize = "mcp_tool.name")]
     McpToolName,
     // Permission mode
     FromMode,
@@ -153,6 +170,7 @@ pub enum ExternalKey {
     Trigger,
     // Skills / plugins
     SkillSource,
+    #[strum(serialize = "skill.name")]
     SkillName,
     InstallKind,
     PluginScope,
@@ -176,203 +194,58 @@ pub enum ExternalKey {
     Tip,
     Action,
 }
-
-impl ExternalKey {
-    /// Stable wire name for this key.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::SessionId => "session.id",
-            Self::TurnNumber => "turn_number",
-            Self::PromptId => "prompt.id",
-            Self::EventSequence => "event.sequence",
-            Self::UserId => "user.id",
-            Self::UserEmail => "user.email",
-            Self::OrganizationId => "organization.id",
-            Self::TeamId => "team.id",
-            Self::DeploymentId => "deployment.id",
-            Self::Model => "model",
-            Self::PermissionMode => "permission_mode",
-            Self::McpServerCount => "mcp_server_count",
-            Self::PluginCount => "plugin_count",
-            Self::SkillCount => "skill_count",
-            Self::HookCount => "hook_count",
-            Self::MemoryEnabled => "memory_enabled",
-            Self::IsGitRepo => "is_git_repo",
-            Self::ClientIdentifier => "client_identifier",
-            Self::DurationSecs => "duration_secs",
-            Self::TurnCount => "turn_count",
-            Self::ToolCallCount => "tool_call_count",
-            Self::CompactionCount => "compaction_count",
-            Self::PromptLength => "prompt_length",
-            Self::Prompt => "prompt",
-            Self::ResponseLength => "response_length",
-            Self::Response => "response",
-            Self::ScreenMode => "screen_mode",
-            Self::CommandName => "command_name",
-            Self::Outcome => "outcome",
-            Self::DurationMs => "duration_ms",
-            Self::ErrorCategory => "error_category",
-            Self::CancellationCategory => "cancellation_category",
-            Self::StopReason => "stop_reason",
-            Self::InputTokens => "input_tokens",
-            Self::OutputTokens => "output_tokens",
-            Self::ReasoningTokens => "reasoning_tokens",
-            Self::CacheReadTokens => "cache_read_tokens",
-            Self::CacheCreationTokens => "cache_creation_tokens",
-            Self::CostUsdMicros => "cost_usd_micros",
-            Self::StatusCode => "status_code",
-            Self::ToolName => "tool_name",
-            Self::Success => "success",
-            Self::HookRewrote => "hook_rewrote",
-            Self::FileExtension => "file_extension",
-            Self::ToolParameters => "tool_parameters",
-            Self::ToolInput => "tool_input",
-            Self::ToolOutput => "tool_output",
-            Self::FullCommand => "full_command",
-            Self::ToolUseId => "tool_use_id",
-            Self::FilePath => "file_path",
-            Self::Decision => "decision",
-            Self::AccessKind => "access_kind",
-            Self::Source => "source",
-            Self::Status => "status",
-            Self::TransportType => "transport_type",
-            Self::ToolCount => "tool_count",
-            Self::ErrorType => "error_type",
-            Self::ErrorMessage => "error_message",
-            Self::McpServerName => "mcp_server.name",
-            Self::McpToolName => "mcp_tool.name",
-            Self::FromMode => "from_mode",
-            Self::ToMode => "to_mode",
-            Self::Trigger => "trigger",
-            Self::SkillSource => "skill_source",
-            Self::SkillName => "skill.name",
-            Self::InstallKind => "install_kind",
-            Self::PluginScope => "plugin_scope",
-            Self::PluginName => "plugin_name",
-            Self::PluginVersion => "plugin_version",
-            Self::CompactionTrigger => "compaction_trigger",
-            Self::CompactionOutcome => "compaction_outcome",
-            Self::TokensBefore => "tokens_before",
-            Self::TokensAfter => "tokens_after",
-            Self::Phase => "phase",
-            Self::SubagentType => "subagent_type",
-            Self::AuthMethod => "auth_method",
-            Self::FromModel => "from_model",
-            Self::ToModel => "to_model",
-            Self::ErrorCode => "error_code",
-            Self::Tip => "tip",
-            Self::Action => "action",
-        }
-    }
-}
-
-/// Every [`ExternalKey`] variant, for allowlist construction.
-/// The `EnumCount` assertion below keeps it complete.
-pub(crate) const ALL_KEYS: &[ExternalKey] = &[
-    ExternalKey::SessionId,
-    ExternalKey::TurnNumber,
-    ExternalKey::PromptId,
-    ExternalKey::EventSequence,
-    ExternalKey::UserId,
-    ExternalKey::UserEmail,
-    ExternalKey::OrganizationId,
-    ExternalKey::TeamId,
-    ExternalKey::DeploymentId,
-    ExternalKey::Model,
-    ExternalKey::PermissionMode,
-    ExternalKey::McpServerCount,
-    ExternalKey::PluginCount,
-    ExternalKey::SkillCount,
-    ExternalKey::HookCount,
-    ExternalKey::MemoryEnabled,
-    ExternalKey::IsGitRepo,
-    ExternalKey::ClientIdentifier,
-    ExternalKey::DurationSecs,
-    ExternalKey::TurnCount,
-    ExternalKey::ToolCallCount,
-    ExternalKey::CompactionCount,
-    ExternalKey::PromptLength,
-    ExternalKey::Prompt,
-    ExternalKey::ResponseLength,
-    ExternalKey::Response,
-    ExternalKey::ScreenMode,
-    ExternalKey::CommandName,
-    ExternalKey::Outcome,
-    ExternalKey::DurationMs,
-    ExternalKey::ErrorCategory,
-    ExternalKey::CancellationCategory,
-    ExternalKey::StopReason,
-    ExternalKey::InputTokens,
-    ExternalKey::OutputTokens,
-    ExternalKey::ReasoningTokens,
-    ExternalKey::CacheReadTokens,
-    ExternalKey::CacheCreationTokens,
-    ExternalKey::CostUsdMicros,
-    ExternalKey::StatusCode,
-    ExternalKey::ToolName,
-    ExternalKey::Success,
-    ExternalKey::HookRewrote,
-    ExternalKey::FileExtension,
-    ExternalKey::ToolParameters,
-    ExternalKey::ToolInput,
-    ExternalKey::ToolOutput,
-    ExternalKey::FullCommand,
-    ExternalKey::ToolUseId,
-    ExternalKey::FilePath,
-    ExternalKey::Decision,
-    ExternalKey::AccessKind,
-    ExternalKey::Source,
-    ExternalKey::Status,
-    ExternalKey::TransportType,
-    ExternalKey::ToolCount,
-    ExternalKey::ErrorType,
-    ExternalKey::ErrorMessage,
-    ExternalKey::McpServerName,
-    ExternalKey::McpToolName,
-    ExternalKey::FromMode,
-    ExternalKey::ToMode,
-    ExternalKey::Trigger,
-    ExternalKey::SkillSource,
-    ExternalKey::SkillName,
-    ExternalKey::InstallKind,
-    ExternalKey::PluginScope,
-    ExternalKey::PluginName,
-    ExternalKey::PluginVersion,
-    ExternalKey::CompactionTrigger,
-    ExternalKey::CompactionOutcome,
-    ExternalKey::TokensBefore,
-    ExternalKey::TokensAfter,
-    ExternalKey::Phase,
-    ExternalKey::SubagentType,
-    ExternalKey::AuthMethod,
-    ExternalKey::FromModel,
-    ExternalKey::ToModel,
-    ExternalKey::ErrorCode,
-    ExternalKey::Tip,
-    ExternalKey::Action,
-];
-
-/// A new `ExternalKey` variant not listed in `ALL_KEYS` fails this assertion, so the allowlist can never silently miss a key.
-const _: () = assert!(ALL_KEYS.len() == <ExternalKey as strum::EnumCount>::COUNT);
+/// Every [`ExternalKey`] variant, in declaration order; the pinned `external_allowed_keys_are_pinned` test guards the wire names against drift.
+pub(crate) const ALL_KEYS: &[ExternalKey] = <ExternalKey as strum::VariantArray>::VARIANTS;
 
 /// The runtime allowlist the export-time validators enforce: exactly the wire names of every [`ExternalKey`].
 /// Pinned by an independent literal copy in the test module (mirroring `otel_layer::redact::allowlist_contents_are_pinned`).
 pub(crate) fn external_allowed_keys() -> &'static std::collections::HashSet<&'static str> {
     static SET: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
-        std::sync::LazyLock::new(|| ALL_KEYS.iter().map(|k| k.as_str()).collect());
+        std::sync::LazyLock::new(|| ALL_KEYS.iter().map(|k| k.as_ref()).collect());
     &SET
 }
 
-/// Keys allowed only when the matching content gate was on at init.
-pub(crate) fn gate_for_key(key: &str) -> Option<Gate> {
+/// Redaction class of an attribute key: always safe to export, or content that rides a gate.
+pub(crate) enum KeyPolicy {
+    Safe,
+    Gated(Gate),
+}
+
+/// Exhaustive Safe/Gated classification of every attribute key. A new [`ExternalKey`] variant
+/// must be classified here or this match fails to compile, so a content-bearing key can never
+/// reach the wire un-gated by omission.
+pub(crate) fn key_policy(key: ExternalKey) -> KeyPolicy {
+    use ExternalKey::*;
+    use KeyPolicy::{Gated, Safe};
     match key {
-        "prompt" => Some(Gate::UserPrompts),
-        "response" => Some(Gate::AssistantResponses),
-        "tool_parameters" | "file_path" | "skill.name" | "plugin_name" | "plugin_version" => {
-            Some(Gate::ToolDetails)
+        Prompt => Gated(Gate::UserPrompts),
+        Response => Gated(Gate::AssistantResponses),
+        ToolParameters | FilePath | SkillName | PluginName | PluginVersion => {
+            Gated(Gate::ToolDetails)
         }
-        "tool_input" | "tool_output" | "full_command" | "error_message" => Some(Gate::ToolContent),
-        _ => None,
+        ToolInput | ToolOutput | FullCommand | ErrorMessage => Gated(Gate::ToolContent),
+        // McpServerName/McpToolName ride a safe placeholder by default and are gated at emit time,
+        // so their key is safe at export; everything else is a label, count, id, or sanitized value.
+        SessionId | TurnNumber | PromptId | EventSequence | UserId | UserEmail | OrganizationId
+        | TeamId | DeploymentId | Model | PermissionMode | McpServerCount | PluginCount
+        | SkillCount | HookCount | MemoryEnabled | IsGitRepo | ClientIdentifier | DurationSecs
+        | TurnCount | ToolCallCount | CompactionCount | PromptLength | ResponseLength
+        | ScreenMode | CommandName | Outcome | DurationMs | ErrorCategory
+        | CancellationCategory | StopReason | InputTokens | OutputTokens | ReasoningTokens
+        | CacheReadTokens | CacheCreationTokens | CostUsdMicros | StatusCode | ToolName
+        | Success | HookRewrote | FileExtension | ToolUseId | Decision | AccessKind | Source
+        | Status | TransportType | ToolCount | ErrorType | McpServerName | McpToolName
+        | FromMode | ToMode | Trigger | SkillSource | InstallKind | PluginScope
+        | CompactionTrigger | CompactionOutcome | TokensBefore | TokensAfter | Phase
+        | SubagentType | AuthMethod | FromModel | ToModel | ErrorCode | Tip | Action => Safe,
+    }
+}
+
+/// The gate guarding a wire key's content, if any. Backed by the exhaustive [`key_policy`] map.
+pub(crate) fn gate_for_key(key: &str) -> Option<Gate> {
+    match key_policy(ExternalKey::from_str(key).ok()?) {
+        KeyPolicy::Gated(gate) => Some(gate),
+        KeyPolicy::Safe => None,
     }
 }
 
@@ -439,6 +312,19 @@ pub enum Gate {
     ToolContent,
 }
 
+impl Gate {
+    /// Whether this gate's content may be emitted under `gates`.
+    /// The single source for the emit-time and export-time (`super::redact`) checks.
+    pub(crate) fn is_open(self, gates: &ContentGates) -> bool {
+        match self {
+            Self::UserPrompts => gates.log_user_prompts,
+            Self::ToolDetails => gates.log_tool_details,
+            Self::AssistantResponses => gates.log_assistant_responses,
+            Self::ToolContent => gates.log_tool_content,
+        }
+    }
+}
+
 /// An attribute emitted only when its gate is on.
 /// When a gated attr shares a key with a default attr (e.g. verbatim vs. sanitized `tool_name`), the gated value replaces the default at emit time.
 #[derive(Debug, Clone, PartialEq)]
@@ -448,61 +334,8 @@ pub struct GatedAttr {
     pub value: AttrValue,
 }
 
-/// Typed metric increment derived at mapping time.
-/// `emit.rs` converts these into instrument `add()` calls with identity/cardinality attributes.
-#[derive(Debug, Clone, PartialEq)]
-pub enum MetricIncrement {
-    SessionCount,
-    TokenUsage {
-        token_type: &'static str,
-        model: String,
-        count: u64,
-    },
-    CostUsage {
-        model: String,
-        cost_usd: f64,
-    },
-    /// `grok_code.turn.count`.
-    TurnCount {
-        outcome: &'static str,
-        model: String,
-    },
-    /// `grok_code.tool.decision`.
-    ToolDecision {
-        tool_name: String,
-        decision: &'static str,
-        access_kind: &'static str,
-        permission_mode: &'static str,
-    },
-    /// `grok_code.tool.usage`.
-    ToolUsage {
-        tool_name: String,
-        outcome: &'static str,
-    },
-    /// `grok_code.error.count`.
-    ErrorCount {
-        error_category: String,
-        model: String,
-    },
-    /// `grok_code.startup.timeout` (`stuck_in` is the phase label).
-    StartupTimeout {
-        stuck_in: String,
-        auth_mode: String,
-    },
-    /// `grok_code.startup.phase_duration` (ms; `phase` is the phase label).
-    StartupPhaseDuration {
-        phase: String,
-        duration_ms: u64,
-        outcome: String,
-        auth_mode: String,
-    },
-    /// `grok_code.startup.total` (ms from process start to a usable session).
-    StartupTotal {
-        duration_ms: u64,
-        outcome: String,
-        auth_mode: String,
-    },
-}
+/// Re-exported from [`super::metrics`] so the external wire schema is reachable here.
+pub use super::metrics::MetricIncrement;
 
 /// Curated external representation of one telemetry event: an optional log record plus derived metric increments.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -560,19 +393,8 @@ impl ExternalRecord {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Metric instrument schema (names / units / pinned attr keys)
+// Metric instrument schema (pinned attr keys)
 // ─────────────────────────────────────────────────────────────────────────────
-
-pub(crate) const METRIC_SESSION_COUNT: &str = "grok_code.session.count";
-pub(crate) const METRIC_TOKEN_USAGE: &str = "grok_code.token.usage";
-pub(crate) const METRIC_COST_USAGE: &str = "grok_code.cost.usage";
-pub(crate) const METRIC_TURN_COUNT: &str = "grok_code.turn.count";
-pub(crate) const METRIC_TOOL_DECISION: &str = "grok_code.tool.decision";
-pub(crate) const METRIC_TOOL_USAGE: &str = "grok_code.tool.usage";
-pub(crate) const METRIC_ERROR_COUNT: &str = "grok_code.error.count";
-pub(crate) const METRIC_STARTUP_PHASE_DURATION: &str = "grok_code.startup.phase_duration";
-pub(crate) const METRIC_STARTUP_TIMEOUT: &str = "grok_code.startup.timeout";
-pub(crate) const METRIC_STARTUP_TOTAL: &str = "grok_code.startup.total";
 
 /// Every attribute key that may appear on a metric data point: the instrument-specific keys plus the per-increment identity/cardinality keys.
 /// `prompt.id` is deliberately absent: its cardinality is unbounded, so it appears on events only.
@@ -712,82 +534,6 @@ pub(crate) fn file_extension(path: &str) -> Option<String> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Enum label helpers (stable snake_case, matching the serde representations)
-// ─────────────────────────────────────────────────────────────────────────────
-
-pub(crate) fn outcome_label(o: events::Outcome) -> &'static str {
-    match o {
-        events::Outcome::Completed => "completed",
-        events::Outcome::Cancelled => "cancelled",
-        events::Outcome::Error => "error",
-    }
-}
-
-pub(crate) fn access_kind_label(k: events::AccessKind) -> &'static str {
-    match k {
-        events::AccessKind::Read => "read",
-        events::AccessKind::Edit => "edit",
-        events::AccessKind::Bash => "bash",
-        events::AccessKind::Grep => "grep",
-        events::AccessKind::Mcp => "mcp",
-        events::AccessKind::Web => "web",
-        events::AccessKind::AgentMessage => "agent_message",
-        events::AccessKind::Other => "other",
-    }
-}
-
-pub(crate) fn permission_mode_label(m: crate::enums::PermissionMode) -> &'static str {
-    match m {
-        crate::enums::PermissionMode::Ask => "ask",
-        crate::enums::PermissionMode::AlwaysApprove => "always_approve",
-        crate::enums::PermissionMode::Auto => "auto",
-    }
-}
-
-fn mcp_transport_label(t: events::McpTransport) -> &'static str {
-    match t {
-        events::McpTransport::Stdio => "stdio",
-        events::McpTransport::Sse => "sse",
-        events::McpTransport::Http => "http",
-    }
-}
-
-fn plan_trigger_label(t: events::PlanModeTrigger) -> &'static str {
-    match t {
-        events::PlanModeTrigger::User => "user",
-        events::PlanModeTrigger::Tool => "tool",
-    }
-}
-
-fn contextual_tip_kind_label(t: events::ContextualTipKind) -> &'static str {
-    match t {
-        events::ContextualTipKind::Undo => "undo",
-        events::ContextualTipKind::PlanMode => "plan_mode",
-        events::ContextualTipKind::ImageInput => "image_input",
-        events::ContextualTipKind::SendNow => "send_now",
-        events::ContextualTipKind::SmallScreen => "small_screen",
-        events::ContextualTipKind::WordSelect => "word_select",
-        events::ContextualTipKind::ExportCopy => "export_copy",
-        events::ContextualTipKind::SshWrap => "ssh_wrap",
-    }
-}
-
-fn contextual_tip_action_label(a: events::ContextualTipAction) -> &'static str {
-    match a {
-        events::ContextualTipAction::Shown => "shown",
-        events::ContextualTipAction::Accepted => "accepted",
-    }
-}
-
-fn yolo_trigger_label(t: events::YoloTrigger) -> &'static str {
-    match t {
-        events::YoloTrigger::SlashCommand => "slash_command",
-        events::YoloTrigger::ClientMeta => "client_meta",
-        events::YoloTrigger::Pager => "pager",
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Mapping functions (`telemetry_event!(…, external = …)` targets)
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -800,7 +546,7 @@ pub fn map_session_start(ev: &events::SessionHarness) -> Option<ExternalRecord> 
             .attr(ExternalKey::Model, ev.model_id.as_str())
             .attr(
                 ExternalKey::PermissionMode,
-                permission_mode_label(ev.permission_mode),
+                <&'static str>::from(ev.permission_mode),
             )
             .attr(ExternalKey::McpServerCount, ev.mcp_server_names.len())
             .attr(ExternalKey::PluginCount, ev.plugin_names.len())
@@ -914,12 +660,14 @@ pub fn map_user_prompt(ev: &events::PromptSubmitted) -> Option<ExternalRecord> {
 
 /// `TurnCompleted` maps to `grok_code.turn_completed` and increments `turn.count` (and `error.count` on error outcomes).
 pub fn map_turn_completed(ev: &events::TurnCompleted) -> Option<ExternalRecord> {
-    let outcome = outcome_label(ev.outcome);
+    let outcome: &'static str = ev.outcome.into();
     let mut rec = ExternalRecord::event(ExternalEventName::TurnCompleted)
         .attr(ExternalKey::Outcome, outcome)
         .attr(ExternalKey::DurationMs, ev.duration_ms)
         .attr(ExternalKey::ToolCallCount, ev.tool_call_count)
         .attr(ExternalKey::Model, ev.model_id.as_str())
+        // `emit_record` falls back to the ambient ctx when this is absent.
+        .attr_opt(ExternalKey::SessionId, ev.session_id.as_deref())
         .attr_opt(ExternalKey::ErrorCategory, ev.error_category.as_deref())
         .attr_opt(
             ExternalKey::CancellationCategory,
@@ -939,6 +687,25 @@ pub fn map_turn_completed(ev: &events::TurnCompleted) -> Option<ExternalRecord> 
         });
     }
     Some(rec)
+}
+
+/// Exports the per-turn first-response histograms, each gated independently: a turn with no model
+/// output records no ttft, and a reasoning-only or tool-only turn records ttft but no ttfm.
+pub fn map_prompt_latency(ev: &events::PromptLatency) -> Option<ExternalRecord> {
+    let mut rec = ExternalRecord::default();
+    if let Some(duration_ms) = ev.ttft_ms {
+        rec = rec.metric(MetricIncrement::TurnTtft {
+            duration_ms,
+            model: ev.model_id.clone(),
+        });
+    }
+    if let Some(duration_ms) = ev.ttfm_ms {
+        rec = rec.metric(MetricIncrement::TurnTtfm {
+            duration_ms,
+            model: ev.model_id.clone(),
+        });
+    }
+    (!rec.metrics.is_empty()).then_some(rec)
 }
 
 /// `ModelResponseReceived` maps to `grok_code.api_request` and increments `token.usage`.
@@ -990,10 +757,9 @@ pub fn map_rate_limit_hit(ev: &events::RateLimitHit) -> Option<ExternalRecord> {
     )
 }
 
-/// `ApiError` maps to `grok_code.api_error`.
-/// It carries category/class enums only, no message text.
-/// Deliberately no `error.count` increment: `ApiError` is emitted alongside `TurnCompleted{outcome: Error}` for the same failure.
-/// The metric's increment sources are exactly `TurnCompleted{Error}` and `RateLimitHit`; adding one here would double-count every failed turn.
+/// It carries category/class enums only, no message text. Deliberately no `error.count` increment: `ApiError` is emitted
+/// alongside `TurnCompleted{outcome: Error}` for the same failure. The metric's increment sources are exactly
+/// `TurnCompleted{Error}` and `RateLimitHit`; adding one here would double-count every failed turn.
 pub fn map_api_error(ev: &events::ApiError) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::event(ExternalEventName::ApiError)
@@ -1015,6 +781,7 @@ pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord>
         .attr(ExternalKey::Success, ev.outcome.ran_successfully())
         .attr(ExternalKey::HookRewrote, ev.hook_rewrote)
         .attr(ExternalKey::DurationMs, ev.duration_ms)
+        .attr(ExternalKey::Model, ev.external_model_id.as_str())
         .gated(
             ExternalKey::ToolName,
             Gate::ToolDetails,
@@ -1023,6 +790,7 @@ pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord>
         .metric(MetricIncrement::ToolUsage {
             tool_name: sanitized.to_owned(),
             outcome,
+            model: ev.external_model_id.clone(),
         });
     rec = attach_mcp_names(rec, &ev.tool_name);
     if let Some(path) = ev.file_path.as_deref() {
@@ -1050,9 +818,9 @@ pub fn map_tool_result(ev: &events::ToolCallCompleted) -> Option<ExternalRecord>
 /// ride [`events::ExternalToolInput`] into [`attach_tool_input`].
 pub fn map_tool_decision(ev: &events::PermissionDecisionRecord) -> Option<ExternalRecord> {
     let sanitized = sanitize_tool_name(&ev.payload.tool_name);
-    let decision = ev.payload.decision.as_str();
-    let access_kind = access_kind_label(ev.payload.access_kind);
-    let permission_mode = permission_mode_label(ev.payload.permission_mode);
+    let decision: &'static str = ev.payload.decision.into();
+    let access_kind: &'static str = ev.payload.access_kind.into();
+    let permission_mode: &'static str = ev.payload.permission_mode.into();
     let rec = ExternalRecord::event(ExternalEventName::ToolDecision)
         .attr(ExternalKey::ToolName, sanitized)
         .attr(ExternalKey::Decision, decision)
@@ -1100,7 +868,7 @@ pub fn map_mcp_server_connected(ev: &events::McpServerConnected) -> Option<Exter
             .attr(ExternalKey::Status, "connected")
             .attr(
                 ExternalKey::TransportType,
-                mcp_transport_label(ev.transport),
+                <&'static str>::from(ev.transport),
             )
             .attr(ExternalKey::DurationMs, ev.duration_ms)
             .attr(ExternalKey::ToolCount, ev.tool_count)
@@ -1118,7 +886,7 @@ pub fn map_mcp_server_failed(ev: &events::McpServerFailed) -> Option<ExternalRec
     Some(
         ExternalRecord::event(ExternalEventName::McpServerConnection)
             .attr(ExternalKey::Status, "failed")
-            .attr(ExternalKey::ErrorType, ev.error_type.as_str())
+            .attr(ExternalKey::ErrorType, ev.error_type.as_ref())
             .attr(ExternalKey::DurationMs, ev.duration_ms)
             .attr(ExternalKey::McpServerName, "mcp_server")
             .gated(
@@ -1146,7 +914,7 @@ pub fn map_plan_mode_toggled(ev: &events::PlanModeToggled) -> Option<ExternalRec
                 ExternalKey::ToMode,
                 if ev.enabled { "plan" } else { "default" },
             )
-            .attr(ExternalKey::Trigger, plan_trigger_label(ev.trigger)),
+            .attr(ExternalKey::Trigger, <&'static str>::from(ev.trigger)),
     )
 }
 
@@ -1155,8 +923,8 @@ pub fn map_plan_mode_toggled(ev: &events::PlanModeToggled) -> Option<ExternalRec
 pub fn map_contextual_tip(ev: &events::ContextualTip) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::event(ExternalEventName::ContextualTip)
-            .attr(ExternalKey::Tip, contextual_tip_kind_label(ev.tip))
-            .attr(ExternalKey::Action, contextual_tip_action_label(ev.action)),
+            .attr(ExternalKey::Tip, <&'static str>::from(ev.tip))
+            .attr(ExternalKey::Action, <&'static str>::from(ev.action)),
     )
 }
 
@@ -1180,7 +948,7 @@ pub fn map_yolo_toggled(ev: &events::YoloToggled) -> Option<ExternalRecord> {
                     "default"
                 },
             )
-            .attr(ExternalKey::Trigger, yolo_trigger_label(ev.trigger)),
+            .attr(ExternalKey::Trigger, <&'static str>::from(ev.trigger)),
     )
 }
 
@@ -1189,14 +957,7 @@ pub fn map_yolo_toggled(ev: &events::YoloToggled) -> Option<ExternalRecord> {
 pub fn map_skill_activated(ev: &events::SkillDispatched) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::event(ExternalEventName::SkillActivated)
-            .attr(
-                ExternalKey::SkillSource,
-                if ev.plugin_source.is_some() {
-                    "plugin"
-                } else {
-                    "local"
-                },
-            )
+            .attr_opt(ExternalKey::SkillSource, ev.skill_source.as_deref())
             .attr(ExternalKey::Trigger, <&'static str>::from(ev.trigger))
             .gated(
                 ExternalKey::SkillName,
@@ -1210,7 +971,7 @@ pub fn map_skill_activated(ev: &events::SkillDispatched) -> Option<ExternalRecor
 pub fn map_plugin_installed(ev: &events::PluginInstalled) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::event(ExternalEventName::PluginLoaded)
-            .attr(ExternalKey::InstallKind, ev.install_kind.as_str())
+            .attr(ExternalKey::InstallKind, ev.install_kind.as_ref())
             .attr(ExternalKey::Success, ev.success)
             .attr_opt(ExternalKey::ErrorCategory, ev.error_category.as_deref()),
     )
@@ -1255,7 +1016,7 @@ pub fn map_subagent_completed(ev: &events::SubagentCompleted) -> Option<External
     Some(
         ExternalRecord::event(ExternalEventName::Subagent)
             .attr(ExternalKey::Phase, "completed")
-            .attr(ExternalKey::Outcome, outcome_label(ev.outcome))
+            .attr(ExternalKey::Outcome, <&'static str>::from(ev.outcome))
             .attr(ExternalKey::DurationMs, ev.duration_ms),
     )
 }
@@ -1298,12 +1059,51 @@ pub fn map_agent_connect(ev: &events::AgentConnect) -> Option<ExternalRecord> {
     Some(rec)
 }
 
+/// `SessionCreateFailed` maps to the session-create timeout counter (no external log event).
+pub fn map_session_create_failed(ev: &events::SessionCreateFailed) -> Option<ExternalRecord> {
+    if ev.outcome != crate::startup::StartupOutcome::Timeout {
+        return None;
+    }
+    let stuck = ev
+        .stuck_phase
+        .clone()
+        .unwrap_or_else(|| "unknown".to_owned());
+    Some(
+        ExternalRecord::default().metric(MetricIncrement::SessionCreateTimeout { stuck_in: stuck }),
+    )
+}
+
+pub fn map_startup_sub_timers(ev: &events::StartupSubTimers) -> Option<ExternalRecord> {
+    if ev.timings.is_empty() {
+        return None;
+    }
+    let mut rec = ExternalRecord::default();
+    for (phase, duration_ms) in &ev.timings {
+        rec = rec.metric(MetricIncrement::StartupSubTimerDuration {
+            phase: phase.clone(),
+            duration_ms: *duration_ms,
+            outcome: ev.outcome.label().to_string(),
+            auth_mode: ev.auth_mode.label().to_string(),
+        });
+    }
+    Some(rec)
+}
+
 /// `StartupCompleted` maps to the total histogram (no external log event).
 pub fn map_startup_completed(ev: &events::StartupCompleted) -> Option<ExternalRecord> {
     Some(
         ExternalRecord::default().metric(MetricIncrement::StartupTotal {
             duration_ms: ev.total_ms,
             outcome: ev.outcome.label().to_string(),
+            auth_mode: ev.auth_mode.label().to_string(),
+        }),
+    )
+}
+
+pub fn map_startup_interactive(ev: &events::StartupInteractive) -> Option<ExternalRecord> {
+    Some(
+        ExternalRecord::default().metric(MetricIncrement::StartupInteractive {
+            duration_ms: ev.interactive_ms,
             auth_mode: ev.auth_mode.label().to_string(),
         }),
     )
@@ -1328,7 +1128,7 @@ mod access_kind_label_tests {
     #[test]
     fn agent_message_has_dedicated_label() {
         assert_eq!(
-            access_kind_label(events::AccessKind::AgentMessage),
+            <&'static str>::from(events::AccessKind::AgentMessage),
             "agent_message"
         );
     }

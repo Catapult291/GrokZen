@@ -11,10 +11,10 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
-use unicode_width::UnicodeWidthStr;
 
-use crate::scrollback::text_selection::apply_selection_highlight;
-use crate::scrollback::types::{col_past_grapheme, grapheme_cells_at, slice_display_cols};
+use crate::views::drag_select::{
+    TextDrag, TextEndpoint, endpoint_at, endpoint_at_clamped, paint_text_drag, text_for_drag,
+};
 
 use crate::scrollback::blocks::ContextInfoBlock;
 use crate::theme::Theme;
@@ -63,7 +63,10 @@ impl UsageInfoTab {
     }
 
     pub fn from_index(i: usize) -> Self {
-        *Self::ALL.get(i).unwrap_or(&Self::ALL[0])
+        match Self::ALL.get(i) {
+            Some(&tab) => tab,
+            None => UsageInfoTab::ContextUsage,
+        }
     }
 }
 
@@ -138,34 +141,6 @@ struct PendingPress {
     click_value: Option<String>,
 }
 
-/// Display-column endpoints into `plain_lines`; copy happens on mouse-up.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TextDrag {
-    anchor: TextEndpoint,
-    head: TextEndpoint,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct TextEndpoint {
-    line_idx: usize,
-    col: u16,
-}
-
-impl TextDrag {
-    fn ordered(self) -> (TextEndpoint, TextEndpoint) {
-        if self.anchor <= self.head {
-            (self.anchor, self.head)
-        } else {
-            (self.head, self.anchor)
-        }
-    }
-
-    fn is_non_empty(self) -> bool {
-        let (s, e) = self.ordered();
-        s != e
-    }
-}
-
 impl UsageInfoModalState {
     pub fn new(tab: UsageInfoTab, ctx: UsageInfoContext) -> Self {
         Self {
@@ -209,16 +184,35 @@ impl UsageInfoModalState {
         self.text_drag.is_some()
     }
 
+    fn endpoint_at(&self, column: u16, row: u16) -> Option<TextEndpoint> {
+        endpoint_at(
+            &self.plain_lines,
+            self.content_rect,
+            self.scroll as usize,
+            column,
+            row,
+        )
+    }
+
+    fn endpoint_at_clamped(&self, column: u16, row: u16) -> Option<TextEndpoint> {
+        endpoint_at_clamped(
+            &self.plain_lines,
+            self.content_rect,
+            self.scroll as usize,
+            column,
+            row,
+        )
+    }
+
     fn scroll_to(&mut self, offset: u16) {
         self.scroll = offset;
         // Content moves under a still pointer; drop an unfinished gesture.
         self.clear_text_drag();
     }
 
-    /// Finish an active drag whose `Up(Left)` never arrived (bare `Moved`).
-    /// Unlike scrollback recovery (which discards), a non-empty drag still copies, so the selection band does not vanish without copying.
-    /// The pending press is left alone: it paints nothing and the next Down overwrites it.
-    /// Clearing it would drop click-to-copy on terminals that report held motion as `Moved`.
+    /// Finish an active drag whose `Up(Left)` never arrived (bare `Moved`). Unlike scrollback recovery
+    /// (which discards), a non-empty drag still copies, so the selection band does not vanish without
+    /// copying. The pending press is left alone: it paints nothing and the next Down overwrites it.
     pub(crate) fn finish_lost_drag(&mut self) -> UsageModalOutcome {
         let outcome = if let Some(drag) = self.text_drag.take()
             && drag.is_non_empty()
@@ -260,23 +254,102 @@ impl UsageInfoModalState {
     }
 }
 
-/// Outcome of a content key/mouse event. Chrome events (Esc, `[✗]`, tab clicks, footer clicks) are handled by the caller via `modal_window`.
+/// Outcome of routing one key/mouse event through the modal.
+/// The host (agent view or dashboard) owns the modal slot, the clipboard, and the toast surface, so every variant is a request to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageModalOutcome {
-    /// Copy the session ID to the clipboard (the caller owns clipboard and toast).
+    /// Drop the modal (Esc, `[✗]`, click outside). Only the chrome routers emit this.
+    Close,
+    /// Copy the session ID to the clipboard.
     /// Emitted by the `c` shortcut and the footer button.
     CopySessionId,
-    /// Copy Session-info text (the caller owns clipboard and toast).
-    /// Emitted by `y`, a click on a value row, and a finished drag-select.
+    /// Copy Session-info text.
+    /// Emitted by `y`, a click on a value row, the footer "copy all" button, and a finished drag-select.
     CopyText(String),
     Changed,
     Unchanged,
 }
 
-pub fn handle_usage_modal_key(
+/// The modal's chrome config: no title, tabs, footer, or fold tree of its own (tabs and shortcuts are painted by `render_usage_modal`).
+fn chrome_cfg() -> ModalWindowConfig<'static> {
+    ModalWindowConfig {
+        title: "",
+        tabs: None,
+        shortcuts: &[],
+        sizing: ModalSizing::default(),
+        fold_info: None,
+    }
+}
+
+/// Route a key: `modal_window` chrome first (Esc closes), then the content keys.
+pub fn route_usage_modal_key(state: &mut UsageInfoModalState, key: &KeyEvent) -> UsageModalOutcome {
+    match mw::handle_modal_key(&mut state.window, key, &chrome_cfg()) {
+        mw::ModalWindowOutcome::CloseRequested => UsageModalOutcome::Close,
+        mw::ModalWindowOutcome::Unhandled => handle_usage_modal_key(state, key),
+        // The chrome config declares no tabs, footer, or fold tree, so these never fire for keys
+        mw::ModalWindowOutcome::Handled
+        | mw::ModalWindowOutcome::TabChanged(_)
+        | mw::ModalWindowOutcome::ShortcutActivated(_)
+        | mw::ModalWindowOutcome::CollapseGroup
+        | mw::ModalWindowOutcome::ExpandGroup
+        | mw::ModalWindowOutcome::CollapseDetails
+        | mw::ModalWindowOutcome::ExpandDetails
+        | mw::ModalWindowOutcome::JumpToParent(_) => UsageModalOutcome::Changed,
+    }
+}
+
+/// Route a mouse event: chrome first (close button, tab headers, footer buttons stay clickable), then drag / wheel / click-to-copy.
+pub fn route_usage_modal_mouse(
     state: &mut UsageInfoModalState,
-    key: &KeyEvent,
+    kind: MouseEventKind,
+    column: u16,
+    row: u16,
 ) -> UsageModalOutcome {
+    match mw::handle_modal_mouse(&mut state.window, kind, column, row) {
+        mw::ModalWindowOutcome::CloseRequested => UsageModalOutcome::Close,
+        mw::ModalWindowOutcome::TabChanged(idx) => {
+            state.set_tab(UsageInfoTab::from_index(idx));
+            UsageModalOutcome::Changed
+        }
+        mw::ModalWindowOutcome::ShortcutActivated(id) => {
+            // Footer click: drop gesture and hover
+            state.clear_text_drag();
+            if id == COPY_SESSION_ID_SHORTCUT {
+                UsageModalOutcome::CopySessionId
+            } else if id == COPY_ALL_SESSION_INFO_SHORTCUT
+                && let Some(text) = state.session_info_copy_all()
+            {
+                UsageModalOutcome::CopyText(text)
+            } else {
+                UsageModalOutcome::Changed
+            }
+        }
+        mw::ModalWindowOutcome::Handled => {
+            // Same rule as content: a bare Moved with an active drag is a lost Up, and a non-empty drag still copies
+            // The pending press is left alone for click-to-copy
+            if matches!(kind, MouseEventKind::Moved) {
+                if state.has_active_drag() {
+                    return state.finish_lost_drag();
+                }
+                state.hovered_copy_line = None;
+            } else {
+                // Same-tab click and other chrome Downs: drop gesture and hover
+                state.clear_text_drag();
+            }
+            UsageModalOutcome::Changed
+        }
+        mw::ModalWindowOutcome::Unhandled => handle_usage_modal_mouse(state, kind, column, row),
+        // Fold-tree navigation belongs to the settings modal; this window has no fold info
+        mw::ModalWindowOutcome::CollapseGroup
+        | mw::ModalWindowOutcome::ExpandGroup
+        | mw::ModalWindowOutcome::CollapseDetails
+        | mw::ModalWindowOutcome::ExpandDetails
+        | mw::ModalWindowOutcome::JumpToParent(_) => UsageModalOutcome::Changed,
+    }
+}
+
+/// Content keys (tabs, scroll, copy); chrome has already had its turn in [`route_usage_modal_key`].
+fn handle_usage_modal_key(state: &mut UsageInfoModalState, key: &KeyEvent) -> UsageModalOutcome {
     use crossterm::event::KeyModifiers;
     // BackTab and `G` legitimately carry SHIFT; reject only real chords
     if key
@@ -332,7 +405,8 @@ pub fn handle_usage_modal_key(
     }
 }
 
-pub fn handle_usage_modal_mouse(
+/// Content gestures (wheel, click-to-copy, drag-select); chrome has already had its turn in [`route_usage_modal_mouse`].
+fn handle_usage_modal_mouse(
     state: &mut UsageInfoModalState,
     kind: MouseEventKind,
     column: u16,
@@ -362,7 +436,7 @@ pub fn handle_usage_modal_mouse(
         MouseEventKind::Down(MouseButton::Left)
             if state.active_tab == UsageInfoTab::SessionInfo && in_content(state, column, row) =>
         {
-            let Some(ep) = endpoint_at(state, column, row) else {
+            let Some(ep) = state.endpoint_at(column, row) else {
                 return UsageModalOutcome::Unchanged;
             };
             // Hold the press; promote to drag only after a 1-cell move (same threshold as scrollback)
@@ -403,11 +477,7 @@ pub fn handle_usage_modal_mouse(
             } else if row >= rect.y.saturating_add(rect.height) {
                 state.scroll = state.scroll.saturating_add(1);
             }
-            let max_c = rect.x.saturating_add(rect.width.saturating_sub(1));
-            let max_r = rect.y.saturating_add(rect.height.saturating_sub(1));
-            let cc = column.clamp(rect.x, max_c);
-            let rr = row.clamp(rect.y, max_r);
-            if let Some(ep) = endpoint_at(state, cc, rr)
+            if let Some(ep) = state.endpoint_at_clamped(column, row)
                 && let Some(d) = state.text_drag.as_mut()
             {
                 d.head = ep;
@@ -424,15 +494,8 @@ pub fn handle_usage_modal_mouse(
             let Some(mut final_drag) = state.text_drag.take() else {
                 return UsageModalOutcome::Unchanged;
             };
-            let rect = state.content_rect;
-            if rect.width > 0 && rect.height > 0 {
-                let max_c = rect.x.saturating_add(rect.width.saturating_sub(1));
-                let max_r = rect.y.saturating_add(rect.height.saturating_sub(1));
-                let cc = column.clamp(rect.x, max_c);
-                let rr = row.clamp(rect.y, max_r);
-                if let Some(ep) = endpoint_at(state, cc, rr) {
-                    final_drag.head = ep;
-                }
+            if let Some(ep) = state.endpoint_at_clamped(column, row) {
+                final_drag.head = ep;
             }
             if final_drag.is_non_empty()
                 && let Some(text) =
@@ -606,7 +669,16 @@ pub fn render_usage_modal(
         .take(content.height as usize)
         .collect();
     Paragraph::new(visible).render(content, buf);
-    paint_text_drag(state, buf, theme);
+    if let Some(drag) = state.text_drag {
+        paint_text_drag(
+            drag,
+            &state.plain_lines,
+            state.content_rect,
+            state.scroll as usize,
+            buf,
+            theme,
+        );
+    }
 }
 
 fn in_content(state: &UsageInfoModalState, column: u16, row: u16) -> bool {
@@ -617,121 +689,6 @@ fn in_content(state: &UsageInfoModalState, column: u16, row: u16) -> bool {
         && column < r.x.saturating_add(r.width)
         && row >= r.y
         && row < r.y.saturating_add(r.height)
-}
-
-fn endpoint_at(state: &UsageInfoModalState, column: u16, row: u16) -> Option<TextEndpoint> {
-    let rect = state.content_rect;
-    if rect.width == 0 || rect.height == 0 || state.plain_lines.is_empty() {
-        return None;
-    }
-    let visible_row = row.saturating_sub(rect.y) as usize;
-    let line_idx = (state.scroll as usize).saturating_add(visible_row);
-    if line_idx >= state.plain_lines.len() {
-        return None;
-    }
-    let text = &state.plain_lines[line_idx];
-    let line_w = text.width().min(u16::MAX as usize) as u16;
-    let col = column.saturating_sub(rect.x).min(line_w);
-    Some(TextEndpoint { line_idx, col })
-}
-
-fn col_at_char_start(text: &str, col: u16) -> u16 {
-    grapheme_cells_at(text, col).map_or(col, |cells| cells.start)
-}
-
-/// Display-column range `[lo, hi)` for one line of a drag, clamped to the panel width so copy and highlight cover the same characters.
-fn selection_cols(
-    drag: TextDrag,
-    line_idx: usize,
-    text: &str,
-    panel_width: u16,
-) -> Option<(u16, u16)> {
-    let (start, end) = drag.ordered();
-    if line_idx < start.line_idx || line_idx > end.line_idx {
-        return None;
-    }
-    let line_w = (text.width().min(u16::MAX as usize) as u16).min(panel_width);
-    let (raw_lo, raw_hi) = if start.line_idx == end.line_idx {
-        (
-            col_at_char_start(text, start.col),
-            col_past_grapheme(text, end.col),
-        )
-    } else if line_idx == start.line_idx {
-        (col_at_char_start(text, start.col), line_w)
-    } else if line_idx == end.line_idx {
-        (0, col_past_grapheme(text, end.col))
-    } else {
-        (0, line_w)
-    };
-    let lo = raw_lo.min(line_w);
-    let hi = raw_hi.min(line_w);
-    if hi < lo {
-        return None;
-    }
-    // Blank lines yield hi == lo == 0; keep them so multi-line copy preserves newlines.
-    if hi == lo && line_w > 0 {
-        return None;
-    }
-    Some((lo, hi))
-}
-
-fn text_for_drag(drag: TextDrag, lines: &[String], panel_width: u16) -> Option<String> {
-    let (start, end) = drag.ordered();
-    if start.line_idx >= lines.len() {
-        return None;
-    }
-    let mut out = String::new();
-    let mut wrote_any = false;
-    let last = end.line_idx.min(lines.len().saturating_sub(1));
-    for (idx, text) in lines.iter().enumerate().take(last + 1).skip(start.line_idx) {
-        let Some((lo, hi)) = selection_cols(drag, idx, text, panel_width) else {
-            continue;
-        };
-        let slice = slice_display_cols(text, lo, hi);
-        if wrote_any {
-            out.push('\n');
-        }
-        out.push_str(&slice);
-        wrote_any = true;
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-fn paint_text_drag(state: &UsageInfoModalState, buf: &mut Buffer, theme: &Theme) {
-    let Some(drag) = state.text_drag else {
-        return;
-    };
-    if !drag.is_non_empty() {
-        return;
-    }
-    let rect = state.content_rect;
-    if rect.width == 0 || rect.height == 0 {
-        return;
-    }
-    let (start, end) = drag.ordered();
-    let scroll = state.scroll as usize;
-    for idx in start.line_idx..=end.line_idx {
-        let Some(text) = state.plain_lines.get(idx) else {
-            break;
-        };
-        let Some(visible_row) = idx.checked_sub(scroll) else {
-            continue;
-        };
-        if visible_row >= rect.height as usize {
-            break;
-        }
-        let Some((lo, hi)) = selection_cols(drag, idx, text, rect.width) else {
-            continue;
-        };
-        let screen_y = rect.y + visible_row as u16;
-        let x_lo = (rect.x + lo).min(rect.x + rect.width);
-        let x_hi = (rect.x + hi).min(rect.x + rect.width);
-        for x in x_lo..x_hi {
-            if let Some(cell) = buf.cell_mut((x, screen_y)) {
-                apply_selection_highlight(theme, cell);
-            }
-        }
-    }
 }
 
 /// A copyable value row: `line_idx` indexes the tab's lines; `value` is copied on click.
@@ -1140,7 +1097,7 @@ fn session_info_content(
             let value_idx = lines.len();
             let hovered = state.hovered_copy_line == Some(value_idx);
             let label_style = if hovered {
-                theme.muted().bg(theme.bg_hover)
+                theme.muted().patch(theme.hover_overlay())
             } else {
                 theme.muted()
             };
@@ -1179,7 +1136,7 @@ fn session_info_content(
 fn copy_value_style(theme: &Theme, hovered: bool) -> Style {
     let mut style = Style::default().fg(theme.text_primary);
     if hovered {
-        style = style.bg(theme.bg_hover);
+        style = style.patch(theme.hover_overlay());
     }
     style
 }
@@ -1274,8 +1231,15 @@ mod tests {
         let theme = Theme::current();
         let lines = usage_limit_lines(&state, Some(&bal), &theme, &LocaleContext::default());
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
-        assert_eq!(text[0], "Weekly limit (SuperGrok)");
-        assert!(text[2].ends_with("50%"), "bar row: {:?}", text[2]);
+        assert_eq!(
+            text.first().map(String::as_str),
+            Some("Weekly limit (SuperGrok)")
+        );
+        assert!(
+            text.get(2).is_some_and(|l| l.ends_with("50%")),
+            "bar row: {:?}",
+            text.get(2)
+        );
         assert!(text.iter().any(|l| l.contains("Resets: May 29, 00:00")));
         assert!(text.iter().any(|l| l == "Pay as you go: Enabled"));
         assert!(
@@ -1294,20 +1258,36 @@ mod tests {
         let mut state = state_with_session();
         state.billing_loading = true;
         let lines = usage_limit_lines(&state, None, &theme, &LocaleContext::default());
-        assert!(lines[0].to_string().contains("Loading usage"));
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.to_string().contains("Loading usage"))
+        );
 
         state.ctx.billing_redirect_url = Some("https://x.example/usage".to_string());
         let lines = usage_limit_lines(&state, None, &theme, &LocaleContext::default());
-        assert!(lines[0].to_string().contains("https://x.example/usage"));
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.to_string().contains("https://x.example/usage"))
+        );
 
         state.ctx.usage_visible = false;
         let lines = usage_limit_lines(&state, None, &theme, &LocaleContext::default());
-        assert!(lines[0].to_string().contains("managed by your team"));
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.to_string().contains("managed by your team"))
+        );
 
         // Gateway chat sessions show no billing at all
         state.ctx.chat_kind = true;
         let lines = usage_limit_lines(&state, None, &theme, &LocaleContext::default());
-        assert!(lines[0].to_string().contains("Loading session usage"));
+        assert!(
+            lines
+                .first()
+                .is_some_and(|l| l.to_string().contains("Loading session usage"))
+        );
     }
 
     #[test]
@@ -1329,7 +1309,7 @@ mod tests {
         let text: String = (0..area.height)
             .map(|y| {
                 (0..area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
                     .collect::<String>()
                     + "\n"
             })
@@ -1377,7 +1357,7 @@ mod tests {
         let text: String = (0..area.height)
             .map(|y| {
                 (0..area.width)
-                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
                     .collect::<String>()
                     + "\n"
             })
@@ -1474,7 +1454,9 @@ mod tests {
             .iter()
             .position(|l| l.contains("fp-abc"))
             .expect("hash row");
-        let line = &state.plain_lines[line_idx];
+        let Some(line) = state.plain_lines.get(line_idx) else {
+            panic!("plain line {line_idx} missing");
+        };
         let hash_col = line.find("fp-abc").expect("hash") as u16;
         let rect = state.content_rect;
         let y = rect.y + (line_idx as u16).saturating_sub(state.scroll);
@@ -1504,7 +1486,9 @@ mod tests {
             &theme,
             &LocaleContext::default(),
         );
-        let cell = &buf[(x0, y)];
+        let Some(cell) = buf.cell((x0, y)) else {
+            panic!("cell ({x0},{y}) missing");
+        };
         if theme.text_primary != ratatui::style::Color::Reset
             && theme.bg_base != ratatui::style::Color::Reset
         {

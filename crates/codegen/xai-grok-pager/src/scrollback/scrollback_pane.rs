@@ -23,12 +23,9 @@ use crate::scrollback::text_selection::{
 use crate::scrollback::types::{BlockContext, DisplayMode, derive_selection_text, selectable_cols};
 use crate::theme::Theme;
 
-/// Displays conversation entries with optional pinned header for the current turn's prompt.
-///
-/// # Scratch Buffers
-/// For efficiency, scratch buffers should be owned by the caller and reused across frames.
-/// Use `render_with_scratch()` for optimal performance.
-/// The `StatefulWidget::render()` impl creates a temporary scratch buffer for API compatibility but is less efficient.
+/// Displays conversation entries with optional pinned header for the current turn's prompt. For efficiency, scratch
+/// buffers should be owned by the caller and reused across frames. Use `render_with_scratch()` for optimal
+/// performance.
 #[derive(Debug, Clone, Default)]
 pub struct ScrollbackPane {
     pub is_active: bool,
@@ -146,29 +143,8 @@ impl StatefulWidget for ScrollbackPane {
 }
 
 impl ScrollbackPane {
-    /// Render the scrollback pane with an externally-owned scratch buffer.
-    ///
-    /// This is the preferred method for rendering: the scratch buffer should be created once and reused across frames to avoid allocations.
-    ///
-    /// # TODO: Make render pure
-    ///
-    /// After implementing `prepare_layout()` in ScrollbackState, this method should take `state: &ScrollbackState` (immutable) rather than `&mut`.
-    /// All state mutations will move to `prepare_layout()`, making render truly pure.
-    ///
-    /// # TODO: Consider StatefulWidget-like pattern
-    ///
-    /// Once state is immutable, we could have a pattern like:
-    /// ```ignore
-    /// trait PureWidget {
-    ///     type ReadState;
-    ///     type ScratchState;
-    ///     fn render(&self, area: Rect, buf: &mut Buffer,
-    ///               state: &Self::ReadState, scratch: &mut Self::ScratchState);
-    /// }
-    /// ```
-    /// This separates read-only state from mutable scratch/working memory.
-    ///
-    /// Returns RenderOutput containing elements to render in a post-pass (e.g., selection box, scroll info).
+    /// This is the preferred method for rendering: the scratch buffer should be created once and reused across frames
+    /// to avoid allocations. This separates read-only state from mutable scratch/working memory.
     pub fn render_with_scratch(
         self,
         area: Rect,
@@ -223,15 +199,9 @@ impl ScrollbackPane {
         output
     }
 
-    /// Paint hover affordance for foldable header-style blocks (`ToolCall`, `Thinking`, `BgTask`, `Subagent`).
-    ///
-    /// - Skips when nothing is hovered, or when the hovered entry is the currently selected entry (selection wins; avoids double-paint).
-    /// - Skips entries that aren't header-style.
-    ///   Markdown / agent message blocks already get the hover *border* via `agent::render_entry_hover` and don't need a full bg patch.
-    /// - Hover bg is `blend(bg_base, bg_dark, 0.5)` so it's strictly dimmer than the selection bg (`bg_dark`) across all themes.
-    /// - Inset matches the group-selection bg rule (skip 1 col on each side unless `display.highlight_overlays_border` is set).
-    /// - Chevron paint is shared with the selected-entry path via [`paint_expandable_indicator`].
-    ///   `BgTask` / `Subagent` aren't foldable so the chevron is a no-op there, but the hover bg still paints to match collapsed tool-call rows.
+    /// Skips entries that aren't header-style. Inset matches the group-selection bg rule (skip 1 col on each side
+    /// unless `display.highlight_overlays_border` is set). `BgTask` / `Subagent` aren't foldable so the chevron is a
+    /// no-op there, but the hover bg still paints to match collapsed tool-call rows.
     fn render_tool_call_hover(
         &self,
         buf: &mut Buffer,
@@ -257,10 +227,7 @@ impl ScrollbackPane {
         ) {
             return;
         }
-        // Skip hover bg whenever the entry isn't collapsed
-        // Folded open means Truncated for `Execute`/`Other` while streaming, or `Expanded` for Edit/markdown
-        // The row then already has line-level styling (diff green/red, stdout `bg_dark`, etc.); a full bg patch either clobbers it or is redundant
-        // The hover border (`render_entry_hover`) still fires to indicate hover; the chevron paint below is a no-op for non-collapsed entries anyway
+        // Skip hover bg whenever the entry isn't collapsed.
         if entry.display_mode != DisplayMode::Collapsed {
             return;
         }
@@ -271,7 +238,7 @@ impl ScrollbackPane {
         };
 
         let display_cfg = &state.appearance().scrollback.display;
-        let hover_bg = blend_color(theme.bg_base, theme.bg_dark, 0.5).unwrap_or(theme.bg_dark);
+        let hover_bg = theme.row_hover_bg();
         let bg_style = Style::default().bg(hover_bg);
 
         // Inset the hover bg by 1 column on each side unless the appearance config opts into overlaying the border
@@ -294,10 +261,9 @@ impl ScrollbackPane {
             }
         }
 
-        // Swap the ◆ bullet for › on the bullet row when the entry is foldable and collapsed (or running and at min fold mode)
-        // Same predicate as the selected-entry chevron paint
-        // An expanded verb slot hovers ⌄ on its header row
-        // When the header is top-clipped off-screen the first visible row is member 0's, which takes the normal ›
+        // Swap the ◆ bullet for › on the bullet row when the entry is foldable and collapsed (or running and at min fold
+        // mode). Same predicate as the selected-entry chevron paint. An expanded verb slot hovers ⌄ on its header row.
+        // When the header is top-clipped off-screen the first visible row is member 0's, which takes the normal ›.
         let verb_expanded = state
             .get_cached_entry_layouts()
             .and_then(|l| l.get(hover_idx))
@@ -312,20 +278,9 @@ impl ScrollbackPane {
         );
     }
 
-    // Unified sticky header rendering for both SingleTurn and AllTurns modes.
-    //
-    // SingleTurn is just AllTurns with a filtered range
-    // Both modes use the same gradual header collapse logic via compute_sticky_layout().
-    //
-    // For SingleTurn:
-    //   - visible_range = state.visible_entry_range() (entries 0..N of the current turn)
-    //   - Prompt descriptors have y_virtual relative to range start
-    //   - The first entry (prompt) becomes a sticky header when scrolled past
-    //
-    // For AllTurns:
-    //   - visible_range = 0..state.len() (all entries)
-    //   - Prompt descriptors have y_virtual as cumulative from entry 0
-    //   - Multiple prompts can become sticky headers as user scrolls
+    // Unified sticky header rendering for both SingleTurn and AllTurns modes. SingleTurn is just AllTurns with a
+    // filtered range. Prompt descriptors have y_virtual relative to range start. Prompt descriptors have y_virtual as
+    // cumulative from entry 0. Multiple prompts can become sticky headers as user scrolls.
 
     /// Render in SingleTurn mode using unified sticky header logic.
     fn render_single_turn(
@@ -342,16 +297,9 @@ impl ScrollbackPane {
 
     // Unified sticky header rendering
 
-    /// Render entries with sticky section headers.
-    ///
-    /// This is the unified rendering path for both SingleTurn and AllTurns modes.
-    /// Prompts within the entry_range act as section headers that stick to the top when scrolled past.
-    /// The next approaching prompt pushes them off.
-    ///
-    /// - For SingleTurn: entry_range = visible_entry_range() (one turn's entries)
-    /// - For AllTurns: entry_range = 0..len() (all entries)
-    ///
-    /// Returns RenderOutput containing selection box (if any) to be rendered after.
+    /// Render entries with sticky section headers. This is the unified rendering path for both SingleTurn and AllTurns
+    /// modes. Prompts within the entry_range act as section headers that stick to the top when scrolled past. The next
+    /// approaching prompt pushes them off. Returns RenderOutput containing selection box (if any) to be rendered after.
     fn render_with_sticky_headers(
         &self,
         area: Rect,
@@ -438,10 +386,9 @@ impl ScrollbackPane {
                     self.mouse_pos,
                 ));
 
-                // Fade out the pushed header as it's being pushed off.
-                // The fade makes the transition smoother visually.
-                // opacity = visible_rows / (full_height + 1)
-                // So even a fully visible pushed header (clip_top=0) starts at 80% for 4-row header.
+                // Fade out the pushed header as it's being pushed off. The fade makes the transition smoother visually. opacity =
+                // visible_rows / (full_height + 1). So even a fully visible pushed header (clip_top=0) starts at 80% for 4-row
+                // header.
                 let opacity =
                     visible_height as f32 / (pushed.render_height.saturating_add(1)) as f32;
                 fade_region(buf, header_area, theme.bg_base, opacity);
@@ -512,11 +459,7 @@ impl ScrollbackPane {
             && let Some((selection_area, entry_idx)) = pinned_header_selection
             && state.selected() == Some(entry_idx)
         {
-            // Selection box for sticky header:
-            // - y_top = selection_area.y (first row of selection content)
-            // - y_bottom = selection_area.y + selection_area.height - 1 (last row)
-            // - top_clipped = false if there's a gap row above for corners
-            // - bottom_clipped = false since there's always a gap row between header and content
+            // bottom_clipped = false since there's always a gap row between header and content.
             let screen_row = sticky.pinned_screen_row().unwrap_or(0);
 
             // Check if there's room for top corners
@@ -586,15 +529,7 @@ impl ScrollbackPane {
         output
     }
 
-    /// Build prompt descriptors for a range of entries.
-    ///
-    /// The y_virtual coordinates are relative to the range start, not absolute.
-    /// This allows the same sticky layout logic to work for both:
-    /// - SingleTurn: range = visible_entry_range() (one turn's entries)
-    /// - AllTurns: range = 0..len() (all entries)
-    ///
-    /// NOTE: This method uses cached data from prepare_layout().
-    /// Heights are NOT recomputed; they come from the LayoutCache.
+    /// Build prompt descriptors for a range of entries. NOTE: This method uses cached data from prepare_layout().
     fn build_prompt_descriptors_for_range(
         &self,
         state: &ScrollbackState,
@@ -633,10 +568,6 @@ impl ScrollbackPane {
     }
 
     /// Render a sticky header (pushed or pinned).
-    ///
-    /// - `render_height`: Total height budget for the block (including vpads)
-    /// - `clip_top`: If > 0, clips rendered output from top (for push effect)
-    /// - `selection_entry_idx`: `entry_idx` rebased onto the rendered range (the selection model's key space)
     #[allow(clippy::too_many_arguments)]
     fn render_sticky_header(
         &self,
@@ -688,7 +619,7 @@ impl ScrollbackPane {
         };
         let content_width_for_block = layout.content_width().saturating_sub(ts_reserved);
 
-        let ctx = entry.context_with_mode_and_budget(
+        let mut ctx = entry.context_with_mode_and_budget(
             content_width_for_block,
             mode,
             content_lines,
@@ -696,6 +627,9 @@ impl ScrollbackPane {
             is_selected,
             cwd,
         );
+        if let Some(locale) = &self.locale {
+            ctx.locale = locale.clone();
+        }
 
         // Published `block_line_idx` values index this budgeted output, while copy re-derives them without `max_lines`
         // The two agree only for blocks that ignore the budget
@@ -705,11 +639,8 @@ impl ScrollbackPane {
         );
 
         let rendered_lines = if clip_top > 0 {
-            // For pushed headers being pushed OFF screen:
-            // - The TOP rows disappear first (pushed up, out of view)
-            // - The BOTTOM rows stay visible longest
-            //
-            // We render the full header to a scratch buffer, then copy only the bottom (visible) rows to the actual buffer
+            // For pushed headers being pushed OFF screen. We render the full header to a scratch buffer, then copy only the
+            // bottom (visible) rows to the actual buffer.
 
             let visible_height = render_height.saturating_sub(clip_top);
 
@@ -789,12 +720,7 @@ impl ScrollbackPane {
         })
     }
 
-    /// Render an entry with a specific BlockContext (for max_lines support).
-    /// Static method to avoid borrow issues.
-    ///
-    /// `mouse_pos` is forwarded for timestamp hover expansion in sticky headers.
-    ///
-    /// Returns a selectable line per painted row, in `area`/`buf` coordinates (a scratch render yields scratch rows for the caller to rebase).
+    /// Render an entry with a specific BlockContext (for max_lines support). Static method to avoid borrow issues.
     fn render_entry_with_ctx_static(
         entry: &ScrollbackEntry,
         ctx: &BlockContext,
@@ -916,12 +842,10 @@ impl ScrollbackPane {
                     && mx >= content_area.x + content_area.width.saturating_sub(10)
                     && mx < content_area.x + content_area.width
             });
-            let ts_str = if ts_hovered {
-                ts.format("  %H:%M:%S | %b %d").to_string()
-            } else {
-                ts.format("  %-I:%M %p").to_string()
-            };
-            let ts_width = ts_str.len() as u16;
+            let ts_str = ts
+                .format(ctx.locale.message_timestamp_format(ts_hovered))
+                .to_string();
+            let ts_width = unicode_width::UnicodeWidthStr::width(ts_str.as_str()) as u16;
             if content_area.width > ts_width + 1
                 && first_content_y < content_area.y + content_area.height
             {
@@ -972,10 +896,8 @@ impl ScrollbackPane {
             .get_cached_entry_layouts()
             .expect("layout cache must be valid - was prepare_layout() called?");
 
-        // O(log n) paint window: only entries that can intersect the content viewport
-        // Avoids collecting/walking the full AllTurns history each frame
-        // Group headers (verb or truncation) that land in the window extend the end of the slice through the rest of their run
-        // The aggregated header labels then still see off-screen members (counts/tense/failures) without re-collecting all history
+        // O(log n) paint window: only entries that can intersect the content viewport. The aggregated header labels then
+        // still see off-screen members (counts/tense/failures) without re-collecting all history.
         let (paint_range, content_y0) = state.paint_window(
             visible_range.clone(),
             scroll_for_content,
@@ -1046,22 +968,9 @@ impl ScrollbackPane {
             selection_boundaries,
         };
 
-        // Post-render: highlight the selected entry's rows with `bg_dark`.
-        //
-        // Fires when:
-        //   1. The selected entry is part of a multi-entry group (so the individual selected row stands out within the group), OR
-        //   2. The selected entry is a header-style foldable block (`ToolCall`, `Thinking`).
-        //      Singletons get the same bg so selection looks consistent across grouped vs lone entries
-        //
-        // Skipped when the selected entry isn't collapsed
-        // Once the row is folded open (Truncated for `Execute`/`Other` while streaming, `Expanded` for Edit/markdown), a full bg fill is too heavy
-        // It would clobber line-level styling (diff green/red, stdout `bg_dark`, etc.). The SelectionBox border alone is enough.
-        //
-        // Other singleton blocks (markdown messages, user prompts, etc.) intentionally don't get the bg patch
-        // For big markdown blocks a full bg fill would be too heavy and the SelectionBox border alone is enough
-        //
-        // The highlight is inset by 1 column on each side unless `display.highlight_overlays_border` is set
-        // That avoids clobbering the SelectionBox border characters (│)
+        // Skipped when the selected entry isn't collapsed. It would clobber line-level styling (diff green/red, stdout
+        // `bg_dark`, etc.). Other singleton blocks (markdown messages, user prompts, etc.) intentionally don't get the bg
+        // patch. The highlight is inset by 1 column on each side unless `display.highlight_overlays_border` is set.
         if self.is_active
             && let Some(ref selected) = selected_area
             && let Some(selected_abs) = state.selected()
@@ -1103,10 +1012,9 @@ impl ScrollbackPane {
                 }
             }
 
-            // Expandable indicator: replace the bullet character with "›" (or the configured char)
-            // Applies when the selected entry is foldable and at its minimum fold mode. Works for both grouped and singleton entries.
-            // In an expanded verb-group slot the selection acts as MEMBER 0, so the caret sits on the member row below the header line
-            // The ⌄ group affordance lives on the hover pass instead
+            // Expandable indicator: replace the bullet character with "›" (or the configured char). In an expanded verb-group
+            // slot the selection acts as MEMBER 0, so the caret sits on the member row below the header line. The ⌄ group
+            // affordance lives on the hover pass instead.
             if let Some(entry) = state.entry(selected_abs) {
                 let verb_expanded = state
                     .get_cached_entry_layouts()
@@ -1124,11 +1032,9 @@ impl ScrollbackPane {
             }
         }
 
-        // Compute selection box for content entries
-        // Skip if:
-        // 1. Selection was already computed for header (header_has_selection is true), OR
-        // 2. The selected entry is the pinned header entry and pinned_header_selection_area is set
-        //    (for SingleTurn mode where selection is computed later)
+        // Compute selection box for content entries. Selection was already computed for header (header_has_selection is
+        // true), OR. The selected entry is the pinned header entry and pinned_header_selection_area is set (for SingleTurn
+        // mode where selection is computed later).
         let skip_content_selection = header_has_selection
             || (pinned_entry_idx.is_some()
                 && state.selected() == pinned_entry_idx
@@ -1166,13 +1072,15 @@ impl ScrollbackPane {
             // Use virtual_y from cache to find screen positions.
             if let Some(all_virtual_y) = state.get_cached_virtual_y()
                 && let Some(all_layouts) = state.get_cached_entry_layouts()
+                && let Some(&base_y) = all_virtual_y.get(visible_range.start)
+                && let Some(&group_start_abs) = all_virtual_y.get(sel_range.start)
+                && let Some(last_idx) = sel_range.end.checked_sub(1)
+                && let Some(&last_vy) = all_virtual_y.get(last_idx)
+                && let Some(last_layout) = all_layouts.get(last_idx)
             {
                 // Virtual y positions (relative to visible range start)
-                let base_y = all_virtual_y[visible_range.start];
-                let group_start_vy = all_virtual_y[sel_range.start] - base_y;
-                let last_idx = sel_range.end - 1;
-                let group_end_vy =
-                    all_virtual_y[last_idx] - base_y + all_layouts[last_idx].height as usize;
+                let group_start_vy = group_start_abs - base_y;
+                let group_end_vy = last_vy - base_y + last_layout.height as usize;
 
                 // Convert virtual y to screen y
                 // Cumulative positions stay usize (tall sessions exceed u16::MAX)
@@ -1231,23 +1139,15 @@ impl ScrollbackPane {
     }
 }
 
-/// Screen row the selection caret belongs on within an entry's slot.
-/// An expanded verb-group slot stacks the header line above member 0's own row.
-/// The caret is the MEMBER's affordance, so it sits one row below the slot top.
-/// When the header is top-clipped off-screen, the slot's first visible row already IS the member row.
+/// Screen row the selection caret belongs on within an entry's slot. The caret is the MEMBER's affordance, so it
+/// sits one row below the slot top.
 fn verb_member_indicator_row(slot_top: u16, verb_expanded: bool, header_clipped: bool) -> u16 {
     slot_top + u16::from(verb_expanded && !header_clipped)
 }
 
-/// Replace the bullet character on `entry_y` (a screen row) with the configured expandable indicator (e.g. `›`).
-/// Applies when the entry is foldable and at its minimum fold mode.
-/// With `point_down` the indicator is the down variant (`⌄`).
-/// The hover pass uses it on an expanded verb-group header row to advertise that the header collapses the group.
-///
-/// Shared between the selected-entry post-pass and the hover post-pass so the chevron behaves identically in both states; only the bg differs.
-///
-/// No-op when `expandable_indicator` is disabled, the entry isn't foldable, or the block has no bullet.
-/// Also a no-op when the entry isn't collapsed (or running and at min fold mode, for streaming blocks like `Execute`/`Thinking`).
+/// Shared between the selected-entry post-pass and the hover post-pass so the chevron behaves identically in both
+/// states. only the bg differs. No-op when `expandable_indicator` is disabled, the entry isn't foldable, or the
+/// block has no bullet.
 fn paint_expandable_indicator(
     buf: &mut Buffer,
     content_area: Rect,
@@ -1324,6 +1224,58 @@ mod tests {
 
     // Pinned-header selectability is covered end to end by the sticky_header_drag_copy_pty e2e
     // Only the pushed/clip rebase branch needs a unit test (the PTY case never drags during a push)
+
+    #[test]
+    fn sticky_header_timestamp_zh_localization_right_aligned() {
+        use crate::locale::{LocaleContext, LocaleSource, ResolvedLocale, UiLocale};
+        use chrono::TimeZone;
+
+        let locale = LocaleContext::new(ResolvedLocale {
+            locale: UiLocale::ZhCn,
+            source: LocaleSource::Config,
+        });
+        let theme = Theme::current();
+        let area = Rect::new(5, 7, 80, 3);
+        let mut state = ScrollbackState::new();
+        let mut appearance = AppearanceConfig::default();
+        appearance.scrollback.blocks.prompt.vpad = true;
+        let right = area.right() - appearance.scrollback.layout.block_pad_right;
+        state.set_appearance(appearance);
+        state.push_block(RenderBlock::user_prompt("hello"));
+        state.entry_mut(0).unwrap().created_at = Some(
+            chrono::Local
+                .with_ymd_and_hms(2026, 9, 20, 13, 30, 4)
+                .unwrap(),
+        );
+        let pane = ScrollbackPane::new().with_locale(Some(&locale));
+        for (hovered, expected) in [(false, "  13:30"), (true, "  13:30:04 | 9月20日")] {
+            let mut buf = Buffer::empty(area);
+            let mut scratch = ScratchBuffer::default();
+            pane.render_sticky_header(
+                &mut buf,
+                area,
+                &state,
+                0,
+                0,
+                &theme,
+                3,
+                0,
+                &mut scratch,
+                false,
+                hovered.then_some((right - 5, area.y + 1)),
+            )
+            .expect("prompt header should render");
+            let mut x = right - unicode_width::UnicodeWidthStr::width(expected) as u16;
+            for ch in expected.chars() {
+                assert_eq!(buf.cell((x, area.y + 1)).unwrap().symbol(), ch.to_string());
+                x += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+            }
+            assert_eq!(
+                x, right,
+                "sticky header must align Chinese dates by display width"
+            );
+        }
+    }
 
     /// A pushed header paints through a scratch buffer, so its lines must be rebased onto the rows that reached the screen; clipped rows are dropped.
     #[test]

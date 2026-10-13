@@ -63,11 +63,7 @@ pub struct IndexAuthor {
     pub name: String,
 }
 
-/// Accepts multiple formats:
-/// - Object: `{ "type": "local", "path": "./plugins/foo" }`
-/// - Object: `{ "source": "url", "url": "https://github.com/...", "ref": "main" }`
-/// - Object: `{ "source": "url", "url": "https://...", "sha": "61f1903b..." }` (recommended for vendor pins)
-/// - String: `"./plugins/foo"` (shorthand used by some marketplaces)
+/// Object: `{ "type": "local", "path": "./plugins/foo" }`; Object: `{ "source": "url", "url": "https://github.com/...", "ref": "main" }`; Object: `{ "source": "url", "url": "https://...", "sha": "61f1903b..." }` (recommended for vendor pins); String: `"./plugins/foo"` (shorthand used by some marketplaces).
 #[derive(Debug, Clone)]
 pub struct IndexSource {
     pub r#type: Option<String>,
@@ -191,14 +187,7 @@ impl IndexEntry {
 }
 
 /// Attempt to load the marketplace index from the given root directory.
-///
-/// Checks (in order):
-/// 1. `.grok-plugin/marketplace.json` (preferred xAI convention)
-/// 2. `.grok-plugin/plugin.json`
-/// 3. `.claude-plugin/marketplace.json` (alternate layout compatibility)
-/// 4. `.claude-plugin/plugin.json`
-///
-/// Returns `None` if no file exists.
+/// `.grok-plugin/marketplace.json` (preferred xAI convention); `.grok-plugin/plugin.json`; `.claude-plugin/marketplace.json` (alternate layout compatibility); `.claude-plugin/plugin.json`.
 /// Returns `Err` if a file exists but can't be parsed.
 pub fn load_index(marketplace_root: &Path) -> Result<Option<MarketplaceIndex>, String> {
     let grok_dir = marketplace_root.join(".grok-plugin");
@@ -231,6 +220,13 @@ pub fn load_index(marketplace_root: &Path) -> Result<Option<MarketplaceIndex>, S
 mod tests {
     use super::*;
 
+    fn nth<T>(xs: &[T], i: usize) -> &T {
+        let Some(x) = xs.get(i) else {
+            panic!("expected item {i}, got {} items", xs.len());
+        };
+        x
+    }
+
     #[test]
     fn parse_marketplace_json() {
         let json = r#"{
@@ -255,12 +251,15 @@ mod tests {
         let index: MarketplaceIndex = serde_json::from_str(json).unwrap();
         assert_eq!(index.name, "test-marketplace");
         assert_eq!(index.plugins.len(), 1);
-        assert_eq!(index.plugins[0].name, "test-plugin");
-        assert_eq!(index.plugins[0].category.as_deref(), Some("development"));
-        assert_eq!(index.plugins[0].tags, vec!["test", "example"]);
-        assert_eq!(index.plugins[0].keywords, vec!["kw1", "kw2"]);
+        assert_eq!(nth(&index.plugins, 0).name, "test-plugin");
         assert_eq!(
-            index.plugins[0].resolved_path().as_deref(),
+            nth(&index.plugins, 0).category.as_deref(),
+            Some("development")
+        );
+        assert_eq!(nth(&index.plugins, 0).tags, vec!["test", "example"]);
+        assert_eq!(nth(&index.plugins, 0).keywords, vec!["kw1", "kw2"]);
+        assert_eq!(
+            nth(&index.plugins, 0).resolved_path().as_deref(),
             Some("plugins/test-plugin")
         );
     }
@@ -391,10 +390,10 @@ mod tests {
 
         let index: MarketplaceIndex = serde_json::from_str(json).unwrap();
         assert_eq!(index.plugins.len(), 1);
-        assert_eq!(index.plugins[0].name, "acme-browser");
-        assert!(index.plugins[0].keywords.is_empty());
+        assert_eq!(nth(&index.plugins, 0).name, "acme-browser");
+        assert!(nth(&index.plugins, 0).keywords.is_empty());
         assert_eq!(
-            index.plugins[0].resolved_path().as_deref(),
+            nth(&index.plugins, 0).resolved_path().as_deref(),
             Some("plugins/acme-browser")
         );
     }
@@ -412,11 +411,11 @@ mod tests {
         let index: MarketplaceIndex = serde_json::from_str(json).unwrap();
         assert_eq!(index.plugins.len(), 2);
         assert_eq!(
-            index.plugins[0].resolved_path().as_deref(),
+            nth(&index.plugins, 0).resolved_path().as_deref(),
             Some("plugins/a")
         );
         assert_eq!(
-            index.plugins[1].resolved_path().as_deref(),
+            nth(&index.plugins, 1).resolved_path().as_deref(),
             Some("plugins/b")
         );
     }
@@ -440,9 +439,9 @@ mod tests {
 
         let index: MarketplaceIndex = serde_json::from_str(json).unwrap();
         assert_eq!(index.plugins.len(), 1);
-        assert_eq!(index.plugins[0].name, "superpowers");
-        assert!(index.plugins[0].resolved_path().is_none());
-        let (url, git_ref) = index.plugins[0].remote_url().unwrap();
+        assert_eq!(nth(&index.plugins, 0).name, "superpowers");
+        assert!(nth(&index.plugins, 0).resolved_path().is_none());
+        let (url, git_ref) = nth(&index.plugins, 0).remote_url().unwrap();
         assert_eq!(url, "https://github.com/obra/superpowers.git");
         assert!(git_ref.is_none());
     }
@@ -464,7 +463,7 @@ mod tests {
         }"#;
 
         let index: MarketplaceIndex = serde_json::from_str(json).unwrap();
-        let (url, git_ref) = index.plugins[0].remote_url().unwrap();
+        let (url, git_ref) = nth(&index.plugins, 0).remote_url().unwrap();
         assert_eq!(url, "https://github.com/obra/superpowers.git");
         assert_eq!(git_ref, Some("dev"));
     }
@@ -486,11 +485,11 @@ mod tests {
         }"#;
         let index: MarketplaceIndex = serde_json::from_str(json).unwrap();
         assert_eq!(
-            index.plugins[0].remote_url().map(|(u, _)| u),
+            nth(&index.plugins, 0).remote_url().map(|(u, _)| u),
             Some("https://github.com/vercel/vercel-plugin.git")
         );
         assert_eq!(
-            index.plugins[0].remote_sha(),
+            nth(&index.plugins, 0).remote_sha(),
             Some("61f1903bed7b322c9745f6ba67095bc006de7e63")
         );
     }
@@ -512,8 +511,8 @@ mod tests {
             ]
         }"#;
         let index: MarketplaceIndex = serde_json::from_str(json).unwrap();
-        assert_eq!(index.plugins[0].remote_subdir(), Some("plugins/acme"));
-        assert!(index.plugins[0].resolved_path().is_none());
+        assert_eq!(nth(&index.plugins, 0).remote_subdir(), Some("plugins/acme"));
+        assert!(nth(&index.plugins, 0).resolved_path().is_none());
     }
 
     #[test]
@@ -528,7 +527,7 @@ mod tests {
             ]
         }"#;
         let index: MarketplaceIndex = serde_json::from_str(json).unwrap();
-        assert!(index.plugins[0].remote_sha().is_none());
+        assert!(nth(&index.plugins, 0).remote_sha().is_none());
     }
 
     #[test]

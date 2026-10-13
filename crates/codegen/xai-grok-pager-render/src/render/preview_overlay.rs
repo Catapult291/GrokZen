@@ -89,10 +89,8 @@ impl Default for PreviewConfig {
 // render_preview_overlay — main rendering function
 // ---------------------------------------------------------------------------
 
-/// The overlay is anchored at the bottom of `area`, showing a bordered box with the content preview.
-/// If content exceeds `config.preview_lines * 2` lines, shows first N lines, a `⋮ (X more lines)` separator, and last N lines.
-///
-/// Returns the `Rect` where the overlay was rendered, or `None` if the overlay couldn't be rendered (area too small, content empty).
+/// Bottom-anchored preview. Over `preview_lines * 2` lines, show head, an elision, and tail.
+/// `None` when the area is too small or content is empty.
 pub fn render_preview_overlay(
     buf: &mut Buffer,
     area: Rect,
@@ -235,10 +233,8 @@ fn render_line(buf: &mut Buffer, x: u16, y: u16, width: u16, line: &str, style: 
     buf.set_span_safe(x, y, &Span::styled(truncated, style), width);
 }
 
-/// Paint the hint into the bottom border row, left-aligned after the corner and one dash: `╰─ enter to expand ────╯`.
-/// A pad space on each side stands the text off the dashes.
-/// The corners and one dash per side are never overwritten.
-/// The hint is skipped entirely when the box is too narrow for readable text.
+/// Hint sits in the bottom border after the corner and one dash. Corners and one dash per side are never overwritten.
+/// Skipped when the box is too narrow for readable text.
 fn render_border_hint(buf: &mut Buffer, box_area: Rect, hint: &Line<'static>, bg: Color) {
     // Chrome around the text: corners (2) + one dash each side (2) + pads (2).
     const CHROME: u16 = 6;
@@ -447,14 +443,24 @@ mod tests {
     }
 
     fn row_to_string(buf: &Buffer, y: u16) -> String {
-        (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect()
+        (0..buf.area.width)
+            .map(|x| {
+                let Some(cell) = buf.cell((x, y)) else {
+                    panic!("missing cell ({x},{y})");
+                };
+                cell.symbol()
+            })
+            .collect()
     }
 
     /// Assert the box's bottom border row keeps both rounded corners.
     fn assert_corners(buf: &Buffer, rect: Rect) {
         let y = rect.y + rect.height - 1;
-        assert_eq!(buf[(rect.x, y)].symbol(), "╰");
-        assert_eq!(buf[(rect.x + rect.width - 1, y)].symbol(), "╯");
+        assert_eq!(buf.cell((rect.x, y)).map(|c| c.symbol()), Some("╰"));
+        assert_eq!(
+            buf.cell((rect.x + rect.width - 1, y)).map(|c| c.symbol()),
+            Some("╯")
+        );
     }
 
     #[test]
@@ -518,7 +524,7 @@ mod tests {
         // Every cell between the corners is a border dash.
         let y = rect.y + rect.height - 1;
         for x in rect.x + 1..rect.x + rect.width - 1 {
-            assert_eq!(buf[(x, y)].symbol(), "─", "col {x}");
+            assert_eq!(buf.cell((x, y)).map(|c| c.symbol()), Some("─"), "col {x}");
         }
     }
 
@@ -562,7 +568,7 @@ mod tests {
         .unwrap();
         let y = rect.y + rect.height - 1;
         for x in rect.x + 1..rect.x + rect.width - 1 {
-            assert_eq!(buf[(x, y)].symbol(), "─", "col {x}");
+            assert_eq!(buf.cell((x, y)).map(|c| c.symbol()), Some("─"), "col {x}");
         }
         assert_corners(&buf, rect);
     }
@@ -571,7 +577,10 @@ mod tests {
         let mut s = String::new();
         for y in 0..buf.area.height {
             for x in 0..buf.area.width {
-                s.push_str(buf[(x, y)].symbol());
+                let Some(cell) = buf.cell((x, y)) else {
+                    panic!("missing cell ({x},{y})");
+                };
+                s.push_str(cell.symbol());
             }
             s.push('\n');
         }

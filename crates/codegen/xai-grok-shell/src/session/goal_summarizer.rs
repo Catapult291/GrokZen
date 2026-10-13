@@ -8,14 +8,14 @@
 
 use crate::session::events::{Event, GoalSummarizerFailReason};
 use crate::session::goal_planner::{
-    GOAL_ROLE_AWAIT_BUDGET_EXCEEDED, GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt,
-    RoleSpawnOverride, SpawnError, spawn_with_fail_open_retry,
+    GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt, RoleSpawnOverride, SpawnError,
+    spawn_with_fail_open_retry,
 };
 use crate::session::goal_role_tools::RoleToolNames;
 use std::path::Path;
 use std::sync::Arc;
 use xai_grok_session_events::EventWriter;
-use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
+use xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend;
 use xai_grok_tools::implementations::grok_build::task::types::{
     SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
 };
@@ -134,7 +134,6 @@ impl GoalSummarizerSpawner for ChannelSpawner {
 }
 
 impl ChannelSpawner {
-    /// Send one spawn (model and harness override resolved by the caller) and await its terminal result.
     /// The subagent_type is always [`GOAL_SUMMARIZER_SUBAGENT_TYPE`].
     /// `harness_agent_type` selects the harness flavor (`None` means the session harness).
     /// Pins a read-only capability mode so the subagent can inspect but never edit or execute.
@@ -163,10 +162,13 @@ impl ChannelSpawner {
             run_in_background: false,
             // Harness-internal: never surface to the model's idle reminder.
             surface_completion: false,
-            await_to_completion: false,
+            // Goal roles are never auto-backgrounded: the child runs until it finishes.
+            await_to_completion: true,
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            spawn_root: Default::default(),
+            tool_call_id: None,
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
         let result = backend
@@ -174,9 +176,8 @@ impl ChannelSpawner {
             .await
             .map_err(|error| SpawnError::Transport(error.to_string()))?;
         if result.backgrounded {
-            let _ = backend.cancel(&result.subagent_id).await;
             return Err(SpawnError::Runtime {
-                message: GOAL_ROLE_AWAIT_BUDGET_EXCEEDED.to_owned(),
+                message: "engine bug: goal role subagent was auto-backgrounded despite await_to_completion".into(),
                 cancelled: true,
             });
         }
@@ -643,6 +644,10 @@ mod tests {
             request.runtime_overrides.capability_mode,
             Some(SubagentCapabilityMode::ReadOnly),
             "summarizer must spawn with a read-only toolset",
+        );
+        assert!(
+            request.await_to_completion,
+            "summarizer subagent must never be auto-backgrounded"
         );
         let _ = request.result_tx.send(SubagentResult::default());
         handle.await.unwrap();

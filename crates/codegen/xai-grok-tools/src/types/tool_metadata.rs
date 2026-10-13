@@ -24,15 +24,9 @@ use crate::types::resources::SharedResources;
 use crate::types::template_renderer::TemplateRenderer;
 use crate::types::tool::{ToolKind, ToolNamespace};
 
-/// Grok-tools-specific metadata trait.
-///
-/// Each tool struct implements this alongside `xai_tool_runtime::Tool`.
-/// Only `kind()`, `namespace()`, and `description_template()` are required;
-/// all other methods have defaults.
-///
-/// The `ToolRegistry` stores a type-erased handle to each tool's
-/// `ToolMetadata` impl so it can call `versioned_definition()`, etc.
-/// after dispatch.
+/// Grok-tools-specific metadata trait. Each tool struct implements this alongside `xai_tool_runtime::Tool`. Only `kind()`, `namespace()`, and
+/// `description_template()` are required; all other methods have defaults. The `ToolRegistry` stores a type-erased handle to each tool's
+/// `ToolMetadata` impl so it can call `versioned_definition()`, etc. after dispatch.
 pub trait ToolMetadata: Send + Sync {
     /// High-level category (Read, Edit, Search, Execute, ...).
     /// Drives template rendering (`${{ tools.by_kind.search }}`) and the
@@ -59,6 +53,20 @@ pub trait ToolMetadata: Send + Sync {
         self.kind().is_read_only()
     }
 
+    /// The canonical input field naming the workspace path this call touches
+    /// (`file_path` on `search_replace`, `filePath` on opencode `edit`, ...).
+    ///
+    /// The tool server advertises it (under the client-facing name, post-rename)
+    /// as `lock_path_param:<name>` so a client can serialize same-path writers
+    /// from the arguments it sends, without a hand-kept table. The server itself
+    /// does not lock: the client that issues the batch owns ordering, as the
+    /// production dispatchers do. Default `None`: the tool has no single path
+    /// key (shells, `apply_patch`, `todo_write`, directory listings whose
+    /// `path` is a directory).
+    fn lock_path_param(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Notification variant tags this tool may emit during execution.
     /// Default: none. Tags match `ToolNotification`'s serde `type` discriminator
     /// (the keys of [`notification_schema_catalog`](crate::notification::notification_schema_catalog)).
@@ -72,23 +80,27 @@ pub trait ToolMetadata: Send + Sync {
         Expr::True
     }
 
-    /// Model-safe fallback description for `xai_tool_runtime::Tool::description()`
-    /// implementations: the raw template with all `${{ … }}` / `${% … %}`
-    /// markers stripped.
-    ///
-    /// The registry path (`versioned_definition`) renders templates properly
-    /// with the finalized toolset context; this is only for consumers that
-    /// bypass the registry, which must never see raw template syntax.
+    /// Model-safe fallback description for `xai_tool_runtime::Tool::description()` implementations: the raw template with all `${{ … }}` / `${% …
+    /// %}` markers stripped. The registry path (`versioned_definition`) renders templates properly with the finalized toolset context; this is only
+    /// for consumers that bypass the registry, which must never see raw template syntax.
     fn sanitized_description_template(&self) -> String {
         crate::types::template_renderer::strip_template_markers(self.description_template())
     }
 
-    /// Build the tool definition for a given contract version.
-    ///
-    /// Default: renders `description_template()` via the `TemplateRenderer`
-    /// and remaps schema parameter names. Override for tools that need
-    /// params-aware descriptions or schemas (e.g., BashTool removes
-    /// `is_background` when disabled).
+    /// The input schema this tool advertises under `contract_version`, when it differs from `input_schema`.
+    /// The registry fills `${{ params.<kind>.* }}` from this schema.
+    fn advertised_input_schema(
+        &self,
+        _contract_version: Option<&str>,
+        _input_schema: &serde_json::Value,
+        _effective_params: &serde_json::Value,
+    ) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Build the tool definition for a given contract version. Default: renders `description_template()` via the
+    /// `TemplateRenderer` and remaps schema parameter names. Override for tools that need params-aware descriptions or
+    /// schemas (e.g., BashTool removes `is_background` when disabled).
     fn versioned_definition(
         &self,
         _contract_version: Option<&str>,
@@ -112,10 +124,8 @@ pub trait ToolMetadata: Send + Sync {
     }
 }
 
-/// Extract `SharedResources` from the runtime tool-call context.
-///
-/// `ToolBridge` inserts `SharedResources` into `ctx.extensions` before
-/// dispatching through the `LocalRegistry`.
+/// Extract `SharedResources` from the runtime tool-call context. `ToolBridge` inserts
+/// `SharedResources` into `ctx.extensions` before dispatching through the `LocalRegistry`.
 pub fn shared_resources(
     ctx: &xai_tool_runtime::ToolCallContext,
 ) -> Result<SharedResources, xai_tool_runtime::ToolError> {
@@ -130,10 +140,8 @@ pub fn shared_resources(
         })
 }
 
-/// Resolve the working directory from the runtime context.
-///
-/// Checks `Cwd` extension first (set when the caller provides a per-call
-/// override), then falls back to `Cwd` in `SharedResources`.
+/// Resolve the working directory from the runtime context. Checks `Cwd` extension first (set when
+/// the caller provides a per-call override), then falls back to `Cwd` in `SharedResources`.
 pub async fn resolve_cwd(
     ctx: &xai_tool_runtime::ToolCallContext,
     resources: &SharedResources,
@@ -149,12 +157,9 @@ pub async fn resolve_cwd(
         })
 }
 
-/// Build a `ToolCallContext` with `SharedResources` installed and a fresh
-/// v7 call id.
-///
-/// Convenience for tests — replaces the per-tool `make_ctx` / `runtime_ctx`
-/// helpers that were duplicated across ~50 tool implementations. Use
-/// [`test_ctx_with_call_id`] when the test needs a specific call id.
+/// Build a `ToolCallContext` with `SharedResources` installed and a fresh v7 call id. Convenience
+/// for tests — replaces the per-tool `make_ctx` / `runtime_ctx` helpers that were duplicated across
+/// ~50 tool implementations. Use [`test_ctx_with_call_id`] when the test needs a specific call id.
 pub fn test_ctx(resources: SharedResources) -> xai_tool_runtime::ToolCallContext {
     let mut ctx = xai_tool_runtime::ToolCallContext::default();
     ctx.extensions.insert(resources);
@@ -191,13 +196,9 @@ pub fn behavior_version(ctx: &xai_tool_runtime::ToolCallContext) -> Option<Strin
         .map(|v| v.0.clone())
 }
 
-/// This tool's own canonical→client param-name map, stamped on the dispatch
-/// context by `prepare_dispatch` / `call_raw`. Returns an empty (identity)
-/// map when absent — e.g. unit tests that call `Tool::run` directly — so
-/// callers resolve to canonical names. Prefer this over kind-wide
-/// [`crate::types::template_renderer::TemplateRenderer::param_for_kind`] when
-/// naming *this* tool's own params (a sibling tool sharing the `ToolKind`
-/// can rename the same field differently).
+/// This tool's own canonical→client param-name map, stamped on the dispatch context by
+/// `prepare_dispatch` / `call_raw`. Returns an empty (identity) map when absent — e.g. unit tests
+/// that call `Tool::run` directly — so callers resolve to canonical names.
 pub fn invoking_param_names(
     ctx: &xai_tool_runtime::ToolCallContext,
 ) -> crate::types::resources::InvokingToolParamNames {

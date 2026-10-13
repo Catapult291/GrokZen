@@ -2,7 +2,6 @@
 //! Covers `dispatch_tool` and its lock and display helpers, direct bash-mode execution, and tool argument parse-error formatting.
 
 use super::*;
-use std::path::PathBuf;
 
 /// Number of output lines to show in final bash mode output summary
 const BASH_MODE_FINAL_OUTPUT_LINES: usize = 10;
@@ -11,6 +10,8 @@ const BASH_MODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60
 /// Phase 2: dispatch a tool call through [`WorkspaceOps::call_tool`].
 ///
 /// Agent sessions always use local workspace ops (in-process toolset).
+/// Production dispatch builds the origin itself and calls [`dispatch_observed`].
+#[cfg(test)]
 pub(super) async fn dispatch_tool(
     workspace_ops: &xai_grok_workspace::WorkspaceOps,
     prepared: &PreparedToolCall,
@@ -23,12 +24,43 @@ pub(super) async fn dispatch_tool(
         mode = "local",
         "dispatch_tool"
     );
+    let origin = crate::session::telemetry::model_origin(
+        &prepared.invocation_id,
+        session_id,
+        None,
+        prepared.model_id.as_deref(),
+        &prepared.tool_id,
+        prepared.tool_version.as_deref(),
+    );
+    dispatch_observed(
+        workspace_ops,
+        prepared,
+        session_id,
+        origin,
+        xai_grok_tools::types::source_summary::SourceSummarySlot::new(),
+    )
+    .await
+}
+
+pub(super) async fn dispatch_observed(
+    workspace_ops: &xai_grok_workspace::WorkspaceOps,
+    prepared: &PreparedToolCall,
+    session_id: &str,
+    origin: xai_grok_tools::types::tool_call_origin::ToolCallOrigin,
+    slot: xai_grok_tools::types::source_summary::SourceSummarySlot,
+) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(
+        xai_tool_protocol::ToolCallId::new(prepared.tool_call_id.0.as_ref())
+            .unwrap_or_else(|_| xai_tool_protocol::ToolCallId::new_v7()),
+    );
+    ctx.insert(origin);
+    ctx.insert(slot);
     workspace_ops
-        .call_tool(
+        .call_tool_with_context(
             &prepared.tool_name,
-            prepared.parsed_args.clone(),
-            &prepared.tool_call_id.0,
+            prepared.execution_arguments().clone(),
             Some(session_id),
+            ctx,
         )
         .await
 }
@@ -39,50 +71,9 @@ fn str_arg<'a>(args: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
 }
 
 /// Extract the workspace path that a tool call targets, to serialize concurrent same-file edits inside `execute_tool_calls`.
-///
-/// Different toolsets advertise the path under different JSON keys:
-/// - `file_path`: grok_build (`search_replace`), opencode (`EditTool`, `WriteTool`, `ReadTool`), codex (`read_file`),
-///   grok_build_hashline (`hashline_edit`)
-/// - `path`: alternate edit/read tools
-/// - `target_file`: grok_build (`read_file`, via `#[serde(rename)]`)
-///
-/// Returning the same key for two calls in a batch causes them to share a `tokio::sync::Mutex` and so run sequentially in model-emitted order.
-/// Returning `None` lets the call run fully concurrently with everything else.
-///
-/// `target_directory` is deliberately omitted: a directory listing isn't an edit and must not share a file lock.
+/// Shared with `FinalizedToolset`'s per-call write lock (`xai_grok_tools::util::lock_path`) so both dispatchers key one file identically.
 pub(super) fn lock_path_for_args(args: &serde_json::Value, cwd: &Path) -> Option<String> {
-    let input = Path::new(str_arg(args, &["file_path", "path", "target_file"])?);
-    let absolute = if input.is_absolute() {
-        input.to_path_buf()
-    } else {
-        cwd.join(input)
-    };
-    let mut normalized = PathBuf::new();
-    for component in absolute.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                normalized.pop();
-            }
-            component => normalized.push(component.as_os_str()),
-        }
-    }
-    let lock_path = canonicalize_existing_ancestor(&normalized).unwrap_or(normalized);
-    Some(lock_path.to_string_lossy().into_owned())
-}
-
-fn canonicalize_existing_ancestor(path: &Path) -> Option<PathBuf> {
-    let mut ancestor = path;
-    let mut suffix = Vec::new();
-    loop {
-        if let Ok(mut canonical) = dunce::canonicalize(ancestor) {
-            suffix.reverse();
-            canonical.extend(suffix);
-            return Some(canonical);
-        }
-        suffix.push(ancestor.file_name()?.to_owned());
-        ancestor = ancestor.parent()?;
-    }
+    xai_grok_tools::util::lock_path::lock_path_for_args(args, cwd)
 }
 
 /// Pull the path a read/list tool targets and classify it against the store.
@@ -99,9 +90,7 @@ pub(super) fn compaction_artifact_read(
 }
 
 /// Map a backend-hosted tool name to a user-facing title, ACP ToolKind, and `raw_input` JSON for display in the pager's tool call UI.
-///
 /// The `raw_input` carries metadata that the pager's `tool_call_to_block()` uses to select the correct renderer.
-/// For example, `variant: "WebSearch"` picks the `WebSearchToolCallBlock` instead of the grep `SearchToolCallBlock`.
 pub(super) fn backend_tool_display(name: &str) -> (String, acp::ToolKind, serde_json::Value) {
     match name {
         "web_search" => (
@@ -122,8 +111,7 @@ pub(super) fn backend_tool_display(name: &str) -> (String, acp::ToolKind, serde_
     }
 }
 
-/// Map a completed backend (server-side) tool call's payload to the ACP terminal status the shell should emit.
-/// The backend reports each call's real success or failure in the payload's `status` field (e.g. a `web_search_call`'s `WebSearchToolCallStatus`).
+/// The backend reports each call's real success or failure in the payload's `status` field.
 /// A `"failed"` status becomes [`acp::ToolCallStatus::Failed`]; any other or absent status stays `Completed`.
 /// Consumers, notably the headless `streaming-messages-json` `web_search_tool_result_error` branch, see the real failure instead of `Completed`.
 pub(super) fn backend_tool_call_status(result: Option<&serde_json::Value>) -> acp::ToolCallStatus {
@@ -150,9 +138,9 @@ pub(super) fn should_show_resolved_model(
 }
 
 /// Resolve the shell name for the system prompt `Shell:` field.
-///
 /// Unix: basename of `$SHELL` (e.g. "zsh", "bash").
-/// Windows: the shell selected by `GROK_SHELL` or `[ui].default_shell`, since `$SHELL` is absent.
+/// Windows: the shell selected by `GROK_SHELL` or `[ui].default_shell` via the
+/// `detect_windows_shell` cascade, since `$SHELL` is absent.
 pub(super) fn resolve_session_shell() -> String {
     #[cfg(unix)]
     {
@@ -179,19 +167,8 @@ pub(super) fn resolve_session_shell() -> String {
 pub(crate) const HTTP_STATUS_DETAILS_KEY: &str = "status";
 
 impl SessionActor {
-    /// Extract the bash command from the prompt blocks if present in meta.
-    /// Returns Some(command) if the prompt is a direct bash command, None otherwise.
     pub(super) fn extract_bash_command(prompt_blocks: &[acp::ContentBlock]) -> Option<String> {
-        use crate::extensions::prompt_meta::PromptBlockMeta;
-        for block in prompt_blocks {
-            if let acp::ContentBlock::Text(text) = block
-                && let Some(meta_val) = &text.meta
-                && let Some(meta) = PromptBlockMeta::from_value(meta_val)
-            {
-                return meta.bash_command;
-            }
-        }
-        None
+        crate::extensions::prompt_meta::PromptBlockMeta::command_in(prompt_blocks)
     }
 
     /// Handle a direct bash command from bash mode.
@@ -251,6 +228,7 @@ impl SessionActor {
             is_background: false,
             encoding: None,
             detach: false,
+            block_until_ms: None,
         });
         // Bash mode has no model-issued wire name; resolve the toolset's execute tool by kind so the x.ai/tool identity still stamps
         let bash_marker = serde_json::json!({"bash_mode": true}).as_object().cloned();
@@ -303,31 +281,19 @@ impl SessionActor {
             Err(e) => (format!("Error running command: {}", e), -1, false, None),
         };
 
-        // Create final summary with last N lines
-        // Format: "... (X lines)\nlast\nfew\nlines"
-        let lines: Vec<&str> = output.lines().collect();
+        // Full stdout for the TUI; prompt/history keep a last-N tail so dumps do not inflate the next turn
+        let full_output = output.trim_end().to_string();
+        let lines: Vec<&str> = full_output.lines().collect();
         let total_lines = lines.len();
-        let displayed_output = if total_lines > BASH_MODE_FINAL_OUTPUT_LINES {
+        let history_output = if total_lines > BASH_MODE_FINAL_OUTPUT_LINES {
             let start = total_lines - BASH_MODE_FINAL_OUTPUT_LINES;
-            let last_lines = lines[start..].join("\n");
+            let last_lines = lines.get(start..).unwrap_or(&[]).join("\n");
             format!("... ({} lines)\n{}", total_lines, last_lines)
         } else {
-            output.trim_end().to_string()
+            full_output.clone()
         };
 
         let is_backgrounded = signal.as_deref() == Some("backgrounded");
-
-        // Build the final response text with output summary and exit code
-        let mut response_text = displayed_output.clone();
-        if is_backgrounded {
-            response_text.push_str("\n\n[command running in background]");
-        } else if timed_out {
-            response_text.push_str("\n\n[command timed out]");
-        } else if let Some(ref sig) = signal {
-            response_text.push_str(&format!("\n\n[killed by signal {}]", sig));
-        } else {
-            response_text.push_str(&format!("\n\n[exit code: {}]", exit_code));
-        }
 
         // Send final tool call update
         // For backgrounded commands, don't mark as completed/failed; let the background task do that
@@ -338,17 +304,17 @@ impl SessionActor {
                 acp::ToolCallStatus::Failed
             };
             let bash_output = BashOutput {
-                output_for_prompt: BashOutput::make_output_for_prompt(&displayed_output),
-                output: displayed_output.as_bytes().to_vec(),
+                output_for_prompt: BashOutput::make_output_for_prompt(&history_output),
+                output: full_output.as_bytes().to_vec(),
                 exit_code,
                 command: command.clone(),
-                truncated: total_lines > BASH_MODE_FINAL_OUTPUT_LINES,
+                truncated: false,
                 signal: signal.clone(),
                 timed_out,
                 description: None,
                 current_dir: self.tool_context.cwd.to_string(),
                 output_file: String::new(),
-                total_bytes: displayed_output.len(),
+                total_bytes: full_output.len(),
                 output_delta: None,
                 was_bare_echo: false,
             };
@@ -370,7 +336,7 @@ impl SessionActor {
         // Build a single user message for chat history that includes command, output, and exit code
         let user_message = format!(
             "I executed a terminal command: `{}`\n\nOutput:\n```\n{}\n```\n\n[exit code: {}]",
-            command, displayed_output, exit_code
+            command, history_output, exit_code
         );
 
         // Add to chat history as a user message only
@@ -392,18 +358,13 @@ impl SessionActor {
 // `truncate_bytes` is the UTF-8-safe truncation helper from xai-grok-sampling-types
 
 /// Maximum bytes of `raw_arguments` echoed in a parse-error tool_result.
-///
 /// The model already holds the full arguments in context, so a prefix plus the JSON error position is enough; echoing more grows every later turn.
 /// A syntax error position past this limit points into truncated text, but the model still has the full arguments in context.
 pub(crate) const MAX_ARGS_IN_ERROR: usize = 2_000;
 
 /// Build the user-facing error message shown when tool arguments cannot be parsed.
 /// The message is stored as a `tool_result` in the conversation history, so the model sees it on the very next turn.
-///
-/// It carries the error description, the original arguments (capped at [`MAX_ARGS_IN_ERROR`] bytes), and the JSON error position for invalid JSON.
-/// Grok-shell sanitizes unparseable arguments to `"{}"` before forwarding to the provider (avoiding 400 errors).
 /// Without the echoed original, the model would only see that empty object and have to regenerate all its work from scratch.
-/// The JSON position (e.g. a missing `"` before a key name) lets the model fix a one-character typo rather than regenerating a thousand-line file.
 pub(super) fn build_tool_parse_error_message(
     function_name: &str,
     err: &xai_tool_runtime::ToolError,
@@ -460,7 +421,13 @@ mod tests {
     #[test]
     fn backend_failed_web_search_maps_to_failed_status() {
         let failed = web_search_payload(rs::WebSearchToolCallStatus::Failed);
-        assert_eq!(failed["status"], "failed", "wire field name is `status`");
+        assert_eq!(
+            failed
+                .pointer("/status")
+                .unwrap_or(&serde_json::Value::Null),
+            "failed",
+            "wire field name is `status`"
+        );
         assert_eq!(
             backend_tool_call_status(Some(&failed)),
             acp::ToolCallStatus::Failed

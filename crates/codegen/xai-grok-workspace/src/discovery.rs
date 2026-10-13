@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use serde_json::Value;
+use tracing::Instrument as _;
 
 // Re-export AgentsMdTracker so consumers can reference it via the workspace crate without a direct xai-grok-tools dependency
 pub use xai_grok_tools::types::agents_md_tracker::AgentsMdTracker;
@@ -17,24 +18,29 @@ pub use xai_grok_agent::plugins::discovery::DiscoveryConfig as PluginDiscoveryCo
 pub use xai_grok_agent::plugins::trust::TrustStore as PluginTrustStore;
 pub use xai_grok_agent::prompt::skills::SkillsConfig;
 
-// ---------------------------------------------------------------------------
-// Skill discovery
-// ---------------------------------------------------------------------------
-
-/// Discover skills visible from the workspace root.
-///
-/// Delegates to [`xai_grok_agent::prompt::skills::list_skills`] with the workspace's `root_cwd` and the caller-supplied `SkillsConfig`.
-/// Returns each [`SkillInfo`] serialized to a `serde_json::Value`.
-/// `list_skills` stats and reads each SKILL.md but holds no async locks across `.await` points, so contention is not a concern.
-pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Value> {
+/// Discover skills visible from the workspace root via `list_skills`, each [`SkillInfo`] as JSON.
+/// That walk holds no async locks across `.await`, so contention is not a concern.
+/// `project_trusted` omits project-scope skills when false.
+pub async fn discover_skills(
+    root_cwd: &Path,
+    config: &SkillsConfig,
+    project_trusted: bool,
+) -> Vec<Value> {
+    let span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+        "workspace.discover_skills",
+        skill_count = tracing::field::Empty,
+    ));
     let cwd_str = root_cwd.to_string_lossy();
     // Workspace discovery does no per-vendor compat gating; pass the all-on default
     let skills = xai_grok_agent::prompt::skills::list_skills(
         Some(&cwd_str),
         config,
         xai_grok_agent::prompt::skills::CompatConfig::default(),
+        project_trusted,
     )
+    .instrument(span.span().clone())
     .await;
+    span.span().record("skill_count", skills.len() as i64);
 
     skills
         .into_iter()
@@ -52,17 +58,21 @@ pub async fn discover_skills(root_cwd: &Path, config: &SkillsConfig) -> Vec<Valu
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// AGENTS.md discovery
-// ---------------------------------------------------------------------------
-
 /// Discover project-instruction files (AGENTS.md, Claude.md, rules) from the workspace root up to the git root.
-pub async fn discover_agents_md(root_cwd: &Path) -> Vec<Value> {
+/// `project_trusted` is the folder-trust verdict for `root_cwd`; when false, project-scope instructions are omitted.
+pub async fn discover_agents_md(root_cwd: &Path, project_trusted: bool) -> Vec<Value> {
+    let span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+        "workspace.discover_agents_md"
+    ));
     let cwd_str = root_cwd.to_string_lossy();
+    // No user config is loaded on this path, so the vendor and `[paths]` defaults apply
     let files = xai_grok_agent::prompt::agents_md::read_agents_config_with_paths(
         &cwd_str,
         xai_grok_tools::types::compat::CompatConfig::default(),
+        &xai_grok_agent::prompt::paths::PathsConfig::default(),
+        project_trusted,
     )
+    .instrument(span.span().clone())
     .await;
 
     files
@@ -81,27 +91,26 @@ pub async fn discover_agents_md(root_cwd: &Path) -> Vec<Value> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Plugin discovery
-// ---------------------------------------------------------------------------
-
-/// Discover plugins visible from the workspace root.
-///
-/// Delegates to [`xai_grok_agent::plugins::discover_plugins`].
-/// [`DiscoveredPlugin`] does not derive `Serialize`, so each plugin is converted to a JSON object with the fields downstream consumers need.
-/// `project_trusted` is the folder-trust verdict for `root_cwd`, threaded into discovery to gate Project-scope plugins.
+/// Discover plugins visible from the workspace root. [`DiscoveredPlugin`] is not `Serialize`, so each is converted to the JSON fields consumers need.
+/// `project_trusted` gates Project-scope plugins.
 pub fn discover_plugins(
     root_cwd: &Path,
     config: &PluginDiscoveryConfig,
     trust_store: &PluginTrustStore,
     project_trusted: bool,
 ) -> Vec<Value> {
+    let _span = tracing::info_span!(
+        "workspace.discover_plugins",
+        plugin_count = tracing::field::Empty
+    )
+    .entered();
     let discovered = xai_grok_agent::plugins::discover_plugins(
         Some(root_cwd),
         config,
         trust_store,
         project_trusted,
     );
+    tracing::Span::current().record("plugin_count", discovered.len() as i64);
 
     discovered
         .into_iter()
@@ -125,14 +134,8 @@ pub fn discover_plugins(
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Project config
-// ---------------------------------------------------------------------------
-
-/// Load the project config from `<root_cwd>/.grok/config.toml`.
-///
-/// Returns `Value::Null` if the file does not exist or cannot be parsed.
-/// Non-fatal errors are logged.
+/// Load project config from `<root_cwd>/.grok/config.toml`.
+/// Missing or unparseable files return `Value::Null`; non-fatal errors are logged.
 pub fn load_project_config(root_cwd: &Path) -> Value {
     let config_path = root_cwd.join(".grok").join("config.toml");
     match xai_grok_config::load_config_file(&config_path) {
@@ -172,18 +175,9 @@ fn toml_to_json(v: &toml::Value) -> Value {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Permissions
-// ---------------------------------------------------------------------------
-
-/// Load the effective permission configuration for the workspace.
-///
-/// Delegates to [`resolution::resolve_permissions_with_provenance`].
-/// It merges rules from requirements.toml, managed-settings.json, managed_config.toml, config.toml, and `.claude/settings.json`.
-/// `project_trusted` gates project-tier permission sources (same contract as env/hooks/plugins).
-/// Hub/cloud callers outside the local folder-trust model should pass `true`.
-/// Returns a JSON object with `sources`, `loaded` (rule count), and `skipped` (unrecognized rules).
-/// Returns `Value::Null` if no permission sources are configured.
+/// Effective permission configuration, merging the usual settings layers via [`resolution::resolve_permissions_with_provenance`].
+/// `project_trusted` gates project-tier sources (same contract as env/hooks/plugins); hub/cloud callers outside that model should pass `true`.
+/// Returns `sources`/`loaded`/`skipped`, or `Value::Null` if nothing is configured.
 pub async fn load_permissions(root_cwd: &Path, project_trusted: bool) -> Value {
     use crate::permission::resolution;
 
@@ -224,8 +218,6 @@ mod tests {
     use super::*;
     use std::fs;
 
-    // ---- Skill discovery tests ----
-
     // Note: `list_skills` also discovers user-scoped skills from
     // `~/.grok/skills/`, so on a developer machine the result may be
     // non-empty even for an empty workspace. Tests below check for specific skills rather than asserting emptiness.
@@ -241,13 +233,21 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(tmp.path(), &SkillsConfig::default()).await;
+        let skills = discover_skills(
+            tmp.path(),
+            &SkillsConfig::default(),
+            /*project_trusted*/ true,
+        )
+        .await;
         let found = skills
             .iter()
-            .find(|s| s["name"].as_str() == Some("my-skill"));
+            .find(|s| s.get("name").and_then(|v| v.as_str()) == Some("my-skill"));
         assert!(found.is_some(), "should find my-skill");
         let skill = found.unwrap();
-        assert_eq!(skill["description"].as_str(), Some("A test skill"));
+        assert_eq!(
+            skill.get("description").and_then(|v| v.as_str()),
+            Some("A test skill")
+        );
     }
 
     #[tokio::test]
@@ -268,8 +268,10 @@ mod tests {
             server_skill_dirs: vec![],
             bundled_skill_dirs: vec![],
         };
-        let skills = discover_skills(tmp.path(), &config).await;
-        let found = skills.iter().any(|s| s["name"].as_str() == Some("ignored"));
+        let skills = discover_skills(tmp.path(), &config, /*project_trusted*/ true).await;
+        let found = skills
+            .iter()
+            .any(|s| s.get("name").and_then(|v| v.as_str()) == Some("ignored"));
         assert!(
             !found,
             "skill in ignore path should be filtered out of results"
@@ -291,17 +293,26 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover_skills(tmp.path(), &SkillsConfig::default()).await;
+        let skills = discover_skills(
+            tmp.path(),
+            &SkillsConfig::default(),
+            /*project_trusted*/ true,
+        )
+        .await;
         let found = skills
             .iter()
-            .find(|s| s["name"].as_str() == Some("serialized-check"))
+            .find(|s| s.get("name").and_then(|v| v.as_str()) == Some("serialized-check"))
             .expect("should find serialized-check");
         // SkillInfo has these required fields when serialized
-        assert!(found["path"].is_string(), "path should be a string");
-        assert!(found["scope"].is_string(), "scope should be serialized");
+        assert!(
+            found.get("path").is_some_and(|v| v.is_string()),
+            "path should be a string"
+        );
+        assert!(
+            found.get("scope").is_some_and(|v| v.is_string()),
+            "scope should be serialized"
+        );
     }
-
-    // ---- AGENTS.md discovery tests ----
 
     #[test]
     fn agent_config_file_wire_matches_workspace_types_mirror() {
@@ -311,6 +322,7 @@ mod tests {
             file_name: "AGENTS.md".to_string(),
             file_path: "/repo/AGENTS.md".to_string(),
             content: "# Instructions\n".to_string(),
+            source: xai_grok_agent::prompt::agents_md::InstructionSource::Configured,
         };
         let json = serde_json::to_value(&src).unwrap();
         let mirror: xai_grok_workspace_types::rpc::agents_md::AgentConfigFile =
@@ -319,6 +331,10 @@ mod tests {
         assert_eq!(mirror.file_name, src.file_name);
         assert_eq!(mirror.file_path, src.file_path);
         assert_eq!(mirror.content, src.content);
+        assert_eq!(
+            mirror.source,
+            xai_grok_workspace_types::rpc::agents_md::InstructionSource::Configured
+        );
         assert_eq!(
             serde_json::to_value(&mirror).unwrap(),
             json,
@@ -338,7 +354,7 @@ mod tests {
         )
         .unwrap();
 
-        let files = discover_agents_md(tmp.path()).await;
+        let files = discover_agents_md(tmp.path(), /*project_trusted*/ true).await;
         // Compare path components: the product reports the native separator on
         // Windows, so a hardcoded `/`-joined suffix would never match there.
         let suffix = Path::new(".cursor")
@@ -347,12 +363,14 @@ mod tests {
         let rule = files
             .iter()
             .find(|f| {
-                f["file_path"]
-                    .as_str()
+                f.get("file_path")
+                    .and_then(|v| v.as_str())
                     .is_some_and(|p| Path::new(p).ends_with(&suffix))
             })
             .expect("should discover the rules file");
-        let content = rule["content"].as_str().unwrap();
+        let Some(content) = rule.get("content").and_then(|v| v.as_str()) else {
+            panic!("rule content missing: {rule}");
+        };
         assert!(
             content.contains("Use tabs, not spaces."),
             "rule body must survive: {content}"
@@ -372,23 +390,23 @@ mod tests {
         )
         .unwrap();
 
-        let files = discover_agents_md(tmp.path()).await;
+        let files = discover_agents_md(tmp.path(), /*project_trusted*/ true).await;
         let agents = files
             .iter()
             .find(|f| {
-                f["content"]
-                    .as_str()
+                f.get("content")
+                    .and_then(|v| v.as_str())
                     .is_some_and(|c| c.contains("XYZZY_LEADING_DASHES_MARKER"))
             })
             .expect("should discover the AGENTS.md with its leading dashes intact");
-        let content = agents["content"].as_str().unwrap();
+        let Some(content) = agents.get("content").and_then(|v| v.as_str()) else {
+            panic!("agents content missing: {agents}");
+        };
         assert!(
             content.starts_with("---\n"),
             "stripping must be rules-files-only: {content}"
         );
     }
-
-    // ---- Plugin discovery tests ----
 
     // Note: `discover_plugins` also discovers user-scoped plugins
     // from `~/.grok/plugins/`, so tests check for specific plugins.
@@ -411,11 +429,11 @@ mod tests {
         let plugins = discover_plugins(tmp.path(), &config, &trust, true);
         let found = plugins
             .iter()
-            .find(|p| p["name"].as_str() == Some("test-plugin"));
+            .find(|p| p.get("name").and_then(|v| v.as_str()) == Some("test-plugin"));
         assert!(found.is_some(), "should find test-plugin");
         let p = found.unwrap();
-        assert_eq!(p["scope"].as_str(), Some("project"));
-        assert_eq!(p["has_skills"].as_bool(), Some(true));
+        assert_eq!(p.get("scope").and_then(|v| v.as_str()), Some("project"));
+        assert_eq!(p.get("has_skills").and_then(|v| v.as_bool()), Some(true));
     }
 
     #[test]
@@ -434,21 +452,22 @@ mod tests {
         let plugins = discover_plugins(tmp.path(), &config, &trust, true);
         let p = plugins
             .iter()
-            .find(|p| p["name"].as_str() == Some("field-test"))
+            .find(|p| p.get("name").and_then(|v| v.as_str()) == Some("field-test"))
             .expect("should find field-test");
-        assert_eq!(p["version"].as_str(), Some("1.0.0"));
-        assert_eq!(p["description"].as_str(), Some("Test plugin"));
-        assert!(p["id"].is_string());
-        assert!(p["root"].is_string());
-        assert!(p["trusted"].is_boolean());
-        assert!(p["has_hooks"].is_boolean());
-        assert!(p["has_mcp"].is_boolean());
-        assert!(p["has_lsp"].is_boolean());
-        assert!(p["has_agents"].is_boolean());
-        assert!(p["has_skills"].is_boolean());
+        assert_eq!(p.get("version").and_then(|v| v.as_str()), Some("1.0.0"));
+        assert_eq!(
+            p.get("description").and_then(|v| v.as_str()),
+            Some("Test plugin")
+        );
+        assert!(p.get("id").is_some_and(|v| v.is_string()));
+        assert!(p.get("root").is_some_and(|v| v.is_string()));
+        assert!(p.get("trusted").is_some_and(|v| v.is_boolean()));
+        assert!(p.get("has_hooks").is_some_and(|v| v.is_boolean()));
+        assert!(p.get("has_mcp").is_some_and(|v| v.is_boolean()));
+        assert!(p.get("has_lsp").is_some_and(|v| v.is_boolean()));
+        assert!(p.get("has_agents").is_some_and(|v| v.is_boolean()));
+        assert!(p.get("has_skills").is_some_and(|v| v.is_boolean()));
     }
-
-    // ---- Project config tests ----
 
     #[test]
     fn load_project_config_missing_file_returns_null() {
@@ -471,63 +490,49 @@ mod tests {
         let config = load_project_config(tmp.path());
         assert!(config.is_object(), "parsed config should be an object");
         assert!(
-            config["skills"]["paths"].is_array(),
+            config
+                .pointer("/skills/paths")
+                .is_some_and(|v| v.is_array()),
             "skills.paths should be an array"
         );
-        assert_eq!(config["skills"]["paths"][0].as_str(), Some("/extra/skills"));
         assert_eq!(
-            config["plugins"]["disabled"][0].as_str(),
+            config.pointer("/skills/paths/0").and_then(|v| v.as_str()),
+            Some("/extra/skills")
+        );
+        assert_eq!(
+            config
+                .pointer("/plugins/disabled/0")
+                .and_then(|v| v.as_str()),
             Some("noisy-plugin")
         );
     }
-
-    // ---- toml_to_json tests ----
 
     #[test]
     fn toml_to_json_basic_types() {
         let toml_val: toml::Value =
             toml::from_str("s = \"hello\"\ni = 42\nf = 3.14\nb = true\n").unwrap();
         let json = toml_to_json(&toml_val);
-        assert_eq!(json["s"], "hello");
-        assert_eq!(json["i"], 42);
-        assert_eq!(json["b"], true);
+        assert_eq!(json.get("s").and_then(|v| v.as_str()), Some("hello"));
+        assert_eq!(json.get("i").and_then(|v| v.as_i64()), Some(42));
+        assert_eq!(json.get("b").and_then(|v| v.as_bool()), Some(true));
     }
 
     #[test]
     fn toml_to_json_nested_table() {
         let toml_val: toml::Value = toml::from_str("[section]\nkey = \"value\"\n").unwrap();
         let json = toml_to_json(&toml_val);
-        assert_eq!(json["section"]["key"], "value");
+        assert_eq!(
+            json.pointer("/section/key").and_then(|v| v.as_str()),
+            Some("value")
+        );
     }
 
     #[test]
     fn toml_to_json_array() {
         let toml_val: toml::Value = toml::from_str("items = [1, 2, 3]\n").unwrap();
         let json = toml_to_json(&toml_val);
-        assert_eq!(json["items"][0], 1);
-        assert_eq!(json["items"][2], 3);
-    }
-
-    // ---- Permissions tests ----
-
-    // Note: `resolve_permissions_with_provenance` checks system-managed settings and requirements.toml from the global config
-    // On a developer machine with Grok installed it may return non-Null even for a temp directory
-    // Both branches assert a concrete condition
-
-    #[tokio::test]
-    async fn load_permissions_returns_valid_json() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = load_permissions(tmp.path(), true).await;
-        // Result is either Null (no sources) or an object with sources, loaded, and skipped fields
-        // Both branches assert a definite pass criterion
-        if result.is_null() {
-            // No permission sources on this machine; Null is correct
-            assert_eq!(result, Value::Null, "expected Null for empty workspace");
-        } else {
-            assert!(result["sources"].is_array(), "sources should be an array");
-            assert!(result["loaded"].is_number(), "loaded should be a number");
-            assert!(result["skipped"].is_array(), "skipped should be an array");
-        }
+        assert_eq!(json.pointer("/items/0").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(json.pointer("/items/2").and_then(|v| v.as_i64()), Some(3));
     }
 
     #[tokio::test]
@@ -544,11 +549,20 @@ mod tests {
 
         let result = load_permissions(tmp.path(), true).await;
         assert!(result.is_object(), "should return an object, got {result}");
-        assert!(result["sources"].is_array(), "sources should be an array");
-        assert!(result["loaded"].is_number(), "loaded should be a number");
-        assert!(result["skipped"].is_array(), "skipped should be an array");
         assert!(
-            result["loaded"].as_u64().unwrap_or(0) >= 1,
+            result.get("sources").is_some_and(|v| v.is_array()),
+            "sources should be an array"
+        );
+        assert!(
+            result.get("loaded").is_some_and(|v| v.is_number()),
+            "loaded should be a number"
+        );
+        assert!(
+            result.get("skipped").is_some_and(|v| v.is_array()),
+            "skipped should be an array"
+        );
+        assert!(
+            result.get("loaded").and_then(|v| v.as_u64()).unwrap_or(0) >= 1,
             "should have at least one loaded rule"
         );
     }

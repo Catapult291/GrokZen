@@ -12,6 +12,9 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::LazyLock;
 
+pub mod diagnostics;
+pub mod dynamic;
+
 const EN_US_SOURCE: &str = include_str!("../locales/en-US.json");
 const ZH_CN_SOURCE: &str = include_str!("../locales/zh-CN.json");
 const ZH_CN_METADATA_SOURCE: &str = include_str!("../locales/zh-CN-metadata.json");
@@ -375,10 +378,12 @@ impl TextKey {
     }
 }
 
-/// Immutable localization context resolved once at the composition root.
+/// Locale choice resolved once at the composition root, with shared display snapshots.
 #[derive(Clone, Debug)]
 pub struct LocaleContext {
     resolved: ResolvedLocale,
+    display_catalogs: dynamic::DisplayCatalogs,
+    settings_sources: dynamic::SettingsSources,
 }
 
 impl Default for LocaleContext {
@@ -391,8 +396,55 @@ impl Default for LocaleContext {
 }
 
 impl LocaleContext {
-    pub const fn new(resolved: ResolvedLocale) -> Self {
-        Self { resolved }
+    pub fn new(resolved: ResolvedLocale) -> Self {
+        Self {
+            resolved,
+            display_catalogs: dynamic::DisplayCatalogs::default(),
+            settings_sources: dynamic::SettingsSources::default(),
+        }
+    }
+
+    pub fn install_display_catalog(&self, catalog: std::sync::Arc<dynamic::DisplayCatalog>) {
+        self.display_catalogs.install(catalog);
+    }
+
+    pub fn has_display_catalog(&self, domain: dynamic::Domain) -> bool {
+        self.locale() == UiLocale::ZhCn && self.display_catalogs.contains(domain)
+    }
+
+    /// Only explicit trusted display call sites use this overlay; named_text,
+    /// protocol values, prompts and ordinary UI catalogs remain unchanged.
+    pub fn display_translation(
+        &self,
+        domain: dynamic::Domain,
+        field: &str,
+        context: &[&str],
+        source: &str,
+    ) -> Option<String> {
+        (self.locale() == UiLocale::ZhCn)
+            .then(|| self.display_catalogs.lookup(domain, field, context, source))
+            .flatten()
+    }
+
+    pub fn set_remote_tip(&self, tip: Option<String>) {
+        self.settings_sources.set_tip(tip);
+    }
+
+    pub fn set_remote_command_tags(&self, tags: std::collections::BTreeMap<String, String>) {
+        self.settings_sources.set_tags(tags);
+    }
+
+    /// Config/env overrides remain user text even if they equal official copy.
+    pub fn remote_settings_translation(
+        &self,
+        field: &str,
+        context: &[&str],
+        source: &str,
+    ) -> Option<String> {
+        self.settings_sources
+            .permits(field, context, source)
+            .then(|| self.display_translation(dynamic::Domain::Settings, field, context, source))
+            .flatten()
     }
 
     pub const fn resolved(&self) -> ResolvedLocale {
@@ -401,6 +453,15 @@ impl LocaleContext {
 
     pub const fn locale(&self) -> UiLocale {
         self.resolved.locale
+    }
+
+    /// Display-only format for message timestamps, including their left padding.
+    pub fn message_timestamp_format(&self, expanded: bool) -> &'static str {
+        if expanded {
+            self.named_static_text("timestamp.message.expanded_format", "  %H:%M:%S | %b %d")
+        } else {
+            self.named_static_text("timestamp.message.short_format", "  %-I:%M %p")
+        }
     }
 
     /// Get a static message, falling back to the complete English catalog.

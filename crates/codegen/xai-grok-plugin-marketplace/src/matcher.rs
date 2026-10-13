@@ -10,9 +10,6 @@ pub struct KeywordCandidate<'a> {
     pub keywords: &'a [String],
 }
 
-/// Return the index of the single candidate whose keyword matches `draft`.
-///
-/// Returns `None` when `draft` has fewer than 3 characters or nothing matches.
 /// A candidate's effective keywords are its explicit `keywords`, its normalized `domains`, and its `name`.
 /// Domain normalization strips the scheme, a leading `www.`, and the path.
 /// Longer keywords take precedence; a keyword matches only when the occurrence is flanked by ASCII word boundaries.
@@ -60,7 +57,7 @@ fn effective_keywords(candidate: &KeywordCandidate<'_>) -> Vec<String> {
 fn normalize_domain(domain: &str) -> Option<String> {
     let trimmed = domain.trim();
     let after_scheme = match trimmed.find("://") {
-        Some(i) => &trimmed[i + 3..],
+        Some(i) => trimmed.get(i + 3..)?,
         None => trimmed,
     };
     let host = after_scheme
@@ -89,8 +86,22 @@ fn keyword_matches(haystack: &[u8], keyword: &[u8]) -> bool {
                 return false;
             }
             let end = start + keyword.len();
-            let start_ok = start == 0 || is_word(haystack[start - 1]) != is_word(haystack[start]);
-            let end_ok = end == len || is_word(haystack[end - 1]) != is_word(haystack[end]);
+            let start_ok = start == 0
+                || match (
+                    start.checked_sub(1).and_then(|j| haystack.get(j)).copied(),
+                    haystack.get(start).copied(),
+                ) {
+                    (Some(prev), Some(cur)) => is_word(prev) != is_word(cur),
+                    _ => false,
+                };
+            let end_ok = end == len
+                || match (
+                    end.checked_sub(1).and_then(|j| haystack.get(j)).copied(),
+                    haystack.get(end).copied(),
+                ) {
+                    (Some(prev), Some(cur)) => is_word(prev) != is_word(cur),
+                    _ => false,
+                };
             start_ok && end_ok
         })
 }

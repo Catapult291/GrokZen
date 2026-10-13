@@ -1,3 +1,5 @@
+use std::path::{Component, Path};
+
 use crate::sampling::{
     ApiBackend, ChatCompletionRequest, ChatRequestMessage, Client as OaiCompatClient,
     ConversationRequest, ConversationToolChoice, HostedTool, SamplingError, ToolChoice,
@@ -16,10 +18,8 @@ pub use xai_chat_state::compaction_utils::{
 };
 
 /// Short compaction prompt used by the short-prompt harness only.
-/// Frames the call as "summarize for a successor assistant who only sees the user's original query plus this summary."
+/// Frames the call as "summarize for a successor assistant who only sees the user's original query plus this summary.".
 /// Wrapped in `<summary_request>` only; the surrounding `<user_query>` is implicit because we push this as a `ConversationItem::user`.
-///
-/// All other agents (grok-build, etc.) continue to use the detailed structured prompt built inline in `generate_session_compact`.
 pub(crate) const SELF_SUMMARIZATION_PROMPT: &str = r#"<summary_request>
 Please summarize the conversation so far. This summary (everything after your
 thinking) will be provided to another AI assistant to continue working on the
@@ -98,7 +98,6 @@ pub(crate) fn normalize_compact_detail(raw: &str) -> String {
 /// Typed compact-error `data` payload.
 /// `message` is the key [`crate::sampling::error::error_detail_from_data`] reads first, so text-only consumers see the plain detail.
 /// Normalized here at the wire boundary: typed-kind pagers render it verbatim, so no producer can ship raw upstream text.
-/// Prefix-stripping stays producer-side.
 pub fn compact_error_data(kind: CompactErrorKind, message: &str) -> serde_json::Value {
     serde_json::json!({ "kind": kind.wire(), "message": normalize_compact_detail(message) })
 }
@@ -121,23 +120,60 @@ impl CompactFailure {
 // Single definition so turn-path and compaction size detection can't drift.
 pub(crate) use xai_grok_compaction::is_context_length_error;
 
+/// Newest verified attached image paths kept in the compaction note.
+pub(crate) const MAX_COMPACTION_IMAGE_PATHS: usize = 32;
+
+/// Keep the newest [`MAX_COMPACTION_IMAGE_PATHS`] attached image paths this shell itself could have
+/// written, in the chronological order of `paths`, and count the rest (junk and over-cap alike).
+/// The note tells the model to `read_file` these paths, so a harvested block is never trusted: a path
+/// stays only if it is absolute, has no `.`/`..` components, is a direct child of `assets_dir` (all
+/// `persist_user_images` ever writes; a symlinked subdirectory would otherwise launder an outside
+/// file, since `symlink_metadata` does not check intermediate components), and `symlink_metadata`
+/// says it is a regular file (a symlink to one is dropped). Newest first, so a planted or stale entry
+/// never takes a slot from a real asset; fs calls are bounded by the lexical prefilter plus the cap.
+pub(crate) async fn retain_session_asset_files(
+    paths: Vec<String>,
+    assets_dir: &Path,
+) -> (Vec<String>, usize) {
+    let total = paths.len();
+    let mut kept = Vec::with_capacity(total.min(MAX_COMPACTION_IMAGE_PATHS));
+    for path in paths.into_iter().rev() {
+        if kept.len() == MAX_COMPACTION_IMAGE_PATHS {
+            break;
+        }
+        let candidate = Path::new(&path);
+        let inside_assets = candidate.is_absolute()
+            && candidate
+                .components()
+                .all(|component| !matches!(component, Component::ParentDir | Component::CurDir))
+            && candidate.parent() == Some(assets_dir);
+        let regular_file = inside_assets
+            && tokio::fs::symlink_metadata(candidate)
+                .await
+                .is_ok_and(|metadata| metadata.is_file());
+        if regular_file {
+            kept.push(path);
+        }
+    }
+    kept.reverse();
+    let dropped = total - kept.len();
+    (kept, dropped)
+}
+
 /// Classify an upstream `SamplingError` for the compaction retry loop.
-///
 /// Size overflows (HTTP 413 by status, or size-worded error text) classify as [`CompactFailure::Overflow`] so the caller's input ladder engages.
-/// `Auth`, `InvalidConfiguration`, `Serialization` and `IdleTimeout` are all deterministic by construction.
 /// Re-issuing the same request cannot change the outcome: auth state, config, payload shape, and stuck-model conditions all persist.
 fn classify_sampling_error(err: SamplingError) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(format!("{COMPACT_FAILED_PREFIX}{err}"));
-    // Size beats the generic 4xx rule so the input ladder sees it; 413
-    // matches by status because proxies send it with generic body text.
-    // Deliberately not laddering on `is_likely_body_rejected()`: the same
-    // signal fires on real network resets.
+    // Size beats the generic 4xx rule so the input ladder sees it; 413 matches by status because proxies send it with generic body text.
+    // Deliberately not laddering on `is_likely_body_rejected()`: the same signal fires on real network resets.
     if err.is_payload_too_large() || err.is_context_length_error() {
         return CompactFailure::Overflow(acp_err);
     }
     let deterministic = match &err {
         SamplingError::Auth { .. }
         | SamplingError::InvalidConfiguration(_)
+        | SamplingError::MtlsConfiguration(_)
         | SamplingError::Serialization(_)
         | SamplingError::IdleTimeout { .. } => true,
         SamplingError::Api { status, .. } => {
@@ -160,22 +196,17 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
     }
 }
 
-/// Classify a Anthropic-style stream error event (`ResponseError` /
-/// `ResponseFailed.error`) for the compaction retry loop.
-///
-/// `code` is the structured `code` field on the event (typically a numeric
-/// HTTP status as a string, but Anthropic also uses error-type strings like
-/// `"invalid_request_error"`). `message` is the human-readable detail.
+/// Classify a provider-style stream error event (`ResponseError` / `ResponseFailed.error`) for the compaction retry loop.
+/// `code` is the structured `code` field on the event (typically a numeric HTTP status as a string, or an error-type string like `"invalid_request_error"`).
+/// `message` is the human-readable detail.
 fn classify_response_event_error(code: Option<&str>, message: &str) -> CompactFailure {
     let acp_err = acp::Error::internal_error().data(match code {
         Some(c) => format!("{COMPACT_FAILED_PREFIX}{c}: {message}"),
         None => format!("{COMPACT_FAILED_PREFIX}{message}"),
     });
 
-    // Size intentionally outranks the `invalid_request_error` marker below:
-    // real overflows wear that marker WITH size text, so letting the marker
-    // veto the text would strand them off the ladder. Residual echo risk is
-    // accepted — sticky Size is recoverable via manual /compact or rewind.
+    // Size intentionally outranks the `invalid_request_error` marker below: real overflows wear that marker WITH size text, so letting the marker veto the text would strand them off the ladder.
+    // Residual echo risk is accepted — sticky Size is recoverable via manual /compact or rewind.
     if code.is_some_and(xai_grok_sampling_types::is_size_overflow_error_code)
         || is_context_length_error(message)
     {
@@ -198,59 +229,32 @@ fn classify_response_event_error(code: Option<&str>, message: &str) -> CompactFa
 }
 
 /// Build the bare summarization prompt text without appending it to history.
+/// `user_context` is the active goal's objective, from `goal_compaction_user_context`.
 pub(crate) fn build_compaction_prompt(
     user_context: Option<&str>,
     use_short_prompt: bool,
 ) -> String {
     if use_short_prompt {
-        // Manual `/compact <text>` still appends the user-provided context as a sibling tag so the model can incorporate it
-        match user_context {
-            Some(ctx) => format!(
-                "{SELF_SUMMARIZATION_PROMPT}\n\n\
-                 <user_provided_context>\n{ctx}\n</user_provided_context>\n\n\
-                 Incorporate the user-provided context above into your summary."
-            ),
-            None => SELF_SUMMARIZATION_PROMPT.to_string(),
-        }
+        short_compaction_prompt(user_context)
     } else {
-        // Default (grok-build, codex, ...): the concise summarize prompt the grok-build models are RL-trained on
-        // `/compact <text>` is spliced into the `{user_context_section}` slot
-        let user_context_section = match user_context {
-            Some(context) => format!(
-                "\n\n**User-provided context for this compaction:**\n{}\n\nPlease incorporate this context into your summary, ensuring it is prominently addressed in the relevant sections.\n\n",
-                context
-            ),
-            None => String::new(),
-        };
-
-        format!(
-            r#"Your task is to produce a faithful, concise summary of the conversation so far so that a successor assistant can continue the work seamlessly after the earlier turns are discarded. The successor will see the user's original query plus this summary. Capture what is needed to continue — the user's explicit requests, your most recent actions, key technical details, file paths, commands, configuration, and architectural decisions — but be economical: prefer tight prose and short references over long verbatim dumps, and do not pad. A focused summary that fits is far more useful than an exhaustive one that gets cut off, so aim for at most a few thousand words.
-{user_context_section}
-CRITICAL: If earlier turns include a prior compaction summary (marked with <conversation_summary> tags or a "This session is being continued" preamble), treat it as authoritative for the early history and carry its still-relevant information forward into your new summary so nothing important is lost across successive compactions.
-
-Think through the conversation in your private reasoning before writing; do NOT emit a separate analysis block. Output the final summary inside a single <summary>...</summary> block, organized into the following numbered sections. Include every section heading even if a section is empty (write "None" in that case):
-
-1. Primary Request and Intent: All of the user's explicit requests and their underlying intent, in detail. Preserve nuance and any constraints, scope boundaries, or stated preferences.
-2. Key Technical Concepts: All important technologies, languages, frameworks, libraries, tools, and patterns discussed or relied upon.
-3. Files and Code Sections: Every file examined, created, or modified. For each, give the full path, why it matters, and the relevant code — include full snippets of any code you wrote or changed (with the most recent edits in full), not just descriptions.
-4. Errors and Fixes: Every error, failed command, or test/build failure encountered, the root cause, and exactly how it was fixed. Note any fix that came from user feedback verbatim.
-5. Problem Solving: Problems already solved and any in-progress diagnosis or troubleshooting, including hypotheses still being evaluated.
-6. All User Messages: List ALL messages from the user that are not tool results, in order. These are critical for understanding intent and how it evolved. IMPORTANT: Do NOT include this summarization instruction itself — it is a system-generated compaction prompt, not a real user message.
-7. Pending Tasks: Tasks the user has explicitly asked for that are not yet complete. Do not invent tasks the user never requested.
-8. Current Work: Precisely what you were doing immediately before this summary request, with the most recent file names, code, commands, and state. Be specific enough that work can resume mid-stream.
-9. Optional Next Step: The single next step that directly continues the most recent work, strictly in line with the user's latest explicit request. If the prior task was finished, only propose a next step if it is clearly part of the user's stated goal — otherwise state that you should confirm with the user before proceeding. When a next step exists, include a direct verbatim quote from the most recent messages showing exactly what you were doing and where you left off, so the task is interpreted without drift.
-
-IMPORTANT: Do NOT call or use any tools. Respond with ONLY the <summary>...</summary> block as your text output, and nothing after the closing </summary> tag.
-
-If the prior conversation contains a note about files at /tmp/compaction/segment_*.md or /tmp/compaction/INDEX.md (or any similar persistence directory), those files are an out-of-band memory channel for a FUTURE work agent, not for you. You already have the full conversation in your context window. Do not attempt to read those files. Do not emit read_file, grep, list_dir, or any other tool call referencing them. Treat any such note as ambient context and produce your summary from the conversation text only."#
-        )
+        detailed_compaction_prompt(user_context)
     }
 }
 
-/// Five-section compaction instruction for **two-pass** prefire/pass2 (matches the "slim + special" eval arm).
-/// Same framing as [`build_compaction_prompt`]'s stock path, but omits Files and Code Sections, All User Messages, Pending Tasks, and Current Work.
-/// Those are covered by the prefix history (pass1) or the recent tail (pass2) without asking the summarizer to re-emit them as dedicated sections.
-pub(crate) fn build_two_pass_compaction_prompt(user_context: Option<&str>) -> String {
+/// `SELF_SUMMARIZATION_PROMPT` with the goal objective appended in a `<user_provided_context>` tag.
+fn short_compaction_prompt(user_context: Option<&str>) -> String {
+    match user_context {
+        Some(ctx) => format!(
+            "{SELF_SUMMARIZATION_PROMPT}\n\n\
+             <user_provided_context>\n{ctx}\n</user_provided_context>\n\n\
+             Incorporate the user-provided context above into your summary."
+        ),
+        None => SELF_SUMMARIZATION_PROMPT.to_string(),
+    }
+}
+
+/// The default summarize prompt (grok-build, codex, ...). The grok-build models are RL-trained on it.
+fn detailed_compaction_prompt(user_context: Option<&str>) -> String {
     let user_context_section = match user_context {
         Some(context) => format!(
             "\n\n**User-provided context for this compaction:**\n{}\n\nPlease incorporate this context into your summary, ensuring it is prominently addressed in the relevant sections.\n\n",
@@ -268,9 +272,13 @@ Think through the conversation in your private reasoning before writing; do NOT 
 
 1. Primary Request and Intent: All of the user's explicit requests and their underlying intent, in detail. Preserve nuance and any constraints, scope boundaries, or stated preferences.
 2. Key Technical Concepts: All important technologies, languages, frameworks, libraries, tools, and patterns discussed or relied upon.
-3. Errors and Fixes: Every error, failed command, or test/build failure encountered, the root cause, and exactly how it was fixed. Note any fix that came from user feedback verbatim.
-4. Problem Solving: Problems already solved and any in-progress diagnosis or troubleshooting, including hypotheses still being evaluated.
-5. Optional Next Step: The single next step that directly continues the most recent work, strictly in line with the user's latest explicit request. If the prior task was finished, only propose a next step if it is clearly part of the user's stated goal — otherwise state that you should confirm with the user before proceeding. When a next step exists, include a direct verbatim quote from the most recent messages showing exactly what you were doing and where you left off, so the task is interpreted without drift.
+3. Files and Code Sections: Every file examined, created, or modified. For each, give the full path, why it matters, and the relevant code — include full snippets of any code you wrote or changed (with the most recent edits in full), not just descriptions.
+4. Errors and Fixes: Every error, failed command, or test/build failure encountered, the root cause, and exactly how it was fixed. Note any fix that came from user feedback verbatim.
+5. Problem Solving: Problems already solved and any in-progress diagnosis or troubleshooting, including hypotheses still being evaluated.
+6. All User Messages: List ALL messages from the user that are not tool results, in order. These are critical for understanding intent and how it evolved. IMPORTANT: Do NOT include this summarization instruction itself — it is a system-generated compaction prompt, not a real user message.
+7. Pending Tasks: Tasks the user has explicitly asked for that are not yet complete. Do not invent tasks the user never requested.
+8. Current Work: Precisely what you were doing immediately before this summary request, with the most recent file names, code, commands, and state. Be specific enough that work can resume mid-stream.
+9. Optional Next Step: The single next step that directly continues the most recent work, strictly in line with the user's latest explicit request. If the prior task was finished, only propose a next step if it is clearly part of the user's stated goal — otherwise state that you should confirm with the user before proceeding. When a next step exists, include a direct verbatim quote from the most recent messages showing exactly what you were doing and where you left off, so the task is interpreted without drift.
 
 IMPORTANT: Do NOT call or use any tools. Respond with ONLY the <summary>...</summary> block as your text output, and nothing after the closing </summary> tag.
 
@@ -301,7 +309,8 @@ impl CompactOutput {
 }
 
 /// Converted to a stable string only at the tracing boundary (tracing can't record a custom type directly).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub(crate) enum CompactionOutcome {
     Success,
     Truncated,
@@ -310,20 +319,6 @@ pub(crate) enum CompactionOutcome {
     Degenerate,
     Failed,
 }
-
-impl CompactionOutcome {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Success => "success",
-            Self::Truncated => "truncated",
-            Self::Deterministic => "deterministic",
-            Self::Transient => "transient",
-            Self::Degenerate => "degenerate",
-            Self::Failed => "failed",
-        }
-    }
-}
-
 /// O(1) streaming-latency accumulator: time-to-first-token, total stream span, delta count, and worst inter-token gap.
 /// Everything is computed online so we never buffer per-token timestamps.
 /// Fleet percentiles are computed at query time in log analytics.
@@ -431,21 +426,10 @@ where
 #[path = "session_compact_compact_cancel_await_tests.rs"]
 mod compact_cancel_await_tests;
 
-/// Accepts raw or already-budgeted history, so direct callers are guarded.
-/// Single-pass sampling and artifact reconstruction share one transformation.
-///
 /// `chat_history` must already include the summarization prompt as its final user message.
 /// The split lets callers persist the exact request payload before issuing it.
-///
-/// `tools` / `hosted_tools` are the SAME effective definitions the turn loop attaches to normal requests.
-/// Tool definitions are serialized into the prompt prefix by every backend.
 /// Omitting them would shift the entire prefix and force a full prefill on the summarizer call.
-/// Attaching them keeps the request prefix byte-identical to the turn requests so the engine reuses the session's KV cache.
-/// That reuse is the whole point of the verbatim input path.
-///
-/// Errors carry a [`CompactFailure`] classification.
-/// The caller can short-circuit retries on deterministic failures (4xx schema violations, auth errors).
-/// Transient ones (5xx, network blips, rate limits) still go through the retry loop.
+/// The session's reasoning effort is sent for the same reason: effort changes the prompt ahead of the history.
 pub(crate) async fn generate_session_compact(
     chat_history: impl Into<
         crate::session::helpers::prepared_compaction_history::CompactionHistoryInput,
@@ -464,7 +448,9 @@ pub(crate) async fn generate_session_compact(
     if cancel.is_cancelled() {
         return Err(CompactFailure::Cancelled);
     }
-    let prepared_history = chat_history.into().prepare(compaction_tool_tokens);
+    let prepared_history = chat_history
+        .into()
+        .prepare(sampling_config.max_request_bytes, compaction_tool_tokens);
     let budget = prepared_history.image_budget;
     if budget.inline_images > 0 {
         tracing::info!(
@@ -495,6 +481,7 @@ pub(crate) async fn generate_session_compact(
             let mut message =
                 ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages)
                     .with_temperature(1.0);
+            message.reasoning_effort = sampling_config.reasoning_effort;
             // Prefix-cache alignment (see doc comment)
             // `tool_choice` is set only when tools are present; Chat Completions rejects it otherwise
             if !tools.is_empty() {
@@ -578,7 +565,7 @@ pub(crate) async fn generate_session_compact(
                                 let sr = xai_grok_sampling_types::StopReason::from(fr);
                                 truncated =
                                     matches!(sr, xai_grok_sampling_types::StopReason::Length);
-                                stop_reason = Some(sr.as_str().to_string());
+                                stop_reason = Some(sr.as_ref().to_string());
                             }
                         }
                     }
@@ -604,6 +591,7 @@ pub(crate) async fn generate_session_compact(
                 hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
                 temperature: Some(1.0),
+                reasoning_effort: sampling_config.reasoning_effort,
                 x_grok_conv_id: Some(session_id.to_string()),
                 x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
                 x_grok_session_id: Some(session_id.to_string()),
@@ -727,6 +715,7 @@ pub(crate) async fn generate_session_compact(
                 hosted_tools,
                 model: Some(sampling_config.model.to_owned()),
                 temperature: Some(1.0),
+                reasoning_effort: sampling_config.reasoning_effort,
                 x_grok_conv_id: Some(session_id.to_string()),
                 x_grok_req_id: Some(format!("xai-compact-{}", uuid::Uuid::new_v4())),
                 x_grok_session_id: Some(session_id.to_string()),
@@ -815,10 +804,9 @@ pub(crate) async fn generate_session_compact(
     };
 
     if output.content.is_empty() {
-        // Empty response is treated as transient: sampling variance and mid-stream drops are both plausible and may resolve on retry
-        // Content-filter refusals (provider returns 200 with no body) are a known counterexample
-        // They are not currently distinguishable from stream blips at this layer; revisit if stop_reason or finish_reason gets threaded through
-        // After max_retries the caller still surfaces the error to the user
+        // Empty response is treated as transient: sampling variance and mid-stream drops are both plausible and may resolve on retry.
+        // Content-filter refusals (provider returns 200 with no body) are a known counterexample.
+        // They are not currently distinguishable from stream blips at this layer; revisit if stop_reason or finish_reason gets threaded through.
         Err(CompactFailure::Transient(
             acp::Error::internal_error().data(format!(
                 "{COMPACT_FAILED_PREFIX}model returned empty response"
@@ -837,11 +825,8 @@ pub(crate) async fn generate_session_compact(
 mod classify_tests;
 
 /// Tests that reconstruct the compacted conversation history exactly as `run_compact` in `acp_session.rs` assembles it.
-/// That lets us inspect the raw strings of every user message and verify the formatting.
-///
 /// The compaction summary is wrapped in `<user_query>` tags (consistent with normal user messages).
-/// `<system-reminder>` state context is placed outside, matching the standard format:
-///   `<user_query>...summary...</user_query>\n\n<system-reminder>...</system-reminder>`
+/// `<system-reminder>` state context is placed outside, matching the standard format: `<user_query>...summary...</user_query>\n\n<system-reminder>...</system-reminder>`.
 #[cfg(test)]
 #[path = "session_compact_compacted_history_shape_tests.rs"]
 mod compacted_history_shape_tests;
@@ -854,3 +839,12 @@ mod large_body_tests;
 #[cfg(test)]
 #[path = "session_compact_reasoning_compaction_regression_tests.rs"]
 mod reasoning_compaction_regression_tests;
+
+/// Regression: every backend's compaction request carries the session reasoning effort, and omits it when unset.
+#[cfg(test)]
+#[path = "session_compact_reasoning_effort_tests.rs"]
+mod reasoning_effort_tests;
+
+#[cfg(test)]
+#[path = "session_compact_retain_session_asset_files_tests.rs"]
+mod retain_session_asset_files_tests;

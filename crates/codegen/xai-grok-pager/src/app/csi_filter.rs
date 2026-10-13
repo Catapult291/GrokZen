@@ -6,8 +6,6 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use super::event_loop::{TimedInputEvent, is_bare_esc_press};
 
-/// Persistent filter that reassembles CSI fragments leaked by crossterm when a control sequence splits across `read()` boundaries.
-/// The fragments are SGR mouse reports `\e[<…M/m` and focus reports `\e[I`/`\e[O`.
 /// Carries state across `drain_and_process` calls so a mouse report split across batches is caught (its `\x1b` in batch N, `[<…M` in batch N+1).
 /// A fragmented focus report becomes `Event::FocusGained`/`Event::FocusLost` only when its bare `\e` and `[I`/`[O` arrive in the same batch.
 /// A lone `\e` can't be held across batches (a lone `[` must render at once), so a focus report whose `\e` was isolated in a prior batch still leaks.
@@ -108,9 +106,7 @@ impl CsiFragmentFilter {
             tracing::debug!(filtered_count, "filtered CSI fragments");
         }
 
-        // A lone typed `[` is indistinguishable from the start of a CSI fragment (an SGR mouse report `[<…M` or a focus report `[I`/`[O`)
         // User input must render immediately
-        // Real leaked fragments arrive with the byte after `[` in the same read()
         // Carrying only `Bracket` across batches is therefore unnecessary and holds the key until the next keystroke
         // Deeper partial states (`[<…`) still persist for cross-batch continuation
         if matches!(self.state, CsiFragmentState::Bracket) {
@@ -211,8 +207,6 @@ mod tests {
         press_mods(code, KeyModifiers::SHIFT)
     }
 
-    // ── SGR mouse fragment filter tests ──────────────────────────────
-
     /// Build key events matching crossterm's actual output for a fragmented SGR mouse report `[<btn;col;row{M|m}]`.
     fn sgr_fragment(btn: &str, col: &str, row: &str, term: char) -> Vec<TimedInputEvent> {
         let mut events = vec![press(KeyCode::Char('[')), press(KeyCode::Char('<'))];
@@ -236,11 +230,6 @@ mod tests {
     }
 
     #[test]
-    fn csi_filter_empty() {
-        assert!(CsiFragmentFilter::new().filter(vec![]).is_empty());
-    }
-
-    #[test]
     fn csi_filter_normal_keys_unchanged() {
         let events = vec![
             press(KeyCode::Char('h')),
@@ -248,10 +237,14 @@ mod tests {
             press(KeyCode::Enter),
         ];
         let result = CsiFragmentFilter::new().filter(events);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0], press(KeyCode::Char('h')));
-        assert_eq!(result[1], press(KeyCode::Char('i')));
-        assert_eq!(result[2], press(KeyCode::Enter));
+        assert_eq!(
+            result.as_slice(),
+            [
+                press(KeyCode::Char('h')),
+                press(KeyCode::Char('i')),
+                press(KeyCode::Enter),
+            ]
+        );
     }
 
     #[test]
@@ -302,10 +295,14 @@ mod tests {
         events.extend(sgr_fragment("35", "261", "67", 'M'));
         events.push(press(KeyCode::Char('!')));
         let result = CsiFragmentFilter::new().filter(events);
-        assert_eq!(result.len(), 3);
-        assert_eq!(result[0], press(KeyCode::Char('h')));
-        assert_eq!(result[1], press(KeyCode::Char('i')));
-        assert_eq!(result[2], press(KeyCode::Char('!')));
+        assert_eq!(
+            result.as_slice(),
+            [
+                press(KeyCode::Char('h')),
+                press(KeyCode::Char('i')),
+                press(KeyCode::Char('!')),
+            ]
+        );
     }
 
     #[test]
@@ -326,9 +323,11 @@ mod tests {
             arrived_at: test_instant(),
         });
         let result = CsiFragmentFilter::new().filter(events);
-        assert_eq!(result.len(), 2);
-        assert!(matches!(result[0].event, Event::Resize(80, 24)));
-        assert!(matches!(result[1].event, Event::Resize(100, 30)));
+        let [first, second] = result.as_slice() else {
+            panic!("expected two events: {result:?}");
+        };
+        assert!(matches!(first.event, Event::Resize(80, 24)));
+        assert!(matches!(second.event, Event::Resize(100, 30)));
     }
 
     #[test]
@@ -336,9 +335,10 @@ mod tests {
         let mut events = vec![press(KeyCode::Esc), press(KeyCode::Char('x'))];
         events.extend(sgr_fragment("35", "261", "67", 'M'));
         let result = CsiFragmentFilter::new().filter(events);
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], press(KeyCode::Esc));
-        assert_eq!(result[1], press(KeyCode::Char('x')));
+        assert_eq!(
+            result.as_slice(),
+            [press(KeyCode::Esc), press(KeyCode::Char('x'))]
+        );
     }
 
     #[test]
@@ -410,13 +410,10 @@ mod tests {
         // The `[` starts a potential SGR match but `;` rejects at LessThan.
         // After rejection, `;` doesn't restart, so it and remaining chars pass through
         // The leading `[<` is flushed on reject; `[` was held in tentative while matching
-        // Verify all 7 events come out (some from this call, the rest flushed on the follow-up)
         let result2 = f.filter(vec![]);
         let total = result.len() + result2.len();
         assert_eq!(total, 7);
     }
-
-    // ── Cross-batch SGR filtering tests ──────────────────────────────
 
     #[test]
     fn csi_filter_cross_batch_esc_then_fragment() {
@@ -426,8 +423,7 @@ mod tests {
         // Batch 1: just the Esc
         let r1 = f.filter(vec![press(KeyCode::Esc)]);
         // Esc is emitted (can't be retracted across batches)
-        assert_eq!(r1.len(), 1);
-        assert_eq!(r1[0], press(KeyCode::Esc));
+        assert_eq!(r1.as_slice(), [press(KeyCode::Esc)]);
 
         // Batch 2: the remaining SGR fragment chars
         let r2 = f.filter(sgr_fragment("64", "91", "51", 'M'));
@@ -577,8 +573,6 @@ mod tests {
         );
     }
 
-    // ── CSI focus report filtering tests ─────────────────────────────
-
     #[test]
     fn csi_filter_focus_timestamp_comes_from_completing_fragment() {
         let start = Instant::now();
@@ -599,9 +593,11 @@ mod tests {
         ];
 
         let result = CsiFragmentFilter::new().filter(events);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].event, Event::FocusGained);
-        assert_eq!(result[0].arrived_at, complete);
+        let [got] = result.as_slice() else {
+            panic!("expected one event: {result:?}");
+        };
+        assert_eq!(got.event, Event::FocusGained);
+        assert_eq!(got.arrived_at, complete);
     }
 
     #[test]

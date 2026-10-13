@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Once;
 
-use rusqlite::params;
+use rusqlite::{OptionalExtension as _, params};
 use xai_sqlite_journal::JournalMode;
 
 use super::chunker::{chunk_hash, chunk_markdown};
@@ -27,10 +27,9 @@ static SQLITE_VEC_INIT: Once = Once::new();
 /// Register the sqlite-vec extension globally. Call it before any `MemoryIndex::open_or_create()`; repeat calls are safe (Once guard).
 pub fn init_sqlite_vec() {
     SQLITE_VEC_INIT.call_once(|| {
-        // SAFETY: sqlite_vec::sqlite3_vec_init has the C ABI signature expected by sqlite3_auto_extension
-        // The explicit type annotation on transmute makes this compiler-verified
-        // If sqlite-vec changes its init signature, the annotation will cause a compile error instead of silent UB
-        // We pin sqlite-vec to exact version =0.1.7-alpha.2; any bump must re-verify.
+        // SAFETY: sqlite_vec::sqlite3_vec_init has the C ABI signature expected by sqlite3_auto_extension The explicit type
+        // annotation on transmute makes this compiler-verified If sqlite-vec changes its init signature, the annotation will cause
+        // a compile error instead of silent UB We pin sqlite-vec to exact version =0.1.7-alpha.2; any bump must re-verify.
         unsafe {
             rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
                 *const (),
@@ -90,7 +89,6 @@ pub struct MemoryIndex {
 
 impl MemoryIndex {
     /// Open or create the index database at `db_path`.
-    ///
     /// `dimensions` sets the embedding vector size for the `chunks_vec` table.
     /// If sqlite-vec failed to load (call `init_sqlite_vec()` first), the index gracefully degrades to FTS-only mode.
     pub fn open_or_create(
@@ -113,6 +111,47 @@ impl MemoryIndex {
         )
     }
 
+    /// Open an index for lexical-only maintenance without changing the vector
+    /// dimension already recorded by the embedding backend.
+    pub(crate) fn open_or_create_preserving_dimensions(
+        db_path: &Path,
+        storage: MemoryStorage,
+        config: MemoryIndexConfig,
+        fallback_dimensions: usize,
+    ) -> Result<Self, rusqlite::Error> {
+        if let Some(parent) = db_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let journal_mode = JournalMode::for_db_path(db_path);
+        let db = journal_mode.open(db_path)?;
+        let has_meta = db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let stored_dimensions = if has_meta {
+            db.query_row(
+                schema::GET_META_SQL,
+                params!["embedding_dimensions"],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+        let dimensions = match stored_dimensions {
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|dimensions| *dimensions > 0)
+                .ok_or(rusqlite::Error::InvalidQuery)?,
+            None => fallback_dimensions,
+        };
+        Self::initialize(db, storage, config, dimensions)
+    }
+
     /// Open with an explicit journal mode. Tests use it to exercise the network-filesystem decision on a local disk.
     fn open_or_create_with_journal_mode(
         db_path: &Path,
@@ -123,7 +162,15 @@ impl MemoryIndex {
     ) -> Result<Self, rusqlite::Error> {
         // busy_timeout + journal pragma live in the helper (see JournalMode::open).
         let db = journal_mode.open(db_path)?;
+        Self::initialize(db, storage, config, dimensions)
+    }
 
+    fn initialize(
+        db: rusqlite::Connection,
+        storage: MemoryStorage,
+        config: MemoryIndexConfig,
+        dimensions: usize,
+    ) -> Result<Self, rusqlite::Error> {
         // Check if sqlite-vec loaded (graceful fallback if not)
         let vec_available =
             match db.query_row("SELECT vec_version()", [], |r| r.get::<_, String>(0)) {
@@ -226,11 +273,30 @@ impl MemoryIndex {
                 return Ok(ReindexResult::default());
             }
         };
+        self.reindex_content(path, source, &content)
+    }
 
-        let new_chunks = chunk_markdown(&content, &self.chunk_config);
+    /// Reindex a path from bytes already read and validated by the caller.
+    ///
+    /// This avoids a second filesystem read when the caller must bind indexed
+    /// content to a durable hash.
+    pub fn reindex_content(
+        &mut self,
+        path: &Path,
+        source: &str,
+        content: &str,
+    ) -> Result<ReindexResult, rusqlite::Error> {
+        let span = tracing::info_span!(
+            "memory.reindex_file",
+            bytes = tracing::field::Empty,
+            chunk_count = tracing::field::Empty,
+        );
+        let _g = span.enter();
+        span.record("bytes", content.len() as i64);
+
+        let new_chunks = chunk_markdown(content, &self.chunk_config);
+        span.record("chunk_count", new_chunks.len() as i64);
         let path_str = path.to_string_lossy().to_string();
-
-        let existing = self.get_chunks_for_path(&path_str)?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -240,8 +306,13 @@ impl MemoryIndex {
         let mut result = ReindexResult::default();
         let mut seen_ids = std::collections::HashSet::new();
 
-        // Wrap all mutations in a transaction so partial failures don't leave the index inconsistent between chunks, FTS, and vec tables
-        let tx = self.db.transaction()?;
+        // Keep chunks, FTS, and vec mutations in one transaction. IMMEDIATE locks before
+        // reading existing chunks so concurrent writers cannot both observe an empty path
+        // and race to insert the same chunk ids.
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing = Self::get_chunks_for_path(&tx, &path_str)?;
 
         for (i, chunk) in new_chunks.iter().enumerate() {
             let chunk_id = format!("{}:{}", path_str, i);
@@ -347,7 +418,6 @@ impl MemoryIndex {
     // -----------------------------------------------------------------------
 
     /// FTS5 keyword search. Returns results ranked by BM25 score.
-    ///
     /// Applies stop word filtering to improve precision for conversational queries.
     /// When all words are stop words, it returns empty results; the caller (`hybrid_search`) falls back to the vector search path.
     pub fn search_fts_by_sources(
@@ -365,6 +435,7 @@ impl MemoryIndex {
             return Ok(vec![]);
         }
 
+        let _g = tracing::info_span!("memory.fts_search").entered();
         let placeholders: Vec<String> = sources
             .iter()
             .enumerate()
@@ -403,6 +474,7 @@ impl MemoryIndex {
             return Ok(vec![]);
         }
 
+        let _g = tracing::info_span!("memory.fts_search").entered();
         let mut stmt = self.db.prepare(
             "SELECT rowid, rank FROM chunks_fts WHERE chunks_fts MATCH ?1 \
              ORDER BY rank LIMIT ?2",
@@ -459,8 +531,6 @@ impl MemoryIndex {
         Ok(result)
     }
 
-    /// Return the current value of the reindex claim from meta.
-    ///
     /// An empty string means no claim is active.
     /// A non-empty claim means a session currently owns the reindex lock (or a crashed session left a stale one).
     /// `grok memory doctor` uses this to detect stuck states.
@@ -549,6 +619,11 @@ impl MemoryIndex {
         if !self.vec_available {
             return Ok(vec![]);
         }
+        let span = tracing::info_span!(
+            "memory.vector_search",
+            candidate_count = tracing::field::Empty
+        );
+        let _g = span.enter();
         let query_bytes: Vec<u8> = query_embedding
             .iter()
             .flat_map(|f| f.to_le_bytes())
@@ -562,6 +637,7 @@ impl MemoryIndex {
                 Ok((row.get::<_, String>(0)?, row.get::<_, f32>(1)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        span.record("candidate_count", results.len() as i64);
         Ok(results)
     }
 
@@ -570,9 +646,7 @@ impl MemoryIndex {
     // -----------------------------------------------------------------------
 
     /// Try to claim exclusive reindex rights using the `meta` table.
-    ///
     /// Uses an atomic UPDATE: succeeds only if unclaimed (empty) or stale (older than `stale_threshold_secs`).
-    /// Returns `true` if claimed.
     /// Under SQLite's serialized writer model, at most one agent wins.
     pub fn try_claim_reindex(&self, stale_threshold_secs: i64) -> bool {
         let pid = std::process::id();
@@ -610,19 +684,19 @@ impl MemoryIndex {
     // -----------------------------------------------------------------------
 
     /// Delete all indexed chunks for a given file path.
-    ///
     /// The watcher calls this on file-removal events so deleted memory files stop being searchable.
     /// Deletes from all three tables (`chunks`, `chunks_fts`, `chunks_vec`) in one transaction so the index stays consistent even on partial failure.
-    /// Returns the number of chunks removed, which is 0 when the path was not previously indexed (idempotent).
     pub fn delete_path(&mut self, path: &Path) -> Result<usize, rusqlite::Error> {
         let path_str = path.to_string_lossy().to_string();
-        let existing = self.get_chunks_for_path(&path_str)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing = Self::get_chunks_for_path(&tx, &path_str)?;
 
         if existing.is_empty() {
             return Ok(0);
         }
 
-        let tx = self.db.transaction()?;
         for (chunk_id, record) in &existing {
             // Contentless FTS5 requires the original text for the 'delete' command.
             tx.execute(
@@ -648,11 +722,14 @@ impl MemoryIndex {
     }
 
     /// Get all existing chunks for a path, keyed by chunk ID.
+    ///
+    /// Takes the connection (or an open transaction) explicitly so mutating callers
+    /// read the snapshot inside the same write transaction they mutate under.
     fn get_chunks_for_path(
-        &self,
+        connection: &rusqlite::Connection,
         path: &str,
     ) -> Result<HashMap<String, ChunkRecord>, rusqlite::Error> {
-        let mut stmt = self.db.prepare(
+        let mut stmt = connection.prepare(
             "SELECT rowid, id, path, start_line, end_line, text, hash, source, access_count, \
              created_at FROM chunks WHERE path = ?1",
         )?;
@@ -768,6 +845,61 @@ mod tests {
             .unwrap()
     }
 
+    /// Two connections indexing the same not-yet-indexed file must serialize on the write
+    /// lock rather than both inserting the same chunk ids (`UNIQUE constraint failed: chunks.id`).
+    #[test]
+    fn concurrent_reindex_of_same_file_across_connections_is_safe() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("test.sqlite");
+        let file = tmp.path().join("note.md");
+        std::fs::write(&file, "# Note\n\nShared chunk one.\n\nShared chunk two.\n").unwrap();
+        let workers = 6;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(workers));
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                let db_path = db_path.clone();
+                let file = file.clone();
+                let storage = test_storage(&tmp);
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let mut idx = MemoryIndex::open_or_create(
+                        &db_path,
+                        storage,
+                        MemoryIndexConfig::default(),
+                        1536,
+                    )
+                    .unwrap();
+                    barrier.wait();
+                    idx.reindex_file(&file, "workspace").unwrap();
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let idx = MemoryIndex::open_or_create(
+            &db_path,
+            test_storage(&tmp),
+            MemoryIndexConfig::default(),
+            1536,
+        )
+        .unwrap();
+        let chunks: i64 = idx
+            .db()
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE path = ?1",
+                params![file.to_string_lossy()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let fts: i64 = idx
+            .db()
+            .query_row("SELECT COUNT(*) FROM chunks_fts", [], |r| r.get(0))
+            .unwrap();
+        assert!(chunks >= 1);
+        assert_eq!(fts, chunks);
+    }
+
     #[test]
     fn test_open_or_create_uses_wal_on_local_fs() {
         // GROK_SQLITE_JOURNAL_MODE overrides the journal-mode decision; skip when it is set
@@ -819,6 +951,24 @@ mod tests {
         assert_eq!(result.added, 1);
         assert_eq!(result.updated, 0);
         assert_eq!(result.removed, 0);
+    }
+
+    #[test]
+    fn reindex_content_uses_the_callers_verified_bytes() {
+        let tmp = TempDir::new().unwrap();
+        let mut idx = test_index(&tmp);
+        let file_path = tmp.path().join("test.md");
+        std::fs::write(&file_path, "# Changed\n\nUnverified disk content.").unwrap();
+
+        idx.reindex_content(
+            &file_path,
+            "workspace",
+            "# Verified\n\nHash-bound durable content.",
+        )
+        .unwrap();
+
+        assert!(!idx.search_fts("hash bound durable", 10).unwrap().is_empty());
+        assert!(idx.search_fts("unverified disk", 10).unwrap().is_empty());
     }
 
     #[test]
@@ -940,10 +1090,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Simulates the `/memory append` then immediate-reindex flow.
-    ///
-    /// The TUI's `AppendMemory` action once wrote the file and returned without reindexing.
     /// Appended content was then only searchable after a watcher-driven sync or the next session startup.
-    /// This test keeps that regression from silently returning.
     #[test]
     fn test_append_then_reindex_is_immediately_searchable() {
         let tmp = TempDir::new().unwrap();
@@ -1150,14 +1297,7 @@ mod tests {
     // reindex maintenance path regression tests
     // -----------------------------------------------------------------------
 
-    /// Regression test for the reindex maintenance flow:
-    ///
-    /// 1. Index a file.
-    /// 2. Delete the file from disk (simulates a user removing a session log).
-    /// 3. Run the same orphan-removal logic as `grok memory reindex`:
-    ///    compare `all_indexed_paths()` against current files and call `delete_path()` for paths that no longer exist.
-    /// 4. Verify the stale chunks are gone and are no longer searchable.
-    ///
+    /// Index a file; Delete the file from disk (simulates a user removing a session log); Run the same orphan-removal logic as `grok memory reindex`: compare `all_indexed_paths()` against current files and call `delete_path()` for paths that no longer exist; Verify the stale chunks are gone and are no longer searchable.
     /// This proves that `grok memory reindex`'s Phase 1 fixes the state that `grok memory doctor` warns about.
     #[test]
     fn test_reindex_maintenance_removes_orphaned_chunks() {
@@ -1197,7 +1337,6 @@ mod tests {
     }
 
     /// A fresh (non-stale) reindex claim blocks `try_claim_reindex`.
-    ///
     /// Verifies that `grok memory reindex` Phase 0 bails when a live session holds a fresh claim.
     /// The CLI cannot steal a live session's lock and then mutate the index concurrently.
     #[test]

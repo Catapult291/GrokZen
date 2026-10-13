@@ -37,7 +37,6 @@ fn prompt_preview(text: &str) -> String {
 
 impl ScrollbackState {
     /// Timeline entries, one per turn in conversation order (oldest first).
-    ///
     /// Each entry carries the prompt's stable [`EntryId`].
     /// Dispatch resolves it to an index at the boundary, so the snapshot stays correct across both appends and removals.
     pub fn timeline_entries(&self) -> Vec<TimelineEntry> {
@@ -144,12 +143,15 @@ mod tests {
 
         let entries = state.timeline_entries();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].turn_idx, 0);
-        assert_eq!(state.index_of_id(entries[0].prompt_entry_id), Some(1));
-        assert_eq!(entries[0].preview, "first question");
-        assert_eq!(entries[1].turn_idx, 1);
-        assert_eq!(state.index_of_id(entries[1].prompt_entry_id), Some(3));
-        assert_eq!(entries[1].preview, "second question");
+        let [first, second] = entries.as_slice() else {
+            panic!("expected two timeline entries: {entries:?}");
+        };
+        assert_eq!(first.turn_idx, 0);
+        assert_eq!(state.index_of_id(first.prompt_entry_id), Some(1));
+        assert_eq!(first.preview, "first question");
+        assert_eq!(second.turn_idx, 1);
+        assert_eq!(state.index_of_id(second.prompt_entry_id), Some(3));
+        assert_eq!(second.preview, "second question");
     }
 
     #[test]
@@ -161,9 +163,12 @@ mod tests {
         state.prepare_layout(80, 10);
 
         let entries = state.timeline_entries();
-        assert_eq!(entries[0].preview, "leading blanks skipped");
-        assert_eq!(entries[1].preview.chars().count(), 120);
-        assert!(entries[1].preview.ends_with('\u{2026}'));
+        let [first, second, ..] = entries.as_slice() else {
+            panic!("expected two timeline entries: {entries:?}");
+        };
+        assert_eq!(first.preview, "leading blanks skipped");
+        assert_eq!(second.preview.chars().count(), 120);
+        assert!(second.preview.ends_with('\u{2026}'));
     }
 
     #[test]
@@ -191,15 +196,7 @@ mod tests {
     fn active_turn_stays_top_anchored_at_the_bottom() {
         // A screenful of short trailing turns: even at the bottom the active turn is the one owning the top row (the web-timeline rule)
         // This replaced a clamp to the newest turn, whose highlight leapt at one step off the bottom and whose ▲ chevron stuck
-        let mut state = ScrollbackState::new();
-        state.push_block(user_block("Q1"));
-        state.push_block(tall_agent_block());
-        for i in 2..8 {
-            state.push_block(user_block(&format!("Q{i}")));
-            state.push_block(agent_block("ok"));
-        }
-        state.prepare_layout(80, 12);
-
+        let mut state = clustered_trailing_turns();
         state.goto_bottom();
         let at_bottom = state.active_turn_for_viewport().expect("active at bottom");
         assert!(at_bottom < 6, "top-anchored, not the newest: {at_bottom}");
@@ -237,9 +234,8 @@ mod tests {
         Some(target)
     }
 
-    #[test]
-    fn chevrons_walk_the_conversation_end_to_end_without_sticking() {
-        // The stuck-▲ shape: one tall response, then six short turns that all cluster inside the final screenful
+    /// One tall response, then six short trailing turns that cluster in the last 80x12 screenful.
+    fn clustered_trailing_turns() -> ScrollbackState {
         let mut state = ScrollbackState::new();
         state.push_block(user_block("Q1"));
         state.push_block(tall_agent_block());
@@ -248,6 +244,13 @@ mod tests {
             state.push_block(agent_block("ok"));
         }
         state.prepare_layout(80, 12);
+        state
+    }
+
+    #[test]
+    fn chevrons_walk_the_conversation_end_to_end_without_sticking() {
+        // The stuck-▲ shape: one tall response, then six short turns that all cluster inside the final screenful
+        let mut state = clustered_trailing_turns();
         state.goto_bottom();
 
         // ▲ to the very top: every click moves the viewport up, one boundary per click once on a prompt row, no sticking
@@ -267,7 +270,9 @@ mod tests {
         assert_eq!(state.scroll_offset(), 0, "▲ walk reaches the top");
         assert_eq!(up_visits.last(), Some(&0), "▲ walk ends at the first turn");
         assert!(
-            up_visits.windows(2).all(|w| w[0] - w[1] == 1),
+            up_visits
+                .windows(2)
+                .all(|w| matches!(w, [a, b] if *a - *b == 1)),
             "one boundary per click: {up_visits:?}"
         );
         assert_eq!(click_chevron(&mut state, 12, true), None, "▲ dim at top");
@@ -297,14 +302,7 @@ mod tests {
     fn down_chevron_enters_trailing_turns_at_the_bottom() {
         // Reported bug: short turns cluster in the final screenful and ▼ sat dim at the bottom, even though clicking their ticks jumped to them
         // ▼ now targets the next turn, the same turn a tick click resolves to (both go through jump_to_turn)
-        let mut state = ScrollbackState::new();
-        state.push_block(user_block("Q1"));
-        state.push_block(tall_agent_block());
-        for i in 2..8 {
-            state.push_block(user_block(&format!("Q{i}")));
-            state.push_block(agent_block("ok"));
-        }
-        state.prepare_layout(80, 12);
+        let mut state = clustered_trailing_turns();
         state.goto_bottom();
 
         let active = state.active_turn_for_viewport().expect("active at bottom");

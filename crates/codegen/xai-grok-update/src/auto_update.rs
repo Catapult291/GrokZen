@@ -10,9 +10,10 @@ use futures::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 use tokio::io::AsyncWriteExt;
 
+use crate::cleanup_downloads::cleanup_old_downloads;
 use crate::version::{
     UpdateConfig, fetch_latest_version, get_installed_grok_version, get_latest_version,
-    is_version_cache_fresh, try_fetch_stable_pointer, write_version_cache,
+    is_stable_channel, is_version_cache_fresh, try_fetch_stable_pointer, write_version_cache,
 };
 use semver::Version;
 use xai_grok_shell::util::config;
@@ -107,12 +108,9 @@ fn announce_update_failed(error: &dyn std::fmt::Display) {
     }
 }
 
-/// An empty or `"stable"` channel means stable, the installers' default.
-fn is_stable_channel(channel: &str) -> bool {
-    channel.is_empty() || channel == "stable"
-}
-
-/// Manual-install command or distribution-owned download page.
+/// Manual-install one-liner for this platform's bootstrap installer. On Unix the variable must prefix `bash` (which runs
+/// install.sh), not `curl`. In `VAR=x curl … | bash` the assignment applies to `curl` only and install.sh would fall back
+/// to stable.
 fn manual_install_cmd(channel: &str) -> String {
     // Privacy builds must never point a reinstall hint at vendor installers:
     // running the official install.sh/install.ps1 would replace this binary
@@ -175,12 +173,9 @@ fn reinstall_hint(installer: &str, channel: &str) -> String {
     }
 }
 
-/// True when this process is an x86_64 build translated by Rosetta on an Apple Silicon host.
-/// `hw.optional.arm64` is 1 on Apple Silicon, including from a translated process, where the compile-time arch says x86_64.
-///
-/// Read in-process via `sysctlbyname`: no spawn, no stdout parse, and no dependence on the `sysctl` binary being on PATH.
-/// A missing key (genuine Intel Mac) or any error means not Apple Silicon: the probe fails open to the compile-time arch.
-/// Cached: fixed host property, read from async paths via [`detect_platform`].
+/// True when this process is an x86_64 build translated by Rosetta on an Apple Silicon host. `hw.optional.arm64` is 1 on
+/// Apple Silicon, including from a translated process, where the compile-time arch says x86_64. A missing key (genuine
+/// Intel Mac) or any error means not Apple Silicon: the probe fails open to the compile-time arch.
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 fn running_under_rosetta_on_apple_silicon() -> bool {
     static ROSETTA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -511,6 +506,8 @@ async fn fetch_update_plan(
     update_config: &UpdateConfig,
     policy: &config::VersionPolicy,
 ) -> Result<UpdatePlan> {
+    let _check_span =
+        xai_grok_telemetry::region!("update.check", xai_grok_telemetry::region::Parent::Inherit);
     let latest = fetch_latest_version(installer, update_config).await?;
     Ok(plan_for(policy, latest))
 }
@@ -552,16 +549,9 @@ pub struct EnsureLatestOutcome {
     pub relaunch_needed: bool,
 }
 
-/// One leader auto-update pass: converge the on-disk install to the channel pointer, downloading **only** when the disk is actually behind it.
-/// Then report whether the running process should relaunch onto the on-disk binary.
-///
-/// Unlike [`run_update`] this never uses the compiled-in version for the download decision.
-/// A binary already installed by another process (TUI background download, explicit `grok update`) is reused as-is.
-/// Reusing it stops the hourly re-download while a busy leader keeps deferring its relaunch.
-///
-/// [`disk_version_for_installer`] has no answer for npm-managed installs, Windows copy-based installs, and dev builds.
-/// There the running process's version decides the download, and relaunch happens only after this pass installed something.
-/// On Windows a busy leader therefore still re-downloads hourly; only the symlink layout can prove the disk is current without exec'ing the binary.
+/// Unlike [`run_update`] this never uses the compiled-in version for the download decision. A binary already installed by
+/// another process (TUI background download, explicit `grok update`) is reused as-is. On Windows a busy leader therefore
+/// still re-downloads hourly; only the symlink layout can prove the disk is current without exec'ing the binary.
 pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<EnsureLatestOutcome> {
     if vendor_auto_update_forbidden() {
         return Ok(EnsureLatestOutcome {
@@ -570,6 +560,10 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
         });
     }
 
+    let _ensure_span = xai_grok_telemetry::region!(
+        "update.ensure_latest",
+        xai_grok_telemetry::region::Parent::Inherit
+    );
     let mut outcome = EnsureLatestOutcome {
         installed: None,
         relaunch_needed: false,
@@ -623,13 +617,9 @@ pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<Ensur
     Ok(outcome)
 }
 
-/// Disk-version probe gated on the installer actually maintaining the
-/// managed `~/.grok/bin/grok` symlink.
-///
-/// Only the internal (install.sh / CDN) and gh-release installers write that
-/// symlink. npm manages its own global install, so a symlink left over from a previous internal install would LIE about the npm install's version.
-/// A leftover symlink "newer" than the npm registry would make every updater report "already up to date" and silently suppress npm updates forever.
-/// Unknown installers are treated like npm (no trustworthy disk version).
+/// Disk-version probe gated on the installer actually maintaining the managed `~/.grok/bin/grok` symlink. Only the
+/// internal (install.sh / CDN) and gh-release installers write that symlink. npm manages its own global install, so a
+/// symlink left over from a previous internal install would LIE about the npm install's version.
 fn disk_version_for_installer(installer: &str) -> Option<String> {
     match installer {
         "internal" | "gh-release" => crate::version::installed_on_disk_version(),
@@ -731,12 +721,9 @@ fn needs_update(current: &str, target: &str, channel: &str, allow_downgrade: boo
     })
 }
 
-/// Returns `true` for installer backends whose immutable version source is
-/// authoritative, meaning a pointer rollback is intentional and should trigger
-/// a client downgrade. Returns `false` for backends like npm where stale
-/// corporate registries/proxies can return arbitrarily old versions.
-///
-/// Users who installed via `install.sh` are classified as `"internal"` by `get_installer()`, so they also get rollback support.
+/// Returns `true` for installer backends whose version source is authoritative (managed by xAI directly). Returns `false`
+/// for backends like npm where stale corporate registries/proxies can return arbitrarily old versions. Users who
+/// installed via `install.sh` are classified as `"internal"` by `get_installer()`, so they also get rollback support.
 fn installer_allows_downgrade(installer: &str) -> bool {
     match installer {
         "internal" | "gh-release" => true,
@@ -844,11 +831,9 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
         return BackgroundUpdateCheck::none();
     }
 
-    // Only download when the on-disk install is behind the pointer
-    // The running process being stale (checked above) just means "show the restart hint"
-    // The quit-for-update path's `grok update` child resolves to "Already up to date" against the same disk state
-    // Gated on the installer maintaining the managed symlink
-    // For npm a leftover symlink would wrongly suppress the download (see `disk_version_for_installer`)
+    // Only download when the on-disk install is behind the pointer. The running process being stale (checked above) just
+    // means "show the restart hint". The quit-for-update path's `grok update` child resolves to "Already up to date" against
+    // the same disk state. For npm a leftover symlink would wrongly suppress the download (see `disk_version_for_installer`)
     let disk_needs_download = match disk_version_for_installer(installer) {
         Some(disk) => needs_update(
             &disk,
@@ -1020,12 +1005,9 @@ pub async fn run_update_if_available(
     Ok(false)
 }
 
-/// Launch "grok update" in blocking or non-blocking mode.
-///
-/// `NonBlocking` mode returns the spawned child's handle.
-/// The TUI's quit-for-update path `wait()`s on that in-flight download instead of spawning a second downloader.
-/// Dropping the handle does not kill the child (`kill_on_drop` is off), so callers that don't care can ignore it.
-/// `Blocking` mode returns `None`.
+/// Launch "grok update" in blocking or non-blocking mode. `NonBlocking` mode returns the spawned child's handle. The
+/// TUI's quit-for-update path `wait()`s on that in-flight download instead of spawning a second downloader. Dropping the
+/// handle does not kill the child (`kill_on_drop` is off), so callers that don't care can ignore it.
 async fn run_update_subcommand(
     run_mode: UpdateRunMode,
     trigger: CliUpdateTrigger,
@@ -1034,7 +1016,7 @@ async fn run_update_subcommand(
     let mut cmd = tokio::process::Command::new(exe);
     // One trigger representation end to end: the enum crosses the process boundary as --trigger=<value> (FromStr on the other side)
     cmd.arg("update");
-    cmd.arg(format!("--trigger={}", trigger.as_str()));
+    cmd.arg(format!("--trigger={}", trigger.as_ref()));
     // Hand the resolved telemetry mode to the child, which cannot see the remote-settings layer (requirement pins still beat env)
     // None at the startup spawns: they run before the settings prefetch, when this process knows no more than the child
     // Waiting would let telemetry delay an update
@@ -1043,19 +1025,14 @@ async fn run_update_subcommand(
     }
     match run_mode {
         UpdateRunMode::Blocking => {
-            // stderr must be null, not piped: `.status()` does not drain
-            // pipes, so if the child writes more than the OS pipe buffer
-            // (~16 KB macOS / ~64 KB Linux) to stderr (e.g. download
-            // progress bars), the child blocks on the write while the
-            // parent blocks on waitpid — deadlocking both processes.
-            // With `panic = "abort"`, the blocked child eventually
-            // receives SIGABRT.
+            // stderr must be null, not piped: `.status()` does not drain pipes, so if the child writes more than the OS pipe buffer
+            // (~16 KB macOS / ~64 KB Linux) to stderr (e.g. download progress bars), the child blocks on the write while the parent
+            // blocks on waitpid — deadlocking both processes. With `panic = "abort"`, the blocked child eventually receives SIGABRT.
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::null())
-                // inherit, not piped: the TUI is already restored so the parent's stderr fd is a normal terminal
-                // inherit lets the child's diagnostic output reach the user
-                // With piped stderr, `status()` would immediately close the read end
-                // The child then hits EPIPE and panics, which is SIGABRT (signal 6) under panic=abort
+                // inherit, not piped: the TUI is already restored so the parent's stderr fd is a normal terminal inherit lets the
+                // child's diagnostic output reach the user. With piped stderr, `status()` would immediately close the read end. The
+                // child then hits EPIPE and panics, which is SIGABRT (signal 6) under panic=abort
                 .stderr(Stdio::inherit());
             // No detach: the child must stay in the foreground process group so Ctrl+C cancels it with the parent
             // The atomic install protocol makes mid-download kills safe
@@ -1069,6 +1046,8 @@ async fn run_update_subcommand(
             Ok(None)
         }
         UpdateRunMode::NonBlocking => {
+            #[cfg(feature = "community-build")]
+            cmd.env("GROK_ZH_DEFER_UPDATE_NOTES", "1");
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
@@ -1215,6 +1194,10 @@ pub async fn run_install_script(
         error_kind,
     });
     result.map(|_| ()).map_err(|e| {
+        #[cfg(feature = "community-build")]
+        if e.is::<crate::community_update_cancel::UpdateCancelled>() {
+            return e;
+        }
         if cfg!(feature = "community-build") {
             anyhow::anyhow!(
                 "自动更新失败：{:#}\n\n{}",
@@ -1300,6 +1283,10 @@ async fn install_community_release(
             }
         }
 
+        if let Err(error) = crate::community_update_cancel::check() {
+            let _ = tokio::fs::remove_file(&candidate).await;
+            return Err(error);
+        }
         let version_output = match smoke_test_binary(&candidate).await {
             Ok(output) => output,
             Err(error) => {
@@ -1315,9 +1302,19 @@ async fn install_community_release(
             );
         }
 
-        let replace_result = windows_replace_exe(&candidate, &destination).await;
+        // Keep activation and its completion receipt in the same transaction.
+        if let Err(error) = crate::community_update_cancel::begin_activation() {
+            let _ = tokio::fs::remove_file(&candidate).await;
+            return Err(error);
+        }
+        let install_lock = acquire_windows_update_lock(&destination);
+        let replace_result = match &install_lock {
+            Ok(_) => windows_replace_exe_locked(&candidate, &destination).await,
+            Err(error) => Err(anyhow::anyhow!("{error:#}")),
+        };
         let _ = tokio::fs::remove_file(&candidate).await;
         replace_result?;
+        crate::community_update_notes::record_success(&version, asset.release_notes.as_deref());
         eprintln!(
             "  已从 {}/releases 安装 {} v{}。",
             xai_grok_product::COMMUNITY_RELEASE_REPO,
@@ -1670,6 +1667,10 @@ async fn install_community_unix_release(
         }
     }
 
+    if let Err(error) = crate::community_update_cancel::check() {
+        let _ = tokio::fs::remove_file(&candidate).await;
+        return Err(error);
+    }
     let version_output = match smoke_test_binary(&candidate).await {
         Ok(output) => output,
         Err(error) => {
@@ -1685,6 +1686,10 @@ async fn install_community_unix_release(
         );
     }
 
+    if let Err(error) = crate::community_update_cancel::begin_activation() {
+        let _ = tokio::fs::remove_file(&candidate).await;
+        return Err(error);
+    }
     let _install_lock = match acquire_community_install_lock(&bin_dir) {
         Ok(lock) => lock,
         Err(error) => {
@@ -1716,9 +1721,8 @@ async fn install_community_unix_release(
         );
     }
 
-    // Every install gets a fresh immutable target. Atomic link replacement
-    // changes only the two canonical entry points and deliberately keeps old
-    // targets so a still-running process retains its executable inode.
+    // Every install gets a fresh immutable target. Prune only after both
+    // entry points are active, retaining targets still used by live processes.
     if let Err(error) = swap_community_bin_links(&installed, &bin_dir).await {
         // Do not delete `installed`: a rollback failure may have left one link
         // pointing at it, and preserving a harmless orphan is safer than a
@@ -1731,6 +1735,9 @@ async fn install_community_unix_release(
             "community Unix entry points are active but directory sync failed: {error:#}"
         );
     }
+
+    cleanup_community_targets(&download_dir, &bin_dir).await;
+    crate::community_update_notes::record_success(version, asset.release_notes.as_deref());
 
     let _ = config::update_config(|state| {
         state.cli.installer = Some(crate::community_release::COMMUNITY_INSTALLER.to_string());
@@ -1745,12 +1752,8 @@ async fn install_community_unix_release(
     Ok(version.to_string())
 }
 
-/// Detect the platform (os, arch) to download binaries for.
-///
-/// Arch is the compile-time arch with one correction: an x86_64 build on an Apple Silicon host (Rosetta) selects `aarch64`.
-/// Every update path converges to the native build instead of perpetuating the translated one.
-/// That covers interactive `grok update`, background `--auto` children, the leader's hourly converge, and forced minimum-version installs.
-/// This mirrors install.sh's `hw.optional.arm64` probe.
+/// Every update path converges to the native build instead of perpetuating the translated one. That covers interactive
+/// `grok update`, background `--auto` children, the leader's hourly converge, and forced minimum-version installs.
 /// Without it, a lingering x86_64 process would reinstall x86_64 right over a fresh native install.
 pub(crate) fn detect_platform() -> Result<(&'static str, &'static str)> {
     let os = if cfg!(target_os = "macos") {
@@ -1775,12 +1778,10 @@ pub(crate) fn detect_platform() -> Result<(&'static str, &'static str)> {
     ))
 }
 
-/// Age past which a leftover `.tmp` download file or freshly-renamed versioned binary counts as abandoned (crashed or killed updater).
-/// `cleanup_old_downloads` sweeps files older than this.
-/// An hour is generous compared to the longest plausible download.
-/// The per-request budget is [`DOWNLOAD_REQUEST_TIMEOUT`] and the leader's check-and-download pass matches it.
-/// So a concurrent updater's in-flight or just-landed file is never deleted out from under it.
-const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
+/// Age past which a leftover `.tmp` download file or freshly-renamed versioned binary counts as abandoned (crashed or
+/// killed updater). The per-request budget is [`DOWNLOAD_REQUEST_TIMEOUT`] and the leader's check-and-download pass
+/// matches it. So a concurrent updater's in-flight or just-landed file is never deleted out from under it.
+pub(crate) const STALE_TMP_AGE: Duration = Duration::from_secs(60 * 60);
 
 /// Total timeout for a CLI artifact download request (including body).
 /// Tighter budgets abort slow-link transfers mid-body and restart them from zero.
@@ -1790,12 +1791,10 @@ fn download_client() -> reqwest::Result<reqwest::Client> {
     xai_grok_extra_ca::build_reqwest_client(|builder| builder.timeout(DOWNLOAD_REQUEST_TIMEOUT))
 }
 
-/// Unique temp path for an in-flight download of `dest`.
-///
-/// Two updaters may race in the same instant; that residual race is accepted instead of taking a lock.
-/// The unique name means neither racer can rename the other's half-written temp file into place.
-/// Leftovers older than [`STALE_TMP_AGE`] are swept by `cleanup_old_downloads`.
-fn tmp_download_path(dest: &std::path::Path) -> std::path::PathBuf {
+/// Unique temp path for an in-flight download of `dest`. Two updaters may race in the same instant; that residual race is
+/// accepted instead of taking a lock. The unique name means neither racer can rename the other's half-written temp file
+/// into place. Leftovers older than [`STALE_TMP_AGE`] are swept by `cleanup_old_downloads`.
+pub(crate) fn tmp_download_path(dest: &std::path::Path) -> std::path::PathBuf {
     unique_temp_sibling(dest, "tmp")
 }
 
@@ -1818,7 +1817,10 @@ fn unique_temp_sibling(base: &std::path::Path, ext: &str) -> std::path::PathBuf 
 }
 
 /// Set `+x` on the temp file before renaming onto `dest`, so a concurrent same-version installer never execs `dest` while it is still 0644.
-async fn publish_downloaded_artifact(tmp: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+pub(crate) async fn publish_downloaded_artifact(
+    tmp: &std::path::Path,
+    dest: &std::path::Path,
+) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -1857,6 +1859,11 @@ async fn try_parallel_download(
     if size < PARALLEL_DOWNLOAD_MIN_BYTES {
         anyhow::bail!("file too small for parallel download ({} bytes)", size);
     }
+
+    let _dl_span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+        "update.download",
+        bytes = size as i64,
+    ));
 
     let n_chunks = parallel_chunk_count(size);
     if n_chunks < 2 {
@@ -1919,12 +1926,9 @@ async fn try_parallel_download(
     }
 }
 
-/// Fetch bytes `[start, end]` (inclusive) of `url` and write them at `start` in `dest`.
-/// Errors if the server doesn't return `206 Partial Content`.
-///
-/// Streams from the network into a `Vec<u8>` so progress ticks smoothly as bytes arrive.
-/// A single `spawn_blocking` per chunk then does the open, seek, and write_all in `std::fs`.
-/// This avoids the per-write hop into tokio's blocking pool that `tokio::fs::File::write_all` performs on every ~8 KiB Bytes item.
+/// Streams from the network into a `Vec<u8>` so progress ticks smoothly as bytes arrive. A single `spawn_blocking` per
+/// chunk then does the open, seek, and write_all in `std::fs`. This avoids the per-write hop into tokio's blocking pool
+/// that `tokio::fs::File::write_all` performs on every ~8 KiB Bytes item.
 async fn download_range(
     client: &reqwest::Client,
     url: &str,
@@ -1963,10 +1967,9 @@ async fn download_range(
     Ok(())
 }
 
-/// Download a file from `url` to `dest` with a terminal progress bar.
-///
-/// If the server provides a `Content-Length` header, a determinate bar is shown with bytes downloaded, total size, and ETA.
-/// Otherwise a spinner with a byte counter is used as a fallback.
+/// Download a file from `url` to `dest` with a terminal progress bar. If the server provides a `Content-Length` header, a
+/// determinate bar is shown with bytes downloaded, total size, and ETA. Otherwise a spinner with a byte counter is used
+/// as a fallback.
 #[doc(hidden)]
 pub async fn download_with_progress(url: &str, dest: &std::path::Path) -> Result<()> {
     crate::ensure_updates_enabled()?;
@@ -2060,10 +2063,8 @@ pub async fn download_silent(url: &str, dest: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-/// Delete `~/.grok/models_cache.json` after a successful update.
-///
-/// The cache embeds the binary version, so the new binary would treat it as a miss anyway.
-/// Removing it eagerly avoids a wasted disk read and deserialize on first launch.
+/// Delete `~/.grok/models_cache.json` after a successful update. The cache embeds the binary version, so the new binary
+/// would treat it as a miss anyway. Removing it eagerly avoids a wasted disk read and deserialize on first launch.
 async fn remove_stale_models_cache() {
     let cache = grok_home().join("models_cache.json");
     match tokio::fs::remove_file(&cache).await {
@@ -2201,18 +2202,9 @@ async fn install_internal(target: Option<&str>, update_config: &UpdateConfig) ->
     install_internal_from_bases(target, update_config, &base_refs).await
 }
 
-/// Try the base-dependent install phase ([`download_verified_from_base`]:
-/// version resolution, download, smoke test) against each base URL in turn,
-/// falling through to the next on any failure. Used to keep installs working
-/// when the primary CDN endpoint (Cloudflare) is unreachable but the fallback
-/// (direct GCS) still resolves.
-///
-/// Download-phase side effects (download dir creation, binary fetch) are
-/// idempotent, so retrying with a different base after a partial failure is
-/// safe. Smoke-test failures ([`SmokeTestFailure`]) are a property of the
-/// published artifact, not the CDN — retrying another base will not help.
-/// Local activation ([`activate_verified_download`]: link swap, cleanup, config persist) runs once after the first successful download.
-/// Its failures are not base-dependent, so they abort the install instead of triggering a pointless re-download from the next base.
+/// Download-phase side effects (download dir creation, binary fetch) are idempotent, so retrying with a different base
+/// after a partial failure is safe. Its failures are not base-dependent, so they abort the install instead of triggering
+/// a pointless re-download from the next base.
 #[doc(hidden)]
 pub async fn install_internal_from_bases(
     target: Option<&str>,
@@ -2252,12 +2244,11 @@ pub async fn install_internal_from_bases(
 
 /// First-launch of a freshly downloaded macOS binary can exceed 10s (Rosetta AOT and Gatekeeper on ~140MB).
 /// A short cap would fail a good artifact.
-const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+pub(crate) const SMOKE_TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Retry budget for exec attempts refused with ETXTBSY.
-/// The failure window is normally the microseconds another spawn in this process sits between fork and exec (see [`smoke_test_binary`]).
-/// On a heavily loaded machine that window can stretch, so the budget errs generous.
-/// A false "failed to run" both aborts this install and deletes the binary.
+/// Retry budget for exec attempts refused with ETXTBSY. The failure window is normally the microseconds another spawn in
+/// this process sits between fork and exec (see [`probe_version`]). On a heavily loaded machine that window can
+/// stretch, so the budget errs generous. A false "failed to run" both aborts this install and deletes the binary.
 const SMOKE_TEST_ETXTBSY_ATTEMPTS: u32 = 8;
 const SMOKE_TEST_ETXTBSY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(25);
 
@@ -2270,7 +2261,7 @@ fn truncate_err(s: &str, max: usize) -> String {
     while end > 0 && !s.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}...", &s[..end])
+    format!("{}...", s.get(..end).unwrap_or(""))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2303,14 +2294,20 @@ fn nonzero_message(status: &str, stderr: &str) -> String {
     )
 }
 
-async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<String, SmokeTestFailure> {
-    // ETXTBSY race: while a concurrent updater in this process is between
-    // fork and exec (pre_exec in detach_command forces the fork/exec path),
-    // its child briefly holds every open fd — including the write-side fd of
-    // a download that has just been renamed onto `binary_path`. Exec'ing a
-    // binary whose inode is still open for write fails with ETXTBSY even
-    // though the file is complete and healthy, so retry instead of failing
-    // the install (and deleting a racer's freshly installed binary).
+/// How `<binary> --version` failed to produce an exit status.
+pub(crate) enum VersionProbeError {
+    Timeout,
+    Spawn(String),
+}
+
+/// Runs a fresh download's `--version`, detached, within [`SMOKE_TEST_TIMEOUT`]. Shared by the stock
+/// updater and the private distributions, which judge the output differently.
+pub(crate) async fn probe_version(
+    binary_path: &std::path::Path,
+) -> Result<std::process::Output, VersionProbeError> {
+    // ETXTBSY race: a concurrent updater's child in this process briefly holds every open fd between fork and exec pre_exec
+    // in detach_command forces the fork/exec path. The held fds include the write side of a download just renamed onto
+    // `binary_path`. So retry instead of failing the install (and deleting a racer's freshly installed binary)
     let mut last_spawn = String::new();
     for attempt in 1..=SMOKE_TEST_ETXTBSY_ATTEMPTS {
         let mut cmd = tokio::process::Command::new(binary_path);
@@ -2321,30 +2318,38 @@ async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<String, Smok
             .kill_on_drop(true);
         xai_grok_tools::util::detach_command(&mut cmd);
         match tokio::time::timeout(SMOKE_TEST_TIMEOUT, cmd.output()).await {
-            Err(_) => return Err(SmokeTestFailure::Timeout),
-            Ok(Ok(output)) if output.status.success() => {
-                return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
-            }
-            Ok(Ok(output)) => {
-                let status = output
-                    .status
-                    .code()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| output.status.to_string());
-                let stderr = truncate_err(&String::from_utf8_lossy(&output.stderr), 400);
-                return Err(SmokeTestFailure::NonZero { status, stderr });
-            }
+            Err(_) => return Err(VersionProbeError::Timeout),
+            Ok(Ok(output)) => return Ok(output),
             Ok(Err(e)) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
                 last_spawn = e.to_string();
                 if attempt < SMOKE_TEST_ETXTBSY_ATTEMPTS {
                     tokio::time::sleep(SMOKE_TEST_ETXTBSY_BACKOFF * attempt).await;
                 }
             }
-            Ok(Err(e)) => return Err(SmokeTestFailure::Spawn(e.to_string())),
+            Ok(Err(e)) => return Err(VersionProbeError::Spawn(e.to_string())),
         }
     }
     // Reached only when every attempt hit ETXTBSY; `last_spawn` holds the final spawn error
-    Err(SmokeTestFailure::Spawn(last_spawn))
+    Err(VersionProbeError::Spawn(last_spawn))
+}
+
+async fn smoke_test_binary(binary_path: &std::path::Path) -> Result<String, SmokeTestFailure> {
+    let output = probe_version(binary_path)
+        .await
+        .map_err(|error| match error {
+            VersionProbeError::Timeout => SmokeTestFailure::Timeout,
+            VersionProbeError::Spawn(message) => SmokeTestFailure::Spawn(message),
+        })?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+    }
+    let status = output
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| output.status.to_string());
+    let stderr = truncate_err(&String::from_utf8_lossy(&output.stderr), 400);
+    Err(SmokeTestFailure::NonZero { status, stderr })
 }
 
 #[cfg(feature = "community-build")]
@@ -2381,6 +2386,9 @@ pub async fn install_internal_from_base(
 struct VerifiedDownload {
     version: String,
     binary_path: std::path::PathBuf,
+    /// Windows: the grove hook exes and MinGit archive fetched for this release (empty elsewhere).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    payload: windows_payload::Payload,
 }
 
 /// Base-dependent install phase: resolve the version (per base when no target is pinned), download the binary, and smoke-test it.
@@ -2419,21 +2427,43 @@ async fn download_verified_from_base(
 
     // Smoke-test: run the binary before activating it
     // A truncated or corrupt download is caught here and never becomes the active grok
-    if let Err(fail) = smoke_test_binary(&binary_path).await {
+    let smoke_span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+        "update.smoke_test",
+        elapsed_ms = tracing::field::Empty,
+    ));
+    let smoke_started = Instant::now();
+    let smoke_result = smoke_test_binary(&binary_path).await;
+    smoke_span
+        .span()
+        .record("elapsed_ms", smoke_started.elapsed().as_millis() as i64);
+    smoke_span.close();
+    if let Err(fail) = smoke_result {
         let _ = tokio::fs::remove_file(&binary_path).await;
         // No prefix: run_install_script's wrap adds "Auto-update failed:".
         return Err(fail.into());
     }
 
+    // Best-effort and base-dependent, so it belongs to this phase; a miss never fails the install.
+    #[cfg(windows)]
+    let payload = windows_payload::download(gcs_base_url, &version, &platform, &download_dir).await;
+    #[cfg(not(windows))]
+    let payload = windows_payload::Payload::default();
+
     Ok(VerifiedDownload {
         version,
         binary_path,
+        payload,
     })
 }
 
 /// Local activation phase: swap the managed bin links to the downloaded binary and finish bookkeeping.
 /// Nothing here depends on which base URL served the download, so callers must not retry another base on failure.
 async fn activate_verified_download(download: &VerifiedDownload) -> Result<()> {
+    let activate_span = xai_grok_telemetry::region::Region::from_span(tracing::info_span!(
+        "update.install",
+        elapsed_ms = tracing::field::Empty,
+    ));
+    let activate_started = Instant::now();
     let grok_home = grok_home();
     let download_dir = grok_home.join("downloads");
     let bin_dir = grok_home.join("bin");
@@ -2444,9 +2474,13 @@ async fn activate_verified_download(download: &VerifiedDownload) -> Result<()> {
 
     remove_stale_pager(&bin_dir).await;
 
+    // Hook exes beside grok.exe and the bundled MinGit; grok is already live, so a failure here is only logged.
+    #[cfg(windows)]
+    windows_payload::activate(&download.payload, &bin_dir, &download.version).await;
+
     eprintln!();
 
-    // Clean up old versioned binaries (keeps the current and one previous)
+    // Current, N-1, and any leftover a live process is still executing.
     cleanup_old_downloads(&download_dir, "grok", &download.version).await;
     cleanup_old_downloads(&download_dir, "grok-pager", &download.version).await;
 
@@ -2458,13 +2492,15 @@ async fn activate_verified_download(download: &VerifiedDownload) -> Result<()> {
 
     regenerate_completions(&link_path, &grok_home).await;
 
+    activate_span
+        .span()
+        .record("elapsed_ms", activate_started.elapsed().as_millis() as i64);
     Ok(())
 }
 
-/// Regenerate shell completions after a binary update (best-effort).
-///
-/// Spawns the newly-installed binary with `completions <shell>` for each supported shell and writes the output to the standard completion paths.
-/// Failures are silently ignored: completions are a nice-to-have, not a requirement for a successful update.
+/// Regenerate shell completions after a binary update (best-effort). Spawns the newly-installed binary with `completions
+/// <shell>` for each supported shell and writes the output to the standard completion paths. Failures are silently
+/// ignored: completions are a nice-to-have, not a requirement for a successful update.
 async fn regenerate_completions(binary: &std::path::Path, grok_home: &std::path::Path) {
     // Derive $HOME independently: grok_home may be overridden via GROK_HOME env var, so grok_home.parent() isn't necessarily the user's home dir
     let user_home = xai_dirs::home_dir().unwrap_or_default();
@@ -2494,18 +2530,14 @@ async fn regenerate_completions(binary: &std::path::Path, grok_home: &std::path:
     }
 }
 
-/// Compute a relative symlink target from `link` to `target`.
-///
-/// When both paths share a grandparent (e.g. `~/.grok/bin/grok` and
-/// `~/.grok/downloads/grok-0.1.203-linux-x86_64`), returns a relative path
-/// like `../downloads/grok-0.1.203-linux-x86_64`. When they share the same parent directory, returns just the filename.
-/// Falls back to the absolute `target` path for any other layout.
-///
-/// Relative symlinks survive Docker bind-mounts where `~/.grok/` is mapped
-/// into a container with a different `$HOME` (and thus a different absolute
-/// prefix).
+/// When both paths share a grandparent (e.g. `~/.grok/bin/grok` and `~/.grok/downloads/grok-0.1.203-linux-x86_64`),
+/// returns a relative path like `../downloads/grok-0.1.203-linux-x86_64`. Relative symlinks survive Docker bind-mounts
+/// where `~/.grok/` is mapped into a container with a different `$HOME` (and thus a different absolute prefix).
 #[cfg(unix)]
-fn relative_symlink_target(target: &std::path::Path, link: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn relative_symlink_target(
+    target: &std::path::Path,
+    link: &std::path::Path,
+) -> std::path::PathBuf {
     let (Some(target_parent), Some(link_parent)) = (target.parent(), link.parent()) else {
         return target.to_path_buf();
     };
@@ -2525,20 +2557,9 @@ fn relative_symlink_target(target: &std::path::Path, link: &std::path::Path) -> 
     target.to_path_buf()
 }
 
-/// Swap `~/.grok/bin/{grok,agent}` to point at `binary_path`. Returns the
-/// `grok` link path (for [`regenerate_completions`]).
-///
-/// The bootstrap installers (`install.sh`, `install.ps1`, `install-enterprise.sh`) maintain `grok` and `agent` in lockstep, and so must the updater.
-/// Otherwise `grok update` leaves `agent` pinned at the previous version.
-///
-/// Unix: atomic symlink swap with relative target (survives Docker
-/// bind-mounts of `~/.grok/`). Windows: [`windows_replace_exe`].
-///
-/// **All-or-nothing.** Each link's prior state is captured before the swap.
-/// The capture is the prior symlink target on Unix, a `.rollback.bak` on Windows, or an `Absent` marker via `symlink_metadata`.
-/// Any earlier successful swaps are rolled back if a later one fails, including *removing* a link that didn't exist before.
-/// Restore failures go to `tracing::warn!`.
-/// The swap error itself propagates unwrapped so the caller's `reinstall_hint` wrap stays the user-visible message.
+/// The bootstrap installers (`install.sh`, `install.ps1`, `install-enterprise.sh`) maintain `grok` and `agent` in
+/// lockstep, and so must the updater. Otherwise `grok update` leaves `agent` pinned at the previous version. Any earlier
+/// successful swaps are rolled back if a later one fails, including *removing* a link that didn't exist before.
 async fn swap_managed_bin_links(
     binary_path: &std::path::Path,
     bin_dir: &std::path::Path,
@@ -2651,13 +2672,26 @@ async fn swap_managed_entrypoint_links(
     secondary_target: Option<&std::path::Path>,
 ) -> Result<std::path::PathBuf> {
     let primary_link = bin_dir.join(primary_name);
-    let secondary_link = bin_dir.join(secondary_name);
-    let link_paths: [std::path::PathBuf; 2] = [primary_link.clone(), secondary_link];
+    let secondary_source = secondary_target
+        .map(|target| bin_dir.join(target))
+        .unwrap_or_else(|| binary_path.to_path_buf());
+    let pairs = [
+        (binary_path.to_path_buf(), primary_link.clone()),
+        (secondary_source, bin_dir.join(secondary_name)),
+    ];
+    replace_managed_bins(&pairs).await?;
+    Ok(primary_link)
+}
 
-    // Capture every link up-front so a second-link capture failure can't strand the first mid-swap
-    let mut captured: Vec<LinkRollback> = Vec::with_capacity(link_paths.len());
-    for path in &link_paths {
-        match LinkRollback::capture(path).await {
+/// Point every `dest` in `pairs` at its `src` (a symlink on Unix, a copy through
+/// `windows_replace_exe` on Windows) as one unit: every `dest` is captured
+/// up-front, then replaced in order, and a failure restores the completed ones in
+/// reverse, including removing a `dest` that did not exist before.
+async fn replace_managed_bins(pairs: &[(std::path::PathBuf, std::path::PathBuf)]) -> Result<()> {
+    // Capture every dest up-front so a later capture failure can't strand an earlier one mid-swap
+    let mut captured: Vec<LinkRollback> = Vec::with_capacity(pairs.len());
+    for (_, dest) in pairs {
+        match LinkRollback::capture(dest).await {
             Ok(rb) => captured.push(rb),
             Err(e) => {
                 // Nothing swapped yet; drop any Windows .rollback.bak files.
@@ -2665,34 +2699,29 @@ async fn swap_managed_entrypoint_links(
                     prior.cleanup().await;
                 }
                 return Err(e)
-                    .with_context(|| format!("capturing rollback state for {}", path.display()));
+                    .with_context(|| format!("capturing rollback state for {}", dest.display()));
             }
         }
     }
 
     let mut completed: Vec<(&LinkRollback, Option<std::path::PathBuf>)> =
         Vec::with_capacity(captured.len());
-    for (i, (link_path, rollback)) in link_paths.iter().zip(captured.iter()).enumerate() {
-        let target = if i == 1 {
-            secondary_target.unwrap_or(binary_path)
-        } else {
-            binary_path
-        };
+    for (i, ((src, dest), rollback)) in pairs.iter().zip(captured.iter()).enumerate() {
         #[cfg(unix)]
         let swap_result = {
-            let rel_target = relative_symlink_target(target, link_path);
-            atomic_symlink_swap(&rel_target, link_path).await
+            let rel_target = relative_symlink_target(src, dest);
+            atomic_symlink_swap(&rel_target, dest).await
         };
         #[cfg(unix)]
-        let rollback_expected = Some(relative_symlink_target(target, link_path));
+        let rollback_expected = Some(relative_symlink_target(src, dest));
         #[cfg(windows)]
-        let swap_result = windows_replace_exe(target, link_path).await;
+        let swap_result = windows_replace_exe(src, dest).await;
         #[cfg(windows)]
         let rollback_expected = None;
         #[cfg(not(any(unix, windows)))]
         let swap_result: Result<()> = {
             // No managed bin layout on this target; no-op.
-            let _ = (target, link_path);
+            let _ = (src, dest);
             Ok(())
         };
         #[cfg(not(any(unix, windows)))]
@@ -2721,10 +2750,10 @@ async fn swap_managed_entrypoint_links(
                 // Failed swap had no active state to restore; drop its backup.
                 rollback.cleanup().await;
                 // Drop backups for never-attempted later captures (Windows orphans).
-                for later in &captured[i + 1..] {
+                for later in captured.get(i + 1..).unwrap_or(&[]) {
                     later.cleanup().await;
                 }
-                return Err(e);
+                return Err(e).with_context(|| format!("replacing {}", dest.display()));
             }
         }
     }
@@ -2732,10 +2761,10 @@ async fn swap_managed_entrypoint_links(
     for cap in &captured {
         cap.cleanup().await;
     }
-    Ok(primary_link)
+    Ok(())
 }
 
-/// Snapshot of a managed-bin link's prior state for rollback in [`swap_managed_bin_links`].
+/// Snapshot of a managed-bin link's prior state for rollback in [`replace_managed_bins`].
 /// `Absent` vs `Present` is discriminated up front via `symlink_metadata` so capture errors never get misread as "link was absent".
 enum LinkRollback {
     /// Link was absent before the swap; rollback removes the one we created.
@@ -2886,14 +2915,14 @@ impl LinkRollback {
     }
 }
 
-/// Atomically swap a symlink to point to a new target.
-///
-/// Creates a temporary symlink next to `link_path`, then renames it over the old symlink.
-/// This avoids the remove-then-create race where the path briefly doesn't exist, and never deletes the old target file.
-/// On macOS (especially Apple Silicon), deleting a binary that a running process has mmap'd causes SIGKILL.
-/// The kernel can no longer verify the code signature of the executable pages.
+/// Creates a temporary symlink next to `link_path`, then renames it over the old symlink. This avoids the
+/// remove-then-create race where the path briefly doesn't exist, and never deletes the old target file. On macOS
+/// (especially Apple Silicon), deleting a binary that a running process has mmap'd causes SIGKILL.
 #[cfg(unix)]
-async fn atomic_symlink_swap(target: &std::path::Path, link_path: &std::path::Path) -> Result<()> {
+pub(crate) async fn atomic_symlink_swap(
+    target: &std::path::Path,
+    link_path: &std::path::Path,
+) -> Result<()> {
     // Per-racer temp name: a shared one makes remove_file then symlink racy (EEXIST, or ENOENT when another racer renames the link away)
     sweep_stale_tmp_links(link_path, STALE_TMP_AGE).await;
     let tmp_link = unique_temp_sibling(link_path, "tmp-link");
@@ -2937,20 +2966,17 @@ async fn sweep_stale_tmp_links(link_path: &std::path::Path, max_age: Duration) {
     }
 }
 
-/// Replace an executable that may be locked by a running process (Windows).
-///
-/// On Windows the kernel prevents writes to a running executable but allows renames.
-/// If a direct copy fails with a sharing violation, this renames `dest` aside and copies `src` into the freed path.
-/// If the copy then fails, the rename is rolled back to avoid a broken install.
-///
-/// The aside target is normally `<dest>.old`, but a leftover `.old` can itself still be a running image.
-/// The session that was live during the previous update keeps executing the renamed-aside file.
-/// A running image can neither be deleted nor rename-replaced.
-/// In that case `dest` is renamed to a unique `<dest>.old.{pid}-{seq}.old` sibling instead, so a locked leftover can never block the update.
-/// All `.old` leftovers are swept best-effort at the start of each cycle.
-/// Still-locked ones survive until a later update runs after those processes exit.
+/// If the copy then fails, the rename is rolled back to avoid a broken install. In that case `dest` is renamed to a
+/// unique `<dest>.old.{pid}-{seq}.old` sibling instead, so a locked leftover can never block the update. Still-locked
+/// ones survive until a later update runs after those processes exit.
 #[cfg(windows)]
 async fn windows_replace_exe(src: &std::path::Path, dest: &std::path::Path) -> Result<()> {
+    let _install_lock = acquire_windows_update_lock(dest)?;
+    windows_replace_exe_locked(src, dest).await
+}
+
+#[cfg(windows)]
+async fn windows_replace_exe_locked(src: &std::path::Path, dest: &std::path::Path) -> Result<()> {
     let file_name = dest
         .file_name()
         .ok_or_else(|| anyhow::anyhow!("destination has no filename: {}", dest.display()))?
@@ -3011,24 +3037,26 @@ async fn windows_replace_exe(src: &std::path::Path, dest: &std::path::Path) -> R
         )
     })?;
     match tokio::fs::copy(src, dest).await {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            sweep_old_exe_backups(&old).await;
+            Ok(())
+        }
         Err(e) => {
             // Rollback: restore the old binary so the install isn't broken.
-            let _ = tokio::fs::rename(&aside, dest).await;
+            if let Err(rollback) = tokio::fs::rename(&aside, dest).await {
+                anyhow::bail!(
+                    "install failed: {e}; rollback failed: {rollback}; previous executable retained at {}",
+                    aside.display()
+                );
+            }
             Err(e.into())
         }
     }
 }
 
-/// Best-effort removal of `<exe>.old` plus the unique `<exe>.old.{pid}-{seq}.old` asides accumulated by prior update cycles.
-/// Locked ones (still-running images) survive and are collected by a later update once those processes exit.
-/// The `<exe>.old` prefix keeps the sweep away from `<exe>` itself, other executables' leftovers, and the `.rollback.bak` / `.tmp` sibling shapes.
-///
-/// Unlike `sweep_stale_tmp_links` there is deliberately no `max_age` gate.
-/// Rename preserves mtime, so a racer's seconds-old aside already looks days old and age cannot distinguish it.
-/// In-use asides survive deletion by being locked.
-/// Deleting a racer's fresh unlocked aside is the same accepted race as in `tmp_download_path`.
-/// That aside is the racer's rollback source while both racers converge on the same dest.
+/// The `<exe>.old` prefix keeps the sweep away from `<exe>` itself, other executables' leftovers, and the `.rollback.bak`
+/// / `.tmp` sibling shapes. Rename preserves mtime, so a racer's seconds-old aside already looks days old and age cannot
+/// distinguish it. Deleting a racer's fresh unlocked aside is the same accepted race as in `tmp_download_path`.
 #[cfg(windows)]
 async fn sweep_old_exe_backups(old: &std::path::Path) {
     let _ = tokio::fs::remove_file(old).await;
@@ -3045,118 +3073,18 @@ async fn sweep_old_exe_backups(old: &std::path::Path) {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.starts_with(&prefix) && name.ends_with(".old") {
+        let is_owned_aside = name
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(".old"))
+            .and_then(|nonce| nonce.split_once('-'))
+            .is_some_and(|(pid, sequence)| {
+                !pid.is_empty()
+                    && !sequence.is_empty()
+                    && pid.bytes().all(|byte| byte.is_ascii_digit())
+                    && sequence.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        if is_owned_aside {
             let _ = tokio::fs::remove_file(entry.path()).await;
-        }
-    }
-}
-
-/// Best-effort cleanup of old versioned binaries for a given binary name.
-///
-/// Mirrors the npm `cleanupOldVersions()` policy: keeps the current version plus one previous version.
-/// A process may still be running the old binary without having loaded all its pages yet.
-/// Deleting it on macOS causes SIGKILL because the kernel can no longer verify the code signature.
-///
-/// `bin_prefix` is the binary name prefix, e.g. `"grok"` or `"grok-pager"`.
-/// Files must match `{bin_prefix}-{digit}*` to be considered versioned binaries (this avoids `grok-*` matching `grok-pager-*` or `grok-latest`).
-///
-/// Temporary/partial files (containing `.tmp`) are deleted only once they are **stale** (mtime older than [`STALE_TMP_AGE`]).
-/// A fresh `.tmp` may be a concurrent updater's in-flight download (the same-instant race the lock-free design accepts).
-/// Deleting it out from under that updater would make its atomic rename fail.
-async fn cleanup_old_downloads(dir: &std::path::Path, bin_prefix: &str, current_version: &str) {
-    let prefix = format!("{}-", bin_prefix);
-    let current_semver = match Version::parse(current_version) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(
-                "cleanup_old_downloads: invalid current version '{}': {}",
-                current_version,
-                e
-            );
-            return;
-        }
-    };
-
-    let mut entries = match tokio::fs::read_dir(dir).await {
-        Ok(rd) => rd,
-        Err(e) => {
-            tracing::warn!(
-                "cleanup_old_downloads: failed to read {}: {}",
-                dir.display(),
-                e
-            );
-            return;
-        }
-    };
-
-    let mut versioned: Vec<(Version, String)> = Vec::new();
-
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !name.starts_with(&prefix) {
-            continue;
-        }
-        // Temp/partial files: sweep only STALE ones (a fresh `.tmp` may be a concurrent updater's in-flight download)
-        if name.contains(".tmp") {
-            let stale = match entry.metadata().await.and_then(|m| m.modified()) {
-                Ok(modified) => std::time::SystemTime::now()
-                    .duration_since(modified)
-                    .map(|age| age > STALE_TMP_AGE)
-                    // Future mtime (clock skew): can't tell; leave it
-                    .unwrap_or(false),
-                // Unknown mtime: leave it; it is swept once readable and old
-                Err(_) => false,
-            };
-            if stale && let Err(e) = tokio::fs::remove_file(entry.path()).await {
-                tracing::warn!("failed to remove stale temp file {}: {}", name, e);
-            }
-            continue;
-        }
-        // Skip symlinks (e.g. grok-latest).
-        if let Ok(ft) = entry.file_type().await
-            && ft.is_symlink()
-        {
-            continue;
-        }
-        // The suffix after the prefix must start with a digit to be a versioned binary (avoids `grok-latest`, `grok-pager-*` when prefix is `grok`)
-        let suffix = &name[prefix.len()..];
-        if !suffix.starts_with(|c: char| c.is_ascii_digit()) {
-            continue;
-        }
-        // Extract the version portion via the shared parser
-        // It handles the internal `grok-0.1.150-macos-aarch64`, pre-release, and npm `grok-0.1.150` layouts
-        let Some(ver_str) = crate::version::version_from_versioned_binary_name(&name, bin_prefix)
-        else {
-            continue;
-        };
-        if let Ok(v) = Version::parse(&ver_str) {
-            // Skip the current version — never delete it.
-            if v == current_semver {
-                continue;
-            }
-            versioned.push((v, name));
-        }
-    }
-
-    versioned.sort_by(|a, b| b.0.cmp(&a.0));
-
-    // Keep the most recent old version (the newest sorts first) and delete the rest
-    for (_, name) in versioned.iter().skip(1) {
-        let path = dir.join(name);
-        // Same freshness guard as the `.tmp` sweep: a versioned binary written moments ago is likely a concurrent installer's just-renamed download
-        // Its symlink swap hasn't happened yet; deleting the binary would leave that swap pointing at nothing
-        // Old binaries from previous releases are days old
-        let fresh = tokio::fs::metadata(&path)
-            .await
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
-            .is_some_and(|age| age <= STALE_TMP_AGE);
-        if fresh {
-            continue;
-        }
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            tracing::warn!("failed to remove old binary {}: {}", name, e);
         }
     }
 }
@@ -3353,8 +3281,11 @@ async fn agent_exe_differs(
         if n == 0 {
             return Ok(false);
         }
-        ra.read_exact(&mut ba[..n]).await?;
-        if bg[..n] != ba[..n] {
+        let Some(dst) = ba.get_mut(..n) else {
+            return Ok(true);
+        };
+        ra.read_exact(dst).await?;
+        if bg.get(..n) != ba.get(..n) {
             return Ok(true);
         }
     }
@@ -3405,10 +3336,9 @@ async fn gh_release_download(tag: &str, pattern: &str, dest: &std::path::Path) -
     Ok(())
 }
 
-/// Download and install grok from GitHub Releases (xai-org-shared/grok-build).
-///
-/// Uses `gh release download` to fetch the binary matching the current platform.
-/// This works anywhere the `gh` CLI is authenticated, without needing npm or internal network access.
+/// Download and install grok from GitHub Releases (xai-org-shared/grok-build). Uses `gh release download` to fetch the
+/// binary matching the current platform. This works anywhere the `gh` CLI is authenticated, without needing npm or
+/// internal network access.
 async fn install_gh_release(target: Option<&str>) -> Result<()> {
     let (os, arch) = detect_platform()?;
     let platform = format!("{}-{}", os, arch);
@@ -3475,7 +3405,7 @@ async fn install_gh_release(target: Option<&str>) -> Result<()> {
 
     eprintln!();
 
-    // Clean up old versioned binaries (keeps the current and one previous)
+    // Current, N-1, and any leftover a live process is still executing.
     cleanup_old_downloads(&download_dir, "grok", &version).await;
     cleanup_old_downloads(&download_dir, "grok-pager", &version).await;
 
@@ -3517,15 +3447,9 @@ fn create_temp_npmrc(npm_registry: Option<&str>) -> Result<Option<std::path::Pat
     Ok(None)
 }
 
-/// Check if other grok processes are running (macOS only).
-///
-/// On macOS, `npm i -g` replaces the vendored binary in node_modules in-place.
-/// Any grok process running from that vendored path will be SIGKILL'd by the kernel.
-/// macOS (Apple Silicon in particular) can no longer verify the code signature of the mmap'd executable pages once the backing inode is unlinked.
-///
-/// While our postinstall.js now uses versioned binaries under ~/.grok/bin/
-/// (so processes launched from there are safe), older installations or npx
-/// invocations may still be running the vendored binary directly.
+/// Check if other grok processes are running (macOS only). Any grok process running from that vendored path will be
+/// SIGKILL'd by the kernel. macOS (Apple Silicon in particular) can no longer verify the code signature of the mmap'd
+/// executable pages once the backing inode is unlinked.
 #[cfg(target_os = "macos")]
 fn warn_if_other_grok_processes_running() {
     let my_pid = std::process::id().to_string();
@@ -3652,12 +3576,9 @@ pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &
     }
 }
 
-/// Run the `grok update` command.
-/// Returns `Ok(Some(version))` when the target version is present on disk afterwards.
-/// That covers both a version installed by this call and one found already installed (e.g. by a concurrent background download).
-/// Returns `Ok(None)` when there is no installer or no applicable target.
-/// Callers use the returned version to signal a running leader to relaunch onto the new binary (see the pager's post-update leader relaunch).
-/// That signal must fire even when the download itself was skipped, so a stale leader still picks up a binary someone else installed.
+/// Returns `Ok(Some(version))` when the target version is present on disk afterwards. Callers use the returned version to
+/// signal a running leader to relaunch onto the new binary (see the pager's post-update leader relaunch). That signal
+/// must fire even when the download itself was skipped, so a stale leader still picks up a binary someone else installed.
 pub async fn run_update(
     force: bool,
     pinned_version: Option<&str>,
@@ -3727,6 +3648,9 @@ pub async fn run_update(
             let commands = crate::community_command_names();
             eprintln!("  ✓ grok-zh v{version} 安装成功！");
             eprintln!("  请重新启动 `{}` 或 `{}`。", commands.grok, commands.agent);
+            if std::env::var_os("GROK_ZH_DEFER_UPDATE_NOTES").is_none() {
+                crate::community_update_notes::print_pending(Some(version));
+            }
         }
         #[cfg(not(feature = "community-build"))]
         {
@@ -3747,13 +3671,16 @@ pub async fn run_update(
             .unwrap(),
     );
     pb.enable_steady_tick(Duration::from_millis(100));
-    let plan = fetch_update_plan(installer, update_config, &policy).await?;
+    let plan = fetch_update_plan(installer, update_config, &policy).await;
     pb.finish_and_clear();
+    let plan = plan?;
 
     let (latest_version, install_target) = match plan {
         UpdatePlan::Skip { latest } => {
             // Cache so an explicit `grok update` doesn't re-prompt every run.
             let stable_ptr = try_fetch_stable_pointer().await;
+            #[cfg(feature = "community-build")]
+            crate::community_update_cancel::check()?;
             write_version_cache(&latest, stable_ptr.as_deref()).await;
             if cfg!(feature = "community-build") {
                 eprintln!(
@@ -3794,11 +3721,9 @@ pub async fn run_update(
         }
     }
 
-    // What's on disk wins over this process's compiled-in version
-    // A concurrent or earlier updater (TUI background download, leader hourly checker) may already have installed the target
-    // In that case there is nothing to download
-    // Gated on the installer maintaining the managed symlink
-    // For npm a leftover symlink would lie (see `disk_version_for_installer`)
+    // What's on disk wins over this process's compiled-in version. A concurrent or earlier updater (TUI background download,
+    // leader hourly checker) may already have installed the target. In that case there is nothing to download. Gated on the
+    // installer maintaining the managed symlink. For npm a leftover symlink would lie (see `disk_version_for_installer`)
     let effective_current =
         disk_version_for_installer(installer).unwrap_or_else(|| current_version.clone());
 
@@ -3818,6 +3743,8 @@ pub async fn run_update(
                     // Fall through to install
                 } else {
                     let stable_ptr = try_fetch_stable_pointer().await;
+                    #[cfg(feature = "community-build")]
+                    crate::community_update_cancel::check()?;
                     write_version_cache(&install_target, stable_ptr.as_deref()).await;
                     if cfg!(feature = "community-build") {
                         eprintln!("已是最新版本（{effective_current}）。");
@@ -3922,25 +3849,170 @@ pub async fn run_update(
             eprintln!("  Please restart Grok.");
         }
     }
+    #[cfg(feature = "community-build")]
+    if std::env::var_os("GROK_ZH_DEFER_UPDATE_NOTES").is_none() {
+        crate::community_update_notes::print_pending(Some(target_version));
+    }
     Ok(Some(target_version.to_string()))
+}
+
+#[cfg(windows)]
+fn acquire_windows_update_lock(exe: &std::path::Path) -> Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    let name = exe
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("executable has no filename"))?;
+    let lock = exe.with_file_name(format!("{}.update.lock", name.to_string_lossy()));
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .share_mode(0)
+        .open(&lock)
+        .context(
+            "another updater or backup cleanup is using this installation; retry after it finishes",
+        )
+}
+
+/// Best-effort retry for files that were locked when activation completed.
+/// This never touches shared conversation data or official-command backups.
+#[cfg(feature = "community-build")]
+pub async fn cleanup_community_update_backups() {
+    #[cfg(windows)]
+    if let Ok(exe) = std::env::current_exe()
+        && exe
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("grok-zh.exe"))
+        && let Ok(_lock) = acquire_windows_update_lock(&exe)
+    {
+        sweep_old_exe_backups(&exe.with_file_name("grok-zh.exe.old")).await;
+    }
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    ))]
+    if let Some(home) = xai_dirs::resolve_grok_home() {
+        let bin = home.join("bin");
+        let downloads = home.join("grok-zh-downloads");
+        if validate_community_home_path(&bin).is_ok()
+            && validate_community_home_path(&downloads).is_ok()
+            && bin.is_dir()
+            && downloads.is_dir()
+            && let Ok(_lock) = acquire_community_install_lock(&bin)
+        {
+            cleanup_community_targets(&downloads, &bin).await;
+        }
+    }
+}
+
+#[cfg(all(unix, feature = "community-build"))]
+async fn cleanup_community_targets(downloads: &std::path::Path, bin: &std::path::Path) {
+    cleanup_community_targets_with(
+        downloads,
+        bin,
+        crate::cleanup_downloads::executable_is_in_use_conservative,
+    )
+    .await;
+}
+
+#[cfg(all(unix, feature = "community-build"))]
+async fn cleanup_community_targets_with(
+    downloads: &std::path::Path,
+    bin: &std::path::Path,
+    is_in_use: impl Fn(&std::path::Path) -> bool,
+) {
+    use std::os::unix::fs::MetadataExt;
+    // Refuse redirected directories. Only plain files with our exact installed
+    // naming contract are eligible; all live launch aliases retain their target.
+    for directory in [downloads, bin] {
+        if !std::fs::symlink_metadata(directory).is_ok_and(|metadata| {
+            metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && metadata.uid() == unsafe { libc::geteuid() }
+        }) {
+            return;
+        }
+    }
+    let Ok(active) = std::fs::canonicalize(bin.join("grok-zh")) else {
+        return;
+    };
+    let Ok(root) = std::fs::canonicalize(downloads) else {
+        return;
+    };
+    if active.parent() != Some(root.as_path()) {
+        return;
+    }
+    let protected: Vec<_> = ["grok-zh", "agent-zh", "grok", "agent"]
+        .iter()
+        .filter_map(|name| std::fs::canonicalize(bin.join(name)).ok())
+        .collect();
+    let Ok(mut entries) = tokio::fs::read_dir(&root).await else {
+        return;
+    };
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let name = entry.file_name();
+        if !name.to_str().is_some_and(is_community_installed_target)
+            || protected.contains(&path)
+            || !entry.file_type().await.is_ok_and(|kind| kind.is_file())
+        {
+            continue;
+        }
+        // A standalone installer may still be publishing a fresh immutable
+        // target. Leave those for a subsequent startup instead of racing it.
+        let stale = entry
+            .metadata()
+            .await
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+            .is_some_and(|age| age > STALE_TMP_AGE);
+        if stale && !is_in_use(&path) {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+    }
+}
+
+#[cfg(all(feature = "community-build", any(unix, test)))]
+fn is_community_installed_target(name: &str) -> bool {
+    let Some(rest) = name
+        .strip_prefix("grok-zh-")
+        .and_then(|rest| rest.strip_suffix(".installed"))
+    else {
+        return false;
+    };
+    ["-linux-x86_64-gnu.", "-macos-aarch64."]
+        .iter()
+        .any(|platform| {
+            let Some((version, nonce)) = rest.rsplit_once(platform) else {
+                return false;
+            };
+            semver::Version::parse(version)
+                .is_ok_and(|parsed| parsed.to_string() == version && parsed.build.is_empty())
+                && !nonce.is_empty()
+                && nonce
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
 }
 
 /// Refresh managed config post-update (best-effort, staleness-gated), for deployment-key and team principals alike.
 async fn refresh_deployment_config() {
-    if !xai_grok_shell::managed_config::has_principal() {
+    if !xai_grok_cloud_config::managed_config::has_principal() {
         return;
     }
-    if !xai_grok_shell::managed_config::is_fetch_enabled() {
+    if !xai_grok_cloud_config::managed_config::is_fetch_enabled() {
         return;
     }
     // Clear a logged-out team's files before deciding to fetch (mirrors the loop).
-    xai_grok_shell::managed_config::clear_orphan();
+    xai_grok_cloud_config::managed_config::clear_orphan();
     if !xai_grok_shell::config::is_managed_config_stale_for(
-        &xai_grok_shell::managed_config::current_serving_identity(),
+        &xai_grok_cloud_config::managed_config::current_serving_identity(),
     ) {
         return;
     }
-    match xai_grok_shell::managed_config::sync().await {
+    match xai_grok_cloud_config::managed_config::sync().await {
         Ok(true) => {
             if cfg!(feature = "community-build") {
                 eprintln!("  已应用托管配置。");
@@ -3968,6 +4040,9 @@ async fn refresh_deployment_config() {
         }
     }
 }
+
+#[path = "windows_payload.rs"]
+mod windows_payload;
 
 #[cfg(test)]
 mod tests {
@@ -6685,9 +6760,15 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), "updated binary");
 
         let old = dir.path().join("grok.exe.old");
-        assert!(old.exists(), ".old must exist after rename fallback");
+        // This handle permits deletion; cleanup leaves its old file data readable.
+        let mut old_bytes = String::new();
+        std::io::Read::read_to_string(&mut &_lock, &mut old_bytes).unwrap();
+        assert_eq!(old_bytes, "running binary");
         drop(_lock);
-        assert_eq!(std::fs::read_to_string(&old).unwrap(), "running binary");
+        assert!(
+            !old.exists(),
+            "successful replacement must clean a deletable aside"
+        );
     }
 
     #[cfg(windows)]
@@ -6809,15 +6890,13 @@ mod tests {
                     .is_some_and(|n| n.starts_with("grok.exe.old.") && n.ends_with(".old"))
             })
             .collect();
-        assert_eq!(
-            asides.len(),
-            1,
-            "dest must be renamed to a unique aside: {asides:?}"
+        assert!(
+            asides.is_empty(),
+            "deletable unique asides must be cleaned after success: {asides:?}"
         );
-        assert_eq!(
-            std::fs::read_to_string(&asides[0]).unwrap(),
-            "running binary"
-        );
+        let mut running_bytes = String::new();
+        std::io::Read::read_to_string(&mut &_dest_lock, &mut running_bytes).unwrap();
+        assert_eq!(running_bytes, "running binary");
     }
 
     #[cfg(windows)]
@@ -7017,5 +7096,98 @@ mod tests {
             npm_registry: None,
         };
         assert!(auto_update_target(&cfg).await.is_none());
+    }
+
+    // --- absorbed from upstream 1.0.45 auto_update_tests.rs (not already covered inline) ---
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_windows_update_lock_protects_concurrent_activation_and_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("grok-zh.exe");
+        let source = dir.path().join("new.exe");
+        std::fs::write(&destination, "original").unwrap();
+        std::fs::write(&source, "new").unwrap();
+        let lock = acquire_windows_update_lock(&destination).unwrap();
+        assert!(windows_replace_exe(&source, &destination).await.is_err());
+        assert!(acquire_windows_update_lock(&destination).is_err());
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "original");
+        drop(lock);
+        windows_replace_exe(&source, &destination).await.unwrap();
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "new");
+    }
+
+    #[cfg(feature = "community-build")]
+    #[test]
+    fn community_cleanup_recognizes_only_owned_installed_target_names() {
+        for valid in [
+            "grok-zh-1.0.35-linux-x86_64-gnu.42-1.installed",
+            "grok-zh-1.0.35-rc.2-macos-aarch64.Ab12Cd.installed",
+        ] {
+            assert!(is_community_installed_target(valid));
+        }
+        for invalid in [
+            "grok-1.0.35-linux-x86_64-gnu.42-1.installed",
+            "grok-zh-config.installed",
+            "grok-zh-1.0.35-linux-x86_64-gnu..installed",
+            "grok-zh-1.0.35-linux-x86_64-gnu.42-1.candidate",
+            "grok-zh-1.0.35+custom-linux-x86_64-gnu.42-1.installed",
+        ] {
+            assert!(!is_community_installed_target(invalid), "{invalid}");
+        }
+    }
+
+    #[cfg(all(unix, feature = "community-build"))]
+    #[tokio::test]
+    async fn community_cleanup_keeps_live_aliases_processes_fresh_files_and_unmanaged_data() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        // Exercise an aliased parent on every Unix host, like /var -> /private/var
+        // for macOS temporary directories.
+        let real_home = dir.path().join("real-home");
+        std::fs::create_dir(&real_home).unwrap();
+        let home = dir.path().join("linked-home");
+        symlink(&real_home, &home).unwrap();
+        let bin = home.join("bin");
+        let downloads = home.join("grok-zh-downloads");
+        std::fs::create_dir(&bin).unwrap();
+        std::fs::create_dir(&downloads).unwrap();
+        let names = [
+            "grok-zh-1.0.36-linux-x86_64-gnu.1-1.installed",
+            "grok-zh-1.0.35-linux-x86_64-gnu.1-2.installed",
+            "grok-zh-1.0.34-linux-x86_64-gnu.1-3.installed",
+            "grok-zh-1.0.33-linux-x86_64-gnu.1-4.installed",
+            "grok-zh-1.0.32-linux-x86_64-gnu.1-5.installed",
+            "personal.txt",
+        ];
+        let paths: Vec<_> = names.iter().map(|name| downloads.join(name)).collect();
+        for path in &paths {
+            std::fs::write(path, "binary").unwrap();
+            std::fs::File::open(path)
+                .unwrap()
+                .set_times(
+                    std::fs::FileTimes::new()
+                        .set_modified(std::time::SystemTime::now() - STALE_TMP_AGE * 2),
+                )
+                .unwrap();
+        }
+        let [active, stale, in_use, fresh, alias, personal] = paths.as_slice() else {
+            unreachable!()
+        };
+        std::fs::File::open(fresh)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))
+            .unwrap();
+        symlink(active, bin.join("grok-zh")).unwrap();
+        symlink(alias, bin.join("agent-zh")).unwrap();
+        // The callback receives entries from the canonical downloads directory.
+        let in_use_canonical = std::fs::canonicalize(in_use).unwrap();
+        cleanup_community_targets_with(&downloads, &bin, |path| path == in_use_canonical).await;
+        assert!(!stale.exists());
+        for kept in [active, in_use, fresh, alias, personal] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+        cleanup_community_targets_with(&downloads, &bin, |_| true).await;
+        assert!(in_use.exists());
     }
 }

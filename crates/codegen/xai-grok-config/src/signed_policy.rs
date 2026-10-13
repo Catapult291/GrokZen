@@ -16,10 +16,6 @@ pub use prod_mc_cli_chat_proxy_types::{
 
 /// Compiled-in trusted keys `(key_id, raw 32 bytes)`. Prod `v1`. Empty means dark (no verification).
 /// The private signing key never lives in this crate or in client env flags.
-///
-/// - base64: `BxP2cxaRIzlhxUvqmlz9e/dIBeWX58P4whEW0sFrdzI=`
-/// - SHA-256: `fb4dcc77c757465b953265146d495166527fcc1c2b365352f8d20c3d8f6de620`
-///
 /// Ship only after the server is emitting valid envelopes for this key id.
 pub const EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS: &[(&str, &[u8])] = &[(
     "v1",
@@ -34,41 +30,38 @@ pub const EMBEDDED_V1_PUBKEY_SHA256_HEX: &str =
     "fb4dcc77c757465b953265146d495166527fcc1c2b365352f8d20c3d8f6de620";
 
 // Compile-time sanity for the key set.
+// `slice::get` is not const-stable, so the const checks walk with `split_first`.
 const _: () = {
-    let keys = EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS;
-    let mut i = 0;
-    while i < keys.len() {
+    let mut rest = EMBEDDED_DEPLOYMENT_CONFIG_PUBKEYS;
+    while let Some((key, tail)) = rest.split_first() {
         assert!(
-            keys[i].1.len() == 32,
+            key.1.len() == 32,
             "every embedded key must be exactly 32 raw Ed25519 bytes"
         );
-        assert!(
-            !keys[i].0.is_empty(),
-            "every embedded key id must be non-empty"
-        );
-        let mut j = i + 1;
-        while j < keys.len() {
+        assert!(!key.0.is_empty(), "every embedded key id must be non-empty");
+        let mut others = tail;
+        while let Some((other, more)) = others.split_first() {
             assert!(
-                !const_str_eq(keys[i].0, keys[j].0),
+                !const_str_eq(key.0, other.0),
                 "embedded key ids must be unique"
             );
-            j += 1;
+            others = more;
         }
-        i += 1;
+        rest = tail;
     }
 };
 
 const fn const_str_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let (mut a, mut b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;
     }
-    let mut i = 0;
-    while i < a.len() {
-        if a[i] != b[i] {
+    while let (Some((x, a_tail)), Some((y, b_tail))) = (a.split_first(), b.split_first()) {
+        if *x != *y {
             return false;
         }
-        i += 1;
+        a = a_tail;
+        b = b_tail;
     }
     true
 }
@@ -93,23 +86,30 @@ pub mod test_seam {
         static LOCAL_OVERRIDE: RefCell<Option<KeyOverride>> = const { RefCell::new(None) };
     }
 
-    fn to_owned_keys(keys: Option<&[(&str, &[u8])]>) -> KeyOverride {
-        keys.map(|ks| {
-            ks.iter()
-                .map(|(id, key)| ((*id).to_owned(), key.to_vec()))
-                .collect()
-        })
+    fn to_owned_keys(keys: &[(&str, &[u8])]) -> OwnedKeys {
+        keys.iter()
+            .map(|(id, key)| ((*id).to_owned(), key.to_vec()))
+            .collect()
     }
 
     /// Set the process-wide keys: `None` clears the override, `Some(&[])` goes dark, anything else overrides.
     pub fn set_embedded_keys(keys: Option<&[(&str, &[u8])]>) {
-        *GLOBAL_OVERRIDE.write().unwrap_or_else(|e| e.into_inner()) = to_owned_keys(keys);
+        *GLOBAL_OVERRIDE.write().unwrap_or_else(|e| e.into_inner()) = keys.map(to_owned_keys);
     }
 
     /// Runs `f` with dark keys on this thread only.
     pub fn with_dark<R>(f: impl FnOnce() -> R) -> R {
+        with_local_keys(Vec::new(), f)
+    }
+
+    /// Runs `f` with `keys` as the trusted set on this thread only (a keyed unit test that must not race the process override).
+    pub fn with_keys<R>(keys: &[(&str, &[u8])], f: impl FnOnce() -> R) -> R {
+        with_local_keys(to_owned_keys(keys), f)
+    }
+
+    fn with_local_keys<R>(keys: OwnedKeys, f: impl FnOnce() -> R) -> R {
         LOCAL_OVERRIDE.with(|cell| {
-            let prev = cell.replace(Some(Some(Vec::new())));
+            let prev = cell.replace(Some(Some(keys)));
             struct Restore(Option<KeyOverride>);
             impl Drop for Restore {
                 fn drop(&mut self) {
@@ -196,11 +196,7 @@ pub fn verification_active() -> bool {
 }
 
 /// Apply remote `managed_config_signature_verification`.
-///
-/// - `Some(false)` disarms only when `settings_origin_trusted` is true **or** no keys are embedded (dark: disarm is a no-op for enforcement).
-///   An untrusted origin (env-overridden proxy) cannot disarm a keyed client; that would make the kill-switch an env toggle.
-/// - `None` / `Some(true)` re-arm always (stronger / default).
-///
+/// `Some(false)` disarms only when `settings_origin_trusted` is true **or** no keys are embedded (dark: disarm is a no-op for enforcement). An untrusted origin (env-overridden proxy) cannot disarm a keyed client; that would make the kill-switch an env toggle; `None` / `Some(true)` re-arm always (stronger / default).
 /// Call only when settings were successfully fetched. Logs on state change.
 pub fn apply_remote_managed_config_signature_verification(
     setting: Option<bool>,
@@ -232,9 +228,7 @@ pub fn embedded_key_id_trusted(key_id: &str) -> bool {
 
 /// Verify `signature_b64` over `signed_payload` against `trusted_keys`, returning the parsed payload.
 /// The verifying key is selected by the SIGNED payload's `key_id`; reading it pre-verification is safe because selection stays in the trusted set.
-/// A forged id either misses or picks a key the signature won't match.
 /// Requires the [`MANAGED_POLICY_TYP`] tag (a claim must never verify as a policy).
-/// Pure: callers supply the keys so tests can use throwaway keypairs.
 pub fn verify_signed_payload(
     signed_payload: &str,
     signature_b64: &str,
@@ -286,7 +280,6 @@ fn verify_signature_with_keys(
 /// Fetch-time identity binding for a VERIFIED payload, expiry enforced.
 /// A deployment-signed payload is trusted on signature alone; a team-signed payload must match the active team.
 /// Lenient on a missing active team: an `auth.json` read blip must not brick a session (a cross-team attacker has a team of their own).
-/// The at-rest checks use [`signed_principal_matches`] instead.
 pub fn check_fetch_identity(
     payload: &SignedPayload,
     active_team_id: Option<&str>,
@@ -364,9 +357,7 @@ fn verify_fetched_with_keys(
 }
 
 /// True when something occupies `path` that is not a regular file (directory, symlink, fifo, …).
-/// The check is NO-FOLLOW, so even a symlink to a byte-identical file counts.
 /// A squatter blocks or redirects reads/rewrites, which is tamper, never a blip.
-/// The clearing side stays no-follow too (a symlink squat is removed as the link).
 fn non_regular_file_at(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| !m.is_file())
 }
@@ -374,7 +365,6 @@ fn non_regular_file_at(path: &std::path::Path) -> bool {
 /// Confirm the on-disk artifacts match the signed payload byte-for-byte: an in-place edit is caught, not just a deletion.
 /// A signed-ABSENT slot must be empty on disk: a locally planted `requirements.toml` (the highest-precedence layer) is tamper, not noise.
 /// An unreadable file is [`SigError::Unreadable`] (a read blip: refetch, don't refuse).
-/// Anything non-regular squatting the slot ([`non_regular_file_at`]) reads as tamper.
 pub fn check_on_disk_matches(
     home: &std::path::Path,
     payload: &SignedPayload,
@@ -409,6 +399,50 @@ pub fn check_on_disk_matches(
         }
     }
     Ok(())
+}
+
+/// True when `content` is exactly the `requirements.toml` the server signed for this home, which makes hooks parsed from it admin-authored policy.
+/// Callers pass the bytes they go on to parse, so classification and parse never see two different files.
+/// False in a dark build (no key verifies), without an authentic readable sidecar, or when the signed requirements are absent or differ; refusing a tampered cache is the fail-closed gate's job.
+/// Identity, expiry and the remote kill-switch are not consulted: they decide whether the gate refuses a session, and none changes who authored the bytes.
+pub fn signed_requirements_attest(home: &std::path::Path, content: &str) -> bool {
+    with_embedded_keys(|keys| signed_requirements_attest_with_keys(home, keys, content))
+}
+
+/// Key-injected core of [`signed_requirements_attest`] so tests can supply throwaway keys.
+fn signed_requirements_attest_with_keys(
+    home: &std::path::Path,
+    trusted_keys: &[(&str, &[u8])],
+    content: &str,
+) -> bool {
+    // A missing sidecar is the common unmanaged case and stays silent; every other miss demotes enforced hooks to user-owned, so say so
+    let sidecar = match read_sidecar(home) {
+        SidecarRead::Present(sidecar) => sidecar,
+        SidecarRead::Absent => return false,
+        SidecarRead::Unreadable => {
+            tracing::info!(path = %sidecar_path(home).display(), "requirements.toml hooks stay user-owned: signature sidecar unreadable");
+            return false;
+        }
+    };
+    let payload = match verify_signed_payload(
+        &sidecar.signed_payload,
+        &sidecar.signature,
+        trusted_keys,
+    ) {
+        Ok(payload) => payload,
+        Err(e) => {
+            tracing::info!(path = %sidecar_path(home).display(), error = %e, "requirements.toml hooks stay user-owned: signature sidecar does not verify");
+            return false;
+        }
+    };
+    let Some(signed) = payload.requirements.as_deref().filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    if signed != content {
+        tracing::info!(path = %home.join(crate::loader::REQUIREMENTS_FILENAME).display(), "requirements.toml differs from the signed copy; its hooks stay user-owned");
+        return false;
+    }
+    true
 }
 
 pub(crate) fn sidecar_path(home: &std::path::Path) -> std::path::PathBuf {
@@ -471,7 +505,6 @@ fn write_envelope_at(path: &std::path::Path, sidecar: &SignatureEnvelope) -> std
 /// Persisted envelope nonce for [`MANAGED_CONFIG_NONCE_ECHO_HEADER`] (unverified; telemetry only, never a trust input).
 /// Both guards fail open by skipping the echo.
 /// Only a nonce with the server's mint shape is echoed (header-safe: a corrupt sidecar can't brick the fetch).
-/// Only a payload issued to `fetch_principal` counts: a leftover sidecar from a prior identity must not read as a cross-tenant replay upstream.
 pub fn stored_envelope_nonce(
     home: &std::path::Path,
     fetch_principal: Option<&str>,
@@ -491,7 +524,6 @@ pub fn stored_envelope_nonce(
 }
 
 /// Whether an authentic claim IMPOSES fail-closed enforcement.
-/// It imposes only when verified, bound to the KNOWN `expected_principal`, in-date vs the caller-clamped `now_unix`, and `fail_closed`.
 /// Anything else imposes nothing: permissive (must not override a now-fail_closed marker), foreign, expired, forged, or absent.
 /// An unknown principal also imposes nothing: a planted claim must not brick a signed-out victim.
 pub fn managed_identity_claim_imposes(
@@ -644,9 +676,6 @@ pub enum SignedVerdict {
     /// No sidecar, or one whose signature doesn't verify: not an authentic verdict.
     /// Under a fail-closed marker that recorded served policy, absence is itself tamper.
     /// Stripping the sidecar must not downgrade enforcement to the forgeable marker path.
-    /// A first keyed launch over a pre-signing cache also refuses until one online refetch writes the sidecar; that is deliberate.
-    /// Residual risk: wiping the marker with the sidecar, inherent to user-writable state, covered by the root-owned /etc/grok and MDM layers.
-    /// Otherwise the marker decides.
     NoAuthenticSidecar,
     /// The sidecar exists but a transient IO error (EACCES-style, never plain absence or a squatting non-file) blocked the read.
     /// Not tamper evidence: the gate falls back to the marker decision, and the refetch trigger fires to rewrite it.
@@ -661,8 +690,6 @@ pub enum SignedVerdict {
 
 /// The signed verdict for the on-disk cache; see [`SignedVerdict`].
 /// The fail-closed opt-in is read from the SIGNED bytes, not the forgeable marker.
-/// `expected_principal` is the machine's managed principal (active team id, or the recorded deployment id).
-/// A payload bound elsewhere is a cross-tenant replay and reads compromised.
 pub fn signed_cache_compromised(
     home: &std::path::Path,
     expected_principal: Option<&str>,
@@ -696,7 +723,7 @@ fn signed_cache_compromised_with_keys(
     }
 }
 
-// Tests live in a sibling file (they dwarf the module) but form a child module, for private access
+// Tests live in a sibling file (they dwarf the module) but form a child module, for private access; its envelope helpers serve the loader tests too
 #[cfg(test)]
 #[path = "signed_policy/tests.rs"]
-mod tests;
+pub(crate) mod tests;

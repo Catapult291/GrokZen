@@ -110,7 +110,10 @@ impl WelcomeWorkspaceMode {
     }
 
     pub fn from_index(i: usize) -> Self {
-        Self::ALL[i % Self::ALL.len()]
+        match Self::ALL.get(i % Self::ALL.len()) {
+            Some(&mode) => mode,
+            None => Self::Sandbox,
+        }
     }
 }
 
@@ -231,11 +234,8 @@ pub struct WorkspaceModeHitRects {
 /// Rows reserved above the welcome menu for the picker (content and gap).
 pub const WORKSPACE_MODE_MENU_ROWS: u16 = 2;
 
-/// Paint the segmented workspace control into `area`.
-///
-/// Layout:
-/// `Workspace  [ Sandbox ]  [ Local workspace ]  ctrl+e`
-/// or when locked: `Workspace  [ Local workspace ]  locked by CLI`
+/// Paint the segmented workspace control into `area`. Layout: `Workspace [ Sandbox ] [ Local
+/// workspace ] ctrl+e` or when locked: `Workspace [ Local workspace ] locked by CLI`.
 pub fn render_workspace_mode_picker(
     area: Rect,
     buf: &mut Buffer,
@@ -348,7 +348,9 @@ pub fn render_workspace_mode_picker_with_locale(
         buf.set_span(x, row.y, &Span::styled(text, style), w);
         if slot < options.len() {
             // Map by mode index so hit-test stays stable.
-            options[mode.index()] = Some(rect);
+            if let Some(hit) = options.get_mut(mode.index()) {
+                *hit = Some(rect);
+            }
         }
         x = x.saturating_add(w);
         if slot + 1 < modes.len() && x + 1 < row.x + row.width {
@@ -545,9 +547,8 @@ pub fn mode_from_active_stamp(
     }
 }
 
-/// Whether keyboard/mouse should mutate the welcome selection.
-///
-/// Same gate as the ACK and render paths: chat mode, access, auth Done, not ZDR, not CLI-startup-locked, and history picker closed.
+/// Whether keyboard/mouse should mutate the welcome selection. Same gate as the ACK and render
+/// paths: chat mode, access, auth Done, not ZDR, not CLI-startup-locked, and history picker closed.
 /// With the history picker open, Ctrl+E/click would mutate the selection with no on-screen control.
 pub fn picker_interactive(
     chat_mode: bool,
@@ -667,12 +668,14 @@ mod tests {
             false,
             false,
         );
-        assert!(hits.options[0].is_some());
-        assert!(hits.options[1].is_some());
+        assert!(hits.options.first().is_some_and(Option::is_some));
+        assert!(hits.options.get(1).is_some_and(Option::is_some));
         assert!(hits.row.is_some());
         let cell = buf.cell((0, 0)).expect("cell");
         assert_eq!(cell.symbol(), "W");
-        let selected = hits.options[1].expect("local selected rect");
+        let Some(Some(selected)) = hits.options.get(1).copied() else {
+            panic!("local selected rect");
+        };
         let selected_text = format!(" • {} ", WelcomeWorkspaceMode::LocalWorkspace.label());
         assert_eq!(
             selected.width,

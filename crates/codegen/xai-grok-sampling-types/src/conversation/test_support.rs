@@ -144,12 +144,9 @@ pub(super) fn make_response(message: ConversationItem) -> ConversationResponse {
     }
 }
 
-// KV Cache Invariant Tests
-//
-// These tests enforce prefix stability and correct turn ordering for the Responses API input construction
-// Prompt caching (server-side prefix match) requires that request N's serialised input is a strict prefix of request N+1's
-// Any re-ordering of items, especially reasoning items, destroys the prefix and tanks the cache hit rate
-// The invariant asserted is `&input2[..input1.len()] == input1` for every pair of consecutive turns
+// These tests enforce prefix stability and correct turn ordering for the Responses API input construction. Prompt
+// caching (server-side prefix match) requires that request N's serialised input is a strict prefix of request N+1's. The
+// invariant asserted is `&input2[..input1.len()] == input1` for every pair of consecutive turns
 
 pub(super) fn reasoning_sibling(
     id: &str,
@@ -171,7 +168,10 @@ pub(super) fn input_items_json(req: &ConversationRequest) -> Vec<serde_json::Val
     let cr: rs::CreateResponse = req.into();
     let mut body = serde_json::to_value(&cr).unwrap();
     patch_reasoning_text_types(&mut body);
-    body["input"].as_array().cloned().unwrap_or_default()
+    body.get("input")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default()
 }
 
 pub(super) fn summarise_input(items: &[serde_json::Value]) -> Vec<String> {
@@ -207,8 +207,15 @@ pub(super) fn assert_prefix_stable(base: &ConversationRequest, extended: &Conver
         ext_input.len(),
         base_input.len(),
     );
+    let Some(prefix) = ext_input.get(..base_input.len()) else {
+        panic!(
+            "extended input shorter than base: base={} ext={}",
+            base_input.len(),
+            ext_input.len()
+        );
+    };
     assert_eq!(
-        &ext_input[..base_input.len()],
+        prefix,
         base_input.as_slice(),
         "serialized input of request N must be a prefix of request N+1.\n\
              Base ({} items): {:?}\nExtended ({} items): {:?}\n\

@@ -3,7 +3,7 @@
 //! The same layered API serves three consumers:
 //!
 //! 1. **Regression scenarios** (e.g. `scenarios::plan_approval_resume`) assert screen contents and multi-process resume behavior.
-//!    They run via `tests/` in this crate and via `pty-scenario` YAML under `xai-grok-pager/tests/scenarios/`.
+//!    They run via `tests/` in this crate and via `pty-scenario` YAML under `tests/scenarios/`.
 //! 2. **Benchmarks** (`benches/pty_bench.rs`) run timing scenarios, collect per-frame timings, emit JSON, and compare against baselines.
 //! 3. **Ad-hoc scenario runs** spin up the harness to reproduce issues locally.
 //!
@@ -35,13 +35,15 @@ pub mod timing;
 
 pub use content::{
     AgentTurnExpectation, ContentController, InferenceEndpoint, InferenceExpectation,
-    InferenceRequestMatcher, MockModel, ScriptedResponse, SseEvent, sse,
+    InferenceRequestMatcher, MockCanAdministerTeam, MockModel, MockUserTeam, ScriptedResponse,
+    SseEvent, sse,
 };
 pub use env::pager_binary;
 pub use flows::{
-    inference_request_count, oauth_credential_ops, seed_fake_oauth,
-    seed_fake_oauth_coding_data_opted_out, seed_fake_oauth_team_member, seed_fake_oauth_zdr_team,
-    submit_turn, wait_for_labels_absent, wait_for_model_via_new_sessions,
+    inference_request_count, inference_requests, oauth_credential_ops, seed_fake_oauth,
+    seed_fake_oauth_coding_data_opted_out, seed_fake_oauth_team_member,
+    seed_fake_oauth_team_member_can_administer, seed_fake_oauth_zdr_team, submit_turn,
+    wait_for_labels_absent, wait_for_model_via_new_sessions,
 };
 pub use host_clipboard::HostClipboardTextGuard;
 pub use leader::LeaderCluster;
@@ -77,10 +79,7 @@ enum PtyPump {
     Closed,
 }
 
-/// High-level harness that composes PTY control, screen state, and frame timing.
-///
-/// [`update`](PtyHarness::update) feeds each PTY output chunk to both the [`ScreenTracker`] and the [`FrameTimingParser`] as it arrives.
-/// Feeding inline preserves inter-chunk timing for accurate frame measurement.
+/// Feeds each PTY chunk to the screen tracker and frame parser as it arrives so inter-chunk timing is preserved.
 pub struct PtyHarness {
     pty: PtyController,
     screen: ScreenTracker,
@@ -174,32 +173,12 @@ impl PtyHarness {
         }
     }
 
-    /// Enable (or disable) forwarding terminal-generated replies back to the child during [`update`](Self::update).
-    /// Real terminals answer device queries automatically; the harness leaves this off by default so probe tests can script their own replies.
-    /// Minimal-mode tests enable it so the inline viewport's startup cursor-position query (`ESC[6n`) is answered.
-    /// Without an answer, `--minimal` silently downgrades to full-screen inline.
+    /// Off by default so probe tests can script replies. Minimal-mode tests need it or the startup `ESC[6n` times out and `--minimal` downgrades.
     pub fn set_respond_to_queries(&mut self, enabled: bool) {
         self.respond_to_queries = enabled;
     }
 
-    /// Spawn the pager with env vars from a [`ContentController`] attached.
-    ///
-    /// This is the common pattern for both e2e tests and benchmarks:
-    ///
-    /// ```no_run
-    /// # use std::time::Duration;
-    /// # use xai_grok_pager_pty_harness::{PtyHarness, ContentController, pager_binary};
-    /// # async fn example() -> anyhow::Result<()> {
-    /// let content = ContentController::start().await?;
-    /// content.set_response("# Hello\n\nAgent said hi.");
-    ///
-    /// let mut harness = PtyHarness::spawn_with_content(
-    ///     &pager_binary()?, 50, 120, &content, &[],
-    /// )?;
-    /// harness.wait_for_text("Hello", Duration::from_secs(10))?;
-    /// harness.quit()?;
-    /// # Ok(()) }
-    /// ```
+    /// Spawn the pager with [`ContentController`] env attached. Common entry for e2e tests and benchmarks.
     pub fn spawn_with_content(
         binary: &Path,
         rows: u16,
@@ -311,10 +290,7 @@ impl PtyHarness {
 
     // ── Update: receive PTY output inline → feed both parsers ────────
 
-    /// Receive PTY output for up to `timeout`, feeding each chunk to both the screen state tracker and the frame timing parser as it arrives.
-    ///
-    /// Processing inline (rather than buffering all chunks first) preserves inter-chunk timing.
-    /// `FrameTimingParser` then records accurate wall-clock frame durations.
+    /// Process each chunk as it arrives. Buffering first would erase inter-chunk timing the frame parser needs.
     pub fn update(&mut self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         loop {
@@ -348,11 +324,7 @@ impl PtyHarness {
         }
     }
 
-    /// Feed bytes **directly into the virtual screen only**, bypassing the child (grok).
-    ///
-    /// Simulates an outer layer (tmux, or an nvim/vim `:terminal`) repainting the screen without going through grok's stdout.
-    /// Used to reproduce the doubled-line class of bugs where grok's diff renderer never re-asserts a region it didn't write itself.
-    /// The harness is a single faithful emulator and cannot nest a real tmux/nvim.
+    /// Bypass the child to simulate an outer layer repainting a region grok did not write. The harness cannot nest a real tmux/nvim.
     pub fn feed_screen(&mut self, bytes: &[u8]) {
         self.screen.feed(bytes);
     }
@@ -392,10 +364,7 @@ impl PtyHarness {
         self.screen.terminal().terminal_modes()
     }
 
-    /// Pump PTY output until `condition` becomes true or `timeout` expires.
-    ///
-    /// The condition is checked before the first pump and after each output slice.
-    /// `description` names the state being waited for in timeout diagnostics.
+    /// Checked before the first pump and after each slice. `description` names the waited state in timeout diagnostics.
     pub fn wait_until(
         &mut self,
         description: &str,
@@ -514,13 +483,7 @@ impl PtyHarness {
         &self.raw_output
     }
 
-    /// Write everything the child PTY emitted so far as an asciinema v2 cast (`.cast`).
-    /// Each received chunk becomes one output event with its original arrival timestamp.
-    /// Replayable locally with `asciinema play`.
-    /// Bytes are decoded lossily so binary escapes cannot poison the JSON encoding.
-    ///
-    /// Limitation: the header is pinned to the spawn-time size and no `"r"` resize events are emitted.
-    /// A cast from a test that calls [`resize`](Self::resize) plays back at the original geometry.
+    /// Lossy decode so binary escapes cannot poison the JSON. Header is spawn-time size; no resize events, so a later [`resize`](Self::resize) plays back at the original geometry.
     pub fn write_cast(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -567,6 +530,11 @@ impl PtyHarness {
         self.screen.full_text()
     }
 
+    /// Native select→copy (WRAPLINE-joined, pads trimmed). Prefer over [`Self::full_text`] for clipboard-shaped asserts.
+    pub fn native_copy_text(&self) -> String {
+        self.screen.native_copy_text()
+    }
+
     /// Whether scrollback plus visible screen contains `text`.
     pub fn contains_full_text(&self, text: &str) -> bool {
         self.screen.full_contains(text)
@@ -593,11 +561,7 @@ impl PtyHarness {
         })
     }
 
-    /// Count Kitty graphics APC sequences that carry image data or placement in the raw PTY output so far.
-    /// Delete and capability-query escapes are excluded.
-    ///
-    /// These escapes are written into the synchronized-update frame buffer (outside the vt100 cell grid), so `wait_for_text` cannot see them.
-    /// Scanning the raw bytes is the only way to observe them.
+    /// Image/placement APCs only. They live outside the vt100 grid, so `wait_for_text` cannot see them.
     pub fn count_kitty_graphics(&self) -> usize {
         scripted::count_kitty_graphics(&self.raw_output)
     }
@@ -662,10 +626,7 @@ impl PtyHarness {
         self.pty.wait_exit_code(timeout)
     }
 
-    /// Wait for child exit, then drain final PTY output through EOF or quiet.
-    ///
-    /// `exit_timeout` applies only until exit.
-    /// Once exit is observed, the known status is preserved while a separate bounded drain phase runs.
+    /// `exit_timeout` applies only until exit. The known status is kept while a separate bounded drain runs.
     pub fn wait_for_exit_and_drain(
         &mut self,
         exit_timeout: Duration,

@@ -72,9 +72,7 @@ pub enum PromptAudience {
 use xai_grok_tools::bridge::ToolBridge;
 use xai_grok_tools::types::template_renderer::TemplateRenderer;
 /// Agent-specific inputs for system prompt rendering.
-///
-/// Serializable (JSON/YAML) so users can dump it and inspect fields.
-/// Rendering goes through `ToolBridge::render_prompt()`.
+/// Serializable so users can dump and inspect fields. Rendering goes through `ToolBridge::render_prompt()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptContext {
     /// Schema version for forward-compatible persistence.
@@ -108,6 +106,9 @@ pub struct PromptContext {
     /// When true, the system prompt includes a `<memory>` section telling the model it can use `memory_search` and `memory_get`.
     #[serde(default)]
     pub memory_enabled: bool,
+    /// Whether isolated filesystem-based Memory is enabled.
+    #[serde(default)]
+    pub memory_v2_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_global_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -146,6 +147,20 @@ fn default_system_prompt_label() -> String {
 fn is_template_override_none(t: &TemplateOverride) -> bool {
     matches!(t, TemplateOverride::None)
 }
+/// Trailing-separator temp directory for the `<scratch_files>` section; a literal path so the model never expands a shell variable.
+fn scratch_dir() -> String {
+    if cfg!(windows) {
+        let dir = std::env::temp_dir();
+        let text = dir.display().to_string();
+        if text.ends_with(std::path::MAIN_SEPARATOR) {
+            text
+        } else {
+            format!("{text}{}", std::path::MAIN_SEPARATOR)
+        }
+    } else {
+        "/tmp/".to_string()
+    }
+}
 impl PromptContext {
     /// For `Subagent` audience, applies the same suppression as the render path: persona summaries are cleared.
     /// AGENTS.md is delivered in full, identical to the primary agent.
@@ -169,6 +184,7 @@ impl Default for PromptContext {
             persona_summaries: vec![],
             build_timestamp_utc: chrono::Utc::now().to_rfc3339(),
             memory_enabled: false,
+            memory_v2_enabled: false,
             memory_global_path: None,
             memory_workspace_path: None,
             role_instructions: None,
@@ -199,10 +215,7 @@ impl PromptContext {
         self.format_agents_md_section()
     }
     /// Personas content for injection as a prepended user message.
-    ///
-    /// Returns a `<system-reminder>` block wrapping the `<personas>` section.
-    ///
-    /// - Subagents never get personas (`task` itself is a parent-only tool).
+    /// Returns a `<system-reminder>` wrapping the `<personas>` section. Subagents never get personas.
     pub fn personas_user_reminder(&self) -> Option<String> {
         if self.audience == PromptAudience::Subagent {
             return None;
@@ -220,6 +233,7 @@ impl PromptContext {
     pub fn placeholders(&self) -> serde_json::Value {
         serde_json::json!({
             "memory_enabled": self.memory_enabled,
+            "memory_v2_enabled": self.memory_v2_enabled,
             "memory_global_path": self.memory_global_path.as_deref().unwrap_or(""),
             "memory_workspace_path": self.memory_workspace_path.as_deref().unwrap_or(""),
             "role_instructions": self.role_instructions.as_deref().unwrap_or(""),
@@ -231,18 +245,22 @@ impl PromptContext {
             "is_non_interactive": self.is_non_interactive,
             "system_prompt_label": self.system_prompt_label.as_str(),
             "include_browser_verification": self.include_browser_verification,
+            "scratch_dir": scratch_dir(),
         })
     }
-    /// Render the full system prompt via `ToolBridge`.
-    ///
-    /// Tool names (`${{ tools.by_kind.* }}`) are resolved by the `TemplateRenderer` inside the bridge.
-    /// Agent-specific fields (`memory_enabled`, `role_instructions`, etc.) are passed as placeholders.
-    ///
-    /// Both the base template AND the `prompt_body` are rendered through MiniJinja.
-    /// This lets `${{ tools.by_kind.* }}` variables resolve correctly regardless of prompt mode.
+    /// Render the full system prompt via `ToolBridge`. Tool names are resolved inside the bridge.
+    /// Both the base template and `prompt_body` go through MiniJinja so `${{ tools.by_kind.* }}` resolves regardless of prompt mode.
     pub async fn render(&self, tool_bridge: &ToolBridge) -> Option<String> {
         let renderer = tool_bridge.template_renderer_snapshot().await?;
         self.render_with_renderer(&renderer)
+    }
+    /// [`render`](Self::render), keeping the context the prompt came from so the pair cannot drift apart.
+    pub async fn render_paired(self, tool_bridge: &ToolBridge) -> Option<RenderedPrompt> {
+        let system_prompt = self.render(tool_bridge).await?;
+        Some(RenderedPrompt {
+            prompt_context: self,
+            system_prompt,
+        })
     }
     /// Render the full system prompt from a finalized tool-name renderer.
     ///
@@ -280,9 +298,23 @@ impl PromptContext {
         Some(prompt)
     }
 }
+/// A system prompt with the [`PromptContext`] it was rendered from; only [`PromptContext::render_paired`] produces one.
+pub struct RenderedPrompt {
+    prompt_context: PromptContext,
+    system_prompt: String,
+}
+impl RenderedPrompt {
+    pub(crate) fn into_parts(self) -> (PromptContext, String) {
+        (self.prompt_context, self.system_prompt)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Test-only lookup: `["k"]` would panic on a missing key, so index through a pointer path.
+    fn jp<'a>(v: &'a serde_json::Value, path: &str) -> &'a serde_json::Value {
+        v.pointer(path).unwrap_or(&serde_json::Value::Null)
+    }
     /// Fixed timestamp for deterministic tests.
     const TEST_TIMESTAMP: &str = "2025-06-15T12:00:00+00:00";
     fn test_context() -> PromptContext {
@@ -297,6 +329,7 @@ mod tests {
             persona_summaries: vec![],
             build_timestamp_utc: TEST_TIMESTAMP.to_string(),
             memory_enabled: false,
+            memory_v2_enabled: false,
             memory_global_path: None,
             memory_workspace_path: None,
             role_instructions: None,
@@ -320,7 +353,7 @@ mod tests {
         let block_start = on
             .find("\n\n<browser_verification>")
             .expect("flagged standard template must render browser verification");
-        assert_eq!(&on[..block_start], off);
+        assert_eq!(on.get(..block_start), Some(off.as_str()));
         assert!(on.ends_with("</browser_verification>"));
         assert!(!off.contains("<browser_verification>"));
     }
@@ -371,18 +404,23 @@ mod tests {
                 file_name: "AGENTS.md".to_string(),
                 file_path: "/repo/AGENTS.md".to_string(),
                 content: "# Repo instructions".to_string(),
+                source: Default::default(),
             },
             AgentConfigFile {
                 file_name: "AGENTS.md".to_string(),
                 file_path: "/repo/sub/AGENTS.md".to_string(),
                 content: "# Sub instructions".to_string(),
+                source: Default::default(),
             },
         ];
         let json = serde_json::to_string(&ctx).unwrap();
         let ctx2: PromptContext = serde_json::from_str(&json).unwrap();
         assert_eq!(ctx2.agents_md_files.len(), 2);
-        assert_eq!(ctx2.agents_md_files[0].content, "# Repo instructions");
-        assert_eq!(ctx2.agents_md_files[1].file_path, "/repo/sub/AGENTS.md");
+        let [first, second] = ctx2.agents_md_files.as_slice() else {
+            panic!("expected two agents.md files: {:?}", ctx2.agents_md_files);
+        };
+        assert_eq!(first.content, "# Repo instructions");
+        assert_eq!(second.file_path, "/repo/sub/AGENTS.md");
     }
     #[test]
     fn test_template_override_deserialize_new_format() {
@@ -449,17 +487,18 @@ mod tests {
     fn test_placeholders_contains_agent_fields() {
         let ctx = test_context();
         let p = ctx.placeholders();
-        assert_eq!(p["memory_enabled"], false);
+        assert_eq!(jp(&p, "/memory_enabled"), false);
+        assert_eq!(jp(&p, "/memory_v2_enabled"), false);
         assert!(p.get("role_instructions").is_some());
         assert!(p.get("persona_instructions").is_some());
-        assert_eq!(p["system_prompt_label"], DEFAULT_SYSTEM_PROMPT_LABEL);
+        assert_eq!(jp(&p, "/system_prompt_label"), DEFAULT_SYSTEM_PROMPT_LABEL);
     }
     #[test]
     fn test_placeholders_system_prompt_label_override() {
         let mut ctx = test_context();
         ctx.system_prompt_label = "Grok Internal".into();
         let p = ctx.placeholders();
-        assert_eq!(p["system_prompt_label"], "Grok Internal");
+        assert_eq!(jp(&p, "/system_prompt_label"), "Grok Internal");
     }
     #[test]
     fn test_missing_system_prompt_label_deserializes_to_default() {
@@ -475,25 +514,27 @@ mod tests {
         ctx.working_directory = Some("/workspace".into());
         ctx.current_date = Some("2026-03-26".into());
         ctx.memory_enabled = true;
+        ctx.memory_v2_enabled = true;
         ctx.role_instructions = Some("test role".into());
         ctx.persona_instructions = Some("test persona".into());
         let p = ctx.placeholders();
-        assert_eq!(p["os_name"], "linux");
-        assert_eq!(p["shell_path"], "/bin/bash");
-        assert_eq!(p["working_directory"], "/workspace");
-        assert_eq!(p["current_date"], "2026-03-26");
-        assert_eq!(p["memory_enabled"], true);
-        assert_eq!(p["role_instructions"], "test role");
-        assert_eq!(p["persona_instructions"], "test persona");
+        assert_eq!(jp(&p, "/os_name"), "linux");
+        assert_eq!(jp(&p, "/shell_path"), "/bin/bash");
+        assert_eq!(jp(&p, "/working_directory"), "/workspace");
+        assert_eq!(jp(&p, "/current_date"), "2026-03-26");
+        assert_eq!(jp(&p, "/memory_enabled"), true);
+        assert_eq!(jp(&p, "/memory_v2_enabled"), true);
+        assert_eq!(jp(&p, "/role_instructions"), "test role");
+        assert_eq!(jp(&p, "/persona_instructions"), "test persona");
     }
     #[test]
     fn test_placeholders_user_info_defaults_to_empty() {
         let ctx = test_context();
         let p = ctx.placeholders();
-        assert_eq!(p["os_name"], "");
-        assert_eq!(p["shell_path"], "");
-        assert_eq!(p["working_directory"], "");
-        assert_eq!(p["current_date"], "");
+        assert_eq!(jp(&p, "/os_name"), "");
+        assert_eq!(jp(&p, "/shell_path"), "");
+        assert_eq!(jp(&p, "/working_directory"), "");
+        assert_eq!(jp(&p, "/current_date"), "");
     }
     #[test]
     fn test_user_info_fields_serialization_round_trip() {
@@ -551,6 +592,7 @@ mod tests {
             file_name: "AGENTS.md".to_string(),
             file_path: "/repo/AGENTS.md".to_string(),
             content: "# Instructions".to_string(),
+            source: Default::default(),
         }];
         let section = ctx.format_agents_md_section().unwrap();
         assert!(section.contains("# Instructions"));
@@ -574,6 +616,7 @@ mod tests {
             file_name: "AGENTS.md".to_string(),
             file_path: "/repo/AGENTS.md".to_string(),
             content: "# XYZZY_AGENTS_MD_MARKER".to_string(),
+            source: Default::default(),
         }];
         let section = ctx
             .agents_md_user_reminder()
@@ -589,6 +632,7 @@ mod tests {
             file_name: "AGENTS.md".to_string(),
             file_path: "/repo/AGENTS.md".to_string(),
             content: "# XYZZY_AGENTS_MD_MARKER".to_string(),
+            source: Default::default(),
         }];
         assert!(ctx.agents_md_user_reminder().is_none());
         assert!(ctx.format_agents_md_section().is_some());
@@ -618,6 +662,7 @@ mod tests {
             ],
             build_timestamp_utc: TEST_TIMESTAMP.to_string(),
             memory_enabled: true,
+            memory_v2_enabled: false,
             memory_global_path: None,
             memory_workspace_path: None,
             role_instructions: None,
@@ -638,6 +683,7 @@ mod tests {
             file_name: "AGENTS.md".to_string(),
             file_path: "/repo/AGENTS.md".to_string(),
             content: "X".repeat(5000),
+            source: Default::default(),
         }];
         assert_eq!(ctx.audience, super::PromptAudience::Subagent);
         let reminder = ctx.agents_md_user_reminder().unwrap();
@@ -922,6 +968,7 @@ mod tests {
                 file_name: "AGENTS.md".to_string(),
                 file_path: format!("{display_path}/AGENTS.md"),
                 content: "# Project rules".to_string(),
+                source: Default::default(),
             }],
             ..test_context()
         };
@@ -987,11 +1034,14 @@ mod tests {
             file_name: "AGENTS.md".to_string(),
             file_path: "/repo/AGENTS.md".to_string(),
             content: "X".repeat(5000),
+            source: Default::default(),
         }];
         ctx.normalize_for_persistence();
         assert_eq!(
-            ctx.agents_md_files[0].content.chars().count(),
-            5000,
+            ctx.agents_md_files
+                .first()
+                .map(|f| f.content.chars().count()),
+            Some(5000),
             "AGENTS content must be preserved in full for subagents (no cap)"
         );
     }
@@ -1002,9 +1052,13 @@ mod tests {
             file_name: "AGENTS.md".to_string(),
             file_path: "/repo/sub/AGENTS.md".to_string(),
             content: "Short rules".to_string(),
+            source: Default::default(),
         }];
         ctx.normalize_for_persistence();
-        assert_eq!(ctx.agents_md_files[0].content, "Short rules");
+        assert_eq!(
+            ctx.agents_md_files.first().map(|f| f.content.as_str()),
+            Some("Short rules")
+        );
     }
     #[test]
     fn normalize_preserves_role_and_persona_instructions() {

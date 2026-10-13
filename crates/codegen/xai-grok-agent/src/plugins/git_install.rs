@@ -39,17 +39,7 @@ pub struct DiscoveredPlugin {
 }
 
 /// Parse an install source string into an `InstallSource`.
-///
-/// Supports:
-/// - `https://github.com/user/repo` — Git HTTPS
-/// - `https://github.com/user/repo@v1.0.0` — Git with ref
-/// - `https://github.com/user/repo#subdir` — Git with subdirectory
-/// - `git@github.com:user/repo.git` — Git SSH
-/// - `user/repo` — GitHub shorthand (expands to `https://github.com/user/repo`)
-/// - `user/repo@v1.0.0` — GitHub shorthand with ref
-/// - `user/repo#subdir` — GitHub shorthand with subdirectory
-/// - `/path/to/dir` or `./relative` or `~/dir` — Local
-/// - `/path/to/dir#subdir` — Local with subdirectory
+/// Git HTTPS/SSH, GitHub shorthand (`user/repo`), optional `@ref` and `#subdir`, or a local path.
 pub fn parse_install_source(input: &str, cwd: &Path) -> InstallSource {
     let (main, subdir) = match input.rsplit_once('#') {
         Some((m, s)) if !s.is_empty() => (m, Some(s.to_string())),
@@ -63,10 +53,21 @@ pub fn parse_install_source(input: &str, cwd: &Path) -> InstallSource {
             // SSH URL: git@host:user/repo.git@ref
             // The @ in git@ is part of the URL, look for @ after the first :
             if let Some(colon_pos) = main.find(':') {
-                let after_colon = &main[colon_pos + 1..];
+                let Some(after_colon) = main.get(colon_pos + 1..) else {
+                    return InstallSource::Git {
+                        url: main.to_string(),
+                        git_ref: None,
+                        git_sha: None,
+                        subdir,
+                    };
+                };
                 if let Some(at_pos) = after_colon.rfind('@') {
-                    let url = format!("{}:{}", &main[..colon_pos], &after_colon[..at_pos]);
-                    let git_ref = after_colon[at_pos + 1..].to_string();
+                    let url = format!(
+                        "{}:{}",
+                        main.get(..colon_pos).unwrap_or(""),
+                        after_colon.get(..at_pos).unwrap_or("")
+                    );
+                    let git_ref = after_colon.get(at_pos + 1..).unwrap_or("").to_string();
                     (url, Some(git_ref))
                 } else {
                     (main.to_string(), None)
@@ -215,7 +216,9 @@ fn is_github_shorthand(s: &str) -> bool {
     };
     // Must be exactly owner/repo (two non-empty segments separated by one /).
     let parts: Vec<&str> = base.splitn(3, '/').collect();
-    parts.len() == 2 && !parts[0].is_empty() && !parts[1].is_empty()
+    parts.len() == 2
+        && parts.first().is_some_and(|p| !p.is_empty())
+        && parts.get(1).is_some_and(|p| !p.is_empty())
 }
 
 fn repo_source_id(source: &InstallSource) -> String {
@@ -531,10 +534,8 @@ pub fn cleanup_plugin_data(repo: &InstalledRepo, scope: super::discovery::Plugin
     }
 }
 
-/// Discovery logic:
-/// 1. If `subdir` is specified, only look in that subdirectory
-/// 2. If root has plugin.json or convention components, it's a single plugin
-/// 3. Otherwise, scan immediate subdirectories for plugins
+/// Discovery: if `subdir` is set, only look there.
+/// If root has plugin.json or convention components, it is a single plugin; otherwise scan immediate subdirectories.
 pub(super) fn discover_plugins_in_dir(
     root: &Path,
     subdir: Option<&str>,
@@ -675,11 +676,8 @@ pub enum UpdateStatus {
     LiveLocal,
 }
 
-/// How each install kind updates:
-/// - Branch installs: `git fetch` and fast-forward to remote branch head
-/// - Tag installs: pinned, no-op
-/// - Commit installs: pinned, no-op
-/// - Local installs: no-op (explicit update); [`super::local_refresh`] re-copies on session spawn / reload
+/// Branch installs fetch and fast-forward; tag and commit installs are pinned no-ops.
+/// Local installs are a no-op here; [`super::local_refresh`] re-copies on session spawn / reload.
 pub fn update_repo(
     repo_key: &str,
     repo: &InstalledRepo,
@@ -1061,7 +1059,7 @@ mod tests {
 
         let plugins = discover_plugins_in_dir(root, Some("packages/plugin-a")).unwrap();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].name, "plugin-a");
+        assert_eq!(plugins.first().map(|p| p.name.as_str()), Some("plugin-a"));
     }
 
     #[test]
@@ -1090,8 +1088,11 @@ mod tests {
 
         let plugins = discover_plugins_in_dir(plugin_dir, None).unwrap();
         assert_eq!(plugins.len(), 1);
-        assert_eq!(plugins[0].name, "my-tool");
-        assert_eq!(plugins[0].version.as_deref(), Some("1.2.0"));
+        let Some(p) = plugins.first() else {
+            panic!("expected one plugin");
+        };
+        assert_eq!(p.name, "my-tool");
+        assert_eq!(p.version.as_deref(), Some("1.2.0"));
     }
 
     fn git_available() -> bool {
@@ -1272,8 +1273,11 @@ mod tests {
         match update_repo("acme-deadbeef", &repo, false).expect("update should succeed") {
             UpdateStatus::Updated(result) => {
                 assert_eq!(result.plugins.len(), 1);
-                assert_eq!(result.plugins[0].name, "acme");
-                assert_eq!(result.plugins[0].subdir.as_deref(), Some("plugins/acme"));
+                let Some(p) = result.plugins.first() else {
+                    panic!("expected one plugin, got {}", result.plugins.len());
+                };
+                assert_eq!(p.name, "acme");
+                assert_eq!(p.subdir.as_deref(), Some("plugins/acme"));
             }
             _ => panic!("expected UpdateStatus::Updated"),
         }

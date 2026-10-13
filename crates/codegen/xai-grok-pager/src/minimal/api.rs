@@ -25,16 +25,17 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 
 use crate::acp::tracker::TurnActivity;
-// Only the test-only setters below reference `AgentSession`.
 #[cfg(any(test, feature = "test-support"))]
 use crate::app::agent::AgentSession;
-use crate::app::agent_view::{AgentView, McpInitProgress};
+use crate::app::agent_view::AgentView;
 use crate::app::app_view::{ActiveView, AppView, SessionPickerEntry};
 use crate::appearance::LayoutConfig;
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::state::ScrollbackState;
 use crate::theme::Theme;
+use crate::views::elicitation_view::ElicitationViewState;
 use crate::views::extensions_modal::{ExtensionsModalState, StatusFilter};
+use crate::views::feedback_modal::FeedbackModalState;
 use crate::views::mcps_modal::{McpServerDisplayStatus, McpServerInfo};
 use crate::views::modal::CancelTurnViewState;
 use crate::views::picker::{PickerEntry, PickerField, PickerState};
@@ -99,23 +100,13 @@ pub(crate) struct SuspendedMinimalBtwLifecycle {
     focused: bool,
 }
 
-// ── Consolidated minimal-mode state (AppView::minimal_state) ─────────────────
-//
-// Minimal's private per-session state, consolidated into a single field on the central `AppView` instead of several loose `pub` fields
-// It defaults to empty and does nothing outside `--minimal`
-
-/// In-progress incremental `/transcript` build (minimal mode).
-///
-/// The full-fidelity ANSI transcript is a layout and syntax-highlight pass over the whole session; building it in one shot froze the event loop.
-/// The block model is `!Send` (syntect's resumable highlighter state lives inside markdown blocks), so the work cannot move to a worker.
-/// Instead the minimal draw loop renders a time-budgeted slice per frame (`xai-grok-pager-minimal::full_view::pump_transcript`).
-/// It sets `pending_pager_path` when done.
+/// In-progress incremental `/transcript` build (minimal mode). The block model is `!Send` (syntect's resumable
+/// highlighter state lives inside markdown blocks), so the work cannot move to a worker. Instead the minimal draw
+/// loop renders a time-budgeted slice per frame (`xai-grok-pager-minimal::full_view::pump_transcript`).
 pub struct TranscriptBuild {
-    /// The agent whose conversation this build snapshots.
-    /// The pump resolves entries against THIS agent, never the active view.
-    /// `EntryId`s are per-`ScrollbackState` counters; every state starts at 1.
-    /// Resolving the snapshot against whichever agent is active after a session switch would silently stitch in another session's blocks.
-    /// Keying by owner also keeps the build alive (and the pager opening) when the user tabs away mid-build.
+    /// The agent whose conversation this build snapshots. The pump resolves entries against THIS agent, never the
+    /// active view. Resolving the snapshot against whichever agent is active after a session switch would silently
+    /// stitch in another session's blocks.
     pub agent: crate::app::agent::AgentId,
     /// Snapshot of the entry IDs to render, in conversation order.
     /// IDs are re-resolved per slice, so entries removed mid-build (rewind / clear) are skipped instead of skewing positions.
@@ -141,6 +132,16 @@ pub(crate) struct MinimalState {
     /// Minimal prints the whole plan as a normal committed block (rather than under the prompt), so this de-dupes the per-frame push.
     /// Each revision is a fresh ExitPlanMode with a new id, so every revised plan still commits as its own block.
     pub(crate) committed_plan_tool_call_id: Option<String>,
+    /// Layout the history was printed in, and a pending reprint after a resize.
+    pub(crate) reprint: crate::minimal_reprint::ReprintState,
+}
+
+impl MinimalState {
+    /// The sliced `/transcript` build and a waiting reprint advance only inside a draw.
+    /// Ticks keep drawing while either is pending.
+    pub(crate) fn needs_frames(&self) -> bool {
+        self.transcript.is_some() || self.reprint.is_waiting()
+    }
 }
 
 /// `AppView::minimal_state.show_todos`.
@@ -174,12 +175,9 @@ pub fn requeue_minimal_pending_expand(app: &mut AppView, mut ids: Vec<EntryId>) 
     app.minimal_state.pending_expand = ids;
 }
 
-// ── Incremental /transcript build ────────────────────────────────────────────
-
-/// Start the incremental minimal `/transcript` build from the active agent's conversation.
-/// No-op when a build is already running; the in-flight one wins.
-/// Pushes the "nothing to show" system block when the conversation is empty.
-/// The minimal draw loop pumps the build a slice per frame and sets `pending_pager_path` on completion.
+/// Start the incremental minimal `/transcript` build from the active agent's conversation. No-op when a build is
+/// already running; the in-flight one wins. Pushes the "nothing to show" system block when the conversation is
+/// empty. The minimal draw loop pumps the build a slice per frame and sets `pending_pager_path` on completion.
 pub fn request_minimal_transcript(app: &mut AppView) {
     if app.minimal_state.transcript.is_some() {
         return;
@@ -247,24 +245,9 @@ pub fn status_line_inner_width(width: u16, padding: u16) -> Option<u16> {
     crate::views::status_line::inner_width(width, padding)
 }
 
-/// Whether minimal's Ctrl+O remap opens the full-transcript pager *right now*.
-///
-/// Minimal remaps Ctrl+O to `Action::OpenTranscriptPager` except when:
-///
-/// - Ctrl+O is bound to interject and an interject would actually consume the press.
-///   Apple Terminal is where that binding exists: the kitty keyboard protocol is unavailable, so Ctrl+Enter doesn't arrive and Ctrl+I aliases to Tab.
-///   That leaves Ctrl+O as the only interject chord.
-///   An interject consumes the press when:
-///   - editing a queued row (the interject key saves / interjects the edit), or
-///   - a turn is running with a non-empty composer, or
-///   - a turn is running with an empty composer **and** a visible queued follow-up (prompt-path force-send of the top queue row; same as full TUI)
-/// - a free-tier pinned upgrade CTA is live (`pinned_upgrade_cta_live`), so Ctrl+O reaches ToggleYolo (open CTA) instead of the transcript
-///
-/// Otherwise the remap keeps the key for the transcript.
-/// When the remap yields, `minimal_key_intercept` routes to the prompt path.
-/// That path is interject, or ToggleYolo on Apple Terminal when interject has nothing to send.
-/// The info-row hint re-evaluates this every frame.
-/// The advertised key ("ctrl+o transcript" vs `/transcript`) always matches what the press would do.
+/// Ctrl+O opens the transcript unless an interject would actually consume the press, or a pinned upgrade CTA needs the key for ToggleYolo.
+/// On Apple Terminal, Ctrl+O is the only interject chord (no kitty protocol, Ctrl+I aliases to Tab).
+/// The info-row hint re-evaluates every frame so the advertised key matches what the press would do.
 pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
@@ -288,19 +271,9 @@ pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
     ) {
         return false;
     }
-    // Matches prompt-path send-now: non-empty composer text *or* a visible queued follow-up (empty-composer force-send of the top row)
-    // Exclude the in-flight shared-queue entry when it is the running turn (same rule as `AgentView::visible_queue_is_empty`)
-    let running = agent.session.current_prompt_id.as_deref();
-    let has_queued_follow_up = !agent.session.pending_prompts.is_empty()
-        || agent
-            .shared_queue
-            .iter()
-            .any(|e| Some(e.id.as_str()) != running);
-    let has_payload = !agent.prompt.text().trim().is_empty() || has_queued_follow_up;
-    if crate::actions::ActionRegistry::interjection_possible(
-        agent.session.state.is_turn_running(),
-        has_payload,
-    ) {
+    // Matches prompt-path send-now: non-empty composer text or a top queued row that dispatch can send now.
+    let has_payload = !agent.prompt.text().trim().is_empty() || agent.held_queue_top_sendable();
+    if crate::actions::ActionRegistry::interjection_possible(agent.can_send_now(), has_payload) {
         return false;
     }
     !agent.pinned_upgrade_cta_live
@@ -310,8 +283,6 @@ pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
 pub fn set_minimal_committed_plan_id(app: &mut AppView, id: Option<String>) {
     app.minimal_state.committed_plan_tool_call_id = id;
 }
-
-// ── AgentView field accessors ────────────────────────────────────────────────
 
 /// `AgentView::last_activity` (read).
 pub fn last_activity(v: &AgentView) -> Option<&TurnActivity> {
@@ -334,6 +305,17 @@ pub fn extensions_modal_mut(v: &mut AgentView) -> Option<&mut ExtensionsModalSta
     v.extensions_modal.as_mut()
 }
 
+/// `AgentView::feedback_modal`.
+pub fn feedback_modal(v: &AgentView) -> Option<&FeedbackModalState> {
+    v.feedback_modal.as_ref()
+}
+
+/// `AgentView::feedback_modal` (mutable).
+/// Minimal reuses the full-TUI modal renderer; it takes `&mut FeedbackModalState` and updates tab/label-row state stored during render.
+pub fn feedback_modal_mut(v: &mut AgentView) -> Option<&mut FeedbackModalState> {
+    v.feedback_modal.as_mut()
+}
+
 /// `AgentView::question_view`.
 pub fn question_view(v: &AgentView) -> Option<&QuestionViewState> {
     v.question_view.as_ref()
@@ -342,6 +324,21 @@ pub fn question_view(v: &AgentView) -> Option<&QuestionViewState> {
 /// `AgentView::question_view` (mutable: minimal clamps the scroll offset).
 pub fn question_view_mut(v: &mut AgentView) -> Option<&mut QuestionViewState> {
     v.question_view.as_mut()
+}
+
+/// `AgentView::elicitation_view`.
+pub fn elicitation_view(v: &AgentView) -> Option<&ElicitationViewState> {
+    v.elicitation_view.as_ref()
+}
+
+/// `AgentView::elicitation_view`, mutable because the renderer clamps the body scroll offset.
+pub fn elicitation_view_mut(v: &mut AgentView) -> Option<&mut ElicitationViewState> {
+    v.elicitation_view.as_mut()
+}
+
+/// [`AgentView::is_awaiting_user_answer`].
+pub fn is_awaiting_user_answer(v: &AgentView) -> bool {
+    v.is_awaiting_user_answer()
 }
 
 /// `AgentView::hovered_question_item`.
@@ -364,9 +361,9 @@ pub fn plan_mode_pending(v: &AgentView) -> Option<bool> {
     v.plan_mode_pending
 }
 
-/// `AgentView::mcp_init_progress`.
-pub fn mcp_init_progress(v: &AgentView) -> Option<&McpInitProgress> {
-    v.mcp_init_progress.as_ref()
+/// `AgentView::session_starting_since`.
+pub fn session_starting_since(v: &AgentView) -> Option<std::time::Instant> {
+    v.session_starting_since
 }
 
 /// `AgentView::plan_approval_view`.
@@ -374,11 +371,8 @@ pub fn plan_approval_view(v: &AgentView) -> Option<&PlanApprovalViewState> {
     v.plan_approval_view.as_ref()
 }
 
-/// Whether the minimal `/btw` panel is the painted input owner.
-///
-/// This mirrors the order the shared router checks surfaces in: everything that handles input before `/btw` takes precedence here.
-/// So do the later surfaces that replace the prompt, which minimal paints in place of the panel.
-/// Keeping the whole owner check in this file gives paint and minimal input the same answer without changing the fullscreen router.
+/// Whether the minimal `/btw` panel is the painted input owner. Keeping the whole owner check in this file gives
+/// paint and minimal input the same answer without changing the fullscreen router.
 pub fn minimal_btw_surface_available(v: &AgentView) -> bool {
     v.active_subagent.is_none()
         && v.image_viewer.is_none()
@@ -387,6 +381,7 @@ pub fn minimal_btw_surface_available(v: &AgentView) -> bool {
         && !(v.show_goal_detail && v.goal_state.is_some())
         && v.line_viewer.is_none()
         && v.extensions_modal.is_none()
+        && v.feedback_modal.is_none()
         && v.persona_detail.is_none()
         && v.agents_modal.is_none()
         && v.block_viewer.is_none()
@@ -464,11 +459,9 @@ pub fn clear_minimal_btw(v: &mut AgentView) {
     v.clear_btw_owned_selection();
 }
 
-/// Clear text-drag state only when it belongs to the minimal `/btw` surface.
-///
-/// Kept in this file rather than widening the viewer module's private helper.
-/// Minimal already owns this lifecycle reset and is the only cross-module caller.
-/// Does not drop a finished highlight; panel replace/dismiss must clear that separately.
+/// Clear text-drag state only when it belongs to the minimal `/btw` surface. Kept in this file rather than widening
+/// the viewer module's private helper. Minimal already owns this lifecycle reset and is the only cross-module
+/// caller. Does not drop a finished highlight; panel replace/dismiss must clear that separately.
 fn clear_btw_drag_state(v: &mut AgentView) {
     let is_btw = v
         .pending_text_drag
@@ -543,8 +536,6 @@ pub fn rewind_state(v: &AgentView) -> Option<&RewindState> {
     v.rewind_state.as_ref()
 }
 
-// ── AgentView method wrappers ────────────────────────────────────────────────
-
 /// [`AgentView::resolve_turn_activity`].
 pub fn resolve_turn_activity(v: &AgentView) -> Option<TurnActivity> {
     v.resolve_turn_activity()
@@ -603,14 +594,10 @@ pub fn drain_blocked(v: &AgentView) -> bool {
     v.drain_blocked()
 }
 
-// ── PromptWidget accessors ───────────────────────────────────────────────────
-
 /// `PromptWidget::suggestions`.
 pub fn prompt_suggestions(pw: &PromptWidget) -> &SuggestionController {
     &pw.suggestions
 }
-
-// ── Dropdown chrome ──────────────────────────────────────────────────────────
 
 /// Lay out the inline dropdown chrome and return the item area rect (`DropdownChrome::items`), or `None` when it doesn't fit.
 /// Wraps [`crate::app::agent_view::render_dropdown_chrome`]; the `DropdownChrome` DTO itself stays crate-internal.
@@ -641,8 +628,6 @@ pub fn dropdown_chrome_items(
     )
     .map(|chrome| chrome.items)
 }
-
-// ── MCP picker rows ──────────────────────────────────────────────────────────
 
 /// Build the MCP-servers picker rows, returning `(labels, group_keys, data_indices)`.
 /// Wraps [`crate::views::extensions_modal::build_mcp_servers_picker_rows`]; the `McpServersPickerRows` DTO stays crate-internal.
@@ -713,7 +698,6 @@ pub fn mcp_status_label_with_locale(
 }
 
 // ── Session picker builders ──────────────────────────────────────────────────
-
 /// Render a search bar from a [`PickerState`] using its grapheme-safe viewport.
 pub fn render_picker_search_bar(
     buf: &mut Buffer,
@@ -839,8 +823,6 @@ pub fn build_grouped_picker_entries<'a>(
     )
 }
 
-// ── Welcome logo ─────────────────────────────────────────────────────────────
-
 /// [`crate::views::welcome::logo::compact_logo_line_count`].
 pub fn compact_logo_line_count() -> u16 {
     crate::views::welcome::logo::compact_logo_line_count()
@@ -851,8 +833,6 @@ pub fn render_compact_logo(area: Rect, buf: &mut Buffer, theme: &Theme) {
     crate::views::welcome::logo::render_compact_logo(area, buf, theme);
 }
 
-// ── Scrollback committed frontier (minimal-mode commit bookkeeping) ──────────
-//
 // The `committed` marker lives on `ScrollbackEntry` so it survives `shift_remove`/`remove_from`
 // The scan cursor and expand ring live on `ScrollbackState`
 // Only minimal drives these; they are `pub(crate)` in `scrollback/*` and reached exclusively through the wrappers below
@@ -884,8 +864,6 @@ pub fn record_committed_for_expand(sb: &mut ScrollbackState, id: EntryId) {
     sb.record_committed_for_expand(id);
 }
 
-// ── Test-only surface (minimal's unit tests, via the test-only helpers) ──
-
 /// [`crate::app::agent_view::test_agent_view`].
 #[cfg(any(test, feature = "test-support"))]
 pub fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf) -> AgentView {
@@ -898,10 +876,39 @@ pub fn set_extensions_modal(v: &mut AgentView, val: Option<ExtensionsModalState>
     v.extensions_modal = val;
 }
 
+/// Test-only setter for `AgentView::feedback_modal`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_feedback_modal(v: &mut AgentView, val: Option<FeedbackModalState>) {
+    v.feedback_modal = val;
+}
+
 /// Test-only setter for `AgentView::question_view`.
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_question_view(v: &mut AgentView, val: Option<QuestionViewState>) {
     v.question_view = val;
+}
+
+/// Test-only: open a one-text-field form elicitation card from `server_name`.
+#[cfg(any(test, feature = "test-support"))]
+pub fn open_test_elicitation(v: &mut AgentView, server_name: &str, message: &str) {
+    use xai_grok_tools::mcp_elicitation::{McpElicitExtRequest, McpElicitModeFields};
+    v.elicitation_view = Some(ElicitationViewState::from_request(
+        McpElicitExtRequest {
+            session_id: "s".to_owned(),
+            tool_call_id: "mcp-elicit-test".to_owned(),
+            server_name: server_name.to_owned(),
+            message: message.to_owned(),
+            mode: McpElicitModeFields::Form {
+                requested_schema: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": { "title": { "type": "string", "title": "Ticket title" } },
+                    "required": ["title"]
+                })),
+            },
+        },
+        None,
+        None,
+    ));
 }
 
 /// Test-only setter for `AgentView::plan_mode_active`.

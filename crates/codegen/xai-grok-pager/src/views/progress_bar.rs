@@ -44,9 +44,9 @@ fn bar_cells(width: u16, value: f32) -> impl Iterator<Item = (&'static str, /* f
     let glyphs = partial_blocks();
     (0..width).map(move |i| {
         if i < full {
-            (glyphs[8], true)
+            (glyphs.last().copied().unwrap_or("█"), true)
         } else if i == full && remainder > 0 {
-            (glyphs[remainder], true)
+            (glyphs.get(remainder).copied().unwrap_or(" "), true)
         } else {
             (" ", false)
         }
@@ -67,12 +67,9 @@ pub fn progress_bar_spans(width: u16, value: f32, fg: Color, bg: Color) -> Vec<S
         .collect()
 }
 
-/// Render a progress bar into the buffer at the given position.
-///
-/// - `width`: number of character cells for the bar
-/// - `value`: fill fraction in `0.0..=1.0` (clamped)
-/// - `fg`: color for the filled portion
-/// - `bg`: background color for the track (filled + empty cells)
+/// Render a progress bar into the buffer at the given position. `width`: number of character cells
+/// for the bar. `value`: fill fraction in `0.0..=1.0` (clamped). `fg`: color for the filled
+/// portion. `bg`: background color for the track (filled + empty cells).
 pub fn render_progress_bar(
     buf: &mut Buffer,
     x: u16,
@@ -104,7 +101,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_progress_bar(&mut buf, 0, 0, 5, 0.0, Color::White, Color::Black);
         for i in 0..5u16 {
-            assert_eq!(buf[(i, 0)].symbol(), " ");
+            assert_eq!(buf.cell((i, 0)).map(|c| c.symbol()), Some(" "));
         }
     }
 
@@ -114,7 +111,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_progress_bar(&mut buf, 0, 0, 5, 1.0, Color::White, Color::Black);
         for i in 0..5u16 {
-            assert_eq!(buf[(i, 0)].symbol(), "█");
+            assert_eq!(buf.cell((i, 0)).map(|c| c.symbol()), Some("█"));
         }
     }
 
@@ -124,10 +121,10 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render_progress_bar(&mut buf, 0, 0, 4, 0.5, Color::White, Color::Black);
         // 50% of 4 cells = 2 full blocks
-        assert_eq!(buf[(0, 0)].symbol(), "█");
-        assert_eq!(buf[(1, 0)].symbol(), "█");
-        assert_eq!(buf[(2, 0)].symbol(), " ");
-        assert_eq!(buf[(3, 0)].symbol(), " ");
+        assert_eq!(buf.cell((0, 0)).map(|c| c.symbol()), Some("█"));
+        assert_eq!(buf.cell((1, 0)).map(|c| c.symbol()), Some("█"));
+        assert_eq!(buf.cell((2, 0)).map(|c| c.symbol()), Some(" "));
+        assert_eq!(buf.cell((3, 0)).map(|c| c.symbol()), Some(" "));
     }
 
     #[test]
@@ -137,8 +134,8 @@ mod tests {
         // 12.5% of 4 cells = 0.125*4*8 = 4 eighths = a half block on cell 0
         render_progress_bar(&mut buf, 0, 0, 4, 0.125, Color::White, Color::Black);
         let half = partial_blocks()[4]; // "▌" normally, "▒" on legacy ConHost
-        assert_eq!(buf[(0, 0)].symbol(), half);
-        assert_eq!(buf[(1, 0)].symbol(), " ");
+        assert_eq!(buf.cell((0, 0)).map(|c| c.symbol()), Some(half));
+        assert_eq!(buf.cell((1, 0)).map(|c| c.symbol()), Some(" "));
     }
 
     #[test]

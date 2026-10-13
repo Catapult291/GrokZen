@@ -22,10 +22,8 @@ use thiserror::Error;
 use crate::chunks::ChunkKind;
 use crate::identity::SessionId;
 
-/// All errors surfaced by a workspace transport.
-///
-/// Every variant is fully serializable so it can travel over the gRPC transport.
-/// Conversion from non-serializable runtime errors (`std::io::Error`, `xai_grok_tools::ToolError`) happens at the workspace-crate boundary.
+/// All errors surfaced by a workspace transport. Every variant is serializable for gRPC.
+/// Conversion from non-serializable runtime errors happens at the workspace-crate boundary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
 pub enum WorkspaceError {
@@ -113,9 +111,7 @@ impl WorkspaceError {
     }
 
     /// Whether the operation is safe to retry.
-    ///
-    /// Retryable: [`Self::Timeout`], [`Self::Remote`], and [`Self::Io`] with a transient [`IoKind`] (see [`IoKind::is_transient`]).
-    /// Everything else, including all domain errors, returns `false`.
+    /// Only [`Self::Timeout`], [`Self::Remote`], and transient [`Self::Io`]; domain errors are not.
     pub fn is_retryable(&self) -> bool {
         match self {
             Self::Timeout { .. } | Self::Remote(_) => true,
@@ -129,10 +125,8 @@ impl WorkspaceError {
     }
 }
 
-/// Serializable mirror of [`std::io::ErrorKind`].
-///
-/// Tracks every currently-stable variant of [`std::io::ErrorKind`] as of Rust 1.83+.
-/// Conversion from `std::io::ErrorKind` is lossless for every enumerated variant; future-stabilized variants collapse to [`IoKind::Other`].
+/// Serializable mirror of [`std::io::ErrorKind`] (stable variants as of Rust 1.83+).
+/// Enumerated variants convert losslessly; future-stabilized ones collapse to [`IoKind::Other`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IoKind {
@@ -258,8 +252,7 @@ mod tests {
             expected: "GitStatus".into(),
             got: ChunkKind::Ack,
         };
-        // ChunkKind::Ack's Display is `"Ack"` (not `"Ack"` from Debug, but they happen to coincide)
-        // Guard against a {got:?} regression by asserting the rendered string
+        // Display, not Debug: a `{got:?}` format would still pass today because they coincide.
         assert_eq!(
             err.to_string(),
             "protocol mismatch: expected GitStatus, got Ack"
@@ -268,7 +261,6 @@ mod tests {
 
     #[test]
     fn is_retryable_only_for_transient_io_remote_timeout() {
-        // Retryable.
         assert!(WorkspaceError::Timeout { elapsed_ms: 1 }.is_retryable());
         assert!(WorkspaceError::Remote("x".into()).is_retryable());
         for kind in [
@@ -294,7 +286,6 @@ mod tests {
                 "expected {kind:?} to be retryable"
             );
         }
-        // Non-retryable IO kinds.
         for kind in [
             IoKind::NotFound,
             IoKind::PermissionDenied,
@@ -319,7 +310,6 @@ mod tests {
                 "expected {kind:?} to be non-retryable"
             );
         }
-        // Non-retryable domain errors.
         assert!(!WorkspaceError::Cancelled.is_retryable());
         assert!(!WorkspaceError::Permission { reason: "x".into() }.is_retryable());
         assert!(!WorkspaceError::EmptyStream.is_retryable());
@@ -340,7 +330,6 @@ mod tests {
 
     #[test]
     fn io_kind_from_round_trips_for_every_std_kind() {
-        // Exercise the From impl on every std::io::ErrorKind we mirror, ensuring no kind silently collapses to Other
         use std::io::ErrorKind as K;
         let cases: &[(K, IoKind)] = &[
             (K::NotFound, IoKind::NotFound),

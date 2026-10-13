@@ -15,10 +15,8 @@ use url::Url;
 use crate::rmcp;
 
 /// Ensure credential paths are owner-only (Unix `0o600`).
-///
 /// Local helper, not shell-base's: `xai-grok-mcp` sits below `config-types` in the dep graph.
 /// Shell-base pulls shared, then config-types, then mcp, so this crate linking shell-base would be a cycle.
-/// Windows ACL tightening stays on auth via shell-base; MCP is Unix-first here.
 fn ensure_owner_only_permissions(path: &Path) -> std::io::Result<()> {
     #[cfg(unix)]
     {
@@ -137,9 +135,7 @@ impl McpCredentialStore {
     }
 
     /// Locked insert ([`Self::locked_mutate_and_save`]) with a freshness guard.
-    /// The write is skipped when the disk entry is strictly newer by `token_received_at` (see [`disk_entry_is_newer`]).
     /// Otherwise a slow writer rolls the stored refresh token back to a rotated-out value (`invalid_grant` on its next use).
-    /// The canonical slow writer is a refresh suspended across system sleep that completes after wake.
     pub fn insert_and_save(
         &mut self,
         server_name: &str,
@@ -263,26 +259,14 @@ fn acquire_store_lock(store_path: &Path) -> Option<std::fs::File> {
     None
 }
 
-/// Config URLs can embed secrets.
+/// Config URLs can embed secrets. Written through a `GROK_HOME`-overlay link, like `auth.json`.
 fn write_owner_only_atomic(path: &Path, content: &str) -> Result<()> {
-    use std::io::Write;
-
     let parent = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
     std::fs::create_dir_all(parent)?;
-
-    let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tmp.as_file()
-            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
-    }
-    tmp.write_all(content.as_bytes())?;
-    tmp.flush()?;
-    tmp.persist(path).map_err(|e| e.error)?;
+    xai_grok_config::fs_atomic::write_user_file_atomically(path, content, Some(0o600))?;
     Ok(())
 }
 
@@ -490,9 +474,11 @@ mod tests {
 
     #[test]
     fn save_and_load_from_file() {
-        let dir = std::env::temp_dir().join("grok-mcp-credentials-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("test_creds.json");
+        // Unique dir: a hardcoded `$TMP/grok-mcp-credentials-test` is shared
+        // across `--runs_per_test` shards on the same worker, so a sibling
+        // can delete the file between `exists()` and `read_to_string`.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test_creds.json");
 
         let mut store = McpCredentialStore::default();
         let url = Url::parse("https://test.example.com/mcp").unwrap();
@@ -501,9 +487,6 @@ mod tests {
 
         let loaded = McpCredentialStore::load_from(&path).unwrap();
         assert!(loaded.get("test", &url).is_some());
-
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_dir(&dir);
     }
 
     #[cfg(unix)]

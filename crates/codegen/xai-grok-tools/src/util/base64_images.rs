@@ -33,12 +33,9 @@ const MAX_PAYLOAD_LEN: usize = 10 * 1024 * 1024;
 /// Cap per tool result to avoid flooding the context with vision tokens.
 const MAX_IMAGES: usize = 5;
 
-/// Prefix regex for `data:<mime>;base64,`. The payload is scanned manually
-/// from prefix end so line-wrapped producers (Python `base64.encodebytes`,
-/// OpenSSL, Perl `MIME::Base64`) round-trip byte-equal. The leading
-/// `(?:[^a-zA-Z0-9]|^)` rejects word-internal matches like
-/// `metadata:image/...`. Only raster MIME types `image_normalize` can
-/// decode are matched. Groups: (1) full prefix, (2) MIME type.
+/// Prefix regex for `data:<mime>;base64,`. The payload is scanned manually from prefix end so line-wrapped producers (Python
+/// `base64.encodebytes`, OpenSSL, Perl `MIME::Base64`) round-trip byte-equal. The leading `(?:[^a-zA-Z0-9]|^)` rejects word-internal matches
+/// like `metadata:image/...`. Only raster MIME types `image_normalize` can decode are matched. Groups: (1) full prefix, (2) MIME type.
 static IMAGE_PREFIX_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(?i)(?:[^a-zA-Z0-9]|^)",
@@ -69,41 +66,33 @@ fn is_base64_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=')
 }
 
-/// Scan a base64 payload starting at `start`, returning the exclusive end.
-///
-/// Admits a greedy core run plus any number of `\r?\n[ \t]*<base64>+`
-/// continuation chunks, so line-wrapped output round-trips byte-equal. A
-/// chunk ending in `=` (real base64 padding) ends the scan. The scan is
-/// also bounded by `end_cap` (the next URI prefix) so adjacent data URIs
-/// do not bleed into each other.
-///
-/// Trade-off: pure base64-alphabet prose on the line after a payload IS
-/// absorbed; the downstream integrity check in
-/// `image_normalize::normalize_one` rejects the resulting corrupt image.
+/// Scan a base64 payload starting at `start`, returning the exclusive end. Admits a greedy core run plus any number of `\r?\n[ \t]*<base64>+`
+/// continuation chunks, so line-wrapped output round-trips byte-equal. A chunk ending in `=` (real base64 padding) ends the scan. The scan is
+/// also bounded by `end_cap` (the next URI prefix) so adjacent data URIs do not bleed into each other.
 fn scan_payload_end(text: &str, start: usize, end_cap: usize) -> usize {
     let bytes = text.as_bytes();
     let cap = end_cap.min(bytes.len());
     let mut i = start;
-    while i < cap && is_base64_byte(bytes[i]) {
+    while i < cap && bytes.get(i).copied().is_some_and(is_base64_byte) {
         i += 1;
     }
-    if i > start && bytes[i - 1] == b'=' {
+    if i > start && i.checked_sub(1).and_then(|j| bytes.get(j)) == Some(&b'=') {
         return i;
     }
     loop {
         let mut p = i;
-        if p < cap && bytes[p] == b'\r' {
+        if p < cap && bytes.get(p) == Some(&b'\r') {
             p += 1;
         }
-        if !(p < cap && bytes[p] == b'\n') {
+        if !(p < cap && bytes.get(p) == Some(&b'\n')) {
             break;
         }
         p += 1;
-        while p < cap && matches!(bytes[p], b' ' | b'\t') {
+        while p < cap && matches!(bytes.get(p).copied(), Some(b' ' | b'\t')) {
             p += 1;
         }
         let chunk_start = p;
-        while p < cap && is_base64_byte(bytes[p]) {
+        while p < cap && bytes.get(p).copied().is_some_and(is_base64_byte) {
             p += 1;
         }
         let chunk_len = p - chunk_start;
@@ -111,7 +100,7 @@ fn scan_payload_end(text: &str, start: usize, end_cap: usize) -> usize {
             break;
         }
         i = p;
-        if bytes[p - 1] == b'=' {
+        if p.checked_sub(1).and_then(|j| bytes.get(j)) == Some(&b'=') {
             break;
         }
     }
@@ -167,14 +156,14 @@ fn strip_pdf_data_uris(text: &str) -> Option<String> {
         let Some(prefix) = caps.get(1) else { continue };
         let next_start = next_prefix_after(&prefix_positions, prefix.start()).unwrap_or(text.len());
         let payload_end = scan_payload_end(text, prefix.end(), next_start);
-        let payload_span = &text[prefix.end()..payload_end];
+        let payload_span = text.get(prefix.end()..payload_end).unwrap_or("");
         let size_kb = if payload_span.len() > GROSS_PAYLOAD_PRE_CAP {
             payload_span.len() * 3 / 4 / 1024
         } else {
             strip_b64_whitespace(payload_span).len() * 3 / 4 / 1024
         };
         matched = true;
-        result.push_str(&text[last_end..prefix.start()]);
+        result.push_str(text.get(last_end..prefix.start()).unwrap_or(""));
         let _ = write!(result, "[PDF attachment removed \u{2014} {size_kb} KB]");
         last_end = payload_end;
     }
@@ -183,14 +172,12 @@ fn strip_pdf_data_uris(text: &str) -> Option<String> {
         return None;
     }
 
-    result.push_str(&text[last_end..]);
+    result.push_str(text.get(last_end..).unwrap_or(""));
     Some(result)
 }
 
-/// Scan `s` for data-URI images, replacing each with a placeholder and
-/// capturing the payload bytes for downstream multimodal injection.
-///
-/// Returns `None` when nothing was modified.
+/// Scan `s` for data-URI images, replacing each with a placeholder and capturing the payload bytes
+/// for downstream multimodal injection. Returns `None` when nothing was modified.
 fn scan_and_extract(s: &str) -> Option<(String, Vec<ExtractedImage>)> {
     if !s.contains("data:image") {
         return None;
@@ -207,10 +194,10 @@ fn scan_and_extract(s: &str) -> Option<(String, Vec<ExtractedImage>)> {
         };
         let next_start = next_prefix_after(&prefix_positions, prefix.start()).unwrap_or(s.len());
         let payload_end = scan_payload_end(s, prefix.end(), next_start);
-        let payload_span = &s[prefix.end()..payload_end];
+        let payload_span = s.get(prefix.end()..payload_end).unwrap_or("");
 
         if payload_span.len() > GROSS_PAYLOAD_PRE_CAP {
-            result.push_str(&s[last_end..prefix.start()]);
+            result.push_str(s.get(last_end..prefix.start()).unwrap_or(""));
             result.push_str("[large image removed]");
             last_end = payload_end;
             continue;
@@ -223,7 +210,7 @@ fn scan_and_extract(s: &str) -> Option<(String, Vec<ExtractedImage>)> {
         }
 
         let mime = mime_match.as_str().to_owned();
-        result.push_str(&s[last_end..prefix.start()]);
+        result.push_str(s.get(last_end..prefix.start()).unwrap_or(""));
 
         if payload_len > MAX_PAYLOAD_LEN {
             result.push_str("[large image removed]");
@@ -231,7 +218,7 @@ fn scan_and_extract(s: &str) -> Option<(String, Vec<ExtractedImage>)> {
             result.push_str("[additional image omitted]");
         } else {
             let data = match cleaned {
-                Cow::Borrowed(b) => b[..payload_len].to_owned(),
+                Cow::Borrowed(b) => b.get(..payload_len).unwrap_or("").to_owned(),
                 Cow::Owned(mut o) => {
                     o.truncate(payload_len);
                     o
@@ -251,14 +238,13 @@ fn scan_and_extract(s: &str) -> Option<(String, Vec<ExtractedImage>)> {
         return None;
     }
 
-    result.push_str(&s[last_end..]);
+    result.push_str(s.get(last_end..).unwrap_or(""));
     Some((result, images))
 }
 
-/// Extract image data URIs from `text`, replacing each with a placeholder.
-/// Small payloads and non-image data URIs survive; PDF data URIs are
-/// stripped first. Owned-input convenience over [`try_extract_base64_images`]
-/// — when nothing matched, the original `text` is returned unmodified.
+/// Extract image data URIs from `text`, replacing each with a placeholder. Small payloads and non-image data URIs
+/// survive; PDF data URIs are stripped first. Owned-input convenience over [`try_extract_base64_images`] — when nothing
+/// matched, the original `text` is returned unmodified.
 pub fn extract_base64_images(text: String) -> ExtractionResult {
     try_extract_base64_images(&text).unwrap_or_else(|| ExtractionResult {
         text,
@@ -266,10 +252,9 @@ pub fn extract_base64_images(text: String) -> ExtractionResult {
     })
 }
 
-/// Borrowed-input variant: returns `Some` only when at least one URI was
-/// matched (image captured, or PDF / oversize stripped). Returns `None`
-/// on the no-op fast path so callers (e.g. the per-line scan inside
-/// `extract_file_content_lines`) can avoid an allocation.
+/// Borrowed-input variant: returns `Some` only when at least one URI was matched (image captured,
+/// or PDF / oversize stripped). Returns `None` on the no-op fast path so callers (e.g. the per-line
+/// scan inside `extract_file_content_lines`) can avoid an allocation.
 pub fn try_extract_base64_images(text: &str) -> Option<ExtractionResult> {
     let after_pdf = strip_pdf_data_uris(text);
     let input = after_pdf.as_deref().unwrap_or(text);
@@ -292,6 +277,13 @@ mod tests {
 
     fn payload(n: usize) -> String {
         "A".repeat(n)
+    }
+
+    fn img(result: &ExtractionResult, i: usize) -> &ExtractedImage {
+        let Some(image) = result.images.get(i) else {
+            panic!("expected image {i}: {:?}", result.images);
+        };
+        image
     }
 
     #[test]
@@ -320,8 +312,8 @@ mod tests {
             "Before ![logo]([image content will be provided separately]) after"
         );
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].mime_type, "image/png");
-        assert_eq!(result.images[0].data, p);
+        assert_eq!(img(&result, 0).mime_type, "image/png");
+        assert_eq!(img(&result, 0).data, p);
     }
 
     #[test]
@@ -332,10 +324,10 @@ mod tests {
             format!("First data:image/png;base64,{p1} middle data:image/jpeg;base64,{p2} end");
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 2);
-        assert_eq!(result.images[0].mime_type, "image/png");
-        assert_eq!(result.images[0].data, p1);
-        assert_eq!(result.images[1].mime_type, "image/jpeg");
-        assert_eq!(result.images[1].data, p2);
+        assert_eq!(img(&result, 0).mime_type, "image/png");
+        assert_eq!(img(&result, 0).data, p1);
+        assert_eq!(img(&result, 1).mime_type, "image/jpeg");
+        assert_eq!(img(&result, 1).data, p2);
         assert!(
             result
                 .text
@@ -409,12 +401,12 @@ mod tests {
 
     #[test]
     fn mixed_image_and_non_image() {
-        let img = payload(2000);
+        let png = payload(2000);
         let txt = payload(2000);
-        let input = format!("data:image/png;base64,{img} middle data:text/html;base64,{txt} end");
+        let input = format!("data:image/png;base64,{png} middle data:text/html;base64,{txt} end");
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].mime_type, "image/png");
+        assert_eq!(img(&result, 0).mime_type, "image/png");
         assert!(result.text.contains("data:text/html;base64,"));
     }
 
@@ -430,7 +422,7 @@ mod tests {
     fn case_insensitive_base64_marker() {
         let result = extract_base64_images(format!("data:image/png;Base64,{} end", payload(2000)));
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].mime_type, "image/png");
+        assert_eq!(img(&result, 0).mime_type, "image/png");
     }
 
     #[test]
@@ -440,7 +432,7 @@ mod tests {
             payload(2000)
         ));
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].mime_type, "image/jpeg");
+        assert_eq!(img(&result, 0).mime_type, "image/jpeg");
     }
 
     #[test]
@@ -488,7 +480,7 @@ mod tests {
         let input = format!("data:image/png;base64,{p}X end");
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].data, p);
+        assert_eq!(img(&result, 0).data, p);
     }
 
     #[test]
@@ -498,7 +490,7 @@ mod tests {
             let input = format!("data:{mime};base64,{p} end");
             let result = extract_base64_images(input);
             assert_eq!(result.images.len(), 1, "expected extraction for {mime}");
-            assert_eq!(result.images[0].mime_type, mime);
+            assert_eq!(img(&result, 0).mime_type, mime);
         }
     }
 
@@ -546,7 +538,7 @@ mod tests {
         let result = extract_base64_images(input);
         assert!(result.text.contains("[PDF attachment removed"));
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].mime_type, "image/png");
+        assert_eq!(img(&result, 0).mime_type, "image/png");
     }
 
     #[test]
@@ -591,8 +583,8 @@ mod tests {
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1, "expected one image after LF wrap");
         let expected_len = 76 * 30;
-        assert_eq!(result.images[0].data.len(), expected_len);
-        assert!(result.images[0].data.chars().all(|c| c == 'A'));
+        assert_eq!(img(&result, 0).data.len(), expected_len);
+        assert!(img(&result, 0).data.chars().all(|c| c == 'A'));
         assert!(result.text.contains("end"), "trailing prose preserved");
     }
 
@@ -605,9 +597,9 @@ mod tests {
         let input = format!("data:image/png;base64,{wrapped}<end");
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].data.len(), 76 * 20);
+        assert_eq!(img(&result, 0).data.len(), 76 * 20);
         assert!(
-            !result.images[0].data.contains(['\r', '\n']),
+            !img(&result, 0).data.contains(['\r', '\n']),
             "CR/LF should be stripped from payload"
         );
     }
@@ -621,9 +613,9 @@ mod tests {
         let input = format!("data:image/png;base64,{body}<end");
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].data.len(), 72 * 16);
+        assert_eq!(img(&result, 0).data.len(), 72 * 16);
         assert!(
-            !result.images[0]
+            !img(&result, 0)
                 .data
                 .chars()
                 .any(|c| c.is_ascii_whitespace()),
@@ -644,8 +636,8 @@ mod tests {
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1, "padded short tail must be kept");
         let expected_len = 76 * 20 + short_tail.len();
-        assert_eq!(result.images[0].data.len(), expected_len);
-        assert!(result.images[0].data.ends_with("AAA="));
+        assert_eq!(img(&result, 0).data.len(), expected_len);
+        assert!(img(&result, 0).data.ends_with("AAA="));
         assert!(result.text.contains("rest text after"));
     }
 
@@ -664,7 +656,7 @@ mod tests {
         let input = format!("data:image/png;base64,{wrapped}<rest");
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].data, p);
+        assert_eq!(img(&result, 0).data, p);
     }
 
     /// 3-aligned input lengths produce SHORT unpadded trailing lines from
@@ -681,8 +673,8 @@ mod tests {
         let input = format!("data:image/png;base64,{wrapped}<eof");
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1, "unpadded short tail must be kept");
-        assert_eq!(result.images[0].data.len(), 76 * 18 + tail.len());
-        assert!(result.images[0].data.ends_with("BCDEFGHIJKLM"));
+        assert_eq!(img(&result, 0).data.len(), 76 * 18 + tail.len());
+        assert!(img(&result, 0).data.ends_with("BCDEFGHIJKLM"));
         assert!(result.text.contains("eof"));
     }
 
@@ -710,7 +702,7 @@ mod tests {
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1);
         // 2000 + 8 ("Comments") = 2008 (mod 4 == 0). ": ok" stays in text.
-        assert_eq!(result.images[0].data.len(), 2008);
+        assert_eq!(img(&result, 0).data.len(), 2008);
         assert!(result.text.contains(": ok"));
     }
 
@@ -722,7 +714,7 @@ mod tests {
         let input = format!("data:image/png;base64,{wrapped} end");
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].data.len(), 1028);
+        assert_eq!(img(&result, 0).data.len(), 1028);
     }
 
     #[test]
@@ -738,7 +730,7 @@ mod tests {
         }
     }
 
-    /// Contract with `xai_grok_mcp::servers::format_mcp_image` dual-emit:
+    /// Contract with `xai_grok_mcp::call_result::format_mcp_image` dual-emit:
     /// the data URI becomes a vision token; the raw `<mcp_image_base64>`
     /// block survives verbatim for agent decoding (e.g. `send_file`).
     #[test]
@@ -752,8 +744,8 @@ mod tests {
         );
         let result = extract_base64_images(input);
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].mime_type, "image/png");
-        assert_eq!(result.images[0].data, p);
+        assert_eq!(img(&result, 0).mime_type, "image/png");
+        assert_eq!(img(&result, 0).data, p);
         assert!(
             result
                 .text
@@ -781,8 +773,8 @@ mod tests {
         let input = format!("before data:image/png;base64,{p} after");
         let result = try_extract_base64_images(&input).expect("URI must be captured");
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].mime_type, "image/png");
-        assert_eq!(result.images[0].data, p);
+        assert_eq!(img(&result, 0).mime_type, "image/png");
+        assert_eq!(img(&result, 0).data, p);
         assert!(
             result
                 .text
@@ -804,8 +796,8 @@ mod tests {
         let input = format!("first data:image/png;base64,{p} mid data:image/jpeg;base64,{p} end");
         let result = try_extract_base64_images(&input).expect("two URIs must be captured");
         assert_eq!(result.images.len(), 2);
-        assert_eq!(result.images[0].mime_type, "image/png");
-        assert_eq!(result.images[1].mime_type, "image/jpeg");
+        assert_eq!(img(&result, 0).mime_type, "image/png");
+        assert_eq!(img(&result, 1).mime_type, "image/jpeg");
         assert_eq!(
             result
                 .text
@@ -835,8 +827,8 @@ mod tests {
         let input = format!("![logo](data:image/png;base64,{p})");
         let result = try_extract_base64_images(&input).expect("long URI must be captured");
         assert_eq!(result.images.len(), 1);
-        assert_eq!(result.images[0].data.len(), 50_000);
-        assert_eq!(result.images[0].data, p);
+        assert_eq!(img(&result, 0).data.len(), 50_000);
+        assert_eq!(img(&result, 0).data, p);
         assert!(result.text.len() < 200);
         assert!(
             result

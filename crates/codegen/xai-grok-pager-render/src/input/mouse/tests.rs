@@ -17,10 +17,7 @@ fn make_vscode_config() -> ScrollConfig {
     ScrollConfig::from_terminal(TerminalName::VsCode, ScrollConfigOverrides::default())
 }
 
-/// Drive the state machine exactly as the event loop's dedicated scroll clock does: tick at each `scroll_clock_deadline` until the stream finalizes.
-/// A zero delay advances by 1ms, mirroring the real loop's monotonic wall clock.
-/// (A tick at the exact 80ms boundary cannot finalize because the gap check is strict.)
-/// Returns `(tick_time, flushed_lines)` for every tick.
+/// Tick at each `scroll_clock_deadline` until finalize. A zero delay advances 1ms; the gap check is strict so an exact 80ms tick cannot finalize.
 fn drive_suggested_ticks(state: &mut MouseScrollState, mut now: Instant) -> Vec<(Instant, i32)> {
     let mut ticks = Vec::new();
     for _ in 0..64 {
@@ -36,14 +33,8 @@ fn drive_suggested_ticks(state: &mut MouseScrollState, mut now: Instant) -> Vec<
 
 #[test]
 fn clamped_pending_tail_does_not_busy_spin_scroll_clock() {
-    // Direction-clamp spin regression: a fast flick followed by a slow drag decays the acceleration multiplier from 2.5x to 1.0x
-    // Under retroactive whole-stream accel this pulled desired BELOW applied, making flushes clamped no-ops that never advanced last_redraw_at
-    // If the deadline predicate disagrees with the flush (raw desired != applied), it reports pending with a zero deadline forever
-    // The scroll clock then busy-spins a full core for the rest of the gesture
-    //
-    // Under this fixture's forced-Trackpad config the pricing formula never switches, so desired is monotone and "applied > desired" is unreachable
-    // Auto-mode promotion re-prices can still clamp, so the clamp is still needed (see effective_pending)
-    // The property under test: suggested deadlines through a decelerating tail are never zero, within the drive helper's 64-wakeup bound
+    // Decaying accel used to pull desired below applied; a deadline that disagrees with the flush then busy-spins.
+    // Forced-Trackpad keeps desired monotone. Deadlines through a decelerating tail must never be zero.
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -121,7 +112,8 @@ fn residual_backlog_flushes_on_16ms_cadence_slots() {
     );
     // The synthetic clock makes the deadline chain exact: consecutive residual flushes land exactly one REDRAW_CADENCE apart, never a 33ms slot
     for pair in flushes.windows(2) {
-        let spacing = pair[1].0.duration_since(pair[0].0);
+        let [a, b] = pair else { continue };
+        let spacing = b.0.duration_since(a.0);
         assert_eq!(
             spacing, REDRAW_CADENCE,
             "residual flushes must be 16ms apart, got {spacing:?}"
@@ -340,11 +332,7 @@ fn stream_gap_closes_stream() {
 
 #[test]
 fn high_rate_wheel_coalesces_redraws() {
-    // Simulate a Logitech free-spinning wheel: 300 events over ~900ms at 3ms intervals (~333 events/sec)
-    // The first 3 events arrive within 12ms and get promoted to Wheel mode
-    //
-    // With cadence coalescing (16ms), we expect ~56 flushes (one per 16ms window), not ~300 (one per event)
-    // Each flush should batch the accumulated lines, so total lines scrolled is preserved
+    // Free-spinning wheel at 3ms. Cadence coalescing must flush once per 16ms window, not once per event, without losing lines.
     let config = make_config(3, ScrollInputMode::Auto);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -503,11 +491,7 @@ fn run_flick_to_finalize(config: ScrollConfig, events: u64, interval_ms: u64) ->
 
 #[test]
 fn fast_flick_delivery_scales_with_viewport() {
-    // Proportional per-flush cap: the fixed 6-line cap held fast flicks to ~360 lines/s regardless of screen size
-    // A dense burst lost most of its travel
-    // The cap is now max(6, viewport/2): the same flick must deliver strictly more on a taller viewport
-    // A stamped viewport must never deliver less than the legacy floor
-    // 6x speed supplies the demand: the 2ms spacing below is accel-excluded (duplicate guard), so acceleration cannot
+    // Cap is max(6, viewport/2): the same flick must deliver more on a taller viewport, never less than the legacy floor.
     let base_config = ScrollConfig::from_terminal(
         TerminalName::Unknown,
         ScrollConfigOverrides {
@@ -560,12 +544,7 @@ fn finalize_flushes_whole_line_backlog_not_just_carry() {
          cap, got {pending}"
     );
 
-    // First tick past the 80ms gap: the backlog is backed by unflushed events (arrivals since the last in-burst flush)
-    // The catch-up flush therefore still delivers it whole
-    //
-    // The gap tick no longer finalizes while lines remain
-    // The drain completes on the 16ms scroll clock and the finalize follows with nothing left to flush or drop
-    // The delivered total matches the old behavior, without the finalize burst
+    // First tick past the gap still delivers the unflushed backlog whole, but does not finalize while lines remain.
     let update = state.on_tick_at(at + STREAM_GAP + Duration::from_millis(1));
     assert_eq!(
         update.lines, pending,
@@ -591,10 +570,7 @@ fn finalize_flushes_whole_line_backlog_not_just_carry() {
 
 #[test]
 fn fractional_carry_not_reamplified_by_speed_multiplier() {
-    // desired/applied/carry share FINAL line units (see MouseScrollState::carry_lines)
-    // A sub-line remainder must therefore cross a stream boundary as-is
-    // Consuming it before the speed multiplier re-amplified it by up to (multiplier - 1) phantom lines per gesture
-    // That is ~5 lines at scroll_speed 100, the exact setting the trackpad pty regression test runs at
+    // Carry is final line units. Consuming it before the speed multiplier minted phantom lines per gesture.
     let config = ScrollConfig::from_terminal(
         TerminalName::Unknown,
         ScrollConfigOverrides {
@@ -638,10 +614,7 @@ fn fractional_carry_not_reamplified_by_speed_multiplier() {
 
 #[test]
 fn desired_monotone_no_zero_flush_window_under_decaying_accel() {
-    // Retroactive accel regression: the whole accumulated total was multiplied by the CURRENT multiplier
-    // A fast start followed by a slow tail then shrank desired below applied: flushes clamped to zero and the gesture visibly paused mid-stream
-    // With per-event weights, desired must be monotone
-    // Every decelerating tail event (each at least 16ms apart, so each can flush on the 16ms cadence) must still deliver lines while backlog exists
+    // Retroactive whole-stream accel shrank desired below applied and paused mid-stream. Per-event weights keep desired monotone.
     let config = make_config(3, ScrollInputMode::Trackpad);
     let base = Instant::now();
     let mut state = MouseScrollState::new_at(base);
@@ -886,11 +859,7 @@ fn cancel_stream_drops_pending_momentum_and_fractional_carry() {
 
 #[test]
 fn wheel_flood_flushes_capped_with_backlog_carry() {
-    // Wheel-path cap regression: the old code capped only confirmed trackpad
-    // A confirmed-wheel flood (e.g. terminal momentum bursts, or a trackpad misread as wheel) flushed its whole backlog in one 16ms slot.
-    // 30 events at 1ms on an ept=3 Auto profile promote to Wheel at event 3 and pile ~1 line/event into two cadence slots
-    // Every flush must respect the proportional cap (viewport 20 yields cap 10), with the excess carried into later slots
-    // The old code delivered it as one jump, flushing 16 at the second slot
+    // Wheel used to be uncapped, so a flood flushed its whole backlog in one slot. Every flush must respect the proportional cap.
     let config = make_config(3, ScrollInputMode::Auto).with_viewport_height(20);
     let cap = config.flush_cap();
     assert_eq!(cap, 10, "fixture: viewport 20 must yield cap 10");
@@ -992,10 +961,7 @@ fn unclassified_flood_on_ept3_capped_not_teleported() {
 
 #[test]
 fn legit_ept1_wheel_notches_never_hit_the_cap() {
-    // Real wheels cannot hit the cap: on an ept=1 profile (iTerm2 shape: 1 event and 1 line per notch) the wheel path has no acceleration
-    // Desired is accumulated_events x (lpt/ept) x speed, so a flush covers at most the notches accumulated since the last 16ms slot
-    // That is ~2 per slot even free-spinning, far under the 6-line floor cap, let alone viewport/2
-    // Every notch must arrive intact and no flush may come near the cap
+    // ept=1 wheel has no accel, so a flush covers only notches since the last slot — far under the cap. Every notch must arrive intact.
     let config = ScrollConfig::from_terminal(TerminalName::Iterm2, Default::default())
         .with_viewport_height(20);
     assert_eq!(config.events_per_tick, 1);
@@ -1198,14 +1164,8 @@ fn scroll_lines_override_beats_profile_and_unset_keeps_it() {
     assert_eq!(set.trackpad_lines_per_tick, 4);
 }
 
-/// Forced-wheel mode prices a flood at exact wheel rates regardless of arrival timing.
-/// 30 events at 8ms deliver exactly `events/ept x wheel_lines` = 30 lines.
-///
-/// The identical Auto stream used to deliver strictly MORE.
-/// It stayed Unknown mid-stream (8ms misses the 12ms wheel-promotion window; ept=3 has no mid-stream trackpad promotion) and priced accel-free.
-/// The finalize's flip from Unknown to Trackpad then re-priced it accel-weighted, bursting the excess AFTER input ended: the end-of-gesture jerk.
-/// The finalize reclassification may no longer add demand, so Auto now equals the forced-wheel total on this shape by design.
-/// Live acceleration still applies to streams confirmed trackpad mid-stream (the ept=1 paths covered by the continuous/vscode throughput tests).
+/// Forced-wheel prices at exact wheel rates. Finalize reclassification must not add demand, so Auto equals that total on this shape.
+/// Live accel still applies to streams confirmed trackpad mid-stream.
 #[test]
 fn forced_wheel_mode_prices_flood_as_wheel_regardless_of_timing() {
     let run = |mode: Option<ScrollInputMode>| -> i32 {
@@ -1370,11 +1330,7 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
             .on_scroll_event_at(at, ScrollDirection::Down, config)
             .lines;
     }
-    // Overdue ticks past the 80ms gap (a starved scroll clock).
-    //
-    // The first post-gap tick no longer finalizes with a capped burst
-    // The backlog drains tapered on 16ms slots first, the coast budget writes off what one cap cannot honor, and only then does the finalize land
-    // Its nonzero `dropped` quantifies the written-off flood excess, not a burst
+    // Starved clock: drain tapered first; finalize `dropped` is written-off flood excess, not a burst.
     let mut final_at = at + Duration::from_millis(81);
     delivered += state.on_tick_at(final_at).lines;
     mirrored += mirror.on_tick_at(final_at).lines;
@@ -1401,52 +1357,82 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
     );
 
     // Ordering: stream_start first, finalize last, only flushes between.
-    assert_eq!(records[0]["evt"], "stream_start");
-    assert_eq!(records[0]["trigger"], "event");
-    assert_eq!(records[0]["events_total"], 0);
+    let Some(start) = records.first() else {
+        panic!("expected records: {records:?}");
+    };
+    assert_eq!(
+        start.get("evt").and_then(|v| v.as_str()),
+        Some("stream_start")
+    );
+    assert_eq!(start.get("trigger").and_then(|v| v.as_str()), Some("event"));
+    assert_eq!(start.get("events_total"), Some(&serde_json::json!(0)));
     // Config echo rides stream_start only, matching the synthetic config.
-    assert_eq!(records[0]["mode"], "trackpad");
-    assert_eq!(records[0]["ept"], 3);
-    assert_eq!(records[0]["wheel_lpt"], 3);
-    assert_eq!(records[0]["trackpad_lpt"], 3);
-    assert_eq!(records[0]["invert"], false);
-    assert_eq!(records[0]["speed"], 1.0);
-    assert_eq!(records[0]["viewport_height"], 0);
+    assert_eq!(start.get("mode").and_then(|v| v.as_str()), Some("trackpad"));
+    assert_eq!(start.get("ept"), Some(&serde_json::json!(3)));
+    assert_eq!(start.get("wheel_lpt"), Some(&serde_json::json!(3)));
+    assert_eq!(start.get("trackpad_lpt"), Some(&serde_json::json!(3)));
+    assert_eq!(start.get("invert"), Some(&serde_json::json!(false)));
+    assert_eq!(start.get("speed"), Some(&serde_json::json!(1.0)));
+    assert_eq!(start.get("viewport_height"), Some(&serde_json::json!(0)));
     let last = records.last().expect("nonempty");
-    assert!(records[1].get("ept").is_none(), "flushes skip the echo");
+    assert!(
+        records.get(1).is_some_and(|r| r.get("ept").is_none()),
+        "flushes skip the echo"
+    );
     assert!(last.get("mode").is_none(), "finalize skips the echo");
-    assert_eq!(last["evt"], "finalize");
-    assert_eq!(last["trigger"], "finalize");
-    for flush in &records[1..records.len() - 1] {
-        assert_eq!(flush["evt"], "flush");
+    assert_eq!(last.get("evt").and_then(|v| v.as_str()), Some("finalize"));
+    assert_eq!(
+        last.get("trigger").and_then(|v| v.as_str()),
+        Some("finalize")
+    );
+    let mid = records
+        .len()
+        .checked_sub(1)
+        .and_then(|end| records.get(1..end))
+        .unwrap_or(&[]);
+    for flush in mid {
+        assert_eq!(flush.get("evt").and_then(|v| v.as_str()), Some("flush"));
         // In-burst flushes ride the event path; the post-gap drain flushes ride the tick path (they replace the old finalize burst)
+        let trigger = flush.get("trigger").and_then(|v| v.as_str());
         assert!(
-            flush["trigger"] == "event" || flush["trigger"] == "tick",
+            trigger == Some("event") || trigger == Some("tick"),
             "unexpected flush trigger: {flush}"
         );
-        assert_ne!(flush["flushed"], 0, "zero-delta flushes are not logged");
+        assert!(
+            flush
+                .get("flushed")
+                .and_then(|v| v.as_i64())
+                .is_some_and(|n| n != 0),
+            "zero-delta flushes are not logged"
+        );
     }
-    let drain_flushes: Vec<i64> = records[1..records.len() - 1]
+    let drain_flushes: Vec<i64> = mid
         .iter()
-        .filter(|r| r["trigger"] == "tick")
-        .map(|r| r["flushed"].as_i64().expect("flushed"))
+        .filter(|r| r.get("trigger").and_then(|v| v.as_str()) == Some("tick"))
+        .map(|r| r.get("flushed").and_then(|v| v.as_i64()).expect("flushed"))
         .collect();
     assert!(
         !drain_flushes.is_empty(),
         "the starved flood must drain over tick flushes before finalizing"
     );
     assert!(
-        drain_flushes.windows(2).all(|w| w[0] >= w[1]),
+        drain_flushes
+            .windows(2)
+            .all(|w| matches!(w, [a, b] if a >= b)),
         "drain flushes must decelerate (non-increasing), got {drain_flushes:?}"
     );
 
     // ts_ms is the synthetic timeline: monotone, finalize at the tick's exact offset
     let ts: Vec<f64> = records
         .iter()
-        .map(|r| r["ts_ms"].as_f64().expect("ts_ms is a number"))
+        .map(|r| {
+            r.get("ts_ms")
+                .and_then(|v| v.as_f64())
+                .expect("ts_ms is a number")
+        })
         .collect();
     assert!(
-        ts.windows(2).all(|w| w[0] <= w[1]),
+        ts.windows(2).all(|w| matches!(w, [a, b] if a <= b)),
         "ts_ms monotone: {ts:?}"
     );
     let expected_ms = final_at.duration_since(base).as_secs_f64() * 1000.0;
@@ -1454,12 +1440,27 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
 
     // Finalize consistency: the finalize flushes nothing because the drain already ran dry or the coast budget wrote the rest off
     // `dropped` is exactly the whole-line backlog the budget declined
-    let cap = last["cap"].as_i64().expect("cap");
-    let flushed = last["flushed"].as_i64().expect("flushed");
-    let dropped = last["dropped"].as_i64().expect("dropped");
-    let backlog_after = last["backlog_after"].as_i64().expect("backlog_after");
-    let desired = last["desired"].as_f64().expect("desired");
-    let applied_total = last["applied_total"].as_i64().expect("applied_total");
+    let cap = last.get("cap").and_then(|v| v.as_i64()).expect("cap");
+    let flushed = last
+        .get("flushed")
+        .and_then(|v| v.as_i64())
+        .expect("flushed");
+    let dropped = last
+        .get("dropped")
+        .and_then(|v| v.as_i64())
+        .expect("dropped");
+    let backlog_after = last
+        .get("backlog_after")
+        .and_then(|v| v.as_i64())
+        .expect("backlog_after");
+    let desired = last
+        .get("desired")
+        .and_then(|v| v.as_f64())
+        .expect("desired");
+    let applied_total = last
+        .get("applied_total")
+        .and_then(|v| v.as_i64())
+        .expect("applied_total");
     assert_eq!(cap, 6, "unstamped viewport floors the cap");
     assert_eq!(
         flushed, 0,
@@ -1471,28 +1472,34 @@ fn scroll_log_records_flood_flushes_and_capped_finalize_drop() {
     );
     assert_eq!(dropped, backlog_after);
     assert_eq!(dropped, desired.trunc() as i64 - applied_total);
-    assert_eq!(last["kind"], "trackpad");
-    assert_eq!(last["events_total"], 50);
+    assert_eq!(last.get("kind").and_then(|v| v.as_str()), Some("trackpad"));
+    assert_eq!(last.get("events_total"), Some(&serde_json::json!(50)));
 
     // Per-stream event accounting: since-flush counts partition the total.
     let since_sum: u64 = records
         .iter()
-        .map(|r| r["events_since_flush"].as_u64().expect("count"))
+        .map(|r| {
+            r.get("events_since_flush")
+                .and_then(|v| v.as_u64())
+                .expect("count")
+        })
         .sum();
     assert_eq!(since_sum, 50);
     assert!(
-        records[0].get("ms_since_prev_flush").is_none(),
+        records
+            .first()
+            .is_some_and(|r| r.get("ms_since_prev_flush").is_none()),
         "no flush precedes the first record"
     );
-    assert!(last["ms_since_prev_flush"].as_f64().expect("spacing") > 0.0);
+    assert!(
+        last.get("ms_since_prev_flush")
+            .and_then(|v| v.as_f64())
+            .expect("spacing")
+            > 0.0
+    );
 }
 
-/// Producer-side twin of the harness's `scroll_matrix::log::ScrollLogLine` parser (`xai-grok-pager-pty-harness/src/scroll_matrix/log.rs`).
-/// The harness declares every always-emitted field REQUIRED, so its deserializer fails loudly on a pager-side rename.
-/// This test pins the same contract from the producer side as raw JSON key sets.
-/// The key lists are hardcoded string fixtures on purpose.
-/// They take no harness dependency (the harness reaches the pager only as a binary via PAGER_BINARY).
-/// They share no constants with the serializer, otherwise a rename would update both sides silently.
+/// Hardcoded JSON keys, not shared with the serializer, so a rename cannot update both sides silently. No harness dependency.
 #[test]
 fn scroll_log_wire_format_matches_harness_required_field_set() {
     // Always-emitted fields the harness parser requires on every record.
@@ -1559,7 +1566,11 @@ fn scroll_log_wire_format_matches_harness_required_field_set() {
         .collect();
     let evts: Vec<&str> = records
         .iter()
-        .map(|r| r["evt"].as_str().expect("evt is a string"))
+        .map(|r| {
+            r.get("evt")
+                .and_then(|v| v.as_str())
+                .expect("evt is a string")
+        })
         .collect();
     for expected in ["stream_start", "flush", "finalize"] {
         assert!(
@@ -1570,7 +1581,7 @@ fn scroll_log_wire_format_matches_harness_required_field_set() {
 
     for record in &records {
         let obj = record.as_object().expect("records are flat JSON objects");
-        let evt = record["evt"].as_str().expect("evt");
+        let evt = record.get("evt").and_then(|v| v.as_str()).expect("evt");
 
         // Every record carries the full harness-required key set
         for key in REQUIRED_KEYS {
@@ -1593,13 +1604,13 @@ fn scroll_log_wire_format_matches_harness_required_field_set() {
             "cap",
         ] {
             assert!(
-                record[key].is_number(),
+                record.get(key).is_some_and(|v| v.is_number()),
                 "{evt} key {key} must be a JSON number: {record}"
             );
         }
         for key in ["evt", "trigger", "kind"] {
             assert!(
-                record[key].is_string(),
+                record.get(key).is_some_and(|v| v.is_string()),
                 "{evt} key {key} must be a JSON string: {record}"
             );
         }
@@ -1678,13 +1689,8 @@ fn toggle_scroll_log_round_trips_without_env() {
     assert!(!state.scroll_log_active());
 }
 
-/// The end-of-gesture jerk, replayed from a synthetic capture: a 54-event trackpad glide on an ept=3 Auto profile (cap 20, speed 1.0, viewport 41).
-/// The glide delivered 1-4 lines per 16.6ms flush with ZERO backlog throughout.
-/// The old finalize then re-priced the Unknown stream accel-weighted (desired 54 to 121.6).
-/// It burst a cap-sized 20 lines after the fingers stopped and dropped 47 more.
-///
-/// The gesture must now deliver exactly its mid-stream total (54) and the finalize must drop nothing.
-/// Any motion after the last event decelerates (non-increasing flushes summing to at most one cap).
+/// Replay of a glide whose finalize re-priced Unknown accel-weighted and burst after the fingers stopped.
+/// Must deliver the mid-stream total with no finalize drop; later motion decelerates and sums to at most one cap.
 #[test]
 fn real_session_glide_ends_without_finalize_burst_or_drop() {
     let config = make_config(3, ScrollInputMode::Auto).with_viewport_height(41);
@@ -1744,7 +1750,7 @@ fn real_session_glide_ends_without_finalize_burst_or_drop() {
         "post-input motion must fit one cap, got {tail:?}"
     );
     assert!(
-        tail.windows(2).all(|w| w[0] >= w[1]),
+        tail.windows(2).all(|w| matches!(w, [a, b] if a >= b)),
         "post-input flushes must decelerate (non-increasing), got {tail:?}"
     );
 
@@ -1752,11 +1758,16 @@ fn real_session_glide_ends_without_finalize_burst_or_drop() {
     let raw = std::fs::read_to_string(&path).expect("finalize flushed the log");
     let last: serde_json::Value =
         serde_json::from_str(raw.lines().last().expect("nonempty")).expect("parses");
-    assert_eq!(last["evt"], "finalize");
-    assert_eq!(last["dropped"], 0, "the 47-line drop class must be gone");
+    assert_eq!(last.get("evt").and_then(|v| v.as_str()), Some("finalize"));
     assert_eq!(
-        last["flushed"], 0,
+        last.get("dropped"),
+        Some(&serde_json::json!(0)),
+        "the 47-line drop class must be gone"
+    );
+    assert_eq!(
+        last.get("flushed"),
+        Some(&serde_json::json!(0)),
         "the finalize no longer bursts a catch-up flush"
     );
-    assert_eq!(last["events_total"], 54);
+    assert_eq!(last.get("events_total"), Some(&serde_json::json!(54)));
 }

@@ -17,30 +17,68 @@ const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 use xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageOperation;
 
 fn message(id: &str) -> ActiveAgentMessage {
+    message_with_text(id, "parent update")
+}
+
+pub(super) fn message_with_text(id: &str, text: &str) -> ActiveAgentMessage {
     ActiveAgentMessage {
         message_id: id.into(),
         sender_session_id: "root-session".into(),
-        text: Arc::from("parent update"),
+        text: Arc::from(text),
     }
 }
 
-async fn await_with_timeout<T>(future: impl Future<Output = T>) -> T {
+/// Fixture for the lane-order tests, which never go through admission.
+pub(in crate::session::acp_session) fn delivery_message(
+    id: &str,
+    operation: ActiveAgentMessageOperation,
+) -> DeliveryMessage<String, ParentMessageOrigin, PendingParentAgentMessage> {
+    let message = message(id);
+    let telemetry = crate::session::telemetry::ActiveAgentMessageAdmissionTelemetry::new(
+        std::time::Instant::now(),
+        xai_grok_telemetry::TelemetryCtx::new(
+            "parent".to_owned(),
+            Arc::new(tokio::sync::Mutex::new(0)),
+        ),
+        operation,
+        operation,
+        None,
+    );
+    DeliveryMessage::new(
+        message.message_id.clone(),
+        ParentMessageOrigin {
+            sender_session_id: message.sender_session_id,
+            source: ActiveAgentMessageSource::Agent,
+        },
+        PendingParentAgentMessage {
+            prompt_id: format!("parent-message-{id}"),
+            message_id: message.message_id,
+            text: message.text,
+            operation,
+            telemetry,
+        },
+    )
+}
+
+pub(super) async fn await_with_timeout<T>(future: impl Future<Output = T>) -> T {
     tokio::time::timeout(TEST_TIMEOUT, future)
         .await
         .expect("parent-message test timed out")
 }
 
-async fn admit_steer(
+pub(super) async fn admit(
     actor: &Arc<SessionActor>,
-    id: &str,
+    message: ActiveAgentMessage,
+    operation: ActiveAgentMessageOperation,
 ) -> crate::agent::subagent::PromptTurnReceipt {
     let (receipt_sink, mut receipt_rx) = mpsc::channel(1);
     let (respond_to, response_rx) = oneshot::channel();
     let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
     actor
         .admit_parent_agent_message_for_test(
-            message(id),
-            ActiveAgentMessageOperation::Steer,
+            message,
+            ActiveAgentMessageSource::Agent,
+            operation,
             receipt_sink,
             respond_to,
             completion_tx,
@@ -53,12 +91,27 @@ async fn admit_steer(
     receipt_rx.recv().await.expect("typed receipt handed off")
 }
 
-async fn set_running(actor: &SessionActor, prompt_id: &str) {
+async fn admit_steer(
+    actor: &Arc<SessionActor>,
+    id: &str,
+) -> crate::agent::subagent::PromptTurnReceipt {
+    admit(actor, message(id), ActiveAgentMessageOperation::Steer).await
+}
+
+/// Starts `prompt_id` as the running turn with a fresh epoch, so two turns are distinguishable.
+pub(super) async fn start_turn(actor: &SessionActor, prompt_id: &str) -> TurnEpoch {
+    let epoch = actor.turn_report.start_next_turn();
+    let handle = tokio::task::spawn_local(std::future::pending::<()>()).abort_handle();
     let mut state = actor.state.lock().await;
     state
         .pending_inputs
         .push_back(super::super::support::user_item(prompt_id, "owner"));
-    state.running_task = Some(super::super::support::running_task_stub(prompt_id));
+    state.running_task = Some(AgentTask::new_at_epoch(prompt_id, epoch, handle));
+    epoch
+}
+
+pub(super) async fn set_running(actor: &SessionActor, prompt_id: &str) {
+    start_turn(actor, prompt_id).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -73,6 +126,7 @@ async fn admission_rejects_closed_receipt_sink_without_queueing() {
 
         await_with_timeout(actor.admit_parent_agent_message_for_test(
             message("closed"),
+            ActiveAgentMessageSource::Agent,
             ActiveAgentMessageOperation::Queue,
             receipt_sink,
             respond_to,
@@ -126,6 +180,7 @@ async fn receipt_backpressure_waits_before_queue_commit() {
                 actor
                     .admit_parent_agent_message_for_test(
                         message("backpressured"),
+                        ActiveAgentMessageSource::Agent,
                         ActiveAgentMessageOperation::Queue,
                         receipt_sink,
                         respond_to,
@@ -189,6 +244,7 @@ async fn busy_state_lock_waits_before_commit_and_receipt_handoff() {
                 actor
                     .admit_parent_agent_message_for_test(
                         message("busy"),
+                        ActiveAgentMessageSource::Agent,
                         ActiveAgentMessageOperation::Queue,
                         receipt_sink,
                         respond_to,
@@ -245,6 +301,7 @@ async fn duplicate_live_identity_rejects_without_second_receiver() {
             let (respond_to, response_rx) = oneshot::channel();
             await_with_timeout(actor.admit_parent_agent_message_for_test(
                 message("duplicate"),
+                ActiveAgentMessageSource::Agent,
                 ActiveAgentMessageOperation::Steer,
                 receipt_sink.clone(),
                 respond_to,
@@ -263,13 +320,14 @@ async fn duplicate_live_identity_rejects_without_second_receiver() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn idle_steer_queues_one_protected_row() {
+async fn idle_human_steer_queues_one_verbatim_protected_row() {
     let local = tokio::task::LocalSet::new();
     await_with_timeout(local.run_until(async {
         let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
-        actor.deferred_prefix.arm(tokio::task::spawn_local(async {
-            "PARENT_PREFIX_READY".to_owned()
-        }));
+        actor.deferred_prefix.arm(
+            tokio::task::spawn_local(async { "PARENT_PREFIX_READY".to_owned() }),
+            false,
+        );
         actor.state.lock().await.arm_hook_block_hold();
         let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         let (receipt_sink, _receipt_rx) = mpsc::channel(1);
@@ -277,6 +335,7 @@ async fn idle_steer_queues_one_protected_row() {
 
         await_with_timeout(actor.admit_parent_agent_message_for_test(
             message("idle-steer"),
+            ActiveAgentMessageSource::Human,
             ActiveAgentMessageOperation::Steer,
             receipt_sink,
             respond_to,
@@ -290,13 +349,16 @@ async fn idle_steer_queues_one_protected_row() {
         );
         let state = await_with_timeout(actor.state.lock()).await;
         assert_eq!(state.pending_inputs.len(), 1);
-        assert!(
-            state
-                .pending_inputs
-                .front()
-                .expect("one queued row")
-                .is_queue_protected()
-        );
+        let queued = state.pending_inputs.front().expect("one queued row");
+        assert!(queued.verbatim);
+        assert!(queued.is_queue_protected());
+        assert!(matches!(
+            queued.input_origin.as_prompt_origin(),
+            PromptOrigin::ParentHumanMessage {
+                message_id,
+                sender_session_id,
+            } if message_id == "idle-steer" && sender_session_id == "root-session"
+        ));
         assert!(state.message_delivery.is_empty());
     }))
     .await;
@@ -320,6 +382,7 @@ async fn running_steer_projects_at_safe_point_with_agent_provenance() {
 
         await_with_timeout(actor.admit_parent_agent_message_for_test(
             message("steered"),
+            ActiveAgentMessageSource::Agent,
             ActiveAgentMessageOperation::Steer,
             receipt_sink,
             respond_to,
@@ -343,9 +406,9 @@ async fn running_steer_projects_at_safe_point_with_agent_provenance() {
         let conversation = await_with_timeout(actor.chat_state_handle.get_conversation()).await;
         assert!(matches!(
             conversation.as_slice(),
-            [ConversationItem::User(user)]
-                if user.synthetic_reason == Some(SyntheticReason::AgentMessage)
-                    && conversation[0].text_content() == "parent update"
+            [item @ ConversationItem::User(user)]
+                if user.synthetic_reason == SyntheticReason::AgentMessage
+                    && item.text_content() == "parent update"
         ));
         let completions = {
             let mut state = await_with_timeout(actor.state.lock()).await;
@@ -386,7 +449,6 @@ async fn completion_fallback_appends_after_retained_queue() {
         let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
         let task = super::super::support::running_task_stub("running");
         let binding = xai_message_delivery_core::TurnBinding::new("running".to_owned(), task.epoch);
-        let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         {
             let mut state = await_with_timeout(actor.state.lock()).await;
             state
@@ -397,20 +459,13 @@ async fn completion_fallback_appends_after_retained_queue() {
                 .push_back(super::super::support::user_item("retained", "owner"));
             state.running_task = Some(task);
         }
-        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
-        let (respond_to, response_rx) = oneshot::channel();
-        await_with_timeout(actor.admit_parent_agent_message_for_test(
-            message("fallback"),
-            ActiveAgentMessageOperation::Steer,
-            receipt_sink,
-            respond_to,
-            completion_tx,
-        ))
-        .await;
-        assert_eq!(
-            admission_response(await_with_timeout(response_rx).await),
-            ActiveMessageAdmission::Admitted
-        );
+        // Both lanes fall back the same way: one protected row each, in admission order
+        for (id, operation) in [
+            ("steer", ActiveAgentMessageOperation::Steer),
+            ("interject", ActiveAgentMessageOperation::Interject),
+        ] {
+            admit(&actor, message(id), operation).await;
+        }
 
         let mut state = await_with_timeout(actor.state.lock()).await;
         let (completions, had_fallbacks) = actor.transition_parent_messages(
@@ -426,7 +481,12 @@ async fn completion_fallback_appends_after_retained_queue() {
                 .iter()
                 .map(|input| input.prompt_id.as_str())
                 .collect::<Vec<_>>(),
-            ["running", "retained", "parent-message-fallback"]
+            [
+                "running",
+                "retained",
+                "parent-message-steer",
+                "parent-message-interject"
+            ]
         );
         assert!(state.message_delivery.is_empty());
     }))
@@ -750,6 +810,10 @@ async fn delivered_message_is_durable_in_updates_and_chat_history_before_shutdow
             acp::ModelId::new("test-model"),
             sampling_client,
             "test-model".to_owned(),
+            crate::session::persistence::ExplicitSessionOpen::New {
+                identity: None,
+                next_trace_turn: None,
+            },
         )
         .await
         .expect("persistence actor");
@@ -825,9 +889,10 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
     let local = tokio::task::LocalSet::new();
     await_with_timeout(local.run_until(async {
         let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
-        actor.deferred_prefix.arm(tokio::task::spawn_local(async {
-            "PARENT_PREFIX_READY".to_string()
-        }));
+        actor.deferred_prefix.arm(
+            tokio::task::spawn_local(async { "PARENT_PREFIX_READY".to_string() }),
+            false,
+        );
         let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
         {
             let mut state = await_with_timeout(actor.state.lock()).await;
@@ -841,6 +906,7 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
 
         await_with_timeout(actor.admit_parent_agent_message_for_test(
             message("queued"),
+            ActiveAgentMessageSource::Agent,
             ActiveAgentMessageOperation::Queue,
             receipt_sink,
             respond_to,
@@ -869,6 +935,7 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
             PromptOrigin::ParentAgentMessage {
                 message_id,
                 sender_session_id,
+                ..
             } if message_id == "queued" && sender_session_id == "root-session"
         ));
         drop(state);
@@ -883,41 +950,42 @@ async fn committed_delivery_queues_protected_fifo_row_with_typed_receipt_identit
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn steer_slots_reject_past_named_cap() {
+async fn safe_point_slots_reject_past_named_cap() {
     let local = tokio::task::LocalSet::new();
     await_with_timeout(local.run_until(async {
         let (actor, _) = await_with_timeout(super::super::support::build_actor()).await;
         set_running(&actor, "running").await;
+        let lanes = [
+            ActiveAgentMessageOperation::Steer,
+            ActiveAgentMessageOperation::Interject,
+        ];
+        // One bound for both lanes: they fill it together and either one overflows it
+        for (i, lane) in lanes
+            .iter()
+            .cycle()
+            .take(super::MAX_PARENT_SAFE_POINT_SLOTS)
+            .enumerate()
+        {
+            admit(&actor, message(&format!("cap-{i}")), *lane).await;
+        }
         let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
-        let (receipt_sink, _receipt_rx) = mpsc::channel(super::MAX_PARENT_STEER_SLOTS + 1);
-        for i in 0..super::MAX_PARENT_STEER_SLOTS {
+        let (receipt_sink, _receipt_rx) = mpsc::channel(1);
+        for (i, operation) in lanes.into_iter().enumerate() {
             let (respond_to, response_rx) = oneshot::channel();
             await_with_timeout(actor.admit_parent_agent_message_for_test(
-                message(&format!("cap-{i}")),
-                ActiveAgentMessageOperation::Steer,
+                message(&format!("cap-overflow-{i}")),
+                ActiveAgentMessageSource::Agent,
+                operation,
                 receipt_sink.clone(),
                 respond_to,
                 completion_tx.clone(),
             ))
             .await;
             assert_eq!(
-                admission_response(await_with_timeout(response_rx).await),
-                ActiveMessageAdmission::Admitted
+                ActiveMessageAdmission::Rejected,
+                admission_response(await_with_timeout(response_rx).await)
             );
         }
-        let (respond_to, response_rx) = oneshot::channel();
-        await_with_timeout(actor.admit_parent_agent_message_for_test(
-            message("cap-overflow"),
-            ActiveAgentMessageOperation::Steer,
-            receipt_sink,
-            respond_to,
-            completion_tx,
-        ))
-        .await;
-        assert_eq!(
-            admission_response(await_with_timeout(response_rx).await),
-            ActiveMessageAdmission::Rejected
-        );
     }))
     .await;
 }

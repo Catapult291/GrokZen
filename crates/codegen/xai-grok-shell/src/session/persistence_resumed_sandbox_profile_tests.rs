@@ -22,20 +22,28 @@ fn write_session(
     fs::create_dir_all(&dir).unwrap();
     let mut summary = serde_json::json!({
         "info": { "id": session_id, "cwd": cwd },
-        "session_summary": "",
+        "session_summary": session_id,
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": updated_at,
-        "num_messages": 0,
+        "num_messages": 1,
         "current_model_id": "grok-3",
     });
-    if let Some(la) = last_active_at {
-        summary["last_active_at"] = serde_json::Value::String(la.to_string());
-    }
-    if let Some(profile) = sandbox_profile {
-        summary["sandbox_profile"] = serde_json::Value::String(profile.to_string());
-    }
-    if hidden {
-        summary["hidden"] = serde_json::Value::Bool(true);
+    if let Some(obj) = summary.as_object_mut() {
+        if let Some(la) = last_active_at {
+            obj.insert(
+                "last_active_at".into(),
+                serde_json::Value::String(la.to_string()),
+            );
+        }
+        if let Some(profile) = sandbox_profile {
+            obj.insert(
+                "sandbox_profile".into(),
+                serde_json::Value::String(profile.to_string()),
+            );
+        }
+        if hidden {
+            obj.insert("hidden".into(), serde_json::Value::Bool(true));
+        }
     }
     fs::write(dir.join("summary.json"), summary.to_string()).unwrap();
 }
@@ -92,10 +100,10 @@ fn explicit_remote_id_resolves_local_child_profile() {
     fs::create_dir_all(&dir).unwrap();
     let summary = serde_json::json!({
         "info": { "id": "local-child", "cwd": cwd },
-        "session_summary": "",
+        "session_summary": "local-child",
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": "2026-01-01T00:00:00Z",
-        "num_messages": 0,
+        "num_messages": 1,
         "current_model_id": "grok-3",
         "parent_session_id": "remote-xyz",
         "sandbox_profile": "workspace",

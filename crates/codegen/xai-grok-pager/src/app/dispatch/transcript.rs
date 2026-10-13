@@ -129,7 +129,9 @@ pub(super) fn dispatch_copy_assistant_message(
             return;
         }
 
-        let text = &agent_messages[n - 1];
+        let Some(text) = n.checked_sub(1).and_then(|i| agent_messages.get(i)) else {
+            return;
+        };
         if text.is_empty() {
             let message = locale.named_text(
                 "transcript.copy.assistant_empty",
@@ -333,15 +335,8 @@ pub(super) fn dispatch_export_conversation(
 }
 
 /// Open the full transcript in `$PAGER`.
-///
-/// Minimal mode renders a full-fidelity ANSI transcript: every block fully expanded (reasoning in full, tool output uncapped, diff colors kept).
-/// That is a full layout, syntax-highlight, and ANSI-serialization pass over the whole session.
-/// Rendering it inline froze the event loop for seconds on long sessions ("laggy /transcript").
 /// The block model is also `!Send` (syntect's resumable highlighter state lives inside markdown blocks), so the work can't move to a worker either.
 /// So this only records the request; the minimal render loop builds the transcript in time-budgeted slices per frame (`full_view::pump_transcript`).
-/// When done it sets `pending_pager_path` and the event loop suspends into `$PAGER`.
-///
-/// Other modes keep the compact markdown export: string concatenation, no layout or highlighting, cheap enough to stay synchronous.
 pub(crate) fn dispatch_open_transcript_pager(app: &mut AppView) {
     if app.screen_mode.is_minimal() {
         crate::minimal_api::request_minimal_transcript(app);
@@ -483,8 +478,8 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
             _ => None,
         };
 
-        if viewer.is_some() {
-            agent.block_viewer = viewer;
+        if let Some(pane) = viewer {
+            agent.install_block_viewer(pane);
             return;
         }
 
@@ -527,6 +522,8 @@ pub(super) fn extensions_modal_tab_fetches(
         Effect::FetchSkillsList {
             agent_id,
             session_id: session_id.clone(),
+            refresh: false,
+            fetch: modal.next_skills_fetch(),
         },
         Effect::FetchWorkflowsList {
             agent_id,
@@ -539,7 +536,6 @@ pub(super) fn extensions_modal_tab_fetches(
 
 /// Push a marketplace list fetch, coalescing overlapping requests.
 /// While one is in flight, further requests fold into a single queued refetch that fires when the current response lands.
-/// See the field docs on `ExtensionsModalState`.
 /// The other tab fetches are cheap local reads and don't need this.
 pub(super) fn push_marketplace_fetch(
     modal: &mut crate::views::extensions_modal::ExtensionsModalState,
@@ -581,7 +577,7 @@ fn config_agents_slash_name(tab: Option<crate::views::agents_modal::AgentsTab>) 
 }
 
 /// Toast shown when a modal that needs a session is opened off the agent view.
-fn toast_session_only_slash(app: &mut AppView, name: &str) {
+pub(super) fn toast_session_only_slash(app: &mut AppView, name: &str) {
     let msg = app
         .locale
         .named_text(
@@ -900,7 +896,11 @@ pub(super) fn handle_marketplace_updates_available(
         let summary = if names.len() <= 2 {
             names.join(", ")
         } else {
-            format!("{} and {} more", names[..2].join(", "), names.len() - 2)
+            format!(
+                "{} and {} more",
+                names.iter().take(2).cloned().collect::<Vec<_>>().join(", "),
+                names.len() - 2
+            )
         };
         agent
             .scrollback
@@ -952,19 +952,15 @@ pub(super) fn handle_marketplace_list_loaded(
 pub(super) fn handle_skills_toggle_done(
     app: &mut AppView,
     agent_id: AgentId,
-    result: Result<Vec<xai_grok_tools::implementations::skills::types::SkillInfo>, String>,
+    result: Result<xai_grok_shell::extensions::skills::SkillsListResponse, String>,
 ) -> Vec<Effect> {
-    use crate::views::extensions_modal::TabDataState;
     if let Some(agent) = app.agents.get_mut(&agent_id)
         && let Some(ref mut modal) = agent.extensions_modal
     {
         modal.pending_action = None;
         modal.pending_entry_index = None;
         match result {
-            Ok(skills) => {
-                modal.seed_skills_groups_once(&skills);
-                modal.skills_data = TabDataState::Loaded(skills);
-            }
+            Ok(listing) => modal.apply_skills_listing(listing),
             Err(e) => {
                 modal.modal_message = Some(crate::views::extensions_modal::ModalMessage::Error(e));
             }

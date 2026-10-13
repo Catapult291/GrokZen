@@ -71,10 +71,6 @@ pub(crate) fn queries_meeting_session_end_threshold(
 }
 
 /// Run the session end hook: save a structured metadata summary to memory.
-///
-/// This is called from the `SessionCommand::Shutdown` handler and the channel-closed path.
-/// It is best-effort: errors are logged but do not prevent shutdown.
-///
 /// Returns the path written (if any) for logging purposes.
 pub fn on_session_end(
     storage: &MemoryStorage,
@@ -170,20 +166,23 @@ pub(crate) fn generate_metadata_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sampling::conversation::{AssistantItem, ContentPart, ToolResultItem, UserItem};
+    use crate::sampling::conversation::{
+        AssistantItem, ContentPart, SyntheticReason, ToolResultItem, UserItem,
+    };
     use tempfile::TempDir;
 
     fn make_user(text: &str) -> ConversationItem {
         ConversationItem::User(UserItem {
             content: vec![ContentPart::Text { text: text.into() }],
-            synthetic_reason: None,
+            synthetic_reason: SyntheticReason::Human,
             ..Default::default()
         })
     }
 
-    /// Build a realistic first-turn user message: metadata prefix plus user query in tags.
+    /// Build a first-turn user message with a metadata prefix plus `<user_query>`.
     ///
-    /// This matches what `SessionActor::construct_legacy_prefix` + `user_query()` produce.
+    /// Includes a historical `<git_status>` block so extractors still work on
+    /// resumed transcripts that predate the prefix removal.
     fn make_synthetic_prefix_with_query(query: &str) -> ConversationItem {
         make_user(&format!(
             "<user_info>\nOS Version: macos\nShell: /bin/bash\n</user_info>\n\
@@ -530,7 +529,6 @@ mod tests {
 
     /// The *actual* AUTO_CONTINUE_PROMPT text pushed into the conversation after auto-compaction must not be counted as a real user message.
     /// It must not appear in session-end topics either.
-    ///
     /// The gate matches the real stored text, not just the `"__auto_continue__"` request-id sentinel.
     #[test]
     fn test_actual_auto_continue_prompt_excluded() {

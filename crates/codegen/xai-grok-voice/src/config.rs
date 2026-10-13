@@ -5,11 +5,8 @@ use crate::error::VoiceError;
 /// Default STT capture rate (Hz). Shared with the `__mic-capture` helper's argv default so parent and child agree when `--rate` is omitted.
 pub const DEFAULT_SAMPLE_RATE: u32 = 16_000;
 
-/// Voice settings for the STT transport.
-///
-/// Prefer **https** `api_base` (same shape as chat). [`Self::stt_ws_url`] derives
-/// `wss://`. When `[voice].api_base` is unset, inherits
-/// `[endpoints].xai_api_base_url` so enterprise proxies need no second knob.
+/// Prefer https `api_base` (same shape as chat). [`Self::stt_ws_url`] derives `wss://`. When `[voice].api_base` is unset,
+/// inherits `[endpoints].xai_api_base_url` so enterprise proxies need no second knob.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct VoiceConfig {
@@ -89,7 +86,7 @@ fn non_empty_str(s: Option<&str>) -> Option<&str> {
 fn strip_scheme<'a>(s: &'a str, scheme: &str) -> Option<&'a str> {
     s.get(..scheme.len())
         .filter(|p| p.eq_ignore_ascii_case(scheme))
-        .map(|_| &s[scheme.len()..])
+        .and_then(|_| s.get(scheme.len()..))
 }
 
 fn ws_url(api_base: &str, path: &str) -> Result<String, VoiceError> {

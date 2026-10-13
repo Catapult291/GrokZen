@@ -11,16 +11,9 @@ use tokio::io::AsyncWriteExt;
 
 use crate::types::resources::Resources;
 
-/// Background persistence for `Resources` state/params.
-///
-/// Same pattern as `ToolStatePersistence` — debounced background writes with
-/// atomic rename. Takes a `serde_json::Value` from `Resources::serialize()`
-/// and writes it to disk. On load, parses the JSON and feeds it to
-/// `Resources::load_from()`.
-///
-/// This replaces the old `ToolStatePersistence` pipeline for the new
-/// architecture. During migration both coexist; once all tools are migrated,
-/// `ToolStatePersistence` will be deleted.
+/// Background persistence for `Resources` state/params. Same pattern as `ToolStatePersistence` — debounced background writes with atomic
+/// rename. Takes a `serde_json::Value` from `Resources::serialize()` and writes it to disk. On load, parses the JSON and feeds it to
+/// `Resources::load_from()`. This replaces the old `ToolStatePersistence` pipeline for the new architecture.
 pub struct ResourcesPersistence {
     /// `None` means this handle reads and writes nothing.
     state_path: Option<PathBuf>,
@@ -101,12 +94,9 @@ impl ResourcesPersistence {
         }
     }
 
-    /// Load existing Resources state from disk, if the file exists.
-    ///
-    /// Reads the JSON, parses it into the nested `HashMap<String, HashMap<String, Value>>`
-    /// shape that `Resources::load_from()` expects, and applies it to the given resources.
-    ///
-    /// Returns `true` if state was loaded, `false` if there is no path, no file, or a parse error.
+    /// Load existing Resources state from disk, if the file exists. Reads the JSON, parses it into the nested
+    /// `HashMap<String, HashMap<String, Value>>` shape that `Resources::load_from()` expects, and applies it to the given
+    /// resources. Returns `true` if state was loaded, `false` if there is no path, no file, or a parse error.
     pub fn load(&self, resources: &mut Resources) -> bool {
         let Some(state_path) = self.state_path.as_ref() else {
             return false;
@@ -502,7 +492,11 @@ mod tests {
         // Final state is intact and reflects the last write.
         let content = std::fs::read_to_string(&state_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(parsed["state"]["grok_build.WebCitation"].is_object());
+        assert!(
+            parsed
+                .pointer("/state/grok_build.WebCitation")
+                .is_some_and(|v| v.is_object())
+        );
     }
 
     #[tokio::test]
@@ -527,7 +521,11 @@ mod tests {
         let content = std::fs::read_to_string(&state_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         // Should have "state" category with "grok_build.WebCitation" key
-        assert!(parsed["state"]["grok_build.WebCitation"].is_object());
+        assert!(
+            parsed
+                .pointer("/state/grok_build.WebCitation")
+                .is_some_and(|v| v.is_object())
+        );
     }
 
     #[tokio::test]
@@ -555,7 +553,10 @@ mod tests {
 
         let content = std::fs::read_to_string(state_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed["state"]["grok_build.WebCitation"]["counter"], 2);
+        assert_eq!(
+            parsed.pointer("/state/grok_build.WebCitation/counter"),
+            Some(&serde_json::json!(2))
+        );
     }
 
     #[tokio::test]
@@ -579,7 +580,10 @@ mod tests {
 
         let content = std::fs::read_to_string(state_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed["state"]["grok_build.WebCitation"]["counter"], 7);
+        assert_eq!(
+            parsed.pointer("/state/grok_build.WebCitation/counter"),
+            Some(&serde_json::json!(7))
+        );
     }
 
     #[tokio::test]
@@ -610,7 +614,10 @@ mod tests {
 
         let content = std::fs::read_to_string(state_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed["state"]["grok_build.WebCitation"]["counter"], 2);
+        assert_eq!(
+            parsed.pointer("/state/grok_build.WebCitation/counter"),
+            Some(&serde_json::json!(2))
+        );
     }
 
     #[tokio::test]

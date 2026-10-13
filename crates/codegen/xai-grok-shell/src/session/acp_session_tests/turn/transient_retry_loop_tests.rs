@@ -9,7 +9,7 @@ use std::time::Duration;
 use xai_grok_test_support::{MockInferenceServer, MockModelEntry, ScriptedResponse};
 
 /// The turn future needs a session-sized stack (spawn.rs: 8 MiB); default test stacks overflow.
-fn on_session_stack(test: impl FnOnce() + Send + 'static) {
+pub(super) fn on_session_stack(test: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .stack_size(8 * 1024 * 1024)
         .spawn(test)
@@ -18,7 +18,7 @@ fn on_session_stack(test: impl FnOnce() + Send + 'static) {
         .expect("test thread panicked");
 }
 
-fn run_paused<F: std::future::Future>(fut: impl FnOnce() -> F) {
+pub(super) fn run_paused<F: std::future::Future>(fut: impl FnOnce() -> F) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .start_paused(true)
@@ -31,7 +31,7 @@ fn run_paused<F: std::future::Future>(fut: impl FnOnce() -> F) {
 }
 
 /// No sampler-internal retries: request counts map 1:1 to submissions.
-fn sampler_surfaces_5xx() -> xai_grok_sampler::RetryPolicy {
+pub(super) fn sampler_surfaces_5xx() -> xai_grok_sampler::RetryPolicy {
     xai_grok_sampler::RetryPolicy {
         max_retries: 0,
         ..Default::default()
@@ -69,8 +69,22 @@ async fn run_turn(
     Duration,
     usize,
 ) {
+    run_turn_attached(server, enabled, false).await
+}
+
+async fn run_turn_attached(
+    server: &MockInferenceServer,
+    enabled: bool,
+    non_interactive: bool,
+) -> (
+    Result<TurnOutcome, agent_client_protocol::Error>,
+    CapturedRetries,
+    Duration,
+    usize,
+) {
     let (actor, retries) =
         actor_under_test(server, SessionKind::Main, sampler_surfaces_5xx(), enabled).await;
+    actor.attach_non_interactive.set(non_interactive);
     // Drive the real turn loop; the request is built inside it.
     let requests_before = server.request_count();
     let started = tokio::time::Instant::now();
@@ -82,6 +96,7 @@ async fn run_turn(
             None,
             None,
             &mut length_salvage::LengthSalvage::new(None),
+            &mut Default::default(),
         ),
     )
     .await
@@ -193,6 +208,79 @@ fn kill_switch_off_fails_on_first_transient() {
     });
 }
 
+#[test]
+fn headless_root_session_resubmits() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            server.enqueue_response("/v1/responses", overloaded_503());
+
+            let (outcome, retries, _elapsed, submissions) =
+                run_turn_attached(&server, true, true).await;
+
+            assert!(
+                outcome.is_ok(),
+                "headless attach: one 503 then success must complete the turn: {:?}",
+                outcome.as_ref().map(|_| "TurnOutcome").err()
+            );
+            assert_eq!(submissions, 2, "original + one resubmit");
+            assert_eq!(
+                retrying_events(&retries),
+                vec![(1, 3, "Server error; retrying request".to_string())],
+                "the headless client is told about the resubmit too"
+            );
+        })
+    });
+}
+
+#[test]
+fn headless_kill_switch_off_fails_on_first_transient() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            server.enqueue_response("/v1/responses", overloaded_503());
+
+            let (outcome, retries, _elapsed, submissions) =
+                run_turn_attached(&server, false, true).await;
+
+            assert!(
+                outcome.is_err(),
+                "headless with the switch off: first 503 is terminal"
+            );
+            assert_eq!(submissions, 1, "no resubmits");
+            assert!(retrying_events(&retries).is_empty());
+        })
+    });
+}
+
+#[test]
+fn headless_exhausts_to_the_original_terminal() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            for _ in 0..4 {
+                server.enqueue_response("/v1/responses", overloaded_503());
+            }
+
+            let (outcome, retries, _elapsed, submissions) =
+                run_turn_attached(&server, true, true).await;
+
+            assert!(
+                outcome.is_err(),
+                "headless: the step budget is the same 3 resubmits"
+            );
+            assert_eq!(submissions, 4, "original + three resubmits");
+            assert_eq!(retrying_events(&retries).len(), 3);
+        })
+    });
+}
+
 // Not covered here: IdleTimeout through the loop
 // The sampler's stall detection is I/O-time based, so it cannot fire under the paused clock
 // Eligibility for the kind is pinned at the handler level instead
@@ -223,6 +311,7 @@ fn prompt_budget_spans_turn_loop_reentries() {
                         None,
                         None,
                         &mut length_salvage::LengthSalvage::new(None),
+                        &mut Default::default(),
                     ),
                 )
                 .await
@@ -236,6 +325,72 @@ fn prompt_budget_spans_turn_loop_reentries() {
                 submissions, 15,
                 "5 re-entries share one 10-resubmit prompt budget \
                  (4+4+4+2+1); 20 means the counter regressed to a loop-local"
+            );
+        })
+    });
+}
+
+#[test]
+fn turn_phase_prompt_latency_invariants() {
+    on_session_stack(|| {
+        run_paused(|| async {
+            let server = MockInferenceServer::start_with_models(vec![MockModelEntry::new("test")])
+                .await
+                .expect("mock inference server");
+            server.enqueue_response("/v1/responses", overloaded_503());
+            server.enqueue_response(
+                "/v1/responses",
+                ScriptedResponse::sse(xai_grok_test_support::sse::responses_api_script_exact(
+                    "final answer",
+                    "test",
+                )),
+            );
+
+            let (actor, _retries) =
+                actor_under_test(&server, SessionKind::Main, sampler_surfaces_5xx(), true).await;
+
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(300),
+                actor.process_conversation_turn_with_recovery(
+                    "req-turn-phase-invariant",
+                    None,
+                    None,
+                    None,
+                    &mut length_salvage::LengthSalvage::new(None),
+                    &mut Default::default(),
+                ),
+            )
+            .await
+            .expect("turn must finish within timeout");
+            assert!(
+                outcome.is_ok(),
+                "one 503 then a streamed answer completes the turn"
+            );
+            pump_local_tasks().await;
+
+            let phases = actor.turn_phases.complete();
+
+            assert_eq!(phases.sampling_request_count, 2);
+            assert_eq!(phases.sampling_retry_count, 1);
+            assert_eq!(phases.tool_blocking_ms, 0);
+            assert_eq!(phases.compaction_ms, 0);
+
+            let accounted_ms = phases.before_first_model_ms
+                + phases.sampling_ms
+                + phases.tool_blocking_ms
+                + phases.compaction_ms
+                + phases.between_sampling_overhead_ms
+                + phases.after_last_sampling_ms;
+            let turn_total_ms = phases.turn_total_ms;
+            assert_eq!(
+                accounted_ms, turn_total_ms,
+                "six phase buckets must partition turn_total_ms"
+            );
+
+            let ttfm_ms = phases.ttfm_ms.expect("a streamed answer stamps ttfm");
+            assert!(
+                ttfm_ms <= turn_total_ms,
+                "ttfm {ttfm_ms}ms exceeds turn_total_ms {turn_total_ms}ms"
             );
         })
     });

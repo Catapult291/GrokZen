@@ -10,7 +10,6 @@ use xai_grok_config_types::MemoryFlushConfig;
 const LOG: &str = "xai_memory";
 
 /// Check whether a memory flush should run before the next compaction.
-///
 /// A flush runs at most once per compaction cycle, once token usage reaches the compact threshold minus `soft_threshold_tokens` headroom.
 /// The flush threshold sits below the compact threshold so the flush completes before the context window overflows.
 pub fn should_flush(
@@ -82,7 +81,6 @@ or discoveries are not worth persisting. Only write content that a future sessio
 would concretely benefit from.";
 
 /// System prompt for incremental (delta) flushes after the first flush.
-///
 /// It applies when `flush_count > 0` and previous flush content is available.
 /// The caller appends the previous flush output after this prompt.
 pub const FLUSH_DELTA_SYSTEM_PROMPT: &str = "\
@@ -126,9 +124,6 @@ pub enum FlushResult {
 }
 
 /// Process the model's flush response, applying quality controls.
-///
-/// Empty and `NO_REPLY` responses become `NothingToStore`.
-/// A response over `max_flush_write_chars` is truncated.
 /// A response without a markdown header (`##`) is `Rejected`.
 pub fn process_flush_response(response: &str, config: &MemoryFlushConfig) -> FlushResult {
     let trimmed = response.trim();
@@ -188,14 +183,8 @@ const MAX_L2_DISTANCE: f64 = 2.0;
 const SEMANTIC_DEDUP_KNN_LIMIT: usize = 3;
 
 /// Check if flush content is semantically similar to existing memory chunks.
-///
 /// `threshold` is the cosine similarity cutoff (0.0 to 1.0); a KNN neighbor above it makes the content a duplicate.
-/// Pass `SEMANTIC_DEDUP_SIMILARITY_THRESHOLD` for the compiled-in default, or a value from config for remote/local overrides.
-///
-/// Returns `false` (allow the write) if embeddings are unavailable, the index has no vector support, or any step fails.
-///
 /// The sync/async/sync phasing means `&MemoryIndex` is never held across an `.await`; it contains a `!Send` `rusqlite::Connection`.
-/// `search.rs` and `backend.rs` use the same pattern.
 pub async fn is_semantically_duplicate(
     content: &str,
     index: &MemoryIndex,
@@ -520,9 +509,10 @@ mod tests {
         // Embed the existing chunk.
         let existing_embedding = provider.embed_batch(&[content]).await.unwrap();
         let chunk_id = format!("{}:0", file_path.to_string_lossy());
-        index
-            .upsert_embedding(&chunk_id, &existing_embedding[0])
-            .unwrap();
+        let Some(emb0) = existing_embedding.first() else {
+            panic!("embed_batch returns one vector per input: {existing_embedding:?}");
+        };
+        index.upsert_embedding(&chunk_id, emb0).unwrap();
 
         // Identical content embeds to the same vector, so the similarity is 1.0
         let result = is_semantically_duplicate(
@@ -558,7 +548,10 @@ mod tests {
         index.reindex_file(&file_path, "session").unwrap();
         let emb = provider.embed_batch(&[existing]).await.unwrap();
         let chunk_id = format!("{}:0", file_path.to_string_lossy());
-        index.upsert_embedding(&chunk_id, &emb[0]).unwrap();
+        let Some(emb0) = emb.first() else {
+            panic!("embed_batch returns one vector per input: {emb:?}");
+        };
+        index.upsert_embedding(&chunk_id, emb0).unwrap();
 
         // Different content should not be flagged as duplicate.
         let novel = "## Architecture\n\nThe API uses Python FastAPI with async handlers.";

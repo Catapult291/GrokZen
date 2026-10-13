@@ -5,22 +5,8 @@ use serde_json::Value;
 
 use super::{RpcActivityClass, WorkspaceRpc};
 
-/// `workspace.git_status`. The response value is a JSON string (branch, ahead/behind, staged files), capped server-side at ~1 KB.
-///
-/// **DEPRECATED**: Use [`GitStatusExtReq`] with `format: GitStatusFormat::Prompt` instead, which provides the same compact JSON string output.
-///
-/// Migration:
-/// ```ignore
-/// // Old (deprecated):
-/// let status: serde_json::Value = client.git_status().await?;
-///
-/// // New (recommended):
-/// let response = client.git_status_ext(&GitStatusExtReq {
-///     format: GitStatusFormat::Prompt,
-///     ..Default::default()
-/// }).await?;
-/// let status = response.prompt.expect("prompt format should have prompt");
-/// ```
+/// `workspace.git_status`. Compact JSON string, capped server-side at ~1 KB.
+/// Deprecated: use [`GitStatusExtReq`] with `GitStatusFormat::Prompt` for the same output.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitStatusReq {}
 
@@ -177,10 +163,8 @@ pub struct GitCommitReq {
     pub push: bool,
     #[serde(default)]
     pub sync: bool,
-    /// Stage everything (`git add -A`, honoring `.gitignore` and `info/exclude`) before committing.
-    /// With this set, a tree with nothing to commit is a result (`CommitOutcome::clean`), not an error.
-    /// The push step still runs, so a retry can deliver an earlier unpushed commit.
-    /// Without it, committing with nothing staged is an error.
+    /// Stage everything (`git add -A`, honoring ignore rules) before committing.
+    /// With this set, nothing to commit is `CommitOutcome::clean` and push still runs so a retry can deliver an earlier unpushed commit; without it, that is an error.
     #[serde(default)]
     pub stage_all: bool,
     /// Seed the local-only default excludes (`.env`, `node_modules/`, build output, …) into `info/exclude` before staging.
@@ -480,8 +464,6 @@ impl WorkspaceRpc for GitMetadataReq {
     type Response = Value;
 }
 
-// ---- Serde helpers ------------------------------------------------------
-
 fn default_true() -> bool {
     true
 }
@@ -492,12 +474,8 @@ fn default_working() -> String {
     "working".into()
 }
 fn default_max_file_bytes() -> u64 {
-    0 // No limit by default
+    0
 }
-
-// =========================================================================
-// Response data types
-// =========================================================================
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -651,12 +629,8 @@ pub struct GitStatusData {
     pub unstaged: Vec<GitFileChange>,
 }
 
-/// Response wrapper for `git_status_ext` that always has the same shape regardless of format.
-///
-/// A tagged struct with optional fields avoids the deserialization ambiguity of an untagged enum.
-/// Callers check `format` to know which field to use.
-/// `Deserialize` is implemented manually (see below): an older workspace server returns a legacy flat `GitStatusData` payload during version skew.
-/// That payload is recognized and wrapped as `format: Structured` rather than silently parsed as empty.
+/// Response wrapper for `git_status_ext` with a stable shape; check `format` for which field is set. Tagged optional fields avoid untagged-enum ambiguity.
+/// Manual `Deserialize` wraps a legacy flat `GitStatusData` from an older server as `format: Structured` instead of parsing it as empty.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct GitStatusExtResponse {
     /// The format of this response (echoed from request for convenience).
@@ -820,10 +794,6 @@ pub struct GitBranchListData {
     pub branches: Vec<GitBranchEntry>,
 }
 
-// =========================================================================
-// Git Collect Changes RPC Types
-// =========================================================================
-
 /// This is the workspace-side half of `serialize_changes`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitCollectChangesReq {
@@ -844,10 +814,8 @@ pub struct GitCollectChangesReq {
     #[serde(default)]
     pub base_ref: Option<String>,
 
-    /// Maximum bytes to inline for a single file blob in commit/uncommitted patches.
-    /// `0` (default) means no limit; larger blobs are truncated with a warning.
-    /// Untracked file content is governed separately by the fixed [`UNTRACKED_CONTENT_THRESHOLD`].
-    /// Oversize untracked files are excluded (not truncated) rather than capped by this value.
+    /// Max bytes to inline for one file blob in commit/uncommitted patches. `0` means no limit; larger blobs are truncated with a warning.
+    /// Untracked content uses [`UNTRACKED_CONTENT_THRESHOLD`] and is excluded, not truncated.
     #[serde(default = "default_max_file_bytes")]
     pub max_file_bytes: u64,
 
@@ -1035,11 +1003,7 @@ pub struct UncommittedChangesData {
 }
 
 /// Untracked file info for wire transfer.
-///
-/// Content inclusion rules:
-/// - Files larger than [`UNTRACKED_CONTENT_THRESHOLD`] (1 MB) have `content_base64: None` and `content_included: false`.
-/// - Binary files (`is_binary: true`) have `content_base64: None` regardless of size.
-/// - Omitted content can be fetched via `workspace.fs_read_file`.
+/// Content is omitted above [`UNTRACKED_CONTENT_THRESHOLD`] and for binaries; fetch omitted content via `workspace.fs_read_file`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UntrackedFileData {
@@ -1076,18 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn method_constant() {
-        assert_eq!(GitStatusReq::METHOD, "workspace.git_status");
-        assert_eq!(GitStatusExtReq::METHOD, "workspace.git_status_ext");
-        assert_eq!(GitBranchInfoReq::METHOD, "workspace.git_branch_info");
-        assert_eq!(GitMetadataReq::METHOD, "workspace.git_metadata");
-        assert_eq!(
-            GitCollectChangesReq::METHOD,
-            "workspace.git_collect_changes"
-        );
-    }
-
-    #[test]
     fn git_file_change_serializes_type_key() {
         let change = GitFileChange {
             path: "src/main.rs".into(),
@@ -1103,7 +1055,7 @@ mod tests {
             new_text: None,
         };
         let json = serde_json::to_value(&change).unwrap();
-        assert_eq!(json["type"], "edit");
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("edit"));
         assert!(json.get("oldPath").is_none(), "camelCase + skip none");
     }
 
@@ -1150,7 +1102,10 @@ mod tests {
         assert!(response.prompt.is_none());
 
         let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["format"], "structured");
+        assert_eq!(
+            json.get("format").and_then(|v| v.as_str()),
+            Some("structured")
+        );
         assert!(json.get("data").is_some());
         assert!(
             json.get("prompt").is_none(),
@@ -1167,12 +1122,15 @@ mod tests {
         assert_eq!(response.prompt, Some("On branch main".to_string()));
 
         let json = serde_json::to_value(&response).unwrap();
-        assert_eq!(json["format"], "prompt");
+        assert_eq!(json.get("format").and_then(|v| v.as_str()), Some("prompt"));
         assert!(
             json.get("data").is_none(),
             "data should be skipped when None"
         );
-        assert_eq!(json["prompt"], "On branch main");
+        assert_eq!(
+            json.get("prompt").and_then(|v| v.as_str()),
+            Some("On branch main")
+        );
     }
 
     #[test]
@@ -1201,8 +1159,7 @@ mod tests {
 
     #[test]
     fn git_status_ext_response_deserializes_legacy_flat_status() {
-        // A legacy workspace server returns flat `GitStatusData` JSON for `git_status_ext`
-        // It must be wrapped as a structured envelope rather than parsed as an empty response
+        // Legacy servers return flat `GitStatusData`; wrap it, do not parse as empty.
         let legacy = serde_json::to_value(GitStatusData {
             branch: Some("main".to_string()),
             ahead: Some(2),
@@ -1212,7 +1169,6 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        // Sanity: the legacy payload has none of the envelope's own keys.
         assert!(legacy.get("format").is_none());
         assert!(legacy.get("data").is_none());
         assert!(legacy.get("prompt").is_none());

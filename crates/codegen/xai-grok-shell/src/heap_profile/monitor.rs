@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::auth::AuthManager;
 use crate::session::repo_changes::{TraceExportConfig, UploadMethod};
 use crate::upload::gcs::WithAuth as _;
+use xai_grok_login::AuthManager;
 
 /// Hard cap for dump uploads: allowed sizes are `1..=HARD_DUMP_SIZE_CAP_BYTES`; larger dumps are skipped.
 pub const HARD_DUMP_SIZE_CAP_BYTES: u64 = 128 * 1024 * 1024;
@@ -1007,10 +1007,12 @@ mod tests {
         mon.poll_tick().await;
         assert!(mon.latched().contains(&100));
         let paths = uploads.lock().unwrap().clone();
-        assert_eq!(paths.len(), 2);
-        assert!(paths[0].starts_with(&format!("{SID}/jemalloc/")));
-        assert!(paths[0].ends_with(".heap"));
-        assert!(paths[1].ends_with(".meta.json"));
+        let [heap, meta] = paths.as_slice() else {
+            panic!("expected two upload paths: {paths:?}");
+        };
+        assert!(heap.starts_with(&format!("{SID}/jemalloc/")));
+        assert!(heap.ends_with(".heap"));
+        assert!(meta.ends_with(".meta.json"));
     }
 
     #[tokio::test]

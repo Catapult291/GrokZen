@@ -14,11 +14,8 @@ use xai_grok_sampling_types::ReasoningEffort;
 
 use crate::session::persistence::Summary;
 
-/// Coarse activity of a session as rendered in the dashboard's status column.
-///
-/// Mirrors the design's `SessionActivity` at dashboard granularity.
-/// A full background-work breakdown (bg tasks / monitors / scheduler / subagents) lands with a richer `SessionActivity`.
-/// The dashboard only needs this coarse signal to pick a status glyph.
+/// Coarse activity of a session as rendered in the dashboard's status column. Mirrors the design's `SessionActivity` at dashboard granularity.
+/// A full background-work breakdown (bg tasks / monitors / scheduler / subagents) lands with a richer `SessionActivity`. The dashboard only needs this coarse signal to pick a status glyph.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RosterActivity {
@@ -46,7 +43,7 @@ pub enum RosterOrigin {
 }
 
 /// One dashboard row.
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RosterEntry {
     pub session_id: String,
@@ -55,6 +52,11 @@ pub struct RosterEntry {
     pub title: Option<String>,
     pub cwd: String,
     pub is_worktree: bool,
+    /// Set only on rows the leader synthesizes outside the agent; rows a local agent owns
+    /// leave it `None`. Its value set is disjoint from the persisted `Summary.session_kind`
+    /// (`worktree`, `subagent`, ...), which `merge_roster` only folds into `is_worktree`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_kind: Option<String>,
     #[serde(default)]
     pub model_id: Option<String>,
     /// Per-session reasoning effort for `model_id`.
@@ -94,13 +96,9 @@ pub struct RosterChanged {
 pub const SESSIONS_LIST_METHOD: &str = "x.ai/sessions/list";
 pub const SESSIONS_CHANGED_METHOD: &str = "x.ai/sessions/changed";
 
-/// Merge live `resident` rows with on-disk `summaries` into the sorted roster.
-/// Pure, so it is unit-testable without disk or a live actor.
-///
-/// Resident rows own the live state but carry no title or last-active time, so each adopts those from its summary.
-/// A `Working` row keeps its "now" timestamp instead.
-/// Summaries with no resident row become `Dormant`; keying by id dedups them.
-/// Hidden and headless summaries are excluded, including resident rows whose persisted summary is headless.
+/// Merge live `resident` rows with on-disk `summaries` into the sorted roster. Pure, so it is unit-testable without disk or a live actor.
+/// Resident rows own the live state but carry no title or last-active time, so each adopts those from its summary. A `Working` row keeps its "now" timestamp instead.
+/// Summaries with no resident row become `Dormant`; keying by id dedups them. Hidden and headless summaries are excluded, including resident rows whose persisted summary is headless.
 pub(crate) fn merge_roster(
     mut entries: Vec<RosterEntry>,
     summaries: Vec<Summary>,
@@ -140,6 +138,7 @@ pub(crate) fn merge_roster(
         cwd: summary.info.cwd.clone(),
         is_worktree: summary.session_kind.as_deref() == Some("worktree")
             || summary.source_workspace_dir.is_some(),
+        session_kind: None,
         model_id: Some(summary.current_model_id.0.to_string()),
         reasoning_effort: summary.reasoning_effort,
         yolo: false,
@@ -182,6 +181,7 @@ mod merge_roster_tests {
             title: None,
             cwd: format!("/live/{id}"),
             is_worktree: false,
+            session_kind: None,
             model_id: Some("grok-4".into()),
             reasoning_effort: None,
             yolo: false,
@@ -201,11 +201,14 @@ mod merge_roster_tests {
             vec![summary("a", Some("Fix the roster"), 1_234)],
         );
         assert_eq!(out.len(), 1, "resident must not be duplicated as dormant");
-        assert_eq!(out[0].title.as_deref(), Some("Fix the roster"));
-        assert_eq!(out[0].last_change_unix_ms, 1_234, "idle adopts last-active");
-        assert!(out[0].resident);
-        assert_eq!(out[0].cwd, "/live/a", "live cwd is preserved");
-        assert_eq!(out[0].activity, RosterActivity::Idle);
+        let Some(row) = out.first() else {
+            panic!("expected one roster row: {out:?}");
+        };
+        assert_eq!(row.title.as_deref(), Some("Fix the roster"));
+        assert_eq!(row.last_change_unix_ms, 1_234, "idle adopts last-active");
+        assert!(row.resident);
+        assert_eq!(row.cwd, "/live/a", "live cwd is preserved");
+        assert_eq!(row.activity, RosterActivity::Idle);
     }
 
     #[test]
@@ -215,16 +218,22 @@ mod merge_roster_tests {
             vec![resident("a", RosterActivity::Working, now)],
             vec![summary("a", Some("Busy turn"), 1_234)],
         );
-        assert_eq!(out[0].title.as_deref(), Some("Busy turn"));
-        assert_eq!(out[0].last_change_unix_ms, now, "Working stays 'now'");
+        let Some(row) = out.first() else {
+            panic!("expected one roster row: {out:?}");
+        };
+        assert_eq!(row.title.as_deref(), Some("Busy turn"));
+        assert_eq!(row.last_change_unix_ms, now, "Working stays 'now'");
     }
 
     #[test]
     fn new_resident_without_summary_stays_titleless_now() {
         let now = 9_000;
         let out = merge_roster(vec![resident("a", RosterActivity::Idle, now)], vec![]);
-        assert_eq!(out[0].title, None);
-        assert_eq!(out[0].last_change_unix_ms, now);
+        let Some(row) = out.first() else {
+            panic!("expected one roster row: {out:?}");
+        };
+        assert_eq!(row.title, None);
+        assert_eq!(row.last_change_unix_ms, now);
     }
 
     #[test]
@@ -233,8 +242,11 @@ mod merge_roster_tests {
             vec![resident("a", RosterActivity::Idle, 9_000)],
             vec![summary("a", Some("   "), 1_234)],
         );
-        assert_eq!(out[0].title, None, "blank title normalizes to None");
-        assert_eq!(out[0].last_change_unix_ms, 1_234);
+        let Some(row) = out.first() else {
+            panic!("expected one roster row: {out:?}");
+        };
+        assert_eq!(row.title, None, "blank title normalizes to None");
+        assert_eq!(row.last_change_unix_ms, 1_234);
     }
 
     #[test]
@@ -294,7 +306,10 @@ mod merge_roster_tests {
         let mut s = summary("dorm", Some("Dormant"), 1_000);
         s.reasoning_effort = Some(ReasoningEffort::Xhigh);
         let out = merge_roster(vec![], vec![s]);
-        assert_eq!(out[0].reasoning_effort, Some(ReasoningEffort::Xhigh));
+        let Some(row) = out.first() else {
+            panic!("expected one roster row: {out:?}");
+        };
+        assert_eq!(row.reasoning_effort, Some(ReasoningEffort::Xhigh));
     }
 
     #[test]
@@ -306,7 +321,10 @@ mod merge_roster_tests {
         s.reasoning_effort = Some(ReasoningEffort::Low);
         let out = merge_roster(vec![live], vec![s]);
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].reasoning_effort, Some(ReasoningEffort::High));
+        let Some(row) = out.first() else {
+            panic!("expected one roster row: {out:?}");
+        };
+        assert_eq!(row.reasoning_effort, Some(ReasoningEffort::High));
     }
 
     #[test]
@@ -340,7 +358,10 @@ mod merge_roster_tests {
         let mut entry = resident("a", RosterActivity::Idle, 9_000);
         entry.last_turn_summary = Some("Stale cached".into());
         let out = merge_roster(vec![entry], vec![summary("a", None, 1)]);
-        assert_eq!(out[0].last_turn_summary, None);
+        let Some(row) = out.first() else {
+            panic!("expected one roster row: {out:?}");
+        };
+        assert_eq!(row.last_turn_summary, None);
     }
 
     #[test]

@@ -15,11 +15,20 @@ public typealias BotEmptyResult = BotEmptyParams
 /// Upstream-verbatim command result. Not interpreted by this crate.
 public typealias BotCommandResult = BotRelayJSONValue
 
-/// `bot.roster` params. Cold — never wakes the box.
+/// `bot.roster` params. A live read from the box that may wake a
+/// hibernated box. The hub bounds the wait and, while the box is coming up,
+/// answers either a retryable `box_unavailable` (`box_waking` /
+/// `box_hibernated` / `wake_failed`) or `box_migrating`, or, when it
+/// remembers one, the last live roster with `rememberedAtMs` set and every
+/// row `unknown`; an empty `agents` list is only ever a real answer from a
+/// live box, never the result of a failure.
 public typealias BotRosterParams = BotEmptyParams
 
 /// `bot.status` params. Cold — never wakes the box.
 public typealias BotStatusParams = BotEmptyParams
+
+/// `bot.usage` params. Cold — never wakes the box.
+public typealias BotUsageParams = BotEmptyParams
 
 /// `bot.subscribe` / `bot.unsubscribe` params.
 public struct BotSubscribeParams: Codable, Sendable, Equatable {
@@ -61,6 +70,9 @@ public typealias BotUnsubscribeResult = BotEmptyResult
 /// `bot.bindConversation` result.
 public typealias BotBindConversationResult = BotEmptyResult
 
+/// `bot.presence` result.
+public typealias BotPresenceResult = BotEmptyResult
+
 /// `bot.command` params. `name` and `args` are upstream-verbatim.
 public struct BotCommandParams: Codable, Sendable, Equatable {
 	public let agentId: String
@@ -84,7 +96,7 @@ public struct BotVncDescriptorParams: Codable, Sendable, Equatable {
 }
 
 /// `bot.vncDescriptor` result.
-/// 
+///
 /// `expires_hint` is unix milliseconds. `null` means a legacy network-token
 /// URL (valid until pod migration); a concrete value is the port-token
 /// expiry the client should refresh before.
@@ -110,27 +122,41 @@ public struct BotVncDescriptorResult: Codable, Sendable, Equatable {
 	}
 }
 
-/// One cached roster row.
+/// One roster row, read live from the box.
 public struct BotRosterEntry: Codable, Sendable, Equatable {
 	public let agentId: String
 	public let name: String
-	/// One of `running`, `idle` or `unknown`. A row read off-box is always
-	/// `unknown`: the durable registry holds identities, not activity. A later
-	/// read against a live box replaces it.
+	/// One of `running`, `idle` or `unknown`.
 	public let status: String
-	/// Unix time in milliseconds of the agent's last turn. Absent on a cold
-	/// row: the durable registry records no turn time.
+	/// `false` marks a row shared with the viewer; mutations on it are
+	/// rejected with `audience_unsupported`.
+	public let viewerIsOwner: Bool
+	/// Unix time in milliseconds of the agent's last turn, when the box
+	/// reports one.
 	public let lastTurnAt: Int64?
+	/// Box `avatarColor`. A short palette id, never an image payload.
+	public let avatarColor: String?
+	/// Box `avatarShape`. A short glyph name, never an image payload.
+	public let avatarShape: String?
+	/// Sidebar hide. Omitted means unknown, not false.
+	public let hiddenFromSidebar: Bool?
+	/// Custom-picture presence. Omitted means unknown.
+	public let hasCustomImage: Bool?
 
-	public init(agentId: String, name: String, status: String, lastTurnAt: Int64?) {
+	public init(agentId: String, name: String, status: String, viewerIsOwner: Bool, lastTurnAt: Int64?, avatarColor: String?, avatarShape: String?, hiddenFromSidebar: Bool?, hasCustomImage: Bool?) {
 		self.agentId = agentId
 		self.name = name
 		self.status = status
+		self.viewerIsOwner = viewerIsOwner
 		self.lastTurnAt = lastTurnAt
+		self.avatarColor = avatarColor
+		self.avatarShape = avatarShape
+		self.hiddenFromSidebar = hiddenFromSidebar
+		self.hasCustomImage = hasCustomImage
 	}
 
 	enum CodingKeys: String, CodingKey {
-		case agentId = "agentId", name = "name", status = "status", lastTurnAt = "lastTurnAt"
+		case agentId = "agentId", name = "name", status = "status", viewerIsOwner = "viewerIsOwner", lastTurnAt = "lastTurnAt", avatarColor = "avatarColor", avatarShape = "avatarShape", hiddenFromSidebar = "hiddenFromSidebar", hasCustomImage = "hasCustomImage"
 	}
 
 	public func encode(to encoder: Encoder) throws {
@@ -138,21 +164,41 @@ public struct BotRosterEntry: Codable, Sendable, Equatable {
 		try container.encode(agentId, forKey: .agentId)
 		try container.encode(name, forKey: .name)
 		try container.encode(status, forKey: .status)
+		try container.encode(viewerIsOwner, forKey: .viewerIsOwner)
 		try container.encodeIfPresent(lastTurnAt, forKey: .lastTurnAt)
+		try container.encodeIfPresent(avatarColor, forKey: .avatarColor)
+		try container.encodeIfPresent(avatarShape, forKey: .avatarShape)
+		try container.encodeIfPresent(hiddenFromSidebar, forKey: .hiddenFromSidebar)
+		try container.encodeIfPresent(hasCustomImage, forKey: .hasCustomImage)
 	}
 }
 
 /// `bot.roster` result.
 public struct BotRosterResult: Codable, Sendable, Equatable {
 	public let agents: [BotRosterEntry]
+	/// Unix time in milliseconds of the live read this roster was remembered
+	/// from. Present only when the box was not ready and the hub served the
+	/// last live roster in its place; every row then reads `unknown`.
+	public let rememberedAtMs: Int64?
 
-	public init(agents: [BotRosterEntry]) {
+	public init(agents: [BotRosterEntry], rememberedAtMs: Int64?) {
 		self.agents = agents
+		self.rememberedAtMs = rememberedAtMs
+	}
+
+	enum CodingKeys: String, CodingKey {
+		case agents = "agents", rememberedAtMs = "rememberedAtMs"
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agents, forKey: .agents)
+		try container.encodeIfPresent(rememberedAtMs, forKey: .rememberedAtMs)
 	}
 }
 
 /// `bot.status` result: off-box run state.
-/// 
+///
 /// `runState` is a string on the wire. Generated clients see `string` and
 /// compare against [`BotRunState`]. Unknown values degrade to `unknown`.
 public struct BotStatusResult: Codable, Sendable, Equatable {
@@ -205,6 +251,90 @@ public struct BotTranscriptOffboxResult: Codable, Sendable, Equatable {
 	}
 }
 
+/// Fields the hub merges into every transcript entry it decodes from the
+/// durable store — `getAgentTranscriptTail` / window / thread reads and
+/// `transcript` events alike — next to the box's own fields. Entries the box
+/// answers directly carry none of them.
+public struct BotTranscriptEntryStamp: Codable, Sendable, Equatable {
+	/// Grows with every write to the entry, so of two copies with the same id
+	/// the higher `entry_version` is the newer one. Taken from the store's
+	/// per-agent write sequence, so versions are not contiguous per entry and
+	/// only compare between copies of the same entry.
+	public let entryVersion: Int64
+
+	public init(entryVersion: Int64) {
+		self.entryVersion = entryVersion
+	}
+}
+
+/// `bot.usage` result: the caller's weekly Grok Bot allowance. Percent-only
+/// by contract — no currency amounts cross the wire — so clients render a
+/// meter, not a balance.
+///
+/// `usage_percent` is absent when the account has no personal meter (a
+/// pooled team allowance, or a zero denominator with no grants). It is not
+/// clamped: on-demand overage reads above 100.
+public struct BotUsageResult: Codable, Sendable, Equatable {
+	public let usagePercent: Double?
+	/// Unix time in milliseconds of the current period start.
+	public let currentPeriodStartMs: Int64
+	/// Unix time in milliseconds of the next reset, or of the trial expiry
+	/// when `trial` is set. Absent until the user's first metered turn.
+	public let nextResetAtMs: Int64?
+	public let hasAvailableUsage: Bool
+	public let hasNonZeroIncludedLimit: Bool
+	public let includedLimitZero: Bool
+	/// The allowance is a live trial grant rather than a weekly bucket.
+	public let trial: Bool
+	public let isTeamSeat: Bool
+	/// `supergrok-plus` / `supergrok-heavy` when the SuperGrok tier is the
+	/// population funding the meter; absent when another plan funds it.
+	public let fundingPlan: String?
+	/// Server-owned meter label (e.g. `SuperGrok Heavy`, `Grok Bot Plan`).
+	public let planLabel: String?
+	/// Where the caller manages on-demand usage for this meter.
+	public let manageUrl: String
+	public let onDemandEligible: Bool
+	public let onDemandEnabled: Bool
+
+	public init(usagePercent: Double?, currentPeriodStartMs: Int64, nextResetAtMs: Int64?, hasAvailableUsage: Bool, hasNonZeroIncludedLimit: Bool, includedLimitZero: Bool, trial: Bool, isTeamSeat: Bool, fundingPlan: String?, planLabel: String?, manageUrl: String, onDemandEligible: Bool, onDemandEnabled: Bool) {
+		self.usagePercent = usagePercent
+		self.currentPeriodStartMs = currentPeriodStartMs
+		self.nextResetAtMs = nextResetAtMs
+		self.hasAvailableUsage = hasAvailableUsage
+		self.hasNonZeroIncludedLimit = hasNonZeroIncludedLimit
+		self.includedLimitZero = includedLimitZero
+		self.trial = trial
+		self.isTeamSeat = isTeamSeat
+		self.fundingPlan = fundingPlan
+		self.planLabel = planLabel
+		self.manageUrl = manageUrl
+		self.onDemandEligible = onDemandEligible
+		self.onDemandEnabled = onDemandEnabled
+	}
+
+	enum CodingKeys: String, CodingKey {
+		case usagePercent = "usagePercent", currentPeriodStartMs = "currentPeriodStartMs", nextResetAtMs = "nextResetAtMs", hasAvailableUsage = "hasAvailableUsage", hasNonZeroIncludedLimit = "hasNonZeroIncludedLimit", includedLimitZero = "includedLimitZero", trial = "trial", isTeamSeat = "isTeamSeat", fundingPlan = "fundingPlan", planLabel = "planLabel", manageUrl = "manageUrl", onDemandEligible = "onDemandEligible", onDemandEnabled = "onDemandEnabled"
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(usagePercent, forKey: .usagePercent)
+		try container.encode(currentPeriodStartMs, forKey: .currentPeriodStartMs)
+		try container.encodeIfPresent(nextResetAtMs, forKey: .nextResetAtMs)
+		try container.encode(hasAvailableUsage, forKey: .hasAvailableUsage)
+		try container.encode(hasNonZeroIncludedLimit, forKey: .hasNonZeroIncludedLimit)
+		try container.encode(includedLimitZero, forKey: .includedLimitZero)
+		try container.encode(trial, forKey: .trial)
+		try container.encode(isTeamSeat, forKey: .isTeamSeat)
+		try container.encodeIfPresent(fundingPlan, forKey: .fundingPlan)
+		try container.encodeIfPresent(planLabel, forKey: .planLabel)
+		try container.encode(manageUrl, forKey: .manageUrl)
+		try container.encode(onDemandEligible, forKey: .onDemandEligible)
+		try container.encode(onDemandEnabled, forKey: .onDemandEnabled)
+	}
+}
+
 /// `bot.bindConversation` params. Binding is an index only; the hub never
 /// infers a command target from `conversationId`.
 public struct BotBindConversationParams: Codable, Sendable, Equatable {
@@ -219,37 +349,95 @@ public struct BotBindConversationParams: Codable, Sendable, Equatable {
 	}
 }
 
-/// Opaque upstream diagnostic. Present for debugging only; clients must
-/// not parse `upstream`.
-public struct BotRelayErrorDetail: Codable, Sendable, Equatable {
-	public let upstream: String?
+/// `bot.presence` params. A connection views at most one agent; `viewing:
+/// true` for a new agent replaces the previous one.
+public struct BotPresenceParams: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let viewing: Bool
 
-	public init(upstream: String?) {
-		self.upstream = upstream
+	public init(agentId: String, viewing: Bool) {
+		self.agentId = agentId
+		self.viewing = viewing
+	}
+}
+
+/// One of the caller's other Grok accounts on the same verified email.
+///
+/// `signIn` is a string on the wire. Generated clients see `string` and
+/// compare against [`BotRelaySignIn`]. Unknown values degrade to `other`.
+public struct BotRelaySiblingAccount: Codable, Sendable, Equatable {
+	public let signIn: String
+	/// X username without `@`, Google / password / email-code email, GitHub username.
+	/// Absent for Apple / SSO / other.
+	public let handle: String?
+	/// Unix time in milliseconds the account was created.
+	public let createdAtMs: Int64
+	/// This sibling holds a live relay session in the hub, so it is the
+	/// account Cursor is linked to. At most one account in a list is `true`.
+	public let linked: Bool
+
+	public init(signIn: String, handle: String?, createdAtMs: Int64, linked: Bool) {
+		self.signIn = signIn
+		self.handle = handle
+		self.createdAtMs = createdAtMs
+		self.linked = linked
 	}
 
 	enum CodingKeys: String, CodingKey {
-		case upstream = "upstream"
+		case signIn = "signIn", handle = "handle", createdAtMs = "createdAtMs", linked = "linked"
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(signIn, forKey: .signIn)
+		try container.encodeIfPresent(handle, forKey: .handle)
+		try container.encode(createdAtMs, forKey: .createdAtMs)
+		try container.encode(linked, forKey: .linked)
+	}
+}
+
+/// Structured context on a bot-relay error. `upstream` is an opaque
+/// diagnostic present for debugging only; clients must not parse it.
+public struct BotRelayErrorDetail: Codable, Sendable, Equatable {
+	public let upstream: String?
+	/// The upstream's own user-facing sentence for a refusal, trimmed and
+	/// capped at [`UPSTREAM_MESSAGE_MAX_CHARS`] chars. Never the raw body.
+	public let upstreamMessage: String?
+	/// Set only on `link_conflict` with reason `jit_link_declined` when the
+	/// sibling lookup succeeded and found at least one account. Ordered by
+	/// `createdAtMs`. Absent when the lookup failed or found nothing.
+	public let siblingAccounts: [BotRelaySiblingAccount]?
+
+	public init(upstream: String?, upstreamMessage: String?, siblingAccounts: [BotRelaySiblingAccount]?) {
+		self.upstream = upstream
+		self.upstreamMessage = upstreamMessage
+		self.siblingAccounts = siblingAccounts
+	}
+
+	enum CodingKeys: String, CodingKey {
+		case upstream = "upstream", upstreamMessage = "upstreamMessage", siblingAccounts = "siblingAccounts"
 	}
 
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		try container.encodeIfPresent(upstream, forKey: .upstream)
+		try container.encodeIfPresent(upstreamMessage, forKey: .upstreamMessage)
+		try container.encodeIfPresent(siblingAccounts, forKey: .siblingAccounts)
 	}
 }
 
 /// Hub-owned bot-relay error object.
-/// 
+///
 /// Wire form: `{code, retryable, detail, reason?}`.
 /// `detail` is always present (empty object when unused).
 /// `reason` is set for [`BotRelayErrorCode::CommandRejected`] and for the
 /// link-state codes ([`BotRelayErrorCode::is_link_state`]), where it
 /// carries the exchange's machine reason token for per-case client copy.
-/// 
+///
 /// On the JSON-RPC envelope this object is `error.data`. Receivers
 /// switch on `data.code`. The envelope `error.message` is the snake_case
 /// [`BotRelayErrorCode`].
-/// 
+///
 /// `code` is a string on the wire. Generated clients see `string` and
 /// compare against [`BotRelayErrorCode`]. Unknown values degrade to
 /// `upstream_error` while preserving `retryable` and `detail`.
@@ -279,16 +467,37 @@ public struct BotRelayError: Codable, Sendable, Equatable {
 	}
 }
 
+/// Body of `hub:turn_started` (`event` when [`HubChannel::TurnStarted`]).
+/// 
+/// The hub mints `turn_id` when it sees the agent's `isRunning` level rise
+/// and repeats it on the matching [`HubTurnFinishedEvent`], so a client can
+/// tell which running span a finish closes. A subscriber joining mid-turn
+/// receives the running turn's start first.
+public struct HubTurnStartedEvent: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let turnId: String
+
+	public init(agentId: String, turnId: String) {
+		self.agentId = agentId
+		self.turnId = turnId
+	}
+}
+
 /// Body of `hub:turn_finished` (`event` when [`HubChannel::TurnFinished`]).
+/// 
+/// `turn_id` matches the [`HubTurnStartedEvent`] that opened the span;
+/// empty from hubs that predate turn ids.
 public struct HubTurnFinishedEvent: Codable, Sendable, Equatable {
 	public let agentId: String
 	public let conversationIds: [String]
 	public let preview: String
+	public let turnId: String
 
-	public init(agentId: String, conversationIds: [String], preview: String) {
+	public init(agentId: String, conversationIds: [String], preview: String, turnId: String) {
 		self.agentId = agentId
 		self.conversationIds = conversationIds
 		self.preview = preview
+		self.turnId = turnId
 	}
 }
 
@@ -302,20 +511,21 @@ public struct HubResyncRequiredEvent: Codable, Sendable, Equatable {
 }
 
 /// `bot.event` envelope v1 (`v == `[`BOT_EVENT_ENVELOPE_V`]).
-/// 
+///
 /// `seq` is a per-(connection, agent) monotonic counter starting at 1 on
 /// each `bot.subscribe`. It is an ordering reference, not a dedupe key
 /// (a redelivered event gets a fresh `seq`) and is never comparable
 /// across connections. Resync is signaled by [`HubChannel::ResyncRequired`]
 /// or a reconnect, never inferred from `seq`.
-/// 
+///
 /// [`Self::event_id`] is reserved for content-identity dedupe and is
 /// omitted from the wire when `None`.
-/// 
+///
 /// `event` is upstream-verbatim for [`BotEventChannel::Upstream`]. For
+/// [`HubChannel::TurnStarted`] it is [`HubTurnStartedEvent`]; for
 /// [`HubChannel::TurnFinished`] it is [`HubTurnFinishedEvent`]; for
 /// [`HubChannel::ResyncRequired`] it is [`HubResyncRequiredEvent`].
-/// 
+///
 /// `channel` is a string on the wire. Typeshare cannot express the
 /// hub / hub-unknown / upstream split, so generated clients see `string`.
 /// Compare against [`HubChannel`] for the known `hub:*` values.
@@ -361,7 +571,7 @@ public enum BotRunState: String, Codable, Sendable, Equatable {
 }
 
 /// Closed hub-owned error code. This list is the client stability boundary.
-/// 
+///
 /// Senders emit only these codes. Receivers treat any unknown wire string
 /// as `upstream_error` and keep `retryable` / `detail`.
 public enum BotRelayErrorCode: String, Codable, Sendable, Equatable {
@@ -394,6 +604,11 @@ public enum BotRelayErrorCode: String, Codable, Sendable, Equatable {
 	/// precisely (a reason token newer than the mapping). `reason` carries
 	/// the token verbatim.
 	case linkUnsupported = "link_unsupported"
+	/// The linked Cursor account, or a Cursor team that seats it, is in
+	/// Privacy Mode (Legacy), which refuses cloud-agent storage. Definitive
+	/// until the user (or a team admin) switches to Privacy Mode. `reason`
+	/// is `personal` or `team`.
+	case legacyPrivacyUnsupported = "legacy_privacy_unsupported"
 	case noPlan = "no_plan"
 	case usageExhausted = "usage_exhausted"
 	case boxMigrating = "box_migrating"
@@ -404,9 +619,24 @@ public enum BotRelayErrorCode: String, Codable, Sendable, Equatable {
 	case upstreamError = "upstream_error"
 }
 
+/// How one of the caller's Grok accounts signs in. Senders emit only the
+/// named variants. Receivers treat any unknown wire string as
+/// [`Self::Other`].
+public enum BotRelaySignIn: String, Codable, Sendable, Equatable {
+	case x
+	case google
+	case apple
+	case password
+	case github
+	case sso
+	case emailCode = "email_code"
+	case other
+}
+
 /// Enumerated hub-owned event channel. Prefixed `hub:` so the set is
 /// structurally disjoint from any unprefixed upstream channel name.
 public enum HubChannel: String, Codable, Sendable, Equatable {
+	case turnStarted = "hub:turn_started"
 	case turnFinished = "hub:turn_finished"
 	case resyncRequired = "hub:resync_required"
 }
@@ -462,10 +692,13 @@ public let COMMAND_REJECTED_ARGS_TOO_LARGE: String = "args_too_large"
 /// `reason` on `command_rejected` when required command args are missing or empty.
 public let COMMAND_REJECTED_ARGS_INVALID: String = "args_invalid"
 
+/// `reason` on `command_rejected` when the session's audience (owner vs. viewer) may not act on that agent.
+public let COMMAND_REJECTED_AUDIENCE_UNSUPPORTED: String = "audience_unsupported"
+
 /// `reason` on `command_rejected` when Live mode cannot accept attachments.
 public let COMMAND_REJECTED_ATTACHMENTS_NOT_SUPPORTED_IN_LIVE: String = "attachments_not_supported_in_live"
 
-/// `reason` on `command_rejected` when Live mode cannot interrupt or look up
+/// `reason` on `command_rejected` when Live mode cannot interrupt or look up prompt acceptance.
 public let COMMAND_REJECTED_NOT_SUPPORTED_IN_LIVE: String = "not_supported_in_live"
 
 /// `reason` on `command_rejected` when attachUpload cannot fetch the file because this connection has no usable credential.
@@ -486,8 +719,20 @@ public let COMMAND_REJECTED_ATTACHMENT_TOO_LARGE: String = "attachment_too_large
 /// `reason` on `command_rejected` when the BotChat upload is not PostProcessDone.
 public let COMMAND_REJECTED_ATTACHMENT_NOT_READY: String = "attachment_not_ready"
 
-/// `reason` on `command_rejected` when the box refused a well-formed
+/// `reason` on `command_rejected` when the live box gateway refused a well-formed command with its own sentence.
+public let COMMAND_REJECTED_BOX_REFUSED: String = "box_refused"
+
+/// `reason` on `command_rejected` when the box refused a well-formed catalog method (capability skew, not a client catalog bug).
 public let COMMAND_REJECTED_GATEWAY_UNKNOWN_METHOD: String = "gateway/unknown-method"
+
+/// `reason` on `command_rejected` when the target agent's harness owns this state and exposes no RPC for the operation.
+public let COMMAND_REJECTED_TEMPORAL_UNSUPPORTED: String = "temporal_unsupported"
+
+/// `reason` on `command_rejected` when the upstream answered the voice mint with `invalid_argument` or a voice harness call with `not_found`: voice calling is not enabled for this account, or the mint was refused.
+public let COMMAND_REJECTED_VOICE_CALL_UNAVAILABLE: String = "voice_call_unavailable"
+
+/// `reason` on `command_rejected` when the upstream refused `setMainAgent` because the main bot feature is not enabled for this account: `getMainAgent` still reads the pointer, but nothing can write it until the account is enrolled.
+public let COMMAND_REJECTED_MAIN_AGENT_NOT_ENABLED: String = "main_agent_not_enabled"
 
 public func isGatewayMethodUnsupported(_ error: BotRelayError) -> Bool {
 	error.code == BotRelayErrorCode.commandRejected.rawValue
@@ -496,10 +741,45 @@ public func isGatewayMethodUnsupported(_ error: BotRelayError) -> Bool {
 
 // Allowlisted bot-relay command schema (Args+Reply transitive closure).
 // Source: crates/common/xai-grok-bot-upstream/src/generated/{defs,methods}.rs
-// Schema closure: 268 types.
+// Schema closure: 606 types.
 
 public struct ArgsClearTrays: Codable, Sendable, Equatable {
 	public init() {}
+}
+
+public struct ArgsCompleteGithubConnect: Codable, Sendable, Equatable {
+	public let code: String?
+	public let error: String?
+	public let installationId: String?
+	public let setupAction: String?
+	public let state: String
+	public init(code: String? = nil, error: String? = nil, installationId: String? = nil, setupAction: String? = nil, state: String) {
+		self.code = code
+		self.error = error
+		self.installationId = installationId
+		self.setupAction = setupAction
+		self.state = state
+	}
+	enum CodingKeys: String, CodingKey {
+		case code, error, installationId, setupAction, state
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(code, forKey: .code)
+		try container.encodeIfPresent(error, forKey: .error)
+		try container.encodeIfPresent(installationId, forKey: .installationId)
+		try container.encodeIfPresent(setupAction, forKey: .setupAction)
+		try container.encode(state, forKey: .state)
+	}
+}
+
+public struct ArgsCompleteMcpOAuth: Codable, Sendable, Equatable {
+	public let code: String
+	public let state: String
+	public init(code: String, state: String) {
+		self.code = code
+		self.state = state
+	}
 }
 
 public struct ArgsConnectChannel: Codable, Sendable, Equatable {
@@ -513,23 +793,108 @@ public struct ArgsConnectChannel: Codable, Sendable, Equatable {
 	}
 }
 
+public struct ArgsCreateAgentAutomation: Codable, Sendable, Equatable {
+	public let id: String
+	public let spec: SandAutomationSpec
+	public init(id: String, spec: SandAutomationSpec) {
+		self.id = id
+		self.spec = spec
+	}
+}
+
 public struct ArgsCreateGroup: Codable, Sendable, Equatable {
+	public let clientNonce: String?
+	public let creationRoute: ArgsCreateGroupCreationRoute?
 	public let description: String?
+	public let humanMemberUserIds: [Double]?
 	public let memberAgentIds: [String]
 	public let name: String
-	public init(description: String? = nil, memberAgentIds: [String], name: String) {
+	public let namedBy: ArgsCreateGroupNamedBy?
+	public init(clientNonce: String? = nil, creationRoute: ArgsCreateGroupCreationRoute? = nil, description: String? = nil, humanMemberUserIds: [Double]? = nil, memberAgentIds: [String], name: String, namedBy: ArgsCreateGroupNamedBy? = nil) {
+		self.clientNonce = clientNonce
+		self.creationRoute = creationRoute
 		self.description = description
+		self.humanMemberUserIds = humanMemberUserIds
 		self.memberAgentIds = memberAgentIds
 		self.name = name
+		self.namedBy = namedBy
 	}
 	enum CodingKeys: String, CodingKey {
-		case description, memberAgentIds, name
+		case clientNonce, creationRoute, description, humanMemberUserIds, memberAgentIds, name, namedBy
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(clientNonce, forKey: .clientNonce)
+		try container.encodeIfPresent(creationRoute, forKey: .creationRoute)
 		try container.encodeIfPresent(description, forKey: .description)
+		try container.encodeIfPresent(humanMemberUserIds, forKey: .humanMemberUserIds)
 		try container.encode(memberAgentIds, forKey: .memberAgentIds)
 		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(namedBy, forKey: .namedBy)
+	}
+}
+
+public enum ArgsCreateGroupCreationRoute: Codable, Sendable, Equatable {
+
+	case box(Box)
+	case temporal(Temporal)
+	case unknown(Unknown)
+
+	public struct Box: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "box") {
+			self.kind = kind
+		}
+	}
+
+	public struct Temporal: Codable, Sendable, Equatable {
+		public let kind: String
+		public let scope: String
+		public init(kind: String = "temporal", scope: String) {
+			self.kind = kind
+			self.scope = scope
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "box": self = .box(try Box(from: decoder))
+		case "temporal": self = .temporal(try Temporal(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .box(let v): try v.encode(to: encoder)
+		case .temporal(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct ArgsCreateGroupNamedBy: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let app = ArgsCreateGroupNamedBy(rawValue: "app")
+	public static let user = ArgsCreateGroupNamedBy(rawValue: "user")
+}
+
+public struct ArgsDeleteAgentAutomation: Codable, Sendable, Equatable {
+	public let automationId: String
+	public let id: String
+	public init(automationId: String, id: String) {
+		self.automationId = automationId
+		self.id = id
 	}
 }
 
@@ -543,9 +908,20 @@ public struct ArgsDeleteAgents: Codable, Sendable, Equatable {
 public struct ArgsDiscardDraft: Codable, Sendable, Equatable {
 	public let agentId: String
 	public let entryId: String
-	public init(agentId: String, entryId: String) {
+	public let sessionId: String?
+	public init(agentId: String, entryId: String, sessionId: String? = nil) {
 		self.agentId = agentId
 		self.entryId = entryId
+		self.sessionId = sessionId
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, entryId, sessionId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encode(entryId, forKey: .entryId)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
 	}
 }
 
@@ -554,6 +930,13 @@ public struct ArgsDisconnectChannel: Codable, Sendable, Equatable {
 	public let platform: String
 	public init(id: String, platform: String) {
 		self.id = id
+		self.platform = platform
+	}
+}
+
+public struct ArgsDisconnectListenerPlatform: Codable, Sendable, Equatable {
+	public let platform: String
+	public init(platform: String) {
 		self.platform = platform
 	}
 }
@@ -594,6 +977,15 @@ public struct ArgsDismissUserFormPlatform: RawRepresentable, Codable, Sendable, 
 	public static let android = ArgsDismissUserFormPlatform(rawValue: "android")
 	public static let desktop = ArgsDismissUserFormPlatform(rawValue: "desktop")
 	public static let ios = ArgsDismissUserFormPlatform(rawValue: "ios")
+}
+
+public struct ArgsDismissWidget: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let entryId: String
+	public init(agentId: String, entryId: String) {
+		self.agentId = agentId
+		self.entryId = entryId
+	}
 }
 
 public struct ArgsGenerateAgentAvatarImage: Codable, Sendable, Equatable {
@@ -642,26 +1034,163 @@ public struct ArgsGetAgentTranscriptTail: Codable, Sendable, Equatable {
 	public let beforeSeq: Double?
 	public let id: String
 	public let limit: Double
-	public init(beforeSeq: Double? = nil, id: String, limit: Double) {
+	public let sessionId: String?
+	public let unreadBoundaryAt: Double?
+	public init(beforeSeq: Double? = nil, id: String, limit: Double, sessionId: String? = nil, unreadBoundaryAt: Double? = nil) {
 		self.beforeSeq = beforeSeq
 		self.id = id
 		self.limit = limit
+		self.sessionId = sessionId
+		self.unreadBoundaryAt = unreadBoundaryAt
 	}
 	enum CodingKeys: String, CodingKey {
-		case beforeSeq, id, limit
+		case beforeSeq, id, limit, sessionId, unreadBoundaryAt
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		try container.encodeIfPresent(beforeSeq, forKey: .beforeSeq)
 		try container.encode(id, forKey: .id)
 		try container.encode(limit, forKey: .limit)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
+		try container.encodeIfPresent(unreadBoundaryAt, forKey: .unreadBoundaryAt)
 	}
+}
+
+public struct ArgsGetAgentTranscriptWindow: Codable, Sendable, Equatable {
+	public let beforeSeq: Double?
+	public let id: String
+	public let limit: Double
+	public let unreadBoundaryAt: Double?
+	public init(beforeSeq: Double? = nil, id: String, limit: Double, unreadBoundaryAt: Double? = nil) {
+		self.beforeSeq = beforeSeq
+		self.id = id
+		self.limit = limit
+		self.unreadBoundaryAt = unreadBoundaryAt
+	}
+	enum CodingKeys: String, CodingKey {
+		case beforeSeq, id, limit, unreadBoundaryAt
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(beforeSeq, forKey: .beforeSeq)
+		try container.encode(id, forKey: .id)
+		try container.encode(limit, forKey: .limit)
+		try container.encodeIfPresent(unreadBoundaryAt, forKey: .unreadBoundaryAt)
+	}
+}
+
+public struct ArgsGetCloudAgentInfo: Codable, Sendable, Equatable {
+	public let bcId: String
+	public let includeArtifacts: Bool?
+	public let includeFiles: Bool?
+	public init(bcId: String, includeArtifacts: Bool? = nil, includeFiles: Bool? = nil) {
+		self.bcId = bcId
+		self.includeArtifacts = includeArtifacts
+		self.includeFiles = includeFiles
+	}
+	enum CodingKeys: String, CodingKey {
+		case bcId, includeArtifacts, includeFiles
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(bcId, forKey: .bcId)
+		try container.encodeIfPresent(includeArtifacts, forKey: .includeArtifacts)
+		try container.encodeIfPresent(includeFiles, forKey: .includeFiles)
+	}
+}
+
+public struct ArgsGetListenerConnectUrl: Codable, Sendable, Equatable {
+	public let forceOauth: Bool?
+	public let oauthRedirectUri: String?
+	public let platform: String
+	public init(forceOauth: Bool? = nil, oauthRedirectUri: String? = nil, platform: String) {
+		self.forceOauth = forceOauth
+		self.oauthRedirectUri = oauthRedirectUri
+		self.platform = platform
+	}
+	enum CodingKeys: String, CodingKey {
+		case forceOauth, oauthRedirectUri, platform
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(forceOauth, forKey: .forceOauth)
+		try container.encodeIfPresent(oauthRedirectUri, forKey: .oauthRedirectUri)
+		try container.encode(platform, forKey: .platform)
+	}
+}
+
+public struct ArgsGetVoiceCall: Codable, Sendable, Equatable {
+	public let callId: String
+	public let id: String
+	public init(callId: String, id: String) {
+		self.callId = callId
+		self.id = id
+	}
+}
+
+public struct ArgsHandBackForeverBox: Codable, Sendable, Equatable {
+	public let id: String
+	public let requestId: String?
+	public let trigger: ArgsHandBackForeverBoxTrigger?
+	public init(id: String, requestId: String? = nil, trigger: ArgsHandBackForeverBoxTrigger? = nil) {
+		self.id = id
+		self.requestId = requestId
+		self.trigger = trigger
+	}
+	enum CodingKeys: String, CodingKey {
+		case id, requestId, trigger
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(id, forKey: .id)
+		try container.encodeIfPresent(requestId, forKey: .requestId)
+		try container.encodeIfPresent(trigger, forKey: .trigger)
+	}
+}
+
+public struct ArgsHandBackForeverBoxTrigger: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let button = ArgsHandBackForeverBoxTrigger(rawValue: "button")
+	public static let dismissed = ArgsHandBackForeverBoxTrigger(rawValue: "dismissed")
+	public static let viewerClosed = ArgsHandBackForeverBoxTrigger(rawValue: "viewer-closed")
 }
 
 public struct ArgsInjectChromeCookies: Codable, Sendable, Equatable {
 	public let cookies: [ChromeCookieRecord]
 	public init(cookies: [ChromeCookieRecord]) {
 		self.cookies = cookies
+	}
+}
+
+public struct ArgsInterruptAgentRun: Codable, Sendable, Equatable {
+	public let id: String
+	public let sessionId: String?
+	public init(id: String, sessionId: String? = nil) {
+		self.id = id
+		self.sessionId = sessionId
+	}
+	enum CodingKeys: String, CodingKey {
+		case id, sessionId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(id, forKey: .id)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
+	}
+}
+
+public struct ArgsListBoxMcpServers: Codable, Sendable, Equatable {
+	public let serverIdentifiers: [String]
+	public init(serverIdentifiers: [String]) {
+		self.serverIdentifiers = serverIdentifiers
+	}
+}
+
+public struct ArgsListMcpServerTools: Codable, Sendable, Equatable {
+	public let serverId: String
+	public init(serverId: String) {
+		self.serverId = serverId
 	}
 }
 
@@ -676,6 +1205,163 @@ public struct ArgsReactToMessage: Codable, Sendable, Equatable {
 	}
 }
 
+public typealias ArgsReadAttachmentImage = SandUploadAttachmentResult
+
+public struct ArgsReadAttachmentImageRendition: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let original = ArgsReadAttachmentImageRendition(rawValue: "original")
+	public static let preview = ArgsReadAttachmentImageRendition(rawValue: "preview")
+}
+
+public struct ArgsRecordVoiceCall: Codable, Sendable, Equatable {
+	public let record: SandVoiceCallRecord
+	public init(record: SandVoiceCallRecord) {
+		self.record = record
+	}
+}
+
+public struct ArgsRefreshMcp: Codable, Sendable, Equatable {
+	public let completion: SandMcpAuthCompletion?
+	public init(completion: SandMcpAuthCompletion? = nil) {
+		self.completion = completion
+	}
+	enum CodingKeys: String, CodingKey {
+		case completion
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(completion, forKey: .completion)
+	}
+}
+
+public struct ArgsResolveAutoReviewApproval: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let approvalPlatform: ArgsResolveAutoReviewApprovalApprovalPlatform?
+	public let approvedCommand: String?
+	public let entryId: String
+	public let requestId: String
+	public let resolution: ArgsResolveAutoReviewApprovalResolution
+	public let sessionId: String?
+	public init(agentId: String, approvalPlatform: ArgsResolveAutoReviewApprovalApprovalPlatform? = nil, approvedCommand: String? = nil, entryId: String, requestId: String, resolution: ArgsResolveAutoReviewApprovalResolution, sessionId: String? = nil) {
+		self.agentId = agentId
+		self.approvalPlatform = approvalPlatform
+		self.approvedCommand = approvedCommand
+		self.entryId = entryId
+		self.requestId = requestId
+		self.resolution = resolution
+		self.sessionId = sessionId
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, approvalPlatform, approvedCommand, entryId, requestId, resolution, sessionId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encodeIfPresent(approvalPlatform, forKey: .approvalPlatform)
+		try container.encodeIfPresent(approvedCommand, forKey: .approvedCommand)
+		try container.encode(entryId, forKey: .entryId)
+		try container.encode(requestId, forKey: .requestId)
+		try container.encode(resolution, forKey: .resolution)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
+	}
+}
+
+public struct ArgsResolveAutoReviewApprovalApprovalPlatform: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let android = ArgsResolveAutoReviewApprovalApprovalPlatform(rawValue: "android")
+	public static let desktop = ArgsResolveAutoReviewApprovalApprovalPlatform(rawValue: "desktop")
+	public static let ios = ArgsResolveAutoReviewApprovalApprovalPlatform(rawValue: "ios")
+}
+
+public struct ArgsResolveAutoReviewApprovalResolution: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let always = ArgsResolveAutoReviewApprovalResolution(rawValue: "always")
+	public static let approved = ArgsResolveAutoReviewApprovalResolution(rawValue: "approved")
+	public static let denied = ArgsResolveAutoReviewApprovalResolution(rawValue: "denied")
+}
+
+public struct ArgsResolveLocalToolPermission: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let entryId: String
+	public let requestId: String
+	public let resolution: ArgsResolveLocalToolPermissionResolution
+	public let sessionId: String?
+	public init(agentId: String, entryId: String, requestId: String, resolution: ArgsResolveLocalToolPermissionResolution, sessionId: String? = nil) {
+		self.agentId = agentId
+		self.entryId = entryId
+		self.requestId = requestId
+		self.resolution = resolution
+		self.sessionId = sessionId
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, entryId, requestId, resolution, sessionId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encode(entryId, forKey: .entryId)
+		try container.encode(requestId, forKey: .requestId)
+		try container.encode(resolution, forKey: .resolution)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
+	}
+}
+
+public struct ArgsResolveLocalToolPermissionResolution: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let allowOnce = ArgsResolveLocalToolPermissionResolution(rawValue: "allow-once")
+	public static let always = ArgsResolveLocalToolPermissionResolution(rawValue: "always")
+	public static let deny = ArgsResolveLocalToolPermissionResolution(rawValue: "deny")
+	public static let never = ArgsResolveLocalToolPermissionResolution(rawValue: "never")
+}
+
+public struct ArgsResolveVirtualCardApproval: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let attestation: SandSpendApprovalAttestation?
+	public let entryId: String
+	public let failureReason: String?
+	public let paymentMethodId: String?
+	public let requestId: String
+	public let resolution: ArgsResolveVirtualCardApprovalResolution
+	public let spendRequestId: String?
+	public init(agentId: String, attestation: SandSpendApprovalAttestation? = nil, entryId: String, failureReason: String? = nil, paymentMethodId: String? = nil, requestId: String, resolution: ArgsResolveVirtualCardApprovalResolution, spendRequestId: String? = nil) {
+		self.agentId = agentId
+		self.attestation = attestation
+		self.entryId = entryId
+		self.failureReason = failureReason
+		self.paymentMethodId = paymentMethodId
+		self.requestId = requestId
+		self.resolution = resolution
+		self.spendRequestId = spendRequestId
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, attestation, entryId, failureReason, paymentMethodId, requestId, resolution, spendRequestId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encodeIfPresent(attestation, forKey: .attestation)
+		try container.encode(entryId, forKey: .entryId)
+		try container.encodeIfPresent(failureReason, forKey: .failureReason)
+		try container.encodeIfPresent(paymentMethodId, forKey: .paymentMethodId)
+		try container.encode(requestId, forKey: .requestId)
+		try container.encode(resolution, forKey: .resolution)
+		try container.encodeIfPresent(spendRequestId, forKey: .spendRequestId)
+	}
+}
+
+public struct ArgsResolveVirtualCardApprovalResolution: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let approved = ArgsResolveVirtualCardApprovalResolution(rawValue: "approved")
+	public static let denied = ArgsResolveVirtualCardApprovalResolution(rawValue: "denied")
+	public static let expired = ArgsResolveVirtualCardApprovalResolution(rawValue: "expired")
+	public static let failed = ArgsResolveVirtualCardApprovalResolution(rawValue: "failed")
+}
+
 public struct ArgsRespondToWidget: Codable, Sendable, Equatable {
 	public let agentId: String
 	public let entryId: String
@@ -684,6 +1370,26 @@ public struct ArgsRespondToWidget: Codable, Sendable, Equatable {
 		self.agentId = agentId
 		self.entryId = entryId
 		self.value = value
+	}
+}
+
+public struct ArgsRunAgentAutomationNow: Codable, Sendable, Equatable {
+	public let automationId: String
+	public let id: String
+	public let sessionId: String?
+	public init(automationId: String, id: String, sessionId: String? = nil) {
+		self.automationId = automationId
+		self.id = id
+		self.sessionId = sessionId
+	}
+	enum CodingKeys: String, CodingKey {
+		case automationId, id, sessionId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(automationId, forKey: .automationId)
+		try container.encode(id, forKey: .id)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
 	}
 }
 
@@ -701,6 +1407,29 @@ public struct ArgsSearchAgents: Codable, Sendable, Equatable {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		try container.encodeIfPresent(limit, forKey: .limit)
 		try container.encode(query, forKey: .query)
+	}
+}
+
+public struct ArgsSendDraft: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let draft: SandDraftPayload
+	public let entryId: String
+	public let sessionId: String?
+	public init(agentId: String, draft: SandDraftPayload, entryId: String, sessionId: String? = nil) {
+		self.agentId = agentId
+		self.draft = draft
+		self.entryId = entryId
+		self.sessionId = sessionId
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, draft, entryId, sessionId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encode(draft, forKey: .draft)
+		try container.encode(entryId, forKey: .entryId)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
 	}
 }
 
@@ -782,13 +1511,44 @@ public struct ArgsSetGroupMembers: Codable, Sendable, Equatable {
 	}
 }
 
+public struct ArgsSetVoiceCallPresence: Codable, Sendable, Equatable {
+	public let acceptsOverheard: Bool?
+	public let callId: String
+	public let id: String
+	public let isOnTheLine: Bool
+	public init(acceptsOverheard: Bool? = nil, callId: String, id: String, isOnTheLine: Bool) {
+		self.acceptsOverheard = acceptsOverheard
+		self.callId = callId
+		self.id = id
+		self.isOnTheLine = isOnTheLine
+	}
+	enum CodingKeys: String, CodingKey {
+		case acceptsOverheard, callId, id, isOnTheLine
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(acceptsOverheard, forKey: .acceptsOverheard)
+		try container.encode(callId, forKey: .callId)
+		try container.encode(id, forKey: .id)
+		try container.encode(isOnTheLine, forKey: .isOnTheLine)
+	}
+}
+
 public struct ArgsStartTeachRecording: Codable, Sendable, Equatable {
 	public let agentId: String
-	public let entryPoint: SandTeachEntryPoint
-	public init(agentId: String, entryPoint: SandTeachEntryPoint) {
+	public let entryPoint: ArgsStartTeachRecordingEntryPoint
+	public init(agentId: String, entryPoint: ArgsStartTeachRecordingEntryPoint) {
 		self.agentId = agentId
 		self.entryPoint = entryPoint
 	}
+}
+
+public struct ArgsStartTeachRecordingEntryPoint: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let composerMenu = ArgsStartTeachRecordingEntryPoint(rawValue: "composer_menu")
+	public static let fullscreenTitleBar = ArgsStartTeachRecordingEntryPoint(rawValue: "fullscreen_title_bar")
+	public static let screenHover = ArgsStartTeachRecordingEntryPoint(rawValue: "screen_hover")
 }
 
 public struct ArgsStopTeachRecording: Codable, Sendable, Equatable {
@@ -797,6 +1557,29 @@ public struct ArgsStopTeachRecording: Codable, Sendable, Equatable {
 	public init(agentId: String, save: Bool) {
 		self.agentId = agentId
 		self.save = save
+	}
+}
+
+public struct ArgsSubmitSecret: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let entryId: String
+	public let sessionId: String?
+	public let value: String
+	public init(agentId: String, entryId: String, sessionId: String? = nil, value: String) {
+		self.agentId = agentId
+		self.entryId = entryId
+		self.sessionId = sessionId
+		self.value = value
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, entryId, sessionId, value
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encode(entryId, forKey: .entryId)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
+		try container.encode(value, forKey: .value)
 	}
 }
 
@@ -831,6 +1614,13 @@ public struct ArgsSubmitUserFormPlatform: RawRepresentable, Codable, Sendable, E
 	public static let ios = ArgsSubmitUserFormPlatform(rawValue: "ios")
 }
 
+public struct ArgsUninstallMcpPlugin: Codable, Sendable, Equatable {
+	public let pluginId: String
+	public init(pluginId: String) {
+		self.pluginId = pluginId
+	}
+}
+
 public struct ArgsUpdateAgent: Codable, Sendable, Equatable {
 	public let id: String
 	public let profile: SandAgentProfile
@@ -840,58 +1630,14 @@ public struct ArgsUpdateAgent: Codable, Sendable, Equatable {
 	}
 }
 
-public struct BotTemplatePublishCardPayload: Codable, Sendable, Equatable {
-	public let audience: BotTemplatePublishCardPayloadAudience
-	public let counts: BotTemplateRecipeCounts
-	public let description: String
-	public let name: String
-	public let replacesActiveVersion: Double?
-	public let shareId: String
-	public let shareUrl: String
-	public let version: Double
-	public init(audience: BotTemplatePublishCardPayloadAudience, counts: BotTemplateRecipeCounts, description: String, name: String, replacesActiveVersion: Double? = nil, shareId: String, shareUrl: String, version: Double) {
-		self.audience = audience
-		self.counts = counts
-		self.description = description
-		self.name = name
-		self.replacesActiveVersion = replacesActiveVersion
-		self.shareId = shareId
-		self.shareUrl = shareUrl
-		self.version = version
-	}
-	enum CodingKeys: String, CodingKey {
-		case audience, counts, description, name, replacesActiveVersion, shareId, shareUrl, version
-	}
-	public func encode(to encoder: Encoder) throws {
-		var container = encoder.container(keyedBy: CodingKeys.self)
-		try container.encode(audience, forKey: .audience)
-		try container.encode(counts, forKey: .counts)
-		try container.encode(description, forKey: .description)
-		try container.encode(name, forKey: .name)
-		try container.encodeIfPresent(replacesActiveVersion, forKey: .replacesActiveVersion)
-		try container.encode(shareId, forKey: .shareId)
-		try container.encode(shareUrl, forKey: .shareUrl)
-		try container.encode(version, forKey: .version)
-	}
-}
-
-public struct BotTemplatePublishCardPayloadAudience: RawRepresentable, Codable, Sendable, Equatable, Hashable {
-	public let rawValue: String
-	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let `public` = BotTemplatePublishCardPayloadAudience(rawValue: "public")
-	public static let team = BotTemplatePublishCardPayloadAudience(rawValue: "team")
-}
-
-public struct BotTemplateRecipeCounts: Codable, Sendable, Equatable {
-	public let memory: Double
-	public let plugins: Double
-	public let routines: Double
-	public let skills: Double
-	public init(memory: Double, plugins: Double, routines: Double, skills: Double) {
-		self.memory = memory
-		self.plugins = plugins
-		self.routines = routines
-		self.skills = skills
+public struct ArgsUpdateAgentAutomation: Codable, Sendable, Equatable {
+	public let automationId: String
+	public let id: String
+	public let spec: SandAutomationSpec
+	public init(automationId: String, id: String, spec: SandAutomationSpec) {
+		self.automationId = automationId
+		self.id = id
+		self.spec = spec
 	}
 }
 
@@ -999,21 +1745,21 @@ public struct ChromeCookieRecord: Codable, Sendable, Equatable {
 }
 
 public enum ChromeCookieRecordPartitionKey: Codable, Sendable, Equatable {
-	case object([String: BotRelayJSONValue])
 	case null
+	case object([String: BotRelayJSONValue])
 	case string(String)
 	public init(from decoder: Decoder) throws {
 		let container = try decoder.singleValueContainer()
-		if let v = try? container.decode([String: BotRelayJSONValue].self) { self = .object(v); return }
 		if container.decodeNil() { self = .null; return }
+		if let v = try? container.decode([String: BotRelayJSONValue].self) { self = .object(v); return }
 		if let v = try? container.decode(String.self) { self = .string(v); return }
 		throw DecodingError.typeMismatch(ChromeCookieRecordPartitionKey.self, .init(codingPath: decoder.codingPath, debugDescription: "Unknown ChromeCookieRecordPartitionKey value"))
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.singleValueContainer()
 		switch self {
-		case .object(let v): try container.encode(v)
 		case .null: try container.encodeNil()
+		case .object(let v): try container.encode(v)
 		case .string(let v): try container.encode(v)
 		}
 	}
@@ -1098,19 +1844,81 @@ public struct GatewayAcceptanceStatusArgs: Codable, Sendable, Equatable {
 	public let accountSlot: String
 	public let agentId: String?
 	public let clientNonce: String
-	public init(accountSlot: String, agentId: String? = nil, clientNonce: String) {
+	public let sessionId: String?
+	public init(accountSlot: String, agentId: String? = nil, clientNonce: String, sessionId: String? = nil) {
 		self.accountSlot = accountSlot
 		self.agentId = agentId
 		self.clientNonce = clientNonce
+		self.sessionId = sessionId
 	}
 	enum CodingKeys: String, CodingKey {
-		case accountSlot, agentId, clientNonce
+		case accountSlot, agentId, clientNonce, sessionId
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		try container.encode(accountSlot, forKey: .accountSlot)
 		try container.encodeIfPresent(agentId, forKey: .agentId)
 		try container.encode(clientNonce, forKey: .clientNonce)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
+	}
+}
+
+public struct GrokBotRoomPerson: Codable, Sendable, Equatable {
+	public let avatarDataUrl: String?
+	public let avatarPhoto: RosterPhotoReference?
+	public let displayName: String
+	public let isViewer: Bool
+	public let userId: Double?
+	public init(avatarDataUrl: String? = nil, avatarPhoto: RosterPhotoReference? = nil, displayName: String, isViewer: Bool, userId: Double? = nil) {
+		self.avatarDataUrl = avatarDataUrl
+		self.avatarPhoto = avatarPhoto
+		self.displayName = displayName
+		self.isViewer = isViewer
+		self.userId = userId
+	}
+	enum CodingKeys: String, CodingKey {
+		case avatarDataUrl, avatarPhoto, displayName, isViewer, userId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(avatarDataUrl, forKey: .avatarDataUrl)
+		try container.encode(avatarPhoto, forKey: .avatarPhoto)
+		try container.encode(displayName, forKey: .displayName)
+		try container.encode(isViewer, forKey: .isViewer)
+		try container.encodeIfPresent(userId, forKey: .userId)
+	}
+}
+
+public enum JsonValue: Codable, Sendable, Equatable {
+	case variant0([String: JsonValue])
+	case variant1(Bool)
+	case variant2(Bool)
+	case variant3([JsonValue])
+	case variant4
+	case variant5(Double)
+	case variant6(String)
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.singleValueContainer()
+		if let v = try? container.decode([String: JsonValue].self) { self = .variant0(v); return }
+		if let v = try? container.decode(Bool.self) { self = .variant1(v); return }
+		if let v = try? container.decode(Bool.self) { self = .variant2(v); return }
+		if let v = try? container.decode([JsonValue].self) { self = .variant3(v); return }
+		if container.decodeNil() { self = .variant4; return }
+		if let v = try? container.decode(Double.self) { self = .variant5(v); return }
+		if let v = try? container.decode(String.self) { self = .variant6(v); return }
+		throw DecodingError.typeMismatch(JsonValue.self, .init(codingPath: decoder.codingPath, debugDescription: "Unknown JsonValue value"))
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.singleValueContainer()
+		switch self {
+		case .variant0(let v): try container.encode(v)
+		case .variant1(let v): try container.encode(v)
+		case .variant2(let v): try container.encode(v)
+		case .variant3(let v): try container.encode(v)
+		case .variant4: try container.encodeNil()
+		case .variant5(let v): try container.encode(v)
+		case .variant6(let v): try container.encode(v)
+		}
 	}
 }
 
@@ -1203,8 +2011,8 @@ public struct PromptAcceptanceRecord: Codable, Sendable, Equatable {
 	public let echoEntryId: String?
 	public let inputDigest: String
 	public let rejectionCode: String?
-	public let status: PromptAcceptanceStatus
-	public init(acceptedAtMs: Double, accountSlot: String, agentId: String, clientNonce: String, echoEntryId: String? = nil, inputDigest: String, rejectionCode: String? = nil, status: PromptAcceptanceStatus) {
+	public let status: PromptAcceptanceRecordStatus
+	public init(acceptedAtMs: Double, accountSlot: String, agentId: String, clientNonce: String, echoEntryId: String? = nil, inputDigest: String, rejectionCode: String? = nil, status: PromptAcceptanceRecordStatus) {
 		self.acceptedAtMs = acceptedAtMs
 		self.accountSlot = accountSlot
 		self.agentId = agentId
@@ -1216,12 +2024,196 @@ public struct PromptAcceptanceRecord: Codable, Sendable, Equatable {
 	}
 }
 
-public struct PromptAcceptanceStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+public struct PromptAcceptanceRecordStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let accepted = PromptAcceptanceStatus(rawValue: "accepted")
-	public static let pending = PromptAcceptanceStatus(rawValue: "pending")
-	public static let rejected = PromptAcceptanceStatus(rawValue: "rejected")
+	public static let accepted = PromptAcceptanceRecordStatus(rawValue: "accepted")
+	public static let pending = PromptAcceptanceRecordStatus(rawValue: "pending")
+	public static let rejected = PromptAcceptanceRecordStatus(rawValue: "rejected")
+}
+
+public struct RegressionEraBotTemplateWireView: Codable, Sendable, Equatable {
+	public let active: Bool?
+	public let activeVersion: Double?
+	public let avatarColor: String
+	public let avatarShape: String
+	public let createdAtMs: Double?
+	public let creatorName: String?
+	public let description: String
+	public let memory: [RegressionEraBotTemplateWireViewMemoryItem]?
+	public let name: String
+	public let plugins: [RegressionEraBotTemplateWireViewPluginsItem]?
+	public let published: Bool?
+	public let routines: [RegressionEraBotTemplateWireViewRoutinesItem]?
+	public let shareId: String
+	public let shareUrl: String
+	public let skills: [RegressionEraBotTemplateWireViewSkillsItem]?
+	public let sourceAgentId: String?
+	public let title: String?
+	public let updatedAtMs: Double?
+	public let version: Double?
+	public let visibility: RegressionEraBotTemplateWireViewVisibility?
+	public init(active: Bool? = nil, activeVersion: Double? = nil, avatarColor: String, avatarShape: String, createdAtMs: Double? = nil, creatorName: String? = nil, description: String, memory: [RegressionEraBotTemplateWireViewMemoryItem]? = nil, name: String, plugins: [RegressionEraBotTemplateWireViewPluginsItem]? = nil, published: Bool? = nil, routines: [RegressionEraBotTemplateWireViewRoutinesItem]? = nil, shareId: String, shareUrl: String, skills: [RegressionEraBotTemplateWireViewSkillsItem]? = nil, sourceAgentId: String? = nil, title: String? = nil, updatedAtMs: Double? = nil, version: Double? = nil, visibility: RegressionEraBotTemplateWireViewVisibility? = nil) {
+		self.active = active
+		self.activeVersion = activeVersion
+		self.avatarColor = avatarColor
+		self.avatarShape = avatarShape
+		self.createdAtMs = createdAtMs
+		self.creatorName = creatorName
+		self.description = description
+		self.memory = memory
+		self.name = name
+		self.plugins = plugins
+		self.published = published
+		self.routines = routines
+		self.shareId = shareId
+		self.shareUrl = shareUrl
+		self.skills = skills
+		self.sourceAgentId = sourceAgentId
+		self.title = title
+		self.updatedAtMs = updatedAtMs
+		self.version = version
+		self.visibility = visibility
+	}
+	enum CodingKeys: String, CodingKey {
+		case active, activeVersion, avatarColor, avatarShape, createdAtMs, creatorName, description, memory, name, plugins, published, routines, shareId, shareUrl, skills, sourceAgentId, title, updatedAtMs, version, visibility
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(active, forKey: .active)
+		try container.encodeIfPresent(activeVersion, forKey: .activeVersion)
+		try container.encode(avatarColor, forKey: .avatarColor)
+		try container.encode(avatarShape, forKey: .avatarShape)
+		try container.encodeIfPresent(createdAtMs, forKey: .createdAtMs)
+		try container.encodeIfPresent(creatorName, forKey: .creatorName)
+		try container.encode(description, forKey: .description)
+		try container.encodeIfPresent(memory, forKey: .memory)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(plugins, forKey: .plugins)
+		try container.encodeIfPresent(published, forKey: .published)
+		try container.encodeIfPresent(routines, forKey: .routines)
+		try container.encode(shareId, forKey: .shareId)
+		try container.encode(shareUrl, forKey: .shareUrl)
+		try container.encodeIfPresent(skills, forKey: .skills)
+		try container.encodeIfPresent(sourceAgentId, forKey: .sourceAgentId)
+		try container.encodeIfPresent(title, forKey: .title)
+		try container.encodeIfPresent(updatedAtMs, forKey: .updatedAtMs)
+		try container.encodeIfPresent(version, forKey: .version)
+		try container.encodeIfPresent(visibility, forKey: .visibility)
+	}
+}
+
+public struct RegressionEraBotTemplateWireViewMemoryItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let createdAt: String?
+	public let kind: RegressionEraBotTemplateWireViewMemoryItemKind?
+	public init(content: String, createdAt: String? = nil, kind: RegressionEraBotTemplateWireViewMemoryItemKind? = nil) {
+		self.content = content
+		self.createdAt = createdAt
+		self.kind = kind
+	}
+	enum CodingKeys: String, CodingKey {
+		case content, createdAt, kind
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(content, forKey: .content)
+		try container.encodeIfPresent(createdAt, forKey: .createdAt)
+		try container.encodeIfPresent(kind, forKey: .kind)
+	}
+}
+
+public struct RegressionEraBotTemplateWireViewMemoryItemKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let log = RegressionEraBotTemplateWireViewMemoryItemKind(rawValue: "log")
+	public static let profile = RegressionEraBotTemplateWireViewMemoryItemKind(rawValue: "profile")
+}
+
+public struct RegressionEraBotTemplateWireViewPluginsItem: Codable, Sendable, Equatable {
+	public let description: String?
+	public let name: String
+	public let pluginId: String
+	public init(description: String? = nil, name: String, pluginId: String) {
+		self.description = description
+		self.name = name
+		self.pluginId = pluginId
+	}
+	enum CodingKeys: String, CodingKey {
+		case description, name, pluginId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(description, forKey: .description)
+		try container.encode(name, forKey: .name)
+		try container.encode(pluginId, forKey: .pluginId)
+	}
+}
+
+public struct RegressionEraBotTemplateWireViewRoutinesItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let description: String
+	public let name: String
+	public let slug: String
+	public init(content: String, description: String, name: String, slug: String) {
+		self.content = content
+		self.description = description
+		self.name = name
+		self.slug = slug
+	}
+}
+
+public struct RegressionEraBotTemplateWireViewSkillsItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let description: String
+	public let name: String
+	public init(content: String, description: String, name: String) {
+		self.content = content
+		self.description = description
+		self.name = name
+	}
+}
+
+public struct RegressionEraBotTemplateWireViewVisibility: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let `public` = RegressionEraBotTemplateWireViewVisibility(rawValue: "public")
+	public static let team = RegressionEraBotTemplateWireViewVisibility(rawValue: "team")
+}
+
+public enum ReplyGetBotTemplateForSourceAgent: Codable, Sendable, Equatable {
+	case regressionEraBotTemplateWireView(RegressionEraBotTemplateWireView)
+	case sandBotTemplateWireView(SandBotTemplateWireView)
+	case null
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.singleValueContainer()
+		if let v = try? container.decode(RegressionEraBotTemplateWireView.self) { self = .regressionEraBotTemplateWireView(v); return }
+		if let v = try? container.decode(SandBotTemplateWireView.self) { self = .sandBotTemplateWireView(v); return }
+		if container.decodeNil() { self = .null; return }
+		throw DecodingError.typeMismatch(ReplyGetBotTemplateForSourceAgent.self, .init(codingPath: decoder.codingPath, debugDescription: "Unknown ReplyGetBotTemplateForSourceAgent value"))
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.singleValueContainer()
+		switch self {
+		case .regressionEraBotTemplateWireView(let v): try container.encode(v)
+		case .sandBotTemplateWireView(let v): try container.encode(v)
+		case .null: try container.encodeNil()
+		}
+	}
+}
+
+public struct ReplyGetListenerConnectUrl: Codable, Sendable, Equatable {
+	public let url: String
+	public init(url: String) {
+		self.url = url
+	}
+}
+
+public struct ReplyGetMcpPluginLogoValue: Codable, Sendable, Equatable {
+	public let dataUrl: String
+	public init(dataUrl: String) {
+		self.dataUrl = dataUrl
+	}
 }
 
 public struct ReplyInjectChromeCookies: Codable, Sendable, Equatable {
@@ -1244,6 +2236,13 @@ public struct ReplyInjectChromeCookies: Codable, Sendable, Equatable {
 		try container.encode(injected, forKey: .injected)
 		try container.encodeIfPresent(monitorsReached, forKey: .monitorsReached)
 		try container.encode(sites, forKey: .sites)
+	}
+}
+
+public struct ReplyListBoxMcpServers: Codable, Sendable, Equatable {
+	public let servers: [SandBoxMcpServerStatus]
+	public init(servers: [SandBoxMcpServerStatus]) {
+		self.servers = servers
 	}
 }
 
@@ -1304,11 +2303,50 @@ public enum ReplyReadAttachmentTextValue: Codable, Sendable, Equatable {
 public struct ResolvedImageAttachment: Codable, Sendable, Equatable {
 	public let dataUrl: String
 	public let height: Double?
+	public let scale: Double?
 	public let width: Double?
-	public init(dataUrl: String, height: Double? = nil, width: Double? = nil) {
+	public init(dataUrl: String, height: Double? = nil, scale: Double? = nil, width: Double? = nil) {
 		self.dataUrl = dataUrl
 		self.height = height
+		self.scale = scale
 		self.width = width
+	}
+	enum CodingKeys: String, CodingKey {
+		case dataUrl, height, scale, width
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(dataUrl, forKey: .dataUrl)
+		try container.encode(height, forKey: .height)
+		try container.encodeIfPresent(scale, forKey: .scale)
+		try container.encode(width, forKey: .width)
+	}
+}
+
+public struct RosterPhotoKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let file = RosterPhotoKind(rawValue: "file")
+	public static let `protocol` = RosterPhotoKind(rawValue: "protocol")
+}
+
+public struct RosterPhotoReference: Codable, Sendable, Equatable {
+	public let key: String
+	public let kind: RosterPhotoKind
+	public let retry: Double?
+	public init(key: String, kind: RosterPhotoKind, retry: Double? = nil) {
+		self.key = key
+		self.kind = kind
+		self.retry = retry
+	}
+	enum CodingKeys: String, CodingKey {
+		case key, kind, retry
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(key, forKey: .key)
+		try container.encode(kind, forKey: .kind)
+		try container.encodeIfPresent(retry, forKey: .retry)
 	}
 }
 
@@ -1377,11 +2415,44 @@ public struct SandAgentAwaitingState: Codable, Sendable, Equatable {
 	}
 }
 
-public struct SandAgentOrigin: RawRepresentable, Codable, Sendable, Equatable, Hashable {
-	public let rawValue: String
-	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let dev = SandAgentOrigin(rawValue: "dev")
-	public static let user = SandAgentOrigin(rawValue: "user")
+public struct SandAgentDefaultModel: Codable, Sendable, Equatable {
+	public let maxMode: Bool
+	public let modelId: String
+	public let parameters: [SandAgentModelParameter]
+	public init(maxMode: Bool, modelId: String, parameters: [SandAgentModelParameter]) {
+		self.maxMode = maxMode
+		self.modelId = modelId
+		self.parameters = parameters
+	}
+}
+
+public struct SandAgentGroupTurn: Codable, Sendable, Equatable {
+	public let currentActivity: SandAgentActivity?
+	public let isComposingMessage: Bool
+	public let roomId: String
+	public init(currentActivity: SandAgentActivity? = nil, isComposingMessage: Bool, roomId: String) {
+		self.currentActivity = currentActivity
+		self.isComposingMessage = isComposingMessage
+		self.roomId = roomId
+	}
+	enum CodingKeys: String, CodingKey {
+		case currentActivity, isComposingMessage, roomId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(currentActivity, forKey: .currentActivity)
+		try container.encode(isComposingMessage, forKey: .isComposingMessage)
+		try container.encode(roomId, forKey: .roomId)
+	}
+}
+
+public struct SandAgentModelParameter: Codable, Sendable, Equatable {
+	public let id: String
+	public let value: String
+	public init(id: String, value: String) {
+		self.id = id
+		self.value = value
+	}
 }
 
 public struct SandAgentProfile: Codable, Sendable, Equatable {
@@ -1414,6 +2485,7 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 	public let activeGroupMemberId: String?
 	public let avatarColor: String?
 	public let avatarDataUrl: String?
+	public let avatarPhoto: RosterPhotoReference?
 	public let avatarShape: String?
 	public let avatarVersion: String?
 	public let awaitingUserResponse: SandAgentAwaitingState?
@@ -1421,6 +2493,7 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 	public let createdAt: Double
 	public let currentActivity: SandAgentActivity?
 	public let description: String
+	public let groupTurns: [SandAgentGroupTurn]?
 	public let harness: String?
 	public let hasUnread: Bool
 	public let id: String
@@ -1431,6 +2504,7 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 	public let isRetrying: Bool?
 	public let isRunning: Bool
 	public let isRunningTurn: Bool?
+	public let isTeamDefault: Bool?
 	public let lastActivityAt: Double?
 	public let lastEntry: SandAgentSummaryLastEntry?
 	public let lastMessageAuthorId: String?
@@ -1441,27 +2515,38 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 	public let lastViewedAt: Double?
 	public let memberIds: [String]
 	public let name: String
+	public let namedBy: SandAgentSummaryNamedBy?
 	public let newestEntryId: String?
 	public let notificationsEnabled: Bool
 	public let notifyOnUpdatesEnabled: Bool
-	public let origin: SandAgentOrigin
+	public let origin: SandAgentSummaryOrigin
+	public let ownerDisplayName: String?
 	public let path: String
+	public let people: [GrokBotRoomPerson]?
+	public let published: Bool?
 	public let purpose: SandAgentSummaryPurpose?
 	public let pushMessageContent: SandPushMessageContentPayload?
+	public let runningSessionIds: [String]?
 	public let serverId: String?
-	public let slackConnected: Bool?
+	public let slackStatus: SandAgentSummarySlackStatus?
 	public let snapshotEpoch: String?
 	public let snapshotSeq: Double?
 	public let teamId: Double?
+	public let teamRank: Double?
 	public let title: String?
 	public let unreadCount: Double?
 	public let updatedAt: Double
 	public let viewerIsOwner: Bool?
+	public let viewerSessionId: String?
 	public let visibility: SandAgentSummaryVisibility?
-	public init(activeGroupMemberId: String? = nil, avatarColor: String? = nil, avatarDataUrl: String? = nil, avatarShape: String? = nil, avatarVersion: String? = nil, awaitingUserResponse: SandAgentAwaitingState? = nil, boxHandoff: SandBoxHandoffInfo? = nil, createdAt: Double, currentActivity: SandAgentActivity? = nil, description: String, harness: String? = nil, hasUnread: Bool, id: String, isActive: Bool, isComposingMessage: Bool, isGroup: Bool, isHiddenFromSidebar: Bool? = nil, isRetrying: Bool? = nil, isRunning: Bool, isRunningTurn: Bool? = nil, lastActivityAt: Double? = nil, lastEntry: SandAgentSummaryLastEntry? = nil, lastMessageAuthorId: String? = nil, lastMessageId: String? = nil, lastMessagePreview: String? = nil, lastMessagePreviewSource: SandAgentSummaryLastMessagePreviewSource? = nil, lastTurnSettlement: SandTurnSettlement? = nil, lastViewedAt: Double? = nil, memberIds: [String], name: String, newestEntryId: String? = nil, notificationsEnabled: Bool, notifyOnUpdatesEnabled: Bool, origin: SandAgentOrigin, path: String, purpose: SandAgentSummaryPurpose? = nil, pushMessageContent: SandPushMessageContentPayload? = nil, serverId: String? = nil, slackConnected: Bool? = nil, snapshotEpoch: String? = nil, snapshotSeq: Double? = nil, teamId: Double? = nil, title: String? = nil, unreadCount: Double? = nil, updatedAt: Double, viewerIsOwner: Bool? = nil, visibility: SandAgentSummaryVisibility? = nil) {
+	public let voiceId: String?
+	public let voiceLanguage: String?
+	public let voiceSpeed: Double?
+	public init(activeGroupMemberId: String? = nil, avatarColor: String? = nil, avatarDataUrl: String? = nil, avatarPhoto: RosterPhotoReference? = nil, avatarShape: String? = nil, avatarVersion: String? = nil, awaitingUserResponse: SandAgentAwaitingState? = nil, boxHandoff: SandBoxHandoffInfo? = nil, createdAt: Double, currentActivity: SandAgentActivity? = nil, description: String, groupTurns: [SandAgentGroupTurn]? = nil, harness: String? = nil, hasUnread: Bool, id: String, isActive: Bool, isComposingMessage: Bool, isGroup: Bool, isHiddenFromSidebar: Bool? = nil, isRetrying: Bool? = nil, isRunning: Bool, isRunningTurn: Bool? = nil, isTeamDefault: Bool? = nil, lastActivityAt: Double? = nil, lastEntry: SandAgentSummaryLastEntry? = nil, lastMessageAuthorId: String? = nil, lastMessageId: String? = nil, lastMessagePreview: String? = nil, lastMessagePreviewSource: SandAgentSummaryLastMessagePreviewSource? = nil, lastTurnSettlement: SandTurnSettlement? = nil, lastViewedAt: Double? = nil, memberIds: [String], name: String, namedBy: SandAgentSummaryNamedBy? = nil, newestEntryId: String? = nil, notificationsEnabled: Bool, notifyOnUpdatesEnabled: Bool, origin: SandAgentSummaryOrigin, ownerDisplayName: String? = nil, path: String, people: [GrokBotRoomPerson]? = nil, published: Bool? = nil, purpose: SandAgentSummaryPurpose? = nil, pushMessageContent: SandPushMessageContentPayload? = nil, runningSessionIds: [String]? = nil, serverId: String? = nil, slackStatus: SandAgentSummarySlackStatus? = nil, snapshotEpoch: String? = nil, snapshotSeq: Double? = nil, teamId: Double? = nil, teamRank: Double? = nil, title: String? = nil, unreadCount: Double? = nil, updatedAt: Double, viewerIsOwner: Bool? = nil, viewerSessionId: String? = nil, visibility: SandAgentSummaryVisibility? = nil, voiceId: String? = nil, voiceLanguage: String? = nil, voiceSpeed: Double? = nil) {
 		self.activeGroupMemberId = activeGroupMemberId
 		self.avatarColor = avatarColor
 		self.avatarDataUrl = avatarDataUrl
+		self.avatarPhoto = avatarPhoto
 		self.avatarShape = avatarShape
 		self.avatarVersion = avatarVersion
 		self.awaitingUserResponse = awaitingUserResponse
@@ -1469,6 +2554,7 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 		self.createdAt = createdAt
 		self.currentActivity = currentActivity
 		self.description = description
+		self.groupTurns = groupTurns
 		self.harness = harness
 		self.hasUnread = hasUnread
 		self.id = id
@@ -1479,6 +2565,7 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 		self.isRetrying = isRetrying
 		self.isRunning = isRunning
 		self.isRunningTurn = isRunningTurn
+		self.isTeamDefault = isTeamDefault
 		self.lastActivityAt = lastActivityAt
 		self.lastEntry = lastEntry
 		self.lastMessageAuthorId = lastMessageAuthorId
@@ -1489,32 +2576,43 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 		self.lastViewedAt = lastViewedAt
 		self.memberIds = memberIds
 		self.name = name
+		self.namedBy = namedBy
 		self.newestEntryId = newestEntryId
 		self.notificationsEnabled = notificationsEnabled
 		self.notifyOnUpdatesEnabled = notifyOnUpdatesEnabled
 		self.origin = origin
+		self.ownerDisplayName = ownerDisplayName
 		self.path = path
+		self.people = people
+		self.published = published
 		self.purpose = purpose
 		self.pushMessageContent = pushMessageContent
+		self.runningSessionIds = runningSessionIds
 		self.serverId = serverId
-		self.slackConnected = slackConnected
+		self.slackStatus = slackStatus
 		self.snapshotEpoch = snapshotEpoch
 		self.snapshotSeq = snapshotSeq
 		self.teamId = teamId
+		self.teamRank = teamRank
 		self.title = title
 		self.unreadCount = unreadCount
 		self.updatedAt = updatedAt
 		self.viewerIsOwner = viewerIsOwner
+		self.viewerSessionId = viewerSessionId
 		self.visibility = visibility
+		self.voiceId = voiceId
+		self.voiceLanguage = voiceLanguage
+		self.voiceSpeed = voiceSpeed
 	}
 	enum CodingKeys: String, CodingKey {
-		case activeGroupMemberId, avatarColor, avatarDataUrl, avatarShape, avatarVersion, awaitingUserResponse, boxHandoff, createdAt, currentActivity, description, harness, hasUnread, id, isActive, isComposingMessage, isGroup, isHiddenFromSidebar, isRetrying, isRunning, isRunningTurn, lastActivityAt, lastEntry, lastMessageAuthorId, lastMessageId, lastMessagePreview, lastMessagePreviewSource, lastTurnSettlement, lastViewedAt, memberIds, name, newestEntryId, notificationsEnabled, notifyOnUpdatesEnabled, origin, path, purpose, pushMessageContent, serverId, slackConnected, snapshotEpoch, snapshotSeq, teamId, title, unreadCount, updatedAt, viewerIsOwner, visibility
+		case activeGroupMemberId, avatarColor, avatarDataUrl, avatarPhoto, avatarShape, avatarVersion, awaitingUserResponse, boxHandoff, createdAt, currentActivity, description, groupTurns, harness, hasUnread, id, isActive, isComposingMessage, isGroup, isHiddenFromSidebar, isRetrying, isRunning, isRunningTurn, isTeamDefault, lastActivityAt, lastEntry, lastMessageAuthorId, lastMessageId, lastMessagePreview, lastMessagePreviewSource, lastTurnSettlement, lastViewedAt, memberIds, name, namedBy, newestEntryId, notificationsEnabled, notifyOnUpdatesEnabled, origin, ownerDisplayName, path, people, published, purpose, pushMessageContent, runningSessionIds, serverId, slackStatus, snapshotEpoch, snapshotSeq, teamId, teamRank, title, unreadCount, updatedAt, viewerIsOwner, viewerSessionId, visibility, voiceId, voiceLanguage, voiceSpeed
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		try container.encodeIfPresent(activeGroupMemberId, forKey: .activeGroupMemberId)
 		try container.encodeIfPresent(avatarColor, forKey: .avatarColor)
 		try container.encode(avatarDataUrl, forKey: .avatarDataUrl)
+		try container.encodeIfPresent(avatarPhoto, forKey: .avatarPhoto)
 		try container.encodeIfPresent(avatarShape, forKey: .avatarShape)
 		try container.encodeIfPresent(avatarVersion, forKey: .avatarVersion)
 		try container.encode(awaitingUserResponse, forKey: .awaitingUserResponse)
@@ -1522,6 +2620,7 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 		try container.encode(createdAt, forKey: .createdAt)
 		try container.encodeIfPresent(currentActivity, forKey: .currentActivity)
 		try container.encode(description, forKey: .description)
+		try container.encodeIfPresent(groupTurns, forKey: .groupTurns)
 		try container.encodeIfPresent(harness, forKey: .harness)
 		try container.encode(hasUnread, forKey: .hasUnread)
 		try container.encode(id, forKey: .id)
@@ -1532,6 +2631,7 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 		try container.encodeIfPresent(isRetrying, forKey: .isRetrying)
 		try container.encode(isRunning, forKey: .isRunning)
 		try container.encodeIfPresent(isRunningTurn, forKey: .isRunningTurn)
+		try container.encodeIfPresent(isTeamDefault, forKey: .isTeamDefault)
 		try container.encodeIfPresent(lastActivityAt, forKey: .lastActivityAt)
 		try container.encode(lastEntry, forKey: .lastEntry)
 		try container.encodeIfPresent(lastMessageAuthorId, forKey: .lastMessageAuthorId)
@@ -1542,23 +2642,33 @@ public struct SandAgentSummary: Codable, Sendable, Equatable {
 		try container.encodeIfPresent(lastViewedAt, forKey: .lastViewedAt)
 		try container.encode(memberIds, forKey: .memberIds)
 		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(namedBy, forKey: .namedBy)
 		try container.encodeIfPresent(newestEntryId, forKey: .newestEntryId)
 		try container.encode(notificationsEnabled, forKey: .notificationsEnabled)
 		try container.encode(notifyOnUpdatesEnabled, forKey: .notifyOnUpdatesEnabled)
 		try container.encode(origin, forKey: .origin)
+		try container.encodeIfPresent(ownerDisplayName, forKey: .ownerDisplayName)
 		try container.encode(path, forKey: .path)
+		try container.encodeIfPresent(people, forKey: .people)
+		try container.encodeIfPresent(published, forKey: .published)
 		try container.encodeIfPresent(purpose, forKey: .purpose)
 		try container.encodeIfPresent(pushMessageContent, forKey: .pushMessageContent)
+		try container.encodeIfPresent(runningSessionIds, forKey: .runningSessionIds)
 		try container.encodeIfPresent(serverId, forKey: .serverId)
-		try container.encodeIfPresent(slackConnected, forKey: .slackConnected)
+		try container.encodeIfPresent(slackStatus, forKey: .slackStatus)
 		try container.encodeIfPresent(snapshotEpoch, forKey: .snapshotEpoch)
 		try container.encodeIfPresent(snapshotSeq, forKey: .snapshotSeq)
 		try container.encodeIfPresent(teamId, forKey: .teamId)
+		try container.encodeIfPresent(teamRank, forKey: .teamRank)
 		try container.encodeIfPresent(title, forKey: .title)
 		try container.encodeIfPresent(unreadCount, forKey: .unreadCount)
 		try container.encode(updatedAt, forKey: .updatedAt)
 		try container.encodeIfPresent(viewerIsOwner, forKey: .viewerIsOwner)
+		try container.encodeIfPresent(viewerSessionId, forKey: .viewerSessionId)
 		try container.encodeIfPresent(visibility, forKey: .visibility)
+		try container.encodeIfPresent(voiceId, forKey: .voiceId)
+		try container.encodeIfPresent(voiceLanguage, forKey: .voiceLanguage)
+		try container.encodeIfPresent(voiceSpeed, forKey: .voiceSpeed)
 	}
 }
 
@@ -1655,6 +2765,7 @@ public enum SandAgentSummaryLastEntrySessionPreview: Codable, Sendable, Equatabl
 	case connectorConnect(ConnectorConnect)
 	case connectorConnected(ConnectorConnected)
 	case connectors(Connectors)
+	case messageText(MessageText)
 	case sentAttachments(SentAttachments)
 	case approvalRequired(ApprovalRequired)
 	case botTemplateShare(BotTemplateShare)
@@ -1664,7 +2775,6 @@ public enum SandAgentSummaryLastEntrySessionPreview: Codable, Sendable, Equatabl
 	case listenerConnect(ListenerConnect)
 	case localToolPermission(LocalToolPermission)
 	case message(Message)
-	case messageText(MessageText)
 	case permissionRequest(PermissionRequest)
 	case receivedAgentMessage(ReceivedAgentMessage)
 	case secretRequest(SecretRequest)
@@ -1721,6 +2831,26 @@ public enum SandAgentSummaryLastEntrySessionPreview: Codable, Sendable, Equatabl
 		public init(kind: String = "connectors", connectors: [String]) {
 			self.kind = kind
 			self.connectors = connectors
+		}
+	}
+
+	public struct MessageText: Codable, Sendable, Equatable {
+		public let kind: String
+		public let copy: SandTeamBotLineCopy?
+		public let text: String
+		public init(kind: String = "message_text", copy: SandTeamBotLineCopy? = nil, text: String) {
+			self.kind = kind
+			self.copy = copy
+			self.text = text
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, copy, text
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(copy, forKey: .copy)
+			try container.encode(text, forKey: .text)
 		}
 	}
 
@@ -1820,15 +2950,6 @@ public enum SandAgentSummaryLastEntrySessionPreview: Codable, Sendable, Equatabl
 		}
 	}
 
-	public struct MessageText: Codable, Sendable, Equatable {
-		public let kind: String
-		public let text: String
-		public init(kind: String = "message_text", text: String) {
-			self.kind = kind
-			self.text = text
-		}
-	}
-
 	public struct PermissionRequest: Codable, Sendable, Equatable {
 		public let kind: String
 		public let title: String
@@ -1956,6 +3077,7 @@ public enum SandAgentSummaryLastEntrySessionPreview: Codable, Sendable, Equatabl
 		case "connector_connect": self = .connectorConnect(try ConnectorConnect(from: decoder))
 		case "connector_connected": self = .connectorConnected(try ConnectorConnected(from: decoder))
 		case "connectors": self = .connectors(try Connectors(from: decoder))
+		case "message_text": self = .messageText(try MessageText(from: decoder))
 		case "sent_attachments": self = .sentAttachments(try SentAttachments(from: decoder))
 		case "approval_required": self = .approvalRequired(try ApprovalRequired(from: decoder))
 		case "bot_template_share": self = .botTemplateShare(try BotTemplateShare(from: decoder))
@@ -1965,7 +3087,6 @@ public enum SandAgentSummaryLastEntrySessionPreview: Codable, Sendable, Equatabl
 		case "listener_connect": self = .listenerConnect(try ListenerConnect(from: decoder))
 		case "local_tool_permission": self = .localToolPermission(try LocalToolPermission(from: decoder))
 		case "message": self = .message(try Message(from: decoder))
-		case "message_text": self = .messageText(try MessageText(from: decoder))
 		case "permission_request": self = .permissionRequest(try PermissionRequest(from: decoder))
 		case "received_agent_message": self = .receivedAgentMessage(try ReceivedAgentMessage(from: decoder))
 		case "secret_request": self = .secretRequest(try SecretRequest(from: decoder))
@@ -1987,6 +3108,7 @@ public enum SandAgentSummaryLastEntrySessionPreview: Codable, Sendable, Equatabl
 		case .connectorConnect(let v): try v.encode(to: encoder)
 		case .connectorConnected(let v): try v.encode(to: encoder)
 		case .connectors(let v): try v.encode(to: encoder)
+		case .messageText(let v): try v.encode(to: encoder)
 		case .sentAttachments(let v): try v.encode(to: encoder)
 		case .approvalRequired(let v): try v.encode(to: encoder)
 		case .botTemplateShare(let v): try v.encode(to: encoder)
@@ -1996,7 +3118,6 @@ public enum SandAgentSummaryLastEntrySessionPreview: Codable, Sendable, Equatabl
 		case .listenerConnect(let v): try v.encode(to: encoder)
 		case .localToolPermission(let v): try v.encode(to: encoder)
 		case .message(let v): try v.encode(to: encoder)
-		case .messageText(let v): try v.encode(to: encoder)
 		case .permissionRequest(let v): try v.encode(to: encoder)
 		case .receivedAgentMessage(let v): try v.encode(to: encoder)
 		case .secretRequest(let v): try v.encode(to: encoder)
@@ -2015,7 +3136,10 @@ public enum SandAgentSummaryLastEntrySessionPreview: Codable, Sendable, Equatabl
 public struct SandAgentSummaryLastEntrySessionPreviewPlatform: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let azureDevops = SandAgentSummaryLastEntrySessionPreviewPlatform(rawValue: "azure-devops")
+	public static let bitbucket = SandAgentSummaryLastEntrySessionPreviewPlatform(rawValue: "bitbucket")
 	public static let github = SandAgentSummaryLastEntrySessionPreviewPlatform(rawValue: "github")
+	public static let gitlab = SandAgentSummaryLastEntrySessionPreviewPlatform(rawValue: "gitlab")
 	public static let origin = SandAgentSummaryLastEntrySessionPreviewPlatform(rawValue: "origin")
 	public static let slack = SandAgentSummaryLastEntrySessionPreviewPlatform(rawValue: "slack")
 }
@@ -2026,6 +3150,7 @@ public enum SandAgentSummaryLastMessagePreviewSource: Codable, Sendable, Equatab
 	case connectorConnect(ConnectorConnect)
 	case connectorConnected(ConnectorConnected)
 	case connectors(Connectors)
+	case messageText(MessageText)
 	case sentAttachments(SentAttachments)
 	case approvalRequired(ApprovalRequired)
 	case botTemplateShare(BotTemplateShare)
@@ -2035,7 +3160,6 @@ public enum SandAgentSummaryLastMessagePreviewSource: Codable, Sendable, Equatab
 	case listenerConnect(ListenerConnect)
 	case localToolPermission(LocalToolPermission)
 	case message(Message)
-	case messageText(MessageText)
 	case permissionRequest(PermissionRequest)
 	case receivedAgentMessage(ReceivedAgentMessage)
 	case secretRequest(SecretRequest)
@@ -2092,6 +3216,26 @@ public enum SandAgentSummaryLastMessagePreviewSource: Codable, Sendable, Equatab
 		public init(kind: String = "connectors", connectors: [String]) {
 			self.kind = kind
 			self.connectors = connectors
+		}
+	}
+
+	public struct MessageText: Codable, Sendable, Equatable {
+		public let kind: String
+		public let copy: SandTeamBotLineCopy?
+		public let text: String
+		public init(kind: String = "message_text", copy: SandTeamBotLineCopy? = nil, text: String) {
+			self.kind = kind
+			self.copy = copy
+			self.text = text
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, copy, text
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(copy, forKey: .copy)
+			try container.encode(text, forKey: .text)
 		}
 	}
 
@@ -2191,15 +3335,6 @@ public enum SandAgentSummaryLastMessagePreviewSource: Codable, Sendable, Equatab
 		}
 	}
 
-	public struct MessageText: Codable, Sendable, Equatable {
-		public let kind: String
-		public let text: String
-		public init(kind: String = "message_text", text: String) {
-			self.kind = kind
-			self.text = text
-		}
-	}
-
 	public struct PermissionRequest: Codable, Sendable, Equatable {
 		public let kind: String
 		public let title: String
@@ -2327,6 +3462,7 @@ public enum SandAgentSummaryLastMessagePreviewSource: Codable, Sendable, Equatab
 		case "connector_connect": self = .connectorConnect(try ConnectorConnect(from: decoder))
 		case "connector_connected": self = .connectorConnected(try ConnectorConnected(from: decoder))
 		case "connectors": self = .connectors(try Connectors(from: decoder))
+		case "message_text": self = .messageText(try MessageText(from: decoder))
 		case "sent_attachments": self = .sentAttachments(try SentAttachments(from: decoder))
 		case "approval_required": self = .approvalRequired(try ApprovalRequired(from: decoder))
 		case "bot_template_share": self = .botTemplateShare(try BotTemplateShare(from: decoder))
@@ -2336,7 +3472,6 @@ public enum SandAgentSummaryLastMessagePreviewSource: Codable, Sendable, Equatab
 		case "listener_connect": self = .listenerConnect(try ListenerConnect(from: decoder))
 		case "local_tool_permission": self = .localToolPermission(try LocalToolPermission(from: decoder))
 		case "message": self = .message(try Message(from: decoder))
-		case "message_text": self = .messageText(try MessageText(from: decoder))
 		case "permission_request": self = .permissionRequest(try PermissionRequest(from: decoder))
 		case "received_agent_message": self = .receivedAgentMessage(try ReceivedAgentMessage(from: decoder))
 		case "secret_request": self = .secretRequest(try SecretRequest(from: decoder))
@@ -2358,6 +3493,7 @@ public enum SandAgentSummaryLastMessagePreviewSource: Codable, Sendable, Equatab
 		case .connectorConnect(let v): try v.encode(to: encoder)
 		case .connectorConnected(let v): try v.encode(to: encoder)
 		case .connectors(let v): try v.encode(to: encoder)
+		case .messageText(let v): try v.encode(to: encoder)
 		case .sentAttachments(let v): try v.encode(to: encoder)
 		case .approvalRequired(let v): try v.encode(to: encoder)
 		case .botTemplateShare(let v): try v.encode(to: encoder)
@@ -2367,7 +3503,6 @@ public enum SandAgentSummaryLastMessagePreviewSource: Codable, Sendable, Equatab
 		case .listenerConnect(let v): try v.encode(to: encoder)
 		case .localToolPermission(let v): try v.encode(to: encoder)
 		case .message(let v): try v.encode(to: encoder)
-		case .messageText(let v): try v.encode(to: encoder)
 		case .permissionRequest(let v): try v.encode(to: encoder)
 		case .receivedAgentMessage(let v): try v.encode(to: encoder)
 		case .secretRequest(let v): try v.encode(to: encoder)
@@ -2386,9 +3521,26 @@ public enum SandAgentSummaryLastMessagePreviewSource: Codable, Sendable, Equatab
 public struct SandAgentSummaryLastMessagePreviewSourcePlatform: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let azureDevops = SandAgentSummaryLastMessagePreviewSourcePlatform(rawValue: "azure-devops")
+	public static let bitbucket = SandAgentSummaryLastMessagePreviewSourcePlatform(rawValue: "bitbucket")
 	public static let github = SandAgentSummaryLastMessagePreviewSourcePlatform(rawValue: "github")
+	public static let gitlab = SandAgentSummaryLastMessagePreviewSourcePlatform(rawValue: "gitlab")
 	public static let origin = SandAgentSummaryLastMessagePreviewSourcePlatform(rawValue: "origin")
 	public static let slack = SandAgentSummaryLastMessagePreviewSourcePlatform(rawValue: "slack")
+}
+
+public struct SandAgentSummaryNamedBy: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let app = SandAgentSummaryNamedBy(rawValue: "app")
+	public static let user = SandAgentSummaryNamedBy(rawValue: "user")
+}
+
+public struct SandAgentSummaryOrigin: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let dev = SandAgentSummaryOrigin(rawValue: "dev")
+	public static let user = SandAgentSummaryOrigin(rawValue: "user")
 }
 
 public struct SandAgentSummaryPurpose: RawRepresentable, Codable, Sendable, Equatable, Hashable {
@@ -2396,6 +3548,18 @@ public struct SandAgentSummaryPurpose: RawRepresentable, Codable, Sendable, Equa
 	public init(rawValue: String) { self.rawValue = rawValue }
 	public static let diskSaver = SandAgentSummaryPurpose(rawValue: "disk-saver")
 	public static let pluginAuth = SandAgentSummaryPurpose(rawValue: "plugin-auth")
+}
+
+public struct SandAgentSummarySlackStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let connected = SandAgentSummarySlackStatus(rawValue: "connected")
+	public static let declined = SandAgentSummarySlackStatus(rawValue: "declined")
+	public static let needsUpdate = SandAgentSummarySlackStatus(rawValue: "needs_update")
+	public static let none = SandAgentSummarySlackStatus(rawValue: "none")
+	public static let pending = SandAgentSummarySlackStatus(rawValue: "pending")
+	public static let reconnect = SandAgentSummarySlackStatus(rawValue: "reconnect")
+	public static let removed = SandAgentSummarySlackStatus(rawValue: "removed")
 }
 
 public struct SandAgentSummaryVisibility: RawRepresentable, Codable, Sendable, Equatable, Hashable {
@@ -2521,20 +3685,10 @@ public struct SandAutoReviewApprovalSubagent: Codable, Sendable, Equatable {
 
 public enum SandAutoReviewApprovalSummaryCopy: Codable, Sendable, Equatable {
 
-	case botTemplatePublish(BotTemplatePublish)
 	case mcp(Mcp)
 	case sensitiveAction(SensitiveAction)
 	case shell(Shell)
 	case unknown(Unknown)
-
-	public struct BotTemplatePublish: Codable, Sendable, Equatable {
-		public let kind: String
-		public let params: BotTemplatePublishCardPayload
-		public init(kind: String = "bot_template_publish", params: BotTemplatePublishCardPayload) {
-			self.kind = kind
-			self.params = params
-		}
-	}
 
 	public struct Mcp: Codable, Sendable, Equatable {
 		public struct McpParams: Codable, Sendable, Equatable {
@@ -2612,7 +3766,6 @@ public enum SandAutoReviewApprovalSummaryCopy: Codable, Sendable, Equatable {
 	public init(from decoder: Decoder) throws {
 		let container = try decoder.container(keyedBy: TagKey.self)
 		switch try container.decode(String.self, forKey: .`kind`) {
-		case "bot_template_publish": self = .botTemplatePublish(try BotTemplatePublish(from: decoder))
 		case "mcp": self = .mcp(try Mcp(from: decoder))
 		case "sensitive_action": self = .sensitiveAction(try SensitiveAction(from: decoder))
 		case "shell": self = .shell(try Shell(from: decoder))
@@ -2623,7 +3776,6 @@ public enum SandAutoReviewApprovalSummaryCopy: Codable, Sendable, Equatable {
 
 	public func encode(to encoder: Encoder) throws {
 		switch self {
-		case .botTemplatePublish(let v): try v.encode(to: encoder)
 		case .mcp(let v): try v.encode(to: encoder)
 		case .sensitiveAction(let v): try v.encode(to: encoder)
 		case .shell(let v): try v.encode(to: encoder)
@@ -2681,20 +3833,10 @@ public struct SandAutoReviewAwaitingCopyParams: Codable, Sendable, Equatable {
 
 public enum SandAutoReviewAwaitingCopyParamsSummaryCopy: Codable, Sendable, Equatable {
 
-	case botTemplatePublish(BotTemplatePublish)
 	case mcp(Mcp)
 	case sensitiveAction(SensitiveAction)
 	case shell(Shell)
 	case unknown(Unknown)
-
-	public struct BotTemplatePublish: Codable, Sendable, Equatable {
-		public let kind: String
-		public let params: BotTemplatePublishCardPayload
-		public init(kind: String = "bot_template_publish", params: BotTemplatePublishCardPayload) {
-			self.kind = kind
-			self.params = params
-		}
-	}
 
 	public struct Mcp: Codable, Sendable, Equatable {
 		public struct McpParams: Codable, Sendable, Equatable {
@@ -2772,7 +3914,6 @@ public enum SandAutoReviewAwaitingCopyParamsSummaryCopy: Codable, Sendable, Equa
 	public init(from decoder: Decoder) throws {
 		let container = try decoder.container(keyedBy: TagKey.self)
 		switch try container.decode(String.self, forKey: .`kind`) {
-		case "bot_template_publish": self = .botTemplatePublish(try BotTemplatePublish(from: decoder))
 		case "mcp": self = .mcp(try Mcp(from: decoder))
 		case "sensitive_action": self = .sensitiveAction(try SensitiveAction(from: decoder))
 		case "shell": self = .shell(try Shell(from: decoder))
@@ -2783,7 +3924,6 @@ public enum SandAutoReviewAwaitingCopyParamsSummaryCopy: Codable, Sendable, Equa
 
 	public func encode(to encoder: Encoder) throws {
 		switch self {
-		case .botTemplatePublish(let v): try v.encode(to: encoder)
 		case .mcp(let v): try v.encode(to: encoder)
 		case .sensitiveAction(let v): try v.encode(to: encoder)
 		case .shell(let v): try v.encode(to: encoder)
@@ -2799,6 +3939,17 @@ public struct SandAutoReviewAwaitingCopyParamsSummaryCopyShellSurface: RawRepres
 	public static let hostShell = SandAutoReviewAwaitingCopyParamsSummaryCopyShellSurface(rawValue: "host_shell")
 }
 
+public struct SandAutoReviewInstructions: Codable, Sendable, Equatable {
+	public let allowInstructions: [String]
+	public let blockInstructions: [String]
+	public let isEnabled: Bool
+	public init(allowInstructions: [String], blockInstructions: [String], isEnabled: Bool) {
+		self.allowInstructions = allowInstructions
+		self.blockInstructions = blockInstructions
+		self.isEnabled = isEnabled
+	}
+}
+
 public struct SandAutoReviewReasonCopy: Codable, Sendable, Equatable {
 	public let kind: String
 	public init(kind: String) {
@@ -2808,6 +3959,7 @@ public struct SandAutoReviewReasonCopy: Codable, Sendable, Equatable {
 
 public struct SandAutomation: Codable, Sendable, Equatable {
 	public let createdAt: Double
+	public let creatorAuthId: String?
 	public let filePath: String
 	public let id: String
 	public let isEnabled: Bool
@@ -2820,11 +3972,13 @@ public struct SandAutomation: Codable, Sendable, Equatable {
 	public let raisedNotices: [String]?
 	public let runs: [SandAutomationRun]
 	public let schedule: String
+	public let sessionId: String?
 	public let trigger: SandAutomationTrigger
 	public let triggerDescription: String
 	public let triggerPresentation: SandAutomationTriggerPresentation?
-	public init(createdAt: Double, filePath: String, id: String, isEnabled: Bool, lastRunAt: Double? = nil, name: String, nextRunAt: Double? = nil, pendingNotices: [String]? = nil, prompt: String, provenance: SandAutomationProvenance? = nil, raisedNotices: [String]? = nil, runs: [SandAutomationRun], schedule: String, trigger: SandAutomationTrigger, triggerDescription: String, triggerPresentation: SandAutomationTriggerPresentation? = nil) {
+	public init(createdAt: Double, creatorAuthId: String? = nil, filePath: String, id: String, isEnabled: Bool, lastRunAt: Double? = nil, name: String, nextRunAt: Double? = nil, pendingNotices: [String]? = nil, prompt: String, provenance: SandAutomationProvenance? = nil, raisedNotices: [String]? = nil, runs: [SandAutomationRun], schedule: String, sessionId: String? = nil, trigger: SandAutomationTrigger, triggerDescription: String, triggerPresentation: SandAutomationTriggerPresentation? = nil) {
 		self.createdAt = createdAt
+		self.creatorAuthId = creatorAuthId
 		self.filePath = filePath
 		self.id = id
 		self.isEnabled = isEnabled
@@ -2837,16 +3991,18 @@ public struct SandAutomation: Codable, Sendable, Equatable {
 		self.raisedNotices = raisedNotices
 		self.runs = runs
 		self.schedule = schedule
+		self.sessionId = sessionId
 		self.trigger = trigger
 		self.triggerDescription = triggerDescription
 		self.triggerPresentation = triggerPresentation
 	}
 	enum CodingKeys: String, CodingKey {
-		case createdAt, filePath, id, isEnabled, lastRunAt, name, nextRunAt, pendingNotices, prompt, provenance, raisedNotices, runs, schedule, trigger, triggerDescription, triggerPresentation
+		case createdAt, creatorAuthId, filePath, id, isEnabled, lastRunAt, name, nextRunAt, pendingNotices, prompt, provenance, raisedNotices, runs, schedule, sessionId, trigger, triggerDescription, triggerPresentation
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		try container.encode(createdAt, forKey: .createdAt)
+		try container.encodeIfPresent(creatorAuthId, forKey: .creatorAuthId)
 		try container.encode(filePath, forKey: .filePath)
 		try container.encode(id, forKey: .id)
 		try container.encode(isEnabled, forKey: .isEnabled)
@@ -2859,25 +4015,17 @@ public struct SandAutomation: Codable, Sendable, Equatable {
 		try container.encodeIfPresent(raisedNotices, forKey: .raisedNotices)
 		try container.encode(runs, forKey: .runs)
 		try container.encode(schedule, forKey: .schedule)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
 		try container.encode(trigger, forKey: .trigger)
 		try container.encode(triggerDescription, forKey: .triggerDescription)
 		try container.encodeIfPresent(triggerPresentation, forKey: .triggerPresentation)
 	}
 }
 
-public struct SandAutomationChangeAction: RawRepresentable, Codable, Sendable, Equatable, Hashable {
-	public let rawValue: String
-	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let created = SandAutomationChangeAction(rawValue: "created")
-	public static let deleted = SandAutomationChangeAction(rawValue: "deleted")
-	public static let disabled = SandAutomationChangeAction(rawValue: "disabled")
-	public static let enabled = SandAutomationChangeAction(rawValue: "enabled")
-	public static let updated = SandAutomationChangeAction(rawValue: "updated")
-}
-
 public struct SandAutomationProvenance: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let templateImport = SandAutomationProvenance(rawValue: "template_import")
 	public static let untrusted = SandAutomationProvenance(rawValue: "untrusted")
 	public static let user = SandAutomationProvenance(rawValue: "user")
 }
@@ -2939,9 +4087,33 @@ public struct SandAutomationRunTrigger: RawRepresentable, Codable, Sendable, Equ
 	public static let schedule = SandAutomationRunTrigger(rawValue: "schedule")
 }
 
+public struct SandAutomationSpec: Codable, Sendable, Equatable {
+	public let isEnabled: Bool?
+	public let name: String
+	public let prompt: String
+	public let trigger: SandAutomationTrigger
+	public init(isEnabled: Bool? = nil, name: String, prompt: String, trigger: SandAutomationTrigger) {
+		self.isEnabled = isEnabled
+		self.name = name
+		self.prompt = prompt
+		self.trigger = trigger
+	}
+	enum CodingKeys: String, CodingKey {
+		case isEnabled, name, prompt, trigger
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(isEnabled, forKey: .isEnabled)
+		try container.encode(name, forKey: .name)
+		try container.encode(prompt, forKey: .prompt)
+		try container.encode(trigger, forKey: .trigger)
+	}
+}
+
 public enum SandAutomationTrigger: Codable, Sendable, Equatable {
 
 	case cron(Cron)
+	case email(Email)
 	case github(Github)
 	case linear(Linear)
 	case microsoftTeams(MicrosoftTeams)
@@ -2959,6 +4131,29 @@ public enum SandAutomationTrigger: Codable, Sendable, Equatable {
 		public init(type: String = "cron", schedule: String) {
 			self.type = type
 			self.schedule = schedule
+		}
+	}
+
+	public struct Email: Codable, Sendable, Equatable {
+		public let type: String
+		public let from: [String]?
+		public let inbox: String
+		public let requireAuthPass: Bool?
+		public init(type: String = "email", from: [String]? = nil, inbox: String, requireAuthPass: Bool? = nil) {
+			self.type = type
+			self.from = from
+			self.inbox = inbox
+			self.requireAuthPass = requireAuthPass
+		}
+		enum CodingKeys: String, CodingKey {
+			case type, from, inbox, requireAuthPass
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(type, forKey: .type)
+			try container.encodeIfPresent(from, forKey: .from)
+			try container.encode(inbox, forKey: .inbox)
+			try container.encodeIfPresent(requireAuthPass, forKey: .requireAuthPass)
 		}
 	}
 
@@ -3109,6 +4304,7 @@ public enum SandAutomationTrigger: Codable, Sendable, Equatable {
 		let container = try decoder.container(keyedBy: TagKey.self)
 		switch try container.decode(String.self, forKey: .`type`) {
 		case "cron": self = .cron(try Cron(from: decoder))
+		case "email": self = .email(try Email(from: decoder))
 		case "github": self = .github(try Github(from: decoder))
 		case "linear": self = .linear(try Linear(from: decoder))
 		case "microsoftTeams": self = .microsoftTeams(try MicrosoftTeams(from: decoder))
@@ -3126,6 +4322,7 @@ public enum SandAutomationTrigger: Codable, Sendable, Equatable {
 	public func encode(to encoder: Encoder) throws {
 		switch self {
 		case .cron(let v): try v.encode(to: encoder)
+		case .email(let v): try v.encode(to: encoder)
 		case .github(let v): try v.encode(to: encoder)
 		case .linear(let v): try v.encode(to: encoder)
 		case .microsoftTeams(let v): try v.encode(to: encoder)
@@ -3155,6 +4352,12 @@ public struct SandAutomationTriggerEventCase: RawRepresentable, Codable, Sendabl
 	public static let incidentEscalated = SandAutomationTriggerEventCase(rawValue: "incidentEscalated")
 	public static let incidentResolved = SandAutomationTriggerEventCase(rawValue: "incidentResolved")
 	public static let incidentTriggered = SandAutomationTriggerEventCase(rawValue: "incidentTriggered")
+	public static let issueAny = SandAutomationTriggerEventCase(rawValue: "issueAny")
+	public static let issueArchived = SandAutomationTriggerEventCase(rawValue: "issueArchived")
+	public static let issueAssigned = SandAutomationTriggerEventCase(rawValue: "issueAssigned")
+	public static let issueCreated = SandAutomationTriggerEventCase(rawValue: "issueCreated")
+	public static let issueResolved = SandAutomationTriggerEventCase(rawValue: "issueResolved")
+	public static let issueUnresolved = SandAutomationTriggerEventCase(rawValue: "issueUnresolved")
 }
 
 public struct SandAutomationTriggerEventsItem: RawRepresentable, Codable, Sendable, Equatable, Hashable {
@@ -3186,6 +4389,415 @@ public struct SandAutomationTriggerPresentation: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandAutomationWebhookCredential: Codable, Sendable, Equatable {
+	public let key: String?
+	public let url: String
+	public init(key: String? = nil, url: String) {
+		self.key = key
+		self.url = url
+	}
+}
+
+public struct SandBotTemplateDeleteArgs: Codable, Sendable, Equatable {
+	public let shareId: String
+	public init(shareId: String) {
+		self.shareId = shareId
+	}
+}
+
+public struct SandBotTemplateExportPolicyReply: Codable, Sendable, Equatable {
+	public let exportPolicy: SandBotTemplateExportPolicyReplyExportPolicy?
+	public init(exportPolicy: SandBotTemplateExportPolicyReplyExportPolicy? = nil) {
+		self.exportPolicy = exportPolicy
+	}
+	enum CodingKeys: String, CodingKey {
+		case exportPolicy
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(exportPolicy, forKey: .exportPolicy)
+	}
+}
+
+public struct SandBotTemplateExportPolicyReplyExportPolicy: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let all = SandBotTemplateExportPolicyReplyExportPolicy(rawValue: "all")
+	public static let none = SandBotTemplateExportPolicyReplyExportPolicy(rawValue: "none")
+	public static let teamOnly = SandBotTemplateExportPolicyReplyExportPolicy(rawValue: "team_only")
+}
+
+public struct SandBotTemplateForSourceAgentArgs: Codable, Sendable, Equatable {
+	public let sourceAgentId: String
+	public init(sourceAgentId: String) {
+		self.sourceAgentId = sourceAgentId
+	}
+}
+
+public enum SandBotTemplateGatewayView: Codable, Sendable, Equatable {
+	case regressionEraBotTemplateWireView(RegressionEraBotTemplateWireView)
+	case sandBotTemplateWireView(SandBotTemplateWireView)
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.singleValueContainer()
+		if let v = try? container.decode(RegressionEraBotTemplateWireView.self) { self = .regressionEraBotTemplateWireView(v); return }
+		if let v = try? container.decode(SandBotTemplateWireView.self) { self = .sandBotTemplateWireView(v); return }
+		throw DecodingError.typeMismatch(SandBotTemplateGatewayView.self, .init(codingPath: decoder.codingPath, debugDescription: "Unknown SandBotTemplateGatewayView value"))
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.singleValueContainer()
+		switch self {
+		case .regressionEraBotTemplateWireView(let v): try container.encode(v)
+		case .sandBotTemplateWireView(let v): try container.encode(v)
+		}
+	}
+}
+
+public struct SandBotTemplatePublishArgs: Codable, Sendable, Equatable {
+	public let shareId: String
+	public let version: Double
+	public init(shareId: String, version: Double) {
+		self.shareId = shareId
+		self.version = version
+	}
+}
+
+public struct SandBotTemplateVersionArgs: Codable, Sendable, Equatable {
+	public let shareId: String
+	public let version: Double
+	public init(shareId: String, version: Double) {
+		self.shareId = shareId
+		self.version = version
+	}
+}
+
+public struct SandBotTemplateView: Codable, Sendable, Equatable {
+	public let active: Bool?
+	public let activeVersion: Double?
+	public let avatarColor: String
+	public let avatarShape: String
+	public let createdAtMs: Double?
+	public let creatorName: String?
+	public let description: String
+	public let memory: [SandBotTemplateViewMemoryItem]?
+	public let name: String
+	public let plugins: [SandBotTemplateViewPluginsItem]?
+	public let published: Bool?
+	public let routines: [SandBotTemplateViewRoutinesItem]?
+	public let shareId: String
+	public let shareUrl: String
+	public let skills: [SandBotTemplateViewSkillsItem]?
+	public let sourceAgentId: String?
+	public let title: String?
+	public let updatedAtMs: Double?
+	public let version: Double?
+	public let visibility: SandBotTemplateViewVisibility?
+	public init(active: Bool? = nil, activeVersion: Double? = nil, avatarColor: String, avatarShape: String, createdAtMs: Double? = nil, creatorName: String? = nil, description: String, memory: [SandBotTemplateViewMemoryItem]? = nil, name: String, plugins: [SandBotTemplateViewPluginsItem]? = nil, published: Bool? = nil, routines: [SandBotTemplateViewRoutinesItem]? = nil, shareId: String, shareUrl: String, skills: [SandBotTemplateViewSkillsItem]? = nil, sourceAgentId: String? = nil, title: String? = nil, updatedAtMs: Double? = nil, version: Double? = nil, visibility: SandBotTemplateViewVisibility? = nil) {
+		self.active = active
+		self.activeVersion = activeVersion
+		self.avatarColor = avatarColor
+		self.avatarShape = avatarShape
+		self.createdAtMs = createdAtMs
+		self.creatorName = creatorName
+		self.description = description
+		self.memory = memory
+		self.name = name
+		self.plugins = plugins
+		self.published = published
+		self.routines = routines
+		self.shareId = shareId
+		self.shareUrl = shareUrl
+		self.skills = skills
+		self.sourceAgentId = sourceAgentId
+		self.title = title
+		self.updatedAtMs = updatedAtMs
+		self.version = version
+		self.visibility = visibility
+	}
+	enum CodingKeys: String, CodingKey {
+		case active, activeVersion, avatarColor, avatarShape, createdAtMs, creatorName, description, memory, name, plugins, published, routines, shareId, shareUrl, skills, sourceAgentId, title, updatedAtMs, version, visibility
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(active, forKey: .active)
+		try container.encodeIfPresent(activeVersion, forKey: .activeVersion)
+		try container.encode(avatarColor, forKey: .avatarColor)
+		try container.encode(avatarShape, forKey: .avatarShape)
+		try container.encodeIfPresent(createdAtMs, forKey: .createdAtMs)
+		try container.encodeIfPresent(creatorName, forKey: .creatorName)
+		try container.encode(description, forKey: .description)
+		try container.encodeIfPresent(memory, forKey: .memory)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(plugins, forKey: .plugins)
+		try container.encodeIfPresent(published, forKey: .published)
+		try container.encodeIfPresent(routines, forKey: .routines)
+		try container.encode(shareId, forKey: .shareId)
+		try container.encode(shareUrl, forKey: .shareUrl)
+		try container.encodeIfPresent(skills, forKey: .skills)
+		try container.encodeIfPresent(sourceAgentId, forKey: .sourceAgentId)
+		try container.encodeIfPresent(title, forKey: .title)
+		try container.encodeIfPresent(updatedAtMs, forKey: .updatedAtMs)
+		try container.encodeIfPresent(version, forKey: .version)
+		try container.encodeIfPresent(visibility, forKey: .visibility)
+	}
+}
+
+public struct SandBotTemplateViewMemoryItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let createdAt: String?
+	public let kind: SandBotTemplateViewMemoryItemKind?
+	public init(content: String, createdAt: String? = nil, kind: SandBotTemplateViewMemoryItemKind? = nil) {
+		self.content = content
+		self.createdAt = createdAt
+		self.kind = kind
+	}
+	enum CodingKeys: String, CodingKey {
+		case content, createdAt, kind
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(content, forKey: .content)
+		try container.encodeIfPresent(createdAt, forKey: .createdAt)
+		try container.encodeIfPresent(kind, forKey: .kind)
+	}
+}
+
+public struct SandBotTemplateViewMemoryItemKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let log = SandBotTemplateViewMemoryItemKind(rawValue: "log")
+	public static let profile = SandBotTemplateViewMemoryItemKind(rawValue: "profile")
+}
+
+public struct SandBotTemplateViewPluginsItem: Codable, Sendable, Equatable {
+	public let description: String?
+	public let name: String
+	public let pluginId: String
+	public init(description: String? = nil, name: String, pluginId: String) {
+		self.description = description
+		self.name = name
+		self.pluginId = pluginId
+	}
+	enum CodingKeys: String, CodingKey {
+		case description, name, pluginId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(description, forKey: .description)
+		try container.encode(name, forKey: .name)
+		try container.encode(pluginId, forKey: .pluginId)
+	}
+}
+
+public struct SandBotTemplateViewRoutinesItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let description: String
+	public let name: String
+	public let slug: String
+	public init(content: String, description: String, name: String, slug: String) {
+		self.content = content
+		self.description = description
+		self.name = name
+		self.slug = slug
+	}
+}
+
+public struct SandBotTemplateViewSkillsItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let description: String
+	public let name: String
+	public init(content: String, description: String, name: String) {
+		self.content = content
+		self.description = description
+		self.name = name
+	}
+}
+
+public struct SandBotTemplateViewVisibility: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let `public` = SandBotTemplateViewVisibility(rawValue: "public")
+	public static let team = SandBotTemplateViewVisibility(rawValue: "team")
+}
+
+public struct SandBotTemplateVisibilityArgs: Codable, Sendable, Equatable {
+	public let shareId: String
+	public let visibility: SandBotTemplateVisibilityArgsVisibility
+	public init(shareId: String, visibility: SandBotTemplateVisibilityArgsVisibility) {
+		self.shareId = shareId
+		self.visibility = visibility
+	}
+}
+
+public struct SandBotTemplateVisibilityArgsVisibility: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let `public` = SandBotTemplateVisibilityArgsVisibility(rawValue: "public")
+	public static let team = SandBotTemplateVisibilityArgsVisibility(rawValue: "team")
+}
+
+public struct SandBotTemplateWireView: Codable, Sendable, Equatable {
+	public let active: Bool?
+	public let activeVersion: Double?
+	public let avatarColor: String
+	public let avatarShape: String
+	public let body: String
+	public let createdAtMs: Double?
+	public let creatorName: String?
+	public let memory: [SandBotTemplateWireViewMemoryItem]?
+	public let name: String
+	public let plugins: [SandBotTemplateWireViewPluginsItem]?
+	public let published: Bool?
+	public let routines: [SandBotTemplateWireViewRoutinesItem]?
+	public let shareId: String
+	public let shareUrl: String
+	public let skills: [SandBotTemplateWireViewSkillsItem]?
+	public let sourceAgentId: String?
+	public let title: String?
+	public let updatedAtMs: Double?
+	public let version: Double?
+	public let visibility: SandBotTemplateWireViewVisibility?
+	public init(active: Bool? = nil, activeVersion: Double? = nil, avatarColor: String, avatarShape: String, body: String, createdAtMs: Double? = nil, creatorName: String? = nil, memory: [SandBotTemplateWireViewMemoryItem]? = nil, name: String, plugins: [SandBotTemplateWireViewPluginsItem]? = nil, published: Bool? = nil, routines: [SandBotTemplateWireViewRoutinesItem]? = nil, shareId: String, shareUrl: String, skills: [SandBotTemplateWireViewSkillsItem]? = nil, sourceAgentId: String? = nil, title: String? = nil, updatedAtMs: Double? = nil, version: Double? = nil, visibility: SandBotTemplateWireViewVisibility? = nil) {
+		self.active = active
+		self.activeVersion = activeVersion
+		self.avatarColor = avatarColor
+		self.avatarShape = avatarShape
+		self.body = body
+		self.createdAtMs = createdAtMs
+		self.creatorName = creatorName
+		self.memory = memory
+		self.name = name
+		self.plugins = plugins
+		self.published = published
+		self.routines = routines
+		self.shareId = shareId
+		self.shareUrl = shareUrl
+		self.skills = skills
+		self.sourceAgentId = sourceAgentId
+		self.title = title
+		self.updatedAtMs = updatedAtMs
+		self.version = version
+		self.visibility = visibility
+	}
+	enum CodingKeys: String, CodingKey {
+		case active, activeVersion, avatarColor, avatarShape, body, createdAtMs, creatorName, memory, name, plugins, published, routines, shareId, shareUrl, skills, sourceAgentId, title, updatedAtMs, version, visibility
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(active, forKey: .active)
+		try container.encodeIfPresent(activeVersion, forKey: .activeVersion)
+		try container.encode(avatarColor, forKey: .avatarColor)
+		try container.encode(avatarShape, forKey: .avatarShape)
+		try container.encode(body, forKey: .body)
+		try container.encodeIfPresent(createdAtMs, forKey: .createdAtMs)
+		try container.encodeIfPresent(creatorName, forKey: .creatorName)
+		try container.encodeIfPresent(memory, forKey: .memory)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(plugins, forKey: .plugins)
+		try container.encodeIfPresent(published, forKey: .published)
+		try container.encodeIfPresent(routines, forKey: .routines)
+		try container.encode(shareId, forKey: .shareId)
+		try container.encode(shareUrl, forKey: .shareUrl)
+		try container.encodeIfPresent(skills, forKey: .skills)
+		try container.encodeIfPresent(sourceAgentId, forKey: .sourceAgentId)
+		try container.encodeIfPresent(title, forKey: .title)
+		try container.encodeIfPresent(updatedAtMs, forKey: .updatedAtMs)
+		try container.encodeIfPresent(version, forKey: .version)
+		try container.encodeIfPresent(visibility, forKey: .visibility)
+	}
+}
+
+public struct SandBotTemplateWireViewMemoryItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let createdAt: String?
+	public let kind: SandBotTemplateWireViewMemoryItemKind?
+	public init(content: String, createdAt: String? = nil, kind: SandBotTemplateWireViewMemoryItemKind? = nil) {
+		self.content = content
+		self.createdAt = createdAt
+		self.kind = kind
+	}
+	enum CodingKeys: String, CodingKey {
+		case content, createdAt, kind
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(content, forKey: .content)
+		try container.encodeIfPresent(createdAt, forKey: .createdAt)
+		try container.encodeIfPresent(kind, forKey: .kind)
+	}
+}
+
+public struct SandBotTemplateWireViewMemoryItemKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let log = SandBotTemplateWireViewMemoryItemKind(rawValue: "log")
+	public static let profile = SandBotTemplateWireViewMemoryItemKind(rawValue: "profile")
+}
+
+public struct SandBotTemplateWireViewPluginsItem: Codable, Sendable, Equatable {
+	public let description: String?
+	public let name: String
+	public let pluginId: String
+	public init(description: String? = nil, name: String, pluginId: String) {
+		self.description = description
+		self.name = name
+		self.pluginId = pluginId
+	}
+	enum CodingKeys: String, CodingKey {
+		case description, name, pluginId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(description, forKey: .description)
+		try container.encode(name, forKey: .name)
+		try container.encode(pluginId, forKey: .pluginId)
+	}
+}
+
+public struct SandBotTemplateWireViewRoutinesItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let description: String
+	public let name: String
+	public let slug: String
+	public init(content: String, description: String, name: String, slug: String) {
+		self.content = content
+		self.description = description
+		self.name = name
+		self.slug = slug
+	}
+}
+
+public struct SandBotTemplateWireViewSkillsItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let description: String
+	public let name: String
+	public init(content: String, description: String, name: String) {
+		self.content = content
+		self.description = description
+		self.name = name
+	}
+}
+
+public struct SandBotTemplateWireViewVisibility: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let `public` = SandBotTemplateWireViewVisibility(rawValue: "public")
+	public static let team = SandBotTemplateWireViewVisibility(rawValue: "team")
+}
+
+public struct SandBoxDiskPressure: Codable, Sendable, Equatable {
+	public let level: SandBoxDiskPressureLevel
+	public init(level: SandBoxDiskPressureLevel) {
+		self.level = level
+	}
+}
+
+public struct SandBoxDiskPressureLevel: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let hard = SandBoxDiskPressureLevel(rawValue: "hard")
+	public static let soft = SandBoxDiskPressureLevel(rawValue: "soft")
+}
+
 public struct SandBoxHandoffInfo: Codable, Sendable, Equatable {
 	public let instruction: String
 	public let requestId: String
@@ -3203,6 +4815,73 @@ public struct SandBoxHandoffInfo: Codable, Sendable, Equatable {
 		try container.encode(instruction, forKey: .instruction)
 		try container.encode(requestId, forKey: .requestId)
 		try container.encodeIfPresent(snapshotDataUrl, forKey: .snapshotDataUrl)
+	}
+}
+
+public struct SandBoxMcpServerStatus: Codable, Sendable, Equatable {
+	public let serverIdentifier: String
+	public let status: String
+	public let statusDetail: String?
+	public let toolCount: Double
+	public init(serverIdentifier: String, status: String, statusDetail: String? = nil, toolCount: Double) {
+		self.serverIdentifier = serverIdentifier
+		self.status = status
+		self.statusDetail = statusDetail
+		self.toolCount = toolCount
+	}
+	enum CodingKeys: String, CodingKey {
+		case serverIdentifier, status, statusDetail, toolCount
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(serverIdentifier, forKey: .serverIdentifier)
+		try container.encode(status, forKey: .status)
+		try container.encodeIfPresent(statusDetail, forKey: .statusDetail)
+		try container.encode(toolCount, forKey: .toolCount)
+	}
+}
+
+public struct SandBoxPullStatus: Codable, Sendable, Equatable {
+	public let percent: Double
+	public init(percent: Double) {
+		self.percent = percent
+	}
+}
+
+public struct SandBoxRunState: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let absent = SandBoxRunState(rawValue: "absent")
+	public static let hibernated = SandBoxRunState(rawValue: "hibernated")
+	public static let running = SandBoxRunState(rawValue: "running")
+}
+
+public struct SandCatalogConnectorDescriptor: Codable, Sendable, Equatable {
+	public let description: String
+	public let name: String
+	public init(description: String, name: String) {
+		self.description = description
+		self.name = name
+	}
+}
+
+public struct SandCatalogSkillDescriptor: Codable, Sendable, Equatable {
+	public let description: String
+	public let name: String
+	public let sourceUrl: String?
+	public init(description: String, name: String, sourceUrl: String? = nil) {
+		self.description = description
+		self.name = name
+		self.sourceUrl = sourceUrl
+	}
+	enum CodingKeys: String, CodingKey {
+		case description, name, sourceUrl
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(description, forKey: .description)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(sourceUrl, forKey: .sourceUrl)
 	}
 }
 
@@ -3246,11 +4925,551 @@ public struct SandChoiceOptionStyle: RawRepresentable, Codable, Sendable, Equata
 	public static let primary = SandChoiceOptionStyle(rawValue: "primary")
 }
 
-public struct SandConnectorCardVariant: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+public struct SandCloudAgentArtifactFile: Codable, Sendable, Equatable {
+	public let absolutePath: String
+	public let boxPath: String
+	public let relativePath: String
+	public let sizeBytes: Double
+	public init(absolutePath: String, boxPath: String, relativePath: String, sizeBytes: Double) {
+		self.absolutePath = absolutePath
+		self.boxPath = boxPath
+		self.relativePath = relativePath
+		self.sizeBytes = sizeBytes
+	}
+}
+
+public struct SandCloudAgentFileChange: Codable, Sendable, Equatable {
+	public let added: Double
+	public let path: String
+	public let removed: Double
+	public init(added: Double, path: String, removed: Double) {
+		self.added = added
+		self.path = path
+		self.removed = removed
+	}
+}
+
+public enum SandCloudAgentFilesRead: Codable, Sendable, Equatable {
+
+	case failed(Failed)
+	case listed(Listed)
+	case skipped(Skipped)
+	case unknown(Unknown)
+
+	public struct Failed: Codable, Sendable, Equatable {
+		public let kind: String
+		public let reason: SandCloudAgentFilesReadReason
+		public init(kind: String = "failed", reason: SandCloudAgentFilesReadReason) {
+			self.kind = kind
+			self.reason = reason
+		}
+	}
+
+	public struct Listed: Codable, Sendable, Equatable {
+		public let kind: String
+		public let files: [SandCloudAgentFileChange]
+		public init(kind: String = "listed", files: [SandCloudAgentFileChange]) {
+			self.kind = kind
+			self.files = files
+		}
+	}
+
+	public struct Skipped: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "skipped") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "failed": self = .failed(try Failed(from: decoder))
+		case "listed": self = .listed(try Listed(from: decoder))
+		case "skipped": self = .skipped(try Skipped(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .failed(let v): try v.encode(to: encoder)
+		case .listed(let v): try v.encode(to: encoder)
+		case .skipped(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandCloudAgentFilesReadReason: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let connect = SandConnectorCardVariant(rawValue: "connect")
-	public static let connected = SandConnectorCardVariant(rawValue: "connected")
+	public static let `internal` = SandCloudAgentFilesReadReason(rawValue: "internal")
+	public static let rejected = SandCloudAgentFilesReadReason(rawValue: "rejected")
+	public static let throttled = SandCloudAgentFilesReadReason(rawValue: "throttled")
+	public static let unauthenticated = SandCloudAgentFilesReadReason(rawValue: "unauthenticated")
+	public static let unreachable = SandCloudAgentFilesReadReason(rawValue: "unreachable")
+}
+
+public struct SandCloudAgentInfo: Codable, Sendable, Equatable {
+	public let artifacts: SandCloudAgentInfoArtifacts?
+	public let bcId: String
+	public let branchName: String
+	public let files: SandCloudAgentFilesRead
+	public let filesChanged: Double
+	public let lastActivityAtMs: Double?
+	public let linesAdded: Double
+	public let linesRemoved: Double
+	public let mergeableState: SandCloudAgentInfoMergeableState
+	public let name: String
+	public let prNumber: Double?
+	public let prState: SandCloudAgentInfoPrState
+	public let prStateSource: SandCloudAgentPrStateSource
+	public let prUrl: String
+	public let project: SandCloudAgentProjectMembership?
+	public let prompt: String
+	public let status: SandCloudAgentInfoStatus
+	public let updatedAtMs: Double?
+	public init(artifacts: SandCloudAgentInfoArtifacts? = nil, bcId: String, branchName: String, files: SandCloudAgentFilesRead, filesChanged: Double, lastActivityAtMs: Double? = nil, linesAdded: Double, linesRemoved: Double, mergeableState: SandCloudAgentInfoMergeableState, name: String, prNumber: Double? = nil, prState: SandCloudAgentInfoPrState, prStateSource: SandCloudAgentPrStateSource, prUrl: String, project: SandCloudAgentProjectMembership? = nil, prompt: String, status: SandCloudAgentInfoStatus, updatedAtMs: Double? = nil) {
+		self.artifacts = artifacts
+		self.bcId = bcId
+		self.branchName = branchName
+		self.files = files
+		self.filesChanged = filesChanged
+		self.lastActivityAtMs = lastActivityAtMs
+		self.linesAdded = linesAdded
+		self.linesRemoved = linesRemoved
+		self.mergeableState = mergeableState
+		self.name = name
+		self.prNumber = prNumber
+		self.prState = prState
+		self.prStateSource = prStateSource
+		self.prUrl = prUrl
+		self.project = project
+		self.prompt = prompt
+		self.status = status
+		self.updatedAtMs = updatedAtMs
+	}
+	enum CodingKeys: String, CodingKey {
+		case artifacts, bcId, branchName, files, filesChanged, lastActivityAtMs, linesAdded, linesRemoved, mergeableState, name, prNumber, prState, prStateSource, prUrl, project, prompt, status, updatedAtMs
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(artifacts, forKey: .artifacts)
+		try container.encode(bcId, forKey: .bcId)
+		try container.encode(branchName, forKey: .branchName)
+		try container.encode(files, forKey: .files)
+		try container.encode(filesChanged, forKey: .filesChanged)
+		try container.encode(lastActivityAtMs, forKey: .lastActivityAtMs)
+		try container.encode(linesAdded, forKey: .linesAdded)
+		try container.encode(linesRemoved, forKey: .linesRemoved)
+		try container.encode(mergeableState, forKey: .mergeableState)
+		try container.encode(name, forKey: .name)
+		try container.encode(prNumber, forKey: .prNumber)
+		try container.encode(prState, forKey: .prState)
+		try container.encode(prStateSource, forKey: .prStateSource)
+		try container.encode(prUrl, forKey: .prUrl)
+		try container.encodeIfPresent(project, forKey: .project)
+		try container.encode(prompt, forKey: .prompt)
+		try container.encode(status, forKey: .status)
+		try container.encodeIfPresent(updatedAtMs, forKey: .updatedAtMs)
+	}
+}
+
+public enum SandCloudAgentInfoArtifacts: Codable, Sendable, Equatable {
+
+	case failed(Failed)
+	case listed(Listed)
+	case skipped(Skipped)
+	case unavailable(Unavailable)
+	case unknown(Unknown)
+
+	public struct Failed: Codable, Sendable, Equatable {
+		public let kind: String
+		public let reason: SandCloudAgentInfoArtifactsReason
+		public init(kind: String = "failed", reason: SandCloudAgentInfoArtifactsReason) {
+			self.kind = kind
+			self.reason = reason
+		}
+	}
+
+	public struct Listed: Codable, Sendable, Equatable {
+		public let kind: String
+		public let files: [SandCloudAgentArtifactFile]
+		public init(kind: String = "listed", files: [SandCloudAgentArtifactFile]) {
+			self.kind = kind
+			self.files = files
+		}
+	}
+
+	public struct Skipped: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "skipped") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unavailable: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "unavailable") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "failed": self = .failed(try Failed(from: decoder))
+		case "listed": self = .listed(try Listed(from: decoder))
+		case "skipped": self = .skipped(try Skipped(from: decoder))
+		case "unavailable": self = .unavailable(try Unavailable(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .failed(let v): try v.encode(to: encoder)
+		case .listed(let v): try v.encode(to: encoder)
+		case .skipped(let v): try v.encode(to: encoder)
+		case .unavailable(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandCloudAgentInfoArtifactsReason: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let `internal` = SandCloudAgentInfoArtifactsReason(rawValue: "internal")
+	public static let rejected = SandCloudAgentInfoArtifactsReason(rawValue: "rejected")
+	public static let throttled = SandCloudAgentInfoArtifactsReason(rawValue: "throttled")
+	public static let unauthenticated = SandCloudAgentInfoArtifactsReason(rawValue: "unauthenticated")
+	public static let unreachable = SandCloudAgentInfoArtifactsReason(rawValue: "unreachable")
+}
+
+public struct SandCloudAgentInfoMergeableState: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let behind = SandCloudAgentInfoMergeableState(rawValue: "behind")
+	public static let blocked = SandCloudAgentInfoMergeableState(rawValue: "blocked")
+	public static let clean = SandCloudAgentInfoMergeableState(rawValue: "clean")
+	public static let dirty = SandCloudAgentInfoMergeableState(rawValue: "dirty")
+	public static let draft = SandCloudAgentInfoMergeableState(rawValue: "draft")
+	public static let hasHooks = SandCloudAgentInfoMergeableState(rawValue: "has_hooks")
+	public static let unknown = SandCloudAgentInfoMergeableState(rawValue: "unknown")
+	public static let unstable = SandCloudAgentInfoMergeableState(rawValue: "unstable")
+}
+
+public struct SandCloudAgentInfoPrState: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let closed = SandCloudAgentInfoPrState(rawValue: "closed")
+	public static let draft = SandCloudAgentInfoPrState(rawValue: "draft")
+	public static let merged = SandCloudAgentInfoPrState(rawValue: "merged")
+	public static let none = SandCloudAgentInfoPrState(rawValue: "none")
+	public static let `open` = SandCloudAgentInfoPrState(rawValue: "open")
+	public static let unknown = SandCloudAgentInfoPrState(rawValue: "unknown")
+}
+
+public struct SandCloudAgentInfoStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let creating = SandCloudAgentInfoStatus(rawValue: "creating")
+	public static let error = SandCloudAgentInfoStatus(rawValue: "error")
+	public static let expired = SandCloudAgentInfoStatus(rawValue: "expired")
+	public static let finished = SandCloudAgentInfoStatus(rawValue: "finished")
+	public static let running = SandCloudAgentInfoStatus(rawValue: "running")
+	public static let unknown = SandCloudAgentInfoStatus(rawValue: "unknown")
+}
+
+public enum SandCloudAgentPrStateSource: Codable, Sendable, Equatable {
+
+	case failed(Failed)
+	case live(Live)
+	case stored(Stored)
+	case unknown(Unknown)
+
+	public struct Failed: Codable, Sendable, Equatable {
+		public let kind: String
+		public let reason: SandCloudAgentPrStateSourceReason
+		public init(kind: String = "failed", reason: SandCloudAgentPrStateSourceReason) {
+			self.kind = kind
+			self.reason = reason
+		}
+	}
+
+	public struct Live: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "live") {
+			self.kind = kind
+		}
+	}
+
+	public struct Stored: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "stored") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "failed": self = .failed(try Failed(from: decoder))
+		case "live": self = .live(try Live(from: decoder))
+		case "stored": self = .stored(try Stored(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .failed(let v): try v.encode(to: encoder)
+		case .live(let v): try v.encode(to: encoder)
+		case .stored(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandCloudAgentPrStateSourceReason: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let `internal` = SandCloudAgentPrStateSourceReason(rawValue: "internal")
+	public static let rejected = SandCloudAgentPrStateSourceReason(rawValue: "rejected")
+	public static let throttled = SandCloudAgentPrStateSourceReason(rawValue: "throttled")
+	public static let unauthenticated = SandCloudAgentPrStateSourceReason(rawValue: "unauthenticated")
+	public static let unreachable = SandCloudAgentPrStateSourceReason(rawValue: "unreachable")
+}
+
+public struct SandCloudAgentProjectMembership: Codable, Sendable, Equatable {
+	public let role: String
+	public init(role: String) {
+		self.role = role
+	}
+}
+
+public struct SandCloudAgentPublishAccess: Codable, Sendable, Equatable {
+	public let kind: String
+	public init(kind: String) {
+		self.kind = kind
+	}
+}
+
+public struct SandCloudAgentPublishProposal: Codable, Sendable, Equatable {
+	public let apex: String
+	public let bcId: String
+	public let changeSummary: String
+	public let createdAtMs: Double
+	public let decidedVia: String
+	public let kind: SandCloudAgentPublishProposalKind
+	public let muteRedeployPrompts: Bool?
+	public let note: String
+	public let previewImageUrl: String?
+	public let previewUrl: String
+	public let projectDir: String
+	public let proposalId: String
+	public let publish: SandCloudAgentPublishState?
+	public let publishId: String
+	public let requireConfirmationForUpdates: Bool?
+	public let slug: String
+	public let status: SandCloudAgentPublishProposalStatus
+	public let targetUrl: String
+	public let teamName: String?
+	public let updatedAtMs: Double
+	public let visibility: SandCloudAgentPublishProposalVisibility
+	public init(apex: String, bcId: String, changeSummary: String, createdAtMs: Double, decidedVia: String, kind: SandCloudAgentPublishProposalKind, muteRedeployPrompts: Bool? = nil, note: String, previewImageUrl: String? = nil, previewUrl: String, projectDir: String, proposalId: String, publish: SandCloudAgentPublishState? = nil, publishId: String, requireConfirmationForUpdates: Bool? = nil, slug: String, status: SandCloudAgentPublishProposalStatus, targetUrl: String, teamName: String? = nil, updatedAtMs: Double, visibility: SandCloudAgentPublishProposalVisibility) {
+		self.apex = apex
+		self.bcId = bcId
+		self.changeSummary = changeSummary
+		self.createdAtMs = createdAtMs
+		self.decidedVia = decidedVia
+		self.kind = kind
+		self.muteRedeployPrompts = muteRedeployPrompts
+		self.note = note
+		self.previewImageUrl = previewImageUrl
+		self.previewUrl = previewUrl
+		self.projectDir = projectDir
+		self.proposalId = proposalId
+		self.publish = publish
+		self.publishId = publishId
+		self.requireConfirmationForUpdates = requireConfirmationForUpdates
+		self.slug = slug
+		self.status = status
+		self.targetUrl = targetUrl
+		self.teamName = teamName
+		self.updatedAtMs = updatedAtMs
+		self.visibility = visibility
+	}
+	enum CodingKeys: String, CodingKey {
+		case apex, bcId, changeSummary, createdAtMs, decidedVia, kind, muteRedeployPrompts, note, previewImageUrl, previewUrl, projectDir, proposalId, publish, publishId, requireConfirmationForUpdates, slug, status, targetUrl, teamName, updatedAtMs, visibility
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(apex, forKey: .apex)
+		try container.encode(bcId, forKey: .bcId)
+		try container.encode(changeSummary, forKey: .changeSummary)
+		try container.encode(createdAtMs, forKey: .createdAtMs)
+		try container.encode(decidedVia, forKey: .decidedVia)
+		try container.encode(kind, forKey: .kind)
+		try container.encodeIfPresent(muteRedeployPrompts, forKey: .muteRedeployPrompts)
+		try container.encode(note, forKey: .note)
+		try container.encodeIfPresent(previewImageUrl, forKey: .previewImageUrl)
+		try container.encode(previewUrl, forKey: .previewUrl)
+		try container.encode(projectDir, forKey: .projectDir)
+		try container.encode(proposalId, forKey: .proposalId)
+		try container.encodeIfPresent(publish, forKey: .publish)
+		try container.encode(publishId, forKey: .publishId)
+		try container.encodeIfPresent(requireConfirmationForUpdates, forKey: .requireConfirmationForUpdates)
+		try container.encode(slug, forKey: .slug)
+		try container.encode(status, forKey: .status)
+		try container.encode(targetUrl, forKey: .targetUrl)
+		try container.encodeIfPresent(teamName, forKey: .teamName)
+		try container.encode(updatedAtMs, forKey: .updatedAtMs)
+		try container.encode(visibility, forKey: .visibility)
+	}
+}
+
+public struct SandCloudAgentPublishProposalKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let create = SandCloudAgentPublishProposalKind(rawValue: "create")
+	public static let update = SandCloudAgentPublishProposalKind(rawValue: "update")
+}
+
+public struct SandCloudAgentPublishProposalStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let confirming = SandCloudAgentPublishProposalStatus(rawValue: "confirming")
+	public static let dismissed = SandCloudAgentPublishProposalStatus(rawValue: "dismissed")
+	public static let pending = SandCloudAgentPublishProposalStatus(rawValue: "pending")
+	public static let published = SandCloudAgentPublishProposalStatus(rawValue: "published")
+}
+
+public struct SandCloudAgentPublishProposalVisibility: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let `private` = SandCloudAgentPublishProposalVisibility(rawValue: "private")
+	public static let `public` = SandCloudAgentPublishProposalVisibility(rawValue: "public")
+	public static let team = SandCloudAgentPublishProposalVisibility(rawValue: "team")
+}
+
+public struct SandCloudAgentPublishState: Codable, Sendable, Equatable {
+	public let access: SandCloudAgentPublishAccess
+	public let errorMessage: String
+	public let publishId: String
+	public let step: SandCloudAgentPublishStep
+	public let url: String
+	public init(access: SandCloudAgentPublishAccess, errorMessage: String, publishId: String, step: SandCloudAgentPublishStep, url: String) {
+		self.access = access
+		self.errorMessage = errorMessage
+		self.publishId = publishId
+		self.step = step
+		self.url = url
+	}
+}
+
+public struct SandCloudAgentPublishStep: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let assigningUrl = SandCloudAgentPublishStep(rawValue: "assigning_url")
+	public static let building = SandCloudAgentPublishStep(rawValue: "building")
+	public static let failed = SandCloudAgentPublishStep(rawValue: "failed")
+	public static let provisioning = SandCloudAgentPublishStep(rawValue: "provisioning")
+	public static let ready = SandCloudAgentPublishStep(rawValue: "ready")
+	public static let unknown = SandCloudAgentPublishStep(rawValue: "unknown")
+}
+
+public struct SandCloudAgentWake: Codable, Sendable, Equatable {
+	public let atMs: Double?
+	public let label: String?
+	public let source: SandCloudAgentWakeSource
+	public let subscriptionId: String?
+	public let url: String?
+	public init(atMs: Double? = nil, label: String? = nil, source: SandCloudAgentWakeSource, subscriptionId: String? = nil, url: String? = nil) {
+		self.atMs = atMs
+		self.label = label
+		self.source = source
+		self.subscriptionId = subscriptionId
+		self.url = url
+	}
+}
+
+public struct SandCloudAgentWakeSource: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let github = SandCloudAgentWakeSource(rawValue: "github")
+	public static let linear = SandCloudAgentWakeSource(rawValue: "linear")
+	public static let origin = SandCloudAgentWakeSource(rawValue: "origin")
+	public static let slack = SandCloudAgentWakeSource(rawValue: "slack")
+	public static let unknown = SandCloudAgentWakeSource(rawValue: "unknown")
+}
+
+public struct SandConnectorGrantAsk: Codable, Sendable, Equatable {
+	public let remembered: SandConnectorGrantAskRemembered?
+	public let requestId: String
+	public let serverId: String
+	public let serverName: String
+	public let status: SandConnectorGrantAskStatus
+	public init(remembered: SandConnectorGrantAskRemembered? = nil, requestId: String, serverId: String, serverName: String, status: SandConnectorGrantAskStatus) {
+		self.remembered = remembered
+		self.requestId = requestId
+		self.serverId = serverId
+		self.serverName = serverName
+		self.status = status
+	}
+	enum CodingKeys: String, CodingKey {
+		case remembered, requestId, serverId, serverName, status
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(remembered, forKey: .remembered)
+		try container.encode(requestId, forKey: .requestId)
+		try container.encode(serverId, forKey: .serverId)
+		try container.encode(serverName, forKey: .serverName)
+		try container.encode(status, forKey: .status)
+	}
+}
+
+public struct SandConnectorGrantAskRemembered: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let allTeamBots = SandConnectorGrantAskRemembered(rawValue: "all_team_bots")
+	public static let thisBot = SandConnectorGrantAskRemembered(rawValue: "this_bot")
+}
+
+public struct SandConnectorGrantAskStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let allowed = SandConnectorGrantAskStatus(rawValue: "allowed")
+	public static let expired = SandConnectorGrantAskStatus(rawValue: "expired")
+	public static let pending = SandConnectorGrantAskStatus(rawValue: "pending")
+	public static let skipped = SandConnectorGrantAskStatus(rawValue: "skipped")
 }
 
 public struct SandCookieOriginApproval: Codable, Sendable, Equatable {
@@ -3306,16 +5525,18 @@ public struct SandCreateAgentArgs: Codable, Sendable, Equatable {
 	public let clientNonce: String?
 	public let creationRoute: SandCreateAgentArgsCreationRoute?
 	public let description: String
-	public let harness: String?
+	public let harness: SandCreateAgentArgsHarness?
+	public let isAutomatic: Bool?
 	public let isIntroductionSuppressed: Bool?
 	public let isKickstartRequested: Bool?
+	public let language: String?
 	public let name: String
 	public let origin: SandCreateAgentArgsOrigin?
 	public let purpose: SandCreateAgentArgsPurpose?
 	public let supportsTemporalHarness: Bool?
 	public let templateId: String?
 	public let title: String?
-	public init(avatarColor: String? = nil, avatarPngBase64: String? = nil, avatarShape: String? = nil, clientNonce: String? = nil, creationRoute: SandCreateAgentArgsCreationRoute? = nil, description: String, harness: String? = nil, isIntroductionSuppressed: Bool? = nil, isKickstartRequested: Bool? = nil, name: String, origin: SandCreateAgentArgsOrigin? = nil, purpose: SandCreateAgentArgsPurpose? = nil, supportsTemporalHarness: Bool? = nil, templateId: String? = nil, title: String? = nil) {
+	public init(avatarColor: String? = nil, avatarPngBase64: String? = nil, avatarShape: String? = nil, clientNonce: String? = nil, creationRoute: SandCreateAgentArgsCreationRoute? = nil, description: String, harness: SandCreateAgentArgsHarness? = nil, isAutomatic: Bool? = nil, isIntroductionSuppressed: Bool? = nil, isKickstartRequested: Bool? = nil, language: String? = nil, name: String, origin: SandCreateAgentArgsOrigin? = nil, purpose: SandCreateAgentArgsPurpose? = nil, supportsTemporalHarness: Bool? = nil, templateId: String? = nil, title: String? = nil) {
 		self.avatarColor = avatarColor
 		self.avatarPngBase64 = avatarPngBase64
 		self.avatarShape = avatarShape
@@ -3323,8 +5544,10 @@ public struct SandCreateAgentArgs: Codable, Sendable, Equatable {
 		self.creationRoute = creationRoute
 		self.description = description
 		self.harness = harness
+		self.isAutomatic = isAutomatic
 		self.isIntroductionSuppressed = isIntroductionSuppressed
 		self.isKickstartRequested = isKickstartRequested
+		self.language = language
 		self.name = name
 		self.origin = origin
 		self.purpose = purpose
@@ -3333,7 +5556,7 @@ public struct SandCreateAgentArgs: Codable, Sendable, Equatable {
 		self.title = title
 	}
 	enum CodingKeys: String, CodingKey {
-		case avatarColor, avatarPngBase64, avatarShape, clientNonce, creationRoute, description, harness, isIntroductionSuppressed, isKickstartRequested, name, origin, purpose, supportsTemporalHarness, templateId, title
+		case avatarColor, avatarPngBase64, avatarShape, clientNonce, creationRoute, description, harness, isAutomatic, isIntroductionSuppressed, isKickstartRequested, language, name, origin, purpose, supportsTemporalHarness, templateId, title
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
@@ -3344,8 +5567,10 @@ public struct SandCreateAgentArgs: Codable, Sendable, Equatable {
 		try container.encodeIfPresent(creationRoute, forKey: .creationRoute)
 		try container.encode(description, forKey: .description)
 		try container.encodeIfPresent(harness, forKey: .harness)
+		try container.encodeIfPresent(isAutomatic, forKey: .isAutomatic)
 		try container.encodeIfPresent(isIntroductionSuppressed, forKey: .isIntroductionSuppressed)
 		try container.encodeIfPresent(isKickstartRequested, forKey: .isKickstartRequested)
+		try container.encodeIfPresent(language, forKey: .language)
 		try container.encode(name, forKey: .name)
 		try container.encodeIfPresent(origin, forKey: .origin)
 		try container.encodeIfPresent(purpose, forKey: .purpose)
@@ -3403,6 +5628,13 @@ public enum SandCreateAgentArgsCreationRoute: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandCreateAgentArgsHarness: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let box = SandCreateAgentArgsHarness(rawValue: "box")
+	public static let temporal = SandCreateAgentArgsHarness(rawValue: "temporal")
+}
+
 public struct SandCreateAgentArgsOrigin: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
@@ -3417,6 +5649,206 @@ public struct SandCreateAgentArgsPurpose: RawRepresentable, Codable, Sendable, E
 	public static let pluginAuth = SandCreateAgentArgsPurpose(rawValue: "plugin-auth")
 }
 
+public struct SandCreateAgentFromTemplateArgs: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let avatarColor: String
+	public let avatarShape: String
+	public let creatorContext: String?
+	public let expectedActiveVersion: Double
+	public let isAutomatic: Bool?
+	public let language: String?
+	public let name: String
+	public let setupDelegationSupported: Bool?
+	public let shareId: String
+	public init(agentId: String, avatarColor: String, avatarShape: String, creatorContext: String? = nil, expectedActiveVersion: Double, isAutomatic: Bool? = nil, language: String? = nil, name: String, setupDelegationSupported: Bool? = nil, shareId: String) {
+		self.agentId = agentId
+		self.avatarColor = avatarColor
+		self.avatarShape = avatarShape
+		self.creatorContext = creatorContext
+		self.expectedActiveVersion = expectedActiveVersion
+		self.isAutomatic = isAutomatic
+		self.language = language
+		self.name = name
+		self.setupDelegationSupported = setupDelegationSupported
+		self.shareId = shareId
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, avatarColor, avatarShape, creatorContext, expectedActiveVersion, isAutomatic, language, name, setupDelegationSupported, shareId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encode(avatarColor, forKey: .avatarColor)
+		try container.encode(avatarShape, forKey: .avatarShape)
+		try container.encodeIfPresent(creatorContext, forKey: .creatorContext)
+		try container.encode(expectedActiveVersion, forKey: .expectedActiveVersion)
+		try container.encodeIfPresent(isAutomatic, forKey: .isAutomatic)
+		try container.encodeIfPresent(language, forKey: .language)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(setupDelegationSupported, forKey: .setupDelegationSupported)
+		try container.encode(shareId, forKey: .shareId)
+	}
+}
+
+public struct SandCreateAgentFromTemplateResult: Codable, Sendable, Equatable {
+	public let agent: SandAgentSummary
+	public let setup: SandCreateAgentFromTemplateResultSetup
+	public let transcript: [SandTranscriptEntry]
+	public init(agent: SandAgentSummary, setup: SandCreateAgentFromTemplateResultSetup, transcript: [SandTranscriptEntry]) {
+		self.agent = agent
+		self.setup = setup
+		self.transcript = transcript
+	}
+}
+
+public enum SandCreateAgentFromTemplateResultSetup: Codable, Sendable, Equatable {
+
+	case recipe(Recipe)
+	case unavailable(Unavailable)
+	case unknown(Unknown)
+
+	public struct Recipe: Codable, Sendable, Equatable {
+		public let kind: String
+		public let automations: [SandCreateAgentFromTemplateResultSetupAutomationsItem]
+		public let gettingStartedSkill: String?
+		public let isConversationalSetup: Bool?
+		public let isSetupSendSuppressed: Bool?
+		public let isTrustedSource: Bool?
+		public let memories: [SandCreateAgentFromTemplateResultSetupMemoriesItem]
+		public let plugins: [SandCreateAgentFromTemplateResultSetupPluginsItem]
+		public let skills: [SandCreateAgentFromTemplateResultSetupSkillsItem]
+		public init(kind: String = "recipe", automations: [SandCreateAgentFromTemplateResultSetupAutomationsItem], gettingStartedSkill: String? = nil, isConversationalSetup: Bool? = nil, isSetupSendSuppressed: Bool? = nil, isTrustedSource: Bool? = nil, memories: [SandCreateAgentFromTemplateResultSetupMemoriesItem], plugins: [SandCreateAgentFromTemplateResultSetupPluginsItem], skills: [SandCreateAgentFromTemplateResultSetupSkillsItem]) {
+			self.kind = kind
+			self.automations = automations
+			self.gettingStartedSkill = gettingStartedSkill
+			self.isConversationalSetup = isConversationalSetup
+			self.isSetupSendSuppressed = isSetupSendSuppressed
+			self.isTrustedSource = isTrustedSource
+			self.memories = memories
+			self.plugins = plugins
+			self.skills = skills
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, automations, gettingStartedSkill, isConversationalSetup, isSetupSendSuppressed, isTrustedSource, memories, plugins, skills
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encode(automations, forKey: .automations)
+			try container.encodeIfPresent(gettingStartedSkill, forKey: .gettingStartedSkill)
+			try container.encodeIfPresent(isConversationalSetup, forKey: .isConversationalSetup)
+			try container.encodeIfPresent(isSetupSendSuppressed, forKey: .isSetupSendSuppressed)
+			try container.encodeIfPresent(isTrustedSource, forKey: .isTrustedSource)
+			try container.encode(memories, forKey: .memories)
+			try container.encode(plugins, forKey: .plugins)
+			try container.encode(skills, forKey: .skills)
+		}
+	}
+
+	public struct Unavailable: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "unavailable") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "recipe": self = .recipe(try Recipe(from: decoder))
+		case "unavailable": self = .unavailable(try Unavailable(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .recipe(let v): try v.encode(to: encoder)
+		case .unavailable(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandCreateAgentFromTemplateResultSetupAutomationsItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let description: String
+	public let name: String
+	public let slug: String
+	public init(content: String, description: String, name: String, slug: String) {
+		self.content = content
+		self.description = description
+		self.name = name
+		self.slug = slug
+	}
+}
+
+public struct SandCreateAgentFromTemplateResultSetupMemoriesItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let createdAt: String?
+	public let kind: SandCreateAgentFromTemplateResultSetupMemoriesItemKind?
+	public init(content: String, createdAt: String? = nil, kind: SandCreateAgentFromTemplateResultSetupMemoriesItemKind? = nil) {
+		self.content = content
+		self.createdAt = createdAt
+		self.kind = kind
+	}
+	enum CodingKeys: String, CodingKey {
+		case content, createdAt, kind
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(content, forKey: .content)
+		try container.encodeIfPresent(createdAt, forKey: .createdAt)
+		try container.encodeIfPresent(kind, forKey: .kind)
+	}
+}
+
+public struct SandCreateAgentFromTemplateResultSetupMemoriesItemKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let log = SandCreateAgentFromTemplateResultSetupMemoriesItemKind(rawValue: "log")
+	public static let profile = SandCreateAgentFromTemplateResultSetupMemoriesItemKind(rawValue: "profile")
+}
+
+public struct SandCreateAgentFromTemplateResultSetupPluginsItem: Codable, Sendable, Equatable {
+	public let description: String?
+	public let name: String
+	public let pluginId: String
+	public init(description: String? = nil, name: String, pluginId: String) {
+		self.description = description
+		self.name = name
+		self.pluginId = pluginId
+	}
+	enum CodingKeys: String, CodingKey {
+		case description, name, pluginId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(description, forKey: .description)
+		try container.encode(name, forKey: .name)
+		try container.encode(pluginId, forKey: .pluginId)
+	}
+}
+
+public struct SandCreateAgentFromTemplateResultSetupSkillsItem: Codable, Sendable, Equatable {
+	public let content: String
+	public let description: String
+	public let name: String
+	public init(content: String, description: String, name: String) {
+		self.content = content
+		self.description = description
+		self.name = name
+	}
+}
+
 public struct SandCreateAgentResult: Codable, Sendable, Equatable {
 	public let agent: SandAgentSummary
 	public let transcript: [SandTranscriptEntry]
@@ -3426,11 +5858,146 @@ public struct SandCreateAgentResult: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandCredentialRequest: Codable, Sendable, Equatable {
+	public let autoFill: Bool?
+	public let catalogRevision: String
+	public let connectionId: String
+	public let credentialId: String
+	public let expiresAtMs: Double
+	public let kind: String
+	public let purpose: String
+	public let requestedAtMs: Double
+	public let targetSite: String
+	public let targetWebSocketDebuggerUrl: String?
+	public init(autoFill: Bool? = nil, catalogRevision: String, connectionId: String, credentialId: String, expiresAtMs: Double, kind: String, purpose: String, requestedAtMs: Double, targetSite: String, targetWebSocketDebuggerUrl: String? = nil) {
+		self.autoFill = autoFill
+		self.catalogRevision = catalogRevision
+		self.connectionId = connectionId
+		self.credentialId = credentialId
+		self.expiresAtMs = expiresAtMs
+		self.kind = kind
+		self.purpose = purpose
+		self.requestedAtMs = requestedAtMs
+		self.targetSite = targetSite
+		self.targetWebSocketDebuggerUrl = targetWebSocketDebuggerUrl
+	}
+	enum CodingKeys: String, CodingKey {
+		case autoFill, catalogRevision, connectionId, credentialId, expiresAtMs, kind, purpose, requestedAtMs, targetSite, targetWebSocketDebuggerUrl
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(autoFill, forKey: .autoFill)
+		try container.encode(catalogRevision, forKey: .catalogRevision)
+		try container.encode(connectionId, forKey: .connectionId)
+		try container.encode(credentialId, forKey: .credentialId)
+		try container.encode(expiresAtMs, forKey: .expiresAtMs)
+		try container.encode(kind, forKey: .kind)
+		try container.encode(purpose, forKey: .purpose)
+		try container.encode(requestedAtMs, forKey: .requestedAtMs)
+		try container.encode(targetSite, forKey: .targetSite)
+		try container.encodeIfPresent(targetWebSocketDebuggerUrl, forKey: .targetWebSocketDebuggerUrl)
+	}
+}
+
 public struct SandDeleteAgentResult: Codable, Sendable, Equatable {
 	public let transcript: [SandTranscriptEntry]
 	public init(transcript: [SandTranscriptEntry]) {
 		self.transcript = transcript
 	}
+}
+
+public enum SandDraftPayload: Codable, Sendable, Equatable {
+
+	case emailDraft(EmailDraft)
+	case slackDraft(SlackDraft)
+	case unknown(Unknown)
+
+	public struct EmailDraft: Codable, Sendable, Equatable {
+		public let type: String
+		public let draft: SandEmailDraft
+		public init(type: String = "email-draft", draft: SandEmailDraft) {
+			self.type = type
+			self.draft = draft
+		}
+	}
+
+	public struct SlackDraft: Codable, Sendable, Equatable {
+		public let type: String
+		public let draft: SandSlackDraft
+		public init(type: String = "slack-draft", draft: SandSlackDraft) {
+			self.type = type
+			self.draft = draft
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let type: String
+		public init(type: String) { self.type = type }
+	}
+
+	private enum TagKey: String, CodingKey { case `type` = "type" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`type`) {
+		case "email-draft": self = .emailDraft(try EmailDraft(from: decoder))
+		case "slack-draft": self = .slackDraft(try SlackDraft(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .emailDraft(let v): try v.encode(to: encoder)
+		case .slackDraft(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandEffectivePlugin: Codable, Sendable, Equatable {
+	public let configuredVariableKeys: [String]?
+	public let displayName: String
+	public let hasTeamConfiguredVariables: Bool?
+	public let installMode: SandEffectivePluginInstallMode
+	public let isEnabled: Bool
+	public let mcpServerNames: [String]?
+	public let name: String
+	public let pluginId: String
+	public init(configuredVariableKeys: [String]? = nil, displayName: String, hasTeamConfiguredVariables: Bool? = nil, installMode: SandEffectivePluginInstallMode, isEnabled: Bool, mcpServerNames: [String]? = nil, name: String, pluginId: String) {
+		self.configuredVariableKeys = configuredVariableKeys
+		self.displayName = displayName
+		self.hasTeamConfiguredVariables = hasTeamConfiguredVariables
+		self.installMode = installMode
+		self.isEnabled = isEnabled
+		self.mcpServerNames = mcpServerNames
+		self.name = name
+		self.pluginId = pluginId
+	}
+	enum CodingKeys: String, CodingKey {
+		case configuredVariableKeys, displayName, hasTeamConfiguredVariables, installMode, isEnabled, mcpServerNames, name, pluginId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(configuredVariableKeys, forKey: .configuredVariableKeys)
+		try container.encode(displayName, forKey: .displayName)
+		try container.encodeIfPresent(hasTeamConfiguredVariables, forKey: .hasTeamConfiguredVariables)
+		try container.encode(installMode, forKey: .installMode)
+		try container.encode(isEnabled, forKey: .isEnabled)
+		try container.encodeIfPresent(mcpServerNames, forKey: .mcpServerNames)
+		try container.encode(name, forKey: .name)
+		try container.encode(pluginId, forKey: .pluginId)
+	}
+}
+
+public struct SandEffectivePluginInstallMode: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let teamDefault = SandEffectivePluginInstallMode(rawValue: "team-default")
+	public static let teamRequired = SandEffectivePluginInstallMode(rawValue: "team-required")
+	public static let unknown = SandEffectivePluginInstallMode(rawValue: "unknown")
+	public static let user = SandEffectivePluginInstallMode(rawValue: "user")
 }
 
 public struct SandEmailDraft: Codable, Sendable, Equatable {
@@ -3459,12 +6026,628 @@ public struct SandEmailDraft: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandErrorTray: Codable, Sendable, Equatable {
+	public let actions: [SandErrorTrayAction]?
+	public let agentId: String
+	public let count: Double?
+	public let createdAt: Double
+	public let dedupeKey: String?
+	public let detail: String?
+	public let errorKind: SandErrorTrayErrorKind?
+	public let errorParams: SandTrayErrorParams?
+	public let id: String
+	public let kind: String
+	public let occurrences: [Double]?
+	public let rawDetail: String?
+	public let requestId: String?
+	public let severity: SandErrorTraySeverity?
+	public let title: String
+	public let titleKind: SandErrorTrayTitleKind?
+	public let titleParams: SandErrorTrayTitleParams?
+	public let usageLimitKind: SandErrorTrayUsageLimitKind?
+	public init(actions: [SandErrorTrayAction]? = nil, agentId: String, count: Double? = nil, createdAt: Double, dedupeKey: String? = nil, detail: String? = nil, errorKind: SandErrorTrayErrorKind? = nil, errorParams: SandTrayErrorParams? = nil, id: String, kind: String, occurrences: [Double]? = nil, rawDetail: String? = nil, requestId: String? = nil, severity: SandErrorTraySeverity? = nil, title: String, titleKind: SandErrorTrayTitleKind? = nil, titleParams: SandErrorTrayTitleParams? = nil, usageLimitKind: SandErrorTrayUsageLimitKind? = nil) {
+		self.actions = actions
+		self.agentId = agentId
+		self.count = count
+		self.createdAt = createdAt
+		self.dedupeKey = dedupeKey
+		self.detail = detail
+		self.errorKind = errorKind
+		self.errorParams = errorParams
+		self.id = id
+		self.kind = kind
+		self.occurrences = occurrences
+		self.rawDetail = rawDetail
+		self.requestId = requestId
+		self.severity = severity
+		self.title = title
+		self.titleKind = titleKind
+		self.titleParams = titleParams
+		self.usageLimitKind = usageLimitKind
+	}
+	enum CodingKeys: String, CodingKey {
+		case actions, agentId, count, createdAt, dedupeKey, detail, errorKind, errorParams, id, kind, occurrences, rawDetail, requestId, severity, title, titleKind, titleParams, usageLimitKind
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(actions, forKey: .actions)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encodeIfPresent(count, forKey: .count)
+		try container.encode(createdAt, forKey: .createdAt)
+		try container.encodeIfPresent(dedupeKey, forKey: .dedupeKey)
+		try container.encodeIfPresent(detail, forKey: .detail)
+		try container.encodeIfPresent(errorKind, forKey: .errorKind)
+		try container.encodeIfPresent(errorParams, forKey: .errorParams)
+		try container.encode(id, forKey: .id)
+		try container.encode(kind, forKey: .kind)
+		try container.encodeIfPresent(occurrences, forKey: .occurrences)
+		try container.encodeIfPresent(rawDetail, forKey: .rawDetail)
+		try container.encodeIfPresent(requestId, forKey: .requestId)
+		try container.encodeIfPresent(severity, forKey: .severity)
+		try container.encode(title, forKey: .title)
+		try container.encodeIfPresent(titleKind, forKey: .titleKind)
+		try container.encodeIfPresent(titleParams, forKey: .titleParams)
+		try container.encodeIfPresent(usageLimitKind, forKey: .usageLimitKind)
+	}
+}
+
+public enum SandErrorTrayAction: Codable, Sendable, Equatable {
+
+	case dashboardAction(DashboardAction)
+	case openBuyCredits(OpenBuyCredits)
+	case openUrl(OpenUrl)
+	case upgrade(Upgrade)
+	case upgradeChoice(UpgradeChoice)
+	case switchModel(SwitchModel)
+	case unknown(Unknown)
+
+	public struct DashboardAction: Codable, Sendable, Equatable {
+		public let kind: String
+		public let action: String
+		public let args: [String: String]
+		public let emphasis: String?
+		public let label: String
+		public let successMessage: String?
+		public init(kind: String = "dashboard-action", action: String, args: [String: String], emphasis: String? = nil, label: String, successMessage: String? = nil) {
+			self.kind = kind
+			self.action = action
+			self.args = args
+			self.emphasis = emphasis
+			self.label = label
+			self.successMessage = successMessage
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, action, args, emphasis, label, successMessage
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encode(action, forKey: .action)
+			try container.encode(args, forKey: .args)
+			try container.encodeIfPresent(emphasis, forKey: .emphasis)
+			try container.encode(label, forKey: .label)
+			try container.encode(successMessage, forKey: .successMessage)
+		}
+	}
+
+	public struct OpenBuyCredits: Codable, Sendable, Equatable {
+		public let kind: String
+		public let emphasis: String?
+		public let entrypoint: String?
+		public let label: String
+		public init(kind: String = "open-buy-credits", emphasis: String? = nil, entrypoint: String? = nil, label: String) {
+			self.kind = kind
+			self.emphasis = emphasis
+			self.entrypoint = entrypoint
+			self.label = label
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, emphasis, entrypoint, label
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(emphasis, forKey: .emphasis)
+			try container.encode(entrypoint, forKey: .entrypoint)
+			try container.encode(label, forKey: .label)
+		}
+	}
+
+	public struct OpenUrl: Codable, Sendable, Equatable {
+		public let kind: String
+		public let emphasis: String?
+		public let label: String
+		public let url: String
+		public init(kind: String = "open-url", emphasis: String? = nil, label: String, url: String) {
+			self.kind = kind
+			self.emphasis = emphasis
+			self.label = label
+			self.url = url
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, emphasis, label, url
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(emphasis, forKey: .emphasis)
+			try container.encode(label, forKey: .label)
+			try container.encode(url, forKey: .url)
+		}
+	}
+
+	public struct Upgrade: Codable, Sendable, Equatable {
+		public let kind: String
+		public let emphasis: String?
+		public let url: String
+		public init(kind: String = "upgrade", emphasis: String? = nil, url: String) {
+			self.kind = kind
+			self.emphasis = emphasis
+			self.url = url
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, emphasis, url
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(emphasis, forKey: .emphasis)
+			try container.encode(url, forKey: .url)
+		}
+	}
+
+	public struct UpgradeChoice: Codable, Sendable, Equatable {
+		public let kind: String
+		public let emphasis: String?
+		public let url: String
+		public init(kind: String = "upgradeChoice", emphasis: String? = nil, url: String) {
+			self.kind = kind
+			self.emphasis = emphasis
+			self.url = url
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, emphasis, url
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(emphasis, forKey: .emphasis)
+			try container.encode(url, forKey: .url)
+		}
+	}
+
+	public struct SwitchModel: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "switch-model") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "dashboard-action": self = .dashboardAction(try DashboardAction(from: decoder))
+		case "open-buy-credits": self = .openBuyCredits(try OpenBuyCredits(from: decoder))
+		case "open-url": self = .openUrl(try OpenUrl(from: decoder))
+		case "upgrade": self = .upgrade(try Upgrade(from: decoder))
+		case "upgradeChoice": self = .upgradeChoice(try UpgradeChoice(from: decoder))
+		case "switch-model": self = .switchModel(try SwitchModel(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .dashboardAction(let v): try v.encode(to: encoder)
+		case .openBuyCredits(let v): try v.encode(to: encoder)
+		case .openUrl(let v): try v.encode(to: encoder)
+		case .upgrade(let v): try v.encode(to: encoder)
+		case .upgradeChoice(let v): try v.encode(to: encoder)
+		case .switchModel(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandErrorTrayErrorKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let automationSyncFailed = SandErrorTrayErrorKind(rawValue: "automation_sync_failed")
+	public static let automationsPausedWhileAway = SandErrorTrayErrorKind(rawValue: "automations_paused_while_away")
+	public static let backendMessage = SandErrorTrayErrorKind(rawValue: "backend_message")
+	public static let backendUnreachable = SandErrorTrayErrorKind(rawValue: "backend_unreachable")
+	public static let boxHibernated = SandErrorTrayErrorKind(rawValue: "box_hibernated")
+	public static let boxNoMonitorAvailable = SandErrorTrayErrorKind(rawValue: "box_no_monitor_available")
+	public static let boxNotResponding = SandErrorTrayErrorKind(rawValue: "box_not_responding")
+	public static let boxStarting = SandErrorTrayErrorKind(rawValue: "box_starting")
+	public static let channelAddressInvalid = SandErrorTrayErrorKind(rawValue: "channel_address_invalid")
+	public static let channelDeliveryFailed = SandErrorTrayErrorKind(rawValue: "channel_delivery_failed")
+	public static let channelMessagingUnavailable = SandErrorTrayErrorKind(rawValue: "channel_messaging_unavailable")
+	public static let channelPlatformNotConnected = SandErrorTrayErrorKind(rawValue: "channel_platform_not_connected")
+	public static let checkpointPublicationFailed = SandErrorTrayErrorKind(rawValue: "checkpoint_publication_failed")
+	public static let computerUpdateFailed = SandErrorTrayErrorKind(rawValue: "computer_update_failed")
+	public static let conversationTooLarge = SandErrorTrayErrorKind(rawValue: "conversation_too_large")
+	public static let firstTokenStall = SandErrorTrayErrorKind(rawValue: "first_token_stall")
+	public static let opaqueWireFailure = SandErrorTrayErrorKind(rawValue: "opaque_wire_failure")
+	public static let providerOverloaded = SandErrorTrayErrorKind(rawValue: "provider_overloaded")
+	public static let routineSyncFailed = SandErrorTrayErrorKind(rawValue: "routine_sync_failed")
+	public static let routinesPausedWhileAway = SandErrorTrayErrorKind(rawValue: "routines_paused_while_away")
+	public static let secretStoreFailed = SandErrorTrayErrorKind(rawValue: "secret_store_failed")
+	public static let transcriptAppendFailed = SandErrorTrayErrorKind(rawValue: "transcript_append_failed")
+	public static let transcriptJournalCorruption = SandErrorTrayErrorKind(rawValue: "transcript_journal_corruption")
+	public static let unknownFailure = SandErrorTrayErrorKind(rawValue: "unknown_failure")
+	public static let usageLimit = SandErrorTrayErrorKind(rawValue: "usage_limit")
+}
+
+public struct SandErrorTraySeverity: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let error = SandErrorTraySeverity(rawValue: "error")
+	public static let info = SandErrorTraySeverity(rawValue: "info")
+}
+
+public struct SandErrorTrayTitleKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let agentToAgentMessageFailed = SandErrorTrayTitleKind(rawValue: "agent_to_agent_message_failed")
+	public static let automationFailed = SandErrorTrayTitleKind(rawValue: "automation_failed")
+	public static let automationSyncFailed = SandErrorTrayTitleKind(rawValue: "automation_sync_failed")
+	public static let automationsPausedWhileAway = SandErrorTrayTitleKind(rawValue: "automations_paused_while_away")
+	public static let backendUnreachable = SandErrorTrayTitleKind(rawValue: "backend_unreachable")
+	public static let backgroundCommandFollowUpFailed = SandErrorTrayTitleKind(rawValue: "background_command_follow_up_failed")
+	public static let backgroundTaskFollowUpFailed = SandErrorTrayTitleKind(rawValue: "background_task_follow_up_failed")
+	public static let botFailedToRespond = SandErrorTrayTitleKind(rawValue: "bot_failed_to_respond")
+	public static let broadcastMessageFailed = SandErrorTrayTitleKind(rawValue: "broadcast_message_failed")
+	public static let channelMessageFollowUpFailed = SandErrorTrayTitleKind(rawValue: "channel_message_follow_up_failed")
+	public static let computerUpdateFailed = SandErrorTrayTitleKind(rawValue: "computer_update_failed")
+	public static let deliveryFailureFollowUpFailed = SandErrorTrayTitleKind(rawValue: "delivery_failure_follow_up_failed")
+	public static let groupChatFailed = SandErrorTrayTitleKind(rawValue: "group_chat_failed")
+	public static let introductionFailed = SandErrorTrayTitleKind(rawValue: "introduction_failed")
+	public static let messageNotDelivered = SandErrorTrayTitleKind(rawValue: "message_not_delivered")
+	public static let modelProviderOverloaded = SandErrorTrayTitleKind(rawValue: "model_provider_overloaded")
+	public static let resumeAfterBoxHandoffFailed = SandErrorTrayTitleKind(rawValue: "resume_after_box_handoff_failed")
+	public static let resumeAfterDraftSendFailed = SandErrorTrayTitleKind(rawValue: "resume_after_draft_send_failed")
+	public static let resumeAfterHostUpdateFailed = SandErrorTrayTitleKind(rawValue: "resume_after_host_update_failed")
+	public static let resumeAfterListenerConnectFailed = SandErrorTrayTitleKind(rawValue: "resume_after_listener_connect_failed")
+	public static let resumeAfterMcpAuthFailed = SandErrorTrayTitleKind(rawValue: "resume_after_mcp_auth_failed")
+	public static let resumeAfterReactionFailed = SandErrorTrayTitleKind(rawValue: "resume_after_reaction_failed")
+	public static let resumeAfterSecretSubmissionFailed = SandErrorTrayTitleKind(rawValue: "resume_after_secret_submission_failed")
+	public static let resumeAfterUserFormFailed = SandErrorTrayTitleKind(rawValue: "resume_after_user_form_failed")
+	public static let routineSyncFailed = SandErrorTrayTitleKind(rawValue: "routine_sync_failed")
+	public static let routinesPausedWhileAway = SandErrorTrayTitleKind(rawValue: "routines_paused_while_away")
+	public static let secretStoreFailed = SandErrorTrayTitleKind(rawValue: "secret_store_failed")
+	public static let timelineEventFollowUpFailed = SandErrorTrayTitleKind(rawValue: "timeline_event_follow_up_failed")
+}
+
+public struct SandErrorTrayTitleParams: Codable, Sendable, Equatable {
+	public let name: String
+	public init(name: String) {
+		self.name = name
+	}
+}
+
+public struct SandErrorTrayUsageLimitKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let cursor = SandErrorTrayUsageLimitKind(rawValue: "cursor")
+	public static let sandIncluded = SandErrorTrayUsageLimitKind(rawValue: "sand_included")
+}
+
+public struct SandFeedbackPromptState: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let improve = SandFeedbackPromptState(rawValue: "improve")
+	public static let prompt = SandFeedbackPromptState(rawValue: "prompt")
+	public static let voted = SandFeedbackPromptState(rawValue: "voted")
+}
+
+public struct SandForeverBoxStatus: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let diskPressure: SandBoxDiskPressure?
+	public let handoff: SandBoxHandoffInfo?
+	public let hostUpdateAvailable: Bool?
+	public let hostVersion: String?
+	public let imageUpdateAvailable: Bool?
+	public let pull: SandBoxPullStatus?
+	public let state: SandBoxRunState
+	public let vncUrl: String?
+	public let windows: [SandForeverBoxWindow]?
+	public init(agentId: String, diskPressure: SandBoxDiskPressure? = nil, handoff: SandBoxHandoffInfo? = nil, hostUpdateAvailable: Bool? = nil, hostVersion: String? = nil, imageUpdateAvailable: Bool? = nil, pull: SandBoxPullStatus? = nil, state: SandBoxRunState, vncUrl: String? = nil, windows: [SandForeverBoxWindow]? = nil) {
+		self.agentId = agentId
+		self.diskPressure = diskPressure
+		self.handoff = handoff
+		self.hostUpdateAvailable = hostUpdateAvailable
+		self.hostVersion = hostVersion
+		self.imageUpdateAvailable = imageUpdateAvailable
+		self.pull = pull
+		self.state = state
+		self.vncUrl = vncUrl
+		self.windows = windows
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, diskPressure, handoff, hostUpdateAvailable, hostVersion, imageUpdateAvailable, pull, state, vncUrl, windows
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encodeIfPresent(diskPressure, forKey: .diskPressure)
+		try container.encodeIfPresent(handoff, forKey: .handoff)
+		try container.encodeIfPresent(hostUpdateAvailable, forKey: .hostUpdateAvailable)
+		try container.encodeIfPresent(hostVersion, forKey: .hostVersion)
+		try container.encodeIfPresent(imageUpdateAvailable, forKey: .imageUpdateAvailable)
+		try container.encodeIfPresent(pull, forKey: .pull)
+		try container.encode(state, forKey: .state)
+		try container.encode(vncUrl, forKey: .vncUrl)
+		try container.encodeIfPresent(windows, forKey: .windows)
+	}
+}
+
+public struct SandForeverBoxWindow: Codable, Sendable, Equatable {
+	public let vncUrl: String
+	public let windowIndex: Double
+	public init(vncUrl: String, windowIndex: Double) {
+		self.vncUrl = vncUrl
+		self.windowIndex = windowIndex
+	}
+}
+
 public struct SandGeneratedAvatarImage: Codable, Sendable, Equatable {
 	public let imageBase64: String
 	public let mimeType: String
 	public init(imageBase64: String, mimeType: String) {
 		self.imageBase64 = imageBase64
 		self.mimeType = mimeType
+	}
+}
+
+public struct SandGithubConnectCompletion: Codable, Sendable, Equatable {
+	public let outcome: SandGithubConnectCompletionOutcome
+	public init(outcome: SandGithubConnectCompletionOutcome) {
+		self.outcome = outcome
+	}
+}
+
+public struct SandGithubConnectCompletionOutcome: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let connected = SandGithubConnectCompletionOutcome(rawValue: "connected")
+	public static let failed = SandGithubConnectCompletionOutcome(rawValue: "failed")
+	public static let pendingApproval = SandGithubConnectCompletionOutcome(rawValue: "pending_approval")
+	public static let stale = SandGithubConnectCompletionOutcome(rawValue: "stale")
+}
+
+public struct SandGroupChatPerson: Codable, Sendable, Equatable {
+	public let name: String
+	public let userId: Double
+	public init(name: String, userId: Double) {
+		self.name = name
+		self.userId = userId
+	}
+}
+
+public struct SandHostSettings: Codable, Sendable, Equatable {
+	public let agentDefaultModel: SandAgentDefaultModel?
+	public let autoReviewInstructions: SandAutoReviewInstructions
+	public let computerUseModel: SandModelSelection?
+	public let experimentOverrides: [String: [String: JsonValue]]?
+	public let featureFlagOverrides: [String: Bool]?
+	public let hasSeenOnboarding: Bool?
+	public let hasSeenOnboardingAccountScope: String?
+	public let localToolPermission: SandHostSettingsLocalToolPermission
+	public let localToolPermissionByMachineId: [String: SandHostSettingsLocalToolPermissionByMachineIdValue]?
+	public let mcpBoxServers: [String]
+	public let mcpCustomInstructions: [String: String]
+	public let mcpCustomInstructionsAccountScope: String?
+	public let mcpCustomInstructionsByServerId: [String: String]?
+	public let mcpDisabledToolsByServerId: [String: [String]]?
+	public let mcpHeldAccountScopes: [String]?
+	public let messagesEnabled: Bool?
+	public let notifications: SandNotificationConfig
+	public let osLocale: String?
+	public let pinnedAgentIds: [String]?
+	public let selectedTeam: SandSelectedTeamBinding?
+	public let selectedTeamId: Double?
+	public let sidebarSections: [StoredSidebarSection]?
+	public let userTimeZone: String?
+	public let userTimeZoneOverride: String?
+	public let webauthnProxyEnabled: Bool
+	public init(agentDefaultModel: SandAgentDefaultModel? = nil, autoReviewInstructions: SandAutoReviewInstructions, computerUseModel: SandModelSelection? = nil, experimentOverrides: [String: [String: JsonValue]]? = nil, featureFlagOverrides: [String: Bool]? = nil, hasSeenOnboarding: Bool? = nil, hasSeenOnboardingAccountScope: String? = nil, localToolPermission: SandHostSettingsLocalToolPermission, localToolPermissionByMachineId: [String: SandHostSettingsLocalToolPermissionByMachineIdValue]? = nil, mcpBoxServers: [String], mcpCustomInstructions: [String: String], mcpCustomInstructionsAccountScope: String? = nil, mcpCustomInstructionsByServerId: [String: String]? = nil, mcpDisabledToolsByServerId: [String: [String]]? = nil, mcpHeldAccountScopes: [String]? = nil, messagesEnabled: Bool? = nil, notifications: SandNotificationConfig, osLocale: String? = nil, pinnedAgentIds: [String]? = nil, selectedTeam: SandSelectedTeamBinding? = nil, selectedTeamId: Double? = nil, sidebarSections: [StoredSidebarSection]? = nil, userTimeZone: String? = nil, userTimeZoneOverride: String? = nil, webauthnProxyEnabled: Bool) {
+		self.agentDefaultModel = agentDefaultModel
+		self.autoReviewInstructions = autoReviewInstructions
+		self.computerUseModel = computerUseModel
+		self.experimentOverrides = experimentOverrides
+		self.featureFlagOverrides = featureFlagOverrides
+		self.hasSeenOnboarding = hasSeenOnboarding
+		self.hasSeenOnboardingAccountScope = hasSeenOnboardingAccountScope
+		self.localToolPermission = localToolPermission
+		self.localToolPermissionByMachineId = localToolPermissionByMachineId
+		self.mcpBoxServers = mcpBoxServers
+		self.mcpCustomInstructions = mcpCustomInstructions
+		self.mcpCustomInstructionsAccountScope = mcpCustomInstructionsAccountScope
+		self.mcpCustomInstructionsByServerId = mcpCustomInstructionsByServerId
+		self.mcpDisabledToolsByServerId = mcpDisabledToolsByServerId
+		self.mcpHeldAccountScopes = mcpHeldAccountScopes
+		self.messagesEnabled = messagesEnabled
+		self.notifications = notifications
+		self.osLocale = osLocale
+		self.pinnedAgentIds = pinnedAgentIds
+		self.selectedTeam = selectedTeam
+		self.selectedTeamId = selectedTeamId
+		self.sidebarSections = sidebarSections
+		self.userTimeZone = userTimeZone
+		self.userTimeZoneOverride = userTimeZoneOverride
+		self.webauthnProxyEnabled = webauthnProxyEnabled
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentDefaultModel, autoReviewInstructions, computerUseModel, experimentOverrides, featureFlagOverrides, hasSeenOnboarding, hasSeenOnboardingAccountScope, localToolPermission, localToolPermissionByMachineId, mcpBoxServers, mcpCustomInstructions, mcpCustomInstructionsAccountScope, mcpCustomInstructionsByServerId, mcpDisabledToolsByServerId, mcpHeldAccountScopes, messagesEnabled, notifications, osLocale, pinnedAgentIds, selectedTeam, selectedTeamId, sidebarSections, userTimeZone, userTimeZoneOverride, webauthnProxyEnabled
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(agentDefaultModel, forKey: .agentDefaultModel)
+		try container.encode(autoReviewInstructions, forKey: .autoReviewInstructions)
+		try container.encodeIfPresent(computerUseModel, forKey: .computerUseModel)
+		try container.encodeIfPresent(experimentOverrides, forKey: .experimentOverrides)
+		try container.encodeIfPresent(featureFlagOverrides, forKey: .featureFlagOverrides)
+		try container.encodeIfPresent(hasSeenOnboarding, forKey: .hasSeenOnboarding)
+		try container.encodeIfPresent(hasSeenOnboardingAccountScope, forKey: .hasSeenOnboardingAccountScope)
+		try container.encode(localToolPermission, forKey: .localToolPermission)
+		try container.encodeIfPresent(localToolPermissionByMachineId, forKey: .localToolPermissionByMachineId)
+		try container.encode(mcpBoxServers, forKey: .mcpBoxServers)
+		try container.encode(mcpCustomInstructions, forKey: .mcpCustomInstructions)
+		try container.encodeIfPresent(mcpCustomInstructionsAccountScope, forKey: .mcpCustomInstructionsAccountScope)
+		try container.encodeIfPresent(mcpCustomInstructionsByServerId, forKey: .mcpCustomInstructionsByServerId)
+		try container.encodeIfPresent(mcpDisabledToolsByServerId, forKey: .mcpDisabledToolsByServerId)
+		try container.encodeIfPresent(mcpHeldAccountScopes, forKey: .mcpHeldAccountScopes)
+		try container.encodeIfPresent(messagesEnabled, forKey: .messagesEnabled)
+		try container.encode(notifications, forKey: .notifications)
+		try container.encodeIfPresent(osLocale, forKey: .osLocale)
+		try container.encodeIfPresent(pinnedAgentIds, forKey: .pinnedAgentIds)
+		try container.encodeIfPresent(selectedTeam, forKey: .selectedTeam)
+		try container.encodeIfPresent(selectedTeamId, forKey: .selectedTeamId)
+		try container.encodeIfPresent(sidebarSections, forKey: .sidebarSections)
+		try container.encodeIfPresent(userTimeZone, forKey: .userTimeZone)
+		try container.encodeIfPresent(userTimeZoneOverride, forKey: .userTimeZoneOverride)
+		try container.encode(webauthnProxyEnabled, forKey: .webauthnProxyEnabled)
+	}
+}
+
+public struct SandHostSettingsLocalToolPermission: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let always = SandHostSettingsLocalToolPermission(rawValue: "always")
+	public static let ask = SandHostSettingsLocalToolPermission(rawValue: "ask")
+	public static let never = SandHostSettingsLocalToolPermission(rawValue: "never")
+}
+
+public struct SandHostSettingsLocalToolPermissionByMachineIdValue: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let always = SandHostSettingsLocalToolPermissionByMachineIdValue(rawValue: "always")
+	public static let ask = SandHostSettingsLocalToolPermissionByMachineIdValue(rawValue: "ask")
+	public static let never = SandHostSettingsLocalToolPermissionByMachineIdValue(rawValue: "never")
+}
+
+public struct SandHostSettingsUpdate: Codable, Sendable, Equatable {
+	public let agentDefaultModel: SandModelSelection?
+	public let autoReviewInstructions: SandAutoReviewInstructions?
+	public let computerUseModel: SandModelSelection?
+	public let experimentOverrides: [String: [String: JsonValue]]?
+	public let featureFlagOverrides: [String: Bool]?
+	public let hasSeenOnboarding: Bool?
+	public let localToolPermission: SandHostSettingsUpdateLocalToolPermission?
+	public let localToolPermissionByMachineId: [String: SandHostSettingsUpdateLocalToolPermissionByMachineIdValue]?
+	public let localToolPermissionMachineId: String?
+	public let mcpBoxServers: [String]?
+	public let mcpCustomInstructions: [String: String]?
+	public let mcpCustomInstructionsAccountScope: String?
+	public let mcpCustomInstructionsByServerId: [String: String]?
+	public let mcpDisabledToolsByServerId: [String: [String]]?
+	public let messagesEnabled: Bool?
+	public let notifications: SandNotificationConfigInput?
+	public let osLocale: String?
+	public let pinnedAgentIds: [String]?
+	public let selectedTeam: SandSelectedTeamBinding?
+	public let sidebarSections: [SidebarSectionUpdate]?
+	public let userTimeZone: String?
+	public let userTimeZoneOverride: String?
+	public let webauthnProxyEnabled: Bool?
+	public init(agentDefaultModel: SandModelSelection? = nil, autoReviewInstructions: SandAutoReviewInstructions? = nil, computerUseModel: SandModelSelection? = nil, experimentOverrides: [String: [String: JsonValue]]? = nil, featureFlagOverrides: [String: Bool]? = nil, hasSeenOnboarding: Bool? = nil, localToolPermission: SandHostSettingsUpdateLocalToolPermission? = nil, localToolPermissionByMachineId: [String: SandHostSettingsUpdateLocalToolPermissionByMachineIdValue]? = nil, localToolPermissionMachineId: String? = nil, mcpBoxServers: [String]? = nil, mcpCustomInstructions: [String: String]? = nil, mcpCustomInstructionsAccountScope: String? = nil, mcpCustomInstructionsByServerId: [String: String]? = nil, mcpDisabledToolsByServerId: [String: [String]]? = nil, messagesEnabled: Bool? = nil, notifications: SandNotificationConfigInput? = nil, osLocale: String? = nil, pinnedAgentIds: [String]? = nil, selectedTeam: SandSelectedTeamBinding? = nil, sidebarSections: [SidebarSectionUpdate]? = nil, userTimeZone: String? = nil, userTimeZoneOverride: String? = nil, webauthnProxyEnabled: Bool? = nil) {
+		self.agentDefaultModel = agentDefaultModel
+		self.autoReviewInstructions = autoReviewInstructions
+		self.computerUseModel = computerUseModel
+		self.experimentOverrides = experimentOverrides
+		self.featureFlagOverrides = featureFlagOverrides
+		self.hasSeenOnboarding = hasSeenOnboarding
+		self.localToolPermission = localToolPermission
+		self.localToolPermissionByMachineId = localToolPermissionByMachineId
+		self.localToolPermissionMachineId = localToolPermissionMachineId
+		self.mcpBoxServers = mcpBoxServers
+		self.mcpCustomInstructions = mcpCustomInstructions
+		self.mcpCustomInstructionsAccountScope = mcpCustomInstructionsAccountScope
+		self.mcpCustomInstructionsByServerId = mcpCustomInstructionsByServerId
+		self.mcpDisabledToolsByServerId = mcpDisabledToolsByServerId
+		self.messagesEnabled = messagesEnabled
+		self.notifications = notifications
+		self.osLocale = osLocale
+		self.pinnedAgentIds = pinnedAgentIds
+		self.selectedTeam = selectedTeam
+		self.sidebarSections = sidebarSections
+		self.userTimeZone = userTimeZone
+		self.userTimeZoneOverride = userTimeZoneOverride
+		self.webauthnProxyEnabled = webauthnProxyEnabled
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentDefaultModel, autoReviewInstructions, computerUseModel, experimentOverrides, featureFlagOverrides, hasSeenOnboarding, localToolPermission, localToolPermissionByMachineId, localToolPermissionMachineId, mcpBoxServers, mcpCustomInstructions, mcpCustomInstructionsAccountScope, mcpCustomInstructionsByServerId, mcpDisabledToolsByServerId, messagesEnabled, notifications, osLocale, pinnedAgentIds, selectedTeam, sidebarSections, userTimeZone, userTimeZoneOverride, webauthnProxyEnabled
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(agentDefaultModel, forKey: .agentDefaultModel)
+		try container.encodeIfPresent(autoReviewInstructions, forKey: .autoReviewInstructions)
+		try container.encodeIfPresent(computerUseModel, forKey: .computerUseModel)
+		try container.encodeIfPresent(experimentOverrides, forKey: .experimentOverrides)
+		try container.encodeIfPresent(featureFlagOverrides, forKey: .featureFlagOverrides)
+		try container.encodeIfPresent(hasSeenOnboarding, forKey: .hasSeenOnboarding)
+		try container.encodeIfPresent(localToolPermission, forKey: .localToolPermission)
+		try container.encodeIfPresent(localToolPermissionByMachineId, forKey: .localToolPermissionByMachineId)
+		try container.encodeIfPresent(localToolPermissionMachineId, forKey: .localToolPermissionMachineId)
+		try container.encodeIfPresent(mcpBoxServers, forKey: .mcpBoxServers)
+		try container.encodeIfPresent(mcpCustomInstructions, forKey: .mcpCustomInstructions)
+		try container.encodeIfPresent(mcpCustomInstructionsAccountScope, forKey: .mcpCustomInstructionsAccountScope)
+		try container.encodeIfPresent(mcpCustomInstructionsByServerId, forKey: .mcpCustomInstructionsByServerId)
+		try container.encodeIfPresent(mcpDisabledToolsByServerId, forKey: .mcpDisabledToolsByServerId)
+		try container.encodeIfPresent(messagesEnabled, forKey: .messagesEnabled)
+		try container.encodeIfPresent(notifications, forKey: .notifications)
+		try container.encodeIfPresent(osLocale, forKey: .osLocale)
+		try container.encodeIfPresent(pinnedAgentIds, forKey: .pinnedAgentIds)
+		try container.encodeIfPresent(selectedTeam, forKey: .selectedTeam)
+		try container.encodeIfPresent(sidebarSections, forKey: .sidebarSections)
+		try container.encodeIfPresent(userTimeZone, forKey: .userTimeZone)
+		try container.encodeIfPresent(userTimeZoneOverride, forKey: .userTimeZoneOverride)
+		try container.encodeIfPresent(webauthnProxyEnabled, forKey: .webauthnProxyEnabled)
+	}
+}
+
+public struct SandHostSettingsUpdateLocalToolPermission: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let always = SandHostSettingsUpdateLocalToolPermission(rawValue: "always")
+	public static let ask = SandHostSettingsUpdateLocalToolPermission(rawValue: "ask")
+	public static let never = SandHostSettingsUpdateLocalToolPermission(rawValue: "never")
+}
+
+public struct SandHostSettingsUpdateLocalToolPermissionByMachineIdValue: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let always = SandHostSettingsUpdateLocalToolPermissionByMachineIdValue(rawValue: "always")
+	public static let ask = SandHostSettingsUpdateLocalToolPermissionByMachineIdValue(rawValue: "ask")
+	public static let never = SandHostSettingsUpdateLocalToolPermissionByMachineIdValue(rawValue: "never")
+}
+
+public struct SandInstallEntryRequest: Codable, Sendable, Equatable {
+	public let entryId: String
+	public let hasTeamConfiguredVariables: Bool?
+	public let values: [String: SandMcpVariableValue]?
+	public init(entryId: String, hasTeamConfiguredVariables: Bool? = nil, values: [String: SandMcpVariableValue]? = nil) {
+		self.entryId = entryId
+		self.hasTeamConfiguredVariables = hasTeamConfiguredVariables
+		self.values = values
+	}
+	enum CodingKeys: String, CodingKey {
+		case entryId, hasTeamConfiguredVariables, values
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(entryId, forKey: .entryId)
+		try container.encodeIfPresent(hasTeamConfiguredVariables, forKey: .hasTeamConfiguredVariables)
+		try container.encodeIfPresent(values, forKey: .values)
 	}
 }
 
@@ -3508,8 +6691,8 @@ public enum SandLinearTriggerEvent: Codable, Sendable, Equatable {
 	}
 
 	public struct Unknown: Codable, Sendable, Equatable {
-		public let case: String
-		public init(case: String) { self.case = case }
+		public let `case`: String
+		public init(`case`: String) { self.`case` = `case` }
 	}
 
 	private enum TagKey: String, CodingKey { case `case` = "case" }
@@ -3535,27 +6718,93 @@ public enum SandLinearTriggerEvent: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandListenerConnectionState: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let connecting = SandListenerConnectionState(rawValue: "connecting")
+	public static let error = SandListenerConnectionState(rawValue: "error")
+	public static let idle = SandListenerConnectionState(rawValue: "idle")
+	public static let listening = SandListenerConnectionState(rawValue: "listening")
+}
+
+public struct SandListenerIntegration: Codable, Sendable, Equatable {
+	public let connectedAtMs: Double?
+	public let detail: String?
+	public let grantedRepos: [String]?
+	public let isConnected: Bool
+	public let neededByCount: Double
+	public let platform: SandListenerIntegrationPlatform
+	public let scopeIssues: [TriggerScopeIssue]?
+	public let state: SandListenerConnectionState
+	public init(connectedAtMs: Double? = nil, detail: String? = nil, grantedRepos: [String]? = nil, isConnected: Bool, neededByCount: Double, platform: SandListenerIntegrationPlatform, scopeIssues: [TriggerScopeIssue]? = nil, state: SandListenerConnectionState) {
+		self.connectedAtMs = connectedAtMs
+		self.detail = detail
+		self.grantedRepos = grantedRepos
+		self.isConnected = isConnected
+		self.neededByCount = neededByCount
+		self.platform = platform
+		self.scopeIssues = scopeIssues
+		self.state = state
+	}
+	enum CodingKeys: String, CodingKey {
+		case connectedAtMs, detail, grantedRepos, isConnected, neededByCount, platform, scopeIssues, state
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(connectedAtMs, forKey: .connectedAtMs)
+		try container.encodeIfPresent(detail, forKey: .detail)
+		try container.encodeIfPresent(grantedRepos, forKey: .grantedRepos)
+		try container.encode(isConnected, forKey: .isConnected)
+		try container.encode(neededByCount, forKey: .neededByCount)
+		try container.encode(platform, forKey: .platform)
+		try container.encodeIfPresent(scopeIssues, forKey: .scopeIssues)
+		try container.encode(state, forKey: .state)
+	}
+}
+
+public struct SandListenerIntegrationPlatform: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let azureDevops = SandListenerIntegrationPlatform(rawValue: "azure-devops")
+	public static let bitbucket = SandListenerIntegrationPlatform(rawValue: "bitbucket")
+	public static let github = SandListenerIntegrationPlatform(rawValue: "github")
+	public static let gitlab = SandListenerIntegrationPlatform(rawValue: "gitlab")
+	public static let origin = SandListenerIntegrationPlatform(rawValue: "origin")
+	public static let slack = SandListenerIntegrationPlatform(rawValue: "slack")
+}
+
+public struct SandListenerIntegrationsView: Codable, Sendable, Equatable {
+	public let integrations: [SandListenerIntegration]
+	public init(integrations: [SandListenerIntegration]) {
+		self.integrations = integrations
+	}
+}
+
 public struct SandLocalToolPermissionAsk: Codable, Sendable, Equatable {
 	public let action: SandLocalToolPermissionAskAction
 	public let description: String?
 	public let machineId: String?
 	public let machineLabel: String?
+	public let recipientName: String?
 	public let requestId: String
-	public let status: SandLocalToolPermissionStatus
+	public let standingGrant: SandLocalToolPermissionAskStandingGrant?
+	public let status: SandLocalToolPermissionAskStatus
 	public let target: String
 	public let targetKind: String?
-	public init(action: SandLocalToolPermissionAskAction, description: String? = nil, machineId: String? = nil, machineLabel: String? = nil, requestId: String, status: SandLocalToolPermissionStatus, target: String, targetKind: String? = nil) {
+	public init(action: SandLocalToolPermissionAskAction, description: String? = nil, machineId: String? = nil, machineLabel: String? = nil, recipientName: String? = nil, requestId: String, standingGrant: SandLocalToolPermissionAskStandingGrant? = nil, status: SandLocalToolPermissionAskStatus, target: String, targetKind: String? = nil) {
 		self.action = action
 		self.description = description
 		self.machineId = machineId
 		self.machineLabel = machineLabel
+		self.recipientName = recipientName
 		self.requestId = requestId
+		self.standingGrant = standingGrant
 		self.status = status
 		self.target = target
 		self.targetKind = targetKind
 	}
 	enum CodingKeys: String, CodingKey {
-		case action, description, machineId, machineLabel, requestId, status, target, targetKind
+		case action, description, machineId, machineLabel, recipientName, requestId, standingGrant, status, target, targetKind
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
@@ -3563,7 +6812,9 @@ public struct SandLocalToolPermissionAsk: Codable, Sendable, Equatable {
 		try container.encodeIfPresent(description, forKey: .description)
 		try container.encodeIfPresent(machineId, forKey: .machineId)
 		try container.encodeIfPresent(machineLabel, forKey: .machineLabel)
+		try container.encodeIfPresent(recipientName, forKey: .recipientName)
 		try container.encode(requestId, forKey: .requestId)
+		try container.encodeIfPresent(standingGrant, forKey: .standingGrant)
 		try container.encode(status, forKey: .status)
 		try container.encode(target, forKey: .target)
 		try container.encodeIfPresent(targetKind, forKey: .targetKind)
@@ -3574,6 +6825,7 @@ public struct SandLocalToolPermissionAskAction: RawRepresentable, Codable, Senda
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
 	public static let listDirectory = SandLocalToolPermissionAskAction(rawValue: "list-directory")
+	public static let readAiToolSetup = SandLocalToolPermissionAskAction(rawValue: "read-ai-tool-setup")
 	public static let readFile = SandLocalToolPermissionAskAction(rawValue: "read-file")
 	public static let readMessages = SandLocalToolPermissionAskAction(rawValue: "read-messages")
 	public static let runCommand = SandLocalToolPermissionAskAction(rawValue: "run-command")
@@ -3582,15 +6834,833 @@ public struct SandLocalToolPermissionAskAction: RawRepresentable, Codable, Senda
 	public static let writeFile = SandLocalToolPermissionAskAction(rawValue: "write-file")
 }
 
-public struct SandLocalToolPermissionStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+public enum SandLocalToolPermissionAskStandingGrant: Codable, Sendable, Equatable {
+
+	case offered(Offered)
+	case unavailable(Unavailable)
+	case unknown(Unknown)
+
+	public struct Offered: Codable, Sendable, Equatable {
+		public let kind: String
+		public let recipient: String
+		public init(kind: String = "offered", recipient: String) {
+			self.kind = kind
+			self.recipient = recipient
+		}
+	}
+
+	public struct Unavailable: Codable, Sendable, Equatable {
+		public let kind: String
+		public let reason: SandStandingGrantUnavailableReason
+		public init(kind: String = "unavailable", reason: SandStandingGrantUnavailableReason) {
+			self.kind = kind
+			self.reason = reason
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "offered": self = .offered(try Offered(from: decoder))
+		case "unavailable": self = .unavailable(try Unavailable(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .offered(let v): try v.encode(to: encoder)
+		case .unavailable(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandLocalToolPermissionAskStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let allowed = SandLocalToolPermissionStatus(rawValue: "allowed")
-	public static let always = SandLocalToolPermissionStatus(rawValue: "always")
-	public static let denied = SandLocalToolPermissionStatus(rawValue: "denied")
-	public static let expired = SandLocalToolPermissionStatus(rawValue: "expired")
-	public static let never = SandLocalToolPermissionStatus(rawValue: "never")
-	public static let pending = SandLocalToolPermissionStatus(rawValue: "pending")
+	public static let allowed = SandLocalToolPermissionAskStatus(rawValue: "allowed")
+	public static let always = SandLocalToolPermissionAskStatus(rawValue: "always")
+	public static let denied = SandLocalToolPermissionAskStatus(rawValue: "denied")
+	public static let expired = SandLocalToolPermissionAskStatus(rawValue: "expired")
+	public static let never = SandLocalToolPermissionAskStatus(rawValue: "never")
+	public static let pending = SandLocalToolPermissionAskStatus(rawValue: "pending")
+}
+
+public struct SandMcpAccountRef: Codable, Sendable, Equatable {
+	public let accountKey: String
+	public let serverId: String
+	public init(accountKey: String, serverId: String) {
+		self.accountKey = accountKey
+		self.serverId = serverId
+	}
+}
+
+public struct SandMcpAuthCompletion: Codable, Sendable, Equatable {
+	public let accountKey: String
+	public let failureDetail: String?
+	public let outcome: SandMcpAuthCompletionOutcome?
+	public let requestingAgentId: String?
+	public let serverId: String
+	public let serverIdentifier: String?
+	public let serverName: String
+	public let serverUrl: String?
+	public init(accountKey: String, failureDetail: String? = nil, outcome: SandMcpAuthCompletionOutcome? = nil, requestingAgentId: String? = nil, serverId: String, serverIdentifier: String? = nil, serverName: String, serverUrl: String? = nil) {
+		self.accountKey = accountKey
+		self.failureDetail = failureDetail
+		self.outcome = outcome
+		self.requestingAgentId = requestingAgentId
+		self.serverId = serverId
+		self.serverIdentifier = serverIdentifier
+		self.serverName = serverName
+		self.serverUrl = serverUrl
+	}
+	enum CodingKeys: String, CodingKey {
+		case accountKey, failureDetail, outcome, requestingAgentId, serverId, serverIdentifier, serverName, serverUrl
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(accountKey, forKey: .accountKey)
+		try container.encodeIfPresent(failureDetail, forKey: .failureDetail)
+		try container.encodeIfPresent(outcome, forKey: .outcome)
+		try container.encode(requestingAgentId, forKey: .requestingAgentId)
+		try container.encode(serverId, forKey: .serverId)
+		try container.encodeIfPresent(serverIdentifier, forKey: .serverIdentifier)
+		try container.encode(serverName, forKey: .serverName)
+		try container.encodeIfPresent(serverUrl, forKey: .serverUrl)
+	}
+}
+
+public struct SandMcpAuthCompletionOutcome: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let cancelled = SandMcpAuthCompletionOutcome(rawValue: "cancelled")
+	public static let connected = SandMcpAuthCompletionOutcome(rawValue: "connected")
+}
+
+public enum SandMcpAuthNotSupportedReason: Codable, Sendable, Equatable {
+
+	case adminBlocked(AdminBlocked)
+	case invalidAuthUrl(InvalidAuthUrl)
+	case noAuthLink(NoAuthLink)
+	case stdioUnsupported(StdioUnsupported)
+	case unknown(Unknown)
+
+	public struct AdminBlocked: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "admin_blocked") {
+			self.kind = kind
+		}
+	}
+
+	public struct InvalidAuthUrl: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "invalid_auth_url") {
+			self.kind = kind
+		}
+	}
+
+	public struct NoAuthLink: Codable, Sendable, Equatable {
+		public let kind: String
+		public let technicalDetail: String?
+		public init(kind: String = "no_auth_link", technicalDetail: String? = nil) {
+			self.kind = kind
+			self.technicalDetail = technicalDetail
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, technicalDetail
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(technicalDetail, forKey: .technicalDetail)
+		}
+	}
+
+	public struct StdioUnsupported: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "stdio_unsupported") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "admin_blocked": self = .adminBlocked(try AdminBlocked(from: decoder))
+		case "invalid_auth_url": self = .invalidAuthUrl(try InvalidAuthUrl(from: decoder))
+		case "no_auth_link": self = .noAuthLink(try NoAuthLink(from: decoder))
+		case "stdio_unsupported": self = .stdioUnsupported(try StdioUnsupported(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .adminBlocked(let v): try v.encode(to: encoder)
+		case .invalidAuthUrl(let v): try v.encode(to: encoder)
+		case .noAuthLink(let v): try v.encode(to: encoder)
+		case .stdioUnsupported(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public enum SandMcpAuthResult: Codable, Sendable, Equatable {
+
+	case started(Started)
+	case notSupported(NotSupported)
+	case unreachable(Unreachable)
+	case alreadyAuthenticated(AlreadyAuthenticated)
+	case notConfigured(NotConfigured)
+	case unknown(Unknown)
+
+	public struct Started: Codable, Sendable, Equatable {
+		public let status: String
+		public let authorizationUrl: String
+		public let completionUnconfirmed: Bool?
+		public let serverName: String
+		public init(status: String = "started", authorizationUrl: String, completionUnconfirmed: Bool? = nil, serverName: String) {
+			self.status = status
+			self.authorizationUrl = authorizationUrl
+			self.completionUnconfirmed = completionUnconfirmed
+			self.serverName = serverName
+		}
+		enum CodingKeys: String, CodingKey {
+			case status, authorizationUrl, completionUnconfirmed, serverName
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(status, forKey: .status)
+			try container.encode(authorizationUrl, forKey: .authorizationUrl)
+			try container.encodeIfPresent(completionUnconfirmed, forKey: .completionUnconfirmed)
+			try container.encode(serverName, forKey: .serverName)
+		}
+	}
+
+	public struct NotSupported: Codable, Sendable, Equatable {
+		public let status: String
+		public let reason: SandMcpAuthNotSupportedReason
+		public let serverName: String
+		public init(status: String = "not-supported", reason: SandMcpAuthNotSupportedReason, serverName: String) {
+			self.status = status
+			self.reason = reason
+			self.serverName = serverName
+		}
+	}
+
+	public struct Unreachable: Codable, Sendable, Equatable {
+		public let status: String
+		public let reason: SandMcpAuthUnreachableReason
+		public let serverName: String
+		public init(status: String = "unreachable", reason: SandMcpAuthUnreachableReason, serverName: String) {
+			self.status = status
+			self.reason = reason
+			self.serverName = serverName
+		}
+	}
+
+	public struct AlreadyAuthenticated: Codable, Sendable, Equatable {
+		public let status: String
+		public let serverName: String
+		public init(status: String = "already-authenticated", serverName: String) {
+			self.status = status
+			self.serverName = serverName
+		}
+	}
+
+	public struct NotConfigured: Codable, Sendable, Equatable {
+		public let status: String
+		public let serverName: String
+		public init(status: String = "not-configured", serverName: String) {
+			self.status = status
+			self.serverName = serverName
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let status: String
+		public init(status: String) { self.status = status }
+	}
+
+	private enum TagKey: String, CodingKey { case `status` = "status" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`status`) {
+		case "started": self = .started(try Started(from: decoder))
+		case "not-supported": self = .notSupported(try NotSupported(from: decoder))
+		case "unreachable": self = .unreachable(try Unreachable(from: decoder))
+		case "already-authenticated": self = .alreadyAuthenticated(try AlreadyAuthenticated(from: decoder))
+		case "not-configured": self = .notConfigured(try NotConfigured(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .started(let v): try v.encode(to: encoder)
+		case .notSupported(let v): try v.encode(to: encoder)
+		case .unreachable(let v): try v.encode(to: encoder)
+		case .alreadyAuthenticated(let v): try v.encode(to: encoder)
+		case .notConfigured(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandMcpAuthUnreachableReason: Codable, Sendable, Equatable {
+	public let kind: String
+	public let technicalDetail: String?
+	public init(kind: String, technicalDetail: String? = nil) {
+		self.kind = kind
+		self.technicalDetail = technicalDetail
+	}
+	enum CodingKeys: String, CodingKey {
+		case kind, technicalDetail
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(kind, forKey: .kind)
+		try container.encodeIfPresent(technicalDetail, forKey: .technicalDetail)
+	}
+}
+
+public struct SandMcpAuthenticateRequest: Codable, Sendable, Equatable {
+	public let accountKey: String?
+	public let forceReauth: Bool?
+	public let oauthRedirectUri: String?
+	public let requestingAgentId: String?
+	public let serverId: String
+	public let trigger: String?
+	public init(accountKey: String? = nil, forceReauth: Bool? = nil, oauthRedirectUri: String? = nil, requestingAgentId: String? = nil, serverId: String, trigger: String? = nil) {
+		self.accountKey = accountKey
+		self.forceReauth = forceReauth
+		self.oauthRedirectUri = oauthRedirectUri
+		self.requestingAgentId = requestingAgentId
+		self.serverId = serverId
+		self.trigger = trigger
+	}
+	enum CodingKeys: String, CodingKey {
+		case accountKey, forceReauth, oauthRedirectUri, requestingAgentId, serverId, trigger
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(accountKey, forKey: .accountKey)
+		try container.encodeIfPresent(forceReauth, forKey: .forceReauth)
+		try container.encodeIfPresent(oauthRedirectUri, forKey: .oauthRedirectUri)
+		try container.encodeIfPresent(requestingAgentId, forKey: .requestingAgentId)
+		try container.encode(serverId, forKey: .serverId)
+		try container.encodeIfPresent(trigger, forKey: .trigger)
+	}
+}
+
+public struct SandMcpCatalogEntryView: Codable, Sendable, Equatable {
+	public let builtinServerIdentifier: String?
+	public let category: String
+	public let categoryKey: String?
+	public let categoryKeys: [String]?
+	public let connectors: [SandCatalogConnectorDescriptor]?
+	public let description: String
+	public let displayName: String
+	public let fields: [SandMcpCatalogField]?
+	public let homepage: String?
+	public let iconId: String?
+	public let iconUrl: String?
+	public let id: String
+	public let isPublicListed: Bool?
+	public let marketplace: SandMcpCatalogEntryViewMarketplace?
+	public let name: String
+	public let native: String?
+	public let pluginName: String?
+	public let publisher: SandMcpCatalogEntryViewPublisher?
+	public let repositoryUrl: String?
+	public let skills: [SandCatalogSkillDescriptor]?
+	public let unsupportedFieldKeys: [String]?
+	public let websiteUrl: String?
+	public init(builtinServerIdentifier: String? = nil, category: String, categoryKey: String? = nil, categoryKeys: [String]? = nil, connectors: [SandCatalogConnectorDescriptor]? = nil, description: String, displayName: String, fields: [SandMcpCatalogField]? = nil, homepage: String? = nil, iconId: String? = nil, iconUrl: String? = nil, id: String, isPublicListed: Bool? = nil, marketplace: SandMcpCatalogEntryViewMarketplace? = nil, name: String, native: String? = nil, pluginName: String? = nil, publisher: SandMcpCatalogEntryViewPublisher? = nil, repositoryUrl: String? = nil, skills: [SandCatalogSkillDescriptor]? = nil, unsupportedFieldKeys: [String]? = nil, websiteUrl: String? = nil) {
+		self.builtinServerIdentifier = builtinServerIdentifier
+		self.category = category
+		self.categoryKey = categoryKey
+		self.categoryKeys = categoryKeys
+		self.connectors = connectors
+		self.description = description
+		self.displayName = displayName
+		self.fields = fields
+		self.homepage = homepage
+		self.iconId = iconId
+		self.iconUrl = iconUrl
+		self.id = id
+		self.isPublicListed = isPublicListed
+		self.marketplace = marketplace
+		self.name = name
+		self.native = native
+		self.pluginName = pluginName
+		self.publisher = publisher
+		self.repositoryUrl = repositoryUrl
+		self.skills = skills
+		self.unsupportedFieldKeys = unsupportedFieldKeys
+		self.websiteUrl = websiteUrl
+	}
+	enum CodingKeys: String, CodingKey {
+		case builtinServerIdentifier, category, categoryKey, categoryKeys, connectors, description, displayName, fields, homepage, iconId, iconUrl, id, isPublicListed, marketplace, name, native, pluginName, publisher, repositoryUrl, skills, unsupportedFieldKeys, websiteUrl
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(builtinServerIdentifier, forKey: .builtinServerIdentifier)
+		try container.encode(category, forKey: .category)
+		try container.encodeIfPresent(categoryKey, forKey: .categoryKey)
+		try container.encodeIfPresent(categoryKeys, forKey: .categoryKeys)
+		try container.encodeIfPresent(connectors, forKey: .connectors)
+		try container.encode(description, forKey: .description)
+		try container.encode(displayName, forKey: .displayName)
+		try container.encodeIfPresent(fields, forKey: .fields)
+		try container.encodeIfPresent(homepage, forKey: .homepage)
+		try container.encodeIfPresent(iconId, forKey: .iconId)
+		try container.encodeIfPresent(iconUrl, forKey: .iconUrl)
+		try container.encode(id, forKey: .id)
+		try container.encodeIfPresent(isPublicListed, forKey: .isPublicListed)
+		try container.encodeIfPresent(marketplace, forKey: .marketplace)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(native, forKey: .native)
+		try container.encodeIfPresent(pluginName, forKey: .pluginName)
+		try container.encodeIfPresent(publisher, forKey: .publisher)
+		try container.encodeIfPresent(repositoryUrl, forKey: .repositoryUrl)
+		try container.encodeIfPresent(skills, forKey: .skills)
+		try container.encodeIfPresent(unsupportedFieldKeys, forKey: .unsupportedFieldKeys)
+		try container.encodeIfPresent(websiteUrl, forKey: .websiteUrl)
+	}
+}
+
+public struct SandMcpCatalogEntryViewMarketplace: Codable, Sendable, Equatable {
+	public let displayName: String
+	public let name: String
+	public let ownership: SandMcpCatalogEntryViewMarketplaceOwnership?
+	public init(displayName: String, name: String, ownership: SandMcpCatalogEntryViewMarketplaceOwnership? = nil) {
+		self.displayName = displayName
+		self.name = name
+		self.ownership = ownership
+	}
+	enum CodingKeys: String, CodingKey {
+		case displayName, name, ownership
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(displayName, forKey: .displayName)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(ownership, forKey: .ownership)
+	}
+}
+
+public struct SandMcpCatalogEntryViewMarketplaceOwnership: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let team = SandMcpCatalogEntryViewMarketplaceOwnership(rawValue: "team")
+	public static let user = SandMcpCatalogEntryViewMarketplaceOwnership(rawValue: "user")
+}
+
+public struct SandMcpCatalogEntryViewPublisher: Codable, Sendable, Equatable {
+	public let displayName: String
+	public let isUserOwned: Bool
+	public let name: String
+	public init(displayName: String, isUserOwned: Bool, name: String) {
+		self.displayName = displayName
+		self.isUserOwned = isUserOwned
+		self.name = name
+	}
+}
+
+public struct SandMcpCatalogField: Codable, Sendable, Equatable {
+	public let defaultValue: SandMcpCatalogFieldDefaultValue?
+	public let hint: String?
+	public let isRequired: Bool?
+	public let isSecret: Bool?
+	public let key: String
+	public let label: String
+	public let options: [SandMcpCatalogFieldOption]?
+	public let placeholder: String?
+	public let type: SandMcpCatalogFieldType
+	public init(defaultValue: SandMcpCatalogFieldDefaultValue? = nil, hint: String? = nil, isRequired: Bool? = nil, isSecret: Bool? = nil, key: String, label: String, options: [SandMcpCatalogFieldOption]? = nil, placeholder: String? = nil, type: SandMcpCatalogFieldType) {
+		self.defaultValue = defaultValue
+		self.hint = hint
+		self.isRequired = isRequired
+		self.isSecret = isSecret
+		self.key = key
+		self.label = label
+		self.options = options
+		self.placeholder = placeholder
+		self.type = type
+	}
+	enum CodingKeys: String, CodingKey {
+		case defaultValue, hint, isRequired, isSecret, key, label, options, placeholder, type
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(defaultValue, forKey: .defaultValue)
+		try container.encodeIfPresent(hint, forKey: .hint)
+		try container.encodeIfPresent(isRequired, forKey: .isRequired)
+		try container.encodeIfPresent(isSecret, forKey: .isSecret)
+		try container.encode(key, forKey: .key)
+		try container.encode(label, forKey: .label)
+		try container.encodeIfPresent(options, forKey: .options)
+		try container.encodeIfPresent(placeholder, forKey: .placeholder)
+		try container.encode(type, forKey: .type)
+	}
+}
+
+public enum SandMcpCatalogFieldDefaultValue: Codable, Sendable, Equatable {
+	case variant0(Bool)
+	case variant1(Bool)
+	case variant2
+	case variant3(String)
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.singleValueContainer()
+		if let v = try? container.decode(Bool.self) { self = .variant0(v); return }
+		if let v = try? container.decode(Bool.self) { self = .variant1(v); return }
+		if container.decodeNil() { self = .variant2; return }
+		if let v = try? container.decode(String.self) { self = .variant3(v); return }
+		throw DecodingError.typeMismatch(SandMcpCatalogFieldDefaultValue.self, .init(codingPath: decoder.codingPath, debugDescription: "Unknown SandMcpCatalogFieldDefaultValue value"))
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.singleValueContainer()
+		switch self {
+		case .variant0(let v): try container.encode(v)
+		case .variant1(let v): try container.encode(v)
+		case .variant2: try container.encodeNil()
+		case .variant3(let v): try container.encode(v)
+		}
+	}
+}
+
+public struct SandMcpCatalogFieldOption: Codable, Sendable, Equatable {
+	public let label: String
+	public let rawValue: String
+	public init(label: String, rawValue: String) {
+		self.label = label
+		self.rawValue = rawValue
+	}
+}
+
+public struct SandMcpCatalogFieldType: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let boolean = SandMcpCatalogFieldType(rawValue: "boolean")
+	public static let integer = SandMcpCatalogFieldType(rawValue: "integer")
+	public static let number = SandMcpCatalogFieldType(rawValue: "number")
+	public static let string = SandMcpCatalogFieldType(rawValue: "string")
+}
+
+public struct SandMcpRemoveResult: Codable, Sendable, Equatable {
+	public let reason: SandMcpRemoveResultReason?
+	public let removed: Bool
+	public let state: SandMcpState
+	public init(reason: SandMcpRemoveResultReason? = nil, removed: Bool, state: SandMcpState) {
+		self.reason = reason
+		self.removed = removed
+		self.state = state
+	}
+	enum CodingKeys: String, CodingKey {
+		case reason, removed, state
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(reason, forKey: .reason)
+		try container.encode(removed, forKey: .removed)
+		try container.encode(state, forKey: .state)
+	}
+}
+
+public struct SandMcpRemoveResultReason: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let stillPresent = SandMcpRemoveResultReason(rawValue: "still-present")
+	public static let teamServer = SandMcpRemoveResultReason(rawValue: "team-server")
+}
+
+public struct SandMcpRenameAccountRequest: Codable, Sendable, Equatable {
+	public let accountKey: String
+	public let newAccountKey: String
+	public let serverId: String
+	public init(accountKey: String, newAccountKey: String, serverId: String) {
+		self.accountKey = accountKey
+		self.newAccountKey = newAccountKey
+		self.serverId = serverId
+	}
+}
+
+public struct SandMcpServerSummary: Codable, Sendable, Equatable {
+	public let accountKey: String
+	public let command: String?
+	public let credentialIsCursorAccount: Bool?
+	public let cursorScmProvider: String?
+	public let customInstructions: String
+	public let disabledToolCount: Double?
+	public let id: String
+	public let isRequired: Bool?
+	public let isTeamServer: Bool
+	public let managedByTeamPluginPolicy: Bool?
+	public let name: String
+	public let pluginId: String?
+	public let rowServerIdentifier: String
+	public let servedBy: SandMcpServerSummaryServedBy?
+	public let serverIdentifier: String
+	public let status: SandMcpServerSummaryStatus
+	public let statusDetail: SandMcpServerSummaryStatusDetail?
+	public let toolCount: Double
+	public let transport: SandMcpServerSummaryTransport
+	public let url: String?
+	public init(accountKey: String, command: String? = nil, credentialIsCursorAccount: Bool? = nil, cursorScmProvider: String? = nil, customInstructions: String, disabledToolCount: Double? = nil, id: String, isRequired: Bool? = nil, isTeamServer: Bool, managedByTeamPluginPolicy: Bool? = nil, name: String, pluginId: String? = nil, rowServerIdentifier: String, servedBy: SandMcpServerSummaryServedBy? = nil, serverIdentifier: String, status: SandMcpServerSummaryStatus, statusDetail: SandMcpServerSummaryStatusDetail? = nil, toolCount: Double, transport: SandMcpServerSummaryTransport, url: String? = nil) {
+		self.accountKey = accountKey
+		self.command = command
+		self.credentialIsCursorAccount = credentialIsCursorAccount
+		self.cursorScmProvider = cursorScmProvider
+		self.customInstructions = customInstructions
+		self.disabledToolCount = disabledToolCount
+		self.id = id
+		self.isRequired = isRequired
+		self.isTeamServer = isTeamServer
+		self.managedByTeamPluginPolicy = managedByTeamPluginPolicy
+		self.name = name
+		self.pluginId = pluginId
+		self.rowServerIdentifier = rowServerIdentifier
+		self.servedBy = servedBy
+		self.serverIdentifier = serverIdentifier
+		self.status = status
+		self.statusDetail = statusDetail
+		self.toolCount = toolCount
+		self.transport = transport
+		self.url = url
+	}
+	enum CodingKeys: String, CodingKey {
+		case accountKey, command, credentialIsCursorAccount, cursorScmProvider, customInstructions, disabledToolCount, id, isRequired, isTeamServer, managedByTeamPluginPolicy, name, pluginId, rowServerIdentifier, servedBy, serverIdentifier, status, statusDetail, toolCount, transport, url
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(accountKey, forKey: .accountKey)
+		try container.encodeIfPresent(command, forKey: .command)
+		try container.encodeIfPresent(credentialIsCursorAccount, forKey: .credentialIsCursorAccount)
+		try container.encodeIfPresent(cursorScmProvider, forKey: .cursorScmProvider)
+		try container.encode(customInstructions, forKey: .customInstructions)
+		try container.encodeIfPresent(disabledToolCount, forKey: .disabledToolCount)
+		try container.encode(id, forKey: .id)
+		try container.encodeIfPresent(isRequired, forKey: .isRequired)
+		try container.encode(isTeamServer, forKey: .isTeamServer)
+		try container.encodeIfPresent(managedByTeamPluginPolicy, forKey: .managedByTeamPluginPolicy)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(pluginId, forKey: .pluginId)
+		try container.encode(rowServerIdentifier, forKey: .rowServerIdentifier)
+		try container.encodeIfPresent(servedBy, forKey: .servedBy)
+		try container.encode(serverIdentifier, forKey: .serverIdentifier)
+		try container.encode(status, forKey: .status)
+		try container.encodeIfPresent(statusDetail, forKey: .statusDetail)
+		try container.encode(toolCount, forKey: .toolCount)
+		try container.encode(transport, forKey: .transport)
+		try container.encodeIfPresent(url, forKey: .url)
+	}
+}
+
+public struct SandMcpServerSummaryServedBy: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let cursor = SandMcpServerSummaryServedBy(rawValue: "cursor")
+	public static let grok = SandMcpServerSummaryServedBy(rawValue: "grok")
+}
+
+public struct SandMcpServerSummaryStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let connected = SandMcpServerSummaryStatus(rawValue: "connected")
+	public static let disabledByTeamAdminPolicy = SandMcpServerSummaryStatus(rawValue: "disabledByTeamAdminPolicy")
+	public static let disconnected = SandMcpServerSummaryStatus(rawValue: "disconnected")
+	public static let error = SandMcpServerSummaryStatus(rawValue: "error")
+	public static let initializing = SandMcpServerSummaryStatus(rawValue: "initializing")
+	public static let needsAuth = SandMcpServerSummaryStatus(rawValue: "needsAuth")
+	public static let needsGrant = SandMcpServerSummaryStatus(rawValue: "needsGrant")
+}
+
+public enum SandMcpServerSummaryStatusDetail: Codable, Sendable, Equatable {
+
+	case authenticationRequired(AuthenticationRequired)
+	case botComputerUnreachable(BotComputerUnreachable)
+	case disabledByTeamAdmin(DisabledByTeamAdmin)
+	case failedToLoad(FailedToLoad)
+	case notReportedByBackend(NotReportedByBackend)
+	case notReportedByBotComputer(NotReportedByBotComputer)
+	case runsOnBotComputer(RunsOnBotComputer)
+	case unknown(Unknown)
+
+	public struct AuthenticationRequired: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "authentication_required") {
+			self.kind = kind
+		}
+	}
+
+	public struct BotComputerUnreachable: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "bot_computer_unreachable") {
+			self.kind = kind
+		}
+	}
+
+	public struct DisabledByTeamAdmin: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "disabled_by_team_admin") {
+			self.kind = kind
+		}
+	}
+
+	public struct FailedToLoad: Codable, Sendable, Equatable {
+		public let kind: String
+		public let technicalDetail: String?
+		public init(kind: String = "failed_to_load", technicalDetail: String? = nil) {
+			self.kind = kind
+			self.technicalDetail = technicalDetail
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, technicalDetail
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(technicalDetail, forKey: .technicalDetail)
+		}
+	}
+
+	public struct NotReportedByBackend: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "not_reported_by_backend") {
+			self.kind = kind
+		}
+	}
+
+	public struct NotReportedByBotComputer: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "not_reported_by_bot_computer") {
+			self.kind = kind
+		}
+	}
+
+	public struct RunsOnBotComputer: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "runs_on_bot_computer") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "authentication_required": self = .authenticationRequired(try AuthenticationRequired(from: decoder))
+		case "bot_computer_unreachable": self = .botComputerUnreachable(try BotComputerUnreachable(from: decoder))
+		case "disabled_by_team_admin": self = .disabledByTeamAdmin(try DisabledByTeamAdmin(from: decoder))
+		case "failed_to_load": self = .failedToLoad(try FailedToLoad(from: decoder))
+		case "not_reported_by_backend": self = .notReportedByBackend(try NotReportedByBackend(from: decoder))
+		case "not_reported_by_bot_computer": self = .notReportedByBotComputer(try NotReportedByBotComputer(from: decoder))
+		case "runs_on_bot_computer": self = .runsOnBotComputer(try RunsOnBotComputer(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .authenticationRequired(let v): try v.encode(to: encoder)
+		case .botComputerUnreachable(let v): try v.encode(to: encoder)
+		case .disabledByTeamAdmin(let v): try v.encode(to: encoder)
+		case .failedToLoad(let v): try v.encode(to: encoder)
+		case .notReportedByBackend(let v): try v.encode(to: encoder)
+		case .notReportedByBotComputer(let v): try v.encode(to: encoder)
+		case .runsOnBotComputer(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandMcpServerSummaryTransport: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let http = SandMcpServerSummaryTransport(rawValue: "http")
+	public static let sse = SandMcpServerSummaryTransport(rawValue: "sse")
+	public static let stdio = SandMcpServerSummaryTransport(rawValue: "stdio")
+}
+
+public struct SandMcpServerTool: Codable, Sendable, Equatable {
+	public let description: String?
+	public let isDisabled: Bool
+	public let name: String
+	public let title: String?
+	public init(description: String? = nil, isDisabled: Bool, name: String, title: String? = nil) {
+		self.description = description
+		self.isDisabled = isDisabled
+		self.name = name
+		self.title = title
+	}
+	enum CodingKeys: String, CodingKey {
+		case description, isDisabled, name, title
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(description, forKey: .description)
+		try container.encode(isDisabled, forKey: .isDisabled)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(title, forKey: .title)
+	}
+}
+
+public struct SandMcpState: Codable, Sendable, Equatable {
+	public let servers: [SandMcpServerSummary]
+	public init(servers: [SandMcpServerSummary]) {
+		self.servers = servers
+	}
+}
+
+public enum SandMcpVariableValue: Codable, Sendable, Equatable {
+	case variant0(Bool)
+	case variant1(Bool)
+	case variant2(Double)
+	case variant3(String)
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.singleValueContainer()
+		if let v = try? container.decode(Bool.self) { self = .variant0(v); return }
+		if let v = try? container.decode(Bool.self) { self = .variant1(v); return }
+		if let v = try? container.decode(Double.self) { self = .variant2(v); return }
+		if let v = try? container.decode(String.self) { self = .variant3(v); return }
+		throw DecodingError.typeMismatch(SandMcpVariableValue.self, .init(codingPath: decoder.codingPath, debugDescription: "Unknown SandMcpVariableValue value"))
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.singleValueContainer()
+		switch self {
+		case .variant0(let v): try container.encode(v)
+		case .variant1(let v): try container.encode(v)
+		case .variant2(let v): try container.encode(v)
+		case .variant3(let v): try container.encode(v)
+		}
+	}
 }
 
 public struct SandMediaMatch: Codable, Sendable, Equatable {
@@ -3630,6 +7700,23 @@ public struct SandMediaMatchKind: RawRepresentable, Codable, Sendable, Equatable
 	public static let table = SandMediaMatchKind(rawValue: "table")
 	public static let text = SandMediaMatchKind(rawValue: "text")
 	public static let video = SandMediaMatchKind(rawValue: "video")
+}
+
+public struct SandMessageAttachment: Codable, Sendable, Equatable {
+	public let byteSize: Double?
+	public let url: String
+	public init(byteSize: Double? = nil, url: String) {
+		self.byteSize = byteSize
+		self.url = url
+	}
+	enum CodingKeys: String, CodingKey {
+		case byteSize, url
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(byteSize, forKey: .byteSize)
+		try container.encode(url, forKey: .url)
+	}
 }
 
 public struct SandMessageAuthor: Codable, Sendable, Equatable {
@@ -3686,32 +7773,68 @@ public struct SandMessageAuthorKind: RawRepresentable, Codable, Sendable, Equata
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
 	public static let agent = SandMessageAuthorKind(rawValue: "agent")
+	public static let cloudAgent = SandMessageAuthorKind(rawValue: "cloud-agent")
 	public static let group = SandMessageAuthorKind(rawValue: "group")
 }
 
-public struct SandMessageRole: RawRepresentable, Codable, Sendable, Equatable, Hashable {
-	public let rawValue: String
-	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let assistant = SandMessageRole(rawValue: "assistant")
-	public static let user = SandMessageRole(rawValue: "user")
+public struct SandModelSelection: Codable, Sendable, Equatable {
+	public let maxMode: Bool
+	public let modelId: String
+	public let parameters: [SandAgentModelParameter]
+	public init(maxMode: Bool, modelId: String, parameters: [SandAgentModelParameter]) {
+		self.maxMode = maxMode
+		self.modelId = modelId
+		self.parameters = parameters
+	}
 }
 
-public struct SandPermissionKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
-	public let rawValue: String
-	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let camera = SandPermissionKind(rawValue: "camera")
-	public static let filesystem = SandPermissionKind(rawValue: "filesystem")
-	public static let microphone = SandPermissionKind(rawValue: "microphone")
-	public static let other = SandPermissionKind(rawValue: "other")
-	public static let screenRecording = SandPermissionKind(rawValue: "screen-recording")
+public struct SandNotificationConfig: Codable, Sendable, Equatable {
+	public let allowedApps: [String]
+	public let isEnabled: Bool
+	public let maxPerWindow: Double
+	public let minIntervalMs: Double
+	public let windowMs: Double
+	public init(allowedApps: [String], isEnabled: Bool, maxPerWindow: Double, minIntervalMs: Double, windowMs: Double) {
+		self.allowedApps = allowedApps
+		self.isEnabled = isEnabled
+		self.maxPerWindow = maxPerWindow
+		self.minIntervalMs = minIntervalMs
+		self.windowMs = windowMs
+	}
+}
+
+public struct SandNotificationConfigInput: Codable, Sendable, Equatable {
+	public let allowedApps: [String]?
+	public let isEnabled: Bool?
+	public let maxPerWindow: Double?
+	public let minIntervalMs: Double?
+	public let windowMs: Double?
+	public init(allowedApps: [String]? = nil, isEnabled: Bool? = nil, maxPerWindow: Double? = nil, minIntervalMs: Double? = nil, windowMs: Double? = nil) {
+		self.allowedApps = allowedApps
+		self.isEnabled = isEnabled
+		self.maxPerWindow = maxPerWindow
+		self.minIntervalMs = minIntervalMs
+		self.windowMs = windowMs
+	}
+	enum CodingKeys: String, CodingKey {
+		case allowedApps, isEnabled, maxPerWindow, minIntervalMs, windowMs
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(allowedApps, forKey: .allowedApps)
+		try container.encodeIfPresent(isEnabled, forKey: .isEnabled)
+		try container.encodeIfPresent(maxPerWindow, forKey: .maxPerWindow)
+		try container.encodeIfPresent(minIntervalMs, forKey: .minIntervalMs)
+		try container.encodeIfPresent(windowMs, forKey: .windowMs)
+	}
 }
 
 public struct SandPermissionRequest: Codable, Sendable, Equatable {
 	public let detail: String?
-	public let kind: SandPermissionKind
+	public let kind: SandPermissionRequestKind
 	public let reason: String
 	public let title: String
-	public init(detail: String? = nil, kind: SandPermissionKind, reason: String, title: String) {
+	public init(detail: String? = nil, kind: SandPermissionRequestKind, reason: String, title: String) {
 		self.detail = detail
 		self.kind = kind
 		self.reason = reason
@@ -3727,6 +7850,16 @@ public struct SandPermissionRequest: Codable, Sendable, Equatable {
 		try container.encode(reason, forKey: .reason)
 		try container.encode(title, forKey: .title)
 	}
+}
+
+public struct SandPermissionRequestKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let camera = SandPermissionRequestKind(rawValue: "camera")
+	public static let filesystem = SandPermissionRequestKind(rawValue: "filesystem")
+	public static let microphone = SandPermissionRequestKind(rawValue: "microphone")
+	public static let other = SandPermissionRequestKind(rawValue: "other")
+	public static let screenRecording = SandPermissionRequestKind(rawValue: "screen-recording")
 }
 
 public struct SandPushMessageContentPayload: Codable, Sendable, Equatable {
@@ -3796,15 +7929,27 @@ public struct SandPushMessageEntryPayloadAuthorKind: RawRepresentable, Codable, 
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
 	public static let agent = SandPushMessageEntryPayloadAuthorKind(rawValue: "agent")
+	public static let cloudAgent = SandPushMessageEntryPayloadAuthorKind(rawValue: "cloud-agent")
 	public static let group = SandPushMessageEntryPayloadAuthorKind(rawValue: "group")
 }
 
 public struct SandReaction: Codable, Sendable, Equatable {
 	public let by: String
 	public let emoji: String
-	public init(by: String, emoji: String) {
+	public let name: String?
+	public init(by: String, emoji: String, name: String? = nil) {
 		self.by = by
 		self.emoji = emoji
+		self.name = name
+	}
+	enum CodingKeys: String, CodingKey {
+		case by, emoji, name
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(by, forKey: .by)
+		try container.encode(emoji, forKey: .emoji)
+		try container.encodeIfPresent(name, forKey: .name)
 	}
 }
 
@@ -3886,16 +8031,18 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 		public let event: SandTimelineEvent
 		public let id: String
 		public let reactions: [SandReaction]?
+		public let seq: Double?
 		public let timestampMs: Double?
-		public init(kind: String = "event", event: SandTimelineEvent, id: String, reactions: [SandReaction]? = nil, timestampMs: Double? = nil) {
+		public init(kind: String = "event", event: SandTimelineEvent, id: String, reactions: [SandReaction]? = nil, seq: Double? = nil, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.event = event
 			self.id = id
 			self.reactions = reactions
+			self.seq = seq
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, event, id, reactions, timestampMs
+			case kind, event, id, reactions, seq, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -3903,6 +8050,7 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			try container.encode(event, forKey: .event)
 			try container.encode(id, forKey: .id)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 		}
 	}
@@ -3913,19 +8061,21 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 		public let reactions: [SandReaction]?
 		public let requestId: String
 		public let sentiment: SandRetainedTranscriptPageEntriesItemSentiment?
-		public let state: SandRetainedTranscriptPageEntriesItemState
+		public let seq: Double?
+		public let state: SandFeedbackPromptState
 		public let timestampMs: Double?
-		public init(kind: String = "feedback", id: String, reactions: [SandReaction]? = nil, requestId: String, sentiment: SandRetainedTranscriptPageEntriesItemSentiment? = nil, state: SandRetainedTranscriptPageEntriesItemState, timestampMs: Double? = nil) {
+		public init(kind: String = "feedback", id: String, reactions: [SandReaction]? = nil, requestId: String, sentiment: SandRetainedTranscriptPageEntriesItemSentiment? = nil, seq: Double? = nil, state: SandFeedbackPromptState, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.id = id
 			self.reactions = reactions
 			self.requestId = requestId
 			self.sentiment = sentiment
+			self.seq = seq
 			self.state = state
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, id, reactions, requestId, sentiment, state, timestampMs
+			case kind, id, reactions, requestId, sentiment, seq, state, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -3934,6 +8084,7 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			try container.encodeIfPresent(reactions, forKey: .reactions)
 			try container.encode(requestId, forKey: .requestId)
 			try container.encodeIfPresent(sentiment, forKey: .sentiment)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encode(state, forKey: .state)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 		}
@@ -3941,12 +8092,14 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 
 	public struct Message: Codable, Sendable, Equatable {
 		public let kind: String
+		public let attachments: [SandMessageAttachment]?
 		public let author: SandMessageAuthorEnvelope?
 		public let batchId: String?
 		public let branched: Bool?
 		public let channel: String?
 		public let channelSender: String?
 		public let clientNonce: String?
+		public let cloudAgentWake: SandCloudAgentWake?
 		public let content: String
 		public let fromAgent: SandMessageAuthor?
 		public let fromUser: SandRetainedTranscriptPageEntriesItemFromUser?
@@ -3957,18 +8110,23 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 		public let replyTo: String?
 		public let requestId: String?
 		public let richText: String?
-		public let role: SandMessageRole
+		public let role: SandRetainedTranscriptPageEntriesItemRole
 		public let sentWhileOfflineAtMs: Double?
+		public let seq: Double?
+		public let suppressed: String?
 		public let timestampMs: Double?
 		public let toAgent: SandMessageAuthor?
-		public init(kind: String = "message", author: SandMessageAuthorEnvelope? = nil, batchId: String? = nil, branched: Bool? = nil, channel: String? = nil, channelSender: String? = nil, clientNonce: String? = nil, content: String, fromAgent: SandMessageAuthor? = nil, fromUser: SandRetainedTranscriptPageEntriesItemFromUser? = nil, id: String, images: [SandSendMessageImage]? = nil, isStreaming: Bool, reactions: [SandReaction]? = nil, replyTo: String? = nil, requestId: String? = nil, richText: String? = nil, role: SandMessageRole, sentWhileOfflineAtMs: Double? = nil, timestampMs: Double? = nil, toAgent: SandMessageAuthor? = nil) {
+		public let wakeOutcomeUnseen: Bool?
+		public init(kind: String = "message", attachments: [SandMessageAttachment]? = nil, author: SandMessageAuthorEnvelope? = nil, batchId: String? = nil, branched: Bool? = nil, channel: String? = nil, channelSender: String? = nil, clientNonce: String? = nil, cloudAgentWake: SandCloudAgentWake? = nil, content: String, fromAgent: SandMessageAuthor? = nil, fromUser: SandRetainedTranscriptPageEntriesItemFromUser? = nil, id: String, images: [SandSendMessageImage]? = nil, isStreaming: Bool, reactions: [SandReaction]? = nil, replyTo: String? = nil, requestId: String? = nil, richText: String? = nil, role: SandRetainedTranscriptPageEntriesItemRole, sentWhileOfflineAtMs: Double? = nil, seq: Double? = nil, suppressed: String? = nil, timestampMs: Double? = nil, toAgent: SandMessageAuthor? = nil, wakeOutcomeUnseen: Bool? = nil) {
 			self.kind = kind
+			self.attachments = attachments
 			self.author = author
 			self.batchId = batchId
 			self.branched = branched
 			self.channel = channel
 			self.channelSender = channelSender
 			self.clientNonce = clientNonce
+			self.cloudAgentWake = cloudAgentWake
 			self.content = content
 			self.fromAgent = fromAgent
 			self.fromUser = fromUser
@@ -3981,21 +8139,26 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			self.richText = richText
 			self.role = role
 			self.sentWhileOfflineAtMs = sentWhileOfflineAtMs
+			self.seq = seq
+			self.suppressed = suppressed
 			self.timestampMs = timestampMs
 			self.toAgent = toAgent
+			self.wakeOutcomeUnseen = wakeOutcomeUnseen
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, author, batchId, branched, channel, channelSender, clientNonce, content, fromAgent, fromUser, id, images, isStreaming, reactions, replyTo, requestId, richText, role, sentWhileOfflineAtMs, timestampMs, toAgent
+			case kind, attachments, author, batchId, branched, channel, channelSender, clientNonce, cloudAgentWake, content, fromAgent, fromUser, id, images, isStreaming, reactions, replyTo, requestId, richText, role, sentWhileOfflineAtMs, seq, suppressed, timestampMs, toAgent, wakeOutcomeUnseen
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
 			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(attachments, forKey: .attachments)
 			try container.encodeIfPresent(author, forKey: .author)
 			try container.encodeIfPresent(batchId, forKey: .batchId)
 			try container.encodeIfPresent(branched, forKey: .branched)
 			try container.encodeIfPresent(channel, forKey: .channel)
 			try container.encodeIfPresent(channelSender, forKey: .channelSender)
 			try container.encodeIfPresent(clientNonce, forKey: .clientNonce)
+			try container.encodeIfPresent(cloudAgentWake, forKey: .cloudAgentWake)
 			try container.encode(content, forKey: .content)
 			try container.encodeIfPresent(fromAgent, forKey: .fromAgent)
 			try container.encodeIfPresent(fromUser, forKey: .fromUser)
@@ -4008,38 +8171,47 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			try container.encodeIfPresent(richText, forKey: .richText)
 			try container.encode(role, forKey: .role)
 			try container.encodeIfPresent(sentWhileOfflineAtMs, forKey: .sentWhileOfflineAtMs)
+			try container.encodeIfPresent(seq, forKey: .seq)
+			try container.encodeIfPresent(suppressed, forKey: .suppressed)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 			try container.encodeIfPresent(toAgent, forKey: .toAgent)
+			try container.encodeIfPresent(wakeOutcomeUnseen, forKey: .wakeOutcomeUnseen)
 		}
 	}
 
 	public struct Notice: Codable, Sendable, Equatable {
 		public let kind: String
 		public let branched: Bool?
+		public let copy: SandTeamBotLineCopy?
 		public let id: String
 		public let reactions: [SandReaction]?
 		public let replyTo: String?
+		public let seq: Double?
 		public let text: String
 		public let timestampMs: Double?
-		public init(kind: String = "notice", branched: Bool? = nil, id: String, reactions: [SandReaction]? = nil, replyTo: String? = nil, text: String, timestampMs: Double? = nil) {
+		public init(kind: String = "notice", branched: Bool? = nil, copy: SandTeamBotLineCopy? = nil, id: String, reactions: [SandReaction]? = nil, replyTo: String? = nil, seq: Double? = nil, text: String, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.branched = branched
+			self.copy = copy
 			self.id = id
 			self.reactions = reactions
 			self.replyTo = replyTo
+			self.seq = seq
 			self.text = text
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, branched, id, reactions, replyTo, text, timestampMs
+			case kind, branched, copy, id, reactions, replyTo, seq, text, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
 			try container.encode(kind, forKey: .kind)
 			try container.encodeIfPresent(branched, forKey: .branched)
+			try container.encodeIfPresent(copy, forKey: .copy)
 			try container.encode(id, forKey: .id)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
 			try container.encodeIfPresent(replyTo, forKey: .replyTo)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encode(text, forKey: .text)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 		}
@@ -4047,6 +8219,7 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 
 	public struct SendMessage: Codable, Sendable, Equatable {
 		public let kind: String
+		public let attachments: [SandMessageAttachment]?
 		public let author: SandMessageAuthor?
 		public let batchId: String?
 		public let boxInstruction: String?
@@ -4055,6 +8228,10 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 		public let boxResolution: SandRetainedTranscriptPageEntriesItemBoxResolution?
 		public let boxSnapshot: String?
 		public let branched: Bool?
+		public let channelPermalink: String?
+		public let cloudAgentArtifacts: [SandCloudAgentArtifactFile]?
+		public let cloudAgentWake: SandCloudAgentWake?
+		public let credentialResolution: SandRetainedTranscriptPageEntriesItemCredentialResolution?
 		public let deliverTo: String?
 		public let draftRoute: SandRetainedTranscriptPageEntriesItemDraftRoute?
 		public let draftRouteVerified: SandRetainedTranscriptPageEntriesItemDraftRouteVerified?
@@ -4062,6 +8239,7 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 		public let formFieldOutcomes: [SandUserFormFieldOutcome]?
 		public let formRequestId: String?
 		public let formResolution: SandRetainedTranscriptPageEntriesItemFormResolution?
+		public let formSubmissionEffect: SandRetainedTranscriptPageEntriesItemFormSubmissionEffect?
 		public let id: String
 		public let message: SandSendMessage
 		public let reactions: [SandReaction]?
@@ -4070,12 +8248,16 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 		public let respondedValue: String?
 		public let respondedValueEchoed: Bool?
 		public let secretProvided: Bool?
+		public let seq: Double?
 		public let streaming: Bool?
 		public let timestampMs: Double?
+		public let wake: SandRetainedTranscriptPageEntriesItemWake?
+		public let wakeOutcomeUnseen: Bool?
 		public let widgetDismissed: Bool?
 		public let widgetSkipped: Bool?
-		public init(kind: String = "send-message", author: SandMessageAuthor? = nil, batchId: String? = nil, boxInstruction: String? = nil, boxRequest: String? = nil, boxRequestId: String? = nil, boxResolution: SandRetainedTranscriptPageEntriesItemBoxResolution? = nil, boxSnapshot: String? = nil, branched: Bool? = nil, deliverTo: String? = nil, draftRoute: SandRetainedTranscriptPageEntriesItemDraftRoute? = nil, draftRouteVerified: SandRetainedTranscriptPageEntriesItemDraftRouteVerified? = nil, draftSendState: SandRetainedTranscriptPageEntriesItemDraftSendState? = nil, formFieldOutcomes: [SandUserFormFieldOutcome]? = nil, formRequestId: String? = nil, formResolution: SandRetainedTranscriptPageEntriesItemFormResolution? = nil, id: String, message: SandSendMessage, reactions: [SandReaction]? = nil, replyTo: String? = nil, requestId: String? = nil, respondedValue: String? = nil, respondedValueEchoed: Bool? = nil, secretProvided: Bool? = nil, streaming: Bool? = nil, timestampMs: Double? = nil, widgetDismissed: Bool? = nil, widgetSkipped: Bool? = nil) {
+		public init(kind: String = "send-message", attachments: [SandMessageAttachment]? = nil, author: SandMessageAuthor? = nil, batchId: String? = nil, boxInstruction: String? = nil, boxRequest: String? = nil, boxRequestId: String? = nil, boxResolution: SandRetainedTranscriptPageEntriesItemBoxResolution? = nil, boxSnapshot: String? = nil, branched: Bool? = nil, channelPermalink: String? = nil, cloudAgentArtifacts: [SandCloudAgentArtifactFile]? = nil, cloudAgentWake: SandCloudAgentWake? = nil, credentialResolution: SandRetainedTranscriptPageEntriesItemCredentialResolution? = nil, deliverTo: String? = nil, draftRoute: SandRetainedTranscriptPageEntriesItemDraftRoute? = nil, draftRouteVerified: SandRetainedTranscriptPageEntriesItemDraftRouteVerified? = nil, draftSendState: SandRetainedTranscriptPageEntriesItemDraftSendState? = nil, formFieldOutcomes: [SandUserFormFieldOutcome]? = nil, formRequestId: String? = nil, formResolution: SandRetainedTranscriptPageEntriesItemFormResolution? = nil, formSubmissionEffect: SandRetainedTranscriptPageEntriesItemFormSubmissionEffect? = nil, id: String, message: SandSendMessage, reactions: [SandReaction]? = nil, replyTo: String? = nil, requestId: String? = nil, respondedValue: String? = nil, respondedValueEchoed: Bool? = nil, secretProvided: Bool? = nil, seq: Double? = nil, streaming: Bool? = nil, timestampMs: Double? = nil, wake: SandRetainedTranscriptPageEntriesItemWake? = nil, wakeOutcomeUnseen: Bool? = nil, widgetDismissed: Bool? = nil, widgetSkipped: Bool? = nil) {
 			self.kind = kind
+			self.attachments = attachments
 			self.author = author
 			self.batchId = batchId
 			self.boxInstruction = boxInstruction
@@ -4084,6 +8266,10 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			self.boxResolution = boxResolution
 			self.boxSnapshot = boxSnapshot
 			self.branched = branched
+			self.channelPermalink = channelPermalink
+			self.cloudAgentArtifacts = cloudAgentArtifacts
+			self.cloudAgentWake = cloudAgentWake
+			self.credentialResolution = credentialResolution
 			self.deliverTo = deliverTo
 			self.draftRoute = draftRoute
 			self.draftRouteVerified = draftRouteVerified
@@ -4091,6 +8277,7 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			self.formFieldOutcomes = formFieldOutcomes
 			self.formRequestId = formRequestId
 			self.formResolution = formResolution
+			self.formSubmissionEffect = formSubmissionEffect
 			self.id = id
 			self.message = message
 			self.reactions = reactions
@@ -4099,17 +8286,21 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			self.respondedValue = respondedValue
 			self.respondedValueEchoed = respondedValueEchoed
 			self.secretProvided = secretProvided
+			self.seq = seq
 			self.streaming = streaming
 			self.timestampMs = timestampMs
+			self.wake = wake
+			self.wakeOutcomeUnseen = wakeOutcomeUnseen
 			self.widgetDismissed = widgetDismissed
 			self.widgetSkipped = widgetSkipped
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, author, batchId, boxInstruction, boxRequest, boxRequestId, boxResolution, boxSnapshot, branched, deliverTo, draftRoute, draftRouteVerified, draftSendState, formFieldOutcomes, formRequestId, formResolution, id, message, reactions, replyTo, requestId, respondedValue, respondedValueEchoed, secretProvided, streaming, timestampMs, widgetDismissed, widgetSkipped
+			case kind, attachments, author, batchId, boxInstruction, boxRequest, boxRequestId, boxResolution, boxSnapshot, branched, channelPermalink, cloudAgentArtifacts, cloudAgentWake, credentialResolution, deliverTo, draftRoute, draftRouteVerified, draftSendState, formFieldOutcomes, formRequestId, formResolution, formSubmissionEffect, id, message, reactions, replyTo, requestId, respondedValue, respondedValueEchoed, secretProvided, seq, streaming, timestampMs, wake, wakeOutcomeUnseen, widgetDismissed, widgetSkipped
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
 			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(attachments, forKey: .attachments)
 			try container.encodeIfPresent(author, forKey: .author)
 			try container.encodeIfPresent(batchId, forKey: .batchId)
 			try container.encodeIfPresent(boxInstruction, forKey: .boxInstruction)
@@ -4118,6 +8309,10 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			try container.encodeIfPresent(boxResolution, forKey: .boxResolution)
 			try container.encodeIfPresent(boxSnapshot, forKey: .boxSnapshot)
 			try container.encodeIfPresent(branched, forKey: .branched)
+			try container.encodeIfPresent(channelPermalink, forKey: .channelPermalink)
+			try container.encodeIfPresent(cloudAgentArtifacts, forKey: .cloudAgentArtifacts)
+			try container.encodeIfPresent(cloudAgentWake, forKey: .cloudAgentWake)
+			try container.encodeIfPresent(credentialResolution, forKey: .credentialResolution)
 			try container.encodeIfPresent(deliverTo, forKey: .deliverTo)
 			try container.encodeIfPresent(draftRoute, forKey: .draftRoute)
 			try container.encodeIfPresent(draftRouteVerified, forKey: .draftRouteVerified)
@@ -4125,6 +8320,7 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			try container.encodeIfPresent(formFieldOutcomes, forKey: .formFieldOutcomes)
 			try container.encodeIfPresent(formRequestId, forKey: .formRequestId)
 			try container.encodeIfPresent(formResolution, forKey: .formResolution)
+			try container.encodeIfPresent(formSubmissionEffect, forKey: .formSubmissionEffect)
 			try container.encode(id, forKey: .id)
 			try container.encode(message, forKey: .message)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
@@ -4133,8 +8329,11 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			try container.encodeIfPresent(respondedValue, forKey: .respondedValue)
 			try container.encodeIfPresent(respondedValueEchoed, forKey: .respondedValueEchoed)
 			try container.encodeIfPresent(secretProvided, forKey: .secretProvided)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encodeIfPresent(streaming, forKey: .streaming)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
+			try container.encodeIfPresent(wake, forKey: .wake)
+			try container.encodeIfPresent(wakeOutcomeUnseen, forKey: .wakeOutcomeUnseen)
 			try container.encodeIfPresent(widgetDismissed, forKey: .widgetDismissed)
 			try container.encodeIfPresent(widgetSkipped, forKey: .widgetSkipped)
 		}
@@ -4164,20 +8363,22 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 		public let id: String
 		public let name: String
 		public let reactions: [SandReaction]?
-		public let status: SandToolCallStatus
+		public let seq: Double?
+		public let status: SandRetainedTranscriptPageEntriesItemStatus
 		public let summary: String?
 		public let timestampMs: Double?
-		public init(kind: String = "tool-call", id: String, name: String, reactions: [SandReaction]? = nil, status: SandToolCallStatus, summary: String? = nil, timestampMs: Double? = nil) {
+		public init(kind: String = "tool-call", id: String, name: String, reactions: [SandReaction]? = nil, seq: Double? = nil, status: SandRetainedTranscriptPageEntriesItemStatus, summary: String? = nil, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.id = id
 			self.name = name
 			self.reactions = reactions
+			self.seq = seq
 			self.status = status
 			self.summary = summary
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, id, name, reactions, status, summary, timestampMs
+			case kind, id, name, reactions, seq, status, summary, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -4185,6 +8386,7 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			try container.encode(id, forKey: .id)
 			try container.encode(name, forKey: .name)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encode(status, forKey: .status)
 			try container.encodeIfPresent(summary, forKey: .summary)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
@@ -4203,9 +8405,10 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 		public let id: String
 		public let reactions: [SandReaction]?
 		public let replyTo: String?
+		public let seq: Double?
 		public let timestampMs: Double?
 		public let width: Double?
-		public init(kind: String = "user-attachment", batchId: String? = nil, branched: Bool? = nil, byteSize: Double? = nil, clientNonce: String? = nil, file_name: String? = nil, file_path: String, height: Double? = nil, id: String, reactions: [SandReaction]? = nil, replyTo: String? = nil, timestampMs: Double? = nil, width: Double? = nil) {
+		public init(kind: String = "user-attachment", batchId: String? = nil, branched: Bool? = nil, byteSize: Double? = nil, clientNonce: String? = nil, file_name: String? = nil, file_path: String, height: Double? = nil, id: String, reactions: [SandReaction]? = nil, replyTo: String? = nil, seq: Double? = nil, timestampMs: Double? = nil, width: Double? = nil) {
 			self.kind = kind
 			self.batchId = batchId
 			self.branched = branched
@@ -4217,11 +8420,12 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			self.id = id
 			self.reactions = reactions
 			self.replyTo = replyTo
+			self.seq = seq
 			self.timestampMs = timestampMs
 			self.width = width
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, batchId, branched, byteSize, clientNonce, file_name, file_path, height, id, reactions, replyTo, timestampMs, width
+			case kind, batchId, branched, byteSize, clientNonce, file_name, file_path, height, id, reactions, replyTo, seq, timestampMs, width
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -4236,6 +8440,7 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			try container.encode(id, forKey: .id)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
 			try container.encodeIfPresent(replyTo, forKey: .replyTo)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 			try container.encodeIfPresent(width, forKey: .width)
 		}
@@ -4247,17 +8452,19 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 		public let conversation: SandVoiceCallConversation?
 		public let id: String
 		public let reactions: [SandReaction]?
+		public let seq: Double?
 		public let timestampMs: Double?
-		public init(kind: String = "voice-call", call: SandVoiceCallSummary, conversation: SandVoiceCallConversation? = nil, id: String, reactions: [SandReaction]? = nil, timestampMs: Double? = nil) {
+		public init(kind: String = "voice-call", call: SandVoiceCallSummary, conversation: SandVoiceCallConversation? = nil, id: String, reactions: [SandReaction]? = nil, seq: Double? = nil, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.call = call
 			self.conversation = conversation
 			self.id = id
 			self.reactions = reactions
+			self.seq = seq
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, call, conversation, id, reactions, timestampMs
+			case kind, call, conversation, id, reactions, seq, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -4266,6 +8473,7 @@ public enum SandRetainedTranscriptPageEntriesItem: Codable, Sendable, Equatable 
 			try container.encodeIfPresent(conversation, forKey: .conversation)
 			try container.encode(id, forKey: .id)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 		}
 	}
@@ -4318,6 +8526,16 @@ public struct SandRetainedTranscriptPageEntriesItemBoxResolution: RawRepresentab
 	public static let replied = SandRetainedTranscriptPageEntriesItemBoxResolution(rawValue: "replied")
 }
 
+public struct SandRetainedTranscriptPageEntriesItemCredentialResolution: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let approved = SandRetainedTranscriptPageEntriesItemCredentialResolution(rawValue: "approved")
+	public static let denied = SandRetainedTranscriptPageEntriesItemCredentialResolution(rawValue: "denied")
+	public static let failed = SandRetainedTranscriptPageEntriesItemCredentialResolution(rawValue: "failed")
+	public static let filling = SandRetainedTranscriptPageEntriesItemCredentialResolution(rawValue: "filling")
+	public static let retryable = SandRetainedTranscriptPageEntriesItemCredentialResolution(rawValue: "retryable")
+}
+
 public enum SandRetainedTranscriptPageEntriesItemDraftRoute: Codable, Sendable, Equatable {
 
 	case slack(Slack)
@@ -4349,19 +8567,22 @@ public enum SandRetainedTranscriptPageEntriesItemDraftRoute: Codable, Sendable, 
 
 	public struct Email: Codable, Sendable, Equatable {
 		public let platform: String
+		public let mailbox: SandRetainedTranscriptPageEntriesItemDraftRouteMailbox?
 		public let providerIdentifier: String
 		public let replyToMessageId: String?
-		public init(platform: String = "email", providerIdentifier: String, replyToMessageId: String? = nil) {
+		public init(platform: String = "email", mailbox: SandRetainedTranscriptPageEntriesItemDraftRouteMailbox? = nil, providerIdentifier: String, replyToMessageId: String? = nil) {
 			self.platform = platform
+			self.mailbox = mailbox
 			self.providerIdentifier = providerIdentifier
 			self.replyToMessageId = replyToMessageId
 		}
 		enum CodingKeys: String, CodingKey {
-			case platform, providerIdentifier, replyToMessageId
+			case platform, mailbox, providerIdentifier, replyToMessageId
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
 			try container.encode(platform, forKey: .platform)
+			try container.encodeIfPresent(mailbox, forKey: .mailbox)
 			try container.encode(providerIdentifier, forKey: .providerIdentifier)
 			try container.encodeIfPresent(replyToMessageId, forKey: .replyToMessageId)
 		}
@@ -4391,6 +8612,13 @@ public enum SandRetainedTranscriptPageEntriesItemDraftRoute: Codable, Sendable, 
 		case .unknown(let v): try v.encode(to: encoder)
 		}
 	}
+}
+
+public struct SandRetainedTranscriptPageEntriesItemDraftRouteMailbox: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let gmail = SandRetainedTranscriptPageEntriesItemDraftRouteMailbox(rawValue: "gmail")
+	public static let outlook = SandRetainedTranscriptPageEntriesItemDraftRouteMailbox(rawValue: "outlook")
 }
 
 public enum SandRetainedTranscriptPageEntriesItemDraftRouteVerified: Codable, Sendable, Equatable {
@@ -4487,6 +8715,122 @@ public struct SandRetainedTranscriptPageEntriesItemFormResolution: RawRepresenta
 	public static let submitted = SandRetainedTranscriptPageEntriesItemFormResolution(rawValue: "submitted")
 }
 
+public enum SandRetainedTranscriptPageEntriesItemFormSubmissionEffect: Codable, Sendable, Equatable {
+
+	case claimed(Claimed)
+	case settled(Settled)
+	case unknown(Unknown)
+
+	public struct Claimed: Codable, Sendable, Equatable {
+		public let kind: String
+		public let claimId: String?
+		public let claimedAtMs: Double?
+		public init(kind: String = "claimed", claimId: String? = nil, claimedAtMs: Double? = nil) {
+			self.kind = kind
+			self.claimId = claimId
+			self.claimedAtMs = claimedAtMs
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, claimId, claimedAtMs
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(claimId, forKey: .claimId)
+			try container.encodeIfPresent(claimedAtMs, forKey: .claimedAtMs)
+		}
+	}
+
+	public struct Settled: Codable, Sendable, Equatable {
+		public let kind: String
+		public let submit: SandRetainedTranscriptPageEntriesItemFormSubmissionEffectSubmit?
+		public let wakeDelivery: SandRetainedTranscriptPageEntriesItemFormSubmissionEffectWakeDelivery?
+		public init(kind: String = "settled", submit: SandRetainedTranscriptPageEntriesItemFormSubmissionEffectSubmit? = nil, wakeDelivery: SandRetainedTranscriptPageEntriesItemFormSubmissionEffectWakeDelivery? = nil) {
+			self.kind = kind
+			self.submit = submit
+			self.wakeDelivery = wakeDelivery
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, submit, wakeDelivery
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(submit, forKey: .submit)
+			try container.encodeIfPresent(wakeDelivery, forKey: .wakeDelivery)
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "claimed": self = .claimed(try Claimed(from: decoder))
+		case "settled": self = .settled(try Settled(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .claimed(let v): try v.encode(to: encoder)
+		case .settled(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public enum SandRetainedTranscriptPageEntriesItemFormSubmissionEffectSubmit: Codable, Sendable, Equatable {
+	case variant0(Variant0)
+	case variant1(Variant1)
+	case variant2
+
+	public struct Variant0: Codable, Sendable, Equatable {
+		public let attempted: Bool
+		public init(attempted: Bool) {
+			self.attempted = attempted
+		}
+	}
+
+	public struct Variant1: Codable, Sendable, Equatable {
+		public let attempted: Bool
+		public let succeeded: Bool
+		public init(attempted: Bool, succeeded: Bool) {
+			self.attempted = attempted
+			self.succeeded = succeeded
+		}
+	}
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.singleValueContainer()
+		if let v = try? container.decode(Variant0.self) { self = .variant0(v); return }
+		if let v = try? container.decode(Variant1.self) { self = .variant1(v); return }
+		if container.decodeNil() { self = .variant2; return }
+		throw DecodingError.typeMismatch(SandRetainedTranscriptPageEntriesItemFormSubmissionEffectSubmit.self, .init(codingPath: decoder.codingPath, debugDescription: "Unknown SandRetainedTranscriptPageEntriesItemFormSubmissionEffectSubmit value"))
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.singleValueContainer()
+		switch self {
+		case .variant0(let v): try container.encode(v)
+		case .variant1(let v): try container.encode(v)
+		case .variant2: try container.encodeNil()
+		}
+	}
+}
+
+public struct SandRetainedTranscriptPageEntriesItemFormSubmissionEffectWakeDelivery: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let delivered = SandRetainedTranscriptPageEntriesItemFormSubmissionEffectWakeDelivery(rawValue: "delivered")
+	public static let pending = SandRetainedTranscriptPageEntriesItemFormSubmissionEffectWakeDelivery(rawValue: "pending")
+}
+
 public struct SandRetainedTranscriptPageEntriesItemFromUser: Codable, Sendable, Equatable {
 	public let authId: String?
 	public let avatarUrl: String?
@@ -4507,6 +8851,13 @@ public struct SandRetainedTranscriptPageEntriesItemFromUser: Codable, Sendable, 
 	}
 }
 
+public struct SandRetainedTranscriptPageEntriesItemRole: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let assistant = SandRetainedTranscriptPageEntriesItemRole(rawValue: "assistant")
+	public static let user = SandRetainedTranscriptPageEntriesItemRole(rawValue: "user")
+}
+
 public struct SandRetainedTranscriptPageEntriesItemSentiment: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
@@ -4514,12 +8865,25 @@ public struct SandRetainedTranscriptPageEntriesItemSentiment: RawRepresentable, 
 	public static let up = SandRetainedTranscriptPageEntriesItemSentiment(rawValue: "up")
 }
 
-public struct SandRetainedTranscriptPageEntriesItemState: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+public struct SandRetainedTranscriptPageEntriesItemStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let improve = SandRetainedTranscriptPageEntriesItemState(rawValue: "improve")
-	public static let prompt = SandRetainedTranscriptPageEntriesItemState(rawValue: "prompt")
-	public static let voted = SandRetainedTranscriptPageEntriesItemState(rawValue: "voted")
+	public static let done = SandRetainedTranscriptPageEntriesItemStatus(rawValue: "done")
+	public static let failed = SandRetainedTranscriptPageEntriesItemStatus(rawValue: "failed")
+	public static let pending = SandRetainedTranscriptPageEntriesItemStatus(rawValue: "pending")
+}
+
+public struct SandRetainedTranscriptPageEntriesItemWake: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let agent = SandRetainedTranscriptPageEntriesItemWake(rawValue: "agent")
+	public static let automation = SandRetainedTranscriptPageEntriesItemWake(rawValue: "automation")
+	public static let backgroundRevival = SandRetainedTranscriptPageEntriesItemWake(rawValue: "background-revival")
+	public static let broadcast = SandRetainedTranscriptPageEntriesItemWake(rawValue: "broadcast")
+	public static let connector = SandRetainedTranscriptPageEntriesItemWake(rawValue: "connector")
+	public static let event = SandRetainedTranscriptPageEntriesItemWake(rawValue: "event")
+	public static let handoffResume = SandRetainedTranscriptPageEntriesItemWake(rawValue: "handoff-resume")
+	public static let voiceCall = SandRetainedTranscriptPageEntriesItemWake(rawValue: "voice-call")
 }
 
 public struct SandScheduledAutomation: Codable, Sendable, Equatable {
@@ -4551,14 +8915,104 @@ public struct SandSecretRequest: Codable, Sendable, Equatable {
 	}
 }
 
-public struct SandSecretTarget: Codable, Sendable, Equatable {
-	public let field: String
-	public let kind: String
-	public let platform: String
-	public init(field: String, kind: String, platform: String) {
-		self.field = field
-		self.kind = kind
-		self.platform = platform
+public enum SandSecretTarget: Codable, Sendable, Equatable {
+
+	case boxEnv(BoxEnv)
+	case channelCredential(ChannelCredential)
+	case botPluginVariable(BotPluginVariable)
+	case botSecret(BotSecret)
+	case unknown(Unknown)
+
+	public struct BoxEnv: Codable, Sendable, Equatable {
+		public let kind: String
+		public let field: String?
+		public let name: String
+		public let platform: String?
+		public init(kind: String = "box-env", field: String? = nil, name: String, platform: String? = nil) {
+			self.kind = kind
+			self.field = field
+			self.name = name
+			self.platform = platform
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, field, name, platform
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(field, forKey: .field)
+			try container.encode(name, forKey: .name)
+			try container.encodeIfPresent(platform, forKey: .platform)
+		}
+	}
+
+	public struct ChannelCredential: Codable, Sendable, Equatable {
+		public let kind: String
+		public let field: String
+		public let platform: String
+		public init(kind: String = "channel-credential", field: String, platform: String) {
+			self.kind = kind
+			self.field = field
+			self.platform = platform
+		}
+	}
+
+	public struct BotPluginVariable: Codable, Sendable, Equatable {
+		public let kind: String
+		public let key: String
+		public let pluginId: String
+		public init(kind: String = "bot-plugin-variable", key: String, pluginId: String) {
+			self.kind = kind
+			self.key = key
+			self.pluginId = pluginId
+		}
+	}
+
+	public struct BotSecret: Codable, Sendable, Equatable {
+		public let kind: String
+		public let name: String
+		public init(kind: String = "bot-secret", name: String) {
+			self.kind = kind
+			self.name = name
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "box-env": self = .boxEnv(try BoxEnv(from: decoder))
+		case "channel-credential": self = .channelCredential(try ChannelCredential(from: decoder))
+		case "bot-plugin-variable": self = .botPluginVariable(try BotPluginVariable(from: decoder))
+		case "bot-secret": self = .botSecret(try BotSecret(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .boxEnv(let v): try v.encode(to: encoder)
+		case .channelCredential(let v): try v.encode(to: encoder)
+		case .botPluginVariable(let v): try v.encode(to: encoder)
+		case .botSecret(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandSelectedTeamBinding: Codable, Sendable, Equatable {
+	public let accountScope: String
+	public let teamId: Double
+	public init(accountScope: String, teamId: Double) {
+		self.accountScope = accountScope
+		self.teamId = teamId
 	}
 }
 
@@ -4574,14 +9028,17 @@ public enum SandSendMessage: Codable, Sendable, Equatable {
 	case text(Text)
 	case connector(Connector)
 	case connectors(Connectors)
+	case credentialRequest(CredentialRequest)
 	case emailDraft(EmailDraft)
 	case slackDraft(SlackDraft)
 	case userForm(UserForm)
+	case scmConnect(ScmConnect)
 	case permissionRequest(PermissionRequest)
 	case listenerConnect(ListenerConnect)
 	case slackConnect(SlackConnect)
 	case teamAccess(TeamAccess)
 	case secretRequest(SecretRequest)
+	case onepasswordConnect(OnepasswordConnect)
 	case widget(Widget)
 	case unknown(Unknown)
 
@@ -4730,25 +9187,31 @@ public enum SandSendMessage: Codable, Sendable, Equatable {
 		public let type: String
 		public let channel: String?
 		public let content: String
+		public let copy: SandTeamBotLineCopy?
 		public let images: [SandSendMessageImage]?
 		public let reply_to: String?
-		public init(type: String = "text", channel: String? = nil, content: String, images: [SandSendMessageImage]? = nil, reply_to: String? = nil) {
+		public let voice_memo: Bool?
+		public init(type: String = "text", channel: String? = nil, content: String, copy: SandTeamBotLineCopy? = nil, images: [SandSendMessageImage]? = nil, reply_to: String? = nil, voice_memo: Bool? = nil) {
 			self.type = type
 			self.channel = channel
 			self.content = content
+			self.copy = copy
 			self.images = images
 			self.reply_to = reply_to
+			self.voice_memo = voice_memo
 		}
 		enum CodingKeys: String, CodingKey {
-			case type, channel, content, images, reply_to
+			case type, channel, content, copy, images, reply_to, voice_memo
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
 			try container.encode(type, forKey: .type)
 			try container.encodeIfPresent(channel, forKey: .channel)
 			try container.encode(content, forKey: .content)
+			try container.encodeIfPresent(copy, forKey: .copy)
 			try container.encodeIfPresent(images, forKey: .images)
 			try container.encodeIfPresent(reply_to, forKey: .reply_to)
+			try container.encodeIfPresent(voice_memo, forKey: .voice_memo)
 		}
 	}
 
@@ -4759,8 +9222,8 @@ public enum SandSendMessage: Codable, Sendable, Equatable {
 		public let reply_to: String?
 		public let serverId: String?
 		public let suggestions: [String]?
-		public let variant: SandConnectorCardVariant
-		public init(type: String = "connector", connector: String, reason: String? = nil, reply_to: String? = nil, serverId: String? = nil, suggestions: [String]? = nil, variant: SandConnectorCardVariant) {
+		public let variant: SandSendMessageVariant
+		public init(type: String = "connector", connector: String, reason: String? = nil, reply_to: String? = nil, serverId: String? = nil, suggestions: [String]? = nil, variant: SandSendMessageVariant) {
 			self.type = type
 			self.connector = connector
 			self.reason = reason
@@ -4803,6 +9266,26 @@ public enum SandSendMessage: Codable, Sendable, Equatable {
 			try container.encode(type, forKey: .type)
 			try container.encode(connectors, forKey: .connectors)
 			try container.encodeIfPresent(reason, forKey: .reason)
+			try container.encodeIfPresent(reply_to, forKey: .reply_to)
+		}
+	}
+
+	public struct CredentialRequest: Codable, Sendable, Equatable {
+		public let type: String
+		public let credentialRequest: SandCredentialRequest
+		public let reply_to: String?
+		public init(type: String = "credential-request", credentialRequest: SandCredentialRequest, reply_to: String? = nil) {
+			self.type = type
+			self.credentialRequest = credentialRequest
+			self.reply_to = reply_to
+		}
+		enum CodingKeys: String, CodingKey {
+			case type, credentialRequest, reply_to
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(type, forKey: .type)
+			try container.encode(credentialRequest, forKey: .credentialRequest)
 			try container.encodeIfPresent(reply_to, forKey: .reply_to)
 		}
 	}
@@ -4864,6 +9347,35 @@ public enum SandSendMessage: Codable, Sendable, Equatable {
 			try container.encode(type, forKey: .type)
 			try container.encode(formRequest, forKey: .formRequest)
 			try container.encodeIfPresent(reply_to, forKey: .reply_to)
+		}
+	}
+
+	public struct ScmConnect: Codable, Sendable, Equatable {
+		public let type: String
+		public let intent: SandSendMessageIntent?
+		public let provider: SandSendMessageProvider?
+		public let reason: String?
+		public let reply_to: String?
+		public let repo: String?
+		public init(type: String = "scm-connect", intent: SandSendMessageIntent? = nil, provider: SandSendMessageProvider? = nil, reason: String? = nil, reply_to: String? = nil, repo: String? = nil) {
+			self.type = type
+			self.intent = intent
+			self.provider = provider
+			self.reason = reason
+			self.reply_to = reply_to
+			self.repo = repo
+		}
+		enum CodingKeys: String, CodingKey {
+			case type, intent, provider, reason, reply_to, repo
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(type, forKey: .type)
+			try container.encodeIfPresent(intent, forKey: .intent)
+			try container.encodeIfPresent(provider, forKey: .provider)
+			try container.encodeIfPresent(reason, forKey: .reason)
+			try container.encodeIfPresent(reply_to, forKey: .reply_to)
+			try container.encodeIfPresent(repo, forKey: .repo)
 		}
 	}
 
@@ -4970,6 +9482,23 @@ public enum SandSendMessage: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct OnepasswordConnect: Codable, Sendable, Equatable {
+		public let type: String
+		public let reply_to: String?
+		public init(type: String = "onepassword-connect", reply_to: String? = nil) {
+			self.type = type
+			self.reply_to = reply_to
+		}
+		enum CodingKeys: String, CodingKey {
+			case type, reply_to
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(type, forKey: .type)
+			try container.encodeIfPresent(reply_to, forKey: .reply_to)
+		}
+	}
+
 	public struct Widget: Codable, Sendable, Equatable {
 		public let type: String
 		public let reply_to: String?
@@ -5010,14 +9539,17 @@ public enum SandSendMessage: Codable, Sendable, Equatable {
 		case "text": self = .text(try Text(from: decoder))
 		case "connector": self = .connector(try Connector(from: decoder))
 		case "connectors": self = .connectors(try Connectors(from: decoder))
+		case "credential-request": self = .credentialRequest(try CredentialRequest(from: decoder))
 		case "email-draft": self = .emailDraft(try EmailDraft(from: decoder))
 		case "slack-draft": self = .slackDraft(try SlackDraft(from: decoder))
 		case "user-form": self = .userForm(try UserForm(from: decoder))
+		case "scm-connect": self = .scmConnect(try ScmConnect(from: decoder))
 		case "permission-request": self = .permissionRequest(try PermissionRequest(from: decoder))
 		case "listener-connect": self = .listenerConnect(try ListenerConnect(from: decoder))
 		case "slack-connect": self = .slackConnect(try SlackConnect(from: decoder))
 		case "team-access": self = .teamAccess(try TeamAccess(from: decoder))
 		case "secret-request": self = .secretRequest(try SecretRequest(from: decoder))
+		case "onepassword-connect": self = .onepasswordConnect(try OnepasswordConnect(from: decoder))
 		case "widget": self = .widget(try Widget(from: decoder))
 		default:
 			self = .unknown(try Unknown(from: decoder))
@@ -5036,14 +9568,17 @@ public enum SandSendMessage: Codable, Sendable, Equatable {
 		case .text(let v): try v.encode(to: encoder)
 		case .connector(let v): try v.encode(to: encoder)
 		case .connectors(let v): try v.encode(to: encoder)
+		case .credentialRequest(let v): try v.encode(to: encoder)
 		case .emailDraft(let v): try v.encode(to: encoder)
 		case .slackDraft(let v): try v.encode(to: encoder)
 		case .userForm(let v): try v.encode(to: encoder)
+		case .scmConnect(let v): try v.encode(to: encoder)
 		case .permissionRequest(let v): try v.encode(to: encoder)
 		case .listenerConnect(let v): try v.encode(to: encoder)
 		case .slackConnect(let v): try v.encode(to: encoder)
 		case .teamAccess(let v): try v.encode(to: encoder)
 		case .secretRequest(let v): try v.encode(to: encoder)
+		case .onepasswordConnect(let v): try v.encode(to: encoder)
 		case .widget(let v): try v.encode(to: encoder)
 		case .unknown(let v): try v.encode(to: encoder)
 		}
@@ -5073,12 +9608,40 @@ public struct SandSendMessageImage: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandSendMessageIntent: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let access = SandSendMessageIntent(rawValue: "access")
+	public static let connect = SandSendMessageIntent(rawValue: "connect")
+}
+
 public struct SandSendMessagePlatform: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let azureDevops = SandSendMessagePlatform(rawValue: "azure-devops")
+	public static let bitbucket = SandSendMessagePlatform(rawValue: "bitbucket")
 	public static let github = SandSendMessagePlatform(rawValue: "github")
+	public static let gitlab = SandSendMessagePlatform(rawValue: "gitlab")
 	public static let origin = SandSendMessagePlatform(rawValue: "origin")
 	public static let slack = SandSendMessagePlatform(rawValue: "slack")
+}
+
+public struct SandSendMessageProvider: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let azureDevops = SandSendMessageProvider(rawValue: "azure-devops")
+	public static let bitbucket = SandSendMessageProvider(rawValue: "bitbucket")
+	public static let github = SandSendMessageProvider(rawValue: "github")
+	public static let gitlab = SandSendMessageProvider(rawValue: "gitlab")
+	public static let origin = SandSendMessageProvider(rawValue: "origin")
+	public static let slack = SandSendMessageProvider(rawValue: "slack")
+}
+
+public struct SandSendMessageVariant: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let connect = SandSendMessageVariant(rawValue: "connect")
+	public static let connected = SandSendMessageVariant(rawValue: "connected")
 }
 
 public struct SandSendMessageVisibility: RawRepresentable, Codable, Sendable, Equatable, Hashable {
@@ -5092,19 +9655,22 @@ public struct SandSendPromptArgs: Codable, Sendable, Equatable {
 	public let agentId: String
 	public let attachmentNames: [String]?
 	public let attachmentPaths: [String]?
-	public let automationWriteProvenance: String?
+	public let automationWriteProvenance: SandSendPromptArgsAutomationWriteProvenance?
 	public let clientNonce: String?
 	public let composedAtMs: Double?
 	public let directAddressedAcceptance: Bool?
 	public let enterEpochMs: Double?
 	public let isFork: Bool?
+	public let machineId: String?
 	public let mcpConfigJson: String?
+	public let onePasswordAppInstalled: Bool?
 	public let prompt: String
 	public let replyToId: String?
 	public let richText: String?
+	public let sessionId: String?
 	public let source: SandSendPromptArgsSource?
 	public let traceparent: String?
-	public init(agentId: String, attachmentNames: [String]? = nil, attachmentPaths: [String]? = nil, automationWriteProvenance: String? = nil, clientNonce: String? = nil, composedAtMs: Double? = nil, directAddressedAcceptance: Bool? = nil, enterEpochMs: Double? = nil, isFork: Bool? = nil, mcpConfigJson: String? = nil, prompt: String, replyToId: String? = nil, richText: String? = nil, source: SandSendPromptArgsSource? = nil, traceparent: String? = nil) {
+	public init(agentId: String, attachmentNames: [String]? = nil, attachmentPaths: [String]? = nil, automationWriteProvenance: SandSendPromptArgsAutomationWriteProvenance? = nil, clientNonce: String? = nil, composedAtMs: Double? = nil, directAddressedAcceptance: Bool? = nil, enterEpochMs: Double? = nil, isFork: Bool? = nil, machineId: String? = nil, mcpConfigJson: String? = nil, onePasswordAppInstalled: Bool? = nil, prompt: String, replyToId: String? = nil, richText: String? = nil, sessionId: String? = nil, source: SandSendPromptArgsSource? = nil, traceparent: String? = nil) {
 		self.agentId = agentId
 		self.attachmentNames = attachmentNames
 		self.attachmentPaths = attachmentPaths
@@ -5114,15 +9680,18 @@ public struct SandSendPromptArgs: Codable, Sendable, Equatable {
 		self.directAddressedAcceptance = directAddressedAcceptance
 		self.enterEpochMs = enterEpochMs
 		self.isFork = isFork
+		self.machineId = machineId
 		self.mcpConfigJson = mcpConfigJson
+		self.onePasswordAppInstalled = onePasswordAppInstalled
 		self.prompt = prompt
 		self.replyToId = replyToId
 		self.richText = richText
+		self.sessionId = sessionId
 		self.source = source
 		self.traceparent = traceparent
 	}
 	enum CodingKeys: String, CodingKey {
-		case agentId, attachmentNames, attachmentPaths, automationWriteProvenance, clientNonce, composedAtMs, directAddressedAcceptance, enterEpochMs, isFork, mcpConfigJson, prompt, replyToId, richText, source, traceparent
+		case agentId, attachmentNames, attachmentPaths, automationWriteProvenance, clientNonce, composedAtMs, directAddressedAcceptance, enterEpochMs, isFork, machineId, mcpConfigJson, onePasswordAppInstalled, prompt, replyToId, richText, sessionId, source, traceparent
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
@@ -5135,13 +9704,23 @@ public struct SandSendPromptArgs: Codable, Sendable, Equatable {
 		try container.encodeIfPresent(directAddressedAcceptance, forKey: .directAddressedAcceptance)
 		try container.encodeIfPresent(enterEpochMs, forKey: .enterEpochMs)
 		try container.encodeIfPresent(isFork, forKey: .isFork)
+		try container.encodeIfPresent(machineId, forKey: .machineId)
 		try container.encodeIfPresent(mcpConfigJson, forKey: .mcpConfigJson)
+		try container.encodeIfPresent(onePasswordAppInstalled, forKey: .onePasswordAppInstalled)
 		try container.encode(prompt, forKey: .prompt)
 		try container.encodeIfPresent(replyToId, forKey: .replyToId)
 		try container.encodeIfPresent(richText, forKey: .richText)
+		try container.encodeIfPresent(sessionId, forKey: .sessionId)
 		try container.encodeIfPresent(source, forKey: .source)
 		try container.encodeIfPresent(traceparent, forKey: .traceparent)
 	}
+}
+
+public struct SandSendPromptArgsAutomationWriteProvenance: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let templateImport = SandSendPromptArgsAutomationWriteProvenance(rawValue: "template_import")
+	public static let untrusted = SandSendPromptArgsAutomationWriteProvenance(rawValue: "untrusted")
 }
 
 public struct SandSendPromptArgsSource: RawRepresentable, Codable, Sendable, Equatable, Hashable {
@@ -5162,6 +9741,15 @@ public struct SandSendPromptResult: Codable, Sendable, Equatable {
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		try container.encodeIfPresent(accepted, forKey: .accepted)
+	}
+}
+
+public struct SandSetMcpInstructionsRequest: Codable, Sendable, Equatable {
+	public let instructions: String
+	public let serverId: String
+	public init(instructions: String, serverId: String) {
+		self.instructions = instructions
+		self.serverId = serverId
 	}
 }
 
@@ -5269,6 +9857,13 @@ public enum SandSlackMatch: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandSpendApprovalAttestation: Codable, Sendable, Equatable {
+	public let challengeId: String
+	public init(challengeId: String) {
+		self.challengeId = challengeId
+	}
+}
+
 public enum SandSpendInitiation: Codable, Sendable, Equatable {
 
 	case wake(Wake)
@@ -5350,6 +9945,16 @@ public enum SandSpendInitiation: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandStandingGrantUnavailableReason: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let groupChat = SandStandingGrantUnavailableReason(rawValue: "group-chat")
+	public static let harnessCannotPersist = SandStandingGrantUnavailableReason(rawValue: "harness-cannot-persist")
+	public static let invalidRecipient = SandStandingGrantUnavailableReason(rawValue: "invalid-recipient")
+	public static let machineUnsupported = SandStandingGrantUnavailableReason(rawValue: "machine-unsupported")
+	public static let teamPolicy = SandStandingGrantUnavailableReason(rawValue: "team-policy")
+}
+
 public struct SandSubagentInfo: Codable, Sendable, Equatable {
 	public let startedAtMs: Double
 	public let status: SandSubagentStatus
@@ -5374,14 +9979,6 @@ public struct SandSubagentStatus: RawRepresentable, Codable, Sendable, Equatable
 	public static let running = SandSubagentStatus(rawValue: "running")
 }
 
-public struct SandTeachEntryPoint: RawRepresentable, Codable, Sendable, Equatable, Hashable {
-	public let rawValue: String
-	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let composerMenu = SandTeachEntryPoint(rawValue: "composer_menu")
-	public static let fullscreenTitleBar = SandTeachEntryPoint(rawValue: "fullscreen_title_bar")
-	public static let screenHover = SandTeachEntryPoint(rawValue: "screen_hover")
-}
-
 public struct SandTeachRecordingStatus: Codable, Sendable, Equatable {
 	public let agentId: String?
 	public let maxDurationMs: Double
@@ -5402,20 +9999,280 @@ public struct SandTeachRecordingStatusState: RawRepresentable, Codable, Sendable
 	public static let recording = SandTeachRecordingStatusState(rawValue: "recording")
 }
 
+public struct SandTeamBotLineCopy: Codable, Sendable, Equatable {
+	public let paragraphs: [[TeamBotLineSentence]]
+	public let v: Double
+	public init(paragraphs: [[TeamBotLineSentence]], v: Double) {
+		self.paragraphs = paragraphs
+		self.v = v
+	}
+}
+
+public struct SandTeamSetupAutomationRow: Codable, Sendable, Equatable {
+	public let id: String
+	public let name: String
+	public let trigger: String
+	public init(id: String, name: String, trigger: String) {
+		self.id = id
+		self.name = name
+		self.trigger = trigger
+	}
+}
+
+public struct SandTeamSetupSkillDraft: Codable, Sendable, Equatable {
+	public let body: String
+	public let description: String
+	public let name: String
+	public init(body: String, description: String, name: String) {
+		self.body = body
+		self.description = description
+		self.name = name
+	}
+}
+
+public enum SandTeamSetupSlot: Codable, Sendable, Equatable {
+
+	case description(Description)
+	case memories(Memories)
+	case plugins(Plugins)
+	case skills(Skills)
+	case unknown(Unknown)
+
+	public struct Description: Codable, Sendable, Equatable {
+		public let kind: String
+		public let description: String?
+		public let status: SandTeamSetupSlotStatus
+		public init(kind: String = "description", description: String? = nil, status: SandTeamSetupSlotStatus) {
+			self.kind = kind
+			self.description = description
+			self.status = status
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, description, status
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(description, forKey: .description)
+			try container.encode(status, forKey: .status)
+		}
+	}
+
+	public struct Memories: Codable, Sendable, Equatable {
+		public let kind: String
+		public let borderline: [Double]?
+		public let code: String?
+		public let justYou: Double?
+		public let more: Double?
+		public let shared: [Double]?
+		public let status: SandTeamSetupSlotStatus
+		public let themes: [String]?
+		public let titles: [String]?
+		public let toTeam: [String]?
+		public init(kind: String = "memories", borderline: [Double]? = nil, code: String? = nil, justYou: Double? = nil, more: Double? = nil, shared: [Double]? = nil, status: SandTeamSetupSlotStatus, themes: [String]? = nil, titles: [String]? = nil, toTeam: [String]? = nil) {
+			self.kind = kind
+			self.borderline = borderline
+			self.code = code
+			self.justYou = justYou
+			self.more = more
+			self.shared = shared
+			self.status = status
+			self.themes = themes
+			self.titles = titles
+			self.toTeam = toTeam
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, borderline, code, justYou, more, shared, status, themes, titles, toTeam
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(borderline, forKey: .borderline)
+			try container.encodeIfPresent(code, forKey: .code)
+			try container.encodeIfPresent(justYou, forKey: .justYou)
+			try container.encodeIfPresent(more, forKey: .more)
+			try container.encodeIfPresent(shared, forKey: .shared)
+			try container.encode(status, forKey: .status)
+			try container.encodeIfPresent(themes, forKey: .themes)
+			try container.encodeIfPresent(titles, forKey: .titles)
+			try container.encodeIfPresent(toTeam, forKey: .toTeam)
+		}
+	}
+
+	public struct Plugins: Codable, Sendable, Equatable {
+		public let kind: String
+		public let already: Bool?
+		public let fallback: Bool?
+		public let plugins: [String]?
+		public let reasons: [String: String]?
+		public let secrets: [String]?
+		public let status: SandTeamSetupSlotStatus
+		public let suggestions: [String]?
+		public init(kind: String = "plugins", already: Bool? = nil, fallback: Bool? = nil, plugins: [String]? = nil, reasons: [String: String]? = nil, secrets: [String]? = nil, status: SandTeamSetupSlotStatus, suggestions: [String]? = nil) {
+			self.kind = kind
+			self.already = already
+			self.fallback = fallback
+			self.plugins = plugins
+			self.reasons = reasons
+			self.secrets = secrets
+			self.status = status
+			self.suggestions = suggestions
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, already, fallback, plugins, reasons, secrets, status, suggestions
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(already, forKey: .already)
+			try container.encodeIfPresent(fallback, forKey: .fallback)
+			try container.encodeIfPresent(plugins, forKey: .plugins)
+			try container.encodeIfPresent(reasons, forKey: .reasons)
+			try container.encodeIfPresent(secrets, forKey: .secrets)
+			try container.encode(status, forKey: .status)
+			try container.encodeIfPresent(suggestions, forKey: .suggestions)
+		}
+	}
+
+	public struct Skills: Codable, Sendable, Equatable {
+		public let kind: String
+		public let added: [Double]?
+		public let already: [String]?
+		public let skills: [SandTeamSetupSkillDraft]?
+		public let status: SandTeamSetupSlotStatus
+		public let suggestions: [SandTeamSetupSkillDraft]?
+		public init(kind: String = "skills", added: [Double]? = nil, already: [String]? = nil, skills: [SandTeamSetupSkillDraft]? = nil, status: SandTeamSetupSlotStatus, suggestions: [SandTeamSetupSkillDraft]? = nil) {
+			self.kind = kind
+			self.added = added
+			self.already = already
+			self.skills = skills
+			self.status = status
+			self.suggestions = suggestions
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, added, already, skills, status, suggestions
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(added, forKey: .added)
+			try container.encodeIfPresent(already, forKey: .already)
+			try container.encodeIfPresent(skills, forKey: .skills)
+			try container.encode(status, forKey: .status)
+			try container.encodeIfPresent(suggestions, forKey: .suggestions)
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "description": self = .description(try Description(from: decoder))
+		case "memories": self = .memories(try Memories(from: decoder))
+		case "plugins": self = .plugins(try Plugins(from: decoder))
+		case "skills": self = .skills(try Skills(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .description(let v): try v.encode(to: encoder)
+		case .memories(let v): try v.encode(to: encoder)
+		case .plugins(let v): try v.encode(to: encoder)
+		case .skills(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct SandTeamSetupSlotStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let added = SandTeamSetupSlotStatus(rawValue: "added")
+	public static let carried = SandTeamSetupSlotStatus(rawValue: "carried")
+	public static let dismissed = SandTeamSetupSlotStatus(rawValue: "dismissed")
+	public static let done = SandTeamSetupSlotStatus(rawValue: "done")
+	public static let empty = SandTeamSetupSlotStatus(rawValue: "empty")
+	public static let kept = SandTeamSetupSlotStatus(rawValue: "kept")
+	public static let moved = SandTeamSetupSlotStatus(rawValue: "moved")
+	public static let pending = SandTeamSetupSlotStatus(rawValue: "pending")
+	public static let proposed = SandTeamSetupSlotStatus(rawValue: "proposed")
+	public static let proposing = SandTeamSetupSlotStatus(rawValue: "proposing")
+	public static let saved = SandTeamSetupSlotStatus(rawValue: "saved")
+	public static let shared = SandTeamSetupSlotStatus(rawValue: "shared")
+	public static let sorting = SandTeamSetupSlotStatus(rawValue: "sorting")
+}
+
 public enum SandTimelineEvent: Codable, Sendable, Equatable {
 
+	case teamShared(TeamShared)
 	case automationChanged(AutomationChanged)
 	case nameChanged(NameChanged)
 	case channelConnected(ChannelConnected)
 	case channelDisconnected(ChannelDisconnected)
 	case unknown(Unknown)
 
+	public struct TeamShared: Codable, Sendable, Equatable {
+		public let type: String
+		public let code: String?
+		public let convert: Bool?
+		public let description: String?
+		public let justYou: Double?
+		public let sequential: Bool?
+		public let setup: Bool?
+		public let slots: [SandTeamSetupSlot]?
+		public let status: SandTimelineEventStatus
+		public let superseded: Bool?
+		public let toTeam: [String]?
+		public let unshared: Bool?
+		public init(type: String = "team-shared", code: String? = nil, convert: Bool? = nil, description: String? = nil, justYou: Double? = nil, sequential: Bool? = nil, setup: Bool? = nil, slots: [SandTeamSetupSlot]? = nil, status: SandTimelineEventStatus, superseded: Bool? = nil, toTeam: [String]? = nil, unshared: Bool? = nil) {
+			self.type = type
+			self.code = code
+			self.convert = convert
+			self.description = description
+			self.justYou = justYou
+			self.sequential = sequential
+			self.setup = setup
+			self.slots = slots
+			self.status = status
+			self.superseded = superseded
+			self.toTeam = toTeam
+			self.unshared = unshared
+		}
+		enum CodingKeys: String, CodingKey {
+			case type, code, convert, description, justYou, sequential, setup, slots, status, superseded, toTeam, unshared
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(type, forKey: .type)
+			try container.encodeIfPresent(code, forKey: .code)
+			try container.encodeIfPresent(convert, forKey: .convert)
+			try container.encodeIfPresent(description, forKey: .description)
+			try container.encodeIfPresent(justYou, forKey: .justYou)
+			try container.encodeIfPresent(sequential, forKey: .sequential)
+			try container.encodeIfPresent(setup, forKey: .setup)
+			try container.encodeIfPresent(slots, forKey: .slots)
+			try container.encode(status, forKey: .status)
+			try container.encodeIfPresent(superseded, forKey: .superseded)
+			try container.encodeIfPresent(toTeam, forKey: .toTeam)
+			try container.encodeIfPresent(unshared, forKey: .unshared)
+		}
+	}
+
 	public struct AutomationChanged: Codable, Sendable, Equatable {
 		public let type: String
-		public let action: SandAutomationChangeAction
+		public let action: SandTimelineEventAction
 		public let automationId: String
 		public let automationName: String
-		public init(type: String = "automation-changed", action: SandAutomationChangeAction, automationId: String, automationName: String) {
+		public init(type: String = "automation-changed", action: SandTimelineEventAction, automationId: String, automationName: String) {
 			self.type = type
 			self.action = action
 			self.automationId = automationId
@@ -5466,6 +10323,7 @@ public enum SandTimelineEvent: Codable, Sendable, Equatable {
 	public init(from decoder: Decoder) throws {
 		let container = try decoder.container(keyedBy: TagKey.self)
 		switch try container.decode(String.self, forKey: .`type`) {
+		case "team-shared": self = .teamShared(try TeamShared(from: decoder))
 		case "automation-changed": self = .automationChanged(try AutomationChanged(from: decoder))
 		case "name-changed": self = .nameChanged(try NameChanged(from: decoder))
 		case "channel-connected": self = .channelConnected(try ChannelConnected(from: decoder))
@@ -5477,6 +10335,7 @@ public enum SandTimelineEvent: Codable, Sendable, Equatable {
 
 	public func encode(to encoder: Encoder) throws {
 		switch self {
+		case .teamShared(let v): try v.encode(to: encoder)
 		case .automationChanged(let v): try v.encode(to: encoder)
 		case .nameChanged(let v): try v.encode(to: encoder)
 		case .channelConnected(let v): try v.encode(to: encoder)
@@ -5486,12 +10345,33 @@ public enum SandTimelineEvent: Codable, Sendable, Equatable {
 	}
 }
 
-public struct SandToolCallStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+public struct SandTimelineEventAction: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let done = SandToolCallStatus(rawValue: "done")
-	public static let failed = SandToolCallStatus(rawValue: "failed")
-	public static let pending = SandToolCallStatus(rawValue: "pending")
+	public static let created = SandTimelineEventAction(rawValue: "created")
+	public static let deleted = SandTimelineEventAction(rawValue: "deleted")
+	public static let disabled = SandTimelineEventAction(rawValue: "disabled")
+	public static let enabled = SandTimelineEventAction(rawValue: "enabled")
+	public static let updated = SandTimelineEventAction(rawValue: "updated")
+}
+
+public struct SandTimelineEventStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let done = SandTimelineEventStatus(rawValue: "done")
+	public static let kept = SandTimelineEventStatus(rawValue: "kept")
+	public static let proposed = SandTimelineEventStatus(rawValue: "proposed")
+	public static let shared = SandTimelineEventStatus(rawValue: "shared")
+	public static let sorting = SandTimelineEventStatus(rawValue: "sorting")
+}
+
+public struct SandToggleMcpToolDisabledRequest: Codable, Sendable, Equatable {
+	public let serverId: String
+	public let toolName: String
+	public init(serverId: String, toolName: String) {
+		self.serverId = serverId
+		self.toolName = toolName
+	}
 }
 
 public enum SandTranscriptEntry: Codable, Sendable, Equatable {
@@ -5511,16 +10391,18 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 		public let event: SandTimelineEvent
 		public let id: String
 		public let reactions: [SandReaction]?
+		public let seq: Double?
 		public let timestampMs: Double?
-		public init(kind: String = "event", event: SandTimelineEvent, id: String, reactions: [SandReaction]? = nil, timestampMs: Double? = nil) {
+		public init(kind: String = "event", event: SandTimelineEvent, id: String, reactions: [SandReaction]? = nil, seq: Double? = nil, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.event = event
 			self.id = id
 			self.reactions = reactions
+			self.seq = seq
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, event, id, reactions, timestampMs
+			case kind, event, id, reactions, seq, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -5528,6 +10410,7 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			try container.encode(event, forKey: .event)
 			try container.encode(id, forKey: .id)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 		}
 	}
@@ -5538,19 +10421,21 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 		public let reactions: [SandReaction]?
 		public let requestId: String
 		public let sentiment: SandTranscriptEntrySentiment?
-		public let state: SandTranscriptEntryState
+		public let seq: Double?
+		public let state: SandFeedbackPromptState
 		public let timestampMs: Double?
-		public init(kind: String = "feedback", id: String, reactions: [SandReaction]? = nil, requestId: String, sentiment: SandTranscriptEntrySentiment? = nil, state: SandTranscriptEntryState, timestampMs: Double? = nil) {
+		public init(kind: String = "feedback", id: String, reactions: [SandReaction]? = nil, requestId: String, sentiment: SandTranscriptEntrySentiment? = nil, seq: Double? = nil, state: SandFeedbackPromptState, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.id = id
 			self.reactions = reactions
 			self.requestId = requestId
 			self.sentiment = sentiment
+			self.seq = seq
 			self.state = state
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, id, reactions, requestId, sentiment, state, timestampMs
+			case kind, id, reactions, requestId, sentiment, seq, state, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -5559,6 +10444,7 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			try container.encodeIfPresent(reactions, forKey: .reactions)
 			try container.encode(requestId, forKey: .requestId)
 			try container.encodeIfPresent(sentiment, forKey: .sentiment)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encode(state, forKey: .state)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 		}
@@ -5566,12 +10452,14 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 
 	public struct Message: Codable, Sendable, Equatable {
 		public let kind: String
+		public let attachments: [SandMessageAttachment]?
 		public let author: SandMessageAuthorEnvelope?
 		public let batchId: String?
 		public let branched: Bool?
 		public let channel: String?
 		public let channelSender: String?
 		public let clientNonce: String?
+		public let cloudAgentWake: SandCloudAgentWake?
 		public let content: String
 		public let fromAgent: SandMessageAuthor?
 		public let fromUser: SandTranscriptEntryFromUser?
@@ -5582,18 +10470,23 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 		public let replyTo: String?
 		public let requestId: String?
 		public let richText: String?
-		public let role: SandMessageRole
+		public let role: SandTranscriptEntryRole
 		public let sentWhileOfflineAtMs: Double?
+		public let seq: Double?
+		public let suppressed: String?
 		public let timestampMs: Double?
 		public let toAgent: SandMessageAuthor?
-		public init(kind: String = "message", author: SandMessageAuthorEnvelope? = nil, batchId: String? = nil, branched: Bool? = nil, channel: String? = nil, channelSender: String? = nil, clientNonce: String? = nil, content: String, fromAgent: SandMessageAuthor? = nil, fromUser: SandTranscriptEntryFromUser? = nil, id: String, images: [SandSendMessageImage]? = nil, isStreaming: Bool, reactions: [SandReaction]? = nil, replyTo: String? = nil, requestId: String? = nil, richText: String? = nil, role: SandMessageRole, sentWhileOfflineAtMs: Double? = nil, timestampMs: Double? = nil, toAgent: SandMessageAuthor? = nil) {
+		public let wakeOutcomeUnseen: Bool?
+		public init(kind: String = "message", attachments: [SandMessageAttachment]? = nil, author: SandMessageAuthorEnvelope? = nil, batchId: String? = nil, branched: Bool? = nil, channel: String? = nil, channelSender: String? = nil, clientNonce: String? = nil, cloudAgentWake: SandCloudAgentWake? = nil, content: String, fromAgent: SandMessageAuthor? = nil, fromUser: SandTranscriptEntryFromUser? = nil, id: String, images: [SandSendMessageImage]? = nil, isStreaming: Bool, reactions: [SandReaction]? = nil, replyTo: String? = nil, requestId: String? = nil, richText: String? = nil, role: SandTranscriptEntryRole, sentWhileOfflineAtMs: Double? = nil, seq: Double? = nil, suppressed: String? = nil, timestampMs: Double? = nil, toAgent: SandMessageAuthor? = nil, wakeOutcomeUnseen: Bool? = nil) {
 			self.kind = kind
+			self.attachments = attachments
 			self.author = author
 			self.batchId = batchId
 			self.branched = branched
 			self.channel = channel
 			self.channelSender = channelSender
 			self.clientNonce = clientNonce
+			self.cloudAgentWake = cloudAgentWake
 			self.content = content
 			self.fromAgent = fromAgent
 			self.fromUser = fromUser
@@ -5606,21 +10499,26 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			self.richText = richText
 			self.role = role
 			self.sentWhileOfflineAtMs = sentWhileOfflineAtMs
+			self.seq = seq
+			self.suppressed = suppressed
 			self.timestampMs = timestampMs
 			self.toAgent = toAgent
+			self.wakeOutcomeUnseen = wakeOutcomeUnseen
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, author, batchId, branched, channel, channelSender, clientNonce, content, fromAgent, fromUser, id, images, isStreaming, reactions, replyTo, requestId, richText, role, sentWhileOfflineAtMs, timestampMs, toAgent
+			case kind, attachments, author, batchId, branched, channel, channelSender, clientNonce, cloudAgentWake, content, fromAgent, fromUser, id, images, isStreaming, reactions, replyTo, requestId, richText, role, sentWhileOfflineAtMs, seq, suppressed, timestampMs, toAgent, wakeOutcomeUnseen
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
 			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(attachments, forKey: .attachments)
 			try container.encodeIfPresent(author, forKey: .author)
 			try container.encodeIfPresent(batchId, forKey: .batchId)
 			try container.encodeIfPresent(branched, forKey: .branched)
 			try container.encodeIfPresent(channel, forKey: .channel)
 			try container.encodeIfPresent(channelSender, forKey: .channelSender)
 			try container.encodeIfPresent(clientNonce, forKey: .clientNonce)
+			try container.encodeIfPresent(cloudAgentWake, forKey: .cloudAgentWake)
 			try container.encode(content, forKey: .content)
 			try container.encodeIfPresent(fromAgent, forKey: .fromAgent)
 			try container.encodeIfPresent(fromUser, forKey: .fromUser)
@@ -5633,38 +10531,47 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			try container.encodeIfPresent(richText, forKey: .richText)
 			try container.encode(role, forKey: .role)
 			try container.encodeIfPresent(sentWhileOfflineAtMs, forKey: .sentWhileOfflineAtMs)
+			try container.encodeIfPresent(seq, forKey: .seq)
+			try container.encodeIfPresent(suppressed, forKey: .suppressed)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 			try container.encodeIfPresent(toAgent, forKey: .toAgent)
+			try container.encodeIfPresent(wakeOutcomeUnseen, forKey: .wakeOutcomeUnseen)
 		}
 	}
 
 	public struct Notice: Codable, Sendable, Equatable {
 		public let kind: String
 		public let branched: Bool?
+		public let copy: SandTeamBotLineCopy?
 		public let id: String
 		public let reactions: [SandReaction]?
 		public let replyTo: String?
+		public let seq: Double?
 		public let text: String
 		public let timestampMs: Double?
-		public init(kind: String = "notice", branched: Bool? = nil, id: String, reactions: [SandReaction]? = nil, replyTo: String? = nil, text: String, timestampMs: Double? = nil) {
+		public init(kind: String = "notice", branched: Bool? = nil, copy: SandTeamBotLineCopy? = nil, id: String, reactions: [SandReaction]? = nil, replyTo: String? = nil, seq: Double? = nil, text: String, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.branched = branched
+			self.copy = copy
 			self.id = id
 			self.reactions = reactions
 			self.replyTo = replyTo
+			self.seq = seq
 			self.text = text
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, branched, id, reactions, replyTo, text, timestampMs
+			case kind, branched, copy, id, reactions, replyTo, seq, text, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
 			try container.encode(kind, forKey: .kind)
 			try container.encodeIfPresent(branched, forKey: .branched)
+			try container.encodeIfPresent(copy, forKey: .copy)
 			try container.encode(id, forKey: .id)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
 			try container.encodeIfPresent(replyTo, forKey: .replyTo)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encode(text, forKey: .text)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 		}
@@ -5672,6 +10579,7 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 
 	public struct SendMessage: Codable, Sendable, Equatable {
 		public let kind: String
+		public let attachments: [SandMessageAttachment]?
 		public let author: SandMessageAuthor?
 		public let batchId: String?
 		public let boxInstruction: String?
@@ -5680,6 +10588,10 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 		public let boxResolution: SandTranscriptEntryBoxResolution?
 		public let boxSnapshot: String?
 		public let branched: Bool?
+		public let channelPermalink: String?
+		public let cloudAgentArtifacts: [SandCloudAgentArtifactFile]?
+		public let cloudAgentWake: SandCloudAgentWake?
+		public let credentialResolution: SandTranscriptEntryCredentialResolution?
 		public let deliverTo: String?
 		public let draftRoute: SandTranscriptEntryDraftRoute?
 		public let draftRouteVerified: SandTranscriptEntryDraftRouteVerified?
@@ -5687,6 +10599,7 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 		public let formFieldOutcomes: [SandUserFormFieldOutcome]?
 		public let formRequestId: String?
 		public let formResolution: SandTranscriptEntryFormResolution?
+		public let formSubmissionEffect: SandTranscriptEntryFormSubmissionEffect?
 		public let id: String
 		public let message: SandSendMessage
 		public let reactions: [SandReaction]?
@@ -5695,12 +10608,16 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 		public let respondedValue: String?
 		public let respondedValueEchoed: Bool?
 		public let secretProvided: Bool?
+		public let seq: Double?
 		public let streaming: Bool?
 		public let timestampMs: Double?
+		public let wake: SandTranscriptEntryWake?
+		public let wakeOutcomeUnseen: Bool?
 		public let widgetDismissed: Bool?
 		public let widgetSkipped: Bool?
-		public init(kind: String = "send-message", author: SandMessageAuthor? = nil, batchId: String? = nil, boxInstruction: String? = nil, boxRequest: String? = nil, boxRequestId: String? = nil, boxResolution: SandTranscriptEntryBoxResolution? = nil, boxSnapshot: String? = nil, branched: Bool? = nil, deliverTo: String? = nil, draftRoute: SandTranscriptEntryDraftRoute? = nil, draftRouteVerified: SandTranscriptEntryDraftRouteVerified? = nil, draftSendState: SandTranscriptEntryDraftSendState? = nil, formFieldOutcomes: [SandUserFormFieldOutcome]? = nil, formRequestId: String? = nil, formResolution: SandTranscriptEntryFormResolution? = nil, id: String, message: SandSendMessage, reactions: [SandReaction]? = nil, replyTo: String? = nil, requestId: String? = nil, respondedValue: String? = nil, respondedValueEchoed: Bool? = nil, secretProvided: Bool? = nil, streaming: Bool? = nil, timestampMs: Double? = nil, widgetDismissed: Bool? = nil, widgetSkipped: Bool? = nil) {
+		public init(kind: String = "send-message", attachments: [SandMessageAttachment]? = nil, author: SandMessageAuthor? = nil, batchId: String? = nil, boxInstruction: String? = nil, boxRequest: String? = nil, boxRequestId: String? = nil, boxResolution: SandTranscriptEntryBoxResolution? = nil, boxSnapshot: String? = nil, branched: Bool? = nil, channelPermalink: String? = nil, cloudAgentArtifacts: [SandCloudAgentArtifactFile]? = nil, cloudAgentWake: SandCloudAgentWake? = nil, credentialResolution: SandTranscriptEntryCredentialResolution? = nil, deliverTo: String? = nil, draftRoute: SandTranscriptEntryDraftRoute? = nil, draftRouteVerified: SandTranscriptEntryDraftRouteVerified? = nil, draftSendState: SandTranscriptEntryDraftSendState? = nil, formFieldOutcomes: [SandUserFormFieldOutcome]? = nil, formRequestId: String? = nil, formResolution: SandTranscriptEntryFormResolution? = nil, formSubmissionEffect: SandTranscriptEntryFormSubmissionEffect? = nil, id: String, message: SandSendMessage, reactions: [SandReaction]? = nil, replyTo: String? = nil, requestId: String? = nil, respondedValue: String? = nil, respondedValueEchoed: Bool? = nil, secretProvided: Bool? = nil, seq: Double? = nil, streaming: Bool? = nil, timestampMs: Double? = nil, wake: SandTranscriptEntryWake? = nil, wakeOutcomeUnseen: Bool? = nil, widgetDismissed: Bool? = nil, widgetSkipped: Bool? = nil) {
 			self.kind = kind
+			self.attachments = attachments
 			self.author = author
 			self.batchId = batchId
 			self.boxInstruction = boxInstruction
@@ -5709,6 +10626,10 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			self.boxResolution = boxResolution
 			self.boxSnapshot = boxSnapshot
 			self.branched = branched
+			self.channelPermalink = channelPermalink
+			self.cloudAgentArtifacts = cloudAgentArtifacts
+			self.cloudAgentWake = cloudAgentWake
+			self.credentialResolution = credentialResolution
 			self.deliverTo = deliverTo
 			self.draftRoute = draftRoute
 			self.draftRouteVerified = draftRouteVerified
@@ -5716,6 +10637,7 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			self.formFieldOutcomes = formFieldOutcomes
 			self.formRequestId = formRequestId
 			self.formResolution = formResolution
+			self.formSubmissionEffect = formSubmissionEffect
 			self.id = id
 			self.message = message
 			self.reactions = reactions
@@ -5724,17 +10646,21 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			self.respondedValue = respondedValue
 			self.respondedValueEchoed = respondedValueEchoed
 			self.secretProvided = secretProvided
+			self.seq = seq
 			self.streaming = streaming
 			self.timestampMs = timestampMs
+			self.wake = wake
+			self.wakeOutcomeUnseen = wakeOutcomeUnseen
 			self.widgetDismissed = widgetDismissed
 			self.widgetSkipped = widgetSkipped
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, author, batchId, boxInstruction, boxRequest, boxRequestId, boxResolution, boxSnapshot, branched, deliverTo, draftRoute, draftRouteVerified, draftSendState, formFieldOutcomes, formRequestId, formResolution, id, message, reactions, replyTo, requestId, respondedValue, respondedValueEchoed, secretProvided, streaming, timestampMs, widgetDismissed, widgetSkipped
+			case kind, attachments, author, batchId, boxInstruction, boxRequest, boxRequestId, boxResolution, boxSnapshot, branched, channelPermalink, cloudAgentArtifacts, cloudAgentWake, credentialResolution, deliverTo, draftRoute, draftRouteVerified, draftSendState, formFieldOutcomes, formRequestId, formResolution, formSubmissionEffect, id, message, reactions, replyTo, requestId, respondedValue, respondedValueEchoed, secretProvided, seq, streaming, timestampMs, wake, wakeOutcomeUnseen, widgetDismissed, widgetSkipped
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
 			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(attachments, forKey: .attachments)
 			try container.encodeIfPresent(author, forKey: .author)
 			try container.encodeIfPresent(batchId, forKey: .batchId)
 			try container.encodeIfPresent(boxInstruction, forKey: .boxInstruction)
@@ -5743,6 +10669,10 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			try container.encodeIfPresent(boxResolution, forKey: .boxResolution)
 			try container.encodeIfPresent(boxSnapshot, forKey: .boxSnapshot)
 			try container.encodeIfPresent(branched, forKey: .branched)
+			try container.encodeIfPresent(channelPermalink, forKey: .channelPermalink)
+			try container.encodeIfPresent(cloudAgentArtifacts, forKey: .cloudAgentArtifacts)
+			try container.encodeIfPresent(cloudAgentWake, forKey: .cloudAgentWake)
+			try container.encodeIfPresent(credentialResolution, forKey: .credentialResolution)
 			try container.encodeIfPresent(deliverTo, forKey: .deliverTo)
 			try container.encodeIfPresent(draftRoute, forKey: .draftRoute)
 			try container.encodeIfPresent(draftRouteVerified, forKey: .draftRouteVerified)
@@ -5750,6 +10680,7 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			try container.encodeIfPresent(formFieldOutcomes, forKey: .formFieldOutcomes)
 			try container.encodeIfPresent(formRequestId, forKey: .formRequestId)
 			try container.encodeIfPresent(formResolution, forKey: .formResolution)
+			try container.encodeIfPresent(formSubmissionEffect, forKey: .formSubmissionEffect)
 			try container.encode(id, forKey: .id)
 			try container.encode(message, forKey: .message)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
@@ -5758,8 +10689,11 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			try container.encodeIfPresent(respondedValue, forKey: .respondedValue)
 			try container.encodeIfPresent(respondedValueEchoed, forKey: .respondedValueEchoed)
 			try container.encodeIfPresent(secretProvided, forKey: .secretProvided)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encodeIfPresent(streaming, forKey: .streaming)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
+			try container.encodeIfPresent(wake, forKey: .wake)
+			try container.encodeIfPresent(wakeOutcomeUnseen, forKey: .wakeOutcomeUnseen)
 			try container.encodeIfPresent(widgetDismissed, forKey: .widgetDismissed)
 			try container.encodeIfPresent(widgetSkipped, forKey: .widgetSkipped)
 		}
@@ -5770,20 +10704,22 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 		public let id: String
 		public let name: String
 		public let reactions: [SandReaction]?
-		public let status: SandToolCallStatus
+		public let seq: Double?
+		public let status: SandTranscriptEntryStatus
 		public let summary: String?
 		public let timestampMs: Double?
-		public init(kind: String = "tool-call", id: String, name: String, reactions: [SandReaction]? = nil, status: SandToolCallStatus, summary: String? = nil, timestampMs: Double? = nil) {
+		public init(kind: String = "tool-call", id: String, name: String, reactions: [SandReaction]? = nil, seq: Double? = nil, status: SandTranscriptEntryStatus, summary: String? = nil, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.id = id
 			self.name = name
 			self.reactions = reactions
+			self.seq = seq
 			self.status = status
 			self.summary = summary
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, id, name, reactions, status, summary, timestampMs
+			case kind, id, name, reactions, seq, status, summary, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -5791,6 +10727,7 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			try container.encode(id, forKey: .id)
 			try container.encode(name, forKey: .name)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encode(status, forKey: .status)
 			try container.encodeIfPresent(summary, forKey: .summary)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
@@ -5809,9 +10746,10 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 		public let id: String
 		public let reactions: [SandReaction]?
 		public let replyTo: String?
+		public let seq: Double?
 		public let timestampMs: Double?
 		public let width: Double?
-		public init(kind: String = "user-attachment", batchId: String? = nil, branched: Bool? = nil, byteSize: Double? = nil, clientNonce: String? = nil, file_name: String? = nil, file_path: String, height: Double? = nil, id: String, reactions: [SandReaction]? = nil, replyTo: String? = nil, timestampMs: Double? = nil, width: Double? = nil) {
+		public init(kind: String = "user-attachment", batchId: String? = nil, branched: Bool? = nil, byteSize: Double? = nil, clientNonce: String? = nil, file_name: String? = nil, file_path: String, height: Double? = nil, id: String, reactions: [SandReaction]? = nil, replyTo: String? = nil, seq: Double? = nil, timestampMs: Double? = nil, width: Double? = nil) {
 			self.kind = kind
 			self.batchId = batchId
 			self.branched = branched
@@ -5823,11 +10761,12 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			self.id = id
 			self.reactions = reactions
 			self.replyTo = replyTo
+			self.seq = seq
 			self.timestampMs = timestampMs
 			self.width = width
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, batchId, branched, byteSize, clientNonce, file_name, file_path, height, id, reactions, replyTo, timestampMs, width
+			case kind, batchId, branched, byteSize, clientNonce, file_name, file_path, height, id, reactions, replyTo, seq, timestampMs, width
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -5842,6 +10781,7 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			try container.encode(id, forKey: .id)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
 			try container.encodeIfPresent(replyTo, forKey: .replyTo)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 			try container.encodeIfPresent(width, forKey: .width)
 		}
@@ -5853,17 +10793,19 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 		public let conversation: SandVoiceCallConversation?
 		public let id: String
 		public let reactions: [SandReaction]?
+		public let seq: Double?
 		public let timestampMs: Double?
-		public init(kind: String = "voice-call", call: SandVoiceCallSummary, conversation: SandVoiceCallConversation? = nil, id: String, reactions: [SandReaction]? = nil, timestampMs: Double? = nil) {
+		public init(kind: String = "voice-call", call: SandVoiceCallSummary, conversation: SandVoiceCallConversation? = nil, id: String, reactions: [SandReaction]? = nil, seq: Double? = nil, timestampMs: Double? = nil) {
 			self.kind = kind
 			self.call = call
 			self.conversation = conversation
 			self.id = id
 			self.reactions = reactions
+			self.seq = seq
 			self.timestampMs = timestampMs
 		}
 		enum CodingKeys: String, CodingKey {
-			case kind, call, conversation, id, reactions, timestampMs
+			case kind, call, conversation, id, reactions, seq, timestampMs
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
@@ -5872,6 +10814,7 @@ public enum SandTranscriptEntry: Codable, Sendable, Equatable {
 			try container.encodeIfPresent(conversation, forKey: .conversation)
 			try container.encode(id, forKey: .id)
 			try container.encodeIfPresent(reactions, forKey: .reactions)
+			try container.encodeIfPresent(seq, forKey: .seq)
 			try container.encodeIfPresent(timestampMs, forKey: .timestampMs)
 		}
 	}
@@ -5922,6 +10865,16 @@ public struct SandTranscriptEntryBoxResolution: RawRepresentable, Codable, Senda
 	public static let replied = SandTranscriptEntryBoxResolution(rawValue: "replied")
 }
 
+public struct SandTranscriptEntryCredentialResolution: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let approved = SandTranscriptEntryCredentialResolution(rawValue: "approved")
+	public static let denied = SandTranscriptEntryCredentialResolution(rawValue: "denied")
+	public static let failed = SandTranscriptEntryCredentialResolution(rawValue: "failed")
+	public static let filling = SandTranscriptEntryCredentialResolution(rawValue: "filling")
+	public static let retryable = SandTranscriptEntryCredentialResolution(rawValue: "retryable")
+}
+
 public enum SandTranscriptEntryDraftRoute: Codable, Sendable, Equatable {
 
 	case slack(Slack)
@@ -5953,19 +10906,22 @@ public enum SandTranscriptEntryDraftRoute: Codable, Sendable, Equatable {
 
 	public struct Email: Codable, Sendable, Equatable {
 		public let platform: String
+		public let mailbox: SandTranscriptEntryDraftRouteMailbox?
 		public let providerIdentifier: String
 		public let replyToMessageId: String?
-		public init(platform: String = "email", providerIdentifier: String, replyToMessageId: String? = nil) {
+		public init(platform: String = "email", mailbox: SandTranscriptEntryDraftRouteMailbox? = nil, providerIdentifier: String, replyToMessageId: String? = nil) {
 			self.platform = platform
+			self.mailbox = mailbox
 			self.providerIdentifier = providerIdentifier
 			self.replyToMessageId = replyToMessageId
 		}
 		enum CodingKeys: String, CodingKey {
-			case platform, providerIdentifier, replyToMessageId
+			case platform, mailbox, providerIdentifier, replyToMessageId
 		}
 		public func encode(to encoder: Encoder) throws {
 			var container = encoder.container(keyedBy: CodingKeys.self)
 			try container.encode(platform, forKey: .platform)
+			try container.encodeIfPresent(mailbox, forKey: .mailbox)
 			try container.encode(providerIdentifier, forKey: .providerIdentifier)
 			try container.encodeIfPresent(replyToMessageId, forKey: .replyToMessageId)
 		}
@@ -5995,6 +10951,13 @@ public enum SandTranscriptEntryDraftRoute: Codable, Sendable, Equatable {
 		case .unknown(let v): try v.encode(to: encoder)
 		}
 	}
+}
+
+public struct SandTranscriptEntryDraftRouteMailbox: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let gmail = SandTranscriptEntryDraftRouteMailbox(rawValue: "gmail")
+	public static let outlook = SandTranscriptEntryDraftRouteMailbox(rawValue: "outlook")
 }
 
 public enum SandTranscriptEntryDraftRouteVerified: Codable, Sendable, Equatable {
@@ -6091,6 +11054,122 @@ public struct SandTranscriptEntryFormResolution: RawRepresentable, Codable, Send
 	public static let submitted = SandTranscriptEntryFormResolution(rawValue: "submitted")
 }
 
+public enum SandTranscriptEntryFormSubmissionEffect: Codable, Sendable, Equatable {
+
+	case claimed(Claimed)
+	case settled(Settled)
+	case unknown(Unknown)
+
+	public struct Claimed: Codable, Sendable, Equatable {
+		public let kind: String
+		public let claimId: String?
+		public let claimedAtMs: Double?
+		public init(kind: String = "claimed", claimId: String? = nil, claimedAtMs: Double? = nil) {
+			self.kind = kind
+			self.claimId = claimId
+			self.claimedAtMs = claimedAtMs
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, claimId, claimedAtMs
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(claimId, forKey: .claimId)
+			try container.encodeIfPresent(claimedAtMs, forKey: .claimedAtMs)
+		}
+	}
+
+	public struct Settled: Codable, Sendable, Equatable {
+		public let kind: String
+		public let submit: SandTranscriptEntryFormSubmissionEffectSubmit?
+		public let wakeDelivery: SandTranscriptEntryFormSubmissionEffectWakeDelivery?
+		public init(kind: String = "settled", submit: SandTranscriptEntryFormSubmissionEffectSubmit? = nil, wakeDelivery: SandTranscriptEntryFormSubmissionEffectWakeDelivery? = nil) {
+			self.kind = kind
+			self.submit = submit
+			self.wakeDelivery = wakeDelivery
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, submit, wakeDelivery
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encodeIfPresent(submit, forKey: .submit)
+			try container.encodeIfPresent(wakeDelivery, forKey: .wakeDelivery)
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "claimed": self = .claimed(try Claimed(from: decoder))
+		case "settled": self = .settled(try Settled(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .claimed(let v): try v.encode(to: encoder)
+		case .settled(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public enum SandTranscriptEntryFormSubmissionEffectSubmit: Codable, Sendable, Equatable {
+	case variant0(Variant0)
+	case variant1(Variant1)
+	case variant2
+
+	public struct Variant0: Codable, Sendable, Equatable {
+		public let attempted: Bool
+		public init(attempted: Bool) {
+			self.attempted = attempted
+		}
+	}
+
+	public struct Variant1: Codable, Sendable, Equatable {
+		public let attempted: Bool
+		public let succeeded: Bool
+		public init(attempted: Bool, succeeded: Bool) {
+			self.attempted = attempted
+			self.succeeded = succeeded
+		}
+	}
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.singleValueContainer()
+		if let v = try? container.decode(Variant0.self) { self = .variant0(v); return }
+		if let v = try? container.decode(Variant1.self) { self = .variant1(v); return }
+		if container.decodeNil() { self = .variant2; return }
+		throw DecodingError.typeMismatch(SandTranscriptEntryFormSubmissionEffectSubmit.self, .init(codingPath: decoder.codingPath, debugDescription: "Unknown SandTranscriptEntryFormSubmissionEffectSubmit value"))
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.singleValueContainer()
+		switch self {
+		case .variant0(let v): try container.encode(v)
+		case .variant1(let v): try container.encode(v)
+		case .variant2: try container.encodeNil()
+		}
+	}
+}
+
+public struct SandTranscriptEntryFormSubmissionEffectWakeDelivery: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let delivered = SandTranscriptEntryFormSubmissionEffectWakeDelivery(rawValue: "delivered")
+	public static let pending = SandTranscriptEntryFormSubmissionEffectWakeDelivery(rawValue: "pending")
+}
+
 public struct SandTranscriptEntryFromUser: Codable, Sendable, Equatable {
 	public let authId: String?
 	public let avatarUrl: String?
@@ -6111,6 +11190,13 @@ public struct SandTranscriptEntryFromUser: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandTranscriptEntryRole: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let assistant = SandTranscriptEntryRole(rawValue: "assistant")
+	public static let user = SandTranscriptEntryRole(rawValue: "user")
+}
+
 public struct SandTranscriptEntrySentiment: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
@@ -6118,28 +11204,112 @@ public struct SandTranscriptEntrySentiment: RawRepresentable, Codable, Sendable,
 	public static let up = SandTranscriptEntrySentiment(rawValue: "up")
 }
 
-public struct SandTranscriptEntryState: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+public struct SandTranscriptEntryStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
 	public let rawValue: String
 	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let improve = SandTranscriptEntryState(rawValue: "improve")
-	public static let prompt = SandTranscriptEntryState(rawValue: "prompt")
-	public static let voted = SandTranscriptEntryState(rawValue: "voted")
+	public static let done = SandTranscriptEntryStatus(rawValue: "done")
+	public static let failed = SandTranscriptEntryStatus(rawValue: "failed")
+	public static let pending = SandTranscriptEntryStatus(rawValue: "pending")
+}
+
+public struct SandTranscriptEntryWake: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let agent = SandTranscriptEntryWake(rawValue: "agent")
+	public static let automation = SandTranscriptEntryWake(rawValue: "automation")
+	public static let backgroundRevival = SandTranscriptEntryWake(rawValue: "background-revival")
+	public static let broadcast = SandTranscriptEntryWake(rawValue: "broadcast")
+	public static let connector = SandTranscriptEntryWake(rawValue: "connector")
+	public static let event = SandTranscriptEntryWake(rawValue: "event")
+	public static let handoffResume = SandTranscriptEntryWake(rawValue: "handoff-resume")
+	public static let voiceCall = SandTranscriptEntryWake(rawValue: "voice-call")
 }
 
 public struct SandTranscriptPage: Codable, Sendable, Equatable {
+	public let cloudAgentPeerIds: [String]?
 	public let entries: [SandTranscriptEntry]
 	public let nextBeforeSeq: Double?
-	public init(entries: [SandTranscriptEntry], nextBeforeSeq: Double? = nil) {
+	public let precedingTimestampMs: Double?
+	public let unreadAnchor: SandTranscriptPageUnreadAnchor?
+	public init(cloudAgentPeerIds: [String]? = nil, entries: [SandTranscriptEntry], nextBeforeSeq: Double? = nil, precedingTimestampMs: Double? = nil, unreadAnchor: SandTranscriptPageUnreadAnchor? = nil) {
+		self.cloudAgentPeerIds = cloudAgentPeerIds
 		self.entries = entries
 		self.nextBeforeSeq = nextBeforeSeq
+		self.precedingTimestampMs = precedingTimestampMs
+		self.unreadAnchor = unreadAnchor
 	}
 	enum CodingKeys: String, CodingKey {
-		case entries, nextBeforeSeq
+		case cloudAgentPeerIds, entries, nextBeforeSeq, precedingTimestampMs, unreadAnchor
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(cloudAgentPeerIds, forKey: .cloudAgentPeerIds)
 		try container.encode(entries, forKey: .entries)
 		try container.encodeIfPresent(nextBeforeSeq, forKey: .nextBeforeSeq)
+		try container.encodeIfPresent(precedingTimestampMs, forKey: .precedingTimestampMs)
+		try container.encodeIfPresent(unreadAnchor, forKey: .unreadAnchor)
+	}
+}
+
+public enum SandTranscriptPageUnreadAnchor: Codable, Sendable, Equatable {
+
+	case at(At)
+	case none(None)
+	case unknown(Unknown)
+
+	public struct At: Codable, Sendable, Equatable {
+		public let kind: String
+		public let entryId: String
+		public let newerRows: Double
+		public let seq: Double?
+		public init(kind: String = "at", entryId: String, newerRows: Double, seq: Double? = nil) {
+			self.kind = kind
+			self.entryId = entryId
+			self.newerRows = newerRows
+			self.seq = seq
+		}
+		enum CodingKeys: String, CodingKey {
+			case kind, entryId, newerRows, seq
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(kind, forKey: .kind)
+			try container.encode(entryId, forKey: .entryId)
+			try container.encode(newerRows, forKey: .newerRows)
+			try container.encodeIfPresent(seq, forKey: .seq)
+		}
+	}
+
+	public struct None: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "none") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "at": self = .at(try At(from: decoder))
+		case "none": self = .none(try None(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .at(let v): try v.encode(to: encoder)
+		case .none(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
 	}
 }
 
@@ -6163,9 +11333,30 @@ public struct SandTranscriptWindow: Codable, Sendable, Equatable {
 	}
 }
 
+public struct SandTrayErrorParams: Codable, Sendable, Equatable {
+	public let address: String?
+	public let platform: String?
+	public let technicalDetail: String?
+	public init(address: String? = nil, platform: String? = nil, technicalDetail: String? = nil) {
+		self.address = address
+		self.platform = platform
+		self.technicalDetail = technicalDetail
+	}
+	enum CodingKeys: String, CodingKey {
+		case address, platform, technicalDetail
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(address, forKey: .address)
+		try container.encodeIfPresent(platform, forKey: .platform)
+		try container.encodeIfPresent(technicalDetail, forKey: .technicalDetail)
+	}
+}
+
 public enum SandTrigger: Codable, Sendable, Equatable {
 
 	case cron(Cron)
+	case email(Email)
 	case github(Github)
 	case linear(Linear)
 	case microsoftTeams(MicrosoftTeams)
@@ -6182,6 +11373,29 @@ public enum SandTrigger: Codable, Sendable, Equatable {
 		public init(type: String = "cron", schedule: String) {
 			self.type = type
 			self.schedule = schedule
+		}
+	}
+
+	public struct Email: Codable, Sendable, Equatable {
+		public let type: String
+		public let from: [String]?
+		public let inbox: String
+		public let requireAuthPass: Bool?
+		public init(type: String = "email", from: [String]? = nil, inbox: String, requireAuthPass: Bool? = nil) {
+			self.type = type
+			self.from = from
+			self.inbox = inbox
+			self.requireAuthPass = requireAuthPass
+		}
+		enum CodingKeys: String, CodingKey {
+			case type, from, inbox, requireAuthPass
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(type, forKey: .type)
+			try container.encodeIfPresent(from, forKey: .from)
+			try container.encode(inbox, forKey: .inbox)
+			try container.encodeIfPresent(requireAuthPass, forKey: .requireAuthPass)
 		}
 	}
 
@@ -6323,6 +11537,7 @@ public enum SandTrigger: Codable, Sendable, Equatable {
 		let container = try decoder.container(keyedBy: TagKey.self)
 		switch try container.decode(String.self, forKey: .`type`) {
 		case "cron": self = .cron(try Cron(from: decoder))
+		case "email": self = .email(try Email(from: decoder))
 		case "github": self = .github(try Github(from: decoder))
 		case "linear": self = .linear(try Linear(from: decoder))
 		case "microsoftTeams": self = .microsoftTeams(try MicrosoftTeams(from: decoder))
@@ -6339,6 +11554,7 @@ public enum SandTrigger: Codable, Sendable, Equatable {
 	public func encode(to encoder: Encoder) throws {
 		switch self {
 		case .cron(let v): try v.encode(to: encoder)
+		case .email(let v): try v.encode(to: encoder)
 		case .github(let v): try v.encode(to: encoder)
 		case .linear(let v): try v.encode(to: encoder)
 		case .microsoftTeams(let v): try v.encode(to: encoder)
@@ -6367,6 +11583,12 @@ public struct SandTriggerEventCase: RawRepresentable, Codable, Sendable, Equatab
 	public static let incidentEscalated = SandTriggerEventCase(rawValue: "incidentEscalated")
 	public static let incidentResolved = SandTriggerEventCase(rawValue: "incidentResolved")
 	public static let incidentTriggered = SandTriggerEventCase(rawValue: "incidentTriggered")
+	public static let issueAny = SandTriggerEventCase(rawValue: "issueAny")
+	public static let issueArchived = SandTriggerEventCase(rawValue: "issueArchived")
+	public static let issueAssigned = SandTriggerEventCase(rawValue: "issueAssigned")
+	public static let issueCreated = SandTriggerEventCase(rawValue: "issueCreated")
+	public static let issueResolved = SandTriggerEventCase(rawValue: "issueResolved")
+	public static let issueUnresolved = SandTriggerEventCase(rawValue: "issueUnresolved")
 }
 
 public struct SandTriggerEventsItem: RawRepresentable, Codable, Sendable, Equatable, Hashable {
@@ -6445,6 +11667,15 @@ public struct SandTurnSettlementOutcome: RawRepresentable, Codable, Sendable, Eq
 	public static let success = SandTurnSettlementOutcome(rawValue: "success")
 }
 
+public struct SandUpdatePluginInstallRequest: Codable, Sendable, Equatable {
+	public let pluginId: String
+	public let values: [String: SandMcpVariableValue]
+	public init(pluginId: String, values: [String: SandMcpVariableValue]) {
+		self.pluginId = pluginId
+		self.values = values
+	}
+}
+
 public struct SandUploadAttachmentArgs: Codable, Sendable, Equatable {
 	public let agentId: String?
 	public let bytesBase64: String
@@ -6473,6 +11704,7 @@ public struct SandUploadAttachmentResult: Codable, Sendable, Equatable {
 }
 
 public struct SandUserFormField: Codable, Sendable, Equatable {
+	public let extraKey: String?
 	public let id: String
 	public let label: String
 	public let options: [SandUserFormOption]?
@@ -6481,7 +11713,8 @@ public struct SandUserFormField: Codable, Sendable, Equatable {
 	public let secret: Bool?
 	public let target: SandUserFormTarget?
 	public let type: SandUserFormFieldType
-	public init(id: String, label: String, options: [SandUserFormOption]? = nil, placeholder: String? = nil, required: Bool? = nil, secret: Bool? = nil, target: SandUserFormTarget? = nil, type: SandUserFormFieldType) {
+	public init(extraKey: String? = nil, id: String, label: String, options: [SandUserFormOption]? = nil, placeholder: String? = nil, required: Bool? = nil, secret: Bool? = nil, target: SandUserFormTarget? = nil, type: SandUserFormFieldType) {
+		self.extraKey = extraKey
 		self.id = id
 		self.label = label
 		self.options = options
@@ -6492,10 +11725,11 @@ public struct SandUserFormField: Codable, Sendable, Equatable {
 		self.type = type
 	}
 	enum CodingKeys: String, CodingKey {
-		case id, label, options, placeholder, required, secret, target, type
+		case extraKey, id, label, options, placeholder, required, secret, target, type
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(extraKey, forKey: .extraKey)
 		try container.encode(id, forKey: .id)
 		try container.encode(label, forKey: .label)
 		try container.encodeIfPresent(options, forKey: .options)
@@ -6551,24 +11785,15 @@ public struct SandUserFormOption: Codable, Sendable, Equatable {
 	}
 }
 
-public struct SandUserFormReason: RawRepresentable, Codable, Sendable, Equatable, Hashable {
-	public let rawValue: String
-	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let auth = SandUserFormReason(rawValue: "auth")
-	public static let checkout = SandUserFormReason(rawValue: "checkout")
-	public static let other = SandUserFormReason(rawValue: "other")
-	public static let profile = SandUserFormReason(rawValue: "profile")
-}
-
 public struct SandUserFormRequest: Codable, Sendable, Equatable {
 	public let domain: String?
 	public let fields: [SandUserFormField]
 	public let instruction: String
 	public let liveHost: String?
-	public let reason: SandUserFormReason
+	public let reason: SandUserFormRequestReason
 	public let submitAfterFill: Bool?
 	public let title: String
-	public init(domain: String? = nil, fields: [SandUserFormField], instruction: String, liveHost: String? = nil, reason: SandUserFormReason, submitAfterFill: Bool? = nil, title: String) {
+	public init(domain: String? = nil, fields: [SandUserFormField], instruction: String, liveHost: String? = nil, reason: SandUserFormRequestReason, submitAfterFill: Bool? = nil, title: String) {
 		self.domain = domain
 		self.fields = fields
 		self.instruction = instruction
@@ -6590,6 +11815,15 @@ public struct SandUserFormRequest: Codable, Sendable, Equatable {
 		try container.encodeIfPresent(submitAfterFill, forKey: .submitAfterFill)
 		try container.encode(title, forKey: .title)
 	}
+}
+
+public struct SandUserFormRequestReason: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let auth = SandUserFormRequestReason(rawValue: "auth")
+	public static let checkout = SandUserFormRequestReason(rawValue: "checkout")
+	public static let other = SandUserFormRequestReason(rawValue: "other")
+	public static let profile = SandUserFormRequestReason(rawValue: "profile")
 }
 
 public struct SandUserFormTarget: Codable, Sendable, Equatable {
@@ -6672,29 +11906,29 @@ public struct SandVirtualCardLineItem: Codable, Sendable, Equatable {
 	}
 }
 
-public struct SandVoiceCallAgentContext: Codable, Sendable, Equatable {
-	public let agentId: String
-	public let agentName: String
-	public let isWorking: Bool
-	public let outline: [String]
-	public let recentAgentMessages: [String]
-	public init(agentId: String, agentName: String, isWorking: Bool, outline: [String], recentAgentMessages: [String]) {
-		self.agentId = agentId
-		self.agentName = agentName
-		self.isWorking = isWorking
-		self.outline = outline
-		self.recentAgentMessages = recentAgentMessages
-	}
-}
-
 public struct SandVoiceCallConversation: Codable, Sendable, Equatable {
 	public let events: [SandVoiceCallEvent]
 	public let nudges: [SandVoiceCallNudge]
+	public let overheard: [SandVoiceCallOverheardStep]?
+	public let toolCalls: [SandVoiceCallToolCall]?
 	public let turns: [SandVoiceCallTurn]
-	public init(events: [SandVoiceCallEvent], nudges: [SandVoiceCallNudge], turns: [SandVoiceCallTurn]) {
+	public init(events: [SandVoiceCallEvent], nudges: [SandVoiceCallNudge], overheard: [SandVoiceCallOverheardStep]? = nil, toolCalls: [SandVoiceCallToolCall]? = nil, turns: [SandVoiceCallTurn]) {
 		self.events = events
 		self.nudges = nudges
+		self.overheard = overheard
+		self.toolCalls = toolCalls
 		self.turns = turns
+	}
+	enum CodingKeys: String, CodingKey {
+		case events, nudges, overheard, toolCalls, turns
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(events, forKey: .events)
+		try container.encode(nudges, forKey: .nudges)
+		try container.encodeIfPresent(overheard, forKey: .overheard)
+		try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
+		try container.encode(turns, forKey: .turns)
 	}
 }
 
@@ -6720,8 +11954,10 @@ public struct SandVoiceCallEventKind: RawRepresentable, Codable, Sendable, Equat
 	public init(rawValue: String) { self.rawValue = rawValue }
 	public static let agentSpeechStarted = SandVoiceCallEventKind(rawValue: "agent-speech-started")
 	public static let agentSpeechStopped = SandVoiceCallEventKind(rawValue: "agent-speech-stopped")
+	public static let callerInterrupted = SandVoiceCallEventKind(rawValue: "caller-interrupted")
 	public static let callerSpeechStarted = SandVoiceCallEventKind(rawValue: "caller-speech-started")
 	public static let callerSpeechStopped = SandVoiceCallEventKind(rawValue: "caller-speech-stopped")
+	public static let protocolError = SandVoiceCallEventKind(rawValue: "protocol-error")
 	public static let responseCreate = SandVoiceCallEventKind(rawValue: "response-create")
 }
 
@@ -6729,65 +11965,200 @@ public struct SandVoiceCallNudge: Codable, Sendable, Equatable {
 	public let answer: String?
 	public let answeredAtMs: Double?
 	public let atMs: Double
+	public let cut: SandVoiceCallNudgeCut?
+	public let direction: SandVoiceCallNudgeDirection?
 	public let id: String
 	public let request: String
-	public init(answer: String? = nil, answeredAtMs: Double? = nil, atMs: Double, id: String, request: String) {
+	public init(answer: String? = nil, answeredAtMs: Double? = nil, atMs: Double, cut: SandVoiceCallNudgeCut? = nil, direction: SandVoiceCallNudgeDirection? = nil, id: String, request: String) {
 		self.answer = answer
 		self.answeredAtMs = answeredAtMs
 		self.atMs = atMs
+		self.cut = cut
+		self.direction = direction
 		self.id = id
 		self.request = request
 	}
 	enum CodingKeys: String, CodingKey {
-		case answer, answeredAtMs, atMs, id, request
+		case answer, answeredAtMs, atMs, cut, direction, id, request
 	}
 	public func encode(to encoder: Encoder) throws {
 		var container = encoder.container(keyedBy: CodingKeys.self)
 		try container.encode(answer, forKey: .answer)
 		try container.encodeIfPresent(answeredAtMs, forKey: .answeredAtMs)
 		try container.encode(atMs, forKey: .atMs)
+		try container.encodeIfPresent(cut, forKey: .cut)
+		try container.encodeIfPresent(direction, forKey: .direction)
 		try container.encode(id, forKey: .id)
 		try container.encode(request, forKey: .request)
 	}
 }
 
-public struct SandVoiceCallSpeaker: RawRepresentable, Codable, Sendable, Equatable, Hashable {
-	public let rawValue: String
-	public init(rawValue: String) { self.rawValue = rawValue }
-	public static let assistant = SandVoiceCallSpeaker(rawValue: "assistant")
-	public static let user = SandVoiceCallSpeaker(rawValue: "user")
+public struct SandVoiceCallNudgeCut: Codable, Sendable, Equatable {
+	public let atMs: Double
+	public let heardMs: Double
+	public init(atMs: Double, heardMs: Double) {
+		self.atMs = atMs
+		self.heardMs = heardMs
+	}
 }
 
-public struct SandVoiceCallSummary: Codable, Sendable, Equatable {
-	public let answeredNudgeCount: Double
+public struct SandVoiceCallNudgeDirection: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let toMain = SandVoiceCallNudgeDirection(rawValue: "to-main")
+	public static let toVoice = SandVoiceCallNudgeDirection(rawValue: "to-voice")
+}
+
+public struct SandVoiceCallOverheardStep: Codable, Sendable, Equatable {
+	public let atMs: Double
+	public let id: String
+	public let text: String
+	public init(atMs: Double, id: String, text: String) {
+		self.atMs = atMs
+		self.id = id
+		self.text = text
+	}
+}
+
+public struct SandVoiceCallRecord: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let agentRequestId: String?
 	public let callId: String
 	public let durationMs: Double
 	public let endedAtMs: Double
 	public let ending: SandVoiceCallEnding
-	public let nudgeCount: Double
-	public let turnCount: Double
-	public init(answeredNudgeCount: Double, callId: String, durationMs: Double, endedAtMs: Double, ending: SandVoiceCallEnding, nudgeCount: Double, turnCount: Double) {
-		self.answeredNudgeCount = answeredNudgeCount
+	public let events: [SandVoiceCallEvent]?
+	public let harnessMayCollect: Bool?
+	public let model: String
+	public let nudges: [SandVoiceCallNudge]
+	public let overheard: [SandVoiceCallOverheardStep]?
+	public let realtimeConversationId: String?
+	public let startedAtMs: Double
+	public let toolCalls: [SandVoiceCallToolCall]?
+	public let turns: [SandVoiceCallTurn]
+	public init(agentId: String, agentRequestId: String? = nil, callId: String, durationMs: Double, endedAtMs: Double, ending: SandVoiceCallEnding, events: [SandVoiceCallEvent]? = nil, harnessMayCollect: Bool? = nil, model: String, nudges: [SandVoiceCallNudge], overheard: [SandVoiceCallOverheardStep]? = nil, realtimeConversationId: String? = nil, startedAtMs: Double, toolCalls: [SandVoiceCallToolCall]? = nil, turns: [SandVoiceCallTurn]) {
+		self.agentId = agentId
+		self.agentRequestId = agentRequestId
 		self.callId = callId
 		self.durationMs = durationMs
 		self.endedAtMs = endedAtMs
 		self.ending = ending
+		self.events = events
+		self.harnessMayCollect = harnessMayCollect
+		self.model = model
+		self.nudges = nudges
+		self.overheard = overheard
+		self.realtimeConversationId = realtimeConversationId
+		self.startedAtMs = startedAtMs
+		self.toolCalls = toolCalls
+		self.turns = turns
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, agentRequestId, callId, durationMs, endedAtMs, ending, events, harnessMayCollect, model, nudges, overheard, realtimeConversationId, startedAtMs, toolCalls, turns
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encodeIfPresent(agentRequestId, forKey: .agentRequestId)
+		try container.encode(callId, forKey: .callId)
+		try container.encode(durationMs, forKey: .durationMs)
+		try container.encode(endedAtMs, forKey: .endedAtMs)
+		try container.encode(ending, forKey: .ending)
+		try container.encodeIfPresent(events, forKey: .events)
+		try container.encodeIfPresent(harnessMayCollect, forKey: .harnessMayCollect)
+		try container.encode(model, forKey: .model)
+		try container.encode(nudges, forKey: .nudges)
+		try container.encodeIfPresent(overheard, forKey: .overheard)
+		try container.encodeIfPresent(realtimeConversationId, forKey: .realtimeConversationId)
+		try container.encode(startedAtMs, forKey: .startedAtMs)
+		try container.encodeIfPresent(toolCalls, forKey: .toolCalls)
+		try container.encode(turns, forKey: .turns)
+	}
+}
+
+public struct SandVoiceCallSummary: Codable, Sendable, Equatable {
+	public let agentRequestId: String?
+	public let answeredNudgeCount: Double
+	public let callId: String
+	public let description: String?
+	public let durationMs: Double
+	public let endedAtMs: Double
+	public let ending: SandVoiceCallEnding
+	public let nudgeCount: Double
+	public let realtimeConversationId: String?
+	public let turnCount: Double
+	public init(agentRequestId: String? = nil, answeredNudgeCount: Double, callId: String, description: String? = nil, durationMs: Double, endedAtMs: Double, ending: SandVoiceCallEnding, nudgeCount: Double, realtimeConversationId: String? = nil, turnCount: Double) {
+		self.agentRequestId = agentRequestId
+		self.answeredNudgeCount = answeredNudgeCount
+		self.callId = callId
+		self.description = description
+		self.durationMs = durationMs
+		self.endedAtMs = endedAtMs
+		self.ending = ending
 		self.nudgeCount = nudgeCount
+		self.realtimeConversationId = realtimeConversationId
 		self.turnCount = turnCount
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentRequestId, answeredNudgeCount, callId, description, durationMs, endedAtMs, ending, nudgeCount, realtimeConversationId, turnCount
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(agentRequestId, forKey: .agentRequestId)
+		try container.encode(answeredNudgeCount, forKey: .answeredNudgeCount)
+		try container.encode(callId, forKey: .callId)
+		try container.encodeIfPresent(description, forKey: .description)
+		try container.encode(durationMs, forKey: .durationMs)
+		try container.encode(endedAtMs, forKey: .endedAtMs)
+		try container.encode(ending, forKey: .ending)
+		try container.encode(nudgeCount, forKey: .nudgeCount)
+		try container.encodeIfPresent(realtimeConversationId, forKey: .realtimeConversationId)
+		try container.encode(turnCount, forKey: .turnCount)
+	}
+}
+
+public struct SandVoiceCallToolCall: Codable, Sendable, Equatable {
+	public let argumentsJson: String
+	public let atMs: Double
+	public let id: String
+	public let name: String
+	public let result: SandVoiceCallToolResult?
+	public init(argumentsJson: String, atMs: Double, id: String, name: String, result: SandVoiceCallToolResult? = nil) {
+		self.argumentsJson = argumentsJson
+		self.atMs = atMs
+		self.id = id
+		self.name = name
+		self.result = result
+	}
+}
+
+public struct SandVoiceCallToolResult: Codable, Sendable, Equatable {
+	public let atMs: Double
+	public let json: String
+	public init(atMs: Double, json: String) {
+		self.atMs = atMs
+		self.json = json
 	}
 }
 
 public struct SandVoiceCallTurn: Codable, Sendable, Equatable {
 	public let atMs: Double
 	public let id: String
-	public let speaker: SandVoiceCallSpeaker
+	public let speaker: SandVoiceCallTurnSpeaker
 	public let text: String
-	public init(atMs: Double, id: String, speaker: SandVoiceCallSpeaker, text: String) {
+	public init(atMs: Double, id: String, speaker: SandVoiceCallTurnSpeaker, text: String) {
 		self.atMs = atMs
 		self.id = id
 		self.speaker = speaker
 		self.text = text
 	}
+}
+
+public struct SandVoiceCallTurnSpeaker: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let assistant = SandVoiceCallTurnSpeaker(rawValue: "assistant")
+	public static let user = SandVoiceCallTurnSpeaker(rawValue: "user")
 }
 
 public struct SandWidget: Codable, Sendable, Equatable {
@@ -6836,9 +12207,773 @@ public struct SandWidgetCopyKind: RawRepresentable, Codable, Sendable, Equatable
 	public static let automationSpendGuardPaused = SandWidgetCopyKind(rawValue: "automation_spend_guard_paused")
 }
 
+public struct SidebarSectionUpdate: Codable, Sendable, Equatable {
+	public let agentIds: [String]
+	public let id: String
+	public let isCollapsed: Bool?
+	public let name: String
+	public init(agentIds: [String], id: String, isCollapsed: Bool? = nil, name: String) {
+		self.agentIds = agentIds
+		self.id = id
+		self.isCollapsed = isCollapsed
+		self.name = name
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentIds, id, isCollapsed, name
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentIds, forKey: .agentIds)
+		try container.encode(id, forKey: .id)
+		try container.encodeIfPresent(isCollapsed, forKey: .isCollapsed)
+		try container.encode(name, forKey: .name)
+	}
+}
+
+public struct StoredSidebarSection: Codable, Sendable, Equatable {
+	public let agentIds: [String]
+	public let id: String
+	public let isCollapsed: Bool
+	public let name: String
+	public init(agentIds: [String], id: String, isCollapsed: Bool, name: String) {
+		self.agentIds = agentIds
+		self.id = id
+		self.isCollapsed = isCollapsed
+		self.name = name
+	}
+}
+
+public enum TeamBotLineSentence: Codable, Sendable, Equatable {
+
+	case outroPublishing(OutroPublishing)
+	case whatFirstAsk(WhatFirstAsk)
+	case conversionPlan(ConversionPlan)
+	case setupReceipt(SetupReceipt)
+	case setupReceiptAdded(SetupReceiptAdded)
+	case conversionMemoriesShared(ConversionMemoriesShared)
+	case conversionAutomationsFailedAll(ConversionAutomationsFailedAll)
+	case conversionAutomationsFailedSome(ConversionAutomationsFailedSome)
+	case conversionAutomationsMovedSome(ConversionAutomationsMovedSome)
+	case hello(Hello)
+	case introInvite(IntroInvite)
+	case carryOverDone(CarryOverDone)
+	case closingTeamLink(ClosingTeamLink)
+	case conversionSkillsPicked(ConversionSkillsPicked)
+	case introHi(IntroHi)
+	case setupPlan(SetupPlan)
+	case setupSkillsBridge(SetupSkillsBridge)
+	case setupSkillsPicked(SetupSkillsPicked)
+	case slackDeclined(SlackDeclined)
+	case slackLive(SlackLive)
+	case carryOverInProgress(CarryOverInProgress)
+	case cloneReceipt(CloneReceipt)
+	case closingSetupDone(ClosingSetupDone)
+	case closingWhatDoFirst(ClosingWhatDoFirst)
+	case conversionChatsAndAutomationsYours(ConversionChatsAndAutomationsYours)
+	case conversionChatsPrivate(ConversionChatsPrivate)
+	case conversionMemoriesKept(ConversionMemoriesKept)
+	case conversionMemoriesLead(ConversionMemoriesLead)
+	case conversionMemoriesNone(ConversionMemoriesNone)
+	case conversionMemoriesSorting(ConversionMemoriesSorting)
+	case conversionOpener(ConversionOpener)
+	case conversionSecretsShared(ConversionSecretsShared)
+	case conversionSkillsFailed(ConversionSkillsFailed)
+	case conversionSkillsNone(ConversionSkillsNone)
+	case conversionSkillsNothing(ConversionSkillsNothing)
+	case conversionSkillsPending(ConversionSkillsPending)
+	case conversionSlackToo(ConversionSlackToo)
+	case introManaged(IntroManaged)
+	case outroAlreadyPublished(OutroAlreadyPublished)
+	case outroNotReadyYet(OutroNotReadyYet)
+	case outroTeammatesAddAccounts(OutroTeammatesAddAccounts)
+	case publishedCopyLink(PublishedCopyLink)
+	case publishedFindMe(PublishedFindMe)
+	case publishedSlackOffer(PublishedSlackOffer)
+	case publishedSlackToo(PublishedSlackToo)
+	case setupDone(SetupDone)
+	case setupFilesLead(SetupFilesLead)
+	case setupFirstPlugins(SetupFirstPlugins)
+	case setupPluginsAsk(SetupPluginsAsk)
+	case setupPluginsAskFallback(SetupPluginsAskFallback)
+	case setupPluginsPreselected(SetupPluginsPreselected)
+	case setupSecretsLead(SetupSecretsLead)
+	case setupSkillsNone(SetupSkillsNone)
+	case setupSkillsPending(SetupSkillsPending)
+	case conversionAutomationsKept(ConversionAutomationsKept)
+	case conversionAutomationsLead(ConversionAutomationsLead)
+	case conversionAutomationsMoved(ConversionAutomationsMoved)
+	case unknown(Unknown)
+
+	public struct OutroPublishing: Codable, Sendable, Equatable {
+		public let key: String
+		public let added: [TeamBotLineSentenceAddedItem]
+		public init(key: String = "outro.publishing", added: [TeamBotLineSentenceAddedItem]) {
+			self.key = key
+			self.added = added
+		}
+	}
+
+	public struct WhatFirstAsk: Codable, Sendable, Equatable {
+		public let key: String
+		public let askedEarlier: Bool
+		public init(key: String = "whatFirst.ask", askedEarlier: Bool) {
+			self.key = key
+			self.askedEarlier = askedEarlier
+		}
+	}
+
+	public struct ConversionPlan: Codable, Sendable, Equatable {
+		public let key: String
+		public let automations: Bool
+		public let skills: Bool
+		public init(key: String = "conversion.plan", automations: Bool, skills: Bool) {
+			self.key = key
+			self.automations = automations
+			self.skills = skills
+		}
+	}
+
+	public struct SetupReceipt: Codable, Sendable, Equatable {
+		public let key: String
+		public let card: TeamBotLineSentenceCard
+		public let outcome: TeamBotLineSentenceOutcome
+		public init(key: String = "setup.receipt", card: TeamBotLineSentenceCard, outcome: TeamBotLineSentenceOutcome) {
+			self.key = key
+			self.card = card
+			self.outcome = outcome
+		}
+	}
+
+	public struct SetupReceiptAdded: Codable, Sendable, Equatable {
+		public let key: String
+		public let card: TeamBotLineSentenceCard
+		public let names: [String]
+		public init(key: String = "setup.receiptAdded", card: TeamBotLineSentenceCard, names: [String]) {
+			self.key = key
+			self.card = card
+			self.names = names
+		}
+	}
+
+	public struct ConversionMemoriesShared: Codable, Sendable, Equatable {
+		public let key: String
+		public let count: Double
+		public init(key: String = "conversion.memoriesShared", count: Double) {
+			self.key = key
+			self.count = count
+		}
+	}
+
+	public struct ConversionAutomationsFailedAll: Codable, Sendable, Equatable {
+		public let key: String
+		public let count: Double
+		public let name: String
+		public init(key: String = "conversion.automationsFailedAll", count: Double, name: String) {
+			self.key = key
+			self.count = count
+			self.name = name
+		}
+	}
+
+	public struct ConversionAutomationsFailedSome: Codable, Sendable, Equatable {
+		public let key: String
+		public let count: Double
+		public let name: String
+		public init(key: String = "conversion.automationsFailedSome", count: Double, name: String) {
+			self.key = key
+			self.count = count
+			self.name = name
+		}
+	}
+
+	public struct ConversionAutomationsMovedSome: Codable, Sendable, Equatable {
+		public let key: String
+		public let count: Double
+		public let name: String
+		public init(key: String = "conversion.automationsMovedSome", count: Double, name: String) {
+			self.key = key
+			self.count = count
+			self.name = name
+		}
+	}
+
+	public struct Hello: Codable, Sendable, Equatable {
+		public let key: String
+		public let example: Double
+		public let name: String?
+		public init(key: String = "hello", example: Double, name: String? = nil) {
+			self.key = key
+			self.example = example
+			self.name = name
+		}
+		enum CodingKeys: String, CodingKey {
+			case key, example, name
+		}
+		public func encode(to encoder: Encoder) throws {
+			var container = encoder.container(keyedBy: CodingKeys.self)
+			try container.encode(key, forKey: .key)
+			try container.encode(example, forKey: .example)
+			try container.encodeIfPresent(name, forKey: .name)
+		}
+	}
+
+	public struct IntroInvite: Codable, Sendable, Equatable {
+		public let key: String
+		public let index: Double
+		public init(key: String = "intro.invite", index: Double) {
+			self.key = key
+			self.index = index
+		}
+	}
+
+	public struct CarryOverDone: Codable, Sendable, Equatable {
+		public let key: String
+		public let name: String
+		public init(key: String = "carryOver.done", name: String) {
+			self.key = key
+			self.name = name
+		}
+	}
+
+	public struct ClosingTeamLink: Codable, Sendable, Equatable {
+		public let key: String
+		public let link: String
+		public init(key: String = "closing.teamLink", link: String) {
+			self.key = key
+			self.link = link
+		}
+	}
+
+	public struct ConversionSkillsPicked: Codable, Sendable, Equatable {
+		public let key: String
+		public let names: [String]
+		public init(key: String = "conversion.skillsPicked", names: [String]) {
+			self.key = key
+			self.names = names
+		}
+	}
+
+	public struct IntroHi: Codable, Sendable, Equatable {
+		public let key: String
+		public let name: String
+		public init(key: String = "intro.hi", name: String) {
+			self.key = key
+			self.name = name
+		}
+	}
+
+	public struct SetupPlan: Codable, Sendable, Equatable {
+		public let key: String
+		public let plan: TeamBotLineSentencePlan
+		public init(key: String = "setup.plan", plan: TeamBotLineSentencePlan) {
+			self.key = key
+			self.plan = plan
+		}
+	}
+
+	public struct SetupSkillsBridge: Codable, Sendable, Equatable {
+		public let key: String
+		public let reason: TeamBotLineSentenceReason
+		public init(key: String = "setup.skillsBridge", reason: TeamBotLineSentenceReason) {
+			self.key = key
+			self.reason = reason
+		}
+	}
+
+	public struct SetupSkillsPicked: Codable, Sendable, Equatable {
+		public let key: String
+		public let names: [String]
+		public init(key: String = "setup.skillsPicked", names: [String]) {
+			self.key = key
+			self.names = names
+		}
+	}
+
+	public struct SlackDeclined: Codable, Sendable, Equatable {
+		public let key: String
+		public let name: String
+		public init(key: String = "slack.declined", name: String) {
+			self.key = key
+			self.name = name
+		}
+	}
+
+	public struct SlackLive: Codable, Sendable, Equatable {
+		public let key: String
+		public let name: String
+		public init(key: String = "slack.live", name: String) {
+			self.key = key
+			self.name = name
+		}
+	}
+
+	public struct CarryOverInProgress: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "carryOver.inProgress") {
+			self.key = key
+		}
+	}
+
+	public struct CloneReceipt: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "clone.receipt") {
+			self.key = key
+		}
+	}
+
+	public struct ClosingSetupDone: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "closing.setupDone") {
+			self.key = key
+		}
+	}
+
+	public struct ClosingWhatDoFirst: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "closing.whatDoFirst") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionChatsAndAutomationsYours: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.chatsAndAutomationsYours") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionChatsPrivate: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.chatsPrivate") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionMemoriesKept: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.memoriesKept") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionMemoriesLead: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.memoriesLead") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionMemoriesNone: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.memoriesNone") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionMemoriesSorting: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.memoriesSorting") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionOpener: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.opener") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionSecretsShared: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.secretsShared") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionSkillsFailed: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.skillsFailed") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionSkillsNone: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.skillsNone") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionSkillsNothing: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.skillsNothing") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionSkillsPending: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.skillsPending") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionSlackToo: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "conversion.slackToo") {
+			self.key = key
+		}
+	}
+
+	public struct IntroManaged: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "intro.managed") {
+			self.key = key
+		}
+	}
+
+	public struct OutroAlreadyPublished: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "outro.alreadyPublished") {
+			self.key = key
+		}
+	}
+
+	public struct OutroNotReadyYet: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "outro.notReadyYet") {
+			self.key = key
+		}
+	}
+
+	public struct OutroTeammatesAddAccounts: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "outro.teammatesAddAccounts") {
+			self.key = key
+		}
+	}
+
+	public struct PublishedCopyLink: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "published.copyLink") {
+			self.key = key
+		}
+	}
+
+	public struct PublishedFindMe: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "published.findMe") {
+			self.key = key
+		}
+	}
+
+	public struct PublishedSlackOffer: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "published.slackOffer") {
+			self.key = key
+		}
+	}
+
+	public struct PublishedSlackToo: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "published.slackToo") {
+			self.key = key
+		}
+	}
+
+	public struct SetupDone: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "setup.done") {
+			self.key = key
+		}
+	}
+
+	public struct SetupFilesLead: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "setup.filesLead") {
+			self.key = key
+		}
+	}
+
+	public struct SetupFirstPlugins: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "setup.firstPlugins") {
+			self.key = key
+		}
+	}
+
+	public struct SetupPluginsAsk: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "setup.pluginsAsk") {
+			self.key = key
+		}
+	}
+
+	public struct SetupPluginsAskFallback: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "setup.pluginsAskFallback") {
+			self.key = key
+		}
+	}
+
+	public struct SetupPluginsPreselected: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "setup.pluginsPreselected") {
+			self.key = key
+		}
+	}
+
+	public struct SetupSecretsLead: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "setup.secretsLead") {
+			self.key = key
+		}
+	}
+
+	public struct SetupSkillsNone: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "setup.skillsNone") {
+			self.key = key
+		}
+	}
+
+	public struct SetupSkillsPending: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String = "setup.skillsPending") {
+			self.key = key
+		}
+	}
+
+	public struct ConversionAutomationsKept: Codable, Sendable, Equatable {
+		public let key: String
+		public let name: String
+		public init(key: String = "conversion.automationsKept", name: String) {
+			self.key = key
+			self.name = name
+		}
+	}
+
+	public struct ConversionAutomationsLead: Codable, Sendable, Equatable {
+		public let key: String
+		public let name: String
+		public init(key: String = "conversion.automationsLead", name: String) {
+			self.key = key
+			self.name = name
+		}
+	}
+
+	public struct ConversionAutomationsMoved: Codable, Sendable, Equatable {
+		public let key: String
+		public let name: String
+		public init(key: String = "conversion.automationsMoved", name: String) {
+			self.key = key
+			self.name = name
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let key: String
+		public init(key: String) { self.key = key }
+	}
+
+	private enum TagKey: String, CodingKey { case `key` = "key" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`key`) {
+		case "outro.publishing": self = .outroPublishing(try OutroPublishing(from: decoder))
+		case "whatFirst.ask": self = .whatFirstAsk(try WhatFirstAsk(from: decoder))
+		case "conversion.plan": self = .conversionPlan(try ConversionPlan(from: decoder))
+		case "setup.receipt": self = .setupReceipt(try SetupReceipt(from: decoder))
+		case "setup.receiptAdded": self = .setupReceiptAdded(try SetupReceiptAdded(from: decoder))
+		case "conversion.memoriesShared": self = .conversionMemoriesShared(try ConversionMemoriesShared(from: decoder))
+		case "conversion.automationsFailedAll": self = .conversionAutomationsFailedAll(try ConversionAutomationsFailedAll(from: decoder))
+		case "conversion.automationsFailedSome": self = .conversionAutomationsFailedSome(try ConversionAutomationsFailedSome(from: decoder))
+		case "conversion.automationsMovedSome": self = .conversionAutomationsMovedSome(try ConversionAutomationsMovedSome(from: decoder))
+		case "hello": self = .hello(try Hello(from: decoder))
+		case "intro.invite": self = .introInvite(try IntroInvite(from: decoder))
+		case "carryOver.done": self = .carryOverDone(try CarryOverDone(from: decoder))
+		case "closing.teamLink": self = .closingTeamLink(try ClosingTeamLink(from: decoder))
+		case "conversion.skillsPicked": self = .conversionSkillsPicked(try ConversionSkillsPicked(from: decoder))
+		case "intro.hi": self = .introHi(try IntroHi(from: decoder))
+		case "setup.plan": self = .setupPlan(try SetupPlan(from: decoder))
+		case "setup.skillsBridge": self = .setupSkillsBridge(try SetupSkillsBridge(from: decoder))
+		case "setup.skillsPicked": self = .setupSkillsPicked(try SetupSkillsPicked(from: decoder))
+		case "slack.declined": self = .slackDeclined(try SlackDeclined(from: decoder))
+		case "slack.live": self = .slackLive(try SlackLive(from: decoder))
+		case "carryOver.inProgress": self = .carryOverInProgress(try CarryOverInProgress(from: decoder))
+		case "clone.receipt": self = .cloneReceipt(try CloneReceipt(from: decoder))
+		case "closing.setupDone": self = .closingSetupDone(try ClosingSetupDone(from: decoder))
+		case "closing.whatDoFirst": self = .closingWhatDoFirst(try ClosingWhatDoFirst(from: decoder))
+		case "conversion.chatsAndAutomationsYours": self = .conversionChatsAndAutomationsYours(try ConversionChatsAndAutomationsYours(from: decoder))
+		case "conversion.chatsPrivate": self = .conversionChatsPrivate(try ConversionChatsPrivate(from: decoder))
+		case "conversion.memoriesKept": self = .conversionMemoriesKept(try ConversionMemoriesKept(from: decoder))
+		case "conversion.memoriesLead": self = .conversionMemoriesLead(try ConversionMemoriesLead(from: decoder))
+		case "conversion.memoriesNone": self = .conversionMemoriesNone(try ConversionMemoriesNone(from: decoder))
+		case "conversion.memoriesSorting": self = .conversionMemoriesSorting(try ConversionMemoriesSorting(from: decoder))
+		case "conversion.opener": self = .conversionOpener(try ConversionOpener(from: decoder))
+		case "conversion.secretsShared": self = .conversionSecretsShared(try ConversionSecretsShared(from: decoder))
+		case "conversion.skillsFailed": self = .conversionSkillsFailed(try ConversionSkillsFailed(from: decoder))
+		case "conversion.skillsNone": self = .conversionSkillsNone(try ConversionSkillsNone(from: decoder))
+		case "conversion.skillsNothing": self = .conversionSkillsNothing(try ConversionSkillsNothing(from: decoder))
+		case "conversion.skillsPending": self = .conversionSkillsPending(try ConversionSkillsPending(from: decoder))
+		case "conversion.slackToo": self = .conversionSlackToo(try ConversionSlackToo(from: decoder))
+		case "intro.managed": self = .introManaged(try IntroManaged(from: decoder))
+		case "outro.alreadyPublished": self = .outroAlreadyPublished(try OutroAlreadyPublished(from: decoder))
+		case "outro.notReadyYet": self = .outroNotReadyYet(try OutroNotReadyYet(from: decoder))
+		case "outro.teammatesAddAccounts": self = .outroTeammatesAddAccounts(try OutroTeammatesAddAccounts(from: decoder))
+		case "published.copyLink": self = .publishedCopyLink(try PublishedCopyLink(from: decoder))
+		case "published.findMe": self = .publishedFindMe(try PublishedFindMe(from: decoder))
+		case "published.slackOffer": self = .publishedSlackOffer(try PublishedSlackOffer(from: decoder))
+		case "published.slackToo": self = .publishedSlackToo(try PublishedSlackToo(from: decoder))
+		case "setup.done": self = .setupDone(try SetupDone(from: decoder))
+		case "setup.filesLead": self = .setupFilesLead(try SetupFilesLead(from: decoder))
+		case "setup.firstPlugins": self = .setupFirstPlugins(try SetupFirstPlugins(from: decoder))
+		case "setup.pluginsAsk": self = .setupPluginsAsk(try SetupPluginsAsk(from: decoder))
+		case "setup.pluginsAskFallback": self = .setupPluginsAskFallback(try SetupPluginsAskFallback(from: decoder))
+		case "setup.pluginsPreselected": self = .setupPluginsPreselected(try SetupPluginsPreselected(from: decoder))
+		case "setup.secretsLead": self = .setupSecretsLead(try SetupSecretsLead(from: decoder))
+		case "setup.skillsNone": self = .setupSkillsNone(try SetupSkillsNone(from: decoder))
+		case "setup.skillsPending": self = .setupSkillsPending(try SetupSkillsPending(from: decoder))
+		case "conversion.automationsKept": self = .conversionAutomationsKept(try ConversionAutomationsKept(from: decoder))
+		case "conversion.automationsLead": self = .conversionAutomationsLead(try ConversionAutomationsLead(from: decoder))
+		case "conversion.automationsMoved": self = .conversionAutomationsMoved(try ConversionAutomationsMoved(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .outroPublishing(let v): try v.encode(to: encoder)
+		case .whatFirstAsk(let v): try v.encode(to: encoder)
+		case .conversionPlan(let v): try v.encode(to: encoder)
+		case .setupReceipt(let v): try v.encode(to: encoder)
+		case .setupReceiptAdded(let v): try v.encode(to: encoder)
+		case .conversionMemoriesShared(let v): try v.encode(to: encoder)
+		case .conversionAutomationsFailedAll(let v): try v.encode(to: encoder)
+		case .conversionAutomationsFailedSome(let v): try v.encode(to: encoder)
+		case .conversionAutomationsMovedSome(let v): try v.encode(to: encoder)
+		case .hello(let v): try v.encode(to: encoder)
+		case .introInvite(let v): try v.encode(to: encoder)
+		case .carryOverDone(let v): try v.encode(to: encoder)
+		case .closingTeamLink(let v): try v.encode(to: encoder)
+		case .conversionSkillsPicked(let v): try v.encode(to: encoder)
+		case .introHi(let v): try v.encode(to: encoder)
+		case .setupPlan(let v): try v.encode(to: encoder)
+		case .setupSkillsBridge(let v): try v.encode(to: encoder)
+		case .setupSkillsPicked(let v): try v.encode(to: encoder)
+		case .slackDeclined(let v): try v.encode(to: encoder)
+		case .slackLive(let v): try v.encode(to: encoder)
+		case .carryOverInProgress(let v): try v.encode(to: encoder)
+		case .cloneReceipt(let v): try v.encode(to: encoder)
+		case .closingSetupDone(let v): try v.encode(to: encoder)
+		case .closingWhatDoFirst(let v): try v.encode(to: encoder)
+		case .conversionChatsAndAutomationsYours(let v): try v.encode(to: encoder)
+		case .conversionChatsPrivate(let v): try v.encode(to: encoder)
+		case .conversionMemoriesKept(let v): try v.encode(to: encoder)
+		case .conversionMemoriesLead(let v): try v.encode(to: encoder)
+		case .conversionMemoriesNone(let v): try v.encode(to: encoder)
+		case .conversionMemoriesSorting(let v): try v.encode(to: encoder)
+		case .conversionOpener(let v): try v.encode(to: encoder)
+		case .conversionSecretsShared(let v): try v.encode(to: encoder)
+		case .conversionSkillsFailed(let v): try v.encode(to: encoder)
+		case .conversionSkillsNone(let v): try v.encode(to: encoder)
+		case .conversionSkillsNothing(let v): try v.encode(to: encoder)
+		case .conversionSkillsPending(let v): try v.encode(to: encoder)
+		case .conversionSlackToo(let v): try v.encode(to: encoder)
+		case .introManaged(let v): try v.encode(to: encoder)
+		case .outroAlreadyPublished(let v): try v.encode(to: encoder)
+		case .outroNotReadyYet(let v): try v.encode(to: encoder)
+		case .outroTeammatesAddAccounts(let v): try v.encode(to: encoder)
+		case .publishedCopyLink(let v): try v.encode(to: encoder)
+		case .publishedFindMe(let v): try v.encode(to: encoder)
+		case .publishedSlackOffer(let v): try v.encode(to: encoder)
+		case .publishedSlackToo(let v): try v.encode(to: encoder)
+		case .setupDone(let v): try v.encode(to: encoder)
+		case .setupFilesLead(let v): try v.encode(to: encoder)
+		case .setupFirstPlugins(let v): try v.encode(to: encoder)
+		case .setupPluginsAsk(let v): try v.encode(to: encoder)
+		case .setupPluginsAskFallback(let v): try v.encode(to: encoder)
+		case .setupPluginsPreselected(let v): try v.encode(to: encoder)
+		case .setupSecretsLead(let v): try v.encode(to: encoder)
+		case .setupSkillsNone(let v): try v.encode(to: encoder)
+		case .setupSkillsPending(let v): try v.encode(to: encoder)
+		case .conversionAutomationsKept(let v): try v.encode(to: encoder)
+		case .conversionAutomationsLead(let v): try v.encode(to: encoder)
+		case .conversionAutomationsMoved(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct TeamBotLineSentenceAddedItem: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let files = TeamBotLineSentenceAddedItem(rawValue: "files")
+	public static let plugins = TeamBotLineSentenceAddedItem(rawValue: "plugins")
+	public static let skills = TeamBotLineSentenceAddedItem(rawValue: "skills")
+}
+
+public struct TeamBotLineSentenceCard: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let files = TeamBotLineSentenceCard(rawValue: "files")
+	public static let plugins = TeamBotLineSentenceCard(rawValue: "plugins")
+	public static let secrets = TeamBotLineSentenceCard(rawValue: "secrets")
+	public static let skills = TeamBotLineSentenceCard(rawValue: "skills")
+}
+
+public struct TeamBotLineSentenceOutcome: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let none = TeamBotLineSentenceOutcome(rawValue: "none")
+	public static let set = TeamBotLineSentenceOutcome(rawValue: "set")
+}
+
+public struct TeamBotLineSentencePlan: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let fresh = TeamBotLineSentencePlan(rawValue: "fresh")
+	public static let freshWithSkills = TeamBotLineSentencePlan(rawValue: "fresh-with-skills")
+	public static let redo = TeamBotLineSentencePlan(rawValue: "redo")
+}
+
+public struct TeamBotLineSentenceReason: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let empty = TeamBotLineSentenceReason(rawValue: "empty")
+	public static let failed = TeamBotLineSentenceReason(rawValue: "failed")
+}
+
+public struct TriggerScopeIssue: Codable, Sendable, Equatable {
+	public let kind: TriggerScopeIssueKind
+	public let scope: String
+	public init(kind: TriggerScopeIssueKind, scope: String) {
+		self.kind = kind
+		self.scope = scope
+	}
+}
+
+public struct TriggerScopeIssueKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let botNotInChannel = TriggerScopeIssueKind(rawValue: "bot-not-in-channel")
+	public static let notFound = TriggerScopeIssueKind(rawValue: "not-found")
+}
+
+public typealias ArgsAuthenticateMcpServer = SandMcpAuthenticateRequest
+
+public typealias ArgsCountAgents = ArgsClearTrays
+
 public typealias ArgsCreateAgent = SandCreateAgentArgs
 
-public typealias ArgsDismissWidget = ArgsDiscardDraft
+public typealias ArgsCreateAgentFromTemplate = SandCreateAgentFromTemplateArgs
+
+public typealias ArgsDeleteBotTemplate = SandBotTemplateDeleteArgs
+
+public typealias ArgsDismissTray = SandAsyncTaskLabelParams
 
 public typealias ArgsGetAgentAutomations = SandAsyncTaskLabelParams
 
@@ -6848,45 +12983,109 @@ public typealias ArgsGetAgentChannels = SandAsyncTaskLabelParams
 
 public typealias ArgsGetAgentTranscript = SandAsyncTaskLabelParams
 
-public typealias ArgsGetAgentTranscriptWindow = ArgsGetAgentTranscriptTail
+public typealias ArgsGetAutomationWebhookCredential = ArgsDeleteAgentAutomation
+
+public typealias ArgsGetBotTemplateExportPolicy = ArgsClearTrays
+
+public typealias ArgsGetBotTemplateForSourceAgent = SandBotTemplateForSourceAgentArgs
+
+public typealias ArgsGetBotTemplateVersion = SandBotTemplateVersionArgs
+
+public typealias ArgsGetEffectiveMcpPlugins = ArgsClearTrays
+
+public typealias ArgsGetForeverBoxStatus = SandAsyncTaskLabelParams
+
+public typealias ArgsGetHostSettings = ArgsClearTrays
+
+public typealias ArgsGetListenerIntegrations = ArgsClearTrays
+
+public typealias ArgsGetMcpCatalog = ArgsClearTrays
+
+public typealias ArgsGetMcpPluginLogo = ReplyGetListenerConnectUrl
+
+public typealias ArgsGetMcpState = ArgsClearTrays
 
 public typealias ArgsGetSubagents = SandAsyncTaskLabelParams
 
 public typealias ArgsGetTeachRecordingStatus = ArgsClearTrays
 
-public typealias ArgsInterruptAgentRun = SandAsyncTaskLabelParams
+public typealias ArgsGetTrays = ArgsClearTrays
+
+public typealias ArgsInstallMcpEntry = SandInstallEntryRequest
 
 public typealias ArgsListAgents = ArgsClearTrays
 
 public typealias ArgsListAllAutomations = ArgsClearTrays
 
+public typealias ArgsListBotTemplates = ArgsClearTrays
+
 public typealias ArgsPromptAcceptanceStatus = GatewayAcceptanceStatusArgs
+
+public typealias ArgsPublishBotTemplate = SandBotTemplatePublishArgs
 
 public typealias ArgsReadAttachmentChunk = SandReadAttachmentChunkArgs
 
-public typealias ArgsReadAttachmentImage = SandUploadAttachmentResult
-
 public typealias ArgsReadAttachmentText = SandReadAttachmentTextArgs
 
-public typealias ArgsReadVoiceCallAgentContext = SandAsyncTaskLabelParams
-
 public typealias ArgsRefreshChannel = ArgsDisconnectChannel
+
+public typealias ArgsRemoveMcpAccount = SandMcpAccountRef
+
+public typealias ArgsRemoveMcpServer = ArgsListMcpServerTools
+
+public typealias ArgsRenameMcpAccount = SandMcpRenameAccountRequest
 
 public typealias ArgsSearchMedia = ArgsSearchAgents
 
 public typealias ArgsSendPrompt = SandSendPromptArgs
 
+public typealias ArgsSetAgentNotifyOnUpdates = ArgsSetAgentNotificationsEnabled
+
+public typealias ArgsSetBotTemplateVisibility = SandBotTemplateVisibilityArgs
+
+public typealias ArgsSetHostSettings = SandHostSettingsUpdate
+
+public typealias ArgsSetMcpCustomInstructions = SandSetMcpInstructionsRequest
+
+public typealias ArgsToggleMcpToolDisabled = SandToggleMcpToolDisabledRequest
+
+public typealias ArgsUpdateMcpPluginInstall = SandUpdatePluginInstallRequest
+
 public typealias ArgsUploadAttachment = SandUploadAttachmentArgs
+
+public typealias ReplyAuthenticateMcpServer = SandMcpAuthResult
+
+public typealias ReplyClearTrays = BotRelayJSONValue
+
+public typealias ReplyCompleteGithubConnect = SandGithubConnectCompletion
+
+public typealias ReplyCompleteMcpOAuth = BotRelayJSONValue
 
 public typealias ReplyConnectChannel = SandChannelsView
 
+public typealias ReplyCountAgents = Double
+
 public typealias ReplyCreateAgent = SandCreateAgentResult
+
+public typealias ReplyCreateAgentAutomation = [SandAutomation]
+
+public typealias ReplyCreateAgentFromTemplate = SandCreateAgentFromTemplateResult
 
 public typealias ReplyCreateGroup = SandCreateAgentResult
 
+public typealias ReplyDeleteAgentAutomation = [SandAutomation]
+
 public typealias ReplyDeleteAgents = SandDeleteAgentResult
 
+public typealias ReplyDeleteBotTemplate = BotRelayJSONValue
+
+public typealias ReplyDiscardDraft = SandWidgetAnswerResult
+
 public typealias ReplyDisconnectChannel = SandChannelsView
+
+public typealias ReplyDisconnectListenerPlatform = BotRelayJSONValue
+
+public typealias ReplyDismissTray = BotRelayJSONValue
 
 public typealias ReplyDismissUserForm = BotRelayJSONValue
 
@@ -6910,9 +13109,39 @@ public typealias ReplyGetAgentTranscriptTail = SandTranscriptPage
 
 public typealias ReplyGetAgentTranscriptWindow = SandTranscriptWindow
 
+public typealias ReplyGetAutomationWebhookCredential = SandAutomationWebhookCredential
+
+public typealias ReplyGetBotTemplateExportPolicy = SandBotTemplateExportPolicyReply
+
+public typealias ReplyGetBotTemplateVersion = SandBotTemplateGatewayView
+
+public typealias ReplyGetCloudAgentInfo = SandCloudAgentInfo?
+
+public typealias ReplyGetEffectiveMcpPlugins = [SandEffectivePlugin]
+
+public typealias ReplyGetForeverBoxStatus = SandForeverBoxStatus?
+
+public typealias ReplyGetHostSettings = SandHostSettings
+
+public typealias ReplyGetListenerIntegrations = SandListenerIntegrationsView
+
+public typealias ReplyGetMcpCatalog = [SandMcpCatalogEntryView]
+
+public typealias ReplyGetMcpPluginLogo = ReplyGetMcpPluginLogoValue?
+
+public typealias ReplyGetMcpState = SandMcpState
+
 public typealias ReplyGetSubagents = [SandSubagentInfo]
 
 public typealias ReplyGetTeachRecordingStatus = SandTeachRecordingStatus
+
+public typealias ReplyGetTrays = [SandErrorTray]
+
+public typealias ReplyGetVoiceCall = SandVoiceCallRecord?
+
+public typealias ReplyHandBackForeverBox = BotRelayJSONValue
+
+public typealias ReplyInstallMcpEntry = SandMcpState
 
 public typealias ReplyInterruptAgentRun = SandInterruptAgentRunResult
 
@@ -6920,7 +13149,13 @@ public typealias ReplyListAgents = [SandAgentSummary]
 
 public typealias ReplyListAllAutomations = [SandScheduledAutomation]
 
+public typealias ReplyListBotTemplates = [SandBotTemplateGatewayView]
+
+public typealias ReplyListMcpServerTools = [SandMcpServerTool]
+
 public typealias ReplyPromptAcceptanceStatus = PromptAcceptanceLookup
+
+public typealias ReplyPublishBotTemplate = SandBotTemplateGatewayView
 
 public typealias ReplyReactToMessage = BotRelayJSONValue
 
@@ -6930,13 +13165,31 @@ public typealias ReplyReadAttachmentImage = ResolvedImageAttachment?
 
 public typealias ReplyReadAttachmentText = ReplyReadAttachmentTextValue?
 
-public typealias ReplyReadVoiceCallAgentContext = SandVoiceCallAgentContext
+public typealias ReplyRecordVoiceCall = BotRelayJSONValue
 
 public typealias ReplyRefreshChannel = SandChannelsView
 
+public typealias ReplyRefreshMcp = BotRelayJSONValue
+
+public typealias ReplyRemoveMcpAccount = SandMcpState
+
+public typealias ReplyRemoveMcpServer = SandMcpRemoveResult
+
+public typealias ReplyRenameMcpAccount = SandMcpState
+
+public typealias ReplyResolveAutoReviewApproval = BotRelayJSONValue
+
+public typealias ReplyResolveLocalToolPermission = BotRelayJSONValue
+
+public typealias ReplyResolveVirtualCardApproval = BotRelayJSONValue
+
 public typealias ReplyRespondToWidget = SandWidgetAnswerResult?
 
+public typealias ReplyRunAgentAutomationNow = BotRelayJSONValue
+
 public typealias ReplySearchMedia = [SandMediaMatch]
+
+public typealias ReplySendDraft = SandWidgetAnswerResult
 
 public typealias ReplySendPrompt = SandSendPromptResult?
 
@@ -6948,19 +13201,167 @@ public typealias ReplySetAgentHiddenFromSidebar = BotRelayJSONValue
 
 public typealias ReplySetAgentNotificationsEnabled = BotRelayJSONValue
 
+public typealias ReplySetAgentNotifyOnUpdates = BotRelayJSONValue
+
 public typealias ReplySetAgentUnread = BotRelayJSONValue
 
+public typealias ReplySetBotTemplateVisibility = SandBotTemplateView
+
 public typealias ReplySetGroupMembers = SandAgentSummary?
+
+public typealias ReplySetHostSettings = SandHostSettings
+
+public typealias ReplySetMcpCustomInstructions = SandMcpState
+
+public typealias ReplySetVoiceCallPresence = BotRelayJSONValue
 
 public typealias ReplyStartTeachRecording = SandTeachRecordingStatus
 
 public typealias ReplyStopTeachRecording = SandTeachRecordingStatus
 
+public typealias ReplySubmitSecret = BotRelayJSONValue
+
 public typealias ReplySubmitUserForm = BotRelayJSONValue
+
+public typealias ReplyToggleMcpToolDisabled = [SandMcpServerTool]
+
+public typealias ReplyUninstallMcpPlugin = SandMcpRemoveResult
 
 public typealias ReplyUpdateAgent = SandAgentSummary?
 
+public typealias ReplyUpdateAgentAutomation = [SandAutomation]
+
+public typealias ReplyUpdateMcpPluginInstall = SandMcpState
+
 public typealias ReplyUploadAttachment = SandUploadAttachmentResult
+
+public struct ArgsListPublicGrokBotMarketplaceListings: Codable, Sendable, Equatable {
+	public let pageSize: UInt32?
+	public let pageToken: String?
+	public init(pageSize: UInt32? = nil, pageToken: String? = nil) {
+		self.pageSize = pageSize
+		self.pageToken = pageToken
+	}
+	enum CodingKeys: String, CodingKey {
+		case pageSize, pageToken
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(pageSize, forKey: .pageSize)
+		try container.encodeIfPresent(pageToken, forKey: .pageToken)
+	}
+}
+
+public struct ArgsGetPublicGrokBotMarketplaceListing: Codable, Sendable, Equatable {
+	public let slug: String
+	public init(slug: String) {
+		self.slug = slug
+	}
+}
+
+public struct PublicGrokBotMarketplaceAvatar: Codable, Sendable, Equatable {
+	public let shape: String
+	public let color: String
+	public init(shape: String, color: String) {
+		self.shape = shape
+		self.color = color
+	}
+}
+
+public struct PublicGrokBotMarketplaceCreator: Codable, Sendable, Equatable {
+	public let name: String
+	public let profilePhotoUrl: String?
+	public let handles: [String: String]?
+	public init(name: String, profilePhotoUrl: String? = nil, handles: [String: String]? = nil) {
+		self.name = name
+		self.profilePhotoUrl = profilePhotoUrl
+		self.handles = handles
+	}
+	enum CodingKeys: String, CodingKey {
+		case name, profilePhotoUrl, handles
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(name, forKey: .name)
+		try container.encodeIfPresent(profilePhotoUrl, forKey: .profilePhotoUrl)
+		try container.encodeIfPresent(handles, forKey: .handles)
+	}
+}
+
+public struct PublicGrokBotMarketplaceListing: Codable, Sendable, Equatable {
+	public let slug: String
+	public let name: String
+	public let description: String
+	public let defaultAvatar: PublicGrokBotMarketplaceAvatar?
+	public let category: String?
+	public let categories: [String]
+	public let creator: PublicGrokBotMarketplaceCreator?
+	public let createdAtMs: String?
+	public let updatedAtMs: String?
+	public let shareId: String
+	public init(slug: String, name: String, description: String, defaultAvatar: PublicGrokBotMarketplaceAvatar? = nil, category: String? = nil, categories: [String], creator: PublicGrokBotMarketplaceCreator? = nil, createdAtMs: String? = nil, updatedAtMs: String? = nil, shareId: String) {
+		self.slug = slug
+		self.name = name
+		self.description = description
+		self.defaultAvatar = defaultAvatar
+		self.category = category
+		self.categories = categories
+		self.creator = creator
+		self.createdAtMs = createdAtMs
+		self.updatedAtMs = updatedAtMs
+		self.shareId = shareId
+	}
+	enum CodingKeys: String, CodingKey {
+		case slug, name, description, defaultAvatar, category, categories, creator, createdAtMs, updatedAtMs, shareId
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(slug, forKey: .slug)
+		try container.encode(name, forKey: .name)
+		try container.encode(description, forKey: .description)
+		try container.encodeIfPresent(defaultAvatar, forKey: .defaultAvatar)
+		try container.encodeIfPresent(category, forKey: .category)
+		try container.encode(categories, forKey: .categories)
+		try container.encodeIfPresent(creator, forKey: .creator)
+		try container.encodeIfPresent(createdAtMs, forKey: .createdAtMs)
+		try container.encodeIfPresent(updatedAtMs, forKey: .updatedAtMs)
+		try container.encode(shareId, forKey: .shareId)
+	}
+}
+
+public struct ReplyListPublicGrokBotMarketplaceListings: Codable, Sendable, Equatable {
+	public let featuredListings: [PublicGrokBotMarketplaceListing]
+	public let listings: [PublicGrokBotMarketplaceListing]
+	public let allCategoriesOrder: [String]
+	public let nextPageToken: String?
+	public init(featuredListings: [PublicGrokBotMarketplaceListing], listings: [PublicGrokBotMarketplaceListing], allCategoriesOrder: [String], nextPageToken: String? = nil) {
+		self.featuredListings = featuredListings
+		self.listings = listings
+		self.allCategoriesOrder = allCategoriesOrder
+		self.nextPageToken = nextPageToken
+	}
+	enum CodingKeys: String, CodingKey {
+		case featuredListings, listings, allCategoriesOrder, nextPageToken
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(featuredListings, forKey: .featuredListings)
+		try container.encode(listings, forKey: .listings)
+		try container.encode(allCategoriesOrder, forKey: .allCategoriesOrder)
+		try container.encodeIfPresent(nextPageToken, forKey: .nextPageToken)
+	}
+}
+
+public struct PublicGrokBotMarketplaceListingDetail: Codable, Sendable, Equatable {
+	public let listing: PublicGrokBotMarketplaceListing
+	public let templateGetUrl: String
+	public init(listing: PublicGrokBotMarketplaceListing, templateGetUrl: String) {
+		self.listing = listing
+		self.templateGetUrl = templateGetUrl
+	}
+}
+
+public typealias ReplyGetPublicGrokBotMarketplaceListing = PublicGrokBotMarketplaceListingDetail?
 
 public struct ArgsAttachUpload: Codable, Sendable, Equatable {
 	public let uploadId: String
@@ -6984,14 +13385,520 @@ public struct ArgsAttachUpload: Codable, Sendable, Equatable {
 
 public typealias ReplyAttachUpload = SandUploadAttachmentResult
 
+public struct ArgsGetPublicBotTemplate: Codable, Sendable, Equatable {
+	public let shareId: String
+	public init(shareId: String) {
+		self.shareId = shareId
+	}
+}
+
+public struct ArgsGetCursorLinkStatus: Codable, Sendable, Equatable {
+	public init() {}
+}
+
+public struct CursorAccountLinkStatus: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let linked = CursorAccountLinkStatus(rawValue: "linked")
+	public static let notLinked = CursorAccountLinkStatus(rawValue: "not_linked")
+	public static let unavailable = CursorAccountLinkStatus(rawValue: "unavailable")
+}
+
+public struct ReplyGetCursorLinkStatus: Codable, Sendable, Equatable {
+	public let status: CursorAccountLinkStatus
+	public let code: String?
+	public let reason: String?
+	public init(status: CursorAccountLinkStatus, code: String? = nil, reason: String? = nil) {
+		self.status = status
+		self.code = code
+		self.reason = reason
+	}
+	enum CodingKeys: String, CodingKey {
+		case status, code, reason
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(status, forKey: .status)
+		try container.encodeIfPresent(code, forKey: .code)
+		try container.encodeIfPresent(reason, forKey: .reason)
+	}
+}
+
+public struct ArgsGetMainAgent: Codable, Sendable, Equatable {
+	public init() {}
+}
+
+public struct ReplyGetMainAgent: Codable, Sendable, Equatable {
+	public let mainAgentId: String?
+	public init(mainAgentId: String? = nil) {
+		self.mainAgentId = mainAgentId
+	}
+}
+
+public struct ArgsSetMainAgent: Codable, Sendable, Equatable {
+	public let agentId: String
+	public init(agentId: String) {
+		self.agentId = agentId
+	}
+}
+
+public typealias ReplySetMainAgent = ReplyGetMainAgent
+
+public struct ArgsCreateFirstBot: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let creatorContext: String?
+	public let language: String?
+	public init(agentId: String, creatorContext: String? = nil, language: String? = nil) {
+		self.agentId = agentId
+		self.creatorContext = creatorContext
+		self.language = language
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, creatorContext, language
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encodeIfPresent(creatorContext, forKey: .creatorContext)
+		try container.encodeIfPresent(language, forKey: .language)
+	}
+}
+
+public typealias ReplyCreateFirstBot = SandCreateAgentFromTemplateResult
+
+public struct ArgsGetCredentialProviderStatus: Codable, Sendable, Equatable {
+	public init() {}
+}
+
+public enum ReplyGetCredentialProviderStatus: Codable, Sendable, Equatable {
+
+	case notConnected(NotConnected)
+	case connected(Connected)
+	case unavailable(Unavailable)
+	case unknown(Unknown)
+
+	public struct NotConnected: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "not-connected") {
+			self.kind = kind
+		}
+	}
+
+	public struct Connected: Codable, Sendable, Equatable {
+		public let kind: String
+		public let connectionCount: UInt32
+		public let itemCount: UInt32
+		public let connectionsNeedingAttention: UInt32
+		public init(kind: String = "connected", connectionCount: UInt32, itemCount: UInt32, connectionsNeedingAttention: UInt32) {
+			self.kind = kind
+			self.connectionCount = connectionCount
+			self.itemCount = itemCount
+			self.connectionsNeedingAttention = connectionsNeedingAttention
+		}
+	}
+
+	public struct Unavailable: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String = "unavailable") {
+			self.kind = kind
+		}
+	}
+
+	public struct Unknown: Codable, Sendable, Equatable {
+		public let kind: String
+		public init(kind: String) { self.kind = kind }
+	}
+
+	private enum TagKey: String, CodingKey { case `kind` = "kind" }
+
+	public init(from decoder: Decoder) throws {
+		let container = try decoder.container(keyedBy: TagKey.self)
+		switch try container.decode(String.self, forKey: .`kind`) {
+		case "not-connected": self = .notConnected(try NotConnected(from: decoder))
+		case "connected": self = .connected(try Connected(from: decoder))
+		case "unavailable": self = .unavailable(try Unavailable(from: decoder))
+		default:
+			self = .unknown(try Unknown(from: decoder))
+		}
+	}
+
+	public func encode(to encoder: Encoder) throws {
+		switch self {
+		case .notConnected(let v): try v.encode(to: encoder)
+		case .connected(let v): try v.encode(to: encoder)
+		case .unavailable(let v): try v.encode(to: encoder)
+		case .unknown(let v): try v.encode(to: encoder)
+		}
+	}
+}
+
+public struct ArgsListCredentials: Codable, Sendable, Equatable {
+	public let query: String?
+	public let site: String?
+	public let forceRefresh: Bool?
+	public init(query: String? = nil, site: String? = nil, forceRefresh: Bool? = nil) {
+		self.query = query
+		self.site = site
+		self.forceRefresh = forceRefresh
+	}
+	enum CodingKeys: String, CodingKey {
+		case query, site, forceRefresh
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(query, forKey: .query)
+		try container.encodeIfPresent(site, forKey: .site)
+		try container.encodeIfPresent(forceRefresh, forKey: .forceRefresh)
+	}
+}
+
+public struct SandAgentCredentialView: Codable, Sendable, Equatable {
+	public let credentialId: String
+	public let connectionId: String
+	public let catalogRevision: String
+	public let title: String
+	public let category: String
+	public let sites: [String]
+	public let vaultName: String?
+	public let siteMatch: SandCredentialSiteMatch?
+	public init(credentialId: String, connectionId: String, catalogRevision: String, title: String, category: String, sites: [String], vaultName: String? = nil, siteMatch: SandCredentialSiteMatch? = nil) {
+		self.credentialId = credentialId
+		self.connectionId = connectionId
+		self.catalogRevision = catalogRevision
+		self.title = title
+		self.category = category
+		self.sites = sites
+		self.vaultName = vaultName
+		self.siteMatch = siteMatch
+	}
+	enum CodingKeys: String, CodingKey {
+		case credentialId, connectionId, catalogRevision, title, category, sites, vaultName, siteMatch
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(credentialId, forKey: .credentialId)
+		try container.encode(connectionId, forKey: .connectionId)
+		try container.encode(catalogRevision, forKey: .catalogRevision)
+		try container.encode(title, forKey: .title)
+		try container.encode(category, forKey: .category)
+		try container.encode(sites, forKey: .sites)
+		try container.encodeIfPresent(vaultName, forKey: .vaultName)
+		try container.encodeIfPresent(siteMatch, forKey: .siteMatch)
+	}
+}
+
+public struct SandCredentialSiteMatch: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let exact = SandCredentialSiteMatch(rawValue: "exact")
+	public static let subdomain = SandCredentialSiteMatch(rawValue: "subdomain")
+}
+
+public typealias ReplyListCredentials = [SandAgentCredentialView]
+
+public struct ArgsRequestCredentialAutofill: Codable, Sendable, Equatable {
+	public let credentialId: String
+	public let connectionId: String
+	public let catalogRevision: String
+	public let targetSite: String
+	public let entryId: String
+	public let agentId: String
+	public init(credentialId: String, connectionId: String, catalogRevision: String, targetSite: String, entryId: String, agentId: String) {
+		self.credentialId = credentialId
+		self.connectionId = connectionId
+		self.catalogRevision = catalogRevision
+		self.targetSite = targetSite
+		self.entryId = entryId
+		self.agentId = agentId
+	}
+}
+
+public struct ReplyRequestCredentialAutofill: Codable, Sendable, Equatable {
+	public let accepted: Bool
+	public let filled: Bool?
+	public let detail: String?
+	public init(accepted: Bool, filled: Bool? = nil, detail: String? = nil) {
+		self.accepted = accepted
+		self.filled = filled
+		self.detail = detail
+	}
+	enum CodingKeys: String, CodingKey {
+		case accepted, filled, detail
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(accepted, forKey: .accepted)
+		try container.encodeIfPresent(filled, forKey: .filled)
+		try container.encodeIfPresent(detail, forKey: .detail)
+	}
+}
+
+public struct ArgsDenyCredentialRequest: Codable, Sendable, Equatable {
+	public let entryId: String
+	public let agentId: String
+	public init(entryId: String, agentId: String) {
+		self.entryId = entryId
+		self.agentId = agentId
+	}
+}
+
+public struct ReplyDenyCredentialRequest: Codable, Sendable, Equatable {
+	public let ok: Bool
+	public let detail: String?
+	public init(ok: Bool, detail: String? = nil) {
+		self.ok = ok
+		self.detail = detail
+	}
+	enum CodingKeys: String, CodingKey {
+		case ok, detail
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(ok, forKey: .ok)
+		try container.encodeIfPresent(detail, forKey: .detail)
+	}
+}
+
+public struct ArgsApproveCredentialRequest: Codable, Sendable, Equatable {
+	public let entryId: String
+	public let agentId: String
+	public let credentialId: String
+	public let connectionId: String
+	public let catalogRevision: String
+	public let targetSite: String
+	public init(entryId: String, agentId: String, credentialId: String, connectionId: String, catalogRevision: String, targetSite: String) {
+		self.entryId = entryId
+		self.agentId = agentId
+		self.credentialId = credentialId
+		self.connectionId = connectionId
+		self.catalogRevision = catalogRevision
+		self.targetSite = targetSite
+	}
+}
+
+public struct ReplyApproveCredentialRequest: Codable, Sendable, Equatable {
+	public let ok: Bool
+	public let detail: String?
+	public init(ok: Bool, detail: String? = nil) {
+		self.ok = ok
+		self.detail = detail
+	}
+	enum CodingKeys: String, CodingKey {
+		case ok, detail
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(ok, forKey: .ok)
+		try container.encodeIfPresent(detail, forKey: .detail)
+	}
+}
+
+public struct BotTemplateImport: Codable, Sendable, Equatable {
+	public let expectedActiveVersion: UInt32
+	public let instructions: String
+	public let view: SandBotTemplateView
+	public init(expectedActiveVersion: UInt32, instructions: String, view: SandBotTemplateView) {
+		self.expectedActiveVersion = expectedActiveVersion
+		self.instructions = instructions
+		self.view = view
+	}
+}
+
+public typealias ReplyGetPublicBotTemplate = BotTemplateImport?
+
+public struct ArgsMintVoiceCallSecret: Codable, Sendable, Equatable {
+	public let model: String?
+	public init(model: String? = nil) {
+		self.model = model
+	}
+	enum CodingKeys: String, CodingKey {
+		case model
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encodeIfPresent(model, forKey: .model)
+	}
+}
+
+public struct ReplyMintVoiceCallSecret: Codable, Sendable, Equatable {
+	public let clientSecret: String
+	public let expiresAtUnixSeconds: Int64
+	public let model: String
+	public let websocketUrl: String
+	public init(clientSecret: String, expiresAtUnixSeconds: Int64, model: String, websocketUrl: String) {
+		self.clientSecret = clientSecret
+		self.expiresAtUnixSeconds = expiresAtUnixSeconds
+		self.model = model
+		self.websocketUrl = websocketUrl
+	}
+}
+
+public struct ArgsVoiceCallHarnessSession: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let agentName: String
+	public let userName: String?
+	public let description: String?
+	public let spokenLanguage: String?
+	public init(agentId: String, agentName: String, userName: String? = nil, description: String? = nil, spokenLanguage: String? = nil) {
+		self.agentId = agentId
+		self.agentName = agentName
+		self.userName = userName
+		self.description = description
+		self.spokenLanguage = spokenLanguage
+	}
+	enum CodingKeys: String, CodingKey {
+		case agentId, agentName, userName, description, spokenLanguage
+	}
+	public func encode(to encoder: Encoder) throws {
+		var container = encoder.container(keyedBy: CodingKeys.self)
+		try container.encode(agentId, forKey: .agentId)
+		try container.encode(agentName, forKey: .agentName)
+		try container.encodeIfPresent(userName, forKey: .userName)
+		try container.encodeIfPresent(description, forKey: .description)
+		try container.encodeIfPresent(spokenLanguage, forKey: .spokenLanguage)
+	}
+}
+
+public struct VoiceCallToolDescriptor: Codable, Sendable, Equatable {
+	public let type: String
+	public let name: String
+	public let description: String
+	public let parameters: BotRelayJSONValue
+	public init(type: String, name: String, description: String, parameters: BotRelayJSONValue) {
+		self.type = type
+		self.name = name
+		self.description = description
+		self.parameters = parameters
+	}
+}
+
+public struct VoiceCallGreeting: Codable, Sendable, Equatable {
+	public let direction: String
+	public let withLandedWork: String
+	public init(direction: String, withLandedWork: String) {
+		self.direction = direction
+		self.withLandedWork = withLandedWork
+	}
+}
+
+public struct VoiceCallReceiptOutput: Codable, Sendable, Equatable {
+	public let receipt: String
+	public init(receipt: String) {
+		self.receipt = receipt
+	}
+}
+
+public struct VoiceCallReceipt: Codable, Sendable, Equatable {
+	public let output: VoiceCallReceiptOutput
+	public let instructions: String
+	public init(output: VoiceCallReceiptOutput, instructions: String) {
+		self.output = output
+		self.instructions = instructions
+	}
+}
+
+public struct ReplyVoiceCallHarnessSession: Codable, Sendable, Equatable {
+	public let instructions: String
+	public let tools: [VoiceCallToolDescriptor]
+	public let hasOverheard: Bool
+	public let greeting: VoiceCallGreeting?
+	public let receipt: VoiceCallReceipt?
+	public init(instructions: String, tools: [VoiceCallToolDescriptor], hasOverheard: Bool, greeting: VoiceCallGreeting? = nil, receipt: VoiceCallReceipt? = nil) {
+		self.instructions = instructions
+		self.tools = tools
+		self.hasOverheard = hasOverheard
+		self.greeting = greeting
+		self.receipt = receipt
+	}
+}
+
+public struct VoiceCallLineState: Codable, Sendable, Equatable {
+	public let theyJustTalked: Bool
+	public let newsOwed: Bool
+	public let receiptOwed: Bool
+	public let alreadySpokeThisTurn: Bool
+	public init(theyJustTalked: Bool, newsOwed: Bool, receiptOwed: Bool, alreadySpokeThisTurn: Bool) {
+		self.theyJustTalked = theyJustTalked
+		self.newsOwed = newsOwed
+		self.receiptOwed = receiptOwed
+		self.alreadySpokeThisTurn = alreadySpokeThisTurn
+	}
+}
+
+public struct ArgsVoiceCallHarnessTool: Codable, Sendable, Equatable {
+	public let agentId: String
+	public let callId: String
+	public let name: String
+	public let input: BotRelayJSONValue
+	public let line: VoiceCallLineState
+	public init(agentId: String, callId: String, name: String, input: BotRelayJSONValue, line: VoiceCallLineState) {
+		self.agentId = agentId
+		self.callId = callId
+		self.name = name
+		self.input = input
+		self.line = line
+	}
+}
+
+public struct VoiceCallHarnessToolOutcomeKind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let served = VoiceCallHarnessToolOutcomeKind(rawValue: "served")
+	public static let unknownTool = VoiceCallHarnessToolOutcomeKind(rawValue: "unknown_tool")
+	public static let invalidInput = VoiceCallHarnessToolOutcomeKind(rawValue: "invalid_input")
+}
+
+public struct ReplyVoiceCallHarnessTool: Codable, Sendable, Equatable {
+	public let kind: VoiceCallHarnessToolOutcomeKind
+	public let output: BotRelayJSONValue
+	public init(kind: VoiceCallHarnessToolOutcomeKind, output: BotRelayJSONValue) {
+		self.kind = kind
+		self.output = output
+	}
+}
+
+/// Legacy name of `SandCloudAgentInfoMergeableState`.
+public typealias SandCloudAgentMergeableState = SandCloudAgentInfoMergeableState
+
+/// Legacy name of `SandCloudAgentInfoPrState`.
+public typealias SandCloudAgentPrState = SandCloudAgentInfoPrState
+
+/// Legacy name of `SandCloudAgentFilesReadReason`.
+public typealias SandCloudAgentReadFailureReason = SandCloudAgentFilesReadReason
+
+/// Legacy name of `SandCloudAgentInfoStatus`.
+public typealias SandCloudAgentRunStatus = SandCloudAgentInfoStatus
+
+public struct SandErrorTrayActionVariant2Kind: RawRepresentable, Codable, Sendable, Equatable, Hashable {
+	public let rawValue: String
+	public init(rawValue: String) { self.rawValue = rawValue }
+	public static let upgrade = SandErrorTrayActionVariant2Kind(rawValue: "upgrade")
+	public static let upgradeChoice = SandErrorTrayActionVariant2Kind(rawValue: "upgradeChoice")
+}
+
 /// Compiled-default in-box gateway commands. Runtime config may widen/narrow this set.
 public let V1_COMMAND_ALLOWLIST: [String] = [
+	"approveCredentialRequest",
 	"attachUpload",
+	"authenticateMcpServer",
+	"clearTrays",
+	"completeGithubConnect",
+	"completeMcpOAuth",
 	"connectChannel",
+	"countAgents",
 	"createAgent",
+	"createAgentAutomation",
+	"createAgentFromTemplate",
+	"createFirstBot",
 	"createGroup",
+	"deleteAgentAutomation",
 	"deleteAgents",
+	"deleteBotTemplate",
+	"denyCredentialRequest",
+	"discardDraft",
 	"disconnectChannel",
+	"disconnectListenerPlatform",
+	"dismissTray",
 	"dismissUserForm",
 	"dismissWidget",
 	"generateAgentAvatarImage",
@@ -7003,43 +13910,110 @@ public let V1_COMMAND_ALLOWLIST: [String] = [
 	"getAgentTranscriptPage",
 	"getAgentTranscriptTail",
 	"getAgentTranscriptWindow",
+	"getAutomationWebhookCredential",
+	"getBotTemplateExportPolicy",
+	"getBotTemplateForSourceAgent",
+	"getBotTemplateVersion",
+	"getCloudAgentInfo",
+	"getCredentialProviderStatus",
+	"getCursorLinkStatus",
+	"getEffectiveMcpPlugins",
+	"getForeverBoxStatus",
+	"getHostSettings",
+	"getListenerConnectUrl",
+	"getListenerIntegrations",
+	"getMainAgent",
+	"getMcpCatalog",
+	"getMcpPluginLogo",
+	"getMcpState",
+	"getPublicBotTemplate",
+	"getPublicGrokBotMarketplaceListing",
 	"getSubagents",
 	"getTeachRecordingStatus",
+	"getTrays",
+	"getVoiceCall",
+	"handBackForeverBox",
 	"injectChromeCookies",
+	"installMcpEntry",
 	"interruptAgentRun",
 	"listAgents",
 	"listAllAutomations",
+	"listBotTemplates",
+	"listBoxMcpServers",
+	"listCredentials",
+	"listMcpServerTools",
+	"listPublicGrokBotMarketplaceListings",
+	"mintVoiceCallSecret",
 	"promptAcceptanceStatus",
+	"publishBotTemplate",
 	"reactToMessage",
 	"readAttachmentChunk",
 	"readAttachmentImage",
 	"readAttachmentText",
-	"readVoiceCallAgentContext",
+	"recordVoiceCall",
 	"refreshChannel",
+	"refreshMcp",
+	"removeMcpAccount",
+	"removeMcpServer",
+	"renameMcpAccount",
+	"requestCredentialAutofill",
+	"resolveAutoReviewApproval",
+	"resolveLocalToolPermission",
+	"resolveVirtualCardApproval",
 	"respondToWidget",
+	"runAgentAutomationNow",
+	"sendDraft",
 	"sendPrompt",
 	"setAgentAutomationEnabled",
 	"setAgentAvatarBytes",
 	"setAgentHiddenFromSidebar",
 	"setAgentNotificationsEnabled",
+	"setAgentNotifyOnUpdates",
 	"setAgentUnread",
+	"setBotTemplateVisibility",
 	"setGroupMembers",
+	"setHostSettings",
+	"setMainAgent",
+	"setMcpCustomInstructions",
+	"setVoiceCallPresence",
 	"startTeachRecording",
 	"stopTeachRecording",
+	"submitSecret",
 	"submitUserForm",
+	"toggleMcpToolDisabled",
+	"uninstallMcpPlugin",
 	"updateAgent",
+	"updateAgentAutomation",
+	"updateMcpPluginInstall",
 	"uploadAttachment",
+	"voiceCallHarnessSession",
+	"voiceCallHarnessTool",
 ]
 
 /// Allowlisted `bot.command` { name, args } union.
 public enum BotCommand: Codable, Sendable, Equatable {
 
+	case approveCredentialRequest(ApproveCredentialRequest)
 	case attachUpload(AttachUpload)
+	case authenticateMcpServer(AuthenticateMcpServer)
+	case clearTrays(ClearTrays)
+	case completeGithubConnect(CompleteGithubConnect)
+	case completeMcpOAuth(CompleteMcpOAuth)
 	case connectChannel(ConnectChannel)
+	case countAgents(CountAgents)
 	case createAgent(CreateAgent)
+	case createAgentAutomation(CreateAgentAutomation)
+	case createAgentFromTemplate(CreateAgentFromTemplate)
+	case createFirstBot(CreateFirstBot)
 	case createGroup(CreateGroup)
+	case deleteAgentAutomation(DeleteAgentAutomation)
 	case deleteAgents(DeleteAgents)
+	case deleteBotTemplate(DeleteBotTemplate)
+	case denyCredentialRequest(DenyCredentialRequest)
+	case discardDraft(DiscardDraft)
 	case disconnectChannel(DisconnectChannel)
+	case disconnectListenerPlatform(DisconnectListenerPlatform)
+	case dismissTray(DismissTray)
 	case dismissUserForm(DismissUserForm)
 	case dismissWidget(DismissWidget)
 	case generateAgentAvatarImage(GenerateAgentAvatarImage)
@@ -7051,38 +14025,145 @@ public enum BotCommand: Codable, Sendable, Equatable {
 	case getAgentTranscriptPage(GetAgentTranscriptPage)
 	case getAgentTranscriptTail(GetAgentTranscriptTail)
 	case getAgentTranscriptWindow(GetAgentTranscriptWindow)
+	case getAutomationWebhookCredential(GetAutomationWebhookCredential)
+	case getBotTemplateExportPolicy(GetBotTemplateExportPolicy)
+	case getBotTemplateForSourceAgent(GetBotTemplateForSourceAgent)
+	case getBotTemplateVersion(GetBotTemplateVersion)
+	case getCloudAgentInfo(GetCloudAgentInfo)
+	case getCredentialProviderStatus(GetCredentialProviderStatus)
+	case getCursorLinkStatus(GetCursorLinkStatus)
+	case getEffectiveMcpPlugins(GetEffectiveMcpPlugins)
+	case getForeverBoxStatus(GetForeverBoxStatus)
+	case getHostSettings(GetHostSettings)
+	case getListenerConnectUrl(GetListenerConnectUrl)
+	case getListenerIntegrations(GetListenerIntegrations)
+	case getMainAgent(GetMainAgent)
+	case getMcpCatalog(GetMcpCatalog)
+	case getMcpPluginLogo(GetMcpPluginLogo)
+	case getMcpState(GetMcpState)
+	case getPublicBotTemplate(GetPublicBotTemplate)
+	case getPublicGrokBotMarketplaceListing(GetPublicGrokBotMarketplaceListing)
 	case getSubagents(GetSubagents)
 	case getTeachRecordingStatus(GetTeachRecordingStatus)
+	case getTrays(GetTrays)
+	case getVoiceCall(GetVoiceCall)
+	case handBackForeverBox(HandBackForeverBox)
 	case injectChromeCookies(InjectChromeCookies)
+	case installMcpEntry(InstallMcpEntry)
 	case interruptAgentRun(InterruptAgentRun)
 	case listAgents(ListAgents)
 	case listAllAutomations(ListAllAutomations)
+	case listBotTemplates(ListBotTemplates)
+	case listBoxMcpServers(ListBoxMcpServers)
+	case listCredentials(ListCredentials)
+	case listMcpServerTools(ListMcpServerTools)
+	case listPublicGrokBotMarketplaceListings(ListPublicGrokBotMarketplaceListings)
+	case mintVoiceCallSecret(MintVoiceCallSecret)
 	case promptAcceptanceStatus(PromptAcceptanceStatus)
+	case publishBotTemplate(PublishBotTemplate)
 	case reactToMessage(ReactToMessage)
 	case readAttachmentChunk(ReadAttachmentChunk)
 	case readAttachmentImage(ReadAttachmentImage)
 	case readAttachmentText(ReadAttachmentText)
-	case readVoiceCallAgentContext(ReadVoiceCallAgentContext)
+	case recordVoiceCall(RecordVoiceCall)
 	case refreshChannel(RefreshChannel)
+	case refreshMcp(RefreshMcp)
+	case removeMcpAccount(RemoveMcpAccount)
+	case removeMcpServer(RemoveMcpServer)
+	case renameMcpAccount(RenameMcpAccount)
+	case requestCredentialAutofill(RequestCredentialAutofill)
+	case resolveAutoReviewApproval(ResolveAutoReviewApproval)
+	case resolveLocalToolPermission(ResolveLocalToolPermission)
+	case resolveVirtualCardApproval(ResolveVirtualCardApproval)
 	case respondToWidget(RespondToWidget)
+	case runAgentAutomationNow(RunAgentAutomationNow)
+	case sendDraft(SendDraft)
 	case sendPrompt(SendPrompt)
 	case setAgentAutomationEnabled(SetAgentAutomationEnabled)
 	case setAgentAvatarBytes(SetAgentAvatarBytes)
 	case setAgentHiddenFromSidebar(SetAgentHiddenFromSidebar)
 	case setAgentNotificationsEnabled(SetAgentNotificationsEnabled)
+	case setAgentNotifyOnUpdates(SetAgentNotifyOnUpdates)
 	case setAgentUnread(SetAgentUnread)
+	case setBotTemplateVisibility(SetBotTemplateVisibility)
 	case setGroupMembers(SetGroupMembers)
+	case setHostSettings(SetHostSettings)
+	case setMainAgent(SetMainAgent)
+	case setMcpCustomInstructions(SetMcpCustomInstructions)
+	case setVoiceCallPresence(SetVoiceCallPresence)
 	case startTeachRecording(StartTeachRecording)
 	case stopTeachRecording(StopTeachRecording)
+	case submitSecret(SubmitSecret)
 	case submitUserForm(SubmitUserForm)
+	case toggleMcpToolDisabled(ToggleMcpToolDisabled)
+	case uninstallMcpPlugin(UninstallMcpPlugin)
 	case updateAgent(UpdateAgent)
+	case updateAgentAutomation(UpdateAgentAutomation)
+	case updateMcpPluginInstall(UpdateMcpPluginInstall)
 	case uploadAttachment(UploadAttachment)
+	case voiceCallHarnessSession(VoiceCallHarnessSession)
+	case voiceCallHarnessTool(VoiceCallHarnessTool)
+
+	public struct ApproveCredentialRequest: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsApproveCredentialRequest
+		public init(agentId: String, args: ArgsApproveCredentialRequest, name: String = "approveCredentialRequest") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
 
 	public struct AttachUpload: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
 		public let args: ArgsAttachUpload
 		public init(agentId: String, args: ArgsAttachUpload, name: String = "attachUpload") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct AuthenticateMcpServer: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandMcpAuthenticateRequest
+		public init(agentId: String, args: SandMcpAuthenticateRequest, name: String = "authenticateMcpServer") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct ClearTrays: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "clearTrays") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct CompleteGithubConnect: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsCompleteGithubConnect
+		public init(agentId: String, args: ArgsCompleteGithubConnect, name: String = "completeGithubConnect") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct CompleteMcpOAuth: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsCompleteMcpOAuth
+		public init(agentId: String, args: ArgsCompleteMcpOAuth, name: String = "completeMcpOAuth") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7100,11 +14181,55 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct CountAgents: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "countAgents") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct CreateAgent: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
 		public let args: SandCreateAgentArgs
 		public init(agentId: String, args: SandCreateAgentArgs, name: String = "createAgent") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct CreateAgentAutomation: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsCreateAgentAutomation
+		public init(agentId: String, args: ArgsCreateAgentAutomation, name: String = "createAgentAutomation") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct CreateAgentFromTemplate: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandCreateAgentFromTemplateArgs
+		public init(agentId: String, args: SandCreateAgentFromTemplateArgs, name: String = "createAgentFromTemplate") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct CreateFirstBot: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsCreateFirstBot
+		public init(agentId: String, args: ArgsCreateFirstBot, name: String = "createFirstBot") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7122,6 +14247,17 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct DeleteAgentAutomation: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsDeleteAgentAutomation
+		public init(agentId: String, args: ArgsDeleteAgentAutomation, name: String = "deleteAgentAutomation") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct DeleteAgents: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
@@ -7133,11 +14269,66 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct DeleteBotTemplate: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandBotTemplateDeleteArgs
+		public init(agentId: String, args: SandBotTemplateDeleteArgs, name: String = "deleteBotTemplate") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct DenyCredentialRequest: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsDenyCredentialRequest
+		public init(agentId: String, args: ArgsDenyCredentialRequest, name: String = "denyCredentialRequest") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct DiscardDraft: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsDiscardDraft
+		public init(agentId: String, args: ArgsDiscardDraft, name: String = "discardDraft") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct DisconnectChannel: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
 		public let args: ArgsDisconnectChannel
 		public init(agentId: String, args: ArgsDisconnectChannel, name: String = "disconnectChannel") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct DisconnectListenerPlatform: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsDisconnectListenerPlatform
+		public init(agentId: String, args: ArgsDisconnectListenerPlatform, name: String = "disconnectListenerPlatform") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct DismissTray: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandAsyncTaskLabelParams
+		public init(agentId: String, args: SandAsyncTaskLabelParams, name: String = "dismissTray") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7158,8 +14349,8 @@ public enum BotCommand: Codable, Sendable, Equatable {
 	public struct DismissWidget: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
-		public let args: ArgsDiscardDraft
-		public init(agentId: String, args: ArgsDiscardDraft, name: String = "dismissWidget") {
+		public let args: ArgsDismissWidget
+		public init(agentId: String, args: ArgsDismissWidget, name: String = "dismissWidget") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7257,8 +14448,206 @@ public enum BotCommand: Codable, Sendable, Equatable {
 	public struct GetAgentTranscriptWindow: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
-		public let args: ArgsGetAgentTranscriptTail
-		public init(agentId: String, args: ArgsGetAgentTranscriptTail, name: String = "getAgentTranscriptWindow") {
+		public let args: ArgsGetAgentTranscriptWindow
+		public init(agentId: String, args: ArgsGetAgentTranscriptWindow, name: String = "getAgentTranscriptWindow") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetAutomationWebhookCredential: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsDeleteAgentAutomation
+		public init(agentId: String, args: ArgsDeleteAgentAutomation, name: String = "getAutomationWebhookCredential") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetBotTemplateExportPolicy: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "getBotTemplateExportPolicy") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetBotTemplateForSourceAgent: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandBotTemplateForSourceAgentArgs
+		public init(agentId: String, args: SandBotTemplateForSourceAgentArgs, name: String = "getBotTemplateForSourceAgent") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetBotTemplateVersion: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandBotTemplateVersionArgs
+		public init(agentId: String, args: SandBotTemplateVersionArgs, name: String = "getBotTemplateVersion") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetCloudAgentInfo: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsGetCloudAgentInfo
+		public init(agentId: String, args: ArgsGetCloudAgentInfo, name: String = "getCloudAgentInfo") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetCredentialProviderStatus: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsGetCredentialProviderStatus
+		public init(agentId: String, args: ArgsGetCredentialProviderStatus, name: String = "getCredentialProviderStatus") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetCursorLinkStatus: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsGetCursorLinkStatus
+		public init(agentId: String, args: ArgsGetCursorLinkStatus, name: String = "getCursorLinkStatus") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetEffectiveMcpPlugins: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "getEffectiveMcpPlugins") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetForeverBoxStatus: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandAsyncTaskLabelParams
+		public init(agentId: String, args: SandAsyncTaskLabelParams, name: String = "getForeverBoxStatus") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetHostSettings: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "getHostSettings") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetListenerConnectUrl: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsGetListenerConnectUrl
+		public init(agentId: String, args: ArgsGetListenerConnectUrl, name: String = "getListenerConnectUrl") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetListenerIntegrations: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "getListenerIntegrations") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetMainAgent: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsGetMainAgent
+		public init(agentId: String, args: ArgsGetMainAgent, name: String = "getMainAgent") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetMcpCatalog: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "getMcpCatalog") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetMcpPluginLogo: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ReplyGetListenerConnectUrl
+		public init(agentId: String, args: ReplyGetListenerConnectUrl, name: String = "getMcpPluginLogo") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetMcpState: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "getMcpState") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetPublicBotTemplate: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsGetPublicBotTemplate
+		public init(agentId: String, args: ArgsGetPublicBotTemplate, name: String = "getPublicBotTemplate") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetPublicGrokBotMarketplaceListing: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsGetPublicGrokBotMarketplaceListing
+		public init(agentId: String, args: ArgsGetPublicGrokBotMarketplaceListing, name: String = "getPublicGrokBotMarketplaceListing") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7287,6 +14676,39 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct GetTrays: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "getTrays") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct GetVoiceCall: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsGetVoiceCall
+		public init(agentId: String, args: ArgsGetVoiceCall, name: String = "getVoiceCall") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct HandBackForeverBox: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsHandBackForeverBox
+		public init(agentId: String, args: ArgsHandBackForeverBox, name: String = "handBackForeverBox") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct InjectChromeCookies: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
@@ -7298,11 +14720,22 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct InstallMcpEntry: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandInstallEntryRequest
+		public init(agentId: String, args: SandInstallEntryRequest, name: String = "installMcpEntry") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct InterruptAgentRun: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
-		public let args: SandAsyncTaskLabelParams
-		public init(agentId: String, args: SandAsyncTaskLabelParams, name: String = "interruptAgentRun") {
+		public let args: ArgsInterruptAgentRun
+		public init(agentId: String, args: ArgsInterruptAgentRun, name: String = "interruptAgentRun") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7331,11 +14764,88 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct ListBotTemplates: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsClearTrays
+		public init(agentId: String, args: ArgsClearTrays, name: String = "listBotTemplates") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct ListBoxMcpServers: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsListBoxMcpServers
+		public init(agentId: String, args: ArgsListBoxMcpServers, name: String = "listBoxMcpServers") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct ListCredentials: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsListCredentials
+		public init(agentId: String, args: ArgsListCredentials, name: String = "listCredentials") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct ListMcpServerTools: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsListMcpServerTools
+		public init(agentId: String, args: ArgsListMcpServerTools, name: String = "listMcpServerTools") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct ListPublicGrokBotMarketplaceListings: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsListPublicGrokBotMarketplaceListings
+		public init(agentId: String, args: ArgsListPublicGrokBotMarketplaceListings, name: String = "listPublicGrokBotMarketplaceListings") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct MintVoiceCallSecret: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsMintVoiceCallSecret
+		public init(agentId: String, args: ArgsMintVoiceCallSecret, name: String = "mintVoiceCallSecret") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct PromptAcceptanceStatus: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
 		public let args: GatewayAcceptanceStatusArgs
 		public init(agentId: String, args: GatewayAcceptanceStatusArgs, name: String = "promptAcceptanceStatus") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct PublishBotTemplate: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandBotTemplatePublishArgs
+		public init(agentId: String, args: SandBotTemplatePublishArgs, name: String = "publishBotTemplate") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7367,8 +14877,8 @@ public enum BotCommand: Codable, Sendable, Equatable {
 	public struct ReadAttachmentImage: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
-		public let args: SandUploadAttachmentResult
-		public init(agentId: String, args: SandUploadAttachmentResult, name: String = "readAttachmentImage") {
+		public let args: ArgsReadAttachmentImage
+		public init(agentId: String, args: ArgsReadAttachmentImage, name: String = "readAttachmentImage") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7386,11 +14896,11 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
-	public struct ReadVoiceCallAgentContext: Codable, Sendable, Equatable {
+	public struct RecordVoiceCall: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
-		public let args: SandAsyncTaskLabelParams
-		public init(agentId: String, args: SandAsyncTaskLabelParams, name: String = "readVoiceCallAgentContext") {
+		public let args: ArgsRecordVoiceCall
+		public init(agentId: String, args: ArgsRecordVoiceCall, name: String = "recordVoiceCall") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7408,11 +14918,121 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct RefreshMcp: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsRefreshMcp
+		public init(agentId: String, args: ArgsRefreshMcp, name: String = "refreshMcp") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct RemoveMcpAccount: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandMcpAccountRef
+		public init(agentId: String, args: SandMcpAccountRef, name: String = "removeMcpAccount") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct RemoveMcpServer: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsListMcpServerTools
+		public init(agentId: String, args: ArgsListMcpServerTools, name: String = "removeMcpServer") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct RenameMcpAccount: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandMcpRenameAccountRequest
+		public init(agentId: String, args: SandMcpRenameAccountRequest, name: String = "renameMcpAccount") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct RequestCredentialAutofill: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsRequestCredentialAutofill
+		public init(agentId: String, args: ArgsRequestCredentialAutofill, name: String = "requestCredentialAutofill") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct ResolveAutoReviewApproval: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsResolveAutoReviewApproval
+		public init(agentId: String, args: ArgsResolveAutoReviewApproval, name: String = "resolveAutoReviewApproval") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct ResolveLocalToolPermission: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsResolveLocalToolPermission
+		public init(agentId: String, args: ArgsResolveLocalToolPermission, name: String = "resolveLocalToolPermission") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct ResolveVirtualCardApproval: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsResolveVirtualCardApproval
+		public init(agentId: String, args: ArgsResolveVirtualCardApproval, name: String = "resolveVirtualCardApproval") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct RespondToWidget: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
 		public let args: ArgsRespondToWidget
 		public init(agentId: String, args: ArgsRespondToWidget, name: String = "respondToWidget") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct RunAgentAutomationNow: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsRunAgentAutomationNow
+		public init(agentId: String, args: ArgsRunAgentAutomationNow, name: String = "runAgentAutomationNow") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct SendDraft: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsSendDraft
+		public init(agentId: String, args: ArgsSendDraft, name: String = "sendDraft") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7474,6 +15094,17 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct SetAgentNotifyOnUpdates: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsSetAgentNotificationsEnabled
+		public init(agentId: String, args: ArgsSetAgentNotificationsEnabled, name: String = "setAgentNotifyOnUpdates") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct SetAgentUnread: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
@@ -7485,11 +15116,66 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct SetBotTemplateVisibility: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandBotTemplateVisibilityArgs
+		public init(agentId: String, args: SandBotTemplateVisibilityArgs, name: String = "setBotTemplateVisibility") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct SetGroupMembers: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
 		public let args: ArgsSetGroupMembers
 		public init(agentId: String, args: ArgsSetGroupMembers, name: String = "setGroupMembers") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct SetHostSettings: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandHostSettingsUpdate
+		public init(agentId: String, args: SandHostSettingsUpdate, name: String = "setHostSettings") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct SetMainAgent: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsSetMainAgent
+		public init(agentId: String, args: ArgsSetMainAgent, name: String = "setMainAgent") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct SetMcpCustomInstructions: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandSetMcpInstructionsRequest
+		public init(agentId: String, args: SandSetMcpInstructionsRequest, name: String = "setMcpCustomInstructions") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct SetVoiceCallPresence: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsSetVoiceCallPresence
+		public init(agentId: String, args: ArgsSetVoiceCallPresence, name: String = "setVoiceCallPresence") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7518,11 +15204,44 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct SubmitSecret: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsSubmitSecret
+		public init(agentId: String, args: ArgsSubmitSecret, name: String = "submitSecret") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct SubmitUserForm: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
 		public let args: ArgsSubmitUserForm
 		public init(agentId: String, args: ArgsSubmitUserForm, name: String = "submitUserForm") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct ToggleMcpToolDisabled: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandToggleMcpToolDisabledRequest
+		public init(agentId: String, args: SandToggleMcpToolDisabledRequest, name: String = "toggleMcpToolDisabled") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct UninstallMcpPlugin: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsUninstallMcpPlugin
+		public init(agentId: String, args: ArgsUninstallMcpPlugin, name: String = "uninstallMcpPlugin") {
 			self.agentId = agentId
 			self.name = name
 			self.args = args
@@ -7540,6 +15259,28 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct UpdateAgentAutomation: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsUpdateAgentAutomation
+		public init(agentId: String, args: ArgsUpdateAgentAutomation, name: String = "updateAgentAutomation") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct UpdateMcpPluginInstall: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: SandUpdatePluginInstallRequest
+		public init(agentId: String, args: SandUpdatePluginInstallRequest, name: String = "updateMcpPluginInstall") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	public struct UploadAttachment: Codable, Sendable, Equatable {
 		public let agentId: String
 		public let name: String
@@ -7551,17 +15292,54 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		}
 	}
 
+	public struct VoiceCallHarnessSession: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsVoiceCallHarnessSession
+		public init(agentId: String, args: ArgsVoiceCallHarnessSession, name: String = "voiceCallHarnessSession") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
+	public struct VoiceCallHarnessTool: Codable, Sendable, Equatable {
+		public let agentId: String
+		public let name: String
+		public let args: ArgsVoiceCallHarnessTool
+		public init(agentId: String, args: ArgsVoiceCallHarnessTool, name: String = "voiceCallHarnessTool") {
+			self.agentId = agentId
+			self.name = name
+			self.args = args
+		}
+	}
+
 	private enum NameKey: String, CodingKey { case name }
 
 	public init(from decoder: Decoder) throws {
 		let container = try decoder.container(keyedBy: NameKey.self)
 		switch try container.decode(String.self, forKey: .name) {
+		case "approveCredentialRequest": self = .approveCredentialRequest(try ApproveCredentialRequest(from: decoder))
 		case "attachUpload": self = .attachUpload(try AttachUpload(from: decoder))
+		case "authenticateMcpServer": self = .authenticateMcpServer(try AuthenticateMcpServer(from: decoder))
+		case "clearTrays": self = .clearTrays(try ClearTrays(from: decoder))
+		case "completeGithubConnect": self = .completeGithubConnect(try CompleteGithubConnect(from: decoder))
+		case "completeMcpOAuth": self = .completeMcpOAuth(try CompleteMcpOAuth(from: decoder))
 		case "connectChannel": self = .connectChannel(try ConnectChannel(from: decoder))
+		case "countAgents": self = .countAgents(try CountAgents(from: decoder))
 		case "createAgent": self = .createAgent(try CreateAgent(from: decoder))
+		case "createAgentAutomation": self = .createAgentAutomation(try CreateAgentAutomation(from: decoder))
+		case "createAgentFromTemplate": self = .createAgentFromTemplate(try CreateAgentFromTemplate(from: decoder))
+		case "createFirstBot": self = .createFirstBot(try CreateFirstBot(from: decoder))
 		case "createGroup": self = .createGroup(try CreateGroup(from: decoder))
+		case "deleteAgentAutomation": self = .deleteAgentAutomation(try DeleteAgentAutomation(from: decoder))
 		case "deleteAgents": self = .deleteAgents(try DeleteAgents(from: decoder))
+		case "deleteBotTemplate": self = .deleteBotTemplate(try DeleteBotTemplate(from: decoder))
+		case "denyCredentialRequest": self = .denyCredentialRequest(try DenyCredentialRequest(from: decoder))
+		case "discardDraft": self = .discardDraft(try DiscardDraft(from: decoder))
 		case "disconnectChannel": self = .disconnectChannel(try DisconnectChannel(from: decoder))
+		case "disconnectListenerPlatform": self = .disconnectListenerPlatform(try DisconnectListenerPlatform(from: decoder))
+		case "dismissTray": self = .dismissTray(try DismissTray(from: decoder))
 		case "dismissUserForm": self = .dismissUserForm(try DismissUserForm(from: decoder))
 		case "dismissWidget": self = .dismissWidget(try DismissWidget(from: decoder))
 		case "generateAgentAvatarImage": self = .generateAgentAvatarImage(try GenerateAgentAvatarImage(from: decoder))
@@ -7573,32 +15351,84 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		case "getAgentTranscriptPage": self = .getAgentTranscriptPage(try GetAgentTranscriptPage(from: decoder))
 		case "getAgentTranscriptTail": self = .getAgentTranscriptTail(try GetAgentTranscriptTail(from: decoder))
 		case "getAgentTranscriptWindow": self = .getAgentTranscriptWindow(try GetAgentTranscriptWindow(from: decoder))
+		case "getAutomationWebhookCredential": self = .getAutomationWebhookCredential(try GetAutomationWebhookCredential(from: decoder))
+		case "getBotTemplateExportPolicy": self = .getBotTemplateExportPolicy(try GetBotTemplateExportPolicy(from: decoder))
+		case "getBotTemplateForSourceAgent": self = .getBotTemplateForSourceAgent(try GetBotTemplateForSourceAgent(from: decoder))
+		case "getBotTemplateVersion": self = .getBotTemplateVersion(try GetBotTemplateVersion(from: decoder))
+		case "getCloudAgentInfo": self = .getCloudAgentInfo(try GetCloudAgentInfo(from: decoder))
+		case "getCredentialProviderStatus": self = .getCredentialProviderStatus(try GetCredentialProviderStatus(from: decoder))
+		case "getCursorLinkStatus": self = .getCursorLinkStatus(try GetCursorLinkStatus(from: decoder))
+		case "getEffectiveMcpPlugins": self = .getEffectiveMcpPlugins(try GetEffectiveMcpPlugins(from: decoder))
+		case "getForeverBoxStatus": self = .getForeverBoxStatus(try GetForeverBoxStatus(from: decoder))
+		case "getHostSettings": self = .getHostSettings(try GetHostSettings(from: decoder))
+		case "getListenerConnectUrl": self = .getListenerConnectUrl(try GetListenerConnectUrl(from: decoder))
+		case "getListenerIntegrations": self = .getListenerIntegrations(try GetListenerIntegrations(from: decoder))
+		case "getMainAgent": self = .getMainAgent(try GetMainAgent(from: decoder))
+		case "getMcpCatalog": self = .getMcpCatalog(try GetMcpCatalog(from: decoder))
+		case "getMcpPluginLogo": self = .getMcpPluginLogo(try GetMcpPluginLogo(from: decoder))
+		case "getMcpState": self = .getMcpState(try GetMcpState(from: decoder))
+		case "getPublicBotTemplate": self = .getPublicBotTemplate(try GetPublicBotTemplate(from: decoder))
+		case "getPublicGrokBotMarketplaceListing": self = .getPublicGrokBotMarketplaceListing(try GetPublicGrokBotMarketplaceListing(from: decoder))
 		case "getSubagents": self = .getSubagents(try GetSubagents(from: decoder))
 		case "getTeachRecordingStatus": self = .getTeachRecordingStatus(try GetTeachRecordingStatus(from: decoder))
+		case "getTrays": self = .getTrays(try GetTrays(from: decoder))
+		case "getVoiceCall": self = .getVoiceCall(try GetVoiceCall(from: decoder))
+		case "handBackForeverBox": self = .handBackForeverBox(try HandBackForeverBox(from: decoder))
 		case "injectChromeCookies": self = .injectChromeCookies(try InjectChromeCookies(from: decoder))
+		case "installMcpEntry": self = .installMcpEntry(try InstallMcpEntry(from: decoder))
 		case "interruptAgentRun": self = .interruptAgentRun(try InterruptAgentRun(from: decoder))
 		case "listAgents": self = .listAgents(try ListAgents(from: decoder))
 		case "listAllAutomations": self = .listAllAutomations(try ListAllAutomations(from: decoder))
+		case "listBotTemplates": self = .listBotTemplates(try ListBotTemplates(from: decoder))
+		case "listBoxMcpServers": self = .listBoxMcpServers(try ListBoxMcpServers(from: decoder))
+		case "listCredentials": self = .listCredentials(try ListCredentials(from: decoder))
+		case "listMcpServerTools": self = .listMcpServerTools(try ListMcpServerTools(from: decoder))
+		case "listPublicGrokBotMarketplaceListings": self = .listPublicGrokBotMarketplaceListings(try ListPublicGrokBotMarketplaceListings(from: decoder))
+		case "mintVoiceCallSecret": self = .mintVoiceCallSecret(try MintVoiceCallSecret(from: decoder))
 		case "promptAcceptanceStatus": self = .promptAcceptanceStatus(try PromptAcceptanceStatus(from: decoder))
+		case "publishBotTemplate": self = .publishBotTemplate(try PublishBotTemplate(from: decoder))
 		case "reactToMessage": self = .reactToMessage(try ReactToMessage(from: decoder))
 		case "readAttachmentChunk": self = .readAttachmentChunk(try ReadAttachmentChunk(from: decoder))
 		case "readAttachmentImage": self = .readAttachmentImage(try ReadAttachmentImage(from: decoder))
 		case "readAttachmentText": self = .readAttachmentText(try ReadAttachmentText(from: decoder))
-		case "readVoiceCallAgentContext": self = .readVoiceCallAgentContext(try ReadVoiceCallAgentContext(from: decoder))
+		case "recordVoiceCall": self = .recordVoiceCall(try RecordVoiceCall(from: decoder))
 		case "refreshChannel": self = .refreshChannel(try RefreshChannel(from: decoder))
+		case "refreshMcp": self = .refreshMcp(try RefreshMcp(from: decoder))
+		case "removeMcpAccount": self = .removeMcpAccount(try RemoveMcpAccount(from: decoder))
+		case "removeMcpServer": self = .removeMcpServer(try RemoveMcpServer(from: decoder))
+		case "renameMcpAccount": self = .renameMcpAccount(try RenameMcpAccount(from: decoder))
+		case "requestCredentialAutofill": self = .requestCredentialAutofill(try RequestCredentialAutofill(from: decoder))
+		case "resolveAutoReviewApproval": self = .resolveAutoReviewApproval(try ResolveAutoReviewApproval(from: decoder))
+		case "resolveLocalToolPermission": self = .resolveLocalToolPermission(try ResolveLocalToolPermission(from: decoder))
+		case "resolveVirtualCardApproval": self = .resolveVirtualCardApproval(try ResolveVirtualCardApproval(from: decoder))
 		case "respondToWidget": self = .respondToWidget(try RespondToWidget(from: decoder))
+		case "runAgentAutomationNow": self = .runAgentAutomationNow(try RunAgentAutomationNow(from: decoder))
+		case "sendDraft": self = .sendDraft(try SendDraft(from: decoder))
 		case "sendPrompt": self = .sendPrompt(try SendPrompt(from: decoder))
 		case "setAgentAutomationEnabled": self = .setAgentAutomationEnabled(try SetAgentAutomationEnabled(from: decoder))
 		case "setAgentAvatarBytes": self = .setAgentAvatarBytes(try SetAgentAvatarBytes(from: decoder))
 		case "setAgentHiddenFromSidebar": self = .setAgentHiddenFromSidebar(try SetAgentHiddenFromSidebar(from: decoder))
 		case "setAgentNotificationsEnabled": self = .setAgentNotificationsEnabled(try SetAgentNotificationsEnabled(from: decoder))
+		case "setAgentNotifyOnUpdates": self = .setAgentNotifyOnUpdates(try SetAgentNotifyOnUpdates(from: decoder))
 		case "setAgentUnread": self = .setAgentUnread(try SetAgentUnread(from: decoder))
+		case "setBotTemplateVisibility": self = .setBotTemplateVisibility(try SetBotTemplateVisibility(from: decoder))
 		case "setGroupMembers": self = .setGroupMembers(try SetGroupMembers(from: decoder))
+		case "setHostSettings": self = .setHostSettings(try SetHostSettings(from: decoder))
+		case "setMainAgent": self = .setMainAgent(try SetMainAgent(from: decoder))
+		case "setMcpCustomInstructions": self = .setMcpCustomInstructions(try SetMcpCustomInstructions(from: decoder))
+		case "setVoiceCallPresence": self = .setVoiceCallPresence(try SetVoiceCallPresence(from: decoder))
 		case "startTeachRecording": self = .startTeachRecording(try StartTeachRecording(from: decoder))
 		case "stopTeachRecording": self = .stopTeachRecording(try StopTeachRecording(from: decoder))
+		case "submitSecret": self = .submitSecret(try SubmitSecret(from: decoder))
 		case "submitUserForm": self = .submitUserForm(try SubmitUserForm(from: decoder))
+		case "toggleMcpToolDisabled": self = .toggleMcpToolDisabled(try ToggleMcpToolDisabled(from: decoder))
+		case "uninstallMcpPlugin": self = .uninstallMcpPlugin(try UninstallMcpPlugin(from: decoder))
 		case "updateAgent": self = .updateAgent(try UpdateAgent(from: decoder))
+		case "updateAgentAutomation": self = .updateAgentAutomation(try UpdateAgentAutomation(from: decoder))
+		case "updateMcpPluginInstall": self = .updateMcpPluginInstall(try UpdateMcpPluginInstall(from: decoder))
 		case "uploadAttachment": self = .uploadAttachment(try UploadAttachment(from: decoder))
+		case "voiceCallHarnessSession": self = .voiceCallHarnessSession(try VoiceCallHarnessSession(from: decoder))
+		case "voiceCallHarnessTool": self = .voiceCallHarnessTool(try VoiceCallHarnessTool(from: decoder))
 		default:
 			throw DecodingError.dataCorruptedError(
 				forKey: .name, in: container,
@@ -7609,12 +15439,27 @@ public enum BotCommand: Codable, Sendable, Equatable {
 
 	public func encode(to encoder: Encoder) throws {
 		switch self {
+		case .approveCredentialRequest(let v): try v.encode(to: encoder)
 		case .attachUpload(let v): try v.encode(to: encoder)
+		case .authenticateMcpServer(let v): try v.encode(to: encoder)
+		case .clearTrays(let v): try v.encode(to: encoder)
+		case .completeGithubConnect(let v): try v.encode(to: encoder)
+		case .completeMcpOAuth(let v): try v.encode(to: encoder)
 		case .connectChannel(let v): try v.encode(to: encoder)
+		case .countAgents(let v): try v.encode(to: encoder)
 		case .createAgent(let v): try v.encode(to: encoder)
+		case .createAgentAutomation(let v): try v.encode(to: encoder)
+		case .createAgentFromTemplate(let v): try v.encode(to: encoder)
+		case .createFirstBot(let v): try v.encode(to: encoder)
 		case .createGroup(let v): try v.encode(to: encoder)
+		case .deleteAgentAutomation(let v): try v.encode(to: encoder)
 		case .deleteAgents(let v): try v.encode(to: encoder)
+		case .deleteBotTemplate(let v): try v.encode(to: encoder)
+		case .denyCredentialRequest(let v): try v.encode(to: encoder)
+		case .discardDraft(let v): try v.encode(to: encoder)
 		case .disconnectChannel(let v): try v.encode(to: encoder)
+		case .disconnectListenerPlatform(let v): try v.encode(to: encoder)
+		case .dismissTray(let v): try v.encode(to: encoder)
 		case .dismissUserForm(let v): try v.encode(to: encoder)
 		case .dismissWidget(let v): try v.encode(to: encoder)
 		case .generateAgentAvatarImage(let v): try v.encode(to: encoder)
@@ -7626,44 +15471,111 @@ public enum BotCommand: Codable, Sendable, Equatable {
 		case .getAgentTranscriptPage(let v): try v.encode(to: encoder)
 		case .getAgentTranscriptTail(let v): try v.encode(to: encoder)
 		case .getAgentTranscriptWindow(let v): try v.encode(to: encoder)
+		case .getAutomationWebhookCredential(let v): try v.encode(to: encoder)
+		case .getBotTemplateExportPolicy(let v): try v.encode(to: encoder)
+		case .getBotTemplateForSourceAgent(let v): try v.encode(to: encoder)
+		case .getBotTemplateVersion(let v): try v.encode(to: encoder)
+		case .getCloudAgentInfo(let v): try v.encode(to: encoder)
+		case .getCredentialProviderStatus(let v): try v.encode(to: encoder)
+		case .getCursorLinkStatus(let v): try v.encode(to: encoder)
+		case .getEffectiveMcpPlugins(let v): try v.encode(to: encoder)
+		case .getForeverBoxStatus(let v): try v.encode(to: encoder)
+		case .getHostSettings(let v): try v.encode(to: encoder)
+		case .getListenerConnectUrl(let v): try v.encode(to: encoder)
+		case .getListenerIntegrations(let v): try v.encode(to: encoder)
+		case .getMainAgent(let v): try v.encode(to: encoder)
+		case .getMcpCatalog(let v): try v.encode(to: encoder)
+		case .getMcpPluginLogo(let v): try v.encode(to: encoder)
+		case .getMcpState(let v): try v.encode(to: encoder)
+		case .getPublicBotTemplate(let v): try v.encode(to: encoder)
+		case .getPublicGrokBotMarketplaceListing(let v): try v.encode(to: encoder)
 		case .getSubagents(let v): try v.encode(to: encoder)
 		case .getTeachRecordingStatus(let v): try v.encode(to: encoder)
+		case .getTrays(let v): try v.encode(to: encoder)
+		case .getVoiceCall(let v): try v.encode(to: encoder)
+		case .handBackForeverBox(let v): try v.encode(to: encoder)
 		case .injectChromeCookies(let v): try v.encode(to: encoder)
+		case .installMcpEntry(let v): try v.encode(to: encoder)
 		case .interruptAgentRun(let v): try v.encode(to: encoder)
 		case .listAgents(let v): try v.encode(to: encoder)
 		case .listAllAutomations(let v): try v.encode(to: encoder)
+		case .listBotTemplates(let v): try v.encode(to: encoder)
+		case .listBoxMcpServers(let v): try v.encode(to: encoder)
+		case .listCredentials(let v): try v.encode(to: encoder)
+		case .listMcpServerTools(let v): try v.encode(to: encoder)
+		case .listPublicGrokBotMarketplaceListings(let v): try v.encode(to: encoder)
+		case .mintVoiceCallSecret(let v): try v.encode(to: encoder)
 		case .promptAcceptanceStatus(let v): try v.encode(to: encoder)
+		case .publishBotTemplate(let v): try v.encode(to: encoder)
 		case .reactToMessage(let v): try v.encode(to: encoder)
 		case .readAttachmentChunk(let v): try v.encode(to: encoder)
 		case .readAttachmentImage(let v): try v.encode(to: encoder)
 		case .readAttachmentText(let v): try v.encode(to: encoder)
-		case .readVoiceCallAgentContext(let v): try v.encode(to: encoder)
+		case .recordVoiceCall(let v): try v.encode(to: encoder)
 		case .refreshChannel(let v): try v.encode(to: encoder)
+		case .refreshMcp(let v): try v.encode(to: encoder)
+		case .removeMcpAccount(let v): try v.encode(to: encoder)
+		case .removeMcpServer(let v): try v.encode(to: encoder)
+		case .renameMcpAccount(let v): try v.encode(to: encoder)
+		case .requestCredentialAutofill(let v): try v.encode(to: encoder)
+		case .resolveAutoReviewApproval(let v): try v.encode(to: encoder)
+		case .resolveLocalToolPermission(let v): try v.encode(to: encoder)
+		case .resolveVirtualCardApproval(let v): try v.encode(to: encoder)
 		case .respondToWidget(let v): try v.encode(to: encoder)
+		case .runAgentAutomationNow(let v): try v.encode(to: encoder)
+		case .sendDraft(let v): try v.encode(to: encoder)
 		case .sendPrompt(let v): try v.encode(to: encoder)
 		case .setAgentAutomationEnabled(let v): try v.encode(to: encoder)
 		case .setAgentAvatarBytes(let v): try v.encode(to: encoder)
 		case .setAgentHiddenFromSidebar(let v): try v.encode(to: encoder)
 		case .setAgentNotificationsEnabled(let v): try v.encode(to: encoder)
+		case .setAgentNotifyOnUpdates(let v): try v.encode(to: encoder)
 		case .setAgentUnread(let v): try v.encode(to: encoder)
+		case .setBotTemplateVisibility(let v): try v.encode(to: encoder)
 		case .setGroupMembers(let v): try v.encode(to: encoder)
+		case .setHostSettings(let v): try v.encode(to: encoder)
+		case .setMainAgent(let v): try v.encode(to: encoder)
+		case .setMcpCustomInstructions(let v): try v.encode(to: encoder)
+		case .setVoiceCallPresence(let v): try v.encode(to: encoder)
 		case .startTeachRecording(let v): try v.encode(to: encoder)
 		case .stopTeachRecording(let v): try v.encode(to: encoder)
+		case .submitSecret(let v): try v.encode(to: encoder)
 		case .submitUserForm(let v): try v.encode(to: encoder)
+		case .toggleMcpToolDisabled(let v): try v.encode(to: encoder)
+		case .uninstallMcpPlugin(let v): try v.encode(to: encoder)
 		case .updateAgent(let v): try v.encode(to: encoder)
+		case .updateAgentAutomation(let v): try v.encode(to: encoder)
+		case .updateMcpPluginInstall(let v): try v.encode(to: encoder)
 		case .uploadAttachment(let v): try v.encode(to: encoder)
+		case .voiceCallHarnessSession(let v): try v.encode(to: encoder)
+		case .voiceCallHarnessTool(let v): try v.encode(to: encoder)
 		}
 	}
 }
 
 /// JSON-RPC `bot.command` result is the bare reply value, not `{ name, result }`.
 public enum BotCommandReplyByName {
+	public typealias ApproveCredentialRequest = ReplyApproveCredentialRequest
 	public typealias AttachUpload = SandUploadAttachmentResult
+	public typealias AuthenticateMcpServer = SandMcpAuthResult
+	public typealias ClearTrays = BotRelayJSONValue
+	public typealias CompleteGithubConnect = SandGithubConnectCompletion
+	public typealias CompleteMcpOAuth = BotRelayJSONValue
 	public typealias ConnectChannel = SandChannelsView
+	public typealias CountAgents = Double
 	public typealias CreateAgent = SandCreateAgentResult
+	public typealias CreateAgentAutomation = [SandAutomation]
+	public typealias CreateAgentFromTemplate = SandCreateAgentFromTemplateResult
+	public typealias CreateFirstBot = SandCreateAgentFromTemplateResult
 	public typealias CreateGroup = SandCreateAgentResult
+	public typealias DeleteAgentAutomation = [SandAutomation]
 	public typealias DeleteAgents = SandDeleteAgentResult
+	public typealias DeleteBotTemplate = BotRelayJSONValue
+	public typealias DenyCredentialRequest = ReplyDenyCredentialRequest
+	public typealias DiscardDraft = SandWidgetAnswerResult
 	public typealias DisconnectChannel = SandChannelsView
+	public typealias DisconnectListenerPlatform = BotRelayJSONValue
+	public typealias DismissTray = BotRelayJSONValue
 	public typealias DismissUserForm = BotRelayJSONValue
 	public typealias DismissWidget = SandWidgetAnswerResult
 	public typealias GenerateAgentAvatarImage = SandGeneratedAvatarImage
@@ -7675,30 +15587,82 @@ public enum BotCommandReplyByName {
 	public typealias GetAgentTranscriptPage = SandRetainedTranscriptPage
 	public typealias GetAgentTranscriptTail = SandTranscriptPage
 	public typealias GetAgentTranscriptWindow = SandTranscriptWindow
+	public typealias GetAutomationWebhookCredential = SandAutomationWebhookCredential
+	public typealias GetBotTemplateExportPolicy = SandBotTemplateExportPolicyReply
+	public typealias GetBotTemplateForSourceAgent = ReplyGetBotTemplateForSourceAgent
+	public typealias GetBotTemplateVersion = SandBotTemplateGatewayView
+	public typealias GetCloudAgentInfo = SandCloudAgentInfo?
+	public typealias GetCredentialProviderStatus = ReplyGetCredentialProviderStatus
+	public typealias GetCursorLinkStatus = ReplyGetCursorLinkStatus
+	public typealias GetEffectiveMcpPlugins = [SandEffectivePlugin]
+	public typealias GetForeverBoxStatus = SandForeverBoxStatus?
+	public typealias GetHostSettings = SandHostSettings
+	public typealias GetListenerConnectUrl = ReplyGetListenerConnectUrl
+	public typealias GetListenerIntegrations = SandListenerIntegrationsView
+	public typealias GetMainAgent = ReplyGetMainAgent
+	public typealias GetMcpCatalog = [SandMcpCatalogEntryView]
+	public typealias GetMcpPluginLogo = ReplyGetMcpPluginLogoValue?
+	public typealias GetMcpState = SandMcpState
+	public typealias GetPublicBotTemplate = BotTemplateImport?
+	public typealias GetPublicGrokBotMarketplaceListing = PublicGrokBotMarketplaceListingDetail?
 	public typealias GetSubagents = [SandSubagentInfo]
 	public typealias GetTeachRecordingStatus = SandTeachRecordingStatus
+	public typealias GetTrays = [SandErrorTray]
+	public typealias GetVoiceCall = SandVoiceCallRecord?
+	public typealias HandBackForeverBox = BotRelayJSONValue
 	public typealias InjectChromeCookies = ReplyInjectChromeCookies
+	public typealias InstallMcpEntry = SandMcpState
 	public typealias InterruptAgentRun = SandInterruptAgentRunResult
 	public typealias ListAgents = [SandAgentSummary]
 	public typealias ListAllAutomations = [SandScheduledAutomation]
+	public typealias ListBotTemplates = [SandBotTemplateGatewayView]
+	public typealias ListBoxMcpServers = ReplyListBoxMcpServers
+	public typealias ListCredentials = [SandAgentCredentialView]
+	public typealias ListMcpServerTools = [SandMcpServerTool]
+	public typealias ListPublicGrokBotMarketplaceListings = ReplyListPublicGrokBotMarketplaceListings
+	public typealias MintVoiceCallSecret = ReplyMintVoiceCallSecret
 	public typealias PromptAcceptanceStatus = PromptAcceptanceLookup
+	public typealias PublishBotTemplate = SandBotTemplateGatewayView
 	public typealias ReactToMessage = BotRelayJSONValue
 	public typealias ReadAttachmentChunk = SandAttachmentChunk?
 	public typealias ReadAttachmentImage = ResolvedImageAttachment?
 	public typealias ReadAttachmentText = ReplyReadAttachmentTextValue?
-	public typealias ReadVoiceCallAgentContext = SandVoiceCallAgentContext
+	public typealias RecordVoiceCall = BotRelayJSONValue
 	public typealias RefreshChannel = SandChannelsView
+	public typealias RefreshMcp = BotRelayJSONValue
+	public typealias RemoveMcpAccount = SandMcpState
+	public typealias RemoveMcpServer = SandMcpRemoveResult
+	public typealias RenameMcpAccount = SandMcpState
+	public typealias RequestCredentialAutofill = ReplyRequestCredentialAutofill
+	public typealias ResolveAutoReviewApproval = BotRelayJSONValue
+	public typealias ResolveLocalToolPermission = BotRelayJSONValue
+	public typealias ResolveVirtualCardApproval = BotRelayJSONValue
 	public typealias RespondToWidget = SandWidgetAnswerResult?
+	public typealias RunAgentAutomationNow = BotRelayJSONValue
+	public typealias SendDraft = SandWidgetAnswerResult
 	public typealias SendPrompt = SandSendPromptResult?
 	public typealias SetAgentAutomationEnabled = [SandAutomation]
 	public typealias SetAgentAvatarBytes = SandAgentSummary?
 	public typealias SetAgentHiddenFromSidebar = BotRelayJSONValue
 	public typealias SetAgentNotificationsEnabled = BotRelayJSONValue
+	public typealias SetAgentNotifyOnUpdates = BotRelayJSONValue
 	public typealias SetAgentUnread = BotRelayJSONValue
+	public typealias SetBotTemplateVisibility = SandBotTemplateView
 	public typealias SetGroupMembers = SandAgentSummary?
+	public typealias SetHostSettings = SandHostSettings
+	public typealias SetMainAgent = ReplyGetMainAgent
+	public typealias SetMcpCustomInstructions = SandMcpState
+	public typealias SetVoiceCallPresence = BotRelayJSONValue
 	public typealias StartTeachRecording = SandTeachRecordingStatus
 	public typealias StopTeachRecording = SandTeachRecordingStatus
+	public typealias SubmitSecret = BotRelayJSONValue
 	public typealias SubmitUserForm = BotRelayJSONValue
+	public typealias ToggleMcpToolDisabled = [SandMcpServerTool]
+	public typealias UninstallMcpPlugin = SandMcpRemoveResult
 	public typealias UpdateAgent = SandAgentSummary?
+	public typealias UpdateAgentAutomation = [SandAutomation]
+	public typealias UpdateMcpPluginInstall = SandMcpState
 	public typealias UploadAttachment = SandUploadAttachmentResult
+	public typealias VoiceCallHarnessSession = ReplyVoiceCallHarnessSession
+	public typealias VoiceCallHarnessTool = ReplyVoiceCallHarnessTool
 }

@@ -12,41 +12,24 @@ use xai_grok_pager::app::PagerTerminal;
 use xai_grok_pager::app::app_view::{ActiveView, AppView};
 use xai_grok_pager::appearance::AppearanceConfig;
 use xai_grok_pager::minimal_api;
+use xai_grok_pager::minimal_reprint;
 use xai_grok_pager::render::Renderable;
 use xai_grok_pager::scrollback::block::RenderBlock;
 use xai_grok_pager::scrollback::blocks::ToolCallBlock;
 use xai_grok_pager::scrollback::entry::{EntryId, ScrollbackEntry};
 use xai_grok_pager::scrollback::state::ScrollbackState;
-use xai_grok_pager::scrollback::types::DisplayMode;
+use xai_grok_pager::scrollback::types::{BlockBackground, DisplayMode};
 use xai_grok_pager::scrollback::wrappers::EntryRenderer;
 use xai_grok_pager::theme::Theme;
 
-/// Blank rows emitted after each committed block and held after each live-tail entry (`super::live`) in minimal mode.
-///
-/// Zero for now: blocks abut and each block's own chrome reads the boundary; a separator row per block made short collapsed blocks too airy.
-/// Whatever the value, both sides of the commit frontier must apply it identically ([`super::live::draw_tail`], [`super::live::tail_height`]).
-/// Otherwise a block's height would change as it moves into native scrollback and the prompt would shift on every commit.
+/// Whatever the value, both sides of the commit frontier must apply it identically ([`super::live::draw_tail`],
+/// [`super::live::tail_height`]). Otherwise a block's height would change as it moves into native scrollback and
+/// the prompt would shift on every commit.
 pub(crate) const MINIMAL_BLOCK_GAP: u16 = 0;
 
-/// Whether the entry at index `i` may be committed to native scrollback yet.
-///
-/// Mid-turn, an entry is committable once it has finished running and is not awaiting user input.
-/// A tool blocked on a permission or `ask_user_question` prompt is flagged `is_pending_user_input`.
-/// The leading-run scan stops before it, so it stays in the live region until the user answers.
-///
-/// Two block kinds relax the `is_running` gate mid-turn.
-/// The tracker leaves an agent message's `is_running` flag set until turn end, which would wedge the frontier at the message.
-/// A later non-thinking entry proves the tracker moved on and will never append again, so the message commits ([`agent_message_stream_closed`]).
-/// Interleaved thinking does not close the stream: later tokens still append, and committing would freeze the message's first words on the terminal.
-/// A `BgTask` lifecycle block commits immediately: its flag only animates the bullet and its content never changes.
-/// An async task can outlive its turn, so gating it on `is_running` would leave the "started" block stuck in the live tail.
-/// A running tool may still update its result, so it keeps the strict gate, and the last entry always stays live.
-///
-/// Once the turn is idle, everything except a pending-input block is committable; a stale `is_running` flag must not wedge the frontier.
-/// The caller finalizes such entries before rendering so they print in their finished form.
-///
-/// Print-once caveat: an entry pushed as running while the turn is idle commits immediately, so a later in-place fill never reaches the terminal.
-/// Handlers that fill placeholders (e.g. `SessionRecap`) must check `ScrollbackState::is_committed` and append a fresh block instead.
+/// Mid-turn, commit only finished entries not awaiting input; a pending tool stays in the live tail.
+/// Agent messages stay `is_running` until turn end: a later non-thinking entry closes them, interleaved thinking does not (or the first words freeze). `BgTask` commits immediately — content never changes and it can outlive the turn.
+/// Once idle, a stale `is_running` must not wedge the frontier. A running entry pushed while idle commits immediately, so placeholder fills must check `is_committed` and append a fresh block.
 pub fn is_committable(state: &ScrollbackState, i: usize, turn_running: bool) -> bool {
     let Some(entry) = state.get(i) else {
         return false;
@@ -63,17 +46,15 @@ pub fn is_committable(state: &ScrollbackState, i: usize, turn_running: bool) -> 
     if !entry.is_running {
         return true;
     }
-    // Running, mid-turn. Two block kinds commit despite a set `is_running` flag.
-    // A BgTask lifecycle block is a finalized event whose flag is animation-only (see above)
-    // An agent message commits when a later sibling proves the tracker moved on ([`agent_message_stream_closed`])
-    // A running tool may still update its result, and a still-open agent stream (last, or only followed by interleaved thinking) must stay live
+    // Running, mid-turn. A BgTask lifecycle block is a finalized event whose flag is animation-only. A running tool
+    // may still update its result, and a still-open agent stream (last, or only followed by interleaved thinking) must
+    // stay live.
     matches!(entry.block, RenderBlock::BgTask(_))
         || (matches!(entry.block, RenderBlock::AgentMessage(_))
             && agent_message_stream_closed(state, i))
 }
 
 /// Whether a later entry proves the tracker will not append to the agent message at `i` again.
-///
 /// `handle_tool_call`, a new stream, and turn-end push a tool, another message, or a session event and drop `current_agent_msg`.
 /// Interleaved thinking does not: it is inserted after the live message while chunks still append, so it must not trip print-once.
 fn agent_message_stream_closed(state: &ScrollbackState, i: usize) -> bool {
@@ -85,7 +66,6 @@ fn agent_message_stream_closed(state: &ScrollbackState, i: usize) -> bool {
 }
 
 /// The display mode a block should be committed in (minimal mode, print-once).
-///
 /// [`commit_active`] stamps BOTH the entry being committed and the still-uncommitted live-tail entries with this mode.
 /// That keeps a block's height identical on either side of the commit frontier, so the prompt does not jerk when it crosses.
 pub fn minimal_commit_display_mode(
@@ -141,7 +121,6 @@ pub struct FrontierScan {
 }
 
 /// Walk the frontier read-only (no cursor mutation, nothing marked committed).
-///
 /// Used by the overlay host's viewport sizing ([`super::overlay::sync_viewport`] via [`super::live::tail_height`]) and its commit gate.
 /// Both run *before* [`commit_active`] in the frame and must mirror its stop condition exactly.
 pub fn scan_frontier(state: &ScrollbackState, turn_running: bool) -> FrontierScan {
@@ -163,19 +142,8 @@ pub fn scan_frontier(state: &ScrollbackState, turn_running: bool) -> FrontierSca
     }
 }
 
-/// Commit the leading contiguous run of newly-committable entries, in insertion order.
-/// Those are the entries past the scan cursor that are finalized and not pending.
-///
-/// For each entry, `on_commit(state, index)` runs first: the caller finalizes and stamps the entry and renders it into native scrollback.
-/// The entry is marked committed only when it returns `true`.
-/// A `false` return (a failed terminal write) stops the walk with the entry uncommitted and the cursor before it, so the next frame retries.
-/// Print-once can never re-emit a block marked committed but never printed; it would silently vanish.
-///
-/// The scan stops at the first still-running / pending entry, so a turn streams smoothly and a sibling tool awaiting permission holds the frontier.
-/// Returns the number of entries committed.
-///
-/// This is the ONE mutating frontier walk.
-/// [`commit_active`] drives it in production and the unit tests drive it directly, so the tested loop and the production loop cannot drift.
+/// A `false` return (a failed terminal write) stops the walk with the entry uncommitted and the cursor before it,
+/// so the next frame retries. Print-once can never re-emit a block marked committed but never printed.
 pub fn commit_leading_run(
     state: &mut ScrollbackState,
     turn_running: bool,
@@ -209,7 +177,9 @@ pub fn commit_leading_run(
 /// Paired with [`minimal_renderer`] reclaiming the accent column, glyphs start at column 0.
 /// The live region's prompt, status, and info rows mirror that via [`super::live::live_left_inset`].
 ///
-/// The two reasoning-legibility toggles are set here rather than in `pager.toml` so the full TUI stays provably untouched.
+/// The reasoning-legibility toggles are set here rather than in `pager.toml` so the full TUI stays provably untouched.
+/// `rail_under_bullet` moves the reasoning rail out of the reserved accent column and into the body rows, directly below the header's `◆`.
+/// The header diamond then stays flush at column 0 like every other block's, and the gutter reads as one consistent treatment.
 pub(crate) fn committed_appearance(base: &AppearanceConfig) -> AppearanceConfig {
     let mut a = base.clone();
     a.show_timestamps = false;
@@ -217,6 +187,8 @@ pub(crate) fn committed_appearance(base: &AppearanceConfig) -> AppearanceConfig 
     a.scrollback.layout.block_pad_right = 0;
     a.scrollback.blocks.thinking.body_dim_italic = true;
     a.scrollback.blocks.thinking.collapsed_expand_hint = true;
+    a.scrollback.blocks.thinking.rail_under_bullet = true;
+    a.scrollback.blocks.prompt.bg = BlockBackground::None;
     a
 }
 
@@ -225,7 +197,8 @@ pub(crate) const COMMITTED_TICK: u64 = 0;
 /// The renderer for one minimal-mode entry, on either side of the commit frontier; `tick` is the only difference.
 /// Chrome here decides a block's wrapped height, so both sides must agree or the prompt jumps on commit; one constructor keeps them agreeing.
 ///
-/// Reasoning alone keeps the accent column, as the marker that separates it from the answer.
+/// No block reserves the accent column: reasoning's rail renders inside its body rows via `rail_under_bullet` ([`committed_appearance`]), directly below the header's bullet.
+/// Every block, reasoning included, starts flush at column 0; `no_block_spends_the_accent_column` pins this.
 pub(crate) fn minimal_renderer<'a>(
     entry: &'a ScrollbackEntry,
     theme: &'a Theme,
@@ -233,30 +206,20 @@ pub(crate) fn minimal_renderer<'a>(
     cwd: &'a std::path::Path,
     tick: u64,
 ) -> EntryRenderer<'a> {
-    // Reserved only where it is actually painted: `ThinkingBlock::accent` returns `None` when collapsed
-    // Reserving a column nothing paints would indent the header over a blank gutter
-    // Collapsed reasoning has no body to delimit anyway; the folded `Thought for Xs` header cannot be mistaken for the answer
-    // `only_thinking_spends_the_accent_column` pins the reserved column to the painted one so the two rules cannot drift apart
-    let hide_accent = !matches!(entry.block, RenderBlock::Thinking(_))
-        || entry.display_mode() == DisplayMode::Collapsed;
     EntryRenderer::new(entry, theme)
         .with_appearance(appearance)
         .with_cwd(Some(cwd))
         .with_tick(tick)
         .with_flat_background(true)
-        .with_hide_accent(hide_accent)
-        // The accent resolves to `Color::Reset` under the terminal-native palette: full-brightness default fg, which would shout
+        .with_hide_accent(true)
+        // The accent resolves to `Color::Reset` under the terminal-native palette: full-brightness default fg, which would shout.
         .with_dim_accent(true)
 }
 
-/// Emit one committed block into native scrollback via `insert_before`, capping its height at `max_rows` (0 means unbounded).
-///
-/// Diffs always commit in full, so an uncapped multi-thousand-line `Edit` would allocate one huge `Buffer` and writer-thread send burst.
-/// When the block is taller than `max_rows`, only the top `max_rows - 1` content rows are committed.
-/// The final row becomes a `… N more lines · /transcript to view` footer.
-/// The block is laid out at its full `desired_height` so wrapping is byte-identical to an uncapped commit.
-/// The `insert_before` buffer is only `commit_h` rows tall, so content past it is clipped, bounding the allocation to the cap.
-fn insert_committed(
+/// Diffs always commit in full, so an uncapped multi-thousand-line `Edit` would allocate one huge `Buffer` and
+/// writer-thread send burst. When the block is taller than `max_rows`, only the top `max_rows - 1` content rows are
+/// committed.
+pub(crate) fn insert_committed(
     terminal: &mut PagerTerminal,
     renderer: EntryRenderer<'_>,
     width: u16,
@@ -273,25 +236,31 @@ fn insert_committed(
     } else {
         full_h
     };
-    // Propagated (not swallowed): the caller must NOT mark the entry committed
-    // when the terminal write failed — print-once means a marked-but-unprinted
-    // block can never be emitted again (bugbot).
-    let footer_template = locale
-        .named_text(
-            "minimal.commit.more_lines",
-            "… {hidden} more lines — /transcript to view",
-        )
-        .into_owned();
-    terminal.insert_before(commit_h, move |buf| {
-        paint_committed_with_footer(
-            buf,
-            renderer,
-            width,
-            full_h,
-            footer_style,
-            Some(&footer_template),
-        );
-    })?;
+    // Off-screen paint then wrap-aware emit: a dense `insert_before` grid turns pads and soft wraps into hard breaks.
+    let area = Rect {
+        x: 0,
+        y: 0,
+        width,
+        height: commit_h,
+    };
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    let footer_template = locale.named_text(
+        "minimal.commit.more_lines",
+        "… {hidden} more lines — /transcript to view",
+    );
+    paint_committed_with_footer(
+        &mut buf,
+        &renderer,
+        width,
+        full_h,
+        footer_style,
+        Some(footer_template.as_ref()),
+    );
+    let wraps = commit_wrap_flags(&renderer, buf.area.height, full_h);
+    let rows = super::full_view::buffer_to_semantic_rows(&buf, &wraps);
+    // Propagated (not swallowed): the caller must NOT mark the entry committed when the terminal write failed
+    // Print-once means a marked-but-unprinted block can never be emitted again
+    terminal.insert_before_rows(&rows)?;
     insert_gap(terminal);
     Ok(())
 }
@@ -314,7 +283,7 @@ pub(super) fn insert_gap(terminal: &mut PagerTerminal) {
 #[cfg(test)]
 fn paint_committed(
     buf: &mut ratatui::buffer::Buffer,
-    renderer: EntryRenderer<'_>,
+    renderer: &EntryRenderer<'_>,
     width: u16,
     full_h: u16,
     footer_style: Style,
@@ -324,7 +293,7 @@ fn paint_committed(
 
 fn paint_committed_with_footer(
     buf: &mut ratatui::buffer::Buffer,
-    renderer: EntryRenderer<'_>,
+    renderer: &EntryRenderer<'_>,
     width: u16,
     full_h: u16,
     footer_style: Style,
@@ -359,16 +328,26 @@ fn paint_committed_with_footer(
             });
         buf.set_span(buf.area.x, y, &Span::styled(text, style), width);
     }
+    super::full_view::trim_trailing_pads(buf);
 }
 
-/// Commit the active agent's newly-finalized blocks into native scrollback.
-///
-/// Each entry in the leading committable run is stamped with its print-once display mode.
-/// It then prints via the shared `EntryRenderer` at exactly `desired_height(width)` rows.
-///
-/// On resume/attach (`loading_replay`) the replayed transcript prints into native scrollback like any other finalized block.
-/// Minimal has no separate history pane, so the terminal's scrollback *is* the history; a resumed session would otherwise look empty.
-/// The commit frontier (`committed` flags and `commit_scan_cursor`) still guarantees each block prints exactly once.
+/// Renderer joiners for the painted commit. A cap footer is not a wrap continuation.
+fn commit_wrap_flags(renderer: &EntryRenderer<'_>, height: u16, full_h: u16) -> Vec<bool> {
+    let mut wraps = renderer.row_soft_wraps(height);
+    if height > 0 && height < full_h {
+        let last = usize::from(height) - 1;
+        if let Some(flag) = wraps.get_mut(last) {
+            *flag = false;
+        }
+        if let Some(flag) = last.checked_sub(1).and_then(|i| wraps.get_mut(i)) {
+            *flag = false;
+        }
+    }
+    wraps
+}
+
+/// Commit the active agent's newly-finalized blocks into native scrollback. Minimal has no separate history pane,
+/// so the terminal's scrollback *is* the history. a resumed session would otherwise look empty.
 pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
     let id = match &app.active_view {
         ActiveView::Agent(id) => *id,
@@ -380,17 +359,14 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
     let Some(agent) = app.agents.get_mut(&id) else {
         return;
     };
-    // Hold commits while a centered fullscreen app-modal (settings) is open
+    // Hold commits while a band-owning modal (settings, palette, feedback form) is open
     // It takes the whole live region, so an `insert_before` underneath it would scroll the popup
     // Deferred commits flush on the next frame after it closes
-    if super::overlay::app_modal_active(agent) {
+    if super::overlay::is_live_region_modal_active(agent) {
         return;
     }
-    // NB: `sync_pending_user_input_marks` ran at the top of the frame ([`sync_pending_marks`], from `crate::draw`, before the viewport sizing)
-    // The sizing pass and this commit pass must judge committability against the same marks
-    // Syncing here would let a tool look committable to `sync_viewport`/`tail_height` on the very frame its permission arrived
-    //
-    // When idle, every remaining entry is stable and committable (see `is_committable`)
+    // The sizing pass and this commit pass must judge committability against the same marks. Syncing here would let a
+    // tool look committable to `sync_viewport`/`tail_height` on the very frame its permission arrived.
     let turn_running = minimal_api::is_turn_or_wake_running(agent);
     let cwd = agent.session.cwd.as_path();
     let sb = &mut agent.scrollback;
@@ -408,7 +384,7 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
 
     // Drive the ONE frontier walk (`commit_leading_run`, also what the unit tests exercise) with the production per-entry work
     // The per-entry work finalizes, stamps the print-once display mode, prints, then remembers folded blocks for Ctrl+E
-    commit_leading_run(sb, turn_running, |sb, i| {
+    let committed = commit_leading_run(sb, turn_running, |sb, i| {
         // If the turn is idle but this entry still carries a stale `is_running` flag, finalize it first
         // It then renders in its finished form (e.g. "Thought for Xs", not an animated "Thinking…").
         if let Some(id) = sb.get(i).filter(|e| e.is_running).map(|e| e.id) {
@@ -420,16 +396,9 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
             e.set_display_mode(mode);
         }
         if let Some(e) = sb.get(i) {
-            // `insert_committed` pushes these rows above the pinned viewport,
-            // into the terminal's own scrollback (capped — §6.15). A failed
-            // write returns `false` so the walk leaves the entry uncommitted
-            // (retried next frame) instead of marking a never-printed block.
-            //
-            // NOTE (print-once contract): from a successful insert on, the
-            // entry's content is frozen on the user's terminal. Mutating it in
-            // place later (`get_by_id_mut` + edit, the `/recap` fill pattern)
-            // will NOT reach the screen — append a fresh block instead (see
-            // the `SessionRecap` handler in `acp_handler.rs`).
+            // A failed write returns `false` so the walk leaves the entry uncommitted. (retried next frame) instead of marking
+            // a never-printed block. NOTE (print-once contract): from a successful insert on, the entry's content is frozen on
+            // the user's terminal.
             let renderer = minimal_renderer(e, &theme, appearance.clone(), cwd, COMMITTED_TICK);
             if insert_committed(terminal, renderer, width, max_rows, footer_style, &locale).is_err()
             {
@@ -446,26 +415,22 @@ pub fn commit_active(app: &mut AppView, terminal: &mut PagerTerminal) {
         true
     });
 
-    // Stamp the still-uncommitted "live tail" entries with the same print-once display policy they will commit with
-    // The tail renders each entry at its current `display_mode`, but blocks stream Expanded and commit folded
-    // Otherwise the live region is tall while a block streams and snaps short the instant it finalizes, jerking the prompt upward
-    // Idempotent: `set_display_mode` no-ops when unchanged
+    // Otherwise the live region is tall while a block streams and snaps short the instant it finalizes, jerking the
+    // prompt upward.
     let mut j = minimal_api::commit_scan_cursor(sb);
     while let Some(e) = sb.get_mut(j) {
         let mode = minimal_commit_display_mode(&e.block, &appearance);
         e.set_display_mode(mode);
         j += 1;
     }
+    if committed > 0 {
+        minimal_reprint::record_minimal_rows_printed(app, width);
+    }
 }
 
-/// Re-print the entries queued by `Ctrl+E` / `/expand` into native scrollback, fully expanded, below the committed conversation.
-///
-/// Committed terminal text cannot be mutated in place, so "expanding" a folded block is an honest re-print of the same entry in `Expanded` mode.
-/// The entry itself is already committed and past the scan cursor, so flipping its display mode has no effect on the live tail.
-///
-/// The re-print is uncapped (`max_rows = 0`): the initial commit already truncated the block under `minimal_max_commit_rows`.
-/// Capping the explicit "show me the whole thing" action would just reprint the same footer.
-/// A one-shot user-initiated tall insert is an acceptable burst.
+/// Committed terminal text cannot be mutated in place, so "expanding" a folded block is an honest re-print of the
+/// same entry in `Expanded` mode. Capping the explicit "show me the whole thing" action would just reprint the same
+/// footer.
 pub fn expand_pending(app: &mut AppView, terminal: &mut PagerTerminal) {
     if minimal_api::minimal_pending_expand(app).is_empty() {
         return;
@@ -480,22 +445,20 @@ pub fn expand_pending(app: &mut AppView, terminal: &mut PagerTerminal) {
     }
     let appearance = committed_appearance(&app.appearance);
     let locale = app.locale.clone();
-    // Guards: a missing active agent must leave the IDs queued, so confirm it
-    // exists before consuming the queue below (the queue take needs `&mut app`,
-    // which can't overlap the agent borrow — hence the check-then-reborrow).
-    // Likewise hold the whole queue while a centered app-modal owns the live
-    // region — an `insert_before` would scroll the popup and the user wouldn't
-    // see the re-print (same hold as `commit_active`; bugbot).
+    // Guards: a missing active agent must leave the IDs queued, so confirm it exists before consuming the queue below.
+    // The queue take needs `&mut app`, which can't overlap the agent borrow, hence the check-then-reborrow. An
+    // `insert_before` would scroll the popup or the feedback form and the user wouldn't see the re-print.
     match app.agents.get(&id) {
-        Some(agent) if !super::overlay::app_modal_active(agent) => {}
+        Some(agent) if !super::overlay::is_live_region_modal_active(agent) => {}
         _ => return,
     }
     let theme = Theme::current();
     let footer_style = theme.dim();
     // Consume the expand queue only after every guard above has passed
-    // A non-agent active view, a 0-width (probe) frame, or an open app-modal must leave the IDs queued for a later frame
+    // A non-agent active view, a 0-width (probe) frame, or an open band-owning modal must leave the IDs queued for a later frame
     let ids = minimal_api::take_minimal_pending_expand(app);
     let mut requeue: Vec<EntryId> = Vec::new();
+    let mut is_printed = false;
     {
         let Some(agent) = app.agents.get_mut(&id) else {
             // Can't happen (existence checked just above, nothing in between can remove the agent)
@@ -522,20 +485,21 @@ pub fn expand_pending(app: &mut AppView, terminal: &mut PagerTerminal) {
                     requeue.extend(iter);
                     break;
                 }
+                is_printed = true;
             }
         }
     }
     if !requeue.is_empty() {
         minimal_api::requeue_minimal_pending_expand(app, requeue);
     }
+    if is_printed {
+        minimal_reprint::record_minimal_rows_printed(app, width);
+    }
 }
 
-/// Re-mark tool entries that are blocked on a pending permission/question so the frontier holds them in the live region.
-/// The full TUI does this each frame in `AgentView::draw`, which minimal bypasses; `is_committable` reads `is_pending_user_input`.
-///
-/// Called at the TOP of the frame (from [`crate::draw`]), before [`super::overlay::sync_viewport`].
-/// The viewport sizing, the `will_commit` gate, and the commit pass must all judge committability against the same marks.
-/// Syncing inside the commit pass would let a just-arrived permission's tool look committable to the sizing walk for one frame.
+/// Re-mark tool entries that are blocked on a pending permission/question so the frontier holds them in the live
+/// region. The viewport sizing, the `will_commit` gate, and the commit pass must all judge committability against
+/// the same marks.
 pub fn sync_pending_marks(app: &mut AppView) {
     if let ActiveView::Agent(id) = &app.active_view
         && let Some(agent) = app.agents.get_mut(id)

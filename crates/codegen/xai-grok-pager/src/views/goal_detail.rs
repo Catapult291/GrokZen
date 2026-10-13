@@ -39,10 +39,7 @@ const MAX_TODO_DISPLAY: usize = 15;
 /// Maximum per-model token rows displayed before a "+N more" summary row.
 const MAX_MODEL_DISPLAY: usize = 6;
 
-/// Rows the per-model breakdown contributes to the modal: the capped model rows plus an optional "+N more" overflow row.
-/// Returns 0 when the breakdown is suppressed (a single-model or all-inherit goal collapses to the single tokens line).
 /// The cap is applied BEFORE the `u16` cast so the height sum can never overflow.
-/// The height calc and the render loop both use this, so they stay in lockstep.
 fn per_model_row_count(models: &[(String, u64)]) -> u16 {
     if models.len() < 2 {
         return 0;
@@ -51,10 +48,6 @@ fn per_model_row_count(models: &[(String, u64)]) -> u16 {
     let overflow = usize::from(models.len() > MAX_MODEL_DISPLAY);
     (shown + overflow) as u16
 }
-
-// ---------------------------------------------------------------------------
-// Token budget color
-// ---------------------------------------------------------------------------
 
 /// Choose the progress bar fill color based on usage percentage.
 fn budget_color(pct: f32, theme: &Theme) -> Color {
@@ -70,22 +63,30 @@ fn budget_color(pct: f32, theme: &Theme) -> Color {
 /// Format elapsed milliseconds as a compact human-readable duration.
 /// Same style as `goal_orchestrator::format_elapsed`; keep in sync.
 pub(crate) fn format_elapsed(ms: u64) -> String {
+    format_elapsed_with_locale(ms, None)
+}
+
+pub(crate) fn format_elapsed_with_locale(ms: u64, locale: Option<&LocaleContext>) -> String {
+    let unit = |id: &str, fallback: &'static str| {
+        locale
+            .map(|l| l.named_static_text(id, fallback))
+            .unwrap_or(fallback)
+    };
+    let h = unit("status_line.unit.hours", "h");
+    let m = unit("status_line.unit.minutes", "m");
+    let s = unit("status_line.unit.seconds", "s");
     let total_secs = ms / 1000;
     let hours = total_secs / 3600;
     let mins = (total_secs % 3600) / 60;
     let secs = total_secs % 60;
     if hours > 0 {
-        format!("{hours}h{mins:02}m")
+        format!("{hours}{h}{mins:02}{m}")
     } else if mins > 0 {
-        format!("{mins}m{secs:02}s")
+        format!("{mins}{m}{secs:02}{s}")
     } else {
-        format!("{secs}s")
+        format!("{secs}{s}")
     }
 }
-
-// ---------------------------------------------------------------------------
-// Status label
-// ---------------------------------------------------------------------------
 
 fn status_label(goal: &GoalDisplayState) -> (&'static str, Color, String) {
     status_label_with_locale(goal, None)
@@ -134,21 +135,8 @@ fn status_label_with_locale(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Wrapping helpers: pause-message reason block
-// ---------------------------------------------------------------------------
-
-/// Wrap a string into rows of at most `width` terminal columns.
-///
-/// Splits on whitespace first, then hard-splits any token wider than `width`.
-/// Explicit `\n` line breaks are preserved, so a multi-line block reason (the shell's `blocked_reason\nmessage` form) keeps its structure.
-///
-/// Width is measured in terminal columns via `UnicodeWidthStr` and `UnicodeWidthChar`, not Unicode code points.
-/// CJK and East-Asian Wide characters take 2 columns each, combining marks take 0, and emoji can take 2.
-/// Using `chars().count()` would let a model-emitted block reason with wide chars overflow into the right border.
-///
-/// `width` of zero or one returns a single un-split row to avoid divide-by-zero behaviour at degenerate modal widths.
-/// That case is unreachable in practice; the modal bails below width 20.
+/// Wrap a string into rows of at most `width` terminal columns. `width` of zero or one returns a
+/// single un-split row to avoid divide-by-zero behaviour at degenerate modal widths.
 fn wrap_pause_message_lines(text: &str, width: u16) -> Vec<String> {
     use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -246,10 +234,9 @@ pub(crate) fn truncate_to_width(text: &str, budget: usize) -> String {
     out
 }
 
-/// Replace control characters (tab, ESC, BEL, and so on) with spaces.
-/// The callers pass free-form model or wire text (objective title, event detail, timestamp, pause reason) that must not break a rendered row.
-/// Stripping here does not rely on ratatui's own filter, so a ratatui regression can't leak control bytes.
-/// `keep_newlines` preserves `\n` for the pause-reason wrapper (which splits on it before render); single-row callers pass `false`.
+/// Replace control characters (tab, ESC, BEL, and so on) with spaces. The callers pass free-form
+/// model or wire text (objective title, event detail, timestamp, pause reason) that must not break
+/// a rendered row.
 pub(crate) fn strip_control_chars(s: &str, keep_newlines: bool) -> String {
     s.chars()
         .map(|c| {
@@ -280,10 +267,6 @@ fn format_pause_reason_with_locale(msg: &str, locale: Option<&LocaleContext>) ->
     goal_text(locale, "goal.reason.template", "Reason: {reason}").replace("{reason}", &reason)
 }
 
-// ---------------------------------------------------------------------------
-// Public render
-// ---------------------------------------------------------------------------
-
 /// True when the goal carries at least one signal from the completion classifier.
 /// Gates the modal's "Completion review" section so a goal that has never been classified shows nothing extra.
 fn has_classifier_activity(goal: &GoalDisplayState) -> bool {
@@ -294,9 +277,6 @@ fn has_classifier_activity(goal: &GoalDisplayState) -> bool {
 }
 
 /// Display string for the classifier details-path row.
-/// Shows the path when it exists (existence resolved once on receipt and passed as `exists`).
-/// Shows `(unavailable)` when a path was reported but the file is missing (a fail-open run may not have written it).
-/// Shows a hyphen when no path was reported at all.
 fn classifier_details_display(path: Option<&str>, exists: bool) -> &str {
     match path {
         Some(p) if exists => p,
@@ -339,10 +319,9 @@ fn classifier_verdict_label_with_locale(
     }
 }
 
-/// Humanize a wire goal-event name (and optional detail) for the Recent History row.
-/// This is the single wire-to-display mapping, so machine vocabulary (`goal_paused`, snake_case detail) never reaches the user.
-/// Detail is folded into the label for the events that carry one (pause cause, premature-stop pattern).
-/// Unknown events fall back to a de-snake-cased form so a future shell event still renders readably.
+/// Humanize a wire goal-event name (and optional detail) for the Recent History row. This is the
+/// single wire-to-display mapping, so machine vocabulary (`goal_paused`, snake_case detail) never
+/// reaches the user.
 fn humanize_goal_event(event: &str, detail: Option<&str>) -> String {
     humanize_goal_event_with_locale(event, detail, None)
 }
@@ -475,30 +454,13 @@ pub fn goal_detail_area_with_locale(
         .clamp(60, 140)
         .min(screen.width.saturating_sub(4));
 
-    // Inner content width matches the render path
-    // `block.inner(area)` gives `w - 2` (the rounded border)
-    // The render indents 1 more column on each side (`x = inner.x + 1`, `w = inner.width - 2`), so the usable text width is `w - 4`
-    // Mirror that here so pause-message wrapping computes the same row count the renderer will produce
+    // Inner content width matches the render path `block.inner(area)` gives `w - 2` (the rounded
+    // border).
     let inner_w = w.saturating_sub(4);
 
-    // Compute content height based on what will actually be rendered
-    // Each optional section OWNS its leading blank separator (rendered only when the section renders)
-    // That keeps the height budget and the render path in lockstep
-    //   2  border (top + bottom)
-    //   1  status line
-    //   N  pause_message reason block (wrapped, when paused + Some)
-    //   1  pause hint line (only when any paused variant)
-    //   1  budget/tokens line
-    //   1  progress bar (only if budget set)
-    //   1  blank separator (unconditional, before the progress section)
-    //   1  progress header / "no progress items yet"
-    //   N  todo items (+ optional "+N more")
-    //   2-3 subagent block (if active): blank + role line + optional detail line
-    //   N  per-model token rows (only with an active subagent + ≥2 models,
-    //      capped at MAX_MODEL_DISPLAY + optional "+N more")
-    //   5  completion review (if classifier activity): blank + header + 3 lines
-    //   3  recent history (if last_event present): blank + header + event line
-    //   1  commands hint
+    // Compute content height based on what will actually be rendered. Each optional section OWNS its
+    // leading blank separator (rendered only when the section renders). That keeps the height budget
+    // and the render path in lockstep.
     let has_budget = goal.token_budget.is_some_and(|b| b > 0);
     let budget_bar = if has_budget { 1u16 } else { 0 };
     let recovery_hint = if goal.status.is_paused()
@@ -510,10 +472,9 @@ pub fn goal_detail_area_with_locale(
     } else {
         0
     };
-    // The Reason block renders as `Reason: <pause_message>` wrapped to the inner column width
-    // The prefix is part of the wrapped content, so continuation rows continue at column 0 without alignment tricks; matches the renderer's loop
-    // Gated on `is_paused()` to stay in sync with the renderer
-    // A future shell bug that leaks `pause_message` on a non-paused snapshot must not grow the modal box without also rendering content into it
+    // The Reason block renders as `Reason: <pause_message>` wrapped to the inner column width. The
+    // prefix is part of the wrapped content, so continuation rows continue at column 0 without
+    // alignment tricks; matches the renderer's loop.
     let reason_lines = if goal.status.is_paused()
         || matches!(
             goal.status,
@@ -591,16 +552,9 @@ pub fn goal_detail_area_with_locale(
     Rect::new(x, y, w, h)
 }
 
-/// Render the goal detail overlay into the buffer.
-///
-/// Draws a bordered popup with:
-/// - Title: objective
-/// - Status and phase
-/// - Token budget progress bar
-/// - Todo progress list
-/// - Active subagent metrics
-/// - Recent event history
-/// - Available commands hint
+/// Render the goal detail overlay into the buffer. Draws a bordered popup with. Title: objective.
+/// Status and phase. Token budget progress bar. Todo progress list. Active subagent metrics. Recent
+/// event history. Available commands hint.
 #[allow(clippy::too_many_arguments)]
 pub fn render_goal_detail(
     buf: &mut Buffer,
@@ -676,7 +630,7 @@ pub fn render_goal_detail_with_locale(
     let is_active = matches!(goal.status, GoalDisplayStatus::Active);
     let spinner_prefix = if is_active {
         let frames = crate::glyphs::dot_spinner_frames();
-        let frame = frames[(tick / 4) % frames.len()];
+        let frame = frames.get((tick / 4) % frames.len()).copied().unwrap_or("");
         format!("{frame} ")
     } else {
         String::new()
@@ -818,7 +772,6 @@ pub fn render_goal_detail_with_locale(
         }
     }
 
-    // ── Budget / tokens line with optional progress bar ──
     let tokens_str =
         format_tokens_compact(goal.live_tokens_used(context_used, active_subagent_tokens));
     let elapsed_str = format_elapsed(goal.live_elapsed_ms());
@@ -900,14 +853,12 @@ pub fn render_goal_detail_with_locale(
         return Some(close_rect);
     }
 
-    // ── Blank separator ──
     y += 1;
 
     if y >= inner.y + inner.height {
         return Some(close_rect);
     }
 
-    // ── Progress section (todo items) ──
     if todos.is_empty() {
         buf.set_line_safe(
             x,
@@ -934,7 +885,7 @@ pub fn render_goal_detail_with_locale(
         y += 1;
 
         let display_count = todos.len().min(MAX_TODO_DISPLAY);
-        for item in &todos[..display_count] {
+        for item in todos.iter().take(display_count) {
             if y >= inner.y + inner.height.saturating_sub(1) {
                 break;
             }
@@ -977,7 +928,6 @@ pub fn render_goal_detail_with_locale(
         return Some(close_rect);
     }
 
-    // ── Active subagent metrics (with a leading blank separator) ──
     if let Some(ref role) = goal.current_subagent_role {
         // Leading blank, budgeted in `subagent_lines` (renders only with the block)
         y += 1;
@@ -1095,7 +1045,6 @@ pub fn render_goal_detail_with_locale(
         return Some(close_rect);
     }
 
-    // ── Completion review (only when classifier has run at least once) ──
     if has_classifier_activity(goal) {
         // Blank separator.
         y += 1;
@@ -1183,7 +1132,6 @@ pub fn render_goal_detail_with_locale(
         return Some(close_rect);
     }
 
-    // ── Recent history (with a leading blank separator) ──
     if goal.last_event.is_some() {
         // Leading blank, budgeted in `history_lines` (renders only with the block)
         y += 1;
@@ -1230,7 +1178,6 @@ pub fn render_goal_detail_with_locale(
         }
     }
 
-    // ── Commands hint ──
     if y < inner.y + inner.height {
         let hint_style = Style::default().fg(theme.gray_dim);
         let hint = if matches!(
@@ -1254,10 +1201,6 @@ pub fn render_goal_detail_with_locale(
 
     Some(close_rect)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -2075,9 +2018,13 @@ mod tests {
         // The rendered modal then preserves the break between the short label and the long body
         let text = "short reason\nlonger body content";
         let lines = wrap_pause_message_lines(text, 80);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0], "short reason");
-        assert_eq!(lines[1], "longer body content");
+        assert_eq!(
+            lines,
+            [
+                "short reason".to_string(),
+                "longer body content".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -2085,7 +2032,7 @@ mod tests {
         // At unusable width (0/1) the wrapper returns a single un-split row; the kept `\n` must still collapse so the row carries no control byte
         let out = wrap_pause_message_lines("a\nb", 1);
         assert_eq!(out, vec!["a b".to_string()]);
-        assert!(!out[0].contains('\n'));
+        assert!(out.first().is_some_and(|s| !s.contains('\n')));
     }
 
     #[test]
@@ -2106,10 +2053,9 @@ mod tests {
     #[test]
     fn wrap_pause_message_lines_uses_display_width_for_cjk() {
         use unicode_width::UnicodeWidthStr;
-        // Each Han ideograph occupies 2 terminal columns
-        // A 10-char CJK string is 20 columns wide and must NOT fit on a single width=10 row
-        // A chars().count() measure (10) would have mis-wrapped this and silently overflowed the modal border
-        // Use Han chars split into two words so wrapping isn't forced down the hard-split path
+        // Each Han ideograph occupies 2 terminal columns. A 10-char CJK string is 20 columns wide and must
+        // NOT fit on a single width=10 row. Use Han chars split into two words so wrapping isn't forced
+        // down the hard-split path.
         let text = "你好世界 再見天空";
         for line in wrap_pause_message_lines(text, 10) {
             assert!(
@@ -2142,8 +2088,6 @@ mod tests {
             );
         }
     }
-
-    // -- Todo rendering tests -----------------------------------------------
 
     fn make_todo(content: &str, status: TodoStatus) -> TodoItem {
         TodoItem {
@@ -2259,8 +2203,6 @@ mod tests {
         assert!(result.ends_with('\u{2026}'));
     }
 
-    // -- objective in the modal title ---------------------------------------
-
     #[test]
     fn modal_title_renders_objective() {
         // The objective must appear in the modal title (top border) so the user can see which goal is running, not a static placeholder
@@ -2314,8 +2256,6 @@ mod tests {
         );
     }
 
-    // -- commands hint must not be clipped ----------------------------------
-
     #[test]
     fn commands_hint_visible_without_subagent_or_history() {
         // With no active subagent and no recent-history event, the height calc and render must agree on the conditional blank separators
@@ -2345,8 +2285,6 @@ mod tests {
             "commands hint must render (not clipped) with no subagent/history, got:\n{text}"
         );
     }
-
-    // -- details path existence check ---------------------------------------
 
     #[test]
     fn classifier_details_display_handles_missing_present_and_none() {
@@ -2380,8 +2318,6 @@ mod tests {
         );
     }
 
-    // -- Attempts hyphen branch --------------------------------------------
-
     #[test]
     fn modal_attempts_shows_hyphen_when_classifier_active_without_counts() {
         // Completion review renders (a verdict is present) but no run counter has arrived (both counts absent)
@@ -2400,8 +2336,6 @@ mod tests {
             "empty counter must fall back to a hyphen, got:\n{text}"
         );
     }
-
-    // -- Recent-History humanization ----------------------------------------
 
     #[test]
     fn humanize_goal_event_maps_wire_vocabulary() {
@@ -2523,8 +2457,6 @@ mod tests {
         }
     }
 
-    // -- title control-char / boundary handling -----------------------------
-
     #[test]
     fn modal_title_collapses_control_chars_to_one_row() {
         // A newline in the objective must be collapsed to a space so the whole objective stays on the single-row title
@@ -2566,8 +2498,6 @@ mod tests {
         // Degenerate budget 0 yields just the ellipsis (no codepoint dropped silently)
         assert_eq!(truncate_to_width("x", 0), "\u{2026}");
     }
-
-    // -- subagent / classifier height combos --------------------------------
 
     #[test]
     fn subagent_just_spawned_budgets_no_detail_row() {

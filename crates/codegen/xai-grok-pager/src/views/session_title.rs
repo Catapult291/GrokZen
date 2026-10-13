@@ -16,49 +16,71 @@ use crate::scrollback::block::RenderBlock;
 /// Maximum characters of a derived first-prompt title.
 const MAX_TITLE_CHARS: usize = 60;
 
-/// Derive the display title for an agent (rename, then generated title, then first-prompt, then id).
-///
-/// Centralised so every place that shows a session name agrees on the same precedence.
+/// Derive the display title for an agent (rename, then generated title, then first-prompt, then
+/// id). Centralised so every place that shows a session name agrees on the same precedence.
 /// Trimming and truncation happen in this single place to avoid drift.
 pub fn entry_title(agent: &AgentView) -> String {
-    if let Some(name) = agent.display_name.as_deref() {
-        let trimmed = name.trim();
-        if !trimmed.is_empty() {
-            return truncate_title(&sanitize_display_text(trimmed));
-        }
-    }
-    if let Some(title) = agent.generated_session_title.as_deref() {
-        let trimmed = title.trim();
-        if !trimmed.is_empty() {
-            let clean =
-                xai_grok_tools::implementations::skills::skill::extract_skill_display_text(trimmed);
-            let text = clean.as_deref().unwrap_or(trimmed);
-            return truncate_title(&sanitize_display_text(text));
-        }
-    }
-    if let Some(text) = first_user_prompt_text(agent) {
-        let trimmed = text.trim();
-        if !trimmed.is_empty() {
-            let clean =
-                xai_grok_tools::implementations::skills::skill::extract_skill_display_text(trimmed);
-            let display = clean.as_deref().unwrap_or(trimmed);
-            return truncate_title(&sanitize_display_text(display));
-        }
+    entry_title_with_locale(agent, None)
+}
+
+/// Translate only synthetic titles; user and model titles keep their original text.
+pub(crate) fn entry_title_with_locale(
+    agent: &AgentView,
+    locale: Option<&crate::locale::LocaleContext>,
+) -> String {
+    if let Some(title) = named_title(agent) {
+        return title;
     }
     match agent.session.session_id.as_ref() {
         Some(sid) => {
             let short: String = sid.0.chars().take(8).collect();
-            format!("session {short}")
+            locale
+                .map(|locale| locale.named_static_text("session.title.fallback", "session {id}"))
+                .unwrap_or("session {id}")
+                .replace("{id}", &short)
         }
-        None => "loading...".to_string(),
+        None => locale
+            .map(|locale| locale.named_static_text("session.title.loading", "loading..."))
+            .unwrap_or("loading...")
+            .to_string(),
     }
 }
 
-/// Real session title for rename prefill / `/rename` ghost-prefill.
-///
-/// Deliberately **not** [`entry_title`]: that chain falls back to the first prompt and `"session <id8>"`.
-/// Accepting the prefill with Tab would then commit a synthetic label (and a 60-char truncation).
-/// Same derivation as the dashboard `Ctrl+R` editor: non-blank `display_name`, else `generated_session_title`.
+/// The first three tiers of [`entry_title`] — a title the user or model actually gave the session — or `None` for a session that
+/// has only its id. Surfaces that should show nothing rather than `session abc12345` (the header row) read this.
+pub fn named_title(agent: &AgentView) -> Option<String> {
+    // Only model- and prompt-derived text may be a skill invocation to unwrap; a user-chosen name is not
+    agent
+        .display_name
+        .as_deref()
+        .and_then(|name| clean_title(name, false))
+        .or_else(|| {
+            agent
+                .generated_session_title
+                .as_deref()
+                .and_then(|title| clean_title(title, true))
+        })
+        .or_else(|| first_user_prompt_text(agent).and_then(|text| clean_title(&text, true)))
+}
+
+/// Trim, optionally unwrap a skill invocation, sanitise, and cap one title source; `None` when it is blank.
+fn clean_title(raw: &str, unwrap_skill: bool) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let unwrapped = unwrap_skill
+        .then(|| {
+            xai_grok_tools::implementations::skills::skill::extract_skill_display_text(trimmed)
+        })
+        .flatten();
+    Some(truncate_title(&sanitize_display_text(
+        unwrapped.as_deref().unwrap_or(trimmed),
+    )))
+}
+
+/// Real session title for rename prefill / `/rename` ghost-prefill. Deliberately not
+/// [`entry_title`]: that chain falls back to the first prompt and `"session <id8>"`.
 pub fn rename_source_title(agent: &AgentView) -> Option<String> {
     rename_source_title_raw(agent).map(|s| sanitize_display_text(s).into_owned())
 }
@@ -80,9 +102,6 @@ pub(crate) fn rename_source_title_raw(agent: &AgentView) -> Option<&str> {
 }
 
 /// Take the first scrollback `UserPrompt` block's text, if any.
-///
-/// Skips indices whose `entry()` returns `None` (defensive: the indexed range matches `scrollback.len()` so this should not happen in practice).
-/// Bailing out with `?` instead would conflate "no UserPrompt anywhere" with "hit an unexpected gap mid-scan".
 fn first_user_prompt_text(agent: &AgentView) -> Option<String> {
     for i in 0..agent.scrollback.len() {
         if let Some(entry) = agent.scrollback.entry(i)
@@ -114,9 +133,6 @@ pub(crate) fn last_user_prompt_line(agent: &AgentView) -> Option<String> {
 }
 
 /// First renderable line of the newest agent message, ANSI-stripped and sanitised.
-/// Returns `None` when a `UserPrompt` is newer than every agent message.
-/// (That prompt is unanswered; an older reply would misrepresent the latest exchange.)
-/// Also `None` when the message has no renderable line (older messages are not scanned).
 pub(crate) fn last_agent_message_line(agent: &AgentView) -> Option<String> {
     let len = agent.scrollback.len();
     for idx in (0..len).rev() {
@@ -156,11 +172,8 @@ fn truncate_title(text: &str) -> String {
     format!("{head}...")
 }
 
-/// Strip C0/C1 and bidi/format controls that could inject terminal escape sequences or spoof the title.
-/// Replaces them with `U+FFFD` so the caller can still see something was there.
-/// Same character class as [`xai_grok_shell::session::persistence::is_forbidden_title_char`]; persist drops, display replaces.
-///
-/// Returns `Cow::Borrowed(s)` when no sanitization is needed, so the common per-render call on a clean cached display_name does not allocate.
+/// Strip C0/C1 and bidi/format controls that could inject terminal escape sequences or spoof the
+/// title.
 pub(crate) fn sanitize_display_text(s: &str) -> Cow<'_, str> {
     use xai_grok_shell::session::persistence::is_forbidden_title_char;
     if s.chars().any(is_forbidden_title_char) {
@@ -204,6 +217,41 @@ pub(crate) fn format_relative_time(elapsed: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zh_localization_session_titles_translate_only_synthetic_fallbacks() {
+        let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+            locale: crate::locale::UiLocale::ZhCn,
+            source: crate::locale::LocaleSource::Cli,
+        });
+        let mut agent =
+            crate::app::agent_view::test_agent_view(Some("abcd1234-opaque-id"), "/tmp".into());
+        assert_eq!(entry_title(&agent), "session abcd1234");
+        assert_eq!(
+            entry_title_with_locale(&agent, Some(&locale)),
+            "会话 abcd1234"
+        );
+        agent.generated_session_title = Some("Model generated English title".into());
+        assert_eq!(
+            entry_title_with_locale(&agent, Some(&locale)),
+            "Model generated English title"
+        );
+        agent.display_name = Some("My English session".into());
+        assert_eq!(
+            entry_title_with_locale(&agent, Some(&locale)),
+            "My English session"
+        );
+        let mut pending = crate::app::agent_view::test_agent_view(None, "/tmp".into());
+        assert_eq!(entry_title(&pending), "loading...");
+        assert_eq!(entry_title_with_locale(&pending, Some(&locale)), "加载中…");
+        pending
+            .scrollback
+            .push_block(RenderBlock::user_prompt("Original English prompt"));
+        assert_eq!(
+            entry_title_with_locale(&pending, Some(&locale)),
+            "Original English prompt"
+        );
+    }
 
     // ── sanitize_display_text ───────────────────────────────────────
 
@@ -283,8 +331,6 @@ mod tests {
         assert!(matches!(out, Cow::Borrowed(_)));
     }
 
-    // ── rename_source_title ─────────────────────────────────────────
-
     #[test]
     fn rename_source_title_prefers_display_name() {
         let mut agent =
@@ -324,8 +370,6 @@ mod tests {
         );
     }
 
-    // ── truncate_title ──────────────────────────────────────────────
-
     #[test]
     fn truncate_title_keeps_short_strings() {
         assert_eq!(truncate_title("hello"), "hello");
@@ -349,8 +393,6 @@ mod tests {
         assert!(out.ends_with("..."));
         assert_eq!(out.chars().count(), MAX_TITLE_CHARS + 3);
     }
-
-    // ── format_relative_time ────────────────────────────────────────
 
     #[test]
     fn format_relative_time_sub_second_is_now() {

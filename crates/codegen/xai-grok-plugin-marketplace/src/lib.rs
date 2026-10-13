@@ -1,6 +1,8 @@
 //! Provides marketplace source configuration and plugin discovery, indexed with a filesystem fallback.
 //! Install integration goes through the existing `InstallRegistry` pipeline.
 
+#![deny(clippy::indexing_slicing)]
+
 pub mod catalog;
 pub mod config;
 pub mod error;
@@ -13,8 +15,8 @@ pub mod scanner;
 pub mod types;
 
 pub use config::{
-    env_require_sha, load_extra_sources_from_settings, load_extra_sources_from_settings_in,
-    load_require_sha, load_sources,
+    env_require_sha, foreign_settings_roots, load_extra_sources_from_settings,
+    load_extra_sources_from_settings_in, load_require_sha, load_sources, native_settings_roots,
 };
 pub use error::MarketplaceError;
 pub use scanner::scan_marketplace;

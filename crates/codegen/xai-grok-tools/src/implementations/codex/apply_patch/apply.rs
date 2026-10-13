@@ -10,11 +10,9 @@ use super::errors::ApplyPatchError;
 use super::parser::UpdateFileChunk;
 use super::seek_sequence::seek_sequence;
 
-/// Given the original file content as a `&str` and the list of update chunks,
-/// compute and return the new file contents as a `String`.
-///
-/// This is the main entry point for the apply logic. It does NOT read from or
-/// write to the filesystem.
+/// Given the original file content as a `&str` and the list of update chunks, compute and return
+/// the new file contents as a `String`. This is the main entry point for the apply logic. It does
+/// NOT read from or write to the filesystem.
 pub fn derive_new_contents(
     original_content: &str,
     path: &Path,
@@ -91,9 +89,13 @@ pub fn compute_replacements(
         let mut new_slice: &[String] = &chunk.new_lines;
 
         if found.is_none() && pattern.last().is_some_and(String::is_empty) {
-            pattern = &pattern[..pattern.len() - 1];
-            if new_slice.last().is_some_and(String::is_empty) {
-                new_slice = &new_slice[..new_slice.len() - 1];
+            if let Some((_, rest)) = pattern.split_last() {
+                pattern = rest;
+            }
+            if new_slice.last().is_some_and(String::is_empty)
+                && let Some((_, rest)) = new_slice.split_last()
+            {
+                new_slice = rest;
             }
             found = seek_sequence(original_lines, pattern, line_index, chunk.is_end_of_file);
         }
@@ -115,11 +117,9 @@ pub fn compute_replacements(
     Ok(replacements)
 }
 
-/// Apply the `(start_index, old_len, new_lines)` replacements to
-/// `original_lines`, returning the modified file contents as a vector of lines.
-///
-/// Replacements are applied in **reverse order** so that earlier replacements
-/// don't shift the positions of later ones.
+/// Apply the `(start_index, old_len, new_lines)` replacements to `original_lines`, returning the
+/// modified file contents as a vector of lines. Replacements are applied in **reverse order** so
+/// that earlier replacements don't shift the positions of later ones.
 pub fn apply_replacements(
     mut lines: Vec<String>,
     replacements: &[(usize, usize, Vec<String>)],
@@ -167,8 +167,8 @@ mod tests {
             path.display()
         ));
         let parsed = parse_patch(&patch).unwrap();
-        let chunks = match &parsed.hunks[0] {
-            Hunk::UpdateFile { chunks, .. } => chunks,
+        let chunks = match parsed.hunks.first() {
+            Some(Hunk::UpdateFile { chunks, .. }) => chunks,
             _ => panic!("expected UpdateFile"),
         };
         let result = derive_new_contents(original, &path, chunks).unwrap();
@@ -184,8 +184,8 @@ mod tests {
             path.display()
         ));
         let parsed = parse_patch(&patch).unwrap();
-        let chunks = match &parsed.hunks[0] {
-            Hunk::UpdateFile { chunks, .. } => chunks,
+        let chunks = match parsed.hunks.first() {
+            Some(Hunk::UpdateFile { chunks, .. }) => chunks,
             _ => panic!("expected UpdateFile"),
         };
         let result = derive_new_contents(original, &path, chunks).unwrap();
@@ -204,8 +204,8 @@ mod tests {
             path.display()
         ));
         let parsed = parse_patch(&patch).unwrap();
-        let chunks = match &parsed.hunks[0] {
-            Hunk::UpdateFile { chunks, .. } => chunks,
+        let chunks = match parsed.hunks.first() {
+            Some(Hunk::UpdateFile { chunks, .. }) => chunks,
             _ => panic!("expected UpdateFile"),
         };
         let result = derive_new_contents(original, &path, chunks).unwrap();
@@ -226,8 +226,8 @@ mod tests {
             path.display()
         ));
         let parsed = parse_patch(&patch).unwrap();
-        let chunks = match &parsed.hunks[0] {
-            Hunk::UpdateFile { chunks, .. } => chunks,
+        let chunks = match parsed.hunks.first() {
+            Some(Hunk::UpdateFile { chunks, .. }) => chunks,
             _ => panic!("expected UpdateFile"),
         };
         let result = derive_new_contents(original, &path, chunks).unwrap();
@@ -245,8 +245,8 @@ mod tests {
             path.display()
         ));
         let parsed = parse_patch(&patch).unwrap();
-        let chunks = match &parsed.hunks[0] {
-            Hunk::UpdateFile { chunks, .. } => chunks,
+        let chunks = match parsed.hunks.first() {
+            Some(Hunk::UpdateFile { chunks, .. }) => chunks,
             _ => panic!("expected UpdateFile"),
         };
         let result = derive_new_contents(original, &path, chunks).unwrap();
@@ -265,8 +265,8 @@ mod tests {
             path.display()
         ));
         let parsed = parse_patch(&patch).unwrap();
-        let chunks = match &parsed.hunks[0] {
-            Hunk::UpdateFile { chunks, .. } => chunks,
+        let chunks = match parsed.hunks.first() {
+            Some(Hunk::UpdateFile { chunks, .. }) => chunks,
             _ => panic!("expected UpdateFile"),
         };
         let err = derive_new_contents(original, &path, chunks).unwrap_err();
@@ -287,8 +287,8 @@ mod tests {
             path.display()
         ));
         let parsed = parse_patch(&patch).unwrap();
-        let chunks = match &parsed.hunks[0] {
-            Hunk::UpdateFile { chunks, .. } => chunks,
+        let chunks = match parsed.hunks.first() {
+            Some(Hunk::UpdateFile { chunks, .. }) => chunks,
             _ => panic!("expected UpdateFile"),
         };
         let err = derive_new_contents(original, &path, chunks).unwrap_err();
@@ -309,8 +309,8 @@ mod tests {
             path.display()
         ));
         let parsed = parse_patch(&patch).unwrap();
-        let chunks = match &parsed.hunks[0] {
-            Hunk::UpdateFile { chunks, .. } => chunks,
+        let chunks = match parsed.hunks.first() {
+            Some(Hunk::UpdateFile { chunks, .. }) => chunks,
             _ => panic!("expected UpdateFile"),
         };
         let result = derive_new_contents(original, &path, chunks).unwrap();

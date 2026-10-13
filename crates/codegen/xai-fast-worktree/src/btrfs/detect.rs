@@ -46,11 +46,8 @@ pub fn is_btrfs(path: &Path) -> Result<bool> {
     Ok(stat.filesystem_type() == BTRFS_SUPER_MAGIC)
 }
 
-/// Get bind mount information for a path.
-///
-/// Uses `findmnt` to check if a path is a bind mount and retrieve its source.
-/// Returns `Ok(Some(BindMountInfo))` if the path is a bind mount.
-/// Returns `Ok(None)` if not a bind mount or if detection fails.
+/// Bind-mount source via `findmnt`. `Ok(None)` if not a bind mount or if
+/// detection fails.
 pub fn get_bind_mount_info(path: &Path) -> Result<Option<BindMountInfo>> {
     // Use findmnt to get mount information
     // -n: no headers, -o: output fields, -T: target path
@@ -90,9 +87,10 @@ pub fn get_bind_mount_info(path: &Path) -> Result<Option<BindMountInfo>> {
         return Ok(None);
     }
 
-    let source = parts[0];
-    let target = parts[1];
-    let fs_type = parts[2];
+    let [source, target, fs_type, ..] = parts.as_slice() else {
+        tracing::debug!(path = %path.display(), line = %line, "unexpected findmnt output format");
+        return Ok(None);
+    };
     let options = parts.get(3).unwrap_or(&"");
 
     // Check if this is a bind mount by looking for "bind" in options
@@ -147,13 +145,17 @@ fn resolve_bind_mount_source(target: &Path) -> Result<Option<PathBuf>> {
             continue;
         }
 
-        let mount_point = parts[4];
+        let Some(mount_point) = parts.get(4).copied() else {
+            continue;
+        };
         if mount_point != target_str {
             continue;
         }
 
         // Found our mount point
-        let root = parts[3]; // The root within the filesystem
+        let Some(root) = parts.get(3).copied() else {
+            continue;
+        };
         let fstype_idx = parts.iter().position(|&p| p == "-").map(|i| i + 1);
 
         if let Some(fstype_idx) = fstype_idx {
@@ -176,10 +178,8 @@ fn resolve_bind_mount_source(target: &Path) -> Result<Option<PathBuf>> {
                     return Ok(Some(full_source));
                 }
 
-                // Try 2: Resolve using a subvolume mount (no root mount exists).
-                // This handles the case where only a btrfs subvolume is mounted
-                // (e.g., `mount -o subvol=/repo /dev/loop0 /workspace/repo`)
-                // without a separate mount for the btrfs volume root.
+                // No root mount: resolve via a subvolume mount of the same device
+                // (only `subvol=` is mounted, with no separate volume-root mount).
                 match resolve_via_subvol_mount(source, root, &mountinfo) {
                     Ok(Some(full_source)) => return Ok(Some(full_source)),
                     Ok(None) => {
@@ -218,8 +218,12 @@ fn find_btrfs_mount_for_source(source: &str, mountinfo: &str) -> Result<Option<P
             continue;
         }
 
-        let root = parts[3];
-        let mount_point = parts[4];
+        let Some(root) = parts.get(3).copied() else {
+            continue;
+        };
+        let Some(mount_point) = parts.get(4).copied() else {
+            continue;
+        };
 
         let fstype_idx = parts.iter().position(|&p| p == "-").map(|i| i + 1);
         if let Some(fstype_idx) = fstype_idx {
@@ -235,19 +239,9 @@ fn find_btrfs_mount_for_source(source: &str, mountinfo: &str) -> Result<Option<P
     Ok(None)
 }
 
-/// Resolve a btrfs path using an existing subvolume mount when no root mount exists.
-///
-/// On some hosts the btrfs volume root is not mounted separately — only a
-/// specific subvolume is mounted (e.g.,
-/// `mount -o subvol=/repo /dev/loop0 /workspace/repo`). In that case,
-/// `find_btrfs_mount_for_source` returns `None` because there's no `root="/"` mount.
-///
-/// This function finds any mount of the same btrfs device and computes the filesystem
-/// path by adjusting for the mount's root offset.
-///
-/// For example, with mount entry `root=/repo mount_point=/workspace/repo` and target
-/// root `/repo/.grok-snapshots/wt-123`, this returns
-/// `/workspace/repo/.grok-snapshots/wt-123`.
+/// When no `root="/"` mount exists, find any mount of the same device and
+/// adjust for its root offset. `root=/repo` at `/workspace/repo` maps
+/// `/repo/.grok-snapshots/wt` to `/workspace/repo/.grok-snapshots/wt`.
 fn resolve_via_subvol_mount(
     device: &str,
     target_root: &str,
@@ -259,8 +253,12 @@ fn resolve_via_subvol_mount(
             continue;
         }
 
-        let mount_root = parts[3];
-        let mount_point = parts[4];
+        let Some(mount_root) = parts.get(3).copied() else {
+            continue;
+        };
+        let Some(mount_point) = parts.get(4).copied() else {
+            continue;
+        };
 
         let fstype_idx = parts.iter().position(|&p| p == "-").map(|i| i + 1);
         if let Some(fstype_idx) = fstype_idx {
@@ -309,7 +307,9 @@ pub fn get_btrfs_mount_point(path: &Path) -> Result<Option<PathBuf>> {
             continue;
         }
 
-        let mount_point = parts[4];
+        let Some(mount_point) = parts.get(4).copied() else {
+            continue;
+        };
         let fstype_idx = parts.iter().position(|&p| p == "-").map(|i| i + 1);
 
         if let Some(fstype_idx) = fstype_idx {
@@ -328,17 +328,9 @@ pub fn get_btrfs_mount_point(path: &Path) -> Result<Option<PathBuf>> {
     Ok(best_match)
 }
 
-/// Check if a path is a BTRFS subvolume and return info.
-///
-/// Returns `Ok(Some(BtrfsInfo))` if the path is a BTRFS subvolume root.
-/// Returns `Ok(None)` if not on BTRFS or not a subvolume.
-///
-/// This function also detects bind-mounted BTRFS subvolumes. For example, if
-/// `/workspace/repo` is bind-mounted from `/mnt/btrfs/repo`, this function will
-/// detect it as a BTRFS subvolume and populate the `bind_mount_source` field.
-///
-/// Note: This checks if the path itself is a subvolume root, not if it's
-/// contained within a subvolume.
+/// `Ok(Some)` only if `path` itself is a btrfs subvolume root (not merely
+/// inside one). Also fills `bind_mount_source` when the path is a bind mount
+/// of a btrfs subvolume. `Ok(None)` if not on btrfs or not a subvolume.
 pub fn is_btrfs_subvolume(path: &Path) -> Result<Option<BtrfsInfo>> {
     let on_btrfs = is_btrfs(path)?;
 
@@ -382,14 +374,9 @@ pub fn is_btrfs_subvolume(path: &Path) -> Result<Option<BtrfsInfo>> {
         return Ok(None);
     }
 
-    // It's a BTRFS subvolume. Now check if it's accessed via a bind mount.
-    //
-    // A path like `/workspace/repo` can be a bind mount FROM a btrfs subvolume
-    // at `/mnt/btrfs/repo`. In that case, statfs reports btrfs (because the data
-    // IS on btrfs), but the snapshot destination (e.g. `~/.grok/worktrees/...`)
-    // is NOT on btrfs. We need to detect the bind mount so we can create
-    // snapshots inside the actual btrfs mount point and expose them at the
-    // destination via a symlink.
+    // statfs reports btrfs for a bind mount of a btrfs subvolume, but the
+    // snapshot dest may not be on btrfs. Detect the bind so snapshots are
+    // created on the real mount and exposed at dest via a symlink.
     if let Some(bind_info) = get_bind_mount_info(path)?
         && bind_info.fs_type == "btrfs"
     {
@@ -454,16 +441,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Test that a bind-mounted btrfs path (which reports as btrfs via statfs)
-    /// correctly detects the bind mount and populates bind_mount_source.
-    ///
-    /// Regression: a bind-mounted working tree can be mis-detected as a "direct"
-    /// btrfs subvolume (`bind_mount_source=None`), which then makes snapshot
-    /// creation fail because the destination path is not on btrfs.
-    ///
-    /// Optional live check: set `BTRFS_BIND_TEST_PATH` to a bind-mounted btrfs
-    /// path on the host. Skips when the env var is unset or the path is not a
-    /// bind-mounted btrfs location.
+    /// Regression: a bind-mounted tree must not be treated as a direct btrfs
+    /// subvolume (`bind_mount_source=None`), or snapshot creation fails off-btrfs.
+    /// Set `BTRFS_BIND_TEST_PATH`; skips if unset or not a bind-mounted btrfs path.
     #[test]
     fn test_bind_mounted_btrfs_detects_bind_mount_source() {
         let path = match std::env::var_os("BTRFS_BIND_TEST_PATH") {

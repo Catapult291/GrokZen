@@ -4,14 +4,44 @@ use xai_chat_state::conversation_util::replace_or_insert_system_head;
 impl SessionActor {
     pub(super) async fn handle_set_session_model(
         self: &std::sync::Arc<Self>,
-        sampling_config: xai_grok_sampler::SamplerConfig,
-        use_concise: bool,
-        is_family_switch: bool,
-        apply_prompt_override: bool,
-        skip_prompt_rewrite: bool,
-        auto_compact_threshold_percent: u8,
+        switch: crate::session::SessionModelSwitch,
     ) -> Result<acp::ModelId, acp::Error> {
+        let crate::session::SessionModelSwitch {
+            mut sampling_config,
+            use_concise,
+            is_family_switch,
+            apply_prompt_override,
+            skip_prompt_rewrite,
+            auto_compact_threshold_percent,
+            system_prompt_label,
+            context_window_selection,
+            supported_context_windows,
+        } = switch;
+        if let Some(current) = self.chat_state_handle.get_sampling_config().await
+            && let Some(id) = current.conversation_group_id
+        {
+            sampling_config.conversation_group_id = Some(id);
+        }
         let model_id = acp::ModelId::new(sampling_config.model.clone());
+        let supported = |window: &std::num::NonZeroU64| supported_context_windows.contains(window);
+        let selection = match context_window_selection {
+            crate::session::SwitchContextWindow::Preserve => {
+                crate::session::handle::load_context_window_selection(
+                    &self.compaction.context_window_selection,
+                )
+            }
+            crate::session::SwitchContextWindow::Set(selection) => {
+                let selection = selection.filter(supported);
+                self.compaction.context_window_selection.store(
+                    selection.map_or(0, std::num::NonZeroU64::get),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                selection
+            }
+        };
+        if let Some(window) = selection.filter(supported) {
+            sampling_config.context_window = window.get();
+        }
         let new_context_window = self.compaction.context_window_override.unwrap_or_else(|| {
             std::num::NonZeroU64::new(sampling_config.context_window).unwrap_or_else(|| {
                 std::num::NonZeroU64::new(DEFAULT_CONTEXT_WINDOW)
@@ -49,16 +79,24 @@ impl SessionActor {
         self.chat_state_handle
             .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
                 base_url: sampling_config.base_url.clone(),
+                mtls_cert_dir: sampling_config.mtls_cert_dir.clone(),
                 model: sampling_config.model.clone(),
                 max_completion_tokens: sampling_config.max_completion_tokens,
                 temperature: sampling_config.temperature,
                 top_p: sampling_config.top_p,
+                max_retries: Some(xai_grok_sampler::resolve_max_retries(
+                    sampling_config.max_retries,
+                )),
+                rate_limit_retry_threshold: sampling_config.rate_limit_retry_threshold,
                 api_backend: sampling_config.api_backend.clone(),
                 extra_headers: sampling_config.extra_headers.clone(),
+                conversation_group_id: sampling_config.conversation_group_id.clone(),
                 query_params: sampling_config.query_params.clone(),
                 env_http_headers: sampling_config.env_http_headers.clone(),
                 context_window: new_context_window,
+                max_request_bytes: sampling_config.max_request_bytes,
                 reasoning_effort: sampling_config.reasoning_effort,
+                reasoning_summary: sampling_config.reasoning_summary,
                 stream_tool_calls: Some(sampling_config.stream_tool_calls),
             });
         let existing = self.chat_state_handle.get_credentials().await;
@@ -81,6 +119,15 @@ impl SessionActor {
         self.signals_handle()
             .record_model_usage(&sampling_config.model);
         if apply_prompt_override && !skip_prompt_rewrite {
+            if self.state.lock().await.running_task.is_some() {
+                tracing::warn!(
+                    session_id = %self.session_info.id.0,
+                    model_id = %model_id.0,
+                    "system_prompt_label relabel skipped: turn in flight"
+                );
+            } else {
+                self.relabel_agent_system_prompt(system_prompt_label).await;
+            }
             let mut conversation = self.chat_state_handle.get_conversation().await;
             for item in conversation.iter_mut() {
                 if let ConversationItem::System(sys) = item {
@@ -115,8 +162,11 @@ impl SessionActor {
             .persistence_tx
             .send(PersistenceMsg::CurrentModel {
                 model_id: model_id.clone(),
-                agent_name: Some(agent_name),
+                agent: crate::session::persistence::PersistedAgent::Named(agent_name),
                 reasoning_effort: Some(sampling_config.reasoning_effort),
+                context_window: Some(crate::session::handle::load_context_window_selection(
+                    &self.compaction.context_window_selection,
+                )),
             });
         self.emit_status_snapshot_detached();
         let turn_in_flight = self.state.lock().await.running_task.is_some();
@@ -134,6 +184,9 @@ impl SessionActor {
                     estimated_total_tokens,
                     context_window,
                 ),
+                reason_override: Some(
+                    crate::extensions::notification::MODEL_FAMILY_SWITCH_COMPACT_BANNER,
+                ),
             };
             tracing::info!("Family-switch compact: -> {}", sampling_config.model);
             if let Err(e) = self.run_compact_only(trigger_info, true).await {
@@ -141,6 +194,47 @@ impl SessionActor {
             }
         }
         Ok(model_id)
+    }
+    /// `running_task` is re-checked with no await before the `borrow_mut`: a running turn pins `Ref<Agent>`.
+    pub(super) async fn relabel_agent_system_prompt(&self, system_prompt_label: String) {
+        let (mut prompt_context, tool_bridge) = {
+            let agent = self.agent.borrow();
+            if agent.prompt_context().system_prompt_label == system_prompt_label {
+                return;
+            }
+            (
+                agent.prompt_context().clone(),
+                std::sync::Arc::clone(agent.tool_bridge()),
+            )
+        };
+        prompt_context.system_prompt_label = system_prompt_label.clone();
+        let Some(rendered) = prompt_context.render_paired(&tool_bridge).await else {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                %system_prompt_label,
+                "system prompt re-render failed; keeping the previous identity label"
+            );
+            return;
+        };
+        if self.state.lock().await.running_task.is_some() {
+            tracing::warn!(
+                session_id = %self.session_info.id.0,
+                "system_prompt_label relabel skipped: turn started during re-render"
+            );
+            return;
+        }
+        self.agent.borrow_mut().set_rendered_prompt(rendered);
+        self.abort_and_clear_prefire().await;
+        let agent = self.agent.borrow();
+        let mut persisted_context = agent.prompt_context().clone();
+        persisted_context.normalize_for_persistence();
+        save_prompt_context(&self.session_info, &persisted_context);
+        save_system_prompt(&self.session_info, agent.system_prompt());
+        tracing::info!(
+            session_id = %self.session_info.id.0,
+            system_prompt_label = %agent.prompt_context().system_prompt_label,
+            "system_prompt_label updated for model switch"
+        );
     }
     /// Set the reasoning effort on the live sampling config, applying the same
     /// support check and per-effort model routing as `apply_supported_effort`.
@@ -170,23 +264,20 @@ impl SessionActor {
             .persistence_tx
             .send(PersistenceMsg::CurrentModel {
                 model_id: model_id.clone(),
-                agent_name: Some(agent_name),
+                agent: crate::session::persistence::PersistedAgent::Named(agent_name),
                 reasoning_effort: Some(Some(effort)),
+                context_window: None,
             });
         self.emit_status_snapshot_detached();
         Ok(model_id)
     }
     /// Handle [`SessionCommand::RebuildAgentForDefinition`].
-    ///
     /// Builds a fresh [`xai_grok_agent::Agent`] from the cached [`crate::session::agent_rebuild::AgentRebuildSpec`] and the supplied definition.
-    /// Replaces `self.agent`, rewrites the system message in the conversation, persists the new prompt artifacts, and updates `active_agent_type`.
-    ///
     /// Triggered from `MvpAgent::set_session_model` only when the new model's `agent_type` differs from the session's `active_agent_type`.
-    /// The trigger also requires `turn_count == 0` (no user message has been sent yet).
-    /// Defense-in-depth: rejects if a turn is in flight.
     pub(super) async fn handle_rebuild_agent_for_definition(
         &self,
         definition: xai_grok_agent::AgentDefinition,
+        system_prompt_label: String,
     ) -> Result<(), acp::Error> {
         {
             let state = self.state.lock().await;
@@ -201,6 +292,7 @@ impl SessionActor {
             }
         }
         let new_agent_name = definition.name.clone();
+        let previous_mcp_servers = self.agent.borrow().definition().mcp_servers.clone();
         tracing::info!(
             session_id = %self.session_info.id.0,
             new_agent_type = %new_agent_name,
@@ -208,7 +300,7 @@ impl SessionActor {
         );
         let new_agent = self
             .rebuild_spec
-            .build_agent(definition)
+            .build_agent(definition, system_prompt_label)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -286,31 +378,47 @@ impl SessionActor {
             }
             self.inject_deny_read_globs().await;
         }
-        {
-            let notified = self.mcp_handshakes_done.notified();
-            tokio::pin!(notified);
-            let needs_wait = {
-                let s = self.mcp_state.lock().await;
-                !s.configs.is_empty() && !s.is_initialized()
-            };
-            if needs_wait {
-                const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-                tokio::select! {
-                    () = &mut notified => {}
-                    () = tokio::time::sleep(TIMEOUT) => {
-                        tracing::warn!(
-                            session_id = %self.session_info.id.0,
-                            "handle_rebuild_agent_for_definition: timed out waiting for MCP handshakes"
-                        );
-                    }
-                }
-            }
+        let overlay_definition = self.agent.borrow().definition().clone();
+        let both_seats_empty =
+            previous_mcp_servers.is_empty() && overlay_definition.mcp_servers.is_empty();
+        let plugin_registry = self.plugin_registry.borrow().clone();
+        let session_cwd = self.tool_context.cwd.as_path();
+        let desired = if both_seats_empty {
+            None
+        } else {
+            let client_seed = self.initial_client_mcp_servers.borrow().clone();
+            let live = self.mcp_state.lock().await.configs.clone();
+            Some(
+                crate::session::agent_mcp::rematerialize_live_for_agent_seat(
+                    &live,
+                    &previous_mcp_servers,
+                    crate::session::agent_mcp::RematerializeParams {
+                        initial_client_mcp_servers: client_seed,
+                        cwd: session_cwd,
+                        parent_cwd: self.startup_hints.parent_cwd.as_deref(),
+                        plugin_registry: plugin_registry.as_deref(),
+                        compat: &self.rebuild_spec.compat,
+                        definition: &overlay_definition,
+                    },
+                ),
+            )
+        };
+        let (claim, config_diff, dispatch_event_tx) = {
+            let mut mcp_state = self.mcp_state.lock().await;
+            let config_diff = desired.and_then(|servers| mcp_state.update_configs_diff(servers));
+            let dispatch_event_tx = mcp_state.client_event_tx();
+            let claim = self.restart_mcp_init(&mut mcp_state);
+            (claim, config_diff, dispatch_event_tx)
+        };
+        if let Some(diff) = config_diff {
+            self.apply_mcp_config_diff(&diff, dispatch_event_tx);
         }
         self.re_register_mcp_tools_on_rebuilt_bridge().await;
-        if let Some(old_handle) = self.deferred_prefix.take() {
-            old_handle.abort();
-        }
-        let new_user_prefix = self.build_user_message_prefix().await;
+        self.run_mcp_init_with_claim(claim).await;
+        self.deferred_prefix.cancel();
+        let new_user_prefix = self
+            .build_prefix_after_mcp_wait(self.requires_full_mcp_wait())
+            .await;
         {
             let mut conversation = self.chat_state_handle.get_conversation().await;
             let _ = replace_or_insert_system_head(&mut conversation, &new_system_prompt);
@@ -338,7 +446,8 @@ impl SessionActor {
         persist_chat_history_jsonl_sync(&self.session_info, &snapshot);
         self.mcp_reminder_dirty
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.send_available_commands_update().await;
+        self.send_available_commands_update(AdvertiseTrigger::HarnessRebuild)
+            .await;
         tracing::info!(
             session_id = %self.session_info.id.0,
             new_agent_type = %new_agent_name,
@@ -347,9 +456,8 @@ impl SessionActor {
         Ok(())
     }
     /// Apply a client-supplied `systemPromptOverride` on attach without wiping user/assistant history: swap only the leading `System` message.
-    /// The swap happens atomically inside the `ChatStateActor` (see `ChatStateCommand::ReplaceSystemHead` for the serialization guarantees).
+    /// The swap happens atomically inside the `ChatStateActor`.
     /// `system_prompt.txt` (not owned by the persistence actor) is saved directly, even on a head no-op, so a diverged secondary artifact self-heals.
-    /// Skipped entirely on a verbatim mirror-fork (`preserve_inherited_system`).
     pub(super) async fn handle_replace_system_prompt(&self, system_prompt: String) {
         if self.startup_hints.preserve_inherited_system {
             tracing::debug!(

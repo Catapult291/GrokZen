@@ -16,13 +16,14 @@ You know enough to be productive. When you want more:
 ## Good habits
 
 - Sessions save automatically. Resume the latest with `grok -c`, or pick
-  one with `/resume` (`F3`).
+  one with `/resume` (`Ctrl+R`).
 - Long session getting slow? `/compact` frees context; `/context` shows
   where it's going.
 - Automate anything: `grok -p "summarize new TODOs" --output-format json`
   runs headless — great for scripts and CI.
 - Stay current with `grok update`; see what changed with `/release-notes`.
-- Something feel off? `/feedback` goes straight to the team.
+- Something feel off? `/feedback <text>` goes straight to the team, and bare
+  `/feedback` opens a form with your saved drafts.
 
 ## Reopen this tutorial
 

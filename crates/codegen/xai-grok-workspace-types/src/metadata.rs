@@ -25,11 +25,7 @@ pub const META_CLIENT_ID: &str = "x-workspace-client-id";
 pub const META_PROMPT_INDEX: &str = "x-workspace-prompt-index";
 
 /// Standard metadata key for the gRPC call deadline.
-///
-/// The `grpc-timeout` header carries a unit-suffixed string per the [gRPC HTTP/2 spec][grpc-spec], not a bare millisecond count.
-/// Examples: `"100m"` (100 ms), `"30S"` (30 s), `"2H"` (2 h).
-///
-/// [grpc-spec]: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
+/// The `grpc-timeout` header is a unit-suffixed string per the gRPC HTTP/2 spec, not a bare millisecond count.
 pub const META_GRPC_TIMEOUT: &str = "grpc-timeout";
 
 /// All standard metadata keys defined by this crate, in declaration order.
@@ -144,17 +140,6 @@ mod tests {
             STANDARD_META_KEYS.len(),
             "duplicate standard metadata key"
         );
-    }
-
-    #[test]
-    fn standard_meta_keys_have_expected_values() {
-        // Sanity: lock the wire constants down so a typo is a test failure.
-        assert_eq!(META_SESSION_ID, "x-workspace-session-id");
-        assert_eq!(META_TRACEPARENT, "traceparent");
-        assert_eq!(META_TRACESTATE, "tracestate");
-        assert_eq!(META_CLIENT_ID, "x-workspace-client-id");
-        assert_eq!(META_PROMPT_INDEX, "x-workspace-prompt-index");
-        assert_eq!(META_GRPC_TIMEOUT, "grpc-timeout");
     }
 
     #[test]

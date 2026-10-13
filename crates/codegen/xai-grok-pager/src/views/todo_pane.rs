@@ -8,10 +8,6 @@ use xai_grok_shell::tools::{TodoItem, TodoStatus};
 
 use super::list_pane::ListItem;
 
-// ---------------------------------------------------------------------------
-// TodoPaneStyle: per-status colors
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy)]
 pub struct TodoStatusStyle {
     pub icon_fg: Color,
@@ -55,10 +51,6 @@ impl Default for TodoPaneStyle {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// TodoListEntry: ListItem wrapper around TodoItem
-// ---------------------------------------------------------------------------
 
 /// A `TodoItem` wrapped for display in a `ListPane`.
 ///
@@ -121,10 +113,6 @@ impl ListItem for TodoListEntry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// TodoPane: self-contained pane owning items, state, and rendering
-// ---------------------------------------------------------------------------
-
 use crossterm::event::{KeyCode, KeyEvent, MouseEventKind};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -135,10 +123,6 @@ use crate::theme::ThemeKind;
 
 use super::list_pane::{ListPane, ListPaneConfig, ListPaneState, ListPaneStyle, WrapMode};
 use super::overlay::OverlayState;
-
-// ---------------------------------------------------------------------------
-// TodoCounts: aggregate status counts
-// ---------------------------------------------------------------------------
 
 /// Feeds the placeholder message shown when the pane is empty.
 /// Counts ALL items regardless of the `show_done` filter.
@@ -246,8 +230,6 @@ impl TodoPane {
         }
     }
 
-    // -- Data management -----------------------------------------------------
-
     pub fn todos(&self) -> &[TodoItem] {
         &self.todos
     }
@@ -301,11 +283,9 @@ impl TodoPane {
         self.show_done = !self.show_done;
     }
 
-    /// Desired height in lines for layout computation.
-    ///
-    /// Returns 0 when hidden (overlay not visible or no items).
-    /// When visible but empty, returns 2 (for placeholder message).
-    /// Otherwise: `min(10, 15% of view_height)` but at least 1.
+    /// Desired height in lines for layout computation. Returns 0 when hidden (overlay not visible or no
+    /// items). When visible but empty, returns 2 (for placeholder message). Otherwise: `min(10, 15% of
+    /// view_height)` but at least 1.
     pub fn desired_height(&self, view_height: u16) -> u16 {
         if !self.overlay.visible {
             return 0;
@@ -331,10 +311,9 @@ impl TodoPane {
         }
     }
 
-    /// Rebuild `entries` from `todos`, filtered by `show_done`.
-    ///
-    /// Items preserve their original order from the agent (no reordering by status).
-    /// IDs are based on the original index in `todos` so that `ListPaneState` can maintain selection across rebuilds.
+    /// Rebuild `entries` from `todos`, filtered by `show_done`. Items preserve their original order
+    /// from the agent (no reordering by status). IDs are based on the original index in `todos` so that
+    /// `ListPaneState` can maintain selection across rebuilds.
     fn rebuild_entries(&mut self) {
         self.entries.clear();
         for (idx, item) in self.todos.iter().enumerate() {
@@ -347,8 +326,6 @@ impl TodoPane {
                 .push(TodoListEntry::new(idx as u64, item.clone(), &self.style));
         }
     }
-
-    // -- Input handling ------------------------------------------------------
 
     /// Handle a key event when the todo pane is focused.
     ///
@@ -371,10 +348,9 @@ impl TodoPane {
         self.list_state.handle_paste(text, &self.entries)
     }
 
-    /// Handle a mouse scroll event over the todo pane area.
-    ///
-    /// Caps scroll speed for small viewports.
-    /// The app-level scroll accumulator can produce deltas of 3-5 lines, which would jump past most items in a 4-row pane.
+    /// Handle a mouse scroll event over the todo pane area. Caps scroll speed for small viewports. The
+    /// app-level scroll accumulator can produce deltas of 3-5 lines, which would jump past most items
+    /// in a 4-row pane.
     pub fn handle_scroll(&mut self, lines: i32, col: u16, row: u16) {
         let max = match self.list_state.viewport_height() {
             0..=5 => 1,
@@ -394,8 +370,6 @@ impl TodoPane {
             .handle_mouse_event(kind, col, row, area, &self.entries)
     }
 
-    // -- Rendering -----------------------------------------------------------
-
     /// Compute the inner content area with horizontal padding matching the scrollback's `HorizontalLayout`.
     /// The left pad is accent + block_pad_left; the right pad is block_pad_right.
     fn content_area(area: Rect, layout_cfg: &LayoutConfig) -> Rect {
@@ -410,10 +384,9 @@ impl TodoPane {
         }
     }
 
-    /// Render the todo pane into the given area.
-    ///
-    /// Rebuilds entries from `todos` each call, which is cheap at the typical count of under 20 items.
-    /// Runs layout, then renders the `ListPane` widget in a padded inner area matching the scrollback's horizontal layout.
+    /// Render the todo pane into the given area. Rebuilds entries from `todos` each call, which is
+    /// cheap at the typical count of under 20 items. Runs layout, then renders the `ListPane` widget in
+    /// a padded inner area matching the scrollback's horizontal layout.
     pub fn render(
         &mut self,
         area: Rect,
@@ -443,7 +416,6 @@ impl TodoPane {
         self.rebuild_entries();
         let inner = Self::content_area(area, layout_cfg);
         if self.entries.is_empty() {
-            // Empty state: draw the placeholder message in a muted style
             if inner.height > 0 && inner.width > 0 {
                 let msg = empty_placeholder_message_with_locale(
                     self.todos.is_empty(),

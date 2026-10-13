@@ -7,7 +7,10 @@
 
 mod otlp_collector;
 
+use std::time::Duration;
+
 use otlp_collector as col;
+use xai_grok_test_support::{OtelRecorder, OtelSignal};
 
 #[test]
 fn external_stream_grpc_over_tls_end_to_end() {
@@ -16,9 +19,9 @@ fn external_stream_grpc_over_tls_end_to_end() {
     std::fs::write(ca_file.path(), &tls.ca_cert_pem).expect("write CA pem");
     let ca_path = ca_file.path().to_str().expect("utf-8 CA path").to_string();
 
-    let collected = col::Collected::default();
+    let recorder = OtelRecorder::new();
     let endpoint = col::start_grpc_tls_collector(
-        collected.clone(),
+        recorder.clone(),
         tls.server_cert_pem.clone(),
         tls.server_key_pem.clone(),
     );
@@ -46,6 +49,14 @@ fn external_stream_grpc_over_tls_end_to_end() {
     };
 
     xai_grok_telemetry::external::init(Some(cfg));
+    if !xai_grok_product::TELEMETRY_UPLOADS_ALLOWED {
+        // Privacy build: uploads are compiled off, so the stream must not activate.
+        assert!(
+            !xai_grok_telemetry::external::is_active(),
+            "privacy build must not activate the external stream"
+        );
+        return;
+    }
     assert!(
         xai_grok_telemetry::external::is_active(),
         "https gRPC exporters must build and activate the stream (GB-4580)"
@@ -79,25 +90,17 @@ fn external_stream_grpc_over_tls_end_to_end() {
     });
 
     xai_grok_telemetry::external::flush();
-    assert!(
-        col::wait_until(std::time::Duration::from_secs(10), || {
-            collected.logs_len() > 0
-        }),
-        "log records must arrive over TLS"
-    );
-    let names = col::event_names(&collected);
+    col::block_on(recorder.wait_for_signals(Duration::from_secs(10), &[OtelSignal::Logs]))
+        .expect("log records must arrive over TLS");
+    let names = recorder.event_names();
     assert!(
         names.iter().any(|n| n == "grok_code.session_start"),
         "expected grok_code.session_start in {names:?}"
     );
 
     // Metrics ride the same TLS channel config; make sure at least one periodic export lands too
-    assert!(
-        col::wait_until(std::time::Duration::from_secs(10), || {
-            collected.metrics_len() > 0
-        }),
-        "metric exports must arrive over TLS"
-    );
+    col::block_on(recorder.wait_for_signals(Duration::from_secs(10), &[OtelSignal::Metrics]))
+        .expect("metric exports must arrive over TLS");
 
     xai_grok_telemetry::external::shutdown();
 }

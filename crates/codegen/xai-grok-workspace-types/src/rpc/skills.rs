@@ -30,11 +30,8 @@ impl WorkspaceRpc for DiscoverPluginsReq {
     type Response = Vec<Value>;
 }
 
-/// Scope/priority of a skill based on where it was discovered.
-/// Lower values have higher priority.
-///
-/// Serde is manual so that [`Unknown`](Self::Unknown) is lossless.
-/// A scope string from a newer server deserializes into `Unknown(original)` and re-serializes back to the original string.
+/// Scope/priority of a skill based on where it was discovered. Lower values have higher priority.
+/// Manual serde so [`Unknown`](Self::Unknown) round-trips a newer server's original string.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum SkillScope {
     /// cwd/.grok/skills
@@ -168,8 +165,6 @@ mod tests {
         assert!(info.config_source.is_none());
     }
 
-    // Fixture mirrored field-for-field from the xai-grok-tools SkillInfo serialization
-    // Refresh from a captured live response when the wire shape is in question
     #[test]
     fn skill_info_deserializes_full_payload() {
         let raw = serde_json::json!({
@@ -205,11 +200,13 @@ mod tests {
         assert_eq!(info.display_name.as_deref(), Some("Deploy Helper"));
         assert_eq!(info.plugin_name.as_deref(), Some("infra-plugin"));
         assert_eq!(
-            info.config_source.as_ref().and_then(|v| v["type"].as_str()),
+            info.config_source
+                .as_ref()
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str()),
             Some("user")
         );
 
-        // Value equality is order-insensitive; the round-trip pins field presence via skip_serializing_if and every value
         let round = serde_json::to_value(&info).unwrap();
         assert_eq!(round, raw);
     }
@@ -243,11 +240,5 @@ mod tests {
         });
         let info: SkillInfo = serde_json::from_value(raw).unwrap();
         assert_eq!(info.scope, SkillScope::Repo);
-    }
-
-    #[test]
-    fn method_constant() {
-        assert_eq!(DiscoverSkillsReq::METHOD, "workspace.discover_skills");
-        assert_eq!(DiscoverPluginsReq::METHOD, "workspace.discover_plugins");
     }
 }

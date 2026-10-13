@@ -105,11 +105,13 @@ fn is_structurally_empty(text: &str) -> bool {
     let mut without_comments = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("<!--") {
-        match rest[start + "<!--".len()..].find("-->") {
+        match rest.get(start + "<!--".len()..).and_then(|s| s.find("-->")) {
             Some(end) => {
-                without_comments.push_str(&rest[..start]);
+                if let Some(prefix) = rest.get(..start) {
+                    without_comments.push_str(prefix);
+                }
                 let after = start + "<!--".len() + end + "-->".len();
-                rest = &rest[after..];
+                rest = rest.get(after..).unwrap_or("");
             }
             None => {
                 // Unterminated comment: keep the remainder as literal text so a comment split across a chunk boundary can't drop real content
@@ -139,10 +141,7 @@ fn lines_are_scaffolding(text: &str) -> bool {
 }
 
 /// Compute the temporal decay multiplier for a chunk.
-///
-/// - Evergreen sources return `1.0` (no decay).
-/// - Session sources decay exponentially: `e^(-λ × age_days)` where `λ = ln(2) / half_life_days`; the score halves every `half_life_days`.
-/// - `half_life_days = None` disables decay and returns `1.0` for all sources.
+/// Evergreen sources return `1.0` (no decay); Session sources decay exponentially: `e^(-λ × age_days)` where `λ = ln(2) / half_life_days`; the score halves every `half_life_days`; `half_life_days = None` disables decay and returns `1.0` for all sources.
 fn temporal_decay_multiplier(
     source: &str,
     created_at: i64,
@@ -165,12 +164,8 @@ fn temporal_decay_multiplier(
 }
 
 /// Run a hybrid search across the memory index.
-///
-/// Combines FTS5 keyword search with optional vector KNN similarity.
 /// Falls back to FTS-only when vector search is unavailable.
-///
 /// `&MemoryIndex` is never held across `.await` points.
-/// That keeps the caller's future `Send` even though `MemoryIndex` is `!Sync`.
 #[tracing::instrument(name = "memory.hybrid_search", skip_all, fields(
     max_results = config.max_results,
 ))]
@@ -209,6 +204,8 @@ pub(super) fn hybrid_search_merge(
     query_embedding: Option<&[f32]>,
     config: &MemorySearchConfig,
 ) -> Result<SearchMerge, Box<dyn std::error::Error>> {
+    let span = tracing::info_span!("memory.merge_rank", candidate_count = tracing::field::Empty);
+    let _g = span.enter();
     let candidate_limit = config.max_results * 3;
 
     let (vec_results, is_vector_degraded) = if let Some(embedding) = query_embedding {
@@ -249,10 +246,7 @@ pub(super) fn hybrid_search_merge(
     }
 
     // Normalize vector distances to [0,1] similarity on an absolute scale
-    // For normalized embeddings, L2 distance ranges from 0 (identical) to 2 (opposite), so `similarity = 1.0 - distance / 2.0` maps it to [0, 1]
     // Relative normalization (`1 - d/max_d`) would collapse all scores to near-zero when candidates cluster in a narrow distance band
-    // High-dimensional embeddings cluster that way (concentration of measure)
-    // The constant `2.0` is the theoretical maximum L2 distance between two unit-norm vectors: `||u - v||₂ = sqrt(2 - 2·cos(θ)) ≤ sqrt(4) = 2`
     const MAX_L2_DISTANCE: f64 = 2.0;
     for (chunk_id, distance) in &vec_results {
         let similarity = (1.0 - (*distance as f64 / MAX_L2_DISTANCE)).clamp(0.0, 1.0);
@@ -266,6 +260,7 @@ pub(super) fn hybrid_search_merge(
 
     let all_chunk_ids: std::collections::HashSet<&String> =
         fts_scores.keys().chain(vec_scores.keys()).collect();
+    span.record("candidate_count", all_chunk_ids.len() as i64);
 
     for chunk_id in all_chunk_ids {
         let fts = fts_scores.get(chunk_id).copied().unwrap_or(0.0);
@@ -323,8 +318,6 @@ pub(super) fn hybrid_search_merge(
         let access_boost = 1.0 + (chunk.access_count as f64).ln_1p() * 0.05;
         // access_boost is an unbounded multiplier (> 1.0), so the product can exceed 1.0 for top evergreen chunks
         // Ranking uses the unclamped raw_score so the boost still orders chunks that would otherwise both clamp to 1.0
-        // The stored display_score is clamped so it reads as a [0,1] similarity
-        // Gating on display_score keeps the threshold and the stored value in agreement
         let raw_score = base_score * decay_multiplier * source_weight * access_boost;
         let display_score = raw_score.clamp(0.0, 1.0);
 
@@ -449,11 +442,14 @@ mod tests {
             .unwrap();
 
         assert!(!results.is_empty(), "should find results via FTS");
-        assert!(results[0].snippet.contains("Rust"));
+        let Some(first) = results.first() else {
+            panic!("expected FTS results: {results:?}");
+        };
+        assert!(first.snippet.contains("Rust"));
         assert!(
-            results[0].created_at > 0,
+            first.created_at > 0,
             "created_at must propagate from ChunkRecord (got {})",
-            results[0].created_at,
+            first.created_at,
         );
     }
 
@@ -545,7 +541,10 @@ mod tests {
         let chunk_id = format!("{path_str}:0");
         let chunk = idx.get_chunk(&chunk_id).unwrap().unwrap();
         let embeddings = mock.embed_batch(&[&chunk.text]).await.unwrap();
-        idx.upsert_embedding(&chunk_id, &embeddings[0]).unwrap();
+        let Some(emb0) = embeddings.first() else {
+            panic!("embed_batch returns one vector per input: {embeddings:?}");
+        };
+        idx.upsert_embedding(&chunk_id, emb0).unwrap();
 
         // Search: should use both FTS and vector paths
         let config = MemorySearchConfig {
@@ -563,9 +562,12 @@ mod tests {
         .unwrap();
 
         assert!(!results.is_empty(), "hybrid search should find results");
-        assert!(results[0].snippet.contains("Rust"));
+        let Some(first) = results.first() else {
+            panic!("expected hybrid results: {results:?}");
+        };
+        assert!(first.snippet.contains("Rust"));
         // With both FTS and vector results, score should combine both weights
-        assert!(results[0].score > 0.0, "score should be positive");
+        assert!(first.score > 0.0, "score should be positive");
     }
 
     // -----------------------------------------------------------------------
@@ -752,8 +754,6 @@ mod tests {
         idx.record_access(&chunk_b_id).unwrap();
 
         // Use the DEFAULT config (all source_weights = 1.0)
-        // Both chunks normalize to base_score = 1.0 as the top FTS matches, so their display scores both clamp to 1.0
-        // Ranking is performed on the UNCLAMPED score, so the access boost still orders the accessed chunk first
         // This exercises the common default-config path where the clamp would otherwise make the boost inert
         let config = MemorySearchConfig::default();
         let results = hybrid_search_merge(
@@ -782,22 +782,24 @@ mod tests {
         );
         // Pin the premise: both display scores are exactly 1.0, the collision that ranking on the unclamped score resolves
         // The rank ordering above therefore can only come from the unclamped score
+        let Some(score_a) = results.get(pos_a).map(|r| r.score) else {
+            panic!("missing result at pos_a={pos_a}: {results:?}");
+        };
+        let Some(score_b) = results.get(pos_b).map(|r| r.score) else {
+            panic!("missing result at pos_b={pos_b}: {results:?}");
+        };
         assert!(
-            (results[pos_a].score - 1.0).abs() < 1e-9,
-            "unaccessed display score ({:.6}) must clamp to exactly 1.0",
-            results[pos_a].score,
+            (score_a - 1.0).abs() < 1e-9,
+            "unaccessed display score ({score_a:.6}) must clamp to exactly 1.0",
         );
         assert!(
-            (results[pos_b].score - 1.0).abs() < 1e-9,
-            "accessed display score ({:.6}) must clamp to exactly 1.0",
-            results[pos_b].score,
+            (score_b - 1.0).abs() < 1e-9,
+            "accessed display score ({score_b:.6}) must clamp to exactly 1.0",
         );
     }
 
     /// Covers the MMR-enabled path through `hybrid_search_merge`: building the aligned `relevance`/`results` vectors.
     /// No other search test exercises it because MMR is off by default.
-    ///
-    /// The raw-vs-clamped guarantee lives in the unit test `test_mmr_ranks_on_relevance_not_clamped_score`.
     /// Here `results` enters MMR already sorted by `raw_score`, so the boosted chunk would stay first even on a buggy `.score` read.
     #[tokio::test]
     async fn test_hybrid_search_merge_with_mmr_enabled() {
@@ -889,10 +891,13 @@ mod tests {
             !results.is_empty(),
             "FTS-only results must pass min_score=0.3 threshold"
         );
+        let Some(first) = results.first() else {
+            panic!("expected FTS-only results: {results:?}");
+        };
         assert!(
-            results[0].score > 0.3,
+            first.score > 0.3,
             "FTS-only score ({:.4}) must exceed 0.3",
-            results[0].score,
+            first.score,
         );
     }
 
@@ -924,10 +929,13 @@ mod tests {
             !results.is_empty(),
             "global source results must pass min_score=0.25 threshold"
         );
+        let Some(first) = results.first() else {
+            panic!("expected global source results: {results:?}");
+        };
         assert!(
-            results[0].score > 0.25,
+            first.score > 0.25,
             "global chunk score ({:.4}) must exceed 0.25",
-            results[0].score,
+            first.score,
         );
     }
 
@@ -953,7 +961,10 @@ mod tests {
         let chunk_a_id = format!("{path_a}:0");
         let chunk_a = idx.get_chunk(&chunk_a_id).unwrap().unwrap();
         let embeddings = mock.embed_batch(&[&chunk_a.text]).await.unwrap();
-        idx.upsert_embedding(&chunk_a_id, &embeddings[0]).unwrap();
+        let Some(emb0) = embeddings.first() else {
+            panic!("embed_batch returns one vector per input: {embeddings:?}");
+        };
+        idx.upsert_embedding(&chunk_a_id, emb0).unwrap();
 
         // File B: FTS only (no embedding)
         let file_b = tmp.path().join("unembedded.md");
@@ -997,12 +1008,7 @@ mod tests {
     }
 
     /// Vector normalization should use the absolute L2 distance scale (max = 2.0) instead of relative normalization.
-    /// That way vector scores still contribute meaningfully even when all candidates have similar distances.
-    ///
     /// `dimensions: 4` is chosen deliberately: the mock provider (blake3 bytes / 255.0) does not produce unit-norm vectors.
-    /// At low dimensions the L2 distances stay within `MAX_L2_DISTANCE = 2.0`, so the absolute normalization works.
-    /// At production dimensions (1024), mock distances could exceed 2.0 and clamp to 0.
-    /// Use real embeddings or normalize the mock output for high-dimensional tests.
     #[tokio::test]
     async fn test_vector_absolute_normalization() {
         let tmp = TempDir::new().unwrap();
@@ -1018,7 +1024,10 @@ mod tests {
 
         // Use the mock to get a consistent embedding
         let embedding = mock.embed_batch(&["test"]).await.unwrap();
-        idx.upsert_embedding(&chunk_id, &embedding[0]).unwrap();
+        let Some(emb0) = embedding.first() else {
+            panic!("embed_batch returns one vector per input: {embedding:?}");
+        };
+        idx.upsert_embedding(&chunk_id, emb0).unwrap();
 
         // Search with a vector; the mock returns deterministic embeddings
         let fts_results = idx.search_fts("content test", 10).unwrap_or_default();
@@ -1029,17 +1038,23 @@ mod tests {
             ..Default::default()
         };
 
-        let results = hybrid_search_merge(&idx, fts_results, Some(&query_embedding[0]), &config)
+        let Some(query_emb) = query_embedding.first() else {
+            panic!("embed_batch returns one vector per input: {query_embedding:?}");
+        };
+        let results = hybrid_search_merge(&idx, fts_results, Some(query_emb), &config)
             .unwrap()
             .results;
 
         assert!(!results.is_empty(), "should find at least one result");
+        let Some(first) = results.first() else {
+            panic!("expected merge results: {results:?}");
+        };
         // With absolute normalization, the combined score should be substantially above zero
         // Mock embeddings produce deterministic but varying values
         assert!(
-            results[0].score > 0.1,
+            first.score > 0.1,
             "hybrid score ({:.4}) should be meaningful with absolute normalization",
-            results[0].score,
+            first.score,
         );
     }
 
@@ -1297,11 +1312,14 @@ mod tests {
             !results.is_empty(),
             "should find the frequently-accessed chunk"
         );
+        let Some(first) = results.first() else {
+            panic!("expected frequently-accessed results: {results:?}");
+        };
         // The top chunk is a top FTS match (base 1.0) times workspace weight (1.0) times a boost above 1.0, so its unclamped score exceeds 1.0
         assert!(
-            (results[0].score - 1.0).abs() < 1e-9,
+            (first.score - 1.0).abs() < 1e-9,
             "display score ({:.6}) must clamp to exactly 1.0",
-            results[0].score,
+            first.score,
         );
         for r in &results {
             assert!(

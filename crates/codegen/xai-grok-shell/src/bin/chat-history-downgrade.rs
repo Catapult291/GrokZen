@@ -15,6 +15,8 @@
 //!    The downgrade buffers them and folds their text into the next assistant's `reasoning_content`, matching `conversation_to_chat_messages`.
 //!    Intervening user / tool messages clear the buffer.
 
+#![deny(clippy::indexing_slicing)]
+
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::PathBuf;
@@ -33,13 +35,8 @@ struct Args {
     output: PathBuf,
 }
 
-/// Convert one v1 JSONL line to a v0 `ChatRequestMessage`.
-/// `pending_reasoning` threads across calls so sibling `Reasoning` items fold into the following assistant.
-///
-/// Returns:
-/// - `Ok(Some(msg))`: emit this v0 message.
-/// - `Ok(None)`: a sibling `Reasoning` line; its text is buffered in `pending_reasoning` for the next assistant and nothing is emitted.
-/// - `Err(_)`: the line parsed as neither v1 nor v0.
+/// Convert one v1 JSONL line to a v0 `ChatRequestMessage`. `pending_reasoning` threads across calls so sibling `Reasoning` items fold into the following assistant.
+/// `Ok(None)`: a sibling `Reasoning` line; its text is buffered in `pending_reasoning` for the next assistant and nothing is emitted. `Err(_)`: the line parsed as neither v1 nor v0.
 fn convert_line(
     trimmed: &str,
     pending_reasoning: &mut Vec<String>,
@@ -59,10 +56,8 @@ fn convert_line(
         return Ok(None);
     }
 
-    // (a) Legacy reasoning field on the assistant item.
-    // Tries `reasoning.text` first (chat-completions style), then `reasoning.encrypted` (responses-API style)
-    // The encrypted form is opaque bytes, so it becomes a placeholder rather than being dropped silently
-    // Real text wins if both are present
+    // (a) Legacy reasoning field on the assistant item. Tries `reasoning.text` first (chat-completions style), then `reasoning.encrypted` (responses-API style)
+    // The encrypted form is opaque bytes, so it becomes a placeholder rather than being dropped silently Real text wins if both are present
     let legacy_reasoning: Option<String> = if item_type == Some("assistant") {
         raw.get("reasoning").and_then(|r| {
             r.get("text")
@@ -192,8 +187,11 @@ mod tests {
         let v1 = r#"{"type":"system","content":"You are a helpful assistant."}"#;
         let out = convert_line_for_test(v1);
         let v = v0_value(&out);
-        assert_eq!(v["role"], "system");
-        assert_eq!(v["content"], "You are a helpful assistant.");
+        assert_eq!(v.get("role").and_then(|x| x.as_str()), Some("system"));
+        assert_eq!(
+            v.get("content").and_then(|x| x.as_str()),
+            Some("You are a helpful assistant.")
+        );
     }
 
     #[test]
@@ -201,9 +199,9 @@ mod tests {
         let v1 = r#"{"type":"user","content":[{"type":"text","text":"Hello!"}]}"#;
         let out = convert_line_for_test(v1);
         let v = v0_value(&out);
-        assert_eq!(v["role"], "user");
+        assert_eq!(v.get("role").and_then(|x| x.as_str()), Some("user"));
         // v0 content must be a plain string, not an array of blocks
-        assert_eq!(v["content"], "Hello!");
+        assert_eq!(v.get("content").and_then(|x| x.as_str()), Some("Hello!"));
     }
 
     #[test]
@@ -211,10 +209,22 @@ mod tests {
         let v1 = r#"{"type":"user","content":[{"type":"text","text":"Look at this"},{"type":"image","url":"https://example.com/img.png"}]}"#;
         let out = convert_line_for_test(v1);
         let v = v0_value(&out);
-        assert_eq!(v["role"], "user");
-        let blocks = v["content"].as_array().expect("content should be array");
+        assert_eq!(v.get("role").and_then(|x| x.as_str()), Some("user"));
+        let blocks = v
+            .get("content")
+            .and_then(|c| c.as_array())
+            .expect("content should be array");
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[1]["image_url"]["url"], "https://example.com/img.png");
+        let Some(image) = blocks.get(1) else {
+            panic!("expected image block: {blocks:?}");
+        };
+        assert_eq!(
+            image
+                .get("image_url")
+                .and_then(|u| u.get("url"))
+                .and_then(|x| x.as_str()),
+            Some("https://example.com/img.png")
+        );
     }
 
     #[test]
@@ -222,8 +232,8 @@ mod tests {
         let v1 = r#"{"type":"assistant","content":"Hi there!","tool_calls":[]}"#;
         let out = convert_line_for_test(v1);
         let v = v0_value(&out);
-        assert_eq!(v["role"], "assistant");
-        assert_eq!(v["content"], "Hi there!");
+        assert_eq!(v.get("role").and_then(|x| x.as_str()), Some("assistant"));
+        assert_eq!(v.get("content").and_then(|x| x.as_str()), Some("Hi there!"));
     }
 
     /// Legacy shape: `reasoning` was a field on the assistant item.
@@ -233,10 +243,16 @@ mod tests {
         let v1 = r#"{"type":"assistant","content":"The answer is 42.","reasoning":{"text":"Let me think..."},"tool_calls":[],"model_id":"grok-3"}"#;
         let out = convert_line_for_test(v1);
         let v = v0_value(&out);
-        assert_eq!(v["role"], "assistant");
-        assert_eq!(v["content"], "The answer is 42.");
-        assert_eq!(v["reasoning_content"], "Let me think...");
-        assert_eq!(v["model_id"], "grok-3");
+        assert_eq!(v.get("role").and_then(|x| x.as_str()), Some("assistant"));
+        assert_eq!(
+            v.get("content").and_then(|x| x.as_str()),
+            Some("The answer is 42.")
+        );
+        assert_eq!(
+            v.get("reasoning_content").and_then(|x| x.as_str()),
+            Some("Let me think...")
+        );
+        assert_eq!(v.get("model_id").and_then(|x| x.as_str()), Some("grok-3"));
     }
 
     /// Current shape: reasoning is a sibling line before the assistant.
@@ -259,9 +275,15 @@ mod tests {
             .expect("assistant line produces a v0 message");
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
-        assert_eq!(v["role"], "assistant");
-        assert_eq!(v["content"], "The answer is 42.");
-        assert_eq!(v["reasoning_content"], "Let me think...");
+        assert_eq!(v.get("role").and_then(|x| x.as_str()), Some("assistant"));
+        assert_eq!(
+            v.get("content").and_then(|x| x.as_str()),
+            Some("The answer is 42.")
+        );
+        assert_eq!(
+            v.get("reasoning_content").and_then(|x| x.as_str()),
+            Some("Let me think...")
+        );
         assert!(pending.is_empty(), "buffer must be flushed after attaching");
     }
 
@@ -283,7 +305,10 @@ mod tests {
         let a = convert_line(a_line, &mut pending).unwrap().unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
-        assert_eq!(v["reasoning_content"], "first\nsecond\nthird");
+        assert_eq!(
+            v.get("reasoning_content").and_then(|x| x.as_str()),
+            Some("first\nsecond\nthird")
+        );
         assert!(pending.is_empty());
     }
 
@@ -309,7 +334,7 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
         assert!(
-            v.get("reasoning_content").is_none() || v["reasoning_content"].is_null(),
+            v.get("reasoning_content").is_none_or(|x| x.is_null()),
             "orphan reasoning must not attach to assistant across a user turn"
         );
     }
@@ -326,7 +351,10 @@ mod tests {
         let a = convert_line(a_line, &mut pending).unwrap().unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&a).unwrap()).unwrap();
-        assert_eq!(v["reasoning_content"], "from legacy field");
+        assert_eq!(
+            v.get("reasoning_content").and_then(|x| x.as_str()),
+            Some("from legacy field")
+        );
         assert!(pending.is_empty());
     }
 
@@ -335,11 +363,27 @@ mod tests {
         let v1 = r#"{"type":"assistant","content":"","tool_calls":[{"id":"call_1","name":"bash","arguments":"{\"command\":\"ls\"}"}]}"#;
         let out = convert_line_for_test(v1);
         let v = v0_value(&out);
-        assert_eq!(v["role"], "assistant");
-        let tc = &v["tool_calls"][0];
-        assert_eq!(tc["id"], "call_1");
-        assert_eq!(tc["function"]["name"], "bash");
-        assert_eq!(tc["function"]["arguments"], r#"{"command":"ls"}"#);
+        assert_eq!(v.get("role").and_then(|x| x.as_str()), Some("assistant"));
+        let Some(tc) = v
+            .get("tool_calls")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+        else {
+            panic!("expected one tool call: {v:?}");
+        };
+        assert_eq!(tc.get("id").and_then(|x| x.as_str()), Some("call_1"));
+        assert_eq!(
+            tc.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|x| x.as_str()),
+            Some("bash")
+        );
+        assert_eq!(
+            tc.get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|x| x.as_str()),
+            Some(r#"{"command":"ls"}"#)
+        );
     }
 
     #[test]
@@ -348,9 +392,15 @@ mod tests {
             r#"{"type":"tool_result","tool_call_id":"call_1","content":"file1.txt\nfile2.txt"}"#;
         let out = convert_line_for_test(v1);
         let v = v0_value(&out);
-        assert_eq!(v["role"], "tool");
-        assert_eq!(v["tool_call_id"], "call_1");
-        assert_eq!(v["content"], "file1.txt\nfile2.txt");
+        assert_eq!(v.get("role").and_then(|x| x.as_str()), Some("tool"));
+        assert_eq!(
+            v.get("tool_call_id").and_then(|x| x.as_str()),
+            Some("call_1")
+        );
+        assert_eq!(
+            v.get("content").and_then(|x| x.as_str()),
+            Some("file1.txt\nfile2.txt")
+        );
     }
 
     #[test]
@@ -361,7 +411,7 @@ mod tests {
             serde_json::from_str(v0_input).expect("v0 fixture should parse as ChatRequestMessage");
         let out = serde_json::to_string(&parsed).unwrap();
         let v = v0_value(&out);
-        assert_eq!(v["role"], "system");
+        assert_eq!(v.get("role").and_then(|x| x.as_str()), Some("system"));
     }
 
     #[test]
@@ -462,14 +512,26 @@ mod tests {
         let lines: Vec<&str> = output.lines().collect();
         assert_eq!(lines.len(), 5);
 
-        let a1: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
-        assert_eq!(a1["role"], "assistant");
-        assert_eq!(a1["content"], "a1");
-        assert_eq!(a1["reasoning_content"], "think 1");
+        let Some(a1_line) = lines.get(2) else {
+            panic!("expected 5 output lines: {lines:?}");
+        };
+        let a1: serde_json::Value = serde_json::from_str(a1_line).unwrap();
+        assert_eq!(a1.get("role").and_then(|x| x.as_str()), Some("assistant"));
+        assert_eq!(a1.get("content").and_then(|x| x.as_str()), Some("a1"));
+        assert_eq!(
+            a1.get("reasoning_content").and_then(|x| x.as_str()),
+            Some("think 1")
+        );
 
-        let a2: serde_json::Value = serde_json::from_str(lines[4]).unwrap();
-        assert_eq!(a2["role"], "assistant");
-        assert_eq!(a2["content"], "a2");
-        assert_eq!(a2["reasoning_content"], "think 2");
+        let Some(a2_line) = lines.get(4) else {
+            panic!("expected 5 output lines: {lines:?}");
+        };
+        let a2: serde_json::Value = serde_json::from_str(a2_line).unwrap();
+        assert_eq!(a2.get("role").and_then(|x| x.as_str()), Some("assistant"));
+        assert_eq!(a2.get("content").and_then(|x| x.as_str()), Some("a2"));
+        assert_eq!(
+            a2.get("reasoning_content").and_then(|x| x.as_str()),
+            Some("think 2")
+        );
     }
 }

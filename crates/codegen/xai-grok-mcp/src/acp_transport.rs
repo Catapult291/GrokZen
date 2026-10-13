@@ -24,12 +24,8 @@ use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
 
 /// Sends one MCP JSON-RPC message to an in-process server over the ACP reverse channel (`x.ai/mcp/sdk_call`) and returns its JSON-RPC response.
-/// The `Err` string is returned as a JSON-RPC error to the waiting rmcp request.
 /// This is fail-closed: a missing tool server is a real error, unlike a hook gate.
-///
 /// `timeout` bounds the single round trip so a missing or hung client fails this reverse call instead of stalling the agent's tool loop forever.
-/// It carries the resolved per-server tool timeout (the same `tool_timeout_ms` the HTTP path uses).
-/// The bridge threads it in so zero-IPC and loopback share one tool budget.
 #[async_trait::async_trait]
 pub trait AcpReverseInvoker: Send + Sync + 'static {
     async fn invoke(
@@ -55,12 +51,7 @@ const RESPONSE_CHANNEL_CAP: usize = 128;
 const INTERNAL_ERROR_CODE: i64 = -32603;
 
 /// Build an rmcp transport that bridges to an in-process MCP server via `invoker`.
-///
-/// Spawns a pump that forwards each client-to-server message as a reverse `x.ai/mcp/sdk_call` and writes the server-to-client response back.
 /// The pump exits when rmcp drops its half of the duplex (service shutdown), so it never leaks.
-///
-/// `invoke_timeout` is the resolved per-server tool timeout.
-/// It bounds every reverse round trip so the zero-IPC path honors the same budget as the loopback and HTTP paths.
 pub fn acp_bridge_transport(
     server_id: String,
     invoker: Arc<dyn AcpReverseInvoker>,
@@ -79,9 +70,7 @@ pub fn acp_bridge_transport(
 }
 
 /// Forward newline-delimited JSON-RPC between rmcp and the reverse channel.
-///
 /// Each client-to-server request is invoked in its own task so a slow tool can't block later requests to the same server.
-/// JSON-RPC correlates by `id`, not order.
 /// All responses funnel through one writer task so their bytes never interleave on the duplex.
 async fn pump(
     server_id: String,
@@ -104,16 +93,8 @@ async fn pump(
 }
 
 /// Read each client-to-server line and dispatch its request on a fresh task.
-///
-/// The spawned tasks live in a [`tokio::task::JoinSet`] owned by this function rather than as detached `tokio::spawn`s.
-/// When this function returns (EOF means teardown) the set is dropped, aborting every still-running invoke instead of letting it run out its timeout.
 /// Finished tasks are reaped (non-blockingly) after each read so the set can't grow unbounded over a long-lived session.
-///
 /// IMPORTANT: `read_line` is NOT cancellation-safe, so it must never be raced in a `select!`.
-/// A client-to-server message can arrive across multiple `fill_buf` chunks (e.g. a tool call whose JSON args exceed the read buffer).
-/// Suppose another `select!` branch (such as reaping a finished invoke) fired while a `read_line` was pending.
-/// The next `line.clear()` would drop the partially-consumed bytes, desyncing the JSON-RPC stream and hanging that request to its tool-level timeout.
-/// We therefore read each line to completion FIRST, then reap finished invokes with a synchronous, non-cancelling `try_join_next` drain.
 async fn read_requests(
     server_id: String,
     invoker: Arc<dyn AcpReverseInvoker>,
@@ -144,8 +125,7 @@ async fn read_requests(
             }
         };
         // An id-less message is a notification (no response), and the SDK peer rejects reverse `x.ai/mcp/sdk_call`s without a JSON-RPC id
-        // So id-less messages (e.g. rmcp's `notifications/initialized` on every handshake) are logged and discarded locally.
-        // That avoids spawning a doomed round-trip
+        // So id-less messages are logged and discarded locally.
         // Safe only because the SDK `Server` is lenient about never receiving `initialized` (a documented v1 limit)
         let Some(id) = message.get("id").filter(|id| !id.is_null()).cloned() else {
             tracing::debug!(
@@ -192,10 +172,8 @@ async fn write_responses(
 }
 
 /// Overwrite a JSON-RPC response object's `id` with the request id.
-///
 /// If the SDK response isn't a JSON object (so it has nowhere to carry an `id`), rmcp can't correlate it.
 /// The waiting request would otherwise stall until its timeout.
-/// In that case synthesize a properly-keyed JSON-RPC error instead, so the waiting request fails fast and correctly.
 fn with_id(mut response: Value, id: Value) -> Value {
     match response.as_object_mut() {
         Some(obj) => {
@@ -279,8 +257,14 @@ mod tests {
             .unwrap();
 
         let response = read_line(&mut reader).await;
-        assert_eq!(response["id"], 1);
-        assert_eq!(response["result"]["method"], "tools/list");
+        assert_eq!(response.get("id").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            response
+                .get("result")
+                .and_then(|r| r.get("method"))
+                .and_then(|m| m.as_str()),
+            Some("tools/list")
+        );
     }
 
     /// A slow request must not block a later fast one (no head-of-line blocking).
@@ -327,8 +311,20 @@ mod tests {
             .unwrap();
 
         // The fast request (id 2) returns before the slow one (id 1).
-        assert_eq!(read_line(&mut reader).await["id"], 2);
-        assert_eq!(read_line(&mut reader).await["id"], 1);
+        assert_eq!(
+            read_line(&mut reader)
+                .await
+                .get("id")
+                .and_then(|v| v.as_i64()),
+            Some(2)
+        );
+        assert_eq!(
+            read_line(&mut reader)
+                .await
+                .get("id")
+                .and_then(|v| v.as_i64()),
+            Some(1)
+        );
     }
 
     /// Regression: a chunked request (JSON args exceed the read buffer) must still parse when an in-flight invoke completes mid-read.
@@ -389,8 +385,8 @@ mod tests {
         let first = read_line(&mut reader).await;
         let second = read_line(&mut reader).await;
         let mut ids = [
-            first["id"].as_i64().unwrap(),
-            second["id"].as_i64().unwrap(),
+            first.get("id").and_then(|v| v.as_i64()).unwrap_or(-1),
+            second.get("id").and_then(|v| v.as_i64()).unwrap_or(-1),
         ];
         ids.sort_unstable();
         assert_eq!(ids, [1, 2]);
@@ -407,9 +403,21 @@ mod tests {
             .unwrap();
 
         let response = read_line(&mut reader).await;
-        assert_eq!(response["id"], 7);
-        assert_eq!(response["error"]["code"], -32603);
-        assert_eq!(response["error"]["message"], "server exploded");
+        assert_eq!(response.get("id").and_then(|v| v.as_i64()), Some(7));
+        assert_eq!(
+            response
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_i64()),
+            Some(-32603)
+        );
+        assert_eq!(
+            response
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str()),
+            Some("server exploded")
+        );
     }
 
     /// A non-object SDK response can't carry an `id`, so rmcp couldn't correlate it.
@@ -448,8 +456,14 @@ mod tests {
             .unwrap();
 
         let response = read_line(&mut reader).await;
-        assert_eq!(response["id"], 9);
-        assert_eq!(response["error"]["code"], -32603);
+        assert_eq!(response.get("id").and_then(|v| v.as_i64()), Some(9));
+        assert_eq!(
+            response
+                .get("error")
+                .and_then(|e| e.get("code"))
+                .and_then(|c| c.as_i64()),
+            Some(-32603)
+        );
     }
 
     /// The configured per-server timeout (not a hardcoded constant) must reach the invoker for every reverse call.
@@ -493,7 +507,13 @@ mod tests {
             .await
             .unwrap();
         // Wait for the response so the invoke has definitely run.
-        assert_eq!(read_line(&mut reader).await["id"], 1);
+        assert_eq!(
+            read_line(&mut reader)
+                .await
+                .get("id")
+                .and_then(|v| v.as_i64()),
+            Some(1)
+        );
         assert_eq!(*seen.lock().unwrap(), Some(configured));
     }
 
@@ -596,9 +616,6 @@ mod tests {
     }
 
     /// A mock SDK MCP **server** behind the reverse channel.
-    /// It speaks just enough real MCP to satisfy an rmcp client.
-    /// It answers the `initialize` handshake, a `tools/list` advertising one `echo` tool, and a `tools/call` that echoes its text argument.
-    /// Each `invoke` receives one JSON-RPC request and returns one JSON-RPC response (the bridge overwrites the `id`).
     /// This mirrors the real on-wire shapes.
     struct MockSdkServer;
 
@@ -618,7 +635,11 @@ mod tests {
             let result = match method {
                 "initialize" => serde_json::json!({
                     // Echo the client's protocol version so the handshake is always compatible.
-                    "protocolVersion": message["params"]["protocolVersion"],
+                    "protocolVersion": message
+                        .get("params")
+                        .and_then(|p| p.get("protocolVersion"))
+                        .cloned()
+                        .unwrap_or(Value::Null),
                     "capabilities": { "tools": {} },
                     "serverInfo": { "name": "mock-sdk-server", "version": "0.0.0" },
                 }),
@@ -634,8 +655,11 @@ mod tests {
                     }],
                 }),
                 "tools/call" => {
-                    let text = message["params"]["arguments"]["text"]
-                        .as_str()
+                    let text = message
+                        .get("params")
+                        .and_then(|p| p.get("arguments"))
+                        .and_then(|a| a.get("text"))
+                        .and_then(|t| t.as_str())
                         .unwrap_or_default();
                     serde_json::json!({
                         "content": [{ "type": "text", "text": text }],
@@ -649,8 +673,6 @@ mod tests {
     }
 
     /// End-to-end: drive a REAL `rmcp` client (`RunningService<RoleClient, _>`) through `acp_bridge_transport` against [`MockSdkServer`].
-    /// It proves the bridge speaks real MCP: the full `initialize` handshake, `tools/list`, and `tools/call`, then a clean cancel/teardown.
-    /// The handshake includes rmcp's id-less `notifications/initialized`, which the bridge discards.
     /// This is the same client path production uses in `servers.rs` (`client.serve(transport)`).
     #[tokio::test]
     async fn real_rmcp_client_handshakes_lists_and_calls_over_the_bridge() {
@@ -675,7 +697,7 @@ mod tests {
             .await
             .expect("tools/list over the bridge");
         assert_eq!(tools.tools.len(), 1);
-        assert_eq!(tools.tools[0].name.as_ref(), "echo");
+        assert_eq!(tools.tools.first().map(|t| t.name.as_ref()), Some("echo"));
 
         let result = client
             .call_tool(
@@ -688,8 +710,10 @@ mod tests {
             )
             .await
             .expect("tools/call over the bridge");
-        let text = result.content[0]
-            .as_text()
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
             .expect("text content")
             .text
             .clone();

@@ -7,11 +7,12 @@
 //! After parsing, Grok applies [`offset_events`]: only `~~…~~` counts as strikethrough.
 //! Single-tilde pairs (`~text~`), which pulldown treats as strike, are demoted to literal `~` text so LLM output like `~**10%**` is not struck.
 
+#![deny(clippy::indexing_slicing)]
+
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use std::ops::Range;
 
 /// The exact `pulldown-cmark` option set Grok Build uses to render markdown.
-///
 /// With `ENABLE_STRIKETHROUGH`, pulldown treats both `~~…~~` and single-`~` pairs as strike.
 /// Callers must consume events via [`offset_events`] so only double-tilde strikethrough is retained.
 pub fn parser_options() -> Options {
@@ -53,11 +54,13 @@ fn strike_delim_text<'a>(
     let delim = if opening {
         let end = range.start + 1;
         debug_assert!(text.is_char_boundary(end) && end <= text.len());
-        (range.start..end, &text[range.start..end])
+        (range.start..end, text.get(range.start..end).unwrap_or(""))
     } else {
-        let start = range.end - 1;
+        let Some(start) = range.end.checked_sub(1) else {
+            return (Event::Text("".into()), range.clone());
+        };
         debug_assert!(text.is_char_boundary(start) && start < text.len());
-        (start..range.end, &text[start..range.end])
+        (start..range.end, text.get(start..range.end).unwrap_or(""))
     };
     (Event::Text(delim.1.into()), delim.0)
 }
@@ -175,10 +178,10 @@ impl MarkdownStats {
 }
 
 /// The model emitted markdown that does not render as the structure it intended.
-///
 /// Distinct from [`MarkdownStats`] counts: a count answers "how many tables", an issue answers "did a construct silently degrade".
 /// `pulldown-cmark` never errors (every input parses as something), so each issue is detected by comparing the raw syntax against what parsed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
 pub enum StructuralIssue {
     /// A GFM table delimiter row (`|---|---|`) sits under a header line, but the table did not parse (e.g. the column counts differ).
     /// The lines render as a paragraph: the "made a table but it didn't show" bug.
@@ -187,15 +190,7 @@ pub enum StructuralIssue {
     UnterminatedCodeBlock,
 }
 
-impl StructuralIssue {
-    /// Stable snake_case name for this issue (for logs, metrics, or FFI bindings).
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::MalformedTable => "malformed_table",
-            Self::UnterminatedCodeBlock => "unterminated_code_block",
-        }
-    }
-}
+impl StructuralIssue {}
 
 /// Element counts plus any structural issues from a single parse pass.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -210,7 +205,6 @@ fn strip_block_prefix(line: &str) -> &str {
 }
 
 /// True when no line after the opener is a closing fence matching the opener's character and length.
-///
 /// Only the raw block source carries whether the fence closed, so a fence-shaped line inside the content can hide a truly unterminated block.
 /// That miss is rare and errs toward reporting fewer issues, so we accept it for simplicity.
 fn fenced_block_is_unterminated(block_src: &str) -> bool {
@@ -248,10 +242,7 @@ fn line_looks_like_header(line: &str) -> bool {
 }
 
 /// Flag delimiter rows the model intended as a table but that `pulldown-cmark` did not parse as one, so they render as a paragraph.
-///
-/// `parsed_spans` are the byte ranges of real tables and code blocks.
 /// A delimiter line starting inside one is either part of a valid table or literal code text, so it never signals a malformed table.
-/// Outside those spans, a delimiter row directly under a header line with a pipe is an intended table that did not parse.
 fn detect_malformed_tables(
     text: &str,
     parsed_spans: &[Range<usize>],
@@ -296,7 +287,9 @@ pub fn analyze(text: &str) -> MarkdownAnalysis {
             // The range spans the opening fence through the close (or to EOF when unterminated).
             Event::Start(Tag::CodeBlock(kind)) => {
                 if matches!(kind, CodeBlockKind::Fenced(_))
-                    && fenced_block_is_unterminated(&text[range.clone()])
+                    && text
+                        .get(range.clone())
+                        .is_some_and(fenced_block_is_unterminated)
                 {
                     issues.push(StructuralIssue::UnterminatedCodeBlock);
                 }
@@ -799,19 +792,8 @@ mod tests {
     #[test]
     fn legacy_mdx_rule_divergence() {
         // How each legacy markdown-validator MDX_* rule maps to our verdict
-        // We only flag intended structure that pulldown did not parse, never style opinions:
-        //   FENCE_UNBALANCED          -> UnterminatedCodeBlock (fence swallows the rest of the doc).
-        //   TABLE_COLUMN_MISMATCH     -> MalformedTable (header/delimiter arity mismatch un-parses it).
-        //   TABLE_DIVIDER_INVALID     -> NOT flagged: pulldown rejects the table, but a divider with
-        //                                non-`|-: ` chars also fails our delimiter predicate. Accepted
-        //                                safe-direction miss (under-penalize, never over-penalize).
-        //   TABLE_START               -> not flagged: a doc-leading table renders fine (style opinion).
-        //   TABLE_MIN_ROWS            -> not flagged: GFM parses header+delimiter as a body-less table.
-        //   TABLE_EMPTY_HEADER        -> not flagged: empty header cells still parse as a table.
-        //   TABLE_MISSING_BLANK_AFTER -> not flagged: GFM swallows the trailing prose line as a row.
-        //   TABLE_CELL_NEWLINE        -> not flagged: each physical line is its own row; still a table.
-        //   TABLE_FENCE_IN_CELL       -> not flagged: backticks in a cell are inline content.
-        //   TABLE_IN_CODEBLOCK        -> not flagged: a table inside a fence is literal code by design.
+        // We only flag intended structure that pulldown did not parse, never style opinions: FENCE_UNBALANCED -> UnterminatedCodeBlock (fence swallows the rest of the doc).
+        // TABLE_DIVIDER_INVALID -> NOT flagged: pulldown rejects the table, but a divider with non-`|-: ` chars also fails our delimiter predicate. Accepted safe-direction miss (under-penalize, never over-penalize).
         let cases: &[(&str, &str, u32, bool, bool)] = &[
             // (legacy rule, scenario doc, parsed tables, malformed_table?, unterminated_code_block?)
             ("FENCE_UNBALANCED", "```\ncode\n", 0, false, true),
@@ -1009,7 +991,11 @@ mod tests {
                     "drop_delimiter_cell",
                     with_delimiter(base, |line| {
                         let at = line.rfind(" - |").expect("delimiter has a ` - |` cell");
-                        format!("{}{}", &line[..at], &line[at + 4..])
+                        format!(
+                            "{}{}",
+                            line.get(..at).unwrap_or(""),
+                            line.get(at + 4..).unwrap_or("")
+                        )
                     }),
                 ),
             ];

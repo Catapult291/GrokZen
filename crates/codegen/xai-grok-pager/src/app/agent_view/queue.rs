@@ -6,6 +6,7 @@ use super::{AgentPane, AgentView, PromptMode, overlay_action_to_outcome};
 use crate::actions::{ActionId, ActionRegistry};
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
+use crate::views::queue_mutation::ServerRowCapabilities;
 use crossterm::event::KeyEvent;
 
 impl AgentView {
@@ -75,20 +76,16 @@ impl AgentView {
     }
 
     /// Force-send a queued follow-up mid-turn from the prompt (empty composer).
-    ///
     /// Always the **top** visible row (first under the server-then-local merge order, the next item that would drain).
     /// Bare Enter and the send-now chord share this path; queue-pane selection and mouse "Send now" keep intentional selection.
-    /// Returns `None` when there is nothing to send.
     pub(super) fn try_send_now_queued_from_prompt(&mut self) -> Option<InputOutcome> {
-        if !self.session.state.is_turn_running() {
+        if !self.can_send_now() {
             return None;
         }
         self.sync_queue_pane();
         let ids = self.queue.entry_ids();
         let id = *ids.first()?;
         let outcome = self.force_interject_queue_row(id);
-        // Acting on the prompt-path send-now while its tip is up is the user accepting the hint
-        // Mirrors the undo and image-input funnels so the send_now shown-to-accepted conversion is measurable
         if matches!(outcome, InputOutcome::Action(_))
             && self.ephemeral_tip.current_key() == Some(crate::tips::send_now::SEND_NOW_TIP_KEY)
         {
@@ -103,13 +100,8 @@ impl AgentView {
     }
 
     /// The turn is parked in a wait the shell aborts as soon as the user sends anything, and the goal loop is inactive.
-    /// [`crate::views::turn_status::is_sendable_wait`] defines those waits.
-    /// They are blocking `get_task_output`, `wait_tasks`, `Await*`, or a blocked foreground subagent await.
     /// The goal check matters because the shell suppresses the abort during goal runs, so treating the wait as user-interruptible would lie there.
-    ///
     /// Gates Enter interjecting instead of queueing, and the parked queue drain.
-    /// The stopped-session *rendering* additionally excludes subagent waits; see [`Self::renders_parked`].
-    /// Purely view-derived: reading it has no turn-lifecycle side effects.
     pub(crate) fn is_parked_on_sendable_wait(&self) -> bool {
         crate::views::turn_status::is_sendable_wait(&self.resolve_turn_activity_unenriched())
             && !self
@@ -121,7 +113,8 @@ impl AgentView {
     /// Whether an explicit send-now dispatched right now will actually cancel the running turn shell-side.
     /// Also requires the front committed so a spared send-now does not paint under later output from that front.
     pub(crate) fn expects_send_now_cancel(&self) -> bool {
-        self.session.state.is_turn_running()
+        (self.session.state.is_turn_running()
+            || (self.wake_turn_active() && !self.wake_turn_cancelling()))
             && self.front_message_committed
             && !self
                 .goal_state
@@ -147,17 +140,9 @@ impl AgentView {
         self.follow_without_jump_prompt_id = None;
     }
 
-    /// Whether `prompt_id` names a Send Now painted block still awaiting its authoritative interjection notification.
-    /// That notification claims (and restyles) the block in place.
     /// This is the active-goal Send Now flow: painted optimistically without arming a cancel expectation.
-    /// [`crate::app::acp_handler`]'s `handle_interjection` later converts the block to interjection styling.
-    ///
     /// The queue-echo reconcile (`queue/changed`) and the non-running `PromptResponse` (`RemovedFromQueue`) paths must not retire it early.
-    /// The row legitimately disappears from the queue the instant the shell converts the Send Now into an interjection.
     /// Those paths would otherwise drop the block and re-push the message at the scrollback end (flicker and reorder).
-    /// Keeping it in place lets `handle_interjection` convert it, or turn-start adoption reuse it.
-    ///
-    /// Returns `false` for the armed (expects-cancel) Send Now path and for non-goal rows, so their retirement behavior is unchanged.
     pub(crate) fn is_send_now_awaiting_interjection_claim(&self, prompt_id: &str) -> bool {
         self.send_now_painted_blocks.contains_key(prompt_id)
             && self.is_self_originated_prompt(prompt_id)
@@ -229,10 +214,11 @@ impl AgentView {
 
     /// Whether bare Enter on the empty composer would actually send the top visible held row, the "Enter to send now" half of the inline hint.
     /// A server top row sends only when its wire-kind capabilities allow it.
-    /// A local top row sends only when prompt-like (`force_interject_queue_row` refuses bash and client-expanded rows with a toast).
+    /// A local top row sends only when its capabilities allow it and it is prompt-like (`force_interject_queue_row` refuses bash and client-expanded rows with a toast).
     pub(crate) fn held_queue_top_sendable(&self) -> bool {
         let running = self.session.current_prompt_id.as_deref();
         let send_now = self.expect_send_now_cancel.as_deref();
+        let mutation = self.queue.mutation();
         // Merge order: the first visible server row is the top row.
         if let Some(top) = self.shared_queue.iter().find(|entry| {
             crate::views::queue_pane::visible_held_server_row(
@@ -242,12 +228,36 @@ impl AgentView {
                 &self.send_now_painted_blocks,
             )
         }) {
-            return crate::views::queue_pane::ServerRowCapabilities::from_wire_kind(&top.kind)
-                .can_send_now();
+            return ServerRowCapabilities::for_pane(&top.kind, mutation).can_send_now();
         }
-        self.session.pending_prompts.front().is_some_and(|p| {
-            p.kind == crate::app::agent::QueueEntryKind::Prompt && p.wire_matches_display()
-        })
+        ServerRowCapabilities::for_local(mutation).can_send_now()
+            && self.session.pending_prompts.front().is_some_and(|p| {
+                p.kind == crate::app::agent::QueueEntryKind::Prompt && p.wire_matches_display()
+            })
+    }
+
+    pub(crate) fn take_send_now_user_echo(&mut self, text: &str, prompt_id: Option<&str>) -> bool {
+        let echo = text.trim();
+        if let Some(id) = prompt_id
+            && self
+                .send_now_echo_pending
+                .get(id)
+                .is_some_and(|pending| pending == echo)
+        {
+            self.send_now_echo_pending.remove(id);
+            return true;
+        }
+        let matched = self
+            .send_now_echo_pending
+            .iter()
+            .find(|(_, pending)| pending.as_str() == echo)
+            .map(|(id, _)| id.clone());
+        if let Some(id) = matched {
+            self.send_now_echo_pending.remove(&id);
+            true
+        } else {
+            false
+        }
     }
 
     /// Rebuild the queue pane, applying the [`visible_held_server_row`] filter.
@@ -266,6 +276,11 @@ impl AgentView {
     /// Drives the idle keybar and the parked turn-status cue; flips off (the running chrome returns) the moment the wait ends and the turn resumes.
     pub(crate) fn renders_parked(&self) -> bool {
         self.is_parked_on_sendable_wait() && !self.is_waiting_on_subagent()
+    }
+
+    /// Hidden (Ctrl+G) dock is unpainted, so the idle cues stay.
+    pub(crate) fn dock_covers_idle_cues(&self, dock_on: bool) -> bool {
+        dock_on && !self.dock_hidden
     }
 
     /// Live counts for the turn-status watching cue; see [`crate::views::turn_status::Watchers`].
@@ -287,7 +302,7 @@ impl AgentView {
         watchers.subagents = self
             .subagent_sessions
             .values()
-            .filter(|s| s.is_running() && s.workflow_run_id.is_none())
+            .filter(|s| s.is_running() && s.attempt.workflow_run_id.is_none())
             .count();
         watchers.workflows = self
             .workflow_runs
@@ -298,41 +313,31 @@ impl AgentView {
     }
 
     /// Shared tail of every turn-end marker push (`push_turn_terminal_marker`).
-    pub(crate) fn push_end_marker_block(
-        &mut self,
-        event: crate::scrollback::blocks::SessionEvent,
-        stop_hooks: Vec<(String, Vec<crate::scrollback::blocks::tool::HookRunEntry>)>,
-        prompt_id: Option<String>,
-    ) {
-        // The marker keeps its turn's pid for the tail-merge attribution check.
-        let block = crate::scrollback::blocks::SessionEventBlock::with_stop_hooks(
-            event, stop_hooks, prompt_id,
-        );
+    pub(crate) fn push_end_marker_block(&mut self, event: crate::scrollback::blocks::SessionEvent) {
+        let block = crate::scrollback::blocks::SessionEventBlock::new(event);
         self.scrollback
             .push_block(crate::scrollback::block::RenderBlock::SessionEvent(block));
     }
 
+    /// Same derivation as the pane's own rows (origin plus wire kind under its `QueueMutation`), so keys and clicks agree with what it renders.
     pub(in crate::app) fn server_row_capabilities(
         &self,
         row: &crate::views::queue_pane::QueueRowRef,
-    ) -> Option<crate::views::queue_pane::ServerRowCapabilities> {
+    ) -> Option<ServerRowCapabilities> {
         use crate::views::queue_pane::QueueRowOrigin;
+        let mutation = self.queue.mutation();
         if row.origin != QueueRowOrigin::Server {
-            return Some(crate::views::queue_pane::ServerRowCapabilities::from_wire_kind("prompt"));
+            return Some(ServerRowCapabilities::for_local(mutation));
         }
         let server_id = row.server_id.as_deref()?;
         self.shared_queue
             .iter()
             .find(|entry| entry.id == server_id)
-            .map(|entry| {
-                crate::views::queue_pane::ServerRowCapabilities::from_wire_kind(&entry.kind)
-            })
+            .map(|entry| ServerRowCapabilities::for_pane(&entry.kind, mutation))
     }
 
     /// `Some(is_prompt_like)` for a resolvable merged-queue row; `None` when it can't be resolved.
     /// Prompt-like rows may interject: plain prompts, plus raw skill slash rows (`/find-session args`) whose wire payload equals the display text.
-    /// The shell expands raw skill rows at the interjection drain.
-    /// Rows with a client-expanded payload (`/imagine`, `/loop`) and non-prompt kinds stay queued.
     /// Interjecting them would send the display text, not the payload.
     pub(in crate::app) fn queue_row_prompt_like(&self, id: u64) -> Option<bool> {
         use crate::app::agent::QueueEntryKind;
@@ -355,24 +360,19 @@ impl AgentView {
 
     /// Send one merged-queue row now (cancel-and-send), by selection id. The shell cancels the running turn and runs this row as the next turn.
     pub(in crate::app) fn force_interject_queue_row(&mut self, id: u64) -> InputOutcome {
-        if !self.session.state.is_turn_running() {
-            let message = self.scrollback.locale().named_static_text(
-                "queue.no_turn_running",
-                "No turn running: prompt will send when ready",
-            );
-            self.show_toast(message);
+        if !self.can_send_now() {
             return InputOutcome::Changed;
         }
         let (is_server, row) = self.resolve_queue_row(id);
+        // Resolve capabilities before any optimistic park, paint, toast, or action.
+        if let Some(row) = row.as_ref()
+            && !self
+                .server_row_capabilities(row)
+                .is_some_and(|capabilities| capabilities.can_send_now())
+        {
+            return InputOutcome::Unchanged;
+        }
         if is_server {
-            // Resolve capabilities before any optimistic park, paint, or action.
-            if let Some(row) = row.as_ref()
-                && !self
-                    .server_row_capabilities(row)
-                    .is_some_and(|capabilities| capabilities.can_send_now())
-            {
-                return InputOutcome::Unchanged;
-            }
             if let Some(row) = row.as_ref()
                 && let Some(server_id) = row.server_id.clone()
             {
@@ -403,6 +403,7 @@ impl AgentView {
             return InputOutcome::Action(Action::SendPromptNow {
                 text: prompt.text,
                 images: prompt.images,
+                image_notice: None,
             });
         }
         InputOutcome::Changed
@@ -411,11 +412,6 @@ impl AgentView {
     /// Reconcile this client's optimistic queue echoes against a raw `x.ai/queue/changed` broadcast.
     /// Also resolves a parked queue-row send-now ([`Self::send_now_awaiting_confirm`]).
     /// The raw pre-merge entries are used because the mirrored snapshot re-pins unconfirmed echoes, so it can't tell confirmation apart.
-    ///
-    /// Returns `Some((id, version))` when the parked row is now confirmed as queued.
-    /// The caller fires `x.ai/queue/interject` with that authoritative version.
-    /// A parked row confirmed as running clears the park with nothing to do (the natural drain won the race).
-    /// A row in neither set stays parked (its RPC is still in flight).
     pub(crate) fn resolve_send_now_awaiting_confirm(
         &mut self,
         broadcast_entries: &[(String, u64)],
@@ -445,7 +441,6 @@ impl AgentView {
         if self.send_now_awaiting_confirm.as_deref() == Some(prompt_id) {
             self.send_now_awaiting_confirm = None;
         }
-        // An active-goal Send Now painted block awaiting its interjection claim stays put
         // The echo did land (converted into an interjection), so the row's disappearance from the queue is expected
         // `handle_interjection` will convert the block in place; retiring here would drop and re-push it at the scrollback end
         // Callers that must retire regardless (e.g. a genuine send failure) call `retire_send_now_painted_block` directly.
@@ -463,6 +458,9 @@ impl AgentView {
         if self.send_now_awaiting_confirm.as_deref() == Some(old_id) {
             self.send_now_awaiting_confirm = None;
         }
+        if let Some(text) = self.send_now_echo_pending.remove(old_id) {
+            self.send_now_echo_pending.insert(new_id.to_string(), text);
+        }
         if let Some(entry) = self.send_now_painted_blocks.remove(old_id) {
             match self.send_now_painted_blocks.entry(new_id.to_string()) {
                 std::collections::hash_map::Entry::Vacant(slot) => {
@@ -478,6 +476,7 @@ impl AgentView {
 
     /// Remove the optimistic block for a send-now'd prompt that will never run (send failure, removal); a leftover would duplicate on requeue.
     pub(crate) fn retire_send_now_painted_block(&mut self, prompt_id: &str) {
+        self.send_now_echo_pending.remove(prompt_id);
         if let Some((id, _)) = self.send_now_painted_blocks.remove(prompt_id) {
             self.scrollback.remove_entry(id);
         }
@@ -649,12 +648,17 @@ impl AgentView {
         if crate::key!(Down).matches(key)
             && self.queue.selected_id() == self.queue.entry_ids().last().copied()
         {
-            self.queue.overlay.focused = false;
             self.set_active_pane(AgentPane::Prompt, false);
             return InputOutcome::Changed;
         }
 
-        // Navigation keys (j/k, y to copy, etc.).
+        if crate::key!('y').matches(key) {
+            if let Some((_, text)) = self.queue.yank_copy_target() {
+                self.copy_to_clipboard(&text);
+            }
+            return InputOutcome::Changed;
+        }
+
         if self.queue.handle_navigation_key(key) {
             InputOutcome::Changed
         } else {
@@ -707,13 +711,13 @@ impl AgentView {
             .filter(|e| Some(e.id.as_str()) != running)
             .map(|e| e.id.clone())
             .collect();
+        let mutation = self.queue.mutation();
         let can_reorder = |id: &str| {
             self.shared_queue
                 .iter()
                 .find(|entry| entry.id == id)
                 .is_some_and(|entry| {
-                    crate::views::queue_pane::ServerRowCapabilities::from_wire_kind(&entry.kind)
-                        .can_reorder()
+                    ServerRowCapabilities::for_pane(&entry.kind, mutation).can_reorder()
                 })
         };
         let mut swappable: Vec<String> = all_ids
@@ -775,6 +779,7 @@ mod queue_edit_routing_tests {
     use crate::app::agent::AgentState;
     use crate::app::app_view::InputOutcome;
     use crate::app::prompt_queue::QueueEntryWire;
+    use crate::views::queue_mutation::QueueMutation;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn delete_key() -> KeyEvent {
@@ -789,7 +794,11 @@ mod queue_edit_routing_tests {
         let ids = agent.queue.entry_ids();
         assert_eq!(ids.len(), 2);
         // Server row is rendered first (documented merge order).
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
 
         let outcome = agent.handle_queue_key(&delete_key(), &registry);
         match outcome {
@@ -807,7 +816,11 @@ mod queue_edit_routing_tests {
         assert!(agent.queue.overlay.visible);
         assert!(agent.queue.overlay.focused);
 
-        agent.queue.list_state.select_by_id(ids[1]);
+        agent.queue.list_state.select_by_id(
+            ids.get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&delete_key(), &registry);
         assert!(matches!(outcome, InputOutcome::Changed));
         assert!(agent.session.pending_prompts.is_empty());
@@ -910,7 +923,11 @@ mod queue_edit_routing_tests {
         agent.sync_queue_pane();
         let ids = agent.queue.entry_ids();
         assert_eq!(ids.len(), 2, "two rows so Down has somewhere to go");
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
 
         agent.handle_queue_key(&down_key(), &ActionRegistry::defaults());
 
@@ -930,7 +947,11 @@ mod queue_edit_routing_tests {
 
         let ids = agent.queue.entry_ids();
         // ids[1] is the only local row.
-        agent.queue.list_state.select_by_id(ids[1]);
+        agent.queue.list_state.select_by_id(
+            ids.get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&delete_key(), &registry);
         assert!(matches!(outcome, InputOutcome::Changed));
 
@@ -940,7 +961,14 @@ mod queue_edit_routing_tests {
         assert!(agent.queue.overlay.focused);
         assert_eq!(agent.active_pane, AgentPane::Queue);
         // Through the handler: selection lands on the surviving server row (ids[0]) across the merge boundary, not back at the top
-        assert_eq!(agent.queue.selected_id(), Some(ids[0]));
+        assert_eq!(
+            agent.queue.selected_id(),
+            Some(
+                ids.first()
+                    .copied()
+                    .unwrap_or_else(|| panic!("missing index"))
+            )
+        );
     }
 
     /// Deleting down to a truly-empty merged view hides the pane.
@@ -965,7 +993,11 @@ mod queue_edit_routing_tests {
         let ids = agent.queue.entry_ids();
         // Only the local row is a visible queued row (running p1 excluded).
         assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&delete_key(), &registry);
         assert!(matches!(outcome, InputOutcome::Changed));
 
@@ -976,7 +1008,7 @@ mod queue_edit_routing_tests {
         assert_eq!(agent.active_pane, AgentPane::Scrollback);
     }
 
-    /// Keyboard force-interject of the last local row keeps the pane open when
+    /// Keyboard force-interject of the last local row keeps the pane open when a server row remains (mirrors the delete path's visibility treatment).
     /// a server row remains (mirrors the delete path's visibility treatment).
     #[test]
     fn force_interject_last_local_row_keeps_pane_open_when_server_remains() {
@@ -985,7 +1017,11 @@ mod queue_edit_routing_tests {
         let registry = non_vscode_registry();
 
         let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[1]);
+        agent.queue.list_state.select_by_id(
+            ids.get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
             InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
@@ -1008,7 +1044,11 @@ mod queue_edit_routing_tests {
         let registry = ActionRegistry::defaults();
         let ids = agent.queue.entry_ids();
         assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&delete_key(), &registry);
         assert!(matches!(outcome, InputOutcome::Changed));
 
@@ -1034,7 +1074,11 @@ mod queue_edit_routing_tests {
         assert!(agent.queue.overlay.visible);
 
         let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let _ = agent.handle_queue_key(&delete_key(), &registry);
         assert!(!agent.queue.overlay.visible);
 
@@ -1061,7 +1105,11 @@ mod queue_edit_routing_tests {
         let registry = non_vscode_registry();
         let ids = agent.queue.entry_ids();
         assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
             InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
@@ -1083,14 +1131,19 @@ mod queue_edit_routing_tests {
         let mut agent = make_running_agent();
         let registry = non_vscode_registry();
         // The stored image must travel on the action (regression: it was silently dropped)
-        agent.session.pending_prompts[0]
-            .images
-            .push(test_pasted_image());
+        let Some(front) = agent.session.pending_prompts.get_mut(0) else {
+            panic!("missing queued prompt");
+        };
+        front.images.push(test_pasted_image());
 
         let ids = agent.queue.entry_ids();
         assert_eq!(ids.len(), 2);
         // Server row first (documented merge order).
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
             InputOutcome::Action(Action::QueueInterjectShared {
@@ -1107,10 +1160,14 @@ mod queue_edit_routing_tests {
         assert_eq!(agent.session.pending_prompts.len(), 1);
 
         // The local row interjects its text (and stored images) directly.
-        agent.queue.list_state.select_by_id(ids[1]);
+        agent.queue.list_state.select_by_id(
+            ids.get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
-            InputOutcome::Action(Action::SendPromptNow { text, images }) => {
+            InputOutcome::Action(Action::SendPromptNow { text, images, .. }) => {
                 assert_eq!(text, "local one");
                 assert_eq!(images.len(), 1, "row image must ride the interject");
             }
@@ -1120,30 +1177,100 @@ mod queue_edit_routing_tests {
         assert!(agent.session.pending_prompts.is_empty());
     }
 
-    #[test]
-    fn protected_parent_row_capabilities_block_direct_prompt_level_mutations() {
-        let mut agent = protected_parent_agent();
-        let id = agent.queue.entry_ids()[0];
-        let row = agent.queue.row_ref(id).expect("protected row");
-        let capabilities = agent
-            .server_row_capabilities(&row)
-            .expect("server capabilities");
-        assert!(!capabilities.can_edit());
-        assert!(!capabilities.can_delete());
-        assert!(!capabilities.can_reorder());
-        assert!(!capabilities.can_send_now());
-        agent.enter_queue_edit(id, true, Some(row));
-        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
-        assert!(agent.server_queue_reordered(id, true).is_none());
-        assert_eq!(agent.shared_queue.len(), 1);
+    /// A running agent whose queue mirrors a subagent: one `"prompt"` server row plus one local row, all protected.
+    fn read_only_agent() -> AgentView {
+        let mut agent = make_running_agent();
+        agent.queue.set_mutation(QueueMutation::ReadOnly);
+        agent.sync_queue_pane();
+        agent
+    }
+
+    /// The two ways the top server row ends up protected, with that row's server id.
+    fn protected_agents() -> [(AgentView, &'static str); 2] {
+        [
+            (protected_parent_agent(), "parent-message-msg-1"),
+            (read_only_agent(), "p1"),
+        ]
     }
 
     #[test]
-    fn protected_parent_queue_pane_mutation_keys_emit_no_actions() {
-        let mut agent = protected_parent_agent();
-        let id = agent.queue.entry_ids()[0];
-        agent.queue.list_state.select_by_id(id);
+    fn protected_row_capabilities_block_direct_prompt_level_mutations() {
+        for (mut agent, server_id) in protected_agents() {
+            let id = agent
+                .queue
+                .entry_ids()
+                .first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index"));
+            let row = agent.queue.row_ref(id).expect("protected row");
+            assert_eq!(Some(server_id), row.server_id.as_deref());
+            let capabilities = agent
+                .server_row_capabilities(&row)
+                .expect("server capabilities");
+            assert!(!capabilities.can_edit(), "{server_id}");
+            assert!(!capabilities.can_delete(), "{server_id}");
+            assert!(!capabilities.can_reorder(), "{server_id}");
+            assert!(!capabilities.can_send_now(), "{server_id}");
+            agent.enter_queue_edit(id, true, Some(row));
+            assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+            assert!(agent.server_queue_reordered(id, true).is_none());
+            assert_eq!(1, agent.shared_queue.len());
+        }
+    }
+
+    #[test]
+    fn protected_row_queue_pane_mutation_keys_emit_no_actions() {
         let registry = non_vscode_registry();
+        for (mut agent, server_id) in protected_agents() {
+            let id = agent
+                .queue
+                .entry_ids()
+                .first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index"));
+            agent.queue.list_state.select_by_id(id);
+            for key in [
+                delete_key(),
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT),
+                KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
+                force_interject_key(),
+            ] {
+                assert!(
+                    matches!(
+                        agent.handle_queue_key(&key, &registry),
+                        InputOutcome::Unchanged
+                    ),
+                    "{server_id} {key:?}"
+                );
+            }
+            assert_eq!(1, agent.shared_queue.len());
+            assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        }
+    }
+
+    /// On a read-only pane the local row is protected too: no chip binds, and neither the queue pane nor the
+    /// prompt-path send-now emits an `Action` for it, so a child mirror can never address the root's queue.
+    #[test]
+    fn read_only_pane_blocks_every_queue_mutation_path() {
+        let mut agent = read_only_agent();
+        let registry = non_vscode_registry();
+        let ids = agent.queue.entry_ids();
+        assert_eq!(2, ids.len());
+        let local_id = ids
+            .get(1)
+            .copied()
+            .unwrap_or_else(|| panic!("missing local row"));
+        assert_eq!(
+            Some(local_id),
+            agent.session.pending_prompts.front().map(|p| p.id)
+        );
+
+        agent.queue.list_state.select_by_id(local_id);
+        assert!(matches!(
+            agent.force_interject_queue_row(local_id),
+            InputOutcome::Unchanged
+        ));
         for key in [
             delete_key(),
             KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
@@ -1151,42 +1278,78 @@ mod queue_edit_routing_tests {
             KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
             force_interject_key(),
         ] {
-            assert!(matches!(
-                agent.handle_queue_key(&key, &registry),
-                InputOutcome::Unchanged
-            ));
+            assert!(
+                matches!(
+                    agent.handle_queue_key(&key, &registry),
+                    InputOutcome::Unchanged
+                ),
+                "{key:?}"
+            );
         }
-        assert_eq!(agent.shared_queue.len(), 1);
+        assert_eq!(1, agent.session.pending_prompts.len());
+        assert!(!agent.held_queue_top_sendable());
+
+        let area = ratatui::layout::Rect::new(0, 0, 80, 2);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        agent.queue.render(
+            area,
+            &mut buf,
+            true,
+            &crate::appearance::LayoutConfig::default(),
+            None,
+            true,
+        );
+        for row in 0..area.height {
+            for col in 0..area.width {
+                assert_eq!(None, agent.queue.send_now_click(col, row));
+                assert_eq!(None, agent.queue.delete_click(col, row));
+                assert_eq!(None, agent.queue.edit_click(col, row));
+            }
+        }
+
+        // With only the local row left, the prompt-path send-now must not reach `SendPromptNow` either.
+        agent.shared_queue.clear();
+        agent.sync_queue_pane();
+        agent.active_pane = AgentPane::Prompt;
+        agent.queue.overlay.focused = false;
+        agent.prompt.set_text("");
+        assert!(!agent.held_queue_top_sendable());
+        let outcome = agent.handle_prompt_key_for_test(&force_interject_key());
+        assert!(
+            matches!(outcome, InputOutcome::Unchanged | InputOutcome::Changed),
+            "{outcome:?}"
+        );
+        assert_eq!(1, agent.session.pending_prompts.len());
+        assert!(agent.send_now_awaiting_confirm.is_none());
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));
     }
 
     #[test]
-    fn protected_parent_top_row_blocks_prompt_send_now_paths_without_optimism() {
+    fn protected_top_row_blocks_prompt_send_now_paths_without_optimism() {
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         for key in [enter, force_interject_key()] {
-            let mut agent = protected_parent_agent();
-            agent.active_pane = AgentPane::Prompt;
-            agent.queue.overlay.focused = false;
-            agent.prompt.set_text("");
-            agent
-                .optimistic_queue_ids
-                .insert("parent-message-msg-1".into());
-            let scrollback_len = agent.scrollback.len();
+            for (mut agent, server_id) in protected_agents() {
+                agent.active_pane = AgentPane::Prompt;
+                agent.queue.overlay.focused = false;
+                agent.prompt.set_text("");
+                agent.optimistic_queue_ids.insert(String::from(server_id));
+                let scrollback_len = agent.scrollback.len();
 
-            let outcome = agent.handle_prompt_key_for_test(&key);
-            assert!(
-                !matches!(
-                    outcome,
-                    InputOutcome::Action(Action::QueueInterjectShared { .. })
-                ),
-                "protected row emitted QueueInterjectShared for {key:?}: {outcome:?}"
-            );
-            assert!(agent.expect_send_now_cancel.is_none());
-            assert!(agent.send_now_awaiting_confirm.is_none());
-            assert!(agent.send_now_painted_blocks.is_empty());
-            assert_eq!(agent.scrollback.len(), scrollback_len);
-            assert!(!agent.is_self_originated_prompt("parent-message-msg-1"));
-            assert!(!agent.held_queue_top_sendable());
+                let outcome = agent.handle_prompt_key_for_test(&key);
+                assert!(
+                    !matches!(
+                        outcome,
+                        InputOutcome::Action(Action::QueueInterjectShared { .. })
+                    ),
+                    "protected row {server_id} emitted QueueInterjectShared for {key:?}: {outcome:?}"
+                );
+                assert!(agent.expect_send_now_cancel.is_none());
+                assert!(agent.send_now_awaiting_confirm.is_none());
+                assert!(agent.send_now_painted_blocks.is_empty());
+                assert_eq!(scrollback_len, agent.scrollback.len());
+                assert!(!agent.is_self_originated_prompt(server_id));
+                assert!(!agent.held_queue_top_sendable());
+            }
         }
     }
 
@@ -1230,7 +1393,11 @@ mod queue_edit_routing_tests {
 
         let ids = agent.queue.entry_ids();
         assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         assert!(
             matches!(outcome, InputOutcome::Changed),
@@ -1244,7 +1411,11 @@ mod queue_edit_routing_tests {
     #[test]
     fn force_interject_server_bash_row_promotes_via_queue_interject() {
         let mut agent = make_running_agent();
-        agent.shared_queue[0].kind = "bash".into();
+        agent
+            .shared_queue
+            .first_mut()
+            .unwrap_or_else(|| panic!("missing index"))
+            .kind = "bash".into();
         agent.queue.sync_from_merged(
             &agent.session.pending_prompts,
             &agent.shared_queue,
@@ -1255,7 +1426,11 @@ mod queue_edit_routing_tests {
         let registry = non_vscode_registry();
 
         let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
             InputOutcome::Action(Action::QueueInterjectShared { id, .. }) => {
@@ -1324,7 +1499,11 @@ mod queue_edit_routing_tests {
 
         let ids = agent.queue.entry_ids();
         assert_eq!(ids.len(), 1);
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         match outcome {
             InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
@@ -1347,7 +1526,11 @@ mod queue_edit_routing_tests {
         let registry = non_vscode_registry();
 
         let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[0]);
+        agent.queue.list_state.select_by_id(
+            ids.first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
         assert!(
             matches!(outcome, InputOutcome::Changed),
@@ -1398,23 +1581,110 @@ mod queue_edit_routing_tests {
         assert_eq!(agent.prompt.text(), "");
     }
 
-    /// Force-interject with no turn running is a guarded no-op (toast only); it must never emit a server interject for an idle session.
     #[test]
-    fn force_interject_noop_when_idle() {
-        let mut agent = make_running_agent();
-        agent.session.state = AgentState::Idle;
-        let registry = non_vscode_registry();
+    fn idle_looking_wake_keeps_prompt_send_now_available() {
+        for key in [
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            force_interject_key(),
+        ] {
+            let mut agent = running_agent_local_only();
+            agent.session.state = AgentState::Idle;
+            agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+                prompt_id: "task-completed-bg1".into(),
+                cancel_sent: false,
+            });
+            agent.active_pane = AgentPane::Prompt;
+            agent.queue.overlay.focused = false;
+            agent.prompt.set_text("");
 
-        let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[0]);
-        let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "idle force-interject must be a no-op, got {outcome:?}"
-        );
-        // Nothing left the queue.
-        assert_eq!(agent.shared_queue.len(), 1);
-        assert_eq!(agent.session.pending_prompts.len(), 1);
+            let outcome = agent.handle_prompt_key_for_test(&key);
+            assert!(
+                matches!(outcome, InputOutcome::Action(Action::SendPromptNow { ref text, .. }) if text == "local one"),
+                "idle-looking wake must allow queued send-now for {key:?}, got {outcome:?}"
+            );
+            assert!(agent.session.pending_prompts.is_empty());
+        }
+    }
+
+    #[test]
+    fn cancelling_turns_block_prompt_send_now() {
+        for state in [AgentState::TurnCancelling, AgentState::Idle] {
+            for key in [
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                force_interject_key(),
+            ] {
+                let mut agent = running_agent_local_only();
+                agent.session.state = state.clone();
+                if agent.session.state.is_idle() {
+                    agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+                        prompt_id: "task-completed-bg1".into(),
+                        cancel_sent: true,
+                    });
+                }
+                agent.active_pane = AgentPane::Prompt;
+                agent.queue.overlay.focused = false;
+                agent.prompt.set_text("");
+
+                let outcome = agent.handle_prompt_key_for_test(&key);
+                assert!(!matches!(outcome, InputOutcome::Action(_)));
+                assert_eq!(agent.session.pending_prompts.len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn queue_shortcut_tracks_send_now_state() {
+        for (state, wake_cancel_sent, should_send) in [
+            (AgentState::TurnRunning, None, true),
+            (AgentState::Idle, Some(false), true),
+            (AgentState::TurnCancelling, None, false),
+            (AgentState::Idle, Some(true), false),
+        ] {
+            let mut agent = running_agent_local_only();
+            agent.session.state = state;
+            agent.running_wake_turn =
+                wake_cancel_sent.map(|cancel_sent| crate::app::agent_view::RunningWakeTurn {
+                    prompt_id: "task-completed-bg1".into(),
+                    cancel_sent,
+                });
+            agent.active_pane = AgentPane::Queue;
+            let id = agent
+                .queue
+                .entry_ids()
+                .first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index"));
+            agent.queue.list_state.select_by_id(id);
+
+            let outcome = agent.handle_queue_key(&force_interject_key(), &non_vscode_registry());
+            assert_eq!(matches!(outcome, InputOutcome::Action(_)), should_send);
+            assert_eq!(agent.session.pending_prompts.is_empty(), should_send);
+        }
+    }
+
+    #[test]
+    fn force_interject_does_not_dispatch_without_a_turn() {
+        for state in [
+            AgentState::Idle,
+            AgentState::CommandCancelling {
+                command: crate::app::agent::AgentCommand::Compact,
+            },
+        ] {
+            let mut agent = make_running_agent();
+            agent.session.state = state;
+            let registry = non_vscode_registry();
+
+            let ids = agent.queue.entry_ids();
+            agent.queue.list_state.select_by_id(
+                ids.first()
+                    .copied()
+                    .unwrap_or_else(|| panic!("missing index")),
+            );
+            let outcome = agent.handle_queue_key(&force_interject_key(), &registry);
+            assert!(matches!(outcome, InputOutcome::Changed));
+            assert_eq!(agent.shared_queue.len(), 1);
+            assert_eq!(agent.session.pending_prompts.len(), 1);
+        }
     }
 
     /// Reordering a Server row emits `Action::QueueReorderShared` with the swapped server id order.
@@ -1458,7 +1728,11 @@ mod queue_edit_routing_tests {
 
         // Select the second server row and swap it up.
         let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[1]);
+        agent.queue.list_state.select_by_id(
+            ids.get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(
             &KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT),
             &registry,
@@ -1486,12 +1760,28 @@ mod queue_edit_routing_tests {
         let ids = agent.queue.entry_ids();
         assert_eq!(ids.len(), 2, "pane hides the send-now echo");
         assert!(
-            agent.server_queue_reordered(ids[0], true).is_none(),
+            agent
+                .server_queue_reordered(
+                    ids.first()
+                        .copied()
+                        .unwrap_or_else(|| panic!("missing index")),
+                    true
+                )
+                .is_none(),
             "SwapUp on first visible held must not demote send-now"
         );
-        agent.queue.list_state.select_by_id(ids[1]);
+        agent.queue.list_state.select_by_id(
+            ids.get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let ordered = agent
-            .server_queue_reordered(ids[1], true)
+            .server_queue_reordered(
+                ids.get(1)
+                    .copied()
+                    .unwrap_or_else(|| panic!("missing index")),
+                true,
+            )
             .expect("swap up among held rows");
         assert_eq!(
             ordered,
@@ -1800,7 +2090,11 @@ mod queue_edit_routing_tests {
         agent.active_pane = AgentPane::Queue;
         let registry = vscode_family_registry();
         let ids = agent.queue.entry_ids();
-        agent.queue.list_state.select_by_id(ids[1]);
+        agent.queue.list_state.select_by_id(
+            ids.get(1)
+                .copied()
+                .unwrap_or_else(|| panic!("missing index")),
+        );
         let outcome = agent.handle_queue_key(&vscode_interject_key(), &registry);
         match outcome {
             InputOutcome::Action(Action::SendPromptNow { text, .. }) => {
@@ -1904,9 +2198,9 @@ mod watcher_tests {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
         agent.workflow_runs.push(workflow("wf-1", "active"));
         let mut child_a = test_fixtures::running_subagent_info("child-a");
-        child_a.workflow_run_id = Some("wf-1".into());
+        child_a.attempt.workflow_run_id = Some("wf-1".into());
         let mut child_b = test_fixtures::running_subagent_info("child-b");
-        child_b.workflow_run_id = Some("wf-1".into());
+        child_b.attempt.workflow_run_id = Some("wf-1".into());
         agent.subagent_sessions.insert("child-a".into(), child_a);
         agent.subagent_sessions.insert("child-b".into(), child_b);
 
@@ -1935,7 +2229,7 @@ mod watcher_tests {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
         agent.workflow_runs.push(workflow("wf-1", "active"));
         let mut workflow_child = test_fixtures::running_subagent_info("workflow-child");
-        workflow_child.workflow_run_id = Some("wf-1".into());
+        workflow_child.attempt.workflow_run_id = Some("wf-1".into());
         agent
             .subagent_sessions
             .insert("workflow-child".into(), workflow_child);

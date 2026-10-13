@@ -12,10 +12,9 @@ pub const BINARY_EXTENSIONS: &[&str] = &[
 const SAMPLE_SIZE: usize = 8192;
 const NON_PRINTABLE_THRESHOLD: f64 = 0.3;
 
-/// Returns `true` if the file should be treated as binary.
-///
-/// A file is binary if its extension is in [`BINARY_EXTENSIONS`], or if
-/// a significant portion of the first [`SAMPLE_SIZE`] bytes are non-printable.
+/// Returns `true` if the file should be treated as binary. A file is binary if its extension is in
+/// [`BINARY_EXTENSIONS`], or if a significant portion of the first [`SAMPLE_SIZE`] bytes are
+/// non-printable.
 pub fn is_binary(extension: &str, bytes: &[u8]) -> bool {
     if BINARY_EXTENSIONS.binary_search(&extension).is_ok() {
         return true;
@@ -24,7 +23,7 @@ pub fn is_binary(extension: &str, bytes: &[u8]) -> bool {
         return false;
     }
 
-    let sample = &bytes[..bytes.len().min(SAMPLE_SIZE)];
+    let sample = bytes.get(..bytes.len().min(SAMPLE_SIZE)).unwrap_or(&[]);
 
     // Any null byte → binary.
     if sample.contains(&0x00) {
@@ -156,7 +155,7 @@ mod tests {
         sorted.sort();
         assert_eq!(
             BINARY_EXTENSIONS,
-            &sorted[..],
+            sorted.as_slice(),
             "BINARY_EXTENSIONS should be sorted alphabetically"
         );
     }

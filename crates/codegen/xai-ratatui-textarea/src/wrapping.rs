@@ -18,16 +18,19 @@ where
         match line {
             std::borrow::Cow::Borrowed(slice) => {
                 let slice_addr = slice.as_ptr() as usize;
-                // Skip slices whose pointers don't lie within `text`.
-                // This guards against empty Cow::Borrowed("") slices from
-                // textwrap that reference static memory instead of the
-                // input buffer (e.g. at zero or degenerate widths).
+                // Skip slices whose pointers don't lie within `text`. This guards against empty Cow::Borrowed("") slices from textwrap
+                // that reference static memory instead of the input buffer (e.g. at zero or degenerate widths).
                 if slice_addr < text_start || slice_addr > text_end {
                     continue;
                 }
                 let start = slice_addr - text_start;
                 let end = start + slice.len();
-                let trailing_spaces = text[end..].chars().take_while(|c| *c == ' ').count();
+                let trailing_spaces = text
+                    .get(end..)
+                    .unwrap_or("")
+                    .chars()
+                    .take_while(|c| *c == ' ')
+                    .count();
                 lines.push(start..end + trailing_spaces);
             }
             std::borrow::Cow::Owned(_) => panic!("wrap_ranges: unexpected owned string"),
@@ -225,13 +228,21 @@ where
 
     // Wrap the remainder using subsequent indent width and map back to original indices.
     let base = first_line_range.end;
-    let skip_leading_spaces = flat[base..].chars().take_while(|c| *c == ' ').count();
+    let skip_leading_spaces = flat
+        .get(base..)
+        .unwrap_or("")
+        .chars()
+        .take_while(|c| *c == ' ')
+        .count();
     let base = base + skip_leading_spaces;
     let subsequent_width_available = opts
         .width
         .saturating_sub(rt_opts.subsequent_indent.width())
         .max(1);
-    let remaining_wrapped = wrap_ranges_trim(&flat[base..], opts.width(subsequent_width_available));
+    let remaining_wrapped = wrap_ranges_trim(
+        flat.get(base..).unwrap_or(""),
+        opts.width(subsequent_width_available),
+    );
     for r in &remaining_wrapped {
         if r.is_empty() {
             continue;
@@ -326,8 +337,13 @@ fn slice_line_spans<'a>(
         if seg_end > seg_start {
             let local_start = seg_start - s;
             let local_end = seg_end - s;
-            let content = original.spans[i].content.as_ref();
-            let slice = &content[local_start..local_end];
+            let Some(span) = original.spans.get(i) else {
+                continue;
+            };
+            let content = span.content.as_ref();
+            let Some(slice) = content.get(local_start..local_end) else {
+                continue;
+            };
             acc.push(Span {
                 style: *style,
                 content: std::borrow::Cow::Borrowed(slice),
@@ -360,12 +376,26 @@ mod tests {
             .collect::<String>()
     }
 
+    fn line_at<'a, 'b>(out: &'a [Line<'b>], i: usize) -> &'a Line<'b> {
+        let Some(line) = out.get(i) else {
+            panic!("expected line {i}: {out:?}");
+        };
+        line
+    }
+
+    fn first_span<'a, 'b>(line: &'a Line<'b>) -> &'a Span<'b> {
+        let Some(span) = line.spans.first() else {
+            panic!("expected a span: {:?}", line.spans);
+        };
+        span
+    }
+
     #[test]
     fn trivial_unstyled_no_indents_wide_width() {
         let line = Line::from("hello");
         let out = word_wrap_line(&line, 10);
         assert_eq!(out.len(), 1);
-        assert_eq!(concat_line(&out[0]), "hello");
+        assert_eq!(concat_line(line_at(&out, 0)), "hello");
     }
 
     #[test]
@@ -373,8 +403,8 @@ mod tests {
         let line = Line::from("hello world");
         let out = word_wrap_line(&line, 5);
         assert_eq!(out.len(), 2);
-        assert_eq!(concat_line(&out[0]), "hello");
-        assert_eq!(concat_line(&out[1]), "world");
+        assert_eq!(concat_line(line_at(&out, 0)), "hello");
+        assert_eq!(concat_line(line_at(&out, 1)), "world");
     }
 
     #[test]
@@ -383,13 +413,13 @@ mod tests {
         let out = word_wrap_line(&line, 6);
         assert_eq!(out.len(), 2);
         // First line should carry the red style
-        assert_eq!(concat_line(&out[0]), "hello");
-        assert_eq!(out[0].spans.len(), 1);
-        assert_eq!(out[0].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(concat_line(line_at(&out, 0)), "hello");
+        assert_eq!(line_at(&out, 0).spans.len(), 1);
+        assert_eq!(first_span(line_at(&out, 0)).style.fg, Some(Color::Red));
         // Second line is unstyled
-        assert_eq!(concat_line(&out[1]), "world");
-        assert_eq!(out[1].spans.len(), 1);
-        assert_eq!(out[1].spans[0].style.fg, None);
+        assert_eq!(concat_line(line_at(&out, 1)), "world");
+        assert_eq!(line_at(&out, 1).spans.len(), 1);
+        assert_eq!(first_span(line_at(&out, 1)).style.fg, None);
     }
 
     #[test]
@@ -400,13 +430,13 @@ mod tests {
         let line = Line::from("hello world foo");
         let out = word_wrap_line(&line, opts);
         // Expect three lines with proper prefixes
-        assert!(concat_line(&out[0]).starts_with("- "));
-        assert!(concat_line(&out[1]).starts_with("  "));
-        assert!(concat_line(&out[2]).starts_with("  "));
+        assert!(concat_line(line_at(&out, 0)).starts_with("- "));
+        assert!(concat_line(line_at(&out, 1)).starts_with("  "));
+        assert!(concat_line(line_at(&out, 2)).starts_with("  "));
         // And content roughly segmented
-        assert_eq!(concat_line(&out[0]), "- hello");
-        assert_eq!(concat_line(&out[1]), "  world");
-        assert_eq!(concat_line(&out[2]), "  foo");
+        assert_eq!(concat_line(line_at(&out, 0)), "- hello");
+        assert_eq!(concat_line(line_at(&out, 1)), "  world");
+        assert_eq!(concat_line(line_at(&out, 2)), "  foo");
     }
 
     #[test]
@@ -416,8 +446,8 @@ mod tests {
             .subsequent_indent(Line::from("    "));
         let line = Line::from("hello world foobar");
         let out = word_wrap_line(&line, opts);
-        assert!(concat_line(&out[0]).starts_with("hello"));
-        for l in &out[1..] {
+        assert!(concat_line(line_at(&out, 0)).starts_with("hello"));
+        for l in out.get(1..).unwrap_or(&[]) {
             assert!(concat_line(l).starts_with("    "));
         }
     }
@@ -427,7 +457,7 @@ mod tests {
         let line = Line::from("");
         let out = word_wrap_line(&line, 10);
         assert_eq!(out.len(), 1);
-        assert_eq!(concat_line(&out[0]), "");
+        assert_eq!(concat_line(line_at(&out, 0)), "");
     }
 
     #[test]
@@ -435,7 +465,7 @@ mod tests {
         let line = Line::from("   hello");
         let out = word_wrap_line(&line, 8);
         assert_eq!(out.len(), 1);
-        assert_eq!(concat_line(&out[0]), "   hello");
+        assert_eq!(concat_line(line_at(&out, 0)), "   hello");
     }
 
     #[test]
@@ -443,8 +473,8 @@ mod tests {
         let line = Line::from("hello   world");
         let out = word_wrap_line(&line, 8);
         assert_eq!(out.len(), 2);
-        assert_eq!(concat_line(&out[0]), "hello");
-        assert_eq!(concat_line(&out[1]), "world");
+        assert_eq!(concat_line(line_at(&out, 0)), "hello");
+        assert_eq!(concat_line(line_at(&out, 1)), "world");
     }
 
     #[test]
@@ -453,7 +483,7 @@ mod tests {
         let line = Line::from("supercalifragilistic");
         let out = word_wrap_line(&line, opts);
         assert_eq!(out.len(), 1);
-        assert_eq!(concat_line(&out[0]), "supercalifragilistic");
+        assert_eq!(concat_line(line_at(&out, 0)), "supercalifragilistic");
     }
 
     #[test]
@@ -461,8 +491,8 @@ mod tests {
         let line = Line::from("hello-world");
         let out = word_wrap_line(&line, 7);
         assert_eq!(out.len(), 2);
-        assert_eq!(concat_line(&out[0]), "hello-");
-        assert_eq!(concat_line(&out[1]), "world");
+        assert_eq!(concat_line(line_at(&out, 0)), "hello-");
+        assert_eq!(concat_line(line_at(&out, 1)), "world");
     }
 
     #[test]
@@ -473,9 +503,9 @@ mod tests {
         let line = Line::from("hello");
         let out = word_wrap_line(&line, opts);
         assert_eq!(out.len(), 3);
-        assert_eq!(concat_line(&out[0]), ">>>>h");
-        assert_eq!(concat_line(&out[1]), "--el");
-        assert_eq!(concat_line(&out[2]), "--lo");
+        assert_eq!(concat_line(line_at(&out, 0)), ">>>>h");
+        assert_eq!(concat_line(line_at(&out, 1)), "--el");
+        assert_eq!(concat_line(line_at(&out, 2)), "--lo");
     }
 
     #[test]
@@ -483,8 +513,8 @@ mod tests {
         let line = Line::from("😀😀😀");
         let out = word_wrap_line(&line, 4);
         assert_eq!(out.len(), 2);
-        assert_eq!(concat_line(&out[0]), "😀😀");
-        assert_eq!(concat_line(&out[1]), "😀");
+        assert_eq!(concat_line(line_at(&out, 0)), "😀😀");
+        assert_eq!(concat_line(line_at(&out, 1)), "😀");
     }
 
     #[test]
@@ -493,12 +523,12 @@ mod tests {
         let line = Line::from(vec!["abcd".red()]);
         let out = word_wrap_line(&line, 2);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].spans.len(), 1);
-        assert_eq!(out[1].spans.len(), 1);
-        assert_eq!(out[0].spans[0].style.fg, Some(Color::Red));
-        assert_eq!(out[1].spans[0].style.fg, Some(Color::Red));
-        assert_eq!(concat_line(&out[0]), "ab");
-        assert_eq!(concat_line(&out[1]), "cd");
+        assert_eq!(line_at(&out, 0).spans.len(), 1);
+        assert_eq!(line_at(&out, 1).spans.len(), 1);
+        assert_eq!(first_span(line_at(&out, 0)).style.fg, Some(Color::Red));
+        assert_eq!(first_span(line_at(&out, 1)).style.fg, Some(Color::Red));
+        assert_eq!(concat_line(line_at(&out, 0)), "ab");
+        assert_eq!(concat_line(line_at(&out, 1)), "cd");
     }
 
     #[test]
@@ -513,7 +543,10 @@ mod tests {
         // Expect: first line prefixed with "- ", subsequent wrapped pieces with "  "
         // and for the second input line, there should be no "- " prefix on its first piece
         let rendered: Vec<String> = out.iter().map(concat_line).collect();
-        assert!(rendered[0].starts_with("- "));
+        let Some(first) = rendered.first() else {
+            panic!("expected a wrapped line: {rendered:?}");
+        };
+        assert!(first.starts_with("- "));
         for r in rendered.iter().skip(1) {
             assert!(r.starts_with("  "));
         }

@@ -15,7 +15,6 @@ use xai_grok_telemetry::session_ctx::log_event;
 pub(super) const PAYWALL_AUTO_CHECK_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Whether the user is at the highest subscription tier (SuperGrok Heavy).
-///
 /// Returns `true` only when `subscription_tier` positively matches a known max-tier identifier.
 /// An unknown (`None`) or unrecognized tier returns `false`, so lower-tier users always get the Q&A modal with the upgrade option.
 pub(super) fn is_max_tier(subscription_tier: Option<&str>) -> bool {
@@ -42,8 +41,6 @@ pub(super) enum CreditLimitUpsellMode {
 }
 
 /// Resolve upsell copy mode from credits config.
-///
-/// An explicit `is_unified_billing_user` wins; a missing field is not treated as legacy.
 /// A positive `pay_as_you_go` (an on-demand cap over 0) only selects legacy when the unified flag is absent.
 /// Unknown defaults to unified (buy credits) so pool users are never told to enable on-demand.
 pub(super) fn credit_limit_upsell_mode(
@@ -61,9 +58,8 @@ pub(super) fn credit_limit_upsell_mode(
 }
 
 /// Whether an API or retry error is a credit-limit or spend-block denial.
-///
-/// - 402 Payment Required always means a credit or spend block here (Build pool and IC spend blocks); no message filter.
-/// - 403 counts only when the body contains "run out of credits" (legacy IC spend wording); other 403s (content-safety, ZDR, …) are excluded.
+/// 402 Payment Required always means a credit or spend block here (Build pool and IC spend blocks); no message filter.
+/// 403 counts only when the body contains "run out of credits" (legacy IC spend wording); other 403s (content-safety, ZDR, …) are excluded.
 pub(crate) fn is_credit_limit_error(http_status: Option<u16>, message: &str) -> bool {
     let m = message.to_ascii_lowercase();
     let legacy = m.contains("run out of credits");
@@ -75,7 +71,7 @@ pub(crate) fn is_credit_limit_error(http_status: Option<u16>, message: &str) -> 
     }
 }
 
-/// Option id for Try Again. Submit routes on this sentinel, not on
+/// Option id for Try Again. Submit routes on this sentinel, not on position in the telemetry `choices` vec.
 /// position in the telemetry `choices` vec.
 pub(crate) const CREDIT_LIMIT_RETRY_OPTION_ID: &str = "retry-last-prompt";
 
@@ -89,11 +85,8 @@ struct CreditLimitCopy {
 }
 
 /// Open the credit-limit upsell Q&A on the given agent.
-///
 /// Non-max-tier: Upgrade tier + buy-credits (or PAYG) + Try Again.
-/// Max-tier (SuperGrok Heavy): buy-credits (or PAYG) + Try Again — no
-/// upgrade option. URL options carry the target in `id` so the submit
-/// handler is position-independent.
+/// Max-tier (SuperGrok Heavy): buy-credits (or PAYG) + Try Again — no upgrade option. URL options carry the target in `id` so the submit handler is position-independent.
 pub(super) fn open_credit_limit_upsell(
     agent: &mut AgentView,
     mode: CreditLimitUpsellMode,
@@ -223,15 +216,13 @@ pub(super) fn open_credit_limit_upsell(
     )
     .with_local_kind(LocalQuestionKind::CreditLimitUpsell { choices })
     .with_no_freeform();
-    agent.question_view = Some(state);
+    agent.install_local_question(state);
     agent.prompt.set_text("");
 }
 
 /// Open the free-usage paywall on the given agent: a Q&A modal in the [`open_credit_limit_upsell`] style with two upgrade options.
 /// Each option's `id` carries its target URL so the submit handler is position-independent.
-///
 /// Only the driver can reach this: the PromptResponse handler calls it, and viewers never receive that response.
-/// `auth_method` feeds the `SuperGrokUpsellShown` funnel event.
 pub(super) fn open_free_usage_upsell(agent: &mut AgentView, auth_method: Option<String>) {
     open_supergrok_upsell(agent, UpsellReason::FreeUsageLimit, auth_method);
 }
@@ -361,7 +352,7 @@ fn open_supergrok_upsell(
     )
     .with_local_kind(LocalQuestionKind::FreeUsageUpsell { source })
     .with_no_freeform();
-    agent.question_view = Some(state);
+    agent.install_local_question(state);
     agent.prompt.set_text("");
     true
 }
@@ -456,8 +447,21 @@ pub(super) fn handle_gate_refreshed(
     }
 }
 
+/// A re-check snapshot built before hydration can land after it, so for the same account a resolved capability is kept. A genuine loss (removed from the team mid-session) then waits for the next launch, the right way to be wrong: the value is advisory and the row is editable when unknown.
+fn apply_recheck_meta(app: &mut AppView, mut meta: xai_grok_login::AuthMeta) {
+    let same_account = crate::app::app_view::AuthIdentity {
+        email: meta.email.clone(),
+        team_id: meta.team_id.clone(),
+        team_principal: meta.is_team_principal,
+    }
+    .matches(&app.auth_identity());
+    if same_account && meta.can_administer_team.is_none() {
+        meta.can_administer_team = app.can_administer_team;
+    }
+    app.apply_auth_meta(&meta);
+}
+
 /// `x.ai/auth/check_subscription` completed.
-/// Meta is authoritative (`apply_auth_meta` also drops any deferred gate).
 /// A failed check only promotes the deferred gate it was verifying (the `verify` generation).
 /// Generic watch, focus, and paywall-chain failures never touch it.
 pub(super) fn handle_check_subscription_complete(
@@ -468,9 +472,9 @@ pub(super) fn handle_check_subscription_complete(
     let was_blocked = !app.has_access();
     let applied = match meta {
         Some(meta_val) => {
-            match serde_json::from_value::<xai_grok_shell::auth::AuthMeta>(meta_val) {
+            match serde_json::from_value::<xai_grok_login::AuthMeta>(meta_val) {
                 Ok(auth_meta) => {
-                    app.apply_auth_meta(&auth_meta);
+                    apply_recheck_meta(app, auth_meta);
                     true
                 }
                 Err(e) => {
@@ -533,9 +537,9 @@ pub(super) fn handle_credit_limit_recheck_complete(
 ) -> Vec<Effect> {
     let old_tier = app.subscription_tier.clone();
     if let Some(meta_val) = meta
-        && let Ok(auth_meta) = serde_json::from_value::<xai_grok_shell::auth::AuthMeta>(meta_val)
+        && let Ok(auth_meta) = serde_json::from_value::<xai_grok_login::AuthMeta>(meta_val)
     {
-        app.apply_auth_meta(&auth_meta);
+        apply_recheck_meta(app, auth_meta);
     }
     let tier_changed = app.subscription_tier != old_tier && app.subscription_tier.is_some();
     let upgrade_message = tier_changed.then(|| {
@@ -555,7 +559,7 @@ pub(super) fn handle_credit_limit_recheck_complete(
         return vec![];
     };
 
-    // If the user already submitted another prompt while the recheck ran, don't retry the stashed one; they've moved on
+    // If the user already submitted another prompt while the recheck ran, don't retry the stashed one; they've moved on The tier update (above) still takes effect
     // The tier update (above) still takes effect
     let user_moved_on = !agent.session.state.is_idle() || !agent.session.pending_prompts.is_empty();
 
@@ -574,13 +578,13 @@ pub(super) fn handle_credit_limit_recheck_complete(
         let mode = credit_limit_upsell_mode(balance);
         let max_tier = is_max_tier(app.subscription_tier.as_deref());
         open_credit_limit_upsell(agent, mode, max_tier);
-        // Keep the stashed prompt so Try Again can resubmit after the
+        // Keep the stashed prompt so Try Again can resubmit after the user buys credits or the limit resets.
         // user buys credits or the limit resets.
     } else {
         agent.credit_limit_stashed_prompt = None;
     }
 
-    let mut drain = maybe_drain_queue(agent);
+    let mut drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
     drain.effects.push(Effect::FetchBilling {
         agent_id,
         silent: true,
@@ -610,7 +614,7 @@ pub(super) fn dispatch_retry_credit_limit_prompt(app: &mut AppView) -> Vec<Effec
         return vec![];
     };
     agent.session.enqueue_in_flight_prompt_front(prompt);
-    let drain = maybe_drain_queue(agent);
+    let drain = maybe_drain_queue(agent, &mut app.pending_image_notices);
     if drain.effects.iter().any(|effect| {
         matches!(
             effect,

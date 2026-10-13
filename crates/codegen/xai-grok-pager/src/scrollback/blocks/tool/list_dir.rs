@@ -19,6 +19,8 @@ pub struct ListDirToolCallBlock {
     pub started_at: Option<std::time::Instant>,
     /// Elapsed time in ms after completion.
     pub elapsed_ms: Option<i64>,
+    /// Whether this ordinary list targets a memory v2 scope.
+    pub is_memory_activity: bool,
 }
 
 impl ListDirToolCallBlock {
@@ -31,7 +33,13 @@ impl ListDirToolCallBlock {
             error: None,
             started_at: None,
             elapsed_ms: None,
+            is_memory_activity: false,
         }
+    }
+
+    pub fn with_memory_activity(mut self) -> Self {
+        self.is_memory_activity = true;
+        self
     }
 
     pub fn with_output(mut self, output: impl Into<String>) -> Self {
@@ -264,8 +272,11 @@ mod tests {
     }
 
     fn header_text(block: &ListDirToolCallBlock) -> String {
-        block.output(&ctx()).lines[0]
-            .content
+        let output = block.output(&ctx());
+        let Some(line) = output.lines.first() else {
+            panic!("expected a header line");
+        };
+        line.content
             .spans
             .iter()
             .map(|s| s.content.as_ref())

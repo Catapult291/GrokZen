@@ -21,7 +21,7 @@ A few worth knowing on day one:
 
 Two of those deserve a second look:
 
-- **`/compact`** takes an optional hint: `/compact keep the auth details`.
+- **`/compact`** compresses the conversation history to free up context.
   Check context usage anytime with `/context` — Grok also auto-compacts
   when the window fills up.
 - **`/rewind`** rewinds an earlier turn, dropping later turns; the

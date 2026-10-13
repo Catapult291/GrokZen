@@ -39,9 +39,7 @@ pub type ExtractedSymbols = (
 );
 
 /// Version tracking for tree-sitter queries used to build an index.
-///
-/// This is used to detect when queries change and trigger a rebuild of the index,
-/// even if file contents haven't changed.
+/// Detects query changes so the index rebuilds even if file contents have not.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum QueryVersion {
     /// Legacy format - index was built before query versioning was added.
@@ -55,10 +53,7 @@ pub enum QueryVersion {
 
 impl QueryVersion {
     /// Check if a rebuild is needed based on the current query version.
-    ///
-    /// Returns true if:
-    /// - This is a Legacy index (unknown query version)
-    /// - The version doesn't match the current version
+    /// True for a Legacy index (unknown version) or a version mismatch.
     pub fn needs_rebuild(&self, current_version: u64) -> bool {
         match self {
             QueryVersion::Legacy => true,
@@ -92,15 +87,21 @@ impl ScopeGraph {
     }
 
     pub fn is_definition(&self, node_idx: NodeIndex) -> bool {
-        matches!(self.graph[node_idx], NodeKind::Def(_))
+        self.graph
+            .node_weight(node_idx)
+            .is_some_and(|n| matches!(n, NodeKind::Def(_)))
     }
 
     pub fn is_reference(&self, node_idx: NodeIndex) -> bool {
-        matches!(self.graph[node_idx], NodeKind::Ref(_))
+        self.graph
+            .node_weight(node_idx)
+            .is_some_and(|n| matches!(n, NodeKind::Ref(_)))
     }
 
     pub fn is_import(&self, node_idx: NodeIndex) -> bool {
-        matches!(self.graph[node_idx], NodeKind::Import(_))
+        self.graph
+            .node_weight(node_idx)
+            .is_some_and(|n| matches!(n, NodeKind::Import(_)))
     }
 
     pub fn node_by_range(&self, start_byte: usize, end_byte: usize) -> Option<NodeIndex> {
@@ -108,7 +109,9 @@ impl ScopeGraph {
             .node_indices()
             .filter(|&idx| self.is_definition(idx) || self.is_reference(idx) || self.is_import(idx))
             .find(|&idx| {
-                let node = self.graph[idx].range();
+                let Some(node) = self.graph.node_weight(idx).map(|n| n.range()) else {
+                    return false;
+                };
                 start_byte >= node.start_byte() && end_byte <= node.end_byte()
             })
     }
@@ -119,13 +122,23 @@ impl ScopeGraph {
             .node_indices()
             .filter(|&idx| self.is_definition(idx))
             .filter(|&idx| {
-                let node = self.graph[idx].range();
+                let Some(node) = self.graph.node_weight(idx).map(|n| n.range()) else {
+                    return false;
+                };
                 node.start_byte() >= start_byte && node.end_byte() <= end_byte
             })
             .collect::<Vec<_>>();
         node_idxs.sort_by(|a, b| {
-            let first_node = self.graph[*a].range().byte_size();
-            let second_node = self.graph[*b].range().byte_size();
+            let first_node = self
+                .graph
+                .node_weight(*a)
+                .map(|n| n.range().byte_size())
+                .unwrap_or(0);
+            let second_node = self
+                .graph
+                .node_weight(*b)
+                .map(|n| n.range().byte_size())
+                .unwrap_or(0);
             first_node.cmp(&second_node)
         });
         node_idxs.first().copied()
@@ -133,7 +146,7 @@ impl ScopeGraph {
 
     // The smallest scope that encompasses `range`. Start at `start` and narrow down if possible.
     fn scope_by_range(&self, range: Range, start: NodeIndex) -> Option<NodeIndex> {
-        let target_range = self.graph[start].range();
+        let target_range = self.graph.node_weight(start).map(|n| n.range())?;
         if target_range.contains(&range) {
             let child_scopes = self
                 .graph
@@ -168,7 +181,9 @@ impl ScopeGraph {
             let mut found = false;
             for edge in self.graph.edges_directed(current_node, Direction::Incoming) {
                 if let EdgeKind::ScopeToScope = edge.weight() {
-                    let node = &self.graph[edge.source()];
+                    let Some(node) = self.graph.node_weight(edge.source()) else {
+                        continue;
+                    };
                     if let NodeKind::Scope(scope) = node
                         && scope.range.contains(range)
                     {
@@ -182,10 +197,10 @@ impl ScopeGraph {
                 break;
             }
         }
-        if let NodeKind::Scope(scope) = &self.graph[current_node] {
-            scope.clone()
-        } else {
-            unreachable!()
+        match self.graph.node_weight(current_node) {
+            Some(NodeKind::Scope(scope)) => scope.clone(),
+            // The walk starts at the root scope and only follows ScopeToScope edges.
+            _ => unreachable!("scope walk landed on a non-scope node"),
         }
     }
 
@@ -224,7 +239,11 @@ impl ScopeGraph {
 
     // Produce the parent scope of a given scope
     fn parent_scope(&self, start: NodeIndex) -> Option<NodeIndex> {
-        if matches!(self.graph[start], NodeKind::Scope(_)) {
+        if self
+            .graph
+            .node_weight(start)
+            .is_some_and(|n| matches!(n, NodeKind::Scope(_)))
+        {
             return self
                 .graph
                 .edges_directed(start, Direction::Outgoing)
@@ -266,19 +285,15 @@ impl ScopeGraph {
                     .filter(|edge| *edge.weight() == EdgeKind::DefToScope)
                     .map(|edge| edge.source())
                 {
-                    if let NodeKind::Def(def) = &self.graph[local_def]
+                    if let Some(NodeKind::Def(def)) = self.graph.node_weight(local_def)
                         && new.name(src) == def.name(src)
                     {
                         match (&def.symbol_id, &new.symbol_id) {
                             // both contain symbols, but they don't belong to the same namepspace
                             (Some(d), Some(r)) if d.namespace_idx != r.namespace_idx => {}
 
-                            // in all other cases, form an edge from the ref to def.
-                            // an empty symbol belongs to all namespaces:
-                            // * (None, None)
-                            // * (None, Some(_))
-                            // * (Some(_), None)
-                            // * (Some(_), Some(_)) if def.namespace == ref.namespace
+                            // Otherwise form an edge from the ref to def.
+                            // An empty symbol belongs to all namespaces; a named pair matches only equal namespaces.
                             _ => {
                                 possible_defs.push(local_def);
                             }
@@ -293,7 +308,7 @@ impl ScopeGraph {
                     .filter(|edge| *edge.weight() == EdgeKind::ImportToScope)
                     .map(|edge| edge.source())
                 {
-                    if let NodeKind::Import(import) = &self.graph[local_import]
+                    if let Some(NodeKind::Import(import)) = self.graph.node_weight(local_import)
                         && new.name(src) == import.name(src)
                     {
                         possible_imports.push(local_import);
@@ -326,7 +341,7 @@ impl ScopeGraph {
         self.graph
             .node_indices()
             .filter_map(|idx| {
-                if let NodeKind::Def(def) = &self.graph[idx] {
+                if let Some(NodeKind::Def(def)) = self.graph.node_weight(idx) {
                     let name = String::from_utf8_lossy(def.name(src)).to_string();
                     Some((name, def.range))
                 } else {
@@ -341,7 +356,7 @@ impl ScopeGraph {
         self.graph
             .node_indices()
             .filter_map(|idx| {
-                if let NodeKind::Ref(reference) = &self.graph[idx] {
+                if let Some(NodeKind::Ref(reference)) = self.graph.node_weight(idx) {
                     let name = String::from_utf8_lossy(reference.name(src)).to_string();
                     Some((name, reference.range))
                 } else {
@@ -356,7 +371,7 @@ impl ScopeGraph {
         self.graph
             .node_indices()
             .filter_map(|idx| {
-                if let NodeKind::Ref(reference) = &self.graph[idx] {
+                if let Some(NodeKind::Ref(reference)) = self.graph.node_weight(idx) {
                     let ref_name = String::from_utf8_lossy(reference.name(src)).to_string();
                     let ref_range = reference.range;
 
@@ -366,7 +381,8 @@ impl ScopeGraph {
                         .edges_directed(idx, Direction::Outgoing)
                         .find(|edge| *edge.weight() == EdgeKind::RefToDef)
                         .and_then(|edge| {
-                            if let NodeKind::Def(def) = &self.graph[edge.target()] {
+                            if let Some(NodeKind::Def(def)) = self.graph.node_weight(edge.target())
+                            {
                                 let def_name = String::from_utf8_lossy(def.name(src)).to_string();
                                 Some((def_name, def.range))
                             } else {
@@ -385,7 +401,7 @@ impl ScopeGraph {
     /// Find definition by name - returns the range of the definition
     pub fn find_definition(&self, name: &str, src: &[u8]) -> Option<Range> {
         self.graph.node_indices().find_map(|idx| {
-            if let NodeKind::Def(def) = &self.graph[idx]
+            if let Some(NodeKind::Def(def)) = self.graph.node_weight(idx)
                 && def.name(src) == name.as_bytes()
             {
                 return Some(def.range);
@@ -399,7 +415,7 @@ impl ScopeGraph {
         self.graph
             .node_indices()
             .filter_map(|idx| {
-                if let NodeKind::Ref(reference) = &self.graph[idx]
+                if let Some(NodeKind::Ref(reference)) = self.graph.node_weight(idx)
                     && reference.name(src) == name.as_bytes()
                 {
                     return Some(reference.range);
@@ -410,21 +426,17 @@ impl ScopeGraph {
     }
 
     /// Create a minimal ScopeGraph from pre-extracted symbols.
-    ///
-    /// This is used for fast indexing where we already have definitions and references
-    /// extracted via `extract_symbols_fast`.
+    /// Used for fast indexing where definitions and references are already extracted.
     pub fn from_symbols(
         definitions: Vec<(String, Range)>,
         references: Vec<(String, Range)>,
     ) -> Self {
         // Create a graph with a root scope covering the whole file
-        let root_range = if !definitions.is_empty() {
-            definitions[0].1
-        } else if !references.is_empty() {
-            references[0].1
-        } else {
-            Range::default()
-        };
+        let root_range = definitions
+            .first()
+            .or(references.first())
+            .map(|d| d.1)
+            .unwrap_or_default();
 
         let mut graph = Graph::new();
         let root_idx = graph.add_node(NodeKind::scope(root_range));
@@ -478,10 +490,9 @@ impl<'a> Iterator for ScopeStack<'a> {
     }
 }
 
-/// Build a ScopeGraph from file_definitions_query patterns (name.definition.*, name.reference.*)
-/// This is simpler than scope_res_generic as it doesn't handle local scoping rules,
-/// but it works with the existing query patterns in TSLanguageConfig.
-/// Returns: (ScopeGraph, Vec<(alias_name, original_name)>)
+/// Build a ScopeGraph from file_definitions_query patterns (name.definition.*, name.reference.*).
+/// Simpler than scope_res_generic: no local scoping rules, works with existing TSLanguageConfig queries.
+/// Returns `(ScopeGraph, Vec<(alias_name, original_name)>)`.
 pub fn scope_graph_from_definitions_query(
     query: &tree_sitter::Query,
     root_node: tree_sitter::Node<'_>,
@@ -509,8 +520,11 @@ pub fn scope_graph_from_definitions_query(
 
         for capture in match_.captures {
             let range = Range::for_tree_node(&capture.node);
-            let capture_name = &query.capture_names()[capture.index as usize];
-            let text = String::from_utf8_lossy(&src[capture.node.byte_range()]).to_string();
+            let Some(capture_name) = query.capture_names().get(capture.index as usize) else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(src.get(capture.node.byte_range()).unwrap_or(&[]))
+                .to_string();
 
             let parts: Vec<_> = capture_name.split('.').collect();
 
@@ -555,13 +569,9 @@ pub fn scope_graph_from_definitions_query(
     (scope_graph, alias_pairs)
 }
 
-/// Lightweight symbol extraction for fast indexing.
-///
-/// Unlike scope_graph_from_definitions_query, this doesn't build a full ScopeGraph.
-/// It directly extracts (name, range) tuples for definitions and references.
-/// This is ~2-3x faster for indexing purposes where we don't need the full graph.
-///
-/// Returns: (definitions, references, aliases)
+/// Lightweight symbol extraction for fast indexing. Does not build a full ScopeGraph.
+/// Directly extracts (name, range) tuples — ~2-3x faster when the full graph is not needed.
+/// Returns `(definitions, references, aliases)`.
 pub fn extract_symbols_fast(
     query: &tree_sitter::Query,
     root_node: tree_sitter::Node<'_>,
@@ -577,9 +587,13 @@ pub fn extract_symbols_fast(
 
     for (i, name) in capture_names.iter().enumerate() {
         if name.starts_with("name.definition.") {
-            is_def[i] = true;
+            if let Some(slot) = is_def.get_mut(i) {
+                *slot = true;
+            }
         } else if name.starts_with("name.reference.") {
-            is_ref[i] = true;
+            if let Some(slot) = is_ref.get_mut(i) {
+                *slot = true;
+            }
         } else if *name == "alias.original" {
             alias_original_idx = Some(i);
         } else if *name == "alias.name" {
@@ -606,17 +620,19 @@ pub fn extract_symbols_fast(
 
             if is_def.get(idx).copied().unwrap_or(false) {
                 // Convert Cow<str> directly to Arc<str> - avoids intermediate String allocation
-                let text: Arc<str> = String::from_utf8_lossy(&src[byte_range]).into();
+                let text: Arc<str> =
+                    String::from_utf8_lossy(src.get(byte_range).unwrap_or(&[])).into();
                 let range = Range::for_tree_node(&node);
                 definitions.push((text, range));
             } else if is_ref.get(idx).copied().unwrap_or(false) {
-                let text: Arc<str> = String::from_utf8_lossy(&src[byte_range]).into();
+                let text: Arc<str> =
+                    String::from_utf8_lossy(src.get(byte_range).unwrap_or(&[])).into();
                 let range = Range::for_tree_node(&node);
                 references.push((text, range));
             } else if Some(idx) == alias_original_idx {
-                alias_original = Some(&src[byte_range]);
+                alias_original = src.get(byte_range);
             } else if Some(idx) == alias_name_idx {
-                alias_name = Some(&src[byte_range]);
+                alias_name = src.get(byte_range);
             }
         }
 
@@ -638,20 +654,8 @@ pub const SCOPE_GRAPH_INDEX_MAGIC: &[u8; 4] = b"SGIX";
 pub const SCOPE_GRAPH_INDEX_VERSION: u16 = 1;
 
 /// Memory-efficient structure for cross-file symbol indexing.
-///
-/// Uses `StringInterner` to deduplicate all file paths and symbol names,
-/// dramatically reducing memory usage (from ~1GB to ~100MB for large repos).
-///
-/// # Memory Efficiency
-///
-/// Instead of storing `Arc<str>` for each string occurrence (which creates
-/// millions of allocations during deserialization), this struct stores all
-/// unique strings once in a contiguous arena and uses `StringId` (u32) handles.
-///
-/// # Serialization
-///
-/// Uses a custom binary format with magic bytes "SGIX" for detection.
-/// Falls back gracefully when loading legacy bincode format.
+/// Interns paths and names once (`StringId` handles) instead of per-occurrence `Arc<str>`.
+/// Custom binary format with magic "SGIX"; falls back gracefully on legacy bincode.
 #[derive(Debug, Clone)]
 pub struct ScopeGraphIndex {
     /// String interner for all paths and symbols
@@ -659,9 +663,7 @@ pub struct ScopeGraphIndex {
     /// File path ID -> ScopeGraph for that file
     pub(crate) graphs: HashMap<StringId, ScopeGraph>,
     /// Symbol name ID -> list of (file_path_id, line_number) where it's defined.
-    /// Line numbers are stored as `u32` (max ~4 billion lines) rather than
-    /// `usize` to halve per-entry memory: `(StringId, u32)` = 8 bytes vs the
-    /// 16 bytes that `(StringId, usize)` requires on 64-bit targets.
+    /// Line numbers are `u32` to halve per-entry memory vs `usize` on 64-bit.
     pub(crate) definitions: HashMap<StringId, Vec<(StringId, u32)>>,
     /// Symbol name ID -> list of (file_path_id, line_number) where it's referenced.
     /// Same compact representation as `definitions`.
@@ -782,11 +784,7 @@ impl ScopeGraphIndex {
     }
 
     /// Add a definition occurrence with a pre-interned path id.
-    ///
-    /// `line` is a 1-indexed line number.  It is stored internally as `u32`.
-    /// Values above `u32::MAX` (≈ 4.3 billion lines) are **saturated** to
-    /// `u32::MAX` rather than wrapping or panicking — no real source file can
-    /// have that many lines.
+    /// `line` is 1-indexed and stored as `u32`. Values above `u32::MAX` saturate, not wrap.
     pub fn add_definition_with_path_id(&mut self, symbol: &str, path_id: StringId, line: usize) {
         let line_u32 = line.min(u32::MAX as usize) as u32;
         let symbol_id = self.intern(symbol);
@@ -807,9 +805,7 @@ impl ScopeGraphIndex {
     }
 
     /// Add a reference occurrence with a pre-interned path id.
-    ///
-    /// Same line-number contract as [`add_definition_with_path_id`]: values
-    /// above `u32::MAX` are saturated to `u32::MAX`.
+    /// Same line-number contract: values above `u32::MAX` saturate to `u32::MAX`.
     pub fn add_reference_with_path_id(&mut self, symbol: &str, path_id: StringId, line: usize) {
         let line_u32 = line.min(u32::MAX as usize) as u32;
         let symbol_id = self.intern(symbol);
@@ -890,9 +886,7 @@ impl ScopeGraphIndex {
     }
 
     /// Remove a file from the index.
-    ///
-    /// Uses the reverse index (`file_to_defs`/`file_to_refs`) for O(symbols_in_file)
-    /// removal instead of scanning all symbols in the entire index.
+    /// Uses the reverse index for O(symbols_in_file) removal instead of scanning every symbol.
     pub fn remove_file(&mut self, file_path: &Path) {
         let Some(path_id) = self.get_id(&file_path.to_string_lossy()) else {
             return;
@@ -932,10 +926,7 @@ impl ScopeGraphIndex {
     }
 
     /// Rename a file in the index (update paths without reparsing).
-    ///
-    /// Uses the reverse indexes (`file_to_defs`/`file_to_refs`) to update only
-    /// the symbols that reference this file — O(symbols_in_file) instead of
-    /// O(total_symbols).
+    /// Reverse indexes make this O(symbols_in_file), not O(total_symbols).
     pub fn rename_file(&mut self, from: &Path, to: &Path) {
         let Some(from_id) = self.get_id(&from.to_string_lossy()) else {
             return;
@@ -1289,10 +1280,7 @@ impl ScopeGraphIndex {
     // ========================================================================
 
     /// Get statistics: (files_count, total_definitions, total_references).
-    ///
-    /// File count is O(1) via `file_meta.len()`. Definition and reference
-    /// counts are O(unique_symbols) — they iterate the top-level HashMap
-    /// entries, not individual occurrences.
+    /// File count is O(1). Definition and reference counts walk unique symbols, not occurrences.
     pub fn stats(&self) -> (usize, usize, usize) {
         (
             self.file_meta.len(),
@@ -1332,20 +1320,9 @@ impl ScopeGraphIndex {
         self.query_version.needs_rebuild(current_version)
     }
 
-    /// Reclaim over-allocated Vec capacity after a bulk build.
-    ///
-    /// This is a **supported public post-build maintenance hook**.  It is
-    /// called automatically by [`IndexBuilder`] after every bulk build, so
-    /// callers using `IndexBuilder` do not need to call it explicitly.
-    ///
-    /// It is useful when building an index manually via
-    /// [`add_definition`](Self::add_definition) /
-    /// [`add_reference`](Self::add_reference): after all insertions are
-    /// complete, calling `compact()` trims the Vec doubling over-allocation
-    /// in every symbol's location list and in the interner arena/offsets.
-    ///
-    /// Calling it multiple times is safe (idempotent) but wasteful; do not
-    /// call it in tight incremental-update loops.
+    /// Reclaim over-allocated Vec capacity after a bulk build. Idempotent.
+    /// `IndexBuilder` calls this automatically; manual builders should call it once after insertions.
+    /// Do not call it in tight incremental-update loops.
     pub fn compact(&mut self) {
         for locs in self.definitions.values_mut() {
             locs.shrink_to_fit();
@@ -1642,12 +1619,8 @@ pub struct Snippet {
 mod tests {
     use super::*;
 
-    /// Verify that normal line numbers survive the usize→u32→usize round-trip
-    /// without loss, and that the u32::MAX boundary value is also preserved.
-    ///
-    /// This test documents the public contract of `add_definition_with_path_id`
-    /// and `add_reference_with_path_id`: callers may pass any `usize` that fits
-    /// in a `u32`; values at or below `u32::MAX` are stored and returned exactly.
+    /// Verify normal line numbers survive the usize→u32→usize round-trip without loss.
+    /// Callers may pass any `usize` that fits in a `u32`; those values are stored and returned exactly.
     #[test]
     fn test_line_number_u32_roundtrip() {
         let mut index = ScopeGraphIndex::new();
@@ -1673,9 +1646,7 @@ mod tests {
         );
     }
 
-    /// Verify that line numbers above `u32::MAX` are **saturated** to
-    /// `u32::MAX`, not wrapped/truncated.
-    ///
+    /// Verify that line numbers above `u32::MAX` are saturated to `u32::MAX`, not wrapped.
     /// This is the overflow-path test the public contract requires.
     #[test]
     fn test_line_number_overflow_saturates() {
@@ -1687,8 +1658,8 @@ mod tests {
         let locs = index.find_definitions("sym");
         assert_eq!(locs.len(), 1);
         assert_eq!(
-            locs[0].1,
-            u32::MAX as usize,
+            locs.first().map(|l| l.1),
+            Some(u32::MAX as usize),
             "line number exceeding u32::MAX must saturate to u32::MAX, not wrap"
         );
 
@@ -1698,8 +1669,8 @@ mod tests {
         let refs = index2.find_references("sym");
         assert_eq!(refs.len(), 1);
         assert_eq!(
-            refs[0].1,
-            u32::MAX as usize,
+            refs.first().map(|r| r.1),
+            Some(u32::MAX as usize),
             "reference line number exceeding u32::MAX must saturate"
         );
     }

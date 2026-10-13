@@ -32,8 +32,11 @@
 
 use std::collections::HashMap;
 
+use crate::types::context::WholeReadPolicy;
+use crate::types::definition::ToolDefinition;
 use crate::types::description::make_desc_env;
 use crate::types::tool::ToolKind;
+use crate::util::truncate_str;
 
 /// Nested map under `tools` — holds `by_kind` so templates write
 /// `${{ tools.by_kind.read }}` instead of `${{ tools.read }}`.
@@ -43,14 +46,9 @@ struct ToolsContext {
     by_kind: HashMap<ToolKind, String>,
 }
 
-/// The data MiniJinja sees at render time.
-///
-/// `tools.by_kind` and `params` keys are snake_case (serde serializes
-/// `ToolKind::Read` → `"read"`), so templates write
-/// `${{ tools.by_kind.read }}` / `${{ params.edit.old_string }}`.
-///
-/// Shell flags are computed once in [`TemplateRenderer::new`] from
-/// [`xai_grok_config::shell`].
+/// The data MiniJinja sees at render time. `tools.by_kind` and `params` keys are snake_case (serde serializes
+/// `ToolKind::Read` → `"read"`), so templates write `${{ tools.by_kind.read }}` / `${{ params.edit.old_string }}`.
+/// Shell flags are computed once in [`TemplateRenderer::new`] from [`xai_grok_config::shell`].
 #[derive(Debug, Clone, serde::Serialize)]
 struct TemplateContext {
     tools: ToolsContext,
@@ -60,10 +58,9 @@ struct TemplateContext {
     /// `powershell.exe` 5.1 and `cmd.exe` chain with `;`; everything else
     /// with `&&`. Used by templates that document command chaining.
     shell_uses_semicolon: bool,
-    /// Whether `grep`, `head`, `tail`, `sed`, `awk`, `find` are usable
-    /// from the active shell. False on Windows + PowerShell / cmd.exe;
-    /// true everywhere else. Tool descriptions branch on this to swap
-    /// Unix-centric guidance for PowerShell-aware guidance.
+    /// Whether `grep`, `head`, `tail`, `sed`, `awk`, `find` are usable from the active shell. False
+    /// on Windows + PowerShell / cmd.exe; true everywhere else. Tool descriptions branch on this to
+    /// swap Unix-centric guidance for PowerShell-aware guidance.
     has_unix_utilities: bool,
     /// How the active shell treats path-like and switch-like arguments, as a
     /// [`xai_grok_config::shell::PathGuidance`] template value: `msys_translating`,
@@ -79,6 +76,10 @@ struct TemplateContext {
     /// on this so the promise is only made when it can be kept. Defaults
     /// to `true` (prod CLI behavior).
     system_reminders_enabled: bool,
+    /// Absolute path to this session's drafts file, when known.
+    feedback_drafts_path: String,
+    /// Which file classes `read_file` returns whole; read descriptions only promise it for classes that are on.
+    whole_read: WholeReadPolicy,
 }
 
 /// Shared render implementation: fast-path check + MiniJinja render.
@@ -86,7 +87,7 @@ fn render_with_env(
     template: &str,
     ctx: &impl serde::Serialize,
 ) -> Result<String, TemplateRenderError> {
-    if !template.contains("${{") && !template.contains("${%") {
+    if !has_template_markers(template) {
         return Ok(template.to_string());
     }
     let env = make_desc_env();
@@ -97,10 +98,8 @@ fn render_with_env(
         })
 }
 
-/// Error returned when a template fails to render.
-///
-/// Wraps the underlying MiniJinja error. Callers that want the old
-/// silent-fallback behavior can use `.unwrap_or_else(|_| ...)`.
+/// Error returned when a template fails to render. Wraps the underlying MiniJinja error. Callers
+/// that want the old silent-fallback behavior can use `.unwrap_or_else(|_| ...)`.
 #[derive(Debug)]
 pub struct TemplateRenderError {
     template: String,
@@ -130,22 +129,9 @@ impl std::error::Error for TemplateRenderError {
     }
 }
 
-/// Pre-built template renderer stored in Resources.
-///
-/// Strip unrendered template markers (`${{ … }}` and `${% … %}`) from `raw`.
-///
-/// Last-resort fallback for when MiniJinja rendering fails: the model must
-/// never see raw template syntax, so the offending spans are dropped
-/// entirely. The result may read slightly awkwardly around the removed
-/// spans, but it is always plain prose.
-/// Render-failure fallback: strip template markers so the model never sees
-/// raw syntax. A render failure always indicates a template bug, so debug
-/// builds (tests, local dev) panic loudly instead of degrading; release
-/// builds log and degrade gracefully.
-///
-/// Not for the *intentional* pre-finalize sanitize path
-/// (`sanitized_description_template`), which calls
-/// [`strip_template_markers`] directly.
+/// Pre-built template renderer stored in Resources. Strip unrendered template markers (`${{ … }}` and `${% … %}`) from `raw`. Last-resort
+/// fallback for when MiniJinja rendering fails: the model must never see raw template syntax, so the offending spans are dropped entirely.
+/// Render-failure fallback: strip template markers so the model never sees raw syntax.
 #[track_caller]
 pub fn strip_markers_on_render_failure(raw: &str, err: &TemplateRenderError) -> String {
     debug_assert!(
@@ -161,7 +147,9 @@ pub fn strip_template_markers(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
     while let Some(start) = rest.find("${") {
-        let after = &rest[start + 2..];
+        let Some(after) = rest.get(start + 2..) else {
+            break;
+        };
         let close: Option<usize> = if after.starts_with('{') {
             after.find("}}").map(|i| i + 2)
         } else if after.starts_with('%') {
@@ -171,13 +159,13 @@ pub fn strip_template_markers(raw: &str) -> String {
         };
         match close {
             Some(end_in_after) => {
-                out.push_str(&rest[..start]);
-                rest = &rest[start + 2 + end_in_after..];
+                out.push_str(rest.get(..start).unwrap_or(""));
+                rest = rest.get(start + 2 + end_in_after..).unwrap_or("");
             }
             None => {
                 // `${` that is not a marker (or unterminated) — keep as-is.
-                out.push_str(&rest[..start + 2]);
-                rest = &rest[start + 2..];
+                out.push_str(rest.get(..start + 2).unwrap_or(""));
+                rest = rest.get(start + 2..).unwrap_or("");
             }
         }
     }
@@ -185,24 +173,81 @@ pub fn strip_template_markers(raw: &str) -> String {
     out
 }
 
-/// Created once at finalize time and available to all tools and reminders
-/// via `resources.get::<TemplateRenderer>()`. Uses MiniJinja with custom
-/// `${{ }}` / `${%  %}` delimiters to avoid collisions with literal `{{ }}`
-/// in tool descriptions and error messages. Context is baked in at
-/// construction and cannot be modified afterwards.
+/// Byte cap on the snippet [`unresolved_template_markers`] reports per offending description.
+const MARKER_SNIPPET_BYTES: usize = 80;
+
+/// Byte offset of the first `${{` or `${%`; shell-style `${VAR}` is not a marker. This is not a parser: it names the two
+/// delimiters the renderer has always special-cased inline, so callers can ask whether a final text still contains one.
+fn first_template_marker(text: &str) -> Option<usize> {
+    match (text.find("${{"), text.find("${%")) {
+        (Some(interp), Some(tag)) => Some(interp.min(tag)),
+        (interp, tag) => interp.or(tag),
+    }
+}
+
+fn has_template_markers(text: &str) -> bool {
+    first_template_marker(text).is_some()
+}
+
+/// The one walk over a JSON Schema's `description` strings: an object's own description first, then every object value
+/// and array item, so `$defs`, `items`, `anyOf`, … are all reached.
+fn for_each_schema_description_mut(
+    schema: &mut serde_json::Value,
+    visit: &mut impl FnMut(&mut String),
+) {
+    match schema {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::String(desc)) = map.get_mut("description") {
+                visit(desc);
+            }
+            for value in map.values_mut() {
+                for_each_schema_description_mut(value, visit);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items.iter_mut() {
+                for_each_schema_description_mut(item, visit);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `(tool name, snippet)` for every finalized tool description or schema `description` that still carries an unrendered
+/// `${{` / `${%` marker. Hosts run it over the exact definitions they send the model, so a template regression shows up
+/// in their logs rather than in the model's context.
+pub fn unresolved_template_markers(defs: &[ToolDefinition]) -> Vec<(String, String)> {
+    let mut offenders = Vec::new();
+    for def in defs {
+        let mut check = |text: &str| {
+            if let Some(start) = first_template_marker(text) {
+                let snippet = truncate_str(&text[start..], MARKER_SNIPPET_BYTES).to_owned();
+                offenders.push((def.function.name.clone(), snippet));
+            }
+        };
+        if let Some(desc) = def.function.description.as_deref() {
+            check(desc);
+        }
+        // The walker is the renderer's mutable one; cloning the schema keeps a single walk in the file, and this runs
+        // only when a session's toolset changes
+        let mut parameters = def.function.parameters.clone();
+        for_each_schema_description_mut(&mut parameters, &mut |desc| check(desc.as_str()));
+    }
+    offenders
+}
+
+/// Created once at finalize time and available to all tools and reminders via `resources.get::<TemplateRenderer>()`.
+/// Uses MiniJinja with custom `${{ }}` / `${% %}` delimiters to avoid collisions with literal `{{ }}` in tool
+/// descriptions and error messages. Context is baked in at construction and cannot be modified afterwards.
 #[derive(Clone)]
 pub struct TemplateRenderer {
     ctx: TemplateContext,
 }
 
 impl TemplateRenderer {
-    /// Create a new renderer from the finalized kind → name mappings.
-    ///
-    /// `tools`: `ToolKind` → client-facing tool name (e.g., `Read → "read_file"`).
-    /// `params`: `ToolKind` → { canonical param → client-facing param }.
-    ///
-    /// The `params` map keys are converted to snake_case strings to match
-    /// how `tools.by_kind` keys appear in templates.
+    /// Create a new renderer from the finalized kind → name mappings. `tools`: `ToolKind` → client-facing tool name (e.g.,
+    /// `Read → "read_file"`). `params`: `ToolKind` → { canonical param → client-facing param }. The `params` map keys are
+    /// converted to snake_case strings to match how `tools.by_kind` keys appear in templates.
     pub fn new(
         tools: HashMap<ToolKind, String>,
         params: HashMap<ToolKind, HashMap<String, String>>,
@@ -228,8 +273,25 @@ impl TemplateRenderer {
                 has_unix_utilities: xai_grok_config::shell::has_unix_utilities(),
                 path_guidance: xai_grok_config::shell::path_guidance().as_template_value(),
                 system_reminders_enabled: true,
+                feedback_drafts_path: String::new(),
+                whole_read: WholeReadPolicy::default(),
             },
         }
+    }
+
+    /// Set from the finalized `TruncationConfig`; every other construction site keeps the default (both on).
+    #[must_use]
+    pub fn with_whole_read(mut self, policy: WholeReadPolicy) -> Self {
+        self.ctx.whole_read = policy;
+        self
+    }
+
+    /// Absolute drafts file for this session. Session id and cwd are already
+    /// fixed when the tool server starts.
+    #[must_use]
+    pub fn with_feedback_drafts_path(mut self, path: impl Into<String>) -> Self {
+        self.ctx.feedback_drafts_path = path.into();
+        self
     }
 
     /// Override whether templates see `system_reminders_enabled` as true.
@@ -241,15 +303,9 @@ impl TemplateRenderer {
         self
     }
 
-    /// Render a template string with the full context.
-    ///
-    /// Template syntax:
-    /// - `${{ tools.by_kind.read }}` — resolves to the client-facing Read tool name
-    /// - `${{ params.edit.old_string }}` — resolves to the client-facing param name
-    /// - `${%- if tools.by_kind.search %}...${%- endif %}` — conditional sections
-    ///
-    /// Returns the raw template unchanged (without error) if it contains
-    /// no template markers (`${{` or `${%`).
+    /// Render a template string with the full context. `${{ tools.by_kind.read }}` — resolves to the client-facing Read tool name `${{
+    /// params.edit.old_string }}` — resolves to the client-facing param name `${%- if tools.by_kind.search %}...${%- endif %}` — conditional
+    /// sections Returns the raw template unchanged (without error) if it contains no template markers (`${{` or `${%`).
     pub fn render(&self, template: &str) -> Result<String, TemplateRenderError> {
         render_with_env(template, &self.ctx)
     }
@@ -267,77 +323,36 @@ impl TemplateRenderer {
             .collect()
     }
 
-    /// Render `${{ ... }}` placeholders in every `description` string within a
-    /// JSON Schema, in place — recursing into nested objects, array `items`, and
-    /// `$defs`. Property keys are remapped separately; this resolves
-    /// descriptions that reference another param/tool via
-    /// `${{ params.<kind>.<param> }}` or `${{ tools.by_kind.<kind> }}`.
-    /// Untemplated descriptions are left as-is; a render failure logs and
+    /// Render `${{ ... }}` placeholders in every `description` string within a JSON Schema, in place — recursing into
+    /// nested objects, array `items`, and `$defs`. Untemplated descriptions are left as-is; a render failure logs and
     /// strips the template markers so raw syntax never reaches the model.
     pub fn render_schema_descriptions(&self, schema: &mut serde_json::Value) {
-        match schema {
-            serde_json::Value::Object(map) => {
-                let rendered = match map.get("description") {
-                    Some(serde_json::Value::String(desc))
-                        if desc.contains("${{") || desc.contains("${%") =>
-                    {
-                        match self.render(desc) {
-                            Ok(r) => Some(r),
-                            Err(e) => Some(strip_markers_on_render_failure(desc, &e)),
-                        }
-                    }
-                    _ => None,
-                };
-                if let Some(rendered) = rendered {
-                    map.insert(
-                        "description".to_string(),
-                        serde_json::Value::String(rendered),
-                    );
-                }
-                for value in map.values_mut() {
-                    self.render_schema_descriptions(value);
-                }
+        for_each_schema_description_mut(schema, &mut |desc| {
+            if has_template_markers(desc.as_str()) {
+                *desc = self
+                    .render(desc.as_str())
+                    .unwrap_or_else(|e| strip_markers_on_render_failure(desc.as_str(), &e));
             }
-            serde_json::Value::Array(items) => {
-                for item in items.iter_mut() {
-                    self.render_schema_descriptions(item);
-                }
-            }
-            _ => {}
-        }
+        });
     }
 
-    /// Returns the client-facing tool name for the given `ToolKind` if a
-    /// tool of that kind is registered in the finalized toolset.
-    ///
-    /// Use this when you need a structural answer to "does the active
-    /// toolset expose a tool of kind X?" — the kind→name map is the
-    /// single source of truth, populated at `FinalizedToolset` build time
-    /// from each tool's `kind()`.
+    /// Returns the client-facing tool name for the given `ToolKind` if a tool of that kind is registered in the finalized
+    /// toolset. Use this when you need a structural answer to "does the active toolset expose a tool of kind X?" — the
+    /// kind→name map is the single source of truth, populated at `FinalizedToolset` build time from each tool's `kind()`.
     pub fn tool_for_kind(&self, kind: ToolKind) -> Option<&str> {
         self.ctx.tools.by_kind.get(&kind).map(String::as_str)
     }
 
-    /// The client-facing name of a canonical parameter on the tool of `kind`,
-    /// or `None` when no tool of that kind exposes that parameter in the
-    /// finalized toolset.
-    ///
-    /// This is the param-map twin of [`Self::tool_for_kind`]: it resolves the
-    /// same `${{ params.<kind>.<param> }}` mapping that [`Self::render`] would,
-    /// but eagerly and as an `Option`.
+    /// The client-facing name of a canonical parameter on the tool of `kind`, or `None` when no tool of that kind exposes
+    /// that parameter in the finalized toolset. This is the param-map twin of [`Self::tool_for_kind`]: it resolves the same
+    /// `${{ params.<kind>.<param> }}` mapping that [`Self::render`] would, but eagerly and as an `Option`.
     pub fn param_for_kind<'a>(&'a self, kind: ToolKind, canonical: &str) -> Option<&'a str> {
         let key_value = serde_json::to_value(kind).ok()?;
         let key = key_value.as_str()?;
         self.ctx.params.get(key)?.get(canonical).map(String::as_str)
     }
 
-    /// Acquire `TemplateRenderer` from shared resources
-    /// and render a template in one call.
-    ///
-    /// Replaces the common lock → require → render → map_err boilerplate:
-    /// ```ignore
-    /// let name = TemplateRenderer::resolve(&resources, "${{ params.edit.replace_all }}").await?;
-    /// ```
+    /// Acquire `TemplateRenderer` from shared resources and render a template in one call.
     pub async fn resolve(
         resources: &crate::types::resources::SharedResources,
         template: &str,
@@ -349,14 +364,9 @@ impl TemplateRenderer {
             .map_err(|e| xai_tool_runtime::ToolError::invalid_arguments(e.to_string()))
     }
 
-    /// Look up a tool's client-facing name by kind from shared resources.
-    ///
-    /// Convenience wrapper around `lock → get → tool_for_kind`. Returns
-    /// `None` when no `TemplateRenderer` is in resources or no tool of
-    /// that kind is registered.
-    /// ```ignore
-    /// let name = TemplateRenderer::resolve_tool_name(&resources, ToolKind::KillTaskAction).await;
-    /// ```
+    /// Look up a tool's client-facing name by kind from shared resources. Convenience wrapper
+    /// around `lock → get → tool_for_kind`. Returns `None` when no `TemplateRenderer` is in
+    /// resources or no tool of that kind is registered.
     pub async fn resolve_tool_name(
         resources: &crate::types::resources::SharedResources,
         kind: ToolKind,
@@ -366,23 +376,13 @@ impl TemplateRenderer {
             .and_then(|r| r.tool_for_kind(kind).map(str::to_string))
     }
 
-    /// Render a template with the renderer's tool context **plus** arbitrary
-    /// extra placeholders.
-    ///
-    /// `placeholders` is a JSON object whose keys are merged at the top
-    /// level alongside `tools` and `params`:
-    ///
-    /// ```text
-    /// ${{ tools.by_kind.read }}   ← from renderer
-    /// ${{ os_name }}              ← from placeholders
-    /// ${%- if memory_enabled %}   ← from placeholders (bool)
-    /// ```
+    /// Render a template with the renderer's tool context **plus** arbitrary extra placeholders.
     pub fn render_with_extra(
         &self,
         template: &str,
         placeholders: &serde_json::Value,
     ) -> Result<String, TemplateRenderError> {
-        if !template.contains("${{") && !template.contains("${%") {
+        if !has_template_markers(template) {
             return Ok(template.to_string());
         }
         // Merge: start with renderer context, overlay caller placeholders.
@@ -428,6 +428,50 @@ mod tests {
         assert_eq!(strip_template_markers("echo ${VAR}"), "echo ${VAR}");
         // Unterminated marker is preserved rather than eating the rest.
         assert_eq!(strip_template_markers("broken ${{ tail"), "broken ${{ tail");
+    }
+
+    fn offender(tool: &str, snippet: &str) -> (String, String) {
+        (tool.to_owned(), snippet.to_owned())
+    }
+
+    #[test]
+    fn unresolved_template_markers_flags_descriptions_and_schemas_but_not_shell_vars() {
+        let object = serde_json::json!({"type": "object", "properties": {}});
+        let defs = [
+            ToolDefinition::function(
+                "interp",
+                Some("Use ${{ tools.by_kind.read }} first."),
+                object.clone(),
+            ),
+            ToolDefinition::function(
+                "tag",
+                Some("${% if has_unix_utilities %}grep${% endif %}"),
+                object.clone(),
+            ),
+            ToolDefinition::function(
+                "shell",
+                Some("Expands ${HOME} and $PATH literally."),
+                object.clone(),
+            ),
+            ToolDefinition::function(
+                "schema",
+                Some("Clean."),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Relative to ${{ params.read.path }}"}
+                    }
+                }),
+            ),
+        ];
+        assert_eq!(
+            vec![
+                offender("interp", "${{ tools.by_kind.read }} first."),
+                offender("tag", "${% if has_unix_utilities %}grep${% endif %}"),
+                offender("schema", "${{ params.read.path }}"),
+            ],
+            unresolved_template_markers(&defs)
+        );
     }
 
     fn make_renderer(
@@ -495,11 +539,9 @@ mod tests {
             Some("is_background")
         );
 
-        // Regression: an execute tool WITHOUT `is_background` in its schema
-        // (e.g. OpenCode's foreground-only bash) seeds `params.execute` from its
-        // real fields only. `param_for_kind` must report the missing field as
-        // absent so `get_task_output` / `wait_tasks` don't tell the model to
-        // pass `is_background=true` to a tool that has no such field.
+        // Regression: an execute tool WITHOUT `is_background` in its schema (e.g. OpenCode's foreground-only bash) seeds
+        // `params.execute` from its real fields only. `param_for_kind` must report the missing field as absent so
+        // `get_task_output` / `wait_tasks` don't tell the model to pass `is_background=true` to a tool that has no such field.
         let opencode_bash = make_renderer(
             &[(ToolKind::Execute, "bash")],
             &[(
@@ -549,17 +591,23 @@ mod tests {
         });
         r.render_schema_descriptions(&mut schema);
         assert_eq!(
-            schema["properties"]["new_string"]["description"],
-            "The text to replace it with (must be different from find)"
+            schema
+                .pointer("/properties/new_string/description")
+                .and_then(|v| v.as_str()),
+            Some("The text to replace it with (must be different from find)")
         );
         assert_eq!(
-            schema["properties"]["replace_all"]["description"],
-            "Replace all occurrences of find (default false)"
+            schema
+                .pointer("/properties/replace_all/description")
+                .and_then(|v| v.as_str()),
+            Some("Replace all occurrences of find (default false)")
         );
         // Untemplated descriptions are left untouched.
         assert_eq!(
-            schema["properties"]["file_path"]["description"],
-            "The path to the file to modify."
+            schema
+                .pointer("/properties/file_path/description")
+                .and_then(|v| v.as_str()),
+            Some("The path to the file to modify.")
         );
     }
 
@@ -595,8 +643,10 @@ mod tests {
         });
         r.render_schema_descriptions(&mut schema);
         assert_eq!(
-            schema["properties"]["items"]["items"]["properties"]["note"]["description"],
-            "compare against find"
+            schema
+                .pointer("/properties/items/items/properties/note/description")
+                .and_then(|v| v.as_str()),
+            Some("compare against find")
         );
     }
 
@@ -619,6 +669,40 @@ mod tests {
     }
 
     #[test]
+    fn read_description_whole_read_note_follows_policy_and_param_names() {
+        let base = make_renderer(
+            &[(ToolKind::Read, "read_file")],
+            &[(
+                ToolKind::Read,
+                &[("offset", "start_line"), ("limit", "num_lines")],
+            )],
+        );
+        let template = crate::implementations::grok_build::read_file::DESCRIPTION_FULL;
+
+        let on = base.clone().render(template).unwrap();
+        assert!(
+            on.contains("start_line and num_lines are ignored for them"),
+            "note must use the client-facing param names, got: {on}"
+        );
+
+        let off = base
+            .with_whole_read(WholeReadPolicy {
+                skill_markdown: false,
+                instruction_files: false,
+            })
+            .render(template)
+            .unwrap();
+        assert!(
+            !off.contains("returned whole"),
+            "note must vanish with both bits off, got: {off}"
+        );
+        assert!(
+            off.contains("beginning of the file\n"),
+            "bullet must end cleanly, got: {off}"
+        );
+    }
+
+    #[test]
     fn render_conditional_absent() {
         let r = make_renderer(&[], &[]);
         let result = r
@@ -627,11 +711,9 @@ mod tests {
         assert_eq!(result, "OK");
     }
 
-    /// Documents MiniJinja's default (lenient) undefined behavior: a missing
-    /// kind in *output* position renders as an empty string with `Ok`, it
-    /// does NOT return `Err`. Callers that want a fallback name for a
-    /// missing kind must check for an empty result — `.unwrap_or_else` on
-    /// the `Result` alone never fires for this case.
+    /// Documents MiniJinja's default (lenient) undefined behavior: a missing kind in *output* position renders as an empty
+    /// string with `Ok`, it does NOT return `Err`. Callers that want a fallback name for a missing kind must check for an
+    /// empty result — `.unwrap_or_else` on the `Result` alone never fires for this case.
     #[test]
     fn render_missing_kind_output_position_is_empty_ok() {
         let r = make_renderer(&[], &[]);
@@ -691,22 +773,24 @@ mod tests {
                 (ToolKind::Task, "spawn_subagent"),
             ],
             &[
-                (ToolKind::Execute, &[("is_background", "background")]),
+                (ToolKind::Execute, &[("block_until_ms", "block_until_ms")]),
                 (ToolKind::Task, &[("run_in_background", "background")]),
             ],
         );
         let desc = r#"Get output and status from a background task or subagent.
 
 Usage notes:
-- Use the task_id from a command run with ${{ params.execute.is_background }}=true, or a subagent launched with ${{ params.task.run_in_background }}=true
+- Use the task_id from a command run with ${{ params.execute.block_until_ms }}=0, or a subagent launched with ${{ params.task.run_in_background }}=true
 - Omit timeout_ms (or pass 0) for a non-blocking status poll; set a positive timeout_ms to wait up to that many milliseconds for completion (capped at ~10 min)."#;
+
         let rendered = r.render(desc).expect("task_output description must render");
         let _ = std::fs::write("/tmp/task_output_tool_description.txt", &rendered);
+
         assert!(
             !rendered.contains("${{"),
             "must not leak raw template source: {rendered}"
         );
-        assert!(rendered.contains("background=true"));
+        assert!(rendered.contains("block_until_ms=0") && rendered.contains("background=true"));
         assert!(rendered.contains("Omit timeout_ms") || rendered.contains("positive timeout_ms"));
     }
 

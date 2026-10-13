@@ -1,18 +1,17 @@
 //! Workspace and session configuration types.
 use crate::capability::CapabilityMode;
 use crate::hub::HubConfig;
+use crate::permission::ToolApprovalGate;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+pub use xai_grok_hooks::discovery::HookSourceConfig;
 use xai_grok_tools::registry::types::{SessionContext, ToolRegistryBuilder, ToolServerConfig};
+use xai_tool_runtime::ToolApprovalPolicy;
 /// Default capacity for the workspace event broadcast channel.
 pub const DEFAULT_EVENT_BUFFER_CAPACITY: usize = 64;
 /// A session-lifetime terminal backend (background-task registry and persistent shell) paired with its explicit shutdown hook.
-///
-/// The owning [`WorkspaceSession`](crate::session::WorkspaceSession) injects it into every toolset re-resolve.
-/// Background tasks and shell state therefore survive toolset swaps.
-/// The shutdown hook fires the backend's cancel token, killing every child process group and stopping the actor.
 /// Teardown at `drop_session`/evict is an explicit act rather than a side effect of the last `Arc` drop.
 #[derive(Clone)]
 pub struct SessionTerminalBackend {
@@ -20,10 +19,7 @@ pub struct SessionTerminalBackend {
     shutdown: Arc<dyn Fn() + Send + Sync>,
 }
 impl SessionTerminalBackend {
-    /// Pair an already-erased `backend` with its shutdown hook.
-    ///
-    /// The fields are private, so [`SessionContextFactory`] implementors whose backend is not a `LocalTerminalBackend` must build one here.
-    /// In-repo factories use [`Self::local`].
+    /// Pair an already-erased `backend` with its shutdown hook. The fields are private, so [`SessionContextFactory`] implementors whose backend is not a `LocalTerminalBackend` must build one here.
     pub fn new(
         backend: Arc<dyn xai_grok_tools::computer::types::TerminalBackend>,
         shutdown: Arc<dyn Fn() + Send + Sync>,
@@ -67,10 +63,7 @@ impl std::fmt::Debug for SessionTerminalBackend {
             .finish_non_exhaustive()
     }
 }
-/// Pluggable producer of a [`SessionContext`] and [`ToolRegistryBuilder`] for each session.
-///
-/// The workspace can't construct the tool runtime (terminal backend, file system, persistence path, MCP client config, notification handle, ...).
-/// The embedder (TUI, SDK, or remote sampler) hands us a factory at `WorkspaceHandle::new` time and we call it on every session resolution.
+/// Pluggable producer of a [`SessionContext`] and [`ToolRegistryBuilder`] for each session. The workspace can't construct the tool runtime (terminal backend, file system, persistence path, MCP client config, notification handle, ...).
 pub trait SessionContextFactory: Send + Sync {
     /// Build a fresh [`SessionContext`] for the given session, around the given terminal `backend`.
     /// The pipeline rebuilds toolsets around the session-owned backend, so the caller always supplies it.
@@ -110,6 +103,9 @@ pub struct WorkspaceBindConfig {
     pub viewer_ctx: Option<xai_tool_runtime::WorkspaceViewerContext>,
     /// Initial auto-approve (YOLO) state. `None` on legacy payloads fails closed (false).
     pub yolo_mode: Option<bool>,
+    /// The hub-set attended-execution ceiling; omitted → [`ToolApprovalPolicy::GrantsAllowed`],
+    /// present-but-unparseable → [`ToolApprovalPolicy::AlwaysPrompt`].
+    pub tool_approval_policy: ToolApprovalPolicy,
     /// Plane-configured toolset in the gRPC wire shape. An empty list is treated as unset (proto3 repeated default).
     pub tools: Option<Vec<xai_grok_tools_api::ToolConfigEntry>>,
     pub manifest_version: Option<String>,
@@ -167,6 +163,17 @@ impl WorkspaceBindConfig {
                 .and_then(|v| parse_field("tool_config", v)),
             viewer_ctx: wire.viewer_ctx,
             yolo_mode: wire.yolo_mode,
+            tool_approval_policy: match wire.tool_approval_policy {
+                Some(Ok(policy)) => policy,
+                Some(Err(raw)) => {
+                    tracing::warn!(
+                        tool_approval_policy = %raw,
+                        "session.bind metadata: unreadable tool_approval_policy; applying always_prompt"
+                    );
+                    ToolApprovalPolicy::AlwaysPrompt
+                }
+                None => ToolApprovalPolicy::GrantsAllowed,
+            },
             tools: Some(wire.tools).filter(|tools| !tools.is_empty()),
             manifest_version: wire.manifest_version,
             manifest_hash: wire.manifest_hash,
@@ -175,16 +182,8 @@ impl WorkspaceBindConfig {
             session_root: wire.session_root.map(PathBuf::from),
         }
     }
-    /// Resolve the selected toolset.
-    ///
-    /// Precedence: `tool_config`, then `tools` (wire entries), then default/fail-closed.
-    /// Pinned `tools` are served per entry: ids `known_id` rejects are dropped and reported in [`ResolvedTools::unserved_tool_ids`].
+    /// Resolve the selected toolset. Precedence: `tool_config`, then `tools` (wire entries), then default/fail-closed.
     /// Unknown ids never cause a silent fallback to a different toolset.
-    ///
-    /// **Presets are never resolved**: a `preset` on the wire is logged and ignored; only explicit `tools`/`tool_config` may select a toolset.
-    ///
-    /// With `require_explicit_toolset` (sandbox standalone servers) a bind without an explicit toolset fails closed.
-    /// Without the flag it widens to the binary's default catalog.
     pub fn resolve(
         &self,
         known_id: &dyn Fn(&str) -> bool,
@@ -368,6 +367,57 @@ mod bind_config_tests {
         assert_eq!(malformed.preset.as_deref(), Some("explore"));
     }
     #[test]
+    fn workspace_bind_config_tool_approval_policy_defaults_to_grants_allowed() {
+        let ceiling = WorkspaceBindConfig::from_metadata(
+            &serde_json::json!({"tool_approval_policy": "always_prompt"}),
+        );
+        assert_eq!(
+            ceiling.tool_approval_policy,
+            ToolApprovalPolicy::AlwaysPrompt
+        );
+        for metadata in [
+            serde_json::json!({"preset": "explore"}),
+            serde_json::json!({"tool_approval_policy": null}),
+        ] {
+            assert_eq!(
+                ToolApprovalPolicy::GrantsAllowed,
+                WorkspaceBindConfig::from_metadata(&metadata).tool_approval_policy,
+                "{metadata}"
+            );
+        }
+        assert_eq!(
+            ToolApprovalPolicy::UnattendedAllowed,
+            WorkspaceBindConfig::from_metadata(&serde_json::json!({
+                "tool_approval_policy": "unattended_allowed",
+            }))
+            .tool_approval_policy,
+        );
+    }
+    /// A ceiling the hub stamped but this binary cannot read (a newer wire token, a typo,
+    /// the wrong JSON type) is the strict arm, never the omitted-field compat default.
+    #[test]
+    fn workspace_bind_config_malformed_tool_approval_policy_is_always_prompt() {
+        for metadata in [
+            serde_json::json!({"tool_approval_policy": "unattended"}),
+            serde_json::json!({"tool_approval_policy": "not_a_policy"}),
+            serde_json::json!({"tool_approval_policy": "GrantsAllowed"}),
+            serde_json::json!({"tool_approval_policy": true}),
+            serde_json::json!({"tool_approval_policy": 1}),
+            serde_json::json!({"preset": "explore", "tool_approval_policy": ["grants_allowed"]}),
+        ] {
+            let cfg = WorkspaceBindConfig::from_metadata(&metadata);
+            assert_eq!(
+                ToolApprovalPolicy::AlwaysPrompt,
+                cfg.tool_approval_policy,
+                "{metadata}"
+            );
+        }
+        let cfg = WorkspaceBindConfig::from_metadata(
+            &serde_json::json!({"preset": "explore", "tool_approval_policy": "unattended"}),
+        );
+        assert_eq!(Some("explore"), cfg.preset.as_deref());
+    }
+    #[test]
     fn workspace_bind_config_extracts_system_notifications_flag() {
         let on =
             WorkspaceBindConfig::from_metadata(&serde_json::json!({"system_notifications": true}));
@@ -452,7 +502,9 @@ mod bind_config_tests {
             "always the 'current' default"
         );
         assert_eq!(toolset.tools.len(), 2);
-        let grep = &toolset.tools[0];
+        let Some(grep) = toolset.tools.first() else {
+            panic!("expected grep tool: {:?}", toolset.tools);
+        };
         assert_eq!(grep.id, "GrokBuild:grep");
         assert_eq!(
             grep.params,
@@ -460,8 +512,11 @@ mod bind_config_tests {
         );
         assert_eq!(grep.name_override.as_deref(), Some("search"));
         assert_eq!(
-            grep.params_name_overrides.as_ref().unwrap()["pattern"],
-            "query"
+            grep.params_name_overrides
+                .as_ref()
+                .and_then(|m| m.get("pattern"))
+                .map(String::as_str),
+            Some("query")
         );
         assert_eq!(grep.behavior_version.as_deref(), Some("legacy-0.4.10"));
         assert_eq!(
@@ -469,7 +524,10 @@ mod bind_config_tests {
             Some("Search the codebase")
         );
         assert_eq!(grep.kind, None);
-        assert_eq!(toolset.tools[1].id, "GrokBuild:read_file");
+        assert_eq!(
+            toolset.tools.get(1).map(|t| t.id.as_str()),
+            Some("GrokBuild:read_file")
+        );
     }
     #[test]
     fn explicit_tool_config_wins_over_tools_entries() {
@@ -482,7 +540,10 @@ mod bind_config_tests {
             panic!("must resolve to a toolset");
         };
         assert_eq!(resolved.toolset.tools.len(), 1);
-        assert_eq!(resolved.toolset.tools[0].id, "raw:tool");
+        assert_eq!(
+            resolved.toolset.tools.first().map(|t| t.id.as_str()),
+            Some("raw:tool")
+        );
     }
     #[test]
     fn tools_entries_win_even_with_preset_present() {
@@ -495,7 +556,10 @@ mod bind_config_tests {
             panic!("must resolve to a toolset");
         };
         assert_eq!(resolved.toolset.tools.len(), 1);
-        assert_eq!(resolved.toolset.tools[0].id, "wire:tool");
+        assert_eq!(
+            resolved.toolset.tools.first().map(|t| t.id.as_str()),
+            Some("wire:tool")
+        );
     }
     #[test]
     fn empty_tools_array_is_treated_as_unset() {
@@ -609,10 +673,21 @@ mod bind_config_tests {
         };
         assert_eq!(resolved.toolset.tools.len(), 2);
         assert_eq!(
-            resolved.toolset.tools[0].name_override.as_deref(),
+            resolved
+                .toolset
+                .tools
+                .first()
+                .and_then(|t| t.name_override.as_deref()),
             Some("renamed_a")
         );
-        assert_eq!(resolved.toolset.tools[1].name_override, None);
+        assert_eq!(
+            resolved
+                .toolset
+                .tools
+                .get(1)
+                .and_then(|t| t.name_override.clone()),
+            None
+        );
     }
     #[test]
     fn pinned_tools_all_known_serves_full_expansion() {
@@ -627,7 +702,10 @@ mod bind_config_tests {
         };
         assert!(resolved.unserved_tool_ids.is_empty());
         assert_eq!(resolved.toolset.tools.len(), 1);
-        assert_eq!(resolved.toolset.tools[0].id, "wire:tool");
+        assert_eq!(
+            resolved.toolset.tools.first().map(|t| t.id.as_str()),
+            Some("wire:tool")
+        );
     }
     /// Unknown ids must be partitioned and reported, never silently replaced by live preset resolution.
     #[test]
@@ -647,7 +725,10 @@ mod bind_config_tests {
             panic!("partial coverage must still resolve to the known subset");
         };
         assert_eq!(resolved.toolset.tools.len(), 1);
-        assert_eq!(resolved.toolset.tools[0].id, "wire:known");
+        assert_eq!(
+            resolved.toolset.tools.first().map(|t| t.id.as_str()),
+            Some("wire:known")
+        );
         assert_eq!(
             resolved.unserved_tool_ids,
             vec!["wire:aa_unknown".to_owned(), "wire:zz_unknown".to_owned()],
@@ -681,7 +762,10 @@ mod bind_config_tests {
             panic!("legacy unpinned tools must resolve without gating");
         };
         assert_eq!(resolved.toolset.tools.len(), 1);
-        assert_eq!(resolved.toolset.tools[0].id, "wire:tool");
+        assert_eq!(
+            resolved.toolset.tools.first().map(|t| t.id.as_str()),
+            Some("wire:tool")
+        );
     }
     #[test]
     fn tool_config_wins_regardless_of_stale_manifest_version() {
@@ -696,7 +780,10 @@ mod bind_config_tests {
         };
         assert!(resolved.unserved_tool_ids.is_empty());
         assert_eq!(resolved.toolset.tools.len(), 1);
-        assert_eq!(resolved.toolset.tools[0].id, "raw:tool");
+        assert_eq!(
+            resolved.toolset.tools.first().map(|t| t.id.as_str()),
+            Some("raw:tool")
+        );
     }
     #[test]
     fn malformed_tools_field_is_dropped_keeping_siblings() {
@@ -720,34 +807,18 @@ pub struct BindMcpConfig {
     /// Server names designated first-party app endpoints — see
     /// [`Self::with_first_party_servers`].
     first_party: std::sync::Arc<std::collections::HashSet<String>>,
+    /// The call gate for each server name, set with [`Self::with_call_gate`].
+    call_gates: Arc<crate::mcp::McpCallGates>,
 }
 impl BindMcpConfig {
     pub const DEFAULT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
-    /// Cap on how long a `session.bind` *waits* for the session's MCP
-    /// convergence.
-    ///
-    /// The bind never blocks on MCP discovery — tools flow through dynamic
-    /// registration and a slow convergence simply finishes after the bind —
-    /// but waiting a short grace lets fast discovery land in the bind's own
-    /// install, so the first turn usually sees the tools. The cap keeps the
-    /// wait well under the hub's bind ack window
-    /// ([`xai_tool_protocol::SESSION_BIND_ACK_TIMEOUT`], which the hub's ws
-    /// router uses as its bind timeout; `bind_mcp_config_tests` pins the
-    /// headroom), so one stalling MCP endpoint can never turn into a
-    /// hub-visible bind failure. The convergence itself always runs on the
-    /// full [`Self::discovery_timeout`].
+    /// Cap on how long a `session.bind` *waits* for the session's MCP convergence. The bind never blocks on MCP discovery — tools flow through dynamic registration and a slow convergence simply finishes after the bind — but waiting a short grace lets fast discovery land in the bind's own install, so the first turn usually sees the tools.
+    /// The cap keeps the wait well under the hub's bind ack window ([`xai_tool_protocol::SESSION_BIND_ACK_TIMEOUT`], which the hub's ws router uses as its bind timeout; `bind_mcp_config_tests` pins the headroom), so one stalling MCP endpoint can never turn into a hub-visible bind failure.
     pub const MAX_BIND_CONVERGE_GRACE: Duration = Duration::from_secs(8);
-    /// Headroom reserved out of the hub's bind-ack window for everything
-    /// that is NOT the MCP converge wait: serializing the reply, the wire,
-    /// and the hub's own handling. The converge grace is budgeted as
-    /// `SESSION_BIND_ACK_TIMEOUT − elapsed setup − this margin`, so the
-    /// TOTAL bind stays under the ack window no matter how slow session
-    /// create / remount / the bind-mount hook were.
+    /// Headroom reserved out of the hub's bind-ack window for everything that is NOT the MCP converge wait: serializing the reply, the wire, and the hub's own handling.
+    /// The converge grace is budgeted as `SESSION_BIND_ACK_TIMEOUT − elapsed setup − this margin`, so the TOTAL bind stays under the ack window no matter how slow session create / remount / the bind-mount hook were.
     pub const BIND_ACK_SAFETY_MARGIN: Duration = Duration::from_secs(1);
-    /// Hard bound on configured servers. The config is externally influenced
-    /// (a user-authored file on the desktop path), so its fan-out — child
-    /// processes, connections, discovery work — carries an explicit cap;
-    /// entries past it are dropped deterministically, in config order.
+    /// Hard bound on configured servers. The config is externally influenced (a user-authored file on the desktop path), so its fan-out — child processes, connections, discovery work — carries an explicit cap; entries past it are dropped deterministically, in config order.
     pub const MAX_SERVERS: usize = 64;
     pub fn new(servers: impl IntoIterator<Item = agent_client_protocol::McpServer>) -> Self {
         let mut servers: Vec<_> = servers.into_iter().collect();
@@ -757,26 +828,35 @@ impl BindMcpConfig {
             servers: servers.into(),
             discovery_timeout: Self::DEFAULT_DISCOVERY_TIMEOUT,
             first_party: std::sync::Arc::new(std::collections::HashSet::new()),
+            call_gates: Arc::default(),
         }
     }
     pub fn with_discovery_timeout(mut self, timeout: Duration) -> Self {
         self.discovery_timeout = timeout;
         self
     }
-    /// Mark servers (by configured name) as FIRST-PARTY app endpoints: local
-    /// desktop processes addressed by agent id. Only these receive the
-    /// `X-Grok-Agent-ID` header (the bound session id) and the
-    /// local-agent-endpoint transport posture (no OAuth probe, no proxy, no
-    /// redirects). Defaults OFF for every server — a user-configured
-    /// third-party MCP server must never receive the session id or lose its
-    /// OAuth/proxy path. Read when a server STARTS; marking changes alone do
-    /// not restart a running server.
+    /// Mark servers (by configured name) as FIRST-PARTY app endpoints: local desktop processes addressed by agent id.
+    /// Only these receive the `X-Grok-Agent-ID` header (the bound session id) and the local-agent-endpoint transport posture (no OAuth probe, no proxy, no redirects).
+    /// Defaults OFF for every server — a user-configured third-party MCP server must never receive the session id or lose its OAuth/proxy path.
     pub fn with_first_party_servers(mut self, names: impl IntoIterator<Item = String>) -> Self {
         self.first_party = std::sync::Arc::new(names.into_iter().collect());
         self
     }
     pub fn first_party_servers(&self) -> &std::collections::HashSet<String> {
         &self.first_party
+    }
+    /// `gate` checks every tool call to the server named `server`, a host's own built-in server.
+    /// A server that started before this call keeps the gate it started with.
+    pub fn with_call_gate(
+        mut self,
+        server: impl Into<String>,
+        gate: Arc<dyn crate::mcp::McpCallGate>,
+    ) -> Self {
+        Arc::make_mut(&mut self.call_gates).insert(server.into(), gate);
+        self
+    }
+    pub fn call_gates(&self) -> &crate::mcp::McpCallGates {
+        &self.call_gates
     }
     pub fn servers(&self) -> &[agent_client_protocol::McpServer] {
         &self.servers
@@ -790,13 +870,8 @@ impl BindMcpConfig {
     pub fn bind_converge_grace(&self) -> Duration {
         self.discovery_timeout.min(Self::MAX_BIND_CONVERGE_GRACE)
     }
-    /// [`Self::bind_converge_grace`] as a DEADLINE from the start of bind
-    /// handling rather than a duration started late: the grace only bounds
-    /// the MCP wait, but the hub's ack window bounds the WHOLE bind —
-    /// session create, path-virt remount, the bind-mount hook, and
-    /// enrolment all spend from the same budget. Clamped at zero: a bind
-    /// whose setup already consumed the window skips the wait entirely and
-    /// lets discovery ride `tools_changed`.
+    /// [`Self::bind_converge_grace`] as a DEADLINE from the start of bind handling rather than a duration started late: the grace only bounds the MCP wait, but the hub's ack window bounds the WHOLE bind — session create, path-virt remount, the bind-mount hook, and enrolment all spend from the same budget.
+    /// Clamped at zero: a bind whose setup already consumed the window skips the wait entirely and lets discovery ride `tools_changed`.
     pub fn bind_converge_grace_within(&self, elapsed_since_bind_start: Duration) -> Duration {
         let remaining = xai_tool_protocol::SESSION_BIND_ACK_TIMEOUT
             .saturating_sub(Self::BIND_ACK_SAFETY_MARGIN)
@@ -853,21 +928,40 @@ pub struct WorkspaceConfig {
     pub confine_fs_to_workspace_root: bool,
     /// MCP servers initialized for each admitted hub session bind.
     pub bind_mcp: Option<BindMcpConfig>,
+    /// Whether hub tool calls wait for the session owner; resolved per host by
+    /// [`approval_gate_for`](crate::permission::approval_gate_for).
+    pub tool_approval: ToolApprovalGate,
+    /// Which host runs this server; decides whether the root's `FsChanged` producer is lit.
+    pub host_kind: crate::host_kind::WorkspaceHostKind,
+    /// The folder's per-command shell sandbox; `None` on hosts that do not sandbox commands (the
+    /// CLI, the remote sandbox server). The session factory must carry its launch hook.
+    pub sandbox: Option<Arc<crate::sandbox::WorkspaceSandbox>>,
 }
 /// Metadata a tool server announces so hub consumers can identify and route to it.
 /// Re-export of the protocol crate's single catalog of well-known registration-metadata keys; every field is optional and independently sourced.
 pub use xai_tool_protocol::ServerIdentityMetadata as WorkspaceServerMetadata;
 /// Merge an env-sourced logical session id into caller-supplied tool-server metadata (`None` on the restore/local path).
-///
-/// `env_session_id` is the raw `GROK_SESSION_ID`; empty is normalized to absent.
 /// Delegates to [`WorkspaceServerMetadata::merge_into`]: an explicit `session_id` already in `metadata` is never clobbered.
-/// A non-object `metadata` value is returned unchanged (the sole caller always sends an object).
 pub fn merge_session_metadata(
     metadata: Option<serde_json::Value>,
     env_session_id: Option<String>,
 ) -> Option<serde_json::Value> {
     WorkspaceServerMetadata {
         session_id: env_session_id.filter(|s| !s.is_empty()),
+        ..Default::default()
+    }
+    .merge_into(metadata)
+}
+/// Merge the host-identity keys a standalone server can determine for itself (`host_kind`, `platform`) into caller-supplied metadata.
+/// `host_kind` is one of the `xai_tool_protocol::HOST_KIND_*` values; the caller picks it because the same binary serves sandbox containers and headless user machines.
+/// Delegates to [`WorkspaceServerMetadata::merge_into`]: explicit caller keys are never clobbered, and a non-object value passes through unchanged.
+pub fn merge_host_identity_metadata(
+    metadata: Option<serde_json::Value>,
+    host_kind: &str,
+) -> Option<serde_json::Value> {
+    WorkspaceServerMetadata {
+        host_kind: Some(host_kind.to_owned()),
+        platform: Some(std::env::consts::OS.to_owned()),
         ..Default::default()
     }
     .merge_into(metadata)
@@ -901,7 +995,10 @@ impl WorkspaceConfig {
             require_explicit_toolset: false,
             confine_fs_to_workspace_root: false,
             bind_mcp: None,
+            tool_approval: ToolApprovalGate::Off,
             status_config,
+            host_kind: Default::default(),
+            sandbox: None,
         }
     }
 }
@@ -963,15 +1060,6 @@ impl std::fmt::Debug for AgentSessionConfig {
             .finish()
     }
 }
-/// A single hook source: either a JSON settings file or a directory of `*.json` hook files.
-/// Maps 1:1 to [`xai_grok_hooks::discovery::HookSource`] but uses owned `PathBuf` so the config struct is `'static`.
-#[derive(Debug, Clone)]
-pub enum HookSourceConfig {
-    /// A single JSON settings file (e.g. `~/.claude/settings.json`).
-    SettingsFile(PathBuf),
-    /// A directory of `*.json` hook files (e.g. `~/.grok/hooks/`).
-    Directory(PathBuf),
-}
 /// Filesystem isolation strategy for a forked session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IsolationMode {
@@ -987,16 +1075,12 @@ pub enum IsolationMode {
 mod bind_mcp_config_tests {
     use super::BindMcpConfig;
     use std::time::Duration;
-    /// The hub fails a `session.bind` whose ack takes longer than its
-    /// window — the shared protocol constant, which the hub's ws router
-    /// uses as its bind timeout. The grace a bind waits for the session's
-    /// MCP convergence must stay under it with headroom, or one stalling
-    /// MCP endpoint turns into a hub-visible bind failure.
+    /// The hub fails a `session.bind` whose ack takes longer than its window — the shared protocol constant, which the hub's ws router uses as its bind timeout.
+    /// The grace a bind waits for the session's MCP convergence must stay under it with headroom, or one stalling MCP endpoint turns into a hub-visible bind failure.
     const HUB_BIND_ACK_TIMEOUT: Duration = xai_tool_protocol::SESSION_BIND_ACK_TIMEOUT;
-    /// Duplicate names dedupe at the same chokepoint as the caps, LAST
-    /// definition wins (JSON-object semantics): the session maps hold one
-    /// slot per name, so without this, discovery would start one client per
-    /// entry and drop all but one process without shutdown.
+    /// Duplicate names dedupe at the same chokepoint as the caps, LAST definition wins
+    /// (JSON-object semantics): the session maps hold one slot per name, so without this,
+    /// discovery would start one client per entry and drop all but one process without shutdown.
     #[test]
     fn duplicate_server_names_dedupe_last_wins() {
         let http = |name: &str, url: &str| {
@@ -1019,7 +1103,10 @@ mod bind_mcp_config_tests {
             ["other", "dup"],
             "one slot per name, positions of the kept (last) occurrences"
         );
-        let agent_client_protocol::McpServer::Http(kept) = &config.servers()[1] else {
+        let Some(server) = config.servers().get(1) else {
+            panic!("expected second server: {:?}", config.servers());
+        };
+        let agent_client_protocol::McpServer::Http(kept) = server else {
             panic!("expected http server");
         };
         assert_eq!(
@@ -1040,10 +1127,14 @@ mod bind_mcp_config_tests {
             ))
         }));
         assert_eq!(config.servers().len(), BindMcpConfig::MAX_SERVERS);
-        let first = xai_grok_mcp::servers::mcp_server_name(&config.servers()[0]);
-        let last = xai_grok_mcp::servers::mcp_server_name(
-            &config.servers()[BindMcpConfig::MAX_SERVERS - 1],
-        );
+        let Some(first_server) = config.servers().first() else {
+            panic!("expected first server");
+        };
+        let Some(last_server) = config.servers().last() else {
+            panic!("expected last server");
+        };
+        let first = xai_grok_mcp::servers::mcp_server_name(first_server);
+        let last = xai_grok_mcp::servers::mcp_server_name(last_server);
         assert_eq!(first, "server-000");
         assert_eq!(
             last,
@@ -1061,11 +1152,9 @@ mod bind_mcp_config_tests {
         let fast = BindMcpConfig::new([]).with_discovery_timeout(Duration::from_secs(1));
         assert_eq!(fast.bind_converge_grace(), Duration::from_secs(1));
     }
-    /// The grace is a deadline from the START of bind handling, not a
-    /// duration started after setup: slow session create / remount / mount
-    /// hook shrink it, and a bind whose setup already ate the ack window
-    /// waits zero — so the TOTAL bind stays under the hub's ack no matter
-    /// how slow the preceding steps were.
+    /// The grace is a deadline from the START of bind handling, not a duration started after setup: slow
+    /// session create / remount / mount hook shrink it, and a bind whose setup already ate the ack window
+    /// waits zero — so the TOTAL bind stays under the hub's ack no matter how slow the preceding steps were.
     #[test]
     fn bind_converge_grace_shrinks_when_setup_was_slow() {
         let config = BindMcpConfig::new([]);
@@ -1094,7 +1183,35 @@ mod bind_mcp_config_tests {
 }
 #[cfg(test)]
 mod tests {
-    use super::{WorkspaceServerMetadata, merge_session_metadata};
+    use super::{WorkspaceServerMetadata, merge_host_identity_metadata, merge_session_metadata};
+    #[test]
+    fn merge_host_identity_metadata_announces_kind_and_platform_without_clobbering() {
+        let merged = merge_host_identity_metadata(
+            Some(serde_json::json!({ "session_id": "sess-1", "host_kind": "spaceship" })),
+            xai_tool_protocol::HOST_KIND_SANDBOX,
+        )
+        .unwrap();
+        assert_eq!(
+            merged,
+            serde_json::json!({
+                "session_id": "sess-1",
+                "host_kind": "spaceship",
+                "platform": std::env::consts::OS,
+            })
+        );
+        let fresh =
+            merge_host_identity_metadata(None, xai_tool_protocol::HOST_KIND_DAEMON).unwrap();
+        assert_eq!(
+            fresh,
+            serde_json::json!({ "host_kind": "daemon", "platform": std::env::consts::OS })
+        );
+        let scalar = serde_json::json!("opaque");
+        assert_eq!(
+            merge_host_identity_metadata(Some(scalar.clone()), xai_tool_protocol::HOST_KIND_DAEMON)
+                .unwrap(),
+            scalar
+        );
+    }
     #[test]
     fn workspace_server_metadata_serializes_all_present_fields() {
         let meta = WorkspaceServerMetadata {

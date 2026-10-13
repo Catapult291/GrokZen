@@ -49,6 +49,12 @@ fn localized_tip_body<'a>(
     let Some(locale) = locale else {
         return std::borrow::Cow::Borrowed(tip);
     };
+    if locale.has_display_catalog(xai_grok_locale::dynamic::Domain::Settings) {
+        return locale
+            .remote_settings_translation("tip", &[], tip)
+            .map(std::borrow::Cow::Owned)
+            .unwrap_or(std::borrow::Cow::Borrowed(tip));
+    }
     let catalog_id = match tip {
         "Use @ to attach files like @src/main.rs." => Some("tips.attach_files"),
         "Use @! for hidden or ignored files: @!.github/workflows." => Some("tips.hidden_files"),
@@ -134,11 +140,8 @@ pub fn render_tip_with_locale(
         .render(text, buf);
 }
 
-/// Blank every cell of `area` (chars, colors, and modifiers) in `color`.
-///
-/// Modifiers MUST be reset here: ratatui's `Cell::set_style` only *merges* modifiers (`insert(add)` / `remove(sub)`).
-/// A later paint whose style carries no `sub_modifier` inherits whatever BOLD/ITALIC/… an earlier same-frame paint left behind.
-/// One example: the welcome tip's bold `Tip: ` prefix bled into the ephemeral tip as "**Queue**d · Enter to send now".
+/// Blank every cell of `area` (chars, colors, and modifiers) in `color`. Modifiers MUST be reset here: ratatui's
+/// `Cell::set_style` only *merges* modifiers (`insert(add)` / `remove(sub)`).
 fn clear_rect(buf: &mut Buffer, area: Rect, color: Color) {
     for row in 0..area.height {
         for col in 0..area.width {
@@ -311,6 +314,30 @@ pub fn render_ephemeral_tip_with_locale(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zh_localization_dynamic_tip_keeps_local_occurrence_and_shortcuts_unchanged() {
+        use xai_grok_locale::dynamic::{DisplayCatalog, DisplayEntry, Domain};
+        let locale = zh_cn_locale();
+        let raw = "Try /new for a new session.";
+        let entry = DisplayEntry {
+            field: "tip".into(),
+            context: vec![],
+            source: Some(raw.into()),
+            source_sha256: None,
+            translation: "使用 /new 开始新会话。".into(),
+        };
+        locale.install_display_catalog(std::sync::Arc::new(
+            DisplayCatalog::from_entries(Domain::Settings, vec![entry]).unwrap(),
+        ));
+        locale.set_remote_tip(Some(raw.into()));
+        assert_eq!(
+            localized_tip_body(raw, Some(&locale)),
+            "使用 /new 开始新会话。"
+        );
+        locale.set_remote_tip(None);
+        assert_eq!(localized_tip_body(raw, Some(&locale)), raw);
+    }
 
     fn zh_cn_locale() -> crate::locale::LocaleContext {
         crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
@@ -536,7 +563,6 @@ mod tests {
     fn clears_leaked_modifiers_from_underpaint() {
         let area = Rect::new(0, 0, 40, 1);
         let mut buf = Buffer::empty(area);
-        // Simulate a stale session-tip underpaint: 5 bold cells ("Tip: ")
         buf.set_string(
             0,
             0,
@@ -544,17 +570,18 @@ mod tests {
             Style::default().add_modifier(Modifier::BOLD),
         );
 
-        // The send-now tip shape: dim text with a single bold key chord.
+        let prefix = "Status · ";
+        let chord = "Enter";
         let dim = Style::default();
         let bold = Style::default().add_modifier(Modifier::BOLD);
         let line = Line::from(vec![
-            Span::styled("Queued · ", dim),
-            Span::styled("Enter", bold),
-            Span::styled(" to send now", dim),
+            Span::styled(prefix, dim),
+            Span::styled(chord, bold),
+            Span::styled(" to continue", dim),
         ]);
         render_ephemeral_tip(area, &mut buf, &line);
 
-        assert_eq!(row_text(&buf, area, 0).trim(), "Queued · Enter to send now");
+        assert_eq!(row_text(&buf, area, 0).trim(), "Status · Enter to continue");
         let bold_cols: Vec<u16> = (0..area.width)
             .filter(|&x| {
                 buf.cell((x, 0))
@@ -563,10 +590,10 @@ mod tests {
                     .contains(Modifier::BOLD)
             })
             .collect();
-        // Inset by one: "Queued · " occupies cols 1..10, "Enter" cols 10..15.
+        let chord_start = 1 + prefix.chars().count() as u16;
         assert_eq!(
             bold_cols,
-            (10..15).collect::<Vec<u16>>(),
+            (chord_start..chord_start + chord.chars().count() as u16).collect::<Vec<u16>>(),
             "only the Enter chord may be bold — no leak from the underpaint"
         );
     }

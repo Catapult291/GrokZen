@@ -18,12 +18,8 @@ use tracing::debug;
 // ---------------------------------------------------------------------------
 
 /// Read proxy configuration from the environment and decide whether `target_host` should be connected through a proxy.
-///
-/// Resolution order (matches `curl` / `reqwest` behaviour):
-/// 1. If `NO_PROXY` contains `target_host` (or a matching domain suffix / CIDR), return `None`.
-/// 2. If `HTTPS_PROXY` (or `https_proxy`) is set, return its value.
-/// 3. If `HTTP_PROXY` (or `http_proxy`) is set, return its value.
-/// 4. Otherwise return `None`.
+/// Resolution order (matches `curl` / `reqwest` behaviour): If `NO_PROXY` contains `target_host` (or a matching domain suffix / CIDR), return `None`. If `HTTPS_PROXY` (or `https_proxy`) is set, return its value.
+/// If `HTTP_PROXY` (or `http_proxy`) is set, return its value. Otherwise return `None`.
 pub(crate) fn resolve_proxy_for_host(target_host: &str) -> Option<String> {
     resolve_proxy_for_host_with(target_host, |key| std::env::var(key))
 }
@@ -61,7 +57,6 @@ where
 }
 
 /// Check whether `host` is in the `no_proxy` list.
-///
 /// The `no_proxy` value is a comma-separated list of hostnames, domain suffixes (with or without a leading dot), IP addresses, or CIDR ranges.
 /// The special value `*` matches everything.
 fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
@@ -86,7 +81,13 @@ fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
         } else {
             host_lower.len() > entry.len()
                 && host_lower.ends_with(entry.as_str())
-                && host_lower.as_bytes()[host_lower.len() - entry.len() - 1] == b'.'
+                && host_lower
+                    .len()
+                    .checked_sub(entry.len())
+                    .and_then(|i| i.checked_sub(1))
+                    .and_then(|i| host_lower.as_bytes().get(i))
+                    .copied()
+                    == Some(b'.')
         };
         if matches_suffix {
             return true;
@@ -102,7 +103,6 @@ fn is_host_bypassed(host: &str, no_proxy: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Establish a TLS-wrapped TCP stream through an HTTP CONNECT proxy.
-///
 /// Opens the tunnel, wraps it in TLS (rustls with native root certificates), and returns a `MaybeTlsStream<TcpStream>`.
 /// The result is ready for `tokio_tungstenite::client_async`.
 pub(crate) async fn connect_via_proxy(
@@ -115,13 +115,8 @@ pub(crate) async fn connect_via_proxy(
     Ok(MaybeTlsStream::Rustls(tls_stream))
 }
 
-/// Open a raw TCP tunnel through an HTTP CONNECT proxy (no TLS).
-///
-/// 1. Parse the proxy URL to get host and port.
-/// 2. Open a plain TCP connection to the proxy.
-/// 3. Send `CONNECT target_host:target_port HTTP/1.1\r\n\r\n`.
-/// 4. Read the proxy's response; expect `HTTP/1.x 200 …`.
-/// 5. Return the raw `TcpStream` positioned after the CONNECT response.
+/// Open a raw TCP tunnel through an HTTP CONNECT proxy (no TLS). Parse the proxy URL to get host and port. Open a plain TCP connection to the proxy. Send `CONNECT target_host:target_port HTTP/1.1\r\n\r\n`.
+/// Read the proxy's response; expect `HTTP/1.x 200 …`. Return the raw `TcpStream` positioned after the CONNECT response.
 async fn open_connect_tunnel(
     proxy_url: &str,
     target_host: &str,
@@ -166,10 +161,8 @@ async fn open_connect_tunnel(
         }
     }
 
-    // 5. Assert the BufReader's internal buffer is empty before reuniting.
-    // BufReader::read_line may have read ahead into its buffer
-    // A proxy that eagerly forwards data, or coalesced TCP segments, can leave bytes beyond the HTTP headers there
-    // Dropping them would corrupt the subsequent TLS handshake
+    // Assert the BufReader's internal buffer is empty before reuniting. BufReader::read_line may have read ahead into its buffer
+    // A proxy that eagerly forwards data, or coalesced TCP segments, can leave bytes beyond the HTTP headers there Dropping them would corrupt the subsequent TLS handshake
     let remaining = reader.buffer();
     if !remaining.is_empty() {
         anyhow::bail!(
@@ -200,11 +193,7 @@ async fn tls_wrap(
 }
 
 /// Parse a proxy URL into (host, port).
-///
-/// Accepted formats:
-/// - `http://host:port`
-/// - `http://host` (defaults to port 80)
-/// - `host:port`
+/// Accepted formats: `http://host:port` `http://host` (defaults to port 80) `host:port`
 fn parse_proxy_url(url: &str) -> anyhow::Result<(String, u16)> {
     // Strip scheme if present.
     let without_scheme = url
@@ -441,7 +430,6 @@ mod tests {
     // ===== HTTP CONNECT tunnel (integration-style) =====
 
     /// Helper: spawn a mock HTTP CONNECT proxy that accepts one connection.
-    ///
     /// On receiving a CONNECT request, it validates the request format, replies with `status_line`, and then echoes data (simulating a tunnel).
     /// Returns the proxy's listen address.
     async fn spawn_mock_proxy(status_line: &'static str) -> std::net::SocketAddr {
@@ -455,18 +443,27 @@ mod tests {
             let mut buf = vec![0u8; 4096];
             let mut total = 0;
             loop {
-                let n = stream.read(&mut buf[total..]).await.unwrap();
+                let Some(rest) = buf.get_mut(total..) else {
+                    return;
+                };
+                let n = stream.read(rest).await.unwrap();
                 if n == 0 {
                     return;
                 }
                 total += n;
-                let so_far = std::str::from_utf8(&buf[..total]).unwrap_or("");
+                let Some(head) = buf.get(..total) else {
+                    return;
+                };
+                let so_far = std::str::from_utf8(head).unwrap_or("");
                 if so_far.contains("\r\n\r\n") {
                     break;
                 }
             }
 
-            let request = std::str::from_utf8(&buf[..total]).unwrap().to_string();
+            let Some(head) = buf.get(..total) else {
+                return;
+            };
+            let request = std::str::from_utf8(head).unwrap().to_string();
             assert!(
                 request.contains("CONNECT ") && request.contains(" HTTP/1.1"),
                 "Expected CONNECT request, got: {request}"
@@ -482,7 +479,10 @@ mod tests {
                     Ok(0) | Err(_) => break,
                     Ok(n) => n,
                 };
-                if stream.write_all(&echo_buf[..n]).await.is_err() {
+                let Some(written) = echo_buf.get(..n) else {
+                    break;
+                };
+                if stream.write_all(written).await.is_err() {
                     break;
                 }
             }

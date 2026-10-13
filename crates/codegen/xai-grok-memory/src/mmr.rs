@@ -42,11 +42,6 @@ fn jaccard_similarity(a: &HashSet<&str>, b: &HashSet<&str>) -> f64 {
 }
 
 /// Re-rank results using Maximal Marginal Relevance.
-///
-/// Reorders `results` in-place to balance relevance with diversity.
-/// No-op when `config.enabled` is false, `lambda` is 1.0, or there are fewer than 2 results.
-///
-/// `relevance` is the per-result unclamped ranking score, aligned index-for-index with `results` on entry.
 /// It is passed separately because the clamped `SearchResult.score` saturates top chunks to 1.0 and loses the access-frequency boost tiebreak.
 pub fn mmr_rerank(results: &mut Vec<SearchResult>, relevance: &[f64], config: &MmrConfig) {
     if !config.enabled || results.len() <= 1 {
@@ -78,29 +73,48 @@ pub fn mmr_rerank(results: &mut Vec<SearchResult>, relevance: &[f64], config: &M
         let mut best_mmr = f64::NEG_INFINITY;
 
         for (pos, &candidate) in remaining.iter().enumerate() {
-            let normalized = (relevance[candidate] - min_score) / range;
+            let Some(&rel) = relevance.get(candidate) else {
+                continue;
+            };
+            let normalized = (rel - min_score) / range;
 
+            let Some(cand_tokens) = token_cache.get(candidate) else {
+                continue;
+            };
             let max_sim = selected
                 .iter()
-                .map(|&sel| jaccard_similarity(&token_cache[candidate], &token_cache[sel]))
+                .filter_map(|&sel| {
+                    token_cache
+                        .get(sel)
+                        .map(|t| jaccard_similarity(cand_tokens, t))
+                })
                 .fold(0.0_f64, f64::max);
 
             let mmr_score = lambda * normalized - (1.0 - lambda) * max_sim;
 
-            if mmr_score > best_mmr
-                || (mmr_score == best_mmr && relevance[candidate] > relevance[remaining[best_pos]])
-            {
+            let better_relevance = remaining
+                .get(best_pos)
+                .and_then(|&bp| relevance.get(bp))
+                .is_some_and(|&best_rel| rel > best_rel);
+            if mmr_score > best_mmr || (mmr_score == best_mmr && better_relevance) {
                 best_mmr = mmr_score;
                 best_pos = pos;
             }
         }
 
+        if best_pos >= remaining.len() {
+            break;
+        }
         selected.push(remaining.remove(best_pos));
     }
 
     let reordered: Vec<SearchResult> = selected
         .into_iter()
-        .map(|i| std::mem::replace(&mut results[i], placeholder_result()))
+        .filter_map(|i| {
+            results
+                .get_mut(i)
+                .map(|slot| std::mem::replace(slot, placeholder_result()))
+        })
         .collect();
     *results = reordered;
     // `results` is now reordered, so the caller's `relevance` slice is stale and must not be read again
@@ -169,8 +183,13 @@ mod tests {
             make_result("b", "python sync", 0.5),
         ];
         rerank(&mut results, &enabled_config(1.0));
-        assert_eq!(results[0].chunk_id, "a");
-        assert_eq!(results[1].chunk_id, "b");
+        assert_eq!(
+            results
+                .iter()
+                .map(|r| r.chunk_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
     }
 
     #[test]
@@ -178,7 +197,7 @@ mod tests {
         let mut results = vec![make_result("a", "rust async", 1.0)];
         rerank(&mut results, &enabled_config(0.7));
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].chunk_id, "a");
+        assert_eq!(results.first().map(|r| r.chunk_id.as_str()), Some("a"));
     }
 
     /// Regression guard: MMR must rank on `relevance`, not the clamped `SearchResult.score`.
@@ -193,10 +212,13 @@ mod tests {
         mmr_rerank(&mut results, &relevance, &enabled_config(0.7));
 
         assert_eq!(
-            results[0].chunk_id, "high",
+            results
+                .iter()
+                .map(|r| r.chunk_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["high", "low"],
             "MMR must order by unclamped relevance, not the clamped .score",
         );
-        assert_eq!(results[1].chunk_id, "low");
     }
 
     #[test]
@@ -211,12 +233,14 @@ mod tests {
         rerank(&mut results, &enabled_config(0.5));
 
         // "a" has the highest relevance, so it stays first
-        assert_eq!(results[0].chunk_id, "a");
         assert_eq!(
-            results[1].chunk_id, "c",
+            results
+                .iter()
+                .map(|r| r.chunk_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "c", "b"],
             "diverse result should be promoted over redundant one"
         );
-        assert_eq!(results[2].chunk_id, "b");
     }
 
     #[test]
@@ -228,9 +252,10 @@ mod tests {
         ];
         rerank(&mut results, &enabled_config(0.5));
 
-        assert_eq!(results[0].chunk_id, "a");
+        assert_eq!(results.first().map(|r| r.chunk_id.as_str()), Some("a"));
         assert_eq!(
-            results[1].chunk_id, "c",
+            results.get(1).map(|r| r.chunk_id.as_str()),
+            Some("c"),
             "different result should beat identical duplicate"
         );
     }
@@ -246,9 +271,10 @@ mod tests {
         ];
         rerank(&mut results, &enabled_config(0.5));
 
-        assert_eq!(results[0].chunk_id, "a");
+        assert_eq!(results.first().map(|r| r.chunk_id.as_str()), Some("a"));
         assert_eq!(
-            results[1].chunk_id, "c",
+            results.get(1).map(|r| r.chunk_id.as_str()),
+            Some("c"),
             "case-only difference should be detected as redundant"
         );
     }

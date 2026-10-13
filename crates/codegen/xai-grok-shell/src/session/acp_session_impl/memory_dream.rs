@@ -10,8 +10,8 @@ const DREAM_LOCK_STALE_FLOOR_SECS: u64 = DREAM_MODEL_TIMEOUT.as_secs() * 2;
 /// Whether a dream attempt reached the model call. `Ran` reports its own result; `Skipped` returned
 /// before the model call, so a user-initiated caller surfaces the reason and `/dream` is never silent.
 enum DreamAttempt {
-    Ran,
-    Skipped(&'static str),
+    Ran(MemoryDreamDisposition),
+    Skipped(MemoryDreamDisposition, &'static str),
 }
 
 #[derive(Debug)]
@@ -21,7 +21,6 @@ pub(super) struct MemoryFlushSnapshot {
 }
 
 /// Build first-turn injection backend params without mutating the shared session params.
-///
 /// Clones the session-wide params so tool-search and compaction-recovery backends keep their original `search_source` and search thresholds.
 /// The returned effective min score keeps the historical first-turn default of `0.0` unless the injection config explicitly overrides it.
 pub(super) fn build_initial_injection_backend_params(
@@ -42,8 +41,6 @@ pub(super) fn build_initial_injection_backend_params(
 
 impl SessionActor {
     /// Re-register `memory_search` and `memory_get` tools on the tool bridge.
-    ///
-    /// Used when re-enabling memory mid-session (`/memory on`).
     /// The dynamic `register_mcp_tools` path puts the tools in the `LocalRegistry` for dispatch.
     /// The memory backend itself is already in `Resources`, inserted by the caller before this method.
     pub(super) async fn register_memory_tools(
@@ -60,7 +57,6 @@ impl SessionActor {
                 xai_grok_tools::implementations::memory::search_tool::MemorySearchImpl,
                 None,
             )
-            .await
             .map_err(|e| format!("failed to register memory_search: {e}"))?;
         bridge
             .register_mcp_tools(
@@ -68,7 +64,6 @@ impl SessionActor {
                 xai_grok_tools::implementations::memory::get_tool::MemoryGetImpl,
                 None,
             )
-            .await
             .map_err(|e| format!("failed to register memory_get: {e}"))?;
         Ok(())
     }
@@ -83,6 +78,14 @@ impl SessionActor {
             xai_grok_telemetry::memory_telemetry::MemorySessionSummary {
                 session_id: self.session_info.id.to_string(),
                 memory_enabled: self.memory.is_enabled(),
+                memory_mode: match self.memory.mode() {
+                    Some(crate::config::MemoryMode::V2) => {
+                        xai_grok_telemetry::memory_telemetry::MemoryMode::V2
+                    }
+                    Some(crate::config::MemoryMode::Legacy) | None => {
+                        xai_grok_telemetry::memory_telemetry::MemoryMode::Legacy
+                    }
+                },
                 session_duration_secs: self.session_start.elapsed().as_secs(),
                 flush_count: telem.flush_count,
                 flush_success_count: telem.flush_success_count,
@@ -96,6 +99,13 @@ impl SessionActor {
                 dream_count: telem.dream_count,
                 dream_success_count: telem.dream_success_count,
                 dream_error_count: telem.dream_error_count,
+                capture_prompt_tokens: telem.capture_prompt_tokens,
+                capture_completion_tokens: telem.capture_completion_tokens,
+                capture_cost_usd_ticks: telem.capture_cost_usd_ticks,
+                dream_prompt_tokens: telem.dream_prompt_tokens,
+                dream_completion_tokens: telem.dream_completion_tokens,
+                dream_cost_usd_ticks: telem.dream_cost_usd_ticks,
+                injected_bytes: telem.injected_bytes,
             },
         );
     }
@@ -118,7 +128,9 @@ impl SessionActor {
         }
         let mut session_end_result = "disabled";
         let mut total_chunks_at_end = 0usize;
-        if let Some(storage) = self.memory.storage() {
+        if self.memory.uses_legacy_pipeline()
+            && let Some(storage) = self.memory.storage()
+        {
             let _save = session_end::timed_child(timer, Phase::MemorySave, span.span());
             let conversation = self.chat_state_handle.get_conversation().await;
             let result = crate::session::memory::hooks::on_session_end(
@@ -175,12 +187,15 @@ impl SessionActor {
         std::path::PathBuf,
         String,
     )> {
+        if !self.memory.uses_legacy_pipeline() {
+            return None;
+        }
         let storage = self.memory.storage()?;
         let workspace_dir = storage.workspace_dir();
         let lock = crate::session::memory::dream_lock::DreamLock::new(workspace_dir);
         let sessions_dir = storage.sessions_dir();
         let sid = &self.session_info.id.0;
-        let sid8 = sid[..8.min(sid.len())].to_owned();
+        let sid8 = sid.get(..8.min(sid.len())).unwrap_or(sid).to_owned();
         Some((storage, lock, sessions_dir, sid8))
     }
 
@@ -233,11 +248,14 @@ impl SessionActor {
     }
 
     /// Run dream from the `/dream` slash command, bypassing the time and session gates.
-    pub(super) async fn run_dream_slash_command(&self) {
+    pub(super) async fn run_dream_slash_command(self: &Arc<Self>) -> MemoryDreamResponse {
+        if self.memory.mode() == Some(crate::config::MemoryMode::V2) {
+            return self.run_v2_dream_slash_command().await;
+        }
         use crate::session::memory::dream_lock::sessions_since;
 
         let Some((storage, lock, sessions_dir, sid8)) = self.dream_context() else {
-            return;
+            return MemoryDreamResponse::new(MemoryDreamDisposition::Disabled);
         };
 
         let sessions = match sessions_since(
@@ -250,7 +268,7 @@ impl SessionActor {
                     target: xai_grok_telemetry::memory_log::TARGET,
                     "MEMORY_DREAM_SLASH: no session logs found, nothing to consolidate"
                 );
-                return;
+                return MemoryDreamResponse::new(MemoryDreamDisposition::NoWork);
             }
             Ok(s) => s,
             Err(e) => {
@@ -259,7 +277,7 @@ impl SessionActor {
                     error = %e,
                     "MEMORY_DREAM_SLASH: failed to list sessions"
                 );
-                return;
+                return MemoryDreamResponse::new(MemoryDreamDisposition::Failed);
             }
         };
 
@@ -270,7 +288,7 @@ impl SessionActor {
         );
 
         // `/dream` is user-initiated, so a skip must be surfaced rather than logged silently.
-        if let DreamAttempt::Skipped(reason) = self
+        match self
             .run_dream_inner(
                 &storage,
                 &lock,
@@ -281,21 +299,21 @@ impl SessionActor {
             )
             .await
         {
-            self.send_xai_notification(XaiSessionUpdate::MemoryDreamCompleted {
-                result: format!("skipped: {reason}"),
-                path: None,
-            })
-            .await;
+            DreamAttempt::Ran(disposition) => MemoryDreamResponse::new(disposition),
+            DreamAttempt::Skipped(disposition, reason) => {
+                self.send_xai_notification(XaiSessionUpdate::MemoryDreamCompleted {
+                    result: format!("skipped: {reason}"),
+                    path: None,
+                })
+                .await;
+                MemoryDreamResponse::new(disposition)
+            }
         }
     }
 
-    /// Shared dream execution: acquire the lock, re-check the gate under it, build the message,
+    /// Shared dream execution: acquire the lock, re-check the gate under it, build the message,.
     /// call the model, execute, and record the result.
-    ///
-    /// `recheck_sid8` is `Some` for the gated (auto) path: the gate is re-evaluated while holding the
-    /// lock, so a waiter that passed the pre-check cannot run a second dream on a stale snapshot after
-    /// the winner commits. `None` is the `/dream` slash path, which bypasses gates and consolidates
-    /// the caller-supplied `sessions`.
+    /// `recheck_sid8` is `Some` for the gated (auto) path: the gate is re-evaluated while holding the.
     async fn run_dream_inner(
         &self,
         storage: &crate::session::memory::MemoryStorage,
@@ -321,7 +339,10 @@ impl SessionActor {
                     target: xai_grok_telemetry::memory_log::TARGET,
                     "{log_prefix}: lock held by another process, skipping"
                 );
-                return DreamAttempt::Skipped("another consolidation is already running");
+                return DreamAttempt::Skipped(
+                    MemoryDreamDisposition::Busy,
+                    "another consolidation is already running",
+                );
             }
             Err(e) => {
                 tracing::warn!(
@@ -329,7 +350,10 @@ impl SessionActor {
                     error = %e,
                     "{log_prefix}: lock acquire failed"
                 );
-                return DreamAttempt::Skipped("could not acquire the consolidation lock");
+                return DreamAttempt::Skipped(
+                    MemoryDreamDisposition::Failed,
+                    "could not acquire the consolidation lock",
+                );
             }
         };
 
@@ -349,7 +373,10 @@ impl SessionActor {
                             gate = ?other,
                             "{log_prefix}: gate closed under lock, skipping"
                         );
-                        return DreamAttempt::Skipped("nothing new to consolidate");
+                        return DreamAttempt::Skipped(
+                            MemoryDreamDisposition::NoWork,
+                            "nothing new to consolidate",
+                        );
                     }
                 }
             }
@@ -366,7 +393,10 @@ impl SessionActor {
                         target: xai_grok_telemetry::memory_log::TARGET,
                         "{log_prefix}: no readable session content, skipping"
                     );
-                    return DreamAttempt::Skipped("no readable session content");
+                    return DreamAttempt::Skipped(
+                        MemoryDreamDisposition::NoWork,
+                        "no readable session content",
+                    );
                 }
             };
 
@@ -384,7 +414,7 @@ impl SessionActor {
                     "{log_prefix}: model call failed"
                 );
                 self.memory.record_dream_result(false);
-                return DreamAttempt::Ran;
+                return DreamAttempt::Ran(MemoryDreamDisposition::Failed);
             }
             Err(_) => {
                 tracing::warn!(
@@ -392,7 +422,7 @@ impl SessionActor {
                     "{log_prefix}: model call timed out (30m)"
                 );
                 self.memory.record_dream_result(false);
-                return DreamAttempt::Ran;
+                return DreamAttempt::Ran(MemoryDreamDisposition::Failed);
             }
         };
 
@@ -467,7 +497,11 @@ impl SessionActor {
             "{log_prefix}: consolidation complete"
         );
 
-        DreamAttempt::Ran
+        DreamAttempt::Ran(match result.status {
+            DreamStatus::Completed { .. } => MemoryDreamDisposition::Completed,
+            DreamStatus::NothingToConsolidate => MemoryDreamDisposition::NoWork,
+            DreamStatus::Failed(_) => MemoryDreamDisposition::Failed,
+        })
     }
 
     /// Make the dream model call using the session's sampling client.
@@ -503,9 +537,6 @@ impl SessionActor {
 
     /// Run a memory flush turn that summarizes recent conversation into a session log.
     /// Sets `is_flushing` to suppress auto-compact during the call.
-    ///
-    /// Flush failure is non-fatal; compaction proceeds regardless.
-    ///
     /// Returns `true` if a flush was executed, `false` if skipped because another flush is already in progress.
     pub(super) async fn run_memory_flush(
         &self,
@@ -513,6 +544,14 @@ impl SessionActor {
         snapshot: Option<MemoryFlushSnapshot>,
     ) -> bool {
         use xai_grok_memory::flush::*;
+
+        if !self.memory.uses_legacy_pipeline() {
+            tracing::debug!(
+                target: xai_grok_telemetry::memory_log::TARGET,
+                "MEMORY_FLUSH: legacy flush is disabled for this memory mode (trigger={trigger})"
+            );
+            return false;
+        }
 
         // Atomically acquire the flushing lock. If another flush is already running (idle timer, pre-compaction, or user-requested), skip.
         if !self.memory.try_acquire_flush_lock() {

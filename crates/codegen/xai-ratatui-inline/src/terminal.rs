@@ -12,13 +12,12 @@ use ratatui::{
     backend::{Backend, ClearType},
     buffer::{Buffer, Cell},
     layout::{Position, Rect, Size},
+    style::{Color, Modifier},
 };
 use unicode_width::UnicodeWidthStr as _;
 
-/// A hyperlink region on a single screen row, in absolute viewport coordinates.
-///
-/// Handed to [`Terminal::set_frame_links`] each frame. The terminal folds these
-/// into a per-cell link layer that participates in the frame diff, so OSC 8
+/// A hyperlink region on a single screen row, in absolute viewport coordinates. Handed to [`Terminal::set_frame_links`]
+/// each frame. The terminal folds these into a per-cell link layer that participates in the frame diff, so OSC 8
 /// sequences are emitted (and cleared) by the same machinery that draws cells.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkSpan {
@@ -28,6 +27,16 @@ pub struct LinkSpan {
     pub url: Arc<str>,
     /// Source grouping key (markdown / overlay id), not the emitted OSC 8 `id=`.
     pub id: Option<u32>,
+}
+
+/// How the host terminal treats rows already on screen when its width shrinks.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+pub enum WidthShrink {
+    /// Rows are cut at the new width and the cursor keeps its row.
+    #[default]
+    Truncates,
+    /// Rows wider than the new width re-wrap onto extra rows. The cursor moves down with its cell.
+    Rewraps,
 }
 
 /// Resolved hyperlink target stored in a frame's link table; `link_ids` entries
@@ -54,14 +63,8 @@ fn resolve_link<'a>(ids: &[u32], table: &'a [LinkRef], i: usize) -> Option<&'a L
     }
 }
 
-/// Emit an OSC 8 hyperlink open sequence.
-///
-/// Control characters are stripped from `url` to prevent premature sequence
-/// termination or escape injection. The sequence is terminated with BEL
-/// (`\x07`) for broadest terminal/multiplexer support; here the BEL is
-/// immediately followed by the cell draw's ESC (cursor move / SGR), which all
-/// mainstream terminals parse correctly (OSC-BEL followed by CSI is ubiquitous,
-/// e.g. title sets). ST would also be valid but is less widely supported.
+/// Emit an OSC 8 hyperlink open sequence. Control characters are stripped from `url` to prevent premature sequence
+/// termination or escape injection. ST would also be valid but is less widely supported.
 fn write_osc8_open<W: Write>(w: &mut W, url: &str, id: Option<u32>) -> io::Result<()> {
     let sanitized: std::borrow::Cow<str> = if url.chars().any(|c| c.is_control()) {
         std::borrow::Cow::Owned(url.chars().filter(|c| !c.is_control()).collect())
@@ -79,12 +82,9 @@ fn write_osc8_close<W: Write>(w: &mut W) -> io::Result<()> {
     w.write_all(b"\x1b]8;;\x07")
 }
 
-/// Markdown ids restart per document; OSC 8 `id=` is terminal-global.
-///
-/// Full-screen apps must set `id=` so wrap fragments group as one hyperlink
-/// (Windows Terminal hover / Ctrl+click). Consecutive spans that share a
-/// source id and URL reuse the reminted id; unnamed consecutive same-URL
-/// spans (soft-wrap of a scanned URL) do too.
+/// Markdown ids restart per document; OSC 8 `id=` is terminal-global. Full-screen apps must set `id=` so wrap fragments
+/// group as one hyperlink (Windows Terminal hover / Ctrl+click). Consecutive spans that share a source id and URL reuse
+/// the reminted id; unnamed consecutive same-URL spans (soft-wrap of a scanned URL) do too.
 fn next_osc8_id(
     span: &LinkSpan,
     last_named: &mut Option<LastNamedOsc8>,
@@ -107,10 +107,8 @@ fn next_osc8_id(
 
 #[derive(Debug, Hash)]
 pub struct OurFrame<'a> {
-    /// Where should the cursor be after drawing this frame?
-    ///
-    /// If `None`, the cursor is hidden and its position is controlled by the backend. If `Some((x,
-    /// y))`, the cursor is shown and placed at `(x, y)` after the call to `Terminal::draw()`.
+    /// Where should the cursor be after drawing this frame? If `None`, the cursor is hidden and its position is controlled by
+    /// the backend. If `Some((x, y))`, the cursor is shown and placed at `(x, y)` after the call to `Terminal::draw()`.
     pub(crate) cursor_position: Option<Position>,
 
     /// The area of the viewport
@@ -143,51 +141,9 @@ impl<'a> From<Frame<'a>> for OurFrame<'a> {
     }
 }
 
-/// An interface to interact and draw [`Frame`]s on the user's terminal.
-///
-/// This is the main entry point for Ratatui. It is responsible for drawing and maintaining the
-/// state of the buffers, cursor and viewport.
-///
-/// The [`Terminal`] is generic over a [`Backend`] implementation which is used to interface with
-/// the underlying terminal library. The [`Backend`] trait is implemented for three popular Rust
-/// terminal libraries: [Crossterm], [Termion] and [Termwiz]. See the [`backend`] module for more
-/// information.
-///
-/// The `Terminal` struct maintains two buffers: the current and the previous.
-/// When the widgets are drawn, the changes are accumulated in the current buffer.
-/// At the end of each draw pass, the two buffers are compared, and only the changes
-/// between these buffers are written to the terminal, avoiding any redundant operations.
-/// After flushing these changes, the buffers are swapped to prepare for the next draw cycle.
-///
-/// The terminal also has a viewport which is the area of the terminal that is currently visible to
-/// the user. It can be either fullscreen, inline or fixed. See [`Viewport`] for more information.
-///
-/// Applications should detect terminal resizes and call [`Terminal::draw`] to redraw the
-/// application with the new size. This will automatically resize the internal buffers to match the
-/// new size for inline and fullscreen viewports. Fixed viewports are not resized automatically.
-///
-/// # Examples
-///
-/// ```rust,no_run
-/// use std::io::stdout;
-///
-/// use ratatui::{backend::CrosstermBackend, widgets::Paragraph, Terminal};
-///
-/// let backend = CrosstermBackend::new(stdout());
-/// let mut terminal = Terminal::new(backend)?;
-/// terminal.draw(|frame| {
-///     let area = frame.area();
-///     frame.render_widget(Paragraph::new("Hello World!"), area);
-/// })?;
-/// # std::io::Result::Ok(())
-/// ```
-///
-/// [Crossterm]: https://crates.io/crates/crossterm
-/// [Termion]: https://crates.io/crates/termion
-/// [Termwiz]: https://crates.io/crates/termwiz
-/// [`backend`]: crate::backend
-/// [`Backend`]: crate::backend::Backend
-/// [`Buffer`]: crate::buffer::Buffer
+/// See the [`backend`] module for more information. At the end of each draw pass, the two buffers are compared, and only
+/// the changes between these buffers are written to the terminal, avoiding any redundant operations. After flushing these
+/// changes, the buffers are swapped to prepare for the next draw cycle. Fixed viewports are not resized automatically.
 #[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
 pub struct Terminal<B>
 where
@@ -211,6 +167,8 @@ where
     /// Last known position of the cursor. Used to find the new area when the viewport is inlined
     /// and the terminal resized.
     last_known_cursor_pos: Position,
+    /// Decides where an inline resize finds the previous viewport top relative to the cursor.
+    width_shrink: WidthShrink,
     /// Number of frames rendered up until current time.
     frame_count: usize,
     /// Per-cell hyperlink id layer (`0` = no link), one per entry in `buffers`
@@ -234,23 +192,75 @@ where
     }
 }
 
+fn front_back<T>(pair: &[T; 2], current: usize) -> (&T, &T) {
+    let [a, b] = pair;
+    if current == 0 { (a, b) } else { (b, a) }
+}
+
+fn front_back_mut<T>(pair: &mut [T; 2], current: usize) -> (&mut T, &mut T) {
+    let [a, b] = pair;
+    if current == 0 { (a, b) } else { (b, a) }
+}
+
+#[cfg(not(feature = "scrolling-regions"))]
+fn next_row_has_glyphs(rows: &[(String, bool, bool)], i: usize) -> bool {
+    rows.get(i + 1).is_some_and(|(ansi, _, _)| !ansi.is_empty())
+}
+
+/// Xenl is pending only after a full-width wrap; a short joiner is a hard `\r\n`.
+#[cfg(not(feature = "scrolling-regions"))]
+fn xenl_pending(rows: &[(String, bool, bool)], i: usize) -> bool {
+    rows.get(i)
+        .is_some_and(|(_, fills_width, wraps)| *wraps && *fills_width)
+        && next_row_has_glyphs(rows, i)
+}
+
+/// The chunk's last row wraps onto `next` in the full list (chunk-local xenl cannot see it).
+#[cfg(not(feature = "scrolling-regions"))]
+fn chunk_continues_xenl(
+    chunk: &[(String, bool, bool)],
+    next: Option<&(String, bool, bool)>,
+) -> bool {
+    chunk
+        .last()
+        .is_some_and(|(_, fills_width, wraps)| *wraps && *fills_width)
+        && next.is_some_and(|(ansi, _, _)| !ansi.is_empty())
+}
+
+/// Do not end a mid-chunk on a xenl-pending wrap when `max_n` can absorb the
+/// continuation. A wrap chain ≥ `max_n` still ends pending; [`write_semantic_rows`]
+/// consumes xenl at the chunk end so the next CUP cannot insert a hard break.
+/// Scroll-to-fill in [`Terminal::insert_before_rows_no_scrolling_regions`] must
+/// still keep that consume off the last screen line.
+#[cfg(not(feature = "scrolling-regions"))]
+fn mid_chunk_end(row_idx: usize, rows: &[(String, bool, bool)], max_n: usize) -> usize {
+    if max_n == 0 || row_idx >= rows.len() {
+        return row_idx;
+    }
+    let pending = |end: usize| end.checked_sub(1).is_some_and(|i| xenl_pending(rows, i));
+    let mut end = row_idx.saturating_add(max_n).min(rows.len());
+    while end > row_idx + 1 && end < rows.len() && pending(end) {
+        end -= 1;
+    }
+    if end < rows.len() && pending(end) && end - row_idx < max_n {
+        end += 1;
+        while end < rows.len() && end - row_idx < max_n && pending(end) {
+            end += 1;
+        }
+    }
+    // max_n cannot absorb the continuation. One fewer painted row; scroll math
+    // still has to reserve the consume line or fill pins it on last_screen.
+    if end < rows.len() && pending(end) && end > row_idx + 1 && end - row_idx >= max_n {
+        end -= 1;
+    }
+    end
+}
+
 impl<B> Terminal<B>
 where
     B: Backend,
 {
     /// Creates a new [`Terminal`] with the given [`Backend`] with a full screen viewport.
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// use std::io::stdout;
-    ///
-    /// use ratatui::{backend::CrosstermBackend, Terminal};
-    ///
-    /// let backend = CrosstermBackend::new(stdout());
-    /// let terminal = Terminal::new(backend)?;
-    /// # std::io::Result::Ok(())
-    /// ```
     pub fn new(backend: B) -> io::Result<Self> {
         Self::with_options(
             backend,
@@ -261,19 +271,6 @@ where
     }
 
     /// Creates a new [`Terminal`] with the given [`Backend`] and [`TerminalOptions`].
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use std::io::stdout;
-    ///
-    /// use ratatui::{backend::CrosstermBackend, layout::Rect, Terminal, TerminalOptions, Viewport};
-    ///
-    /// let backend = CrosstermBackend::new(stdout());
-    /// let viewport = Viewport::Fixed(Rect::new(0, 0, 10, 10));
-    /// let terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
-    /// # std::io::Result::Ok(())
-    /// ```
     pub fn with_options(mut backend: B, options: TerminalOptions) -> io::Result<Self> {
         let area = match options.viewport {
             Viewport::Fullscreen | Viewport::Inline(_) => {
@@ -298,6 +295,7 @@ where
             viewport_area,
             last_known_area: area,
             last_known_cursor_pos: cursor_pos,
+            width_shrink: WidthShrink::default(),
             frame_count: 0,
             link_ids: [vec![0; link_len], vec![0; link_len]],
             link_tables: [Vec::new(), Vec::new()],
@@ -318,7 +316,15 @@ where
 
     /// Gets the current buffer as a mutable reference.
     pub fn current_buffer_mut(&mut self) -> &mut Buffer {
-        &mut self.buffers[self.current]
+        front_back_mut(&mut self.buffers, self.current).0
+    }
+
+    /// The buffer of the most recently completed frame, as [`Self::draw`] hands back in its `CompletedFrame`.
+    /// Test support for callers that drive [`Self::flush`] and [`Self::swap_buffers`] themselves and want to inspect
+    /// what was painted. Blank after [`Self::clear`] or [`Self::reset_back_buffer`] until the next swap.
+    #[cfg(feature = "test-support")]
+    pub fn completed_buffer(&self) -> &Buffer {
+        front_back(&self.buffers, self.current).1
     }
 
     /// Restore Ratatui's wide-cell invariant before diffing the frame.
@@ -349,18 +355,12 @@ where
         &mut self.backend
     }
 
-    /// Obtains a difference between the previous and the current buffer and passes it to the
-    /// current backend for drawing. Returns `true` if any cells were changed.
-    ///
-    /// Uses [`diff_large`] instead of ratatui's [`Buffer::diff`] to avoid a `u16`
-    /// truncation bug: upstream `pos_of()` casts the flat cell index to `u16`
-    /// before computing `(x, y)`, which silently wraps around when
-    /// `width * height > 65 535`.  On extra-large terminals (e.g. 420×160 = 67 200
-    /// cells) this causes the entire UI to be rendered into a tiny corner.
+    /// Uses [`diff_large`] instead of ratatui's [`Buffer::diff`] to avoid a `u16` truncation bug: upstream `pos_of()` casts
+    /// the flat cell index to `u16` before computing `(x, y)`, which silently wraps around when `width * height > 65 535`. On
+    /// extra-large terminals (e.g. 420×160 = 67 200 cells) this causes the entire UI to be rendered into a tiny corner.
     pub fn flush(&mut self) -> io::Result<bool> {
         self.normalize_current_buffer_wide_cells();
-        let previous_buffer = &self.buffers[1 - self.current];
-        let current_buffer = &self.buffers[self.current];
+        let (current_buffer, previous_buffer) = front_back(&self.buffers, self.current);
         let updates = diff_large(previous_buffer, current_buffer);
         let has_changes = !updates.is_empty();
         if let Some((col, row, _)) = updates.last() {
@@ -370,28 +370,18 @@ where
         Ok(has_changes)
     }
 
-    /// Set the hyperlink spans for the frame about to be flushed.
-    ///
-    /// Rebuilds the *current* link layer from `spans` (absolute viewport
-    /// coordinates); the previous layer is retained so [`flush_with_links`] can
-    /// diff it. Call once per frame, after rendering and before
-    /// [`flush_with_links`]. Passing an empty slice clears the frame's links
-    /// (so links from the previous frame are diffed away).
-    ///
-    /// [`LinkSpan::id`] is a source grouping key. Consecutive spans with the
-    /// same id and URL share one reminted OSC 8 `id=` starting at 1. Unnamed
-    /// consecutive same-URL spans (scanned wrap fragments) share an id too.
-    ///
-    /// [`flush_with_links`]: Self::flush_with_links
+    /// Rebuilds the *current* link layer from `spans` (absolute viewport coordinates); the previous layer is retained so
+    /// [`flush_with_links`] can diff it. Call once per frame, after rendering and before [`flush_with_links`]. Passing an
+    /// empty slice clears the frame's links (so links from the previous frame are diffed away).
     pub fn set_frame_links(&mut self, spans: &[LinkSpan]) {
         let area = self.viewport_area;
         let width = area.width as usize;
         let len = width * (area.height as usize);
 
-        let ids = &mut self.link_ids[self.current];
+        let ids = front_back_mut(&mut self.link_ids, self.current).0;
         ids.clear();
         ids.resize(len, 0);
-        let table = &mut self.link_tables[self.current];
+        let table = front_back_mut(&mut self.link_tables, self.current).0;
         table.clear();
 
         let mut next = 0u32;
@@ -415,95 +405,74 @@ where
             let row = (span.row - area.y) as usize;
             for col in start..end {
                 let idx = row * width + (col - area.x) as usize;
-                if idx < ids.len() {
-                    ids[idx] = id;
+                if let Some(slot) = ids.get_mut(idx) {
+                    *slot = id;
                 }
             }
         }
     }
 
-    /// Like [`flush`](Self::flush) but emits OSC 8 hyperlinks for cells covered
-    /// by the current link layer (see [`set_frame_links`](Self::set_frame_links)).
-    ///
-    /// A cell is rewritten when its content/style changed **or** its link
-    /// changed, so links are cleared automatically when they disappear — no
-    /// out-of-band repaint. Contiguous runs of cells sharing the same link are
-    /// wrapped in a single OSC 8 open/close around the upstream cell draw.
+    /// Like [`flush`](Self::flush) but emits OSC 8 hyperlinks for cells covered by the current link layer (see
+    /// [`set_frame_links`](Self::set_frame_links)). A cell is rewritten when its content/style changed or its link changed,
+    /// so links are cleared automatically when they disappear — no out-of-band repaint.
     pub fn flush_with_links(&mut self) -> io::Result<bool>
     where
         B: Write,
     {
         let cur = self.current;
-        let prev = 1 - cur;
 
-        // Fast path: no hyperlinks in either the current or previous frame. The
-        // link layer can't affect the diff or emission, so fall back to the
-        // plain cell diff + draw — byte-for-byte identical to `flush` with zero
-        // per-cell link resolution. This keeps the overwhelmingly common
-        // link-free frame (streaming output, etc.) as cheap as before.
-        if self.link_tables[cur].is_empty() && self.link_tables[prev].is_empty() {
+        // Fast path: no hyperlinks in either the current or previous frame. The link layer can't affect the diff or emission, so
+        // fall back to the plain cell diff + draw — byte-for-byte identical to `flush` with zero per-cell link resolution. This
+        // keeps the overwhelmingly common link-free frame (streaming output, etc.) as cheap as before.
+        let no_links = {
+            let (cur_tables, prev_tables) = front_back(&self.link_tables, cur);
+            cur_tables.is_empty() && prev_tables.is_empty()
+        };
+        if no_links {
             return self.flush();
         }
 
         self.normalize_current_buffer_wide_cells();
 
+        let (cur_buf, prev_buf) = front_back(&self.buffers, cur);
+        let (cur_ids, prev_ids) = front_back(&self.link_ids, cur);
+        let (cur_tables, prev_tables) = front_back(&self.link_tables, cur);
         let updates = diff_large_with_links(
-            &self.buffers[prev],
-            &self.buffers[cur],
-            &self.link_ids[prev],
-            &self.link_ids[cur],
-            &self.link_tables[prev],
-            &self.link_tables[cur],
+            prev_buf,
+            cur_buf,
+            prev_ids,
+            cur_ids,
+            prev_tables,
+            cur_tables,
         );
         let has_changes = !updates.is_empty();
         if let Some((col, row, _)) = updates.last() {
             self.last_known_cursor_pos = Position { x: *col, y: *row };
         }
-        let area = self.buffers[cur].area;
-        emit_frame_with_links(
-            &mut self.backend,
-            &updates,
-            &self.link_ids[cur],
-            &self.link_tables[cur],
-            area,
-        )?;
+        let area = cur_buf.area;
+        emit_frame_with_links(&mut self.backend, &updates, cur_ids, cur_tables, area)?;
         Ok(has_changes)
     }
 
-    /// Updates the Terminal so that internal buffers match the requested area.
-    ///
-    /// Requested area will be saved to remain consistent when rendering. This leads to a full clear
-    /// of the screen.
+    /// Updates the Terminal so that internal buffers match the requested area. Requested area will be saved to remain
+    /// consistent when rendering. This leads to a full clear of the screen.
     pub fn resize(&mut self, area: Rect) -> io::Result<()> {
         let next_area = match self.viewport {
-            // Full-height inline viewport: the inline viewport currently spans the
-            // entire terminal. This is how the viewport is used when the alternate
-            // screen is unavailable (e.g. under Zellij or tmux control mode, or
-            // with `--no-alt-screen`): the whole terminal is one inline viewport
-            // standing in for a fullscreen app. On resize it must keep spanning
-            // the entire terminal, exactly like a fullscreen viewport.
-            //
-            // The generic `compute_inline_size` path below is built for a *small*
-            // inline viewport anchored near the cursor and is wrong here in two
-            // ways: (1) it clamps the height to the fixed `Viewport::Inline(height)`
-            // captured at startup, so enlarging the terminal never grows the
-            // viewport — the UI ends up truncated at the bottom even though the
-            // width tracks the resize; and (2) on shrink it can reposition the
-            // viewport partly or fully off-screen. Filling the new area avoids both.
+            // This is how the viewport is used when the alternate screen is unavailable (e.g. under Zellij or tmux control mode, or
+            // with `--no-alt-screen`): the whole terminal is one inline viewport standing in for a fullscreen app. On resize it must
+            // keep spanning the entire terminal, exactly like a fullscreen viewport. Filling the new area avoids both.
             Viewport::Inline(_)
                 if self.viewport_area.y == 0
                     && self.viewport_area.height >= self.last_known_area.height =>
             {
                 area
             }
-            Viewport::Inline(height) => {
-                let offset_in_previous_viewport = self
-                    .last_known_cursor_pos
-                    .y
-                    .saturating_sub(self.viewport_area.top());
+            Viewport::Inline(_) => {
+                let offset_in_previous_viewport = self.reflowed_cursor_offset(area.width);
+                // The stored `Inline` height lags `set_viewport_area`. A stale taller height makes the new area cover committed rows
                 compute_inline_size(
                     &mut self.backend,
-                    height,
+                    self.viewport_area.height,
                     area.as_size(),
                     offset_in_previous_viewport,
                 )?
@@ -530,56 +499,9 @@ where
         Ok(())
     }
 
-    /// Draws a single frame to the terminal.
-    ///
-    /// Returns a [`CompletedFrame`] if successful, otherwise a [`std::io::Error`].
-    ///
-    /// If the render callback passed to this method can fail, use [`try_draw`] instead.
-    ///
-    /// Applications should call `draw` or [`try_draw`] in a loop to continuously render the
-    /// terminal. These methods are the main entry points for drawing to the terminal.
-    ///
-    /// [`try_draw`]: Terminal::try_draw
-    ///
-    /// This method will:
-    ///
-    /// - autoresize the terminal if necessary
-    /// - call the render callback, passing it a [`Frame`] reference to render to
-    /// - flush the current internal state by copying the current buffer to the backend
-    /// - move the cursor to the last known position if it was set during the rendering closure
-    /// - return a [`CompletedFrame`] with the current buffer and the area of the terminal
-    ///
-    /// The [`CompletedFrame`] returned by this method can be useful for debugging or testing
-    /// purposes, but it is often not used in regular applicationss.
-    ///
-    /// The render callback should fully render the entire frame when called, including areas that
-    /// are unchanged from the previous frame. This is because each frame is compared to the
-    /// previous frame to determine what has changed, and only the changes are written to the
-    /// terminal. If the render callback does not fully render the frame, the terminal will not be
-    /// in a consistent state.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// # let backend = ratatui::backend::TestBackend::new(10, 10);
-    /// # let mut terminal = ratatui::Terminal::new(backend)?;
-    /// use ratatui::{layout::Position, widgets::Paragraph};
-    ///
-    /// // with a closure
-    /// terminal.draw(|frame| {
-    ///     let area = frame.area();
-    ///     frame.render_widget(Paragraph::new("Hello World!"), area);
-    ///     frame.set_cursor_position(Position { x: 0, y: 0 });
-    /// })?;
-    ///
-    /// // or with a function
-    /// terminal.draw(render)?;
-    ///
-    /// fn render(frame: &mut ratatui::Frame) {
-    ///     frame.render_widget(Paragraph::new("Hello World!"), frame.area());
-    /// }
-    /// # std::io::Result::Ok(())
-    /// ```
+    /// Returns a [`CompletedFrame`] if successful, otherwise a [`std::io::Error`]. This method will: This is because each
+    /// frame is compared to the previous frame to determine what has changed, and only the changes are written to the
+    /// terminal. If the render callback does not fully render the frame, the terminal will not be in a consistent state.
     pub fn draw<F>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'_>>
     where
         F: FnOnce(&mut Frame),
@@ -590,71 +512,9 @@ where
         })
     }
 
-    /// Tries to draw a single frame to the terminal.
-    ///
-    /// Returns [`Result::Ok`] containing a [`CompletedFrame`] if successful, otherwise
-    /// [`Result::Err`] containing the [`std::io::Error`] that caused the failure.
-    ///
-    /// This is the equivalent of [`Terminal::draw`] but the render callback is a function or
-    /// closure that returns a `Result` instead of nothing.
-    ///
-    /// Applications should call `try_draw` or [`draw`] in a loop to continuously render the
-    /// terminal. These methods are the main entry points for drawing to the terminal.
-    ///
-    /// [`draw`]: Terminal::draw
-    ///
-    /// This method will:
-    ///
-    /// - autoresize the terminal if necessary
-    /// - call the render callback, passing it a [`Frame`] reference to render to
-    /// - flush the current internal state by copying the current buffer to the backend
-    /// - move the cursor to the last known position if it was set during the rendering closure
-    /// - return a [`CompletedFrame`] with the current buffer and the area of the terminal
-    ///
-    /// The render callback passed to `try_draw` can return any [`Result`] with an error type that
-    /// can be converted into an [`std::io::Error`] using the [`Into`] trait. This makes it possible
-    /// to use the `?` operator to propagate errors that occur during rendering. If the render
-    /// callback returns an error, the error will be returned from `try_draw` as an
-    /// [`std::io::Error`] and the terminal will not be updated.
-    ///
-    /// The [`CompletedFrame`] returned by this method can be useful for debugging or testing
-    /// purposes, but it is often not used in regular applicationss.
-    ///
-    /// The render callback should fully render the entire frame when called, including areas that
-    /// are unchanged from the previous frame. This is because each frame is compared to the
-    /// previous frame to determine what has changed, and only the changes are written to the
-    /// terminal. If the render function does not fully render the frame, the terminal will not be
-    /// in a consistent state.
-    ///
-    /// # Examples
-    ///
-    /// ```should_panic
-    /// # use ratatui::layout::Position;;
-    /// # let backend = ratatui::backend::TestBackend::new(10, 10);
-    /// # let mut terminal = ratatui::Terminal::new(backend)?;
-    /// use std::io;
-    ///
-    /// use ratatui::widgets::Paragraph;
-    ///
-    /// // with a closure
-    /// terminal.try_draw(|frame| {
-    ///     let value: u8 = "not a number".parse().map_err(io::Error::other)?;
-    ///     let area = frame.area();
-    ///     frame.render_widget(Paragraph::new("Hello World!"), area);
-    ///     frame.set_cursor_position(Position { x: 0, y: 0 });
-    ///     io::Result::Ok(())
-    /// })?;
-    ///
-    /// // or with a function
-    /// terminal.try_draw(render)?;
-    ///
-    /// fn render(frame: &mut ratatui::Frame) -> io::Result<()> {
-    ///     let value: u8 = "not a number".parse().map_err(io::Error::other)?;
-    ///     frame.render_widget(Paragraph::new("Hello World!"), frame.area());
-    ///     Ok(())
-    /// }
-    /// # io::Result::Ok(())
-    /// ```
+    /// Tries to draw a single frame to the terminal. Returns [`Result::Ok`] containing a [`CompletedFrame`] if successful,
+    /// otherwise [`Result::Err`] containing the [`std::io::Error`] that caused the failure. This is because each frame is
+    /// compared to the previous frame to determine what has changed, and only the changes are written to the terminal.
     pub fn try_draw<F, E>(&mut self, render_callback: F) -> io::Result<CompletedFrame<'_>>
     where
         F: FnOnce(&mut Frame) -> Result<(), E>,
@@ -690,7 +550,7 @@ where
         self.backend.flush()?;
 
         let completed_frame = CompletedFrame {
-            buffer: &self.buffers[1 - self.current],
+            buffer: front_back(&self.buffers, self.current).1,
             area: self.last_known_area,
             count: self.frame_count,
         };
@@ -715,10 +575,7 @@ where
         Ok(())
     }
 
-    /// Gets the current cursor position.
-    ///
-    /// This is the position of the cursor after the last draw call and is returned as a tuple of
-    /// `(x, y)` coordinates.
+    /// This is the position of the cursor after the last draw call and is returned as a tuple of `(x, y)` coordinates.
     #[deprecated = "the method get_cursor_position indicates more clearly what about the cursor to get"]
     pub fn get_cursor(&mut self) -> io::Result<(u16, u16)> {
         let Position { x, y } = self.get_cursor_position()?;
@@ -764,7 +621,7 @@ where
             }
         }
         // Reset the back buffer to make sure the next update will redraw everything.
-        self.buffers[1 - self.current].reset();
+        front_back_mut(&mut self.buffers, self.current).1.reset();
         self.reset_back_links();
         Ok(())
     }
@@ -772,22 +629,27 @@ where
     /// Reset the inactive (back) hyperlink layer in lockstep with the back cell
     /// buffer, so a stale link can never survive a buffer reset.
     fn reset_back_links(&mut self) {
-        for id in self.link_ids[1 - self.current].iter_mut() {
+        for id in front_back_mut(&mut self.link_ids, self.current)
+            .1
+            .iter_mut()
+        {
             *id = 0;
         }
-        self.link_tables[1 - self.current].clear();
+        front_back_mut(&mut self.link_tables, self.current)
+            .1
+            .clear();
     }
 
     /// Resets the back buffer without clearing the screen
     /// This is useful when you want to queue clear commands yourself
     pub fn reset_back_buffer(&mut self) {
-        self.buffers[1 - self.current].reset();
+        front_back_mut(&mut self.buffers, self.current).1.reset();
         self.reset_back_links();
     }
 
     /// Clears the inactive buffer and swaps it with the current buffer
     pub fn swap_buffers(&mut self) {
-        self.buffers[1 - self.current].reset();
+        front_back_mut(&mut self.buffers, self.current).1.reset();
         self.reset_back_links();
         self.current = 1 - self.current;
     }
@@ -797,82 +659,9 @@ where
         self.backend.size()
     }
 
-    /// Insert some content before the current inline viewport. This has no effect when the
-    /// viewport is not inline.
-    ///
-    /// The `draw_fn` closure will be called to draw into a writable `Buffer` that is `height`
-    /// lines tall. The content of that `Buffer` will then be inserted before the viewport.
-    ///
-    /// If the viewport isn't yet at the bottom of the screen, inserted lines will push it towards
-    /// the bottom. Once the viewport is at the bottom of the screen, inserted lines will scroll
-    /// the area of the screen above the viewport upwards.
-    ///
-    /// Before:
-    /// ```ignore
-    /// +---------------------+
-    /// | pre-existing line 1 |
-    /// | pre-existing line 2 |
-    /// +---------------------+
-    /// |       viewport      |
-    /// +---------------------+
-    /// |                     |
-    /// |                     |
-    /// +---------------------+
-    /// ```
-    ///
-    /// After inserting 2 lines:
-    /// ```ignore
-    /// +---------------------+
-    /// | pre-existing line 1 |
-    /// | pre-existing line 2 |
-    /// |   inserted line 1   |
-    /// |   inserted line 2   |
-    /// +---------------------+
-    /// |       viewport      |
-    /// +---------------------+
-    /// +---------------------+
-    /// ```
-    ///
-    /// After inserting 2 more lines:
-    /// ```ignore
-    /// +---------------------+
-    /// | pre-existing line 2 |
-    /// |   inserted line 1   |
-    /// |   inserted line 2   |
-    /// |   inserted line 3   |
-    /// |   inserted line 4   |
-    /// +---------------------+
-    /// |       viewport      |
-    /// +---------------------+
-    /// ```
-    ///
-    /// If more lines are inserted than there is space on the screen, then the top lines will go
-    /// directly into the terminal's scrollback buffer. At the limit, if the viewport takes up the
-    /// whole screen, all lines will be inserted directly into the scrollback buffer.
-    ///
-    /// # Examples
-    ///
-    /// ## Insert a single line before the current viewport
-    ///
-    /// ```rust
-    /// use ratatui::{
-    ///     backend::TestBackend,
-    ///     style::{Color, Style},
-    ///     text::{Line, Span},
-    ///     widgets::{Paragraph, Widget},
-    ///     Terminal,
-    /// };
-    /// # let backend = TestBackend::new(10, 10);
-    /// # let mut terminal = Terminal::new(backend).unwrap();
-    /// terminal.insert_before(1, |buf| {
-    ///     Paragraph::new(Line::from(vec![
-    ///         Span::raw("This line will be added "),
-    ///         Span::styled("before", Style::default().fg(Color::Blue)),
-    ///         Span::raw(" the current viewport"),
-    ///     ]))
-    ///     .render(buf.area, buf);
-    /// });
-    /// ```
+    /// Insert some content before the current inline viewport. This has no effect when the viewport is not inline. The
+    /// content of that `Buffer` will then be inserted before the viewport. If the viewport isn't yet at the bottom of the
+    /// screen, inserted lines will push it towards the bottom. Insert a single line before the current viewport
     pub fn insert_before<F>(&mut self, height: u16, draw_fn: F) -> io::Result<()>
     where
         F: FnOnce(&mut Buffer),
@@ -886,43 +675,48 @@ where
         }
     }
 
-    /// Sets the height of an inline viewport and resizes it accordingly.
+    /// Insert wrap-aware ANSI rows before the inline viewport.
     ///
-    /// This method only works with inline viewports. For other viewport types, it has no effect.
-    /// The viewport will be resized to the new height, and the buffers will be cleared and
-    /// reallocated to match the new size.
-    ///
-    /// # Arguments
-    ///
-    /// * `new_height` - The new height for the inline viewport in lines
-    ///
-    /// # Examples
-    ///
-    /// ```rust,ignore
-    /// use ratatui::{Terminal, TerminalOptions, Viewport};
-    ///
-    /// let mut terminal = Terminal::with_options(backend, TerminalOptions {
-    ///     viewport: Viewport::Inline(8),
-    /// })?;
-    ///
-    /// // Later, resize the viewport to 12 lines
-    /// terminal.set_viewport_height(12)?;
-    /// ```
+    /// Mid-insert wrap rows omit `\r\n` so the terminal sets `WRAPLINE`.
+    /// A full-width hard break (fills, does not wrap) disables autowrap so xenl cannot join the next line.
+    pub fn insert_before_rows(&mut self, rows: &[(String, bool, bool)]) -> io::Result<()>
+    where
+        B: Write,
+    {
+        match self.viewport {
+            Viewport::Inline(_) => {
+                let height = u16::try_from(rows.len()).map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "insert_before_rows: row count exceeds u16",
+                    )
+                })?;
+                if height == 0 {
+                    return Ok(());
+                }
+                #[cfg(feature = "scrolling-regions")]
+                {
+                    // Pager builds without this feature; reserve space so the unused variant compiles.
+                    let _ = rows;
+                    self.insert_before(height, |_| {})
+                }
+                #[cfg(not(feature = "scrolling-regions"))]
+                self.insert_before_rows_no_scrolling_regions(rows, height)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Sets the height of an inline viewport and resizes it accordingly. This method only works with inline viewports. For
+    /// other viewport types, it has no effect. The viewport will be resized to the new height, and the buffers will be
+    /// cleared and reallocated to match the new size.
     pub fn set_viewport_height(&mut self, new_height: u16) -> io::Result<()> {
         if !matches!(self.viewport, Viewport::Inline(_)) {
             return Ok(());
         }
-        // Judge grow-vs-shrink against the ACTUAL current viewport height, not
-        // the stored `Viewport::Inline(height)`. The two can drift when a caller
-        // repositions or resizes the inline viewport out-of-band via
-        // `set_viewport_area` (minimal mode's content-anchored commit path
-        // shrinks the viewport that way before `insert_before`). Comparing
-        // against a stale stored height made a genuine grow read as a shrink,
-        // skipping the grow-time `scroll_up` below — so the viewport's top never
-        // moved up and the taller region ran off the bottom of the screen (an
-        // opened dropdown's items landed off-screen). Keep the stored height in
-        // lockstep with the area height on the way out so `resize`
-        // (`compute_inline_size`) also sees the real height.
+        // Comparing against a stale stored height made a genuine grow read as a shrink, skipping the grow-time `scroll_up` below
+        // — so the viewport's top never moved up and the taller region ran off the bottom of the screen (an opened dropdown's
+        // items landed off-screen).
         let old_height = self.viewport_area.height;
         if let Viewport::Inline(height) = &mut self.viewport {
             *height = new_height;
@@ -938,14 +732,9 @@ where
                 let overflow =
                     (self.viewport_area.y + new_height).saturating_sub(self.last_known_area.height);
                 if overflow > 0 {
-                    // Scroll the rows the taller viewport will cover up into the
-                    // terminal's native scrollback *before* moving the viewport
-                    // origin up, so committed content is preserved instead of
-                    // overwritten. Minimal mode (and any inline consumer) relies
-                    // on this when growing the viewport for an overlay near the
-                    // bottom of the screen. The pager builds without the
-                    // `scrolling-regions` feature; that variant is a separate
-                    // (unused-by-the-pager) path left as a TODO.
+                    // Scroll the rows the taller viewport will cover up into the terminal's native scrollback *before* moving the viewport
+                    // origin up, so committed content is preserved instead of overwritten. The pager builds without the `scrolling-regions`
+                    // feature; that variant is a separate (unused-by-the-pager) path left as a TODO.
                     #[cfg(not(feature = "scrolling-regions"))]
                     self.scroll_up(overflow)?;
                     self.viewport_area.y.saturating_sub(overflow)
@@ -991,26 +780,13 @@ where
         let viewport_height: i32 = self.viewport_area.height.into();
         let screen_height: i32 = self.last_known_area.height.into();
 
-        // The algorithm here is to loop, drawing large chunks of text (up to a screen-full at a
-        // time), until the remainder of the buffer plus the viewport fits on the screen. We choose
-        // this loop condition because it guarantees that we can write the remainder of the buffer
-        // with just one call to Self::draw_lines().
+        // The algorithm here is to loop, drawing large chunks of text (up to a screen-full at a time), until the remainder of
+        // the buffer plus the viewport fits on the screen. We choose this loop condition because it guarantees that we can write
+        // the remainder of the buffer with just one call to Self::draw_lines().
         while buffer_height + viewport_height > screen_height {
-            // We will draw as much of the buffer as possible on this iteration in order to make
-            // forward progress. So we have:
-            //
-            //     to_draw = min(buffer_height, screen_height)
-            //
-            // We may need to scroll the screen up to make room to draw. We choose the minimal
-            // possible scroll amount so we don't end up with the viewport sitting in the middle of
-            // the screen when this function is done. The amount to scroll by is:
-            //
-            //     scroll_up = max(0, drawn_height + to_draw - screen_height)
-            //
-            // We want `scroll_up` to be enough so that, after drawing, we have used the whole
-            // screen (drawn_height - scroll_up + to_draw = screen_height). However, there might
-            // already be enough room on the screen to draw without scrolling (drawn_height +
-            // to_draw <= screen_height). In this case, we just don't scroll at all.
+            // We choose the minimal possible scroll amount so we don't end up with the viewport sitting in the middle of the screen
+            // when this function is done. We want `scroll_up` to be enough so that, after drawing, we have used the whole screen
+            // (drawn_height - scroll_up + to_draw = screen_height). In this case, we just don't scroll at all.
             let to_draw = buffer_height.min(screen_height);
             let scroll_up = 0.max(drawn_height + to_draw - screen_height);
             self.scroll_up(scroll_up as u16)?;
@@ -1019,20 +795,9 @@ where
             buffer_height -= to_draw;
         }
 
-        // There is now enough room on the screen for the remaining buffer plus the viewport,
-        // though we may still need to scroll up some of the existing text first. It's possible
-        // that by this point we've drained the buffer, but we may still need to scroll up to make
-        // room for the viewport.
-        //
-        // We want to scroll up the exact amount that will leave us completely filling the screen.
-        // However, it's possible that the viewport didn't start on the bottom of the screen and
-        // the added lines weren't enough to push it all the way to the bottom. We deal with this
-        // case by just ensuring that our scroll amount is non-negative.
-        //
-        // We want:
-        //   screen_height = drawn_height - scroll_up + buffer_height + viewport_height
-        // Or, equivalently:
-        //   scroll_up = drawn_height + buffer_height + viewport_height - screen_height
+        // There is now enough room on the screen for the remaining buffer plus the viewport, though we may still need to scroll
+        // up some of the existing text first. However, it's possible that the viewport didn't start on the bottom of the screen
+        // and the added lines weren't enough to push it all the way to the bottom.
         let scroll_up = 0.max(drawn_height + buffer_height + viewport_height - screen_height);
         self.scroll_up(scroll_up as u16)?;
         self.draw_lines(
@@ -1047,25 +812,128 @@ where
             ..self.viewport_area
         });
 
-        // Clear the viewport off the screen. We didn't clear earlier for two reasons. First, it
-        // wasn't necessary because the buffer we drew out of isn't sparse, so it overwrote
-        // whatever was on the screen. Second, there is a weird bug with tmux where a full screen
-        // clear plus immediate scrolling causes some garbage to go into the scrollback.
+        // We didn't clear earlier for two reasons. First, it wasn't necessary because the buffer we drew out of isn't sparse, so
+        // it overwrote whatever was on the screen. Second, there is a weird bug with tmux where a full screen clear plus
+        // immediate scrolling causes some garbage to go into the scrollback.
         self.clear()?;
 
         Ok(())
     }
 
-    /// Implement `Self::insert_before` using scrolling regions.
-    ///
-    /// If a terminal supports scrolling regions, it means that we can define a subset of rows of
-    /// the screen, and then tell the terminal to scroll up or down just within that region. The
-    /// rows outside of the region are not affected.
-    ///
-    /// This function utilizes this feature to avoid having to redraw the viewport. This is done
-    /// either by splitting the screen at the top of the viewport, and then creating a gap by
-    /// either scrolling the viewport down, or scrolling the area above it up. The lines to insert
-    /// are then drawn into the gap created.
+    /// Same scroll math as [`Self::insert_before_no_scrolling_regions`], with one row of slack so a streaming chunk cannot autowrap off the last screen line. Xenl consume at a mid-chunk end needs a second slack row: fill math would otherwise pin the pending wrap on `last_screen`.
+    #[cfg(not(feature = "scrolling-regions"))]
+    fn insert_before_rows_no_scrolling_regions(
+        &mut self,
+        rows: &[(String, bool, bool)],
+        height: u16,
+    ) -> io::Result<()>
+    where
+        B: Write,
+    {
+        let mut drawn_height: i32 = self.viewport_area.top().into();
+        let mut remaining: i32 = i32::from(height);
+        let viewport_height: i32 = self.viewport_area.height.into();
+        let screen_height: i32 = self.last_known_area.height.into();
+        let max_chunk = if screen_height > 1 {
+            screen_height - 1
+        } else {
+            screen_height
+        };
+        let mut row_idx = 0usize;
+        let max_n = usize::try_from(max_chunk).unwrap_or(0);
+
+        while remaining + viewport_height > screen_height {
+            let end = mid_chunk_end(row_idx, rows, max_n);
+            let n = end.saturating_sub(row_idx);
+            if n == 0 {
+                break;
+            }
+            let to_draw = i32::try_from(n).unwrap_or(0);
+            let chunk = rows.get(row_idx..end).unwrap_or(&[]);
+            let more_xenl = chunk_continues_xenl(chunk, rows.get(end));
+            // Fill would pin the last painted row on last_screen. Xenl consume
+            // wrapping from there extra-scrolls and native-copy-joins the dummy.
+            let consume_slack = if more_xenl && screen_height > 1 { 1 } else { 0 };
+            let scroll_up = 0.max(drawn_height + to_draw + consume_slack - screen_height);
+            self.scroll_up(scroll_up as u16)?;
+            let y = (drawn_height - scroll_up) as u16;
+            self.write_semantic_rows(y, chunk, more_xenl)?;
+            row_idx = end;
+            drawn_height += to_draw - scroll_up;
+            remaining -= to_draw;
+        }
+
+        let scroll_up = 0.max(drawn_height + remaining + viewport_height - screen_height);
+        self.scroll_up(scroll_up as u16)?;
+        let y = (drawn_height - scroll_up) as u16;
+        let chunk = rows.get(row_idx..).unwrap_or(&[]);
+        self.write_semantic_rows(y, chunk, false)?;
+        drawn_height += remaining - scroll_up;
+
+        self.set_viewport_area(Rect {
+            y: drawn_height as u16,
+            ..self.viewport_area
+        });
+        self.clear()?;
+        Ok(())
+    }
+
+    /// CUP once at the chunk start. Xenl-continue only on a full-width wrap onto a nonempty next row;
+    /// a short joiner hard-breaks, and a full-width hard break is DECAWM-off after any xenl consume.
+    /// `more_xenl` is the wrap-pending state of this chunk's last row in the full row list.
+    #[cfg(not(feature = "scrolling-regions"))]
+    fn write_semantic_rows(
+        &mut self,
+        y_offset: u16,
+        rows: &[(String, bool, bool)],
+        more_xenl: bool,
+    ) -> io::Result<()>
+    where
+        B: Write,
+    {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let last_screen = self.last_known_area.height.saturating_sub(1);
+        self.set_cursor_position(Position::new(0, y_offset))?;
+        let mut consume_xenl = false;
+        for (i, (ansi, fills_width, _)) in rows.iter().enumerate() {
+            let y = y_offset.saturating_add(u16::try_from(i).unwrap_or(u16::MAX));
+            let continues = xenl_pending(rows, i) || (more_xenl && i + 1 == rows.len());
+            let disable_autowrap = *fills_width && !continues;
+            if consume_xenl {
+                // Dummy printable first: CSI ?7l drops wrap-pending on VTE/xterm without WRAPLINE.
+                self.backend.write_all(b" \r")?;
+            }
+            if disable_autowrap {
+                self.backend.write_all(b"\x1b[?7l")?;
+            }
+            self.backend.write_all(ansi.as_bytes())?;
+            if !continues {
+                // Short/empty rows do not overwrite the rest of a longer live line.
+                if !*fills_width {
+                    self.backend.write_all(b"\x1b[K")?;
+                }
+                if y < last_screen {
+                    self.backend.write_all(b"\r\n")?;
+                }
+            }
+            if disable_autowrap {
+                self.backend.write_all(b"\x1b[?7h")?;
+            }
+            consume_xenl = continues;
+        }
+        if consume_xenl {
+            // Latch WRAPLINE before the next chunk CUPs; a wrap chain ≥ screen_height-1
+            // cannot keep the continuation in this chunk.
+            self.backend.write_all(b" \r")?;
+        }
+        Backend::flush(&mut self.backend)
+    }
+
+    /// If a terminal supports scrolling regions, it means that we can define a subset of rows of the screen, and then tell
+    /// the terminal to scroll up or down just within that region. The rows outside of the region are not affected. This
+    /// function utilizes this feature to avoid having to redraw the viewport.
     #[cfg(feature = "scrolling-regions")]
     fn insert_before_scrolling_regions(
         &mut self,
@@ -1102,7 +970,12 @@ where
 
             // Redraw the top line of the viewport.
             let width = self.viewport_area.width as usize;
-            let top_line = self.buffers[1 - self.current].content[0..width].to_vec();
+            let back = front_back(&self.buffers, self.current).1;
+            let top_line = back
+                .content
+                .get(..width)
+                .unwrap_or(back.content.as_slice())
+                .to_vec();
             self.draw_lines_over_cleared(0, 1, &top_line)?;
             return Ok(());
         }
@@ -1150,9 +1023,10 @@ where
             let iter = to_draw
                 .iter()
                 .enumerate()
+                .filter(|(_, c)| !c.skip)
                 .map(|(i, c)| ((i % width) as u16, y_offset + (i / width) as u16, c));
             self.backend.draw(iter)?;
-            self.backend.flush()?;
+            Backend::flush(&mut self.backend)?;
         }
         Ok(remainder)
     }
@@ -1259,7 +1133,7 @@ fn diff_large<'a>(prev: &Buffer, next: &'a Buffer) -> Vec<(u16, u16, &'a Cell)> 
             // Safe coordinate conversion: divide in usize, then narrow to u16.
             let x = area.x + (i % width) as u16;
             let y = area.y + (i / width) as u16;
-            updates.push((x, y, &next_buffer[i]));
+            updates.push((x, y, current));
         }
 
         to_skip = current.symbol().width().saturating_sub(1);
@@ -1270,11 +1144,9 @@ fn diff_large<'a>(prev: &Buffer, next: &'a Buffer) -> Vec<(u16, u16, &'a Cell)> 
     updates
 }
 
-/// Like [`diff_large`] but a cell is also considered changed when its hyperlink
-/// changed between the previous and current frame (even if the glyph/style is
-/// identical). This is what makes OSC 8 links participate in the frame diff:
-/// adding, removing, or retargeting a link forces the affected cells to be
-/// rewritten so the terminal's link state stays in sync.
+/// Like [`diff_large`] but a cell is also considered changed when its hyperlink changed between the previous and current
+/// frame (even if the glyph/style is identical). This is what makes OSC 8 links participate in the frame diff: adding,
+/// removing, or retargeting a link forces the affected cells to be rewritten so the terminal's link state stays in sync.
 #[allow(clippy::too_many_arguments)]
 fn diff_large_with_links<'a>(
     prev: &Buffer,
@@ -1302,7 +1174,7 @@ fn diff_large_with_links<'a>(
         {
             let x = area.x + (i % width) as u16;
             let y = area.y + (i / width) as u16;
-            updates.push((x, y, &next_buffer[i]));
+            updates.push((x, y, current));
         }
 
         to_skip = current.symbol().width().saturating_sub(1);
@@ -1313,14 +1185,9 @@ fn diff_large_with_links<'a>(
     updates
 }
 
-/// Emit a frame's cell updates with OSC 8 hyperlinks.
-///
-/// Updates are grouped into maximal runs that resolve to the same link, and the
-/// upstream [`Backend::draw`] is reused per run (so all SGR / wide-char / cursor
-/// handling is unchanged); each linked run is wrapped in one OSC 8 open/close.
-/// Keeping a link open across `draw`'s internal cursor moves is correct because
-/// OSC 8 is a sticky terminal mode — only the written cells inherit it, and
-/// unchanged cells in any gap keep whatever link they already had.
+/// Emit a frame's cell updates with OSC 8 hyperlinks. Keeping a link open across `draw`'s internal cursor moves is
+/// correct because OSC 8 is a sticky terminal mode — only the written cells inherit it, and unchanged cells in any gap
+/// keep whatever link they already had.
 fn emit_frame_with_links<B: Backend + Write>(
     backend: &mut B,
     updates: &[(u16, u16, &Cell)],
@@ -1336,38 +1203,59 @@ fn emit_frame_with_links<B: Backend + Write>(
 
     let mut i = 0;
     while i < updates.len() {
-        // Invariant: `i < updates.len()` (loop guard) and below `i < j <=
-        // updates.len()`, so `updates[i]` and the slice `updates[i..j]` never
-        // panic. `resolve` indexes via `cur_ids.get(..)` (bounds-safe) and the
-        // coordinates come from `diff_large_with_links` as `area.{x,y} + ..`, so
-        // `(y - area.y)` / `(x - area.x)` cannot underflow.
-        let (x, y, _) = updates[i];
+        // Invariant: `i < updates.len()` (loop guard) and below `i < j <= updates.len()`, so `updates[i]` and the slice
+        // `updates[i..j]` never panic. `resolve` indexes via `cur_ids.get(..)` (bounds-safe) and the coordinates come from
+        // `diff_large_with_links` as `area.{x,y} +..`, so `(y - area.y)` / `(x - area.x)` cannot underflow.
+        let Some(&(x, y, _)) = updates.get(i) else {
+            break;
+        };
         let link = resolve(x, y);
 
         // Extend the run while the resolved link is identical.
         let mut j = i + 1;
         while j < updates.len() {
-            let (nx, ny, _) = updates[j];
+            let Some(&(nx, ny, _)) = updates.get(j) else {
+                break;
+            };
             if resolve(nx, ny) != link {
                 break;
             }
             j += 1;
         }
 
+        let Some(run) = updates.get(i..j) else { break };
         if let Some(link) = link {
             write_osc8_open(backend, &link.url, link.id)?;
             // Always close the hyperlink, even if the cell draw errors, so a
             // dangling OSC 8 open can never be flushed to the terminal.
-            let drawn = backend.draw(updates[i..j].iter().copied());
+            let drawn = backend.draw(run.iter().copied());
             write_osc8_close(backend)?;
             drawn?;
         } else {
-            backend.draw(updates[i..j].iter().copied())?;
+            backend.draw(run.iter().copied())?;
         }
 
         i = j;
     }
     Ok(())
+}
+
+/// Columns of row `y` a reflowing terminal keeps when re-wrapping. They run through the last glyph or visibly styled blank.
+fn row_extent(buf: &Buffer, y: u16) -> u16 {
+    let area = buf.area;
+    (area.left()..area.right())
+        .rev()
+        .find_map(|x| {
+            let cell = buf.cell((x, y))?;
+            let is_blank = cell.symbol().trim().is_empty()
+                && cell.bg == Color::Reset
+                && !cell
+                    .modifier
+                    .intersects(Modifier::REVERSED | Modifier::UNDERLINED);
+            let width = u16::try_from(cell.symbol().width()).unwrap_or(1).max(1);
+            (!is_blank).then(|| (x - area.left()).saturating_add(width))
+        })
+        .unwrap_or(0)
 }
 
 fn compute_inline_size<B: Backend>(
@@ -1411,19 +1299,47 @@ impl<B: Backend> Terminal<B> {
         self.viewport_area
     }
 
-    /// The full terminal area as last seen by `autoresize` (i.e. the whole
-    /// screen, not just the inline viewport). This is the exact value
-    /// `set_viewport_height`'s grow/shrink math uses, so callers that size the
-    /// viewport relative to the screen (e.g. the minimal-mode overlay host)
-    /// should read it here for consistency.
+    /// The full terminal area as last seen by `autoresize` (i.e. the whole screen, not just the inline viewport). This is the
+    /// exact value `set_viewport_height`'s grow/shrink math uses, so callers that size the viewport relative to the screen
+    /// (e.g. the minimal-mode overlay host) should read it here for consistency.
     pub fn last_known_area(&self) -> Rect {
         self.last_known_area
     }
 
-    /// Switch the viewport kind in place, keeping the backend alive.
-    ///
-    /// `Viewport::Inline` issues a cursor-position query (caller must be the
-    /// only stdin reader), and both buffers reset — follow with a full redraw.
+    /// Record a cursor move the caller queued straight to the backend, bypassing [`Self::set_cursor_position`].
+    /// An inline resize anchors the viewport on this position.
+    pub fn record_cursor_position(&mut self, position: Position) {
+        self.last_known_cursor_pos = position;
+    }
+
+    /// Set how the host terminal treats on-screen rows when its width shrinks.
+    pub fn set_width_shrink(&mut self, width_shrink: WidthShrink) {
+        self.width_shrink = width_shrink;
+    }
+
+    /// Rows from the viewport top to the cursor once the terminal has applied a resize to `new_width`.
+    /// Trailing blanks do not count. An estimate that errs low leaves a stale row above the redraw and never clears a committed row.
+    fn reflowed_cursor_offset(&self, new_width: u16) -> u16 {
+        let top = self.viewport_area.top();
+        let cursor = self.last_known_cursor_pos;
+        let rows_above = cursor.y.saturating_sub(top);
+        if self.width_shrink == WidthShrink::Truncates
+            || new_width == 0
+            || new_width >= self.viewport_area.width
+        {
+            return rows_above;
+        }
+        let last_frame = front_back(&self.buffers, self.current).1;
+        let spilled = (top..cursor.y)
+            .map(|y| row_extent(last_frame, y).saturating_sub(1) / new_width)
+            .fold(0, u16::saturating_add);
+        rows_above
+            .saturating_add(spilled)
+            .saturating_add(cursor.x / new_width)
+    }
+
+    /// Switch the viewport kind in place, keeping the backend alive. `Viewport::Inline` issues a cursor-position query
+    /// (caller must be the only stdin reader), and both buffers reset — follow with a full redraw.
     pub fn set_viewport(&mut self, viewport: Viewport) -> io::Result<()> {
         let area = match viewport {
             Viewport::Fullscreen | Viewport::Inline(_) => {
@@ -1456,8 +1372,9 @@ impl<B: Backend> Terminal<B> {
 
     /// HACK: this is made pub
     pub fn set_viewport_area(&mut self, area: Rect) {
-        self.buffers[self.current].resize(area);
-        self.buffers[1 - self.current].resize(area);
+        let [front, back] = &mut self.buffers;
+        front.resize(area);
+        back.resize(area);
         let len = (area.width as usize) * (area.height as usize);
         for layer in self.link_ids.iter_mut() {
             layer.clear();
@@ -1536,10 +1453,12 @@ mod wide_cell_diff_tests {
 
 #[cfg(test)]
 mod inline_resize_tests {
-    use ratatui::backend::TestBackend;
-    use ratatui::{TerminalOptions, Viewport, layout::Rect};
+    use ratatui::backend::{Backend, TestBackend};
+    use ratatui::layout::{Position, Rect};
+    use ratatui::style::Style;
+    use ratatui::{TerminalOptions, Viewport};
 
-    use super::Terminal;
+    use super::{Terminal, WidthShrink};
 
     fn full_height_inline(width: u16, height: u16) -> Terminal<TestBackend> {
         Terminal::with_options(
@@ -1551,13 +1470,9 @@ mod inline_resize_tests {
         .unwrap()
     }
 
-    /// A full-height inline viewport (the alt-screen-unavailable case used under
-    /// Zellij / tmux control mode / `--no-alt-screen`) must GROW to fill the
-    /// terminal when it is enlarged.
-    ///
-    /// Regression test for the bug where the viewport height was clamped to the
-    /// startup height (truncated at the bottom) while the width still tracked the
-    /// resize.
+    /// A full-height inline viewport (the alt-screen-unavailable case used under Zellij / tmux control mode /
+    /// `--no-alt-screen`) must GROW to fill the terminal when it is enlarged. Regression test for the bug where the viewport
+    /// height was clamped to the startup height (truncated at the bottom) while the width still tracked the resize.
     #[test]
     fn inline_full_height_grows_with_terminal() {
         let mut terminal = full_height_inline(80, 24);
@@ -1641,10 +1556,8 @@ mod inline_resize_tests {
         assert_eq!(terminal.viewport_area(), Rect::new(0, 0, 100, 50));
     }
 
-    /// A *small* inline viewport (height < terminal height, anchored near the
-    /// bottom) must NOT be forced to full height — it keeps the standard
-    /// `compute_inline_size` behavior, so the full-height special-case does not
-    /// over-apply.
+    /// A *small* inline viewport (height < terminal height, anchored near the bottom) must NOT be forced to full height — it
+    /// keeps the standard `compute_inline_size` behavior, so the full-height special-case does not over-apply.
     #[test]
     fn small_inline_viewport_is_not_forced_full() {
         let backend = TestBackend::new(80, 24);
@@ -1660,13 +1573,148 @@ mod inline_resize_tests {
         terminal.backend_mut().resize(120, 40);
         terminal.autoresize().unwrap();
 
-        // The full-height special-case keys off the viewport spanning the whole
-        // terminal (height >= terminal height). A small inline viewport does not,
-        // so its height stays clamped to the small inline target while the width
-        // tracks the resize — i.e. it keeps the standard `compute_inline_size`
-        // behavior and is not ballooned to full height.
+        // The full-height special-case keys off the viewport spanning the whole terminal (height >= terminal height). A small
+        // inline viewport does not, so its height stays clamped to the small inline target while the width tracks the resize —
+        // i.e. it keeps the standard `compute_inline_size` behavior and is not ballooned to full height.
         assert_eq!(terminal.viewport_area().height, 3);
         assert_eq!(terminal.viewport_area().width, 120);
+    }
+
+    /// A 4-row inline viewport at row 10 of an 80x24 screen whose last frame painted `rows` (absolute y, text).
+    fn painted_inline(rows: &[(u16, &str)]) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::with_options(
+            TestBackend::new(80, 24),
+            TerminalOptions {
+                viewport: Viewport::Inline(4),
+            },
+        )
+        .unwrap();
+        terminal.set_viewport_area(Rect::new(0, 10, 80, 4));
+        terminal.set_width_shrink(WidthShrink::Rewraps);
+        terminal
+            .draw(|f| {
+                for (y, text) in rows {
+                    f.buffer_mut().set_string(0, *y, text, Style::default());
+                }
+            })
+            .unwrap();
+        terminal
+    }
+
+    /// The pager moves the visible cursor after the cell diff. The resize anchors on that position, not on the last diffed cell.
+    #[test]
+    fn inline_resize_anchors_on_recorded_cursor_row() {
+        let mut terminal = painted_inline(&[(11, "status"), (12, "> draft"), (13, "info")]);
+        terminal.record_cursor_position(Position::new(7, 12));
+        terminal.backend_mut().resize(80, 20);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 12))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 10, 80, 4), terminal.viewport_area());
+    }
+
+    /// A reflowing terminal splits a 70-column row onto two rows at 40 columns and moves the cursor down with it.
+    #[test]
+    fn inline_narrowing_counts_rows_rewrapped_above_cursor() {
+        let wide = "w".repeat(70);
+        let mut terminal = painted_inline(&[(10, &wide), (11, "status"), (12, "> draft")]);
+        terminal.record_cursor_position(Position::new(7, 12));
+        terminal.backend_mut().resize(40, 24);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 13))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 10, 40, 4), terminal.viewport_area());
+    }
+
+    /// A cursor past the new width moves onto the re-wrapped part of its own row.
+    #[test]
+    fn inline_narrowing_counts_cursor_column_spill() {
+        let draft = format!("> {}", "d".repeat(50));
+        let mut terminal = painted_inline(&[(11, "status"), (12, &draft)]);
+        terminal.record_cursor_position(Position::new(52, 12));
+        terminal.backend_mut().resize(40, 24);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(12, 13))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 10, 40, 4), terminal.viewport_area());
+    }
+
+    /// `set_viewport_area` leaves the stored `Inline` height behind. A resize must size from the live viewport area.
+    #[test]
+    fn inline_resize_sizes_from_live_viewport_height() {
+        let mut terminal = Terminal::with_options(
+            TestBackend::new(80, 26),
+            TerminalOptions {
+                viewport: Viewport::Inline(15),
+            },
+        )
+        .unwrap();
+        terminal.set_viewport_area(Rect::new(0, 23, 80, 3));
+        terminal.record_cursor_position(Position::new(2, 24));
+        terminal.backend_mut().resize(80, 34);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(2, 32))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 31, 80, 3), terminal.viewport_area());
+    }
+
+    /// On a truncating terminal, wide rows above the cursor do not shift the anchor.
+    #[test]
+    fn inline_narrowing_on_truncating_terminal_keeps_row_offset() {
+        let wide = "w".repeat(70);
+        let mut terminal = painted_inline(&[(10, &wide), (11, "status"), (12, "> draft")]);
+        terminal.set_width_shrink(WidthShrink::Truncates);
+        terminal.record_cursor_position(Position::new(7, 12));
+        terminal.backend_mut().resize(40, 24);
+        terminal
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 12))
+            .unwrap();
+
+        terminal.autoresize().unwrap();
+
+        assert_eq!(Rect::new(0, 10, 40, 4), terminal.viewport_area());
+    }
+
+    /// Unwritten trailing cells do not re-wrap. A widening never splits rows.
+    #[test]
+    fn inline_resize_ignores_trailing_blanks_and_widening() {
+        let mut narrowed = painted_inline(&[(10, "short"), (11, "status"), (12, "> draft")]);
+        narrowed.record_cursor_position(Position::new(7, 12));
+        narrowed.backend_mut().resize(40, 24);
+        narrowed
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 12))
+            .unwrap();
+        narrowed.autoresize().unwrap();
+        assert_eq!(Rect::new(0, 10, 40, 4), narrowed.viewport_area());
+
+        let wide = "w".repeat(70);
+        let mut widened = painted_inline(&[(10, &wide), (11, "status"), (12, "> draft")]);
+        widened.record_cursor_position(Position::new(7, 12));
+        widened.backend_mut().resize(120, 24);
+        widened
+            .backend_mut()
+            .set_cursor_position(Position::new(7, 12))
+            .unwrap();
+        widened.autoresize().unwrap();
+        assert_eq!(Rect::new(0, 10, 120, 4), widened.viewport_area());
     }
 
     /// Fullscreen viewports already track the full size; behavior is unchanged.

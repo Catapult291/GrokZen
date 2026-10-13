@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::time::Instant;
 
 fn workflow_run(name: &str, status: &str) -> crate::views::workflows::WorkflowRunSnapshot {
@@ -82,10 +82,10 @@ fn mixed_workflows_coalesce_children_and_keep_standalone_work_running() {
     let pane = TasksPane::new();
     let mut workflow_child_a =
         crate::app::agent_view::test_fixtures::running_subagent_info("workflow-child-a");
-    workflow_child_a.workflow_run_id = Some("wf_active".into());
+    workflow_child_a.attempt.workflow_run_id = Some("wf_active".into());
     let mut workflow_child_b =
         crate::app::agent_view::test_fixtures::running_subagent_info("workflow-child-b");
-    workflow_child_b.workflow_run_id = Some("wf_paused".into());
+    workflow_child_b.attempt.workflow_run_id = Some("wf_paused".into());
     let standalone = crate::app::agent_view::test_fixtures::running_subagent_info("standalone");
     let subagents = HashMap::from([
         ("workflow-child-a".to_owned(), workflow_child_a),
@@ -114,8 +114,6 @@ fn active_to_paused_stays_visible_without_ticks_then_terminal_closes() {
         &BTreeMap::new(),
         &HashMap::new(),
         &HashMap::new(),
-        None,
-        &HashSet::new(),
         &active,
         &BTreeMap::new(),
     );
@@ -128,8 +126,6 @@ fn active_to_paused_stays_visible_without_ticks_then_terminal_closes() {
         &BTreeMap::new(),
         &HashMap::new(),
         &HashMap::new(),
-        None,
-        &HashSet::new(),
         &paused,
         &BTreeMap::new(),
     );
@@ -139,8 +135,6 @@ fn active_to_paused_stays_visible_without_ticks_then_terminal_closes() {
         &BTreeMap::new(),
         &HashMap::new(),
         &HashMap::new(),
-        None,
-        &HashSet::new(),
         &paused,
         &BTreeMap::new(),
     );
@@ -151,8 +145,6 @@ fn active_to_paused_stays_visible_without_ticks_then_terminal_closes() {
         &BTreeMap::new(),
         &HashMap::new(),
         &HashMap::new(),
-        None,
-        &HashSet::new(),
         &terminal,
         &BTreeMap::new(),
     );

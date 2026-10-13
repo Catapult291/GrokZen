@@ -58,7 +58,12 @@ async fn test_pr_metrics_counters_and_turn_delta() {
     assert_eq!(turn.delta.delta_prs_created, 1);
     assert_eq!(turn.delta.delta_prs_merged, 1);
     assert_eq!(turn.delta.prs_created_this_turn.len(), 1);
-    let pr = &turn.delta.prs_created_this_turn[0];
+    let Some(pr) = turn.delta.prs_created_this_turn.first() else {
+        panic!(
+            "expected a PR created this turn: {:?}",
+            turn.delta.prs_created_this_turn
+        );
+    };
     assert_eq!(pr.number, Some(7));
     assert!(pr.had_commit_in_session);
 
@@ -474,12 +479,9 @@ async fn test_inference_metrics_multi_response_aggregation() {
 
     let snap = handle.snapshot().await.unwrap();
 
-    // The 26 combined intervals, sorted: [5,10,10,15,20,20,25,30,40,50,60,70,80,90,100,100,110,120,130,140,150,160,170,180,190,200]
-    // Exact p50 (26/2=13) -> index 13 = 90
-    // Exact p99: ceil(26*0.99)-1 = ceil(25.74)-1 = 26-1 = 25, min(25, 25) = 25 -> 200
-    // Exact max = 200
-    // Exact mean = (10+20+30+40+50+60+70+80+90+100 + 100+110+120+130+140+150+160+170+180+190+200 + 5+10+15+20+25) / 26
-    //            = (550 + 1650 + 75) / 26 = 2275 / 26 = 87
+    // The 26 combined intervals, sorted: [5,10,10,15,20,20,25,30,40,50,60,70,80,90,100,100,110,120,130,140,150,160,170,180,190,200].
+    // Exact p50 (26/2=13) -> index 13 = 90.
+    // Exact p99: ceil(26*0.99)-1 = ceil(25.74)-1 = 26-1 = 25, min(25, 25) = 25 -> 200.
 
     // TDigest gives approximate percentiles
     let p50 = snap.itl_p50_ms.unwrap();
@@ -525,6 +527,69 @@ async fn test_turn_end_snapshot_resets_per_turn_state() {
     assert!(snap2.delta.error_types_this_turn.is_empty());
     assert_eq!(snap2.delta.last_time_to_first_token_ms, None);
     assert_eq!(snap2.delta.delta_tool_calls, 0);
+
+    handle.shutdown();
+    actor_handle.await.unwrap();
+}
+
+/// Feedback on a completed message reports that turn's tool outcomes; a cancelled turn's
+/// snapshot must not replace them with its partial outcomes.
+#[tokio::test]
+async fn test_unfinished_turn_snapshot_keeps_last_completed_turn_tool_outcomes() {
+    let (handle, actor) = SessionSignalsActor::new();
+    let actor_handle = tokio::spawn(actor.run());
+
+    handle.increment_turn();
+    handle.record_tool_success("bash");
+    handle.take_turn_end_snapshot().await.unwrap();
+
+    handle.increment_turn();
+    handle.record_tool_success("read_file");
+    let cancelled = handle.take_unfinished_turn_snapshot().await.unwrap();
+    assert_eq!(cancelled.delta.tool_outcomes_this_turn.len(), 1);
+    let Some(first_outcome) = cancelled.delta.tool_outcomes_this_turn.first() else {
+        panic!(
+            "expected a tool outcome: {:?}",
+            cancelled.delta.tool_outcomes_this_turn
+        );
+    };
+    assert_eq!(first_outcome.tool_name, "read_file");
+
+    let outcomes = handle.last_turn_tool_outcomes().await;
+    assert_eq!(outcomes.len(), 1);
+    let Some(last) = outcomes.first() else {
+        panic!("expected last-turn tool outcome: {outcomes:?}");
+    };
+    assert_eq!(last.tool_name, "bash");
+
+    handle.shutdown();
+    actor_handle.await.unwrap();
+}
+
+/// The served fingerprint lives in the actor, so a cancelled turn's snapshot still carries the
+/// checkpoint that answered its earlier rounds, and it never leaks into the next turn.
+#[tokio::test]
+async fn test_model_fingerprint_reaches_unfinished_snapshot_and_resets_per_turn() {
+    let (handle, actor) = SessionSignalsActor::new();
+    let actor_handle = tokio::spawn(actor.run());
+
+    handle.increment_turn();
+    handle.record_model_fingerprint("fp_round_1");
+    handle.record_model_fingerprint("fp_round_2");
+    let cancelled = handle.take_unfinished_turn_snapshot().await.unwrap();
+    assert_eq!(cancelled.model_fingerprint.as_deref(), Some("fp_round_2"));
+
+    handle.increment_turn();
+    let next = handle.take_turn_end_snapshot().await.unwrap();
+    assert_eq!(
+        next.model_fingerprint, None,
+        "taken by the previous snapshot"
+    );
+
+    handle.record_model_fingerprint("fp_stale");
+    handle.increment_turn();
+    let opened = handle.take_unfinished_turn_snapshot().await.unwrap();
+    assert_eq!(opened.model_fingerprint, None, "reset when a turn opens");
 
     handle.shutdown();
     actor_handle.await.unwrap();
@@ -608,30 +673,25 @@ async fn test_turn_end_snapshot_tool_outcomes() {
 
     // tool_outcomes_this_turn should be sorted by name
     let outcomes = &snap1.delta.tool_outcomes_this_turn;
-    assert_eq!(outcomes.len(), 3);
     assert_eq!(
-        outcomes[0],
-        ToolOutcome {
-            tool_name: "bash".to_string(),
-            successes: 2,
-            failures: 0,
-        }
-    );
-    assert_eq!(
-        outcomes[1],
-        ToolOutcome {
-            tool_name: "read_file".to_string(),
-            successes: 1,
-            failures: 0,
-        }
-    );
-    assert_eq!(
-        outcomes[2],
-        ToolOutcome {
-            tool_name: "search_replace".to_string(),
-            successes: 0,
-            failures: 1,
-        }
+        outcomes.as_slice(),
+        [
+            ToolOutcome {
+                tool_name: "bash".to_string(),
+                successes: 2,
+                failures: 0,
+            },
+            ToolOutcome {
+                tool_name: "read_file".to_string(),
+                successes: 1,
+                failures: 0,
+            },
+            ToolOutcome {
+                tool_name: "search_replace".to_string(),
+                successes: 0,
+                failures: 1,
+            },
+        ]
     );
 
     // Turn 2: no tools, outcomes should be empty
@@ -1214,7 +1274,6 @@ async fn test_peak_rss_recorded_at_turn_end() {
 }
 
 /// Regression test for Windows Instant underflow panic.
-///
 /// When `session_duration_seconds` exceeds system uptime, the old code `Instant::now() - Duration::from_secs(d)` panicked.
 /// The fix uses `checked_sub` and falls back to `Instant::now()`.
 #[tokio::test]
@@ -1249,9 +1308,15 @@ fn tool_duration_serializes_camel_case_with_call_id() {
         duration_ms: 4_720,
     };
     let v = serde_json::to_value(&d).unwrap();
-    assert_eq!(v["toolName"], "run_terminal_command");
-    assert_eq!(v["toolCallId"], "call_abc");
-    assert_eq!(v["durationMs"], 4720);
+    assert_eq!(
+        v.get("toolName").and_then(|x| x.as_str()),
+        Some("run_terminal_command")
+    );
+    assert_eq!(
+        v.get("toolCallId").and_then(|x| x.as_str()),
+        Some("call_abc")
+    );
+    assert_eq!(v.get("durationMs").and_then(|x| x.as_u64()), Some(4720));
 }
 
 #[test]
@@ -1274,7 +1339,12 @@ async fn record_tool_duration_includes_call_id_in_turn_delta() {
     handle.record_tool_duration("bash", "call_1", 5_000);
     let snap = handle.take_turn_end_snapshot().await.unwrap();
     assert_eq!(snap.delta.tool_durations_this_turn.len(), 1);
-    let td = &snap.delta.tool_durations_this_turn[0];
+    let Some(td) = snap.delta.tool_durations_this_turn.first() else {
+        panic!(
+            "expected a tool duration: {:?}",
+            snap.delta.tool_durations_this_turn
+        );
+    };
     assert_eq!(td.tool_name, "bash");
     assert_eq!(td.tool_call_id, "call_1");
     assert_eq!(td.duration_ms, 5_000);

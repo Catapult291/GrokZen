@@ -12,8 +12,11 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use xai_grok_test_support::{MockInferenceServer, TestSandbox};
 
+pub use xai_grok_test_support::mock_server::FeedbackPost;
 pub use xai_grok_test_support::mock_server::LogEntry;
+pub use xai_grok_test_support::mock_server::MockCanAdministerTeam;
 pub use xai_grok_test_support::mock_server::MockModelEntry as MockModel;
+pub use xai_grok_test_support::mock_server::MockUserTeam;
 pub use xai_grok_test_support::mock_server::StorageUpload;
 pub use xai_grok_test_support::sse;
 pub use xai_grok_test_support::{
@@ -95,10 +98,7 @@ impl AgentTurnExpectation {
     }
 }
 
-/// Drives content into the pager: the bundled shell agent hits the mock inference endpoint for `/v1/chat/completions` and `/v1/responses`.
-/// Thin wrapper over the shared [`MockInferenceServer`] that adds the isolated `$HOME` sandbox and the pager env vars.
-/// Applies the harness defaults the pager depends on (always-200 `/v1/settings`, fixed default response).
-/// Shuts the server down on drop (the inner server's `Drop`).
+/// Mock inference plus an isolated `$HOME`. Always-200 `/v1/settings` and a fixed default response; the server shuts down on drop.
 pub struct ContentController {
     server: MockInferenceServer,
     sandbox: TestSandbox,
@@ -300,6 +300,21 @@ impl ContentController {
     /// Snapshot of accepted (HTTP 200) `/v1/storage` uploads.
     pub fn storage_uploads(&self) -> Vec<StorageUpload> {
         self.server.storage_uploads()
+    }
+
+    /// While set, every `POST /v1/feedback` answers 500 (still recorded).
+    pub fn set_feedback_failure(&self, fail: bool) {
+        self.server.set_feedback_failure(fail);
+    }
+
+    /// Snapshot of every `POST /v1/feedback` seen, accepted or failed, in arrival order.
+    pub fn feedback_posts(&self) -> Vec<FeedbackPost> {
+        self.server.feedback_posts()
+    }
+
+    /// Snapshot of every product-telemetry event posted to `/v1/events` (point `GROK_TELEMETRY_EVENTS_URL` at `{url()}/events`).
+    pub fn telemetry_events(&self) -> Vec<serde_json::Value> {
+        self.server.telemetry_events()
     }
 }
 

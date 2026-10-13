@@ -9,6 +9,8 @@ use tokio::sync::{OwnedSemaphorePermit, oneshot};
 use tokio_util::sync::WaitForCancellationFutureOwned;
 
 use super::SubagentCoordinator;
+use super::agent_quotas::{ActiveMessageQuotaAdmission, TargetIncarnationKey};
+use super::wake::{ResolvedSend, WakeAuthorization};
 use crate::implementations::grok_build::task::active_message::{
     ActiveMessageAdmissionLease, ActiveMessageIngress,
 };
@@ -18,20 +20,14 @@ use crate::implementations::grok_build::task::coordinator_state::{
 };
 use crate::implementations::grok_build::task::types::{
     ActiveAgentMessage, ActiveAgentMessageDelivery, ActiveAgentMessageOutcome,
-    ActiveAgentMessageRequest,
+    ActiveAgentMessageRequest, ActiveAgentMessageSource, ActiveMessageRoute,
+    ActiveMessageSenderContext, ActiveMessageTarget, SubagentActiveMessageRequest,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ActiveChildGeneration(uuid::Uuid);
-
-impl ActiveChildGeneration {
-    pub(super) fn new() -> Self {
-        Self(uuid::Uuid::now_v7())
-    }
-}
+pub use crate::implementations::grok_build::task::root_control::AgentMessageGeneration as ActiveChildGeneration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BeginAdmission {
+pub(super) enum BeginAdmission {
     Started,
     Finalizing,
     Saturated,
@@ -77,7 +73,11 @@ impl Default for ActiveMessageLifecycle {
 }
 
 impl ActiveMessageLifecycle {
-    fn begin_admission(&mut self) -> BeginAdmission {
+    pub(super) fn is_finalizing(&self) -> bool {
+        matches!(self, Self::Finalizing { .. })
+    }
+
+    pub(super) fn begin_admission(&mut self) -> BeginAdmission {
         let Self::Open { in_flight, .. } = self else {
             return BeginAdmission::Finalizing;
         };
@@ -120,7 +120,7 @@ impl ActiveMessageLifecycle {
         }
     }
 
-    fn finish_admission(&mut self, is_settled: bool) -> Option<bool> {
+    pub(super) fn finish_admission(&mut self, is_settled: bool) -> Option<bool> {
         let (in_flight, disposition, waiters) = match self {
             Self::Open {
                 in_flight,
@@ -167,14 +167,19 @@ enum ActiveMessageCompletionOutcome {
     DeadlineElapsed,
 }
 
+#[derive(Clone)]
+pub(super) enum ActiveMessageCompletionTarget {
+    Child(String, ActiveChildGeneration),
+    Root(crate::implementations::grok_build::task::coordinator::root_targets::RootTargetKey),
+}
+
 pub(super) struct ActiveMessageCompletion {
-    subagent_id: String,
-    generation: ActiveChildGeneration,
-    parent_session_id: String,
+    target: ActiveMessageCompletionTarget,
     message_id: String,
     respond_to: Option<oneshot::Sender<ActiveAgentMessageOutcome>>,
     outcome: ActiveMessageCompletionOutcome,
     is_settled: bool,
+    _quota_admission: Option<ActiveMessageQuotaAdmission>,
     _ingress_permit: OwnedSemaphorePermit,
 }
 
@@ -231,16 +236,15 @@ impl Drop for ActiveMessageCompletion {
 }
 
 pub(super) struct ActiveMessageFuture {
-    subagent_id: String,
-    generation: ActiveChildGeneration,
-    parent_session_id: String,
-    message_id: String,
-    future: Pin<Box<dyn Future<Output = ActiveMessageAdmission> + Send + 'static>>,
-    cancellation: Pin<Box<WaitForCancellationFutureOwned>>,
-    deadline: Pin<Box<tokio::time::Sleep>>,
-    lease: Arc<ActiveMessageAdmissionLease>,
-    ingress_permit: Option<OwnedSemaphorePermit>,
-    respond_to: Option<oneshot::Sender<ActiveAgentMessageOutcome>>,
+    pub(super) target: ActiveMessageCompletionTarget,
+    pub(super) message_id: String,
+    pub(super) future: Pin<Box<dyn Future<Output = ActiveMessageAdmission> + Send + 'static>>,
+    pub(super) cancellation: Pin<Box<WaitForCancellationFutureOwned>>,
+    pub(super) deadline: Pin<Box<tokio::time::Sleep>>,
+    pub(super) lease: Arc<ActiveMessageAdmissionLease>,
+    pub(super) ingress_permit: Option<OwnedSemaphorePermit>,
+    pub(super) quota_admission: Option<ActiveMessageQuotaAdmission>,
+    pub(super) respond_to: Option<oneshot::Sender<ActiveAgentMessageOutcome>>,
 }
 
 impl Future for ActiveMessageFuture {
@@ -264,9 +268,7 @@ impl Future for ActiveMessageFuture {
             | ActiveMessageCompletionOutcome::DeadlineElapsed => this.lease.revoke(),
         };
         Poll::Ready(ActiveMessageCompletion {
-            subagent_id: this.subagent_id.clone(),
-            generation: this.generation,
-            parent_session_id: this.parent_session_id.clone(),
+            target: this.target.clone(),
             message_id: this.message_id.clone(),
             respond_to: Some(
                 this.respond_to
@@ -275,11 +277,20 @@ impl Future for ActiveMessageFuture {
             ),
             outcome,
             is_settled,
+            _quota_admission: this.quota_admission.take(),
             _ingress_permit: this
                 .ingress_permit
                 .take()
                 .unwrap_or_else(|| unreachable!("active-message ingress permit taken twice")),
         })
+    }
+}
+
+/// Agent cancel/workflow stays retryable. Human hard-rejects those.
+fn refused_active_outcome(source: ActiveAgentMessageSource) -> ActiveAgentMessageOutcome {
+    match source {
+        ActiveAgentMessageSource::Human => ActiveAgentMessageOutcome::NotFoundOrNotOwned,
+        ActiveAgentMessageSource::Agent => ActiveAgentMessageOutcome::NotActiveOrFinalizing,
     }
 }
 
@@ -303,10 +314,15 @@ struct SpawningChild {
 
 pub(super) struct ParkedSpawnReadyMessage {
     pub(super) subagent_id: String,
-    pub(super) parent_session_id: String,
+    pub(super) sender_context: ActiveMessageSenderContext,
+    pub(super) route: ActiveMessageRoute,
     pub(super) request: ActiveAgentMessageRequest,
     pub(super) respond_to: Option<oneshot::Sender<ActiveAgentMessageOutcome>>,
-    pub(super) deadline: tokio::time::Instant,
+    pub(super) deadline: Option<tokio::time::Instant>,
+    pub(super) initial_message_id: Option<String>,
+    pub(super) quota_admission: Option<ActiveMessageQuotaAdmission>,
+    /// Held for the park window so the ingress cap cannot be recycled.
+    pub(super) permit: Option<OwnedSemaphorePermit>,
 }
 
 impl Drop for ParkedSpawnReadyMessage {
@@ -342,7 +358,7 @@ impl SpawnReadyMessages {
     }
 
     pub(super) fn deadlines(&self) -> impl Iterator<Item = tokio::time::Instant> + '_ {
-        self.parked.iter().map(|parked| parked.deadline)
+        self.parked.iter().filter_map(|parked| parked.deadline)
     }
 
     pub(super) fn push(&mut self, parked: ParkedSpawnReadyMessage) {
@@ -357,45 +373,61 @@ impl SpawnReadyMessages {
         matched
     }
 
-    /// Re-acquire ingress permits for parked sends and return those that fit.
-    /// Saturated leftovers are replied here so capacity lives in one place.
-    pub(super) fn admit(&mut self, subagent_id: &str) -> Vec<ActiveMessageIngress> {
+    /// Move parked sends onto the active path using the permit they already hold.
+    pub(super) fn admit(
+        &mut self,
+        subagent_id: &str,
+    ) -> Vec<(
+        ActiveMessageRoute,
+        Option<ActiveMessageQuotaAdmission>,
+        ActiveMessageIngress,
+    )> {
         let mut admitted = Vec::new();
-        for parked in self.take(subagent_id) {
-            let Some((request, parent_session_id, respond_to)) = parked.into_request() else {
+        for mut parked in self.take(subagent_id) {
+            if parked.acknowledge_initial() {
+                continue;
+            }
+            let route = parked.route;
+            let Some((request, permit, quota_admission)) = parked.into_request() else {
                 continue;
             };
-            match self.try_acquire() {
-                Ok(permit) => {
-                    admitted.push(ActiveMessageIngress {
-                        request: crate::implementations::grok_build::task::types::SubagentActiveMessageRequest {
-                            request,
-                            parent_session_id,
-                            respond_to,
-                        },
-                        permit,
+            let Some(permit) = permit.or_else(|| self.try_acquire().ok()) else {
+                let _ = request
+                    .respond_to
+                    .send(ActiveAgentMessageOutcome::Saturated {
+                        max_in_flight: self.capacity,
                     });
-                }
-                Err(capacity) => {
-                    let _ = respond_to.send(ActiveAgentMessageOutcome::Saturated {
-                        max_in_flight: capacity,
-                    });
-                }
-            }
+                continue;
+            };
+            admitted.push((
+                route,
+                quota_admission,
+                ActiveMessageIngress { request, permit },
+            ));
         }
         admitted
     }
 
-    pub(super) fn reject(&mut self, subagent_id: &str, outcome: ActiveAgentMessageOutcome) {
+    /// Spawn will never become active. Human addresses are terminal; agent
+    /// sends stay retryable `not_active`.
+    pub(super) fn reject_terminal(&mut self, subagent_id: &str) {
         for parked in self.take(subagent_id) {
-            parked.reply(outcome.clone());
+            let outcome = if matches!(
+                &parked.sender_context,
+                ActiveMessageSenderContext::HumanRoot { .. }
+            ) {
+                ActiveAgentMessageOutcome::NotFoundOrNotOwned
+            } else {
+                ActiveAgentMessageOutcome::NotActiveOrFinalizing
+            };
+            parked.reply(outcome);
         }
     }
 
     pub(super) fn expire(&mut self, now: tokio::time::Instant) {
         let (due, live): (Vec<_>, Vec<_>) = std::mem::take(&mut self.parked)
             .into_iter()
-            .partition(|parked| parked.deadline <= now);
+            .partition(|parked| parked.deadline.is_some_and(|deadline| deadline <= now));
         self.parked = live;
         for parked in due {
             parked.reply(ActiveAgentMessageOutcome::NotAcceptedBeforeDeadline);
@@ -413,22 +445,35 @@ impl SpawnReadyMessages {
 }
 
 impl ParkedSpawnReadyMessage {
+    fn acknowledge_initial(&mut self) -> bool {
+        let Some(message_id) = self.initial_message_id.take() else {
+            return false;
+        };
+        if let Some(respond_to) = self.respond_to.take() {
+            let _ = respond_to.send(ActiveAgentMessageOutcome::Accepted { message_id });
+        }
+        self.quota_admission.take();
+        self.permit.take();
+        true
+    }
+
     fn into_request(
         mut self,
     ) -> Option<(
-        ActiveAgentMessageRequest,
-        String,
-        oneshot::Sender<ActiveAgentMessageOutcome>,
+        SubagentActiveMessageRequest,
+        Option<OwnedSemaphorePermit>,
+        Option<ActiveMessageQuotaAdmission>,
     )> {
         let respond_to = self.respond_to.take()?;
-        Some((
-            self.request.take(),
-            std::mem::take(&mut self.parent_session_id),
+        let request = SubagentActiveMessageRequest {
+            request: self.request.take(),
+            sender_context: self.sender_context.clone(),
             respond_to,
-        ))
+        };
+        Some((request, self.permit.take(), self.quota_admission.take()))
     }
 
-    fn reply(mut self, outcome: ActiveAgentMessageOutcome) {
+    pub(super) fn reply(mut self, outcome: ActiveAgentMessageOutcome) {
         if let Some(respond_to) = self.respond_to.take() {
             let _ = respond_to.send(outcome);
         }
@@ -437,124 +482,479 @@ impl ParkedSpawnReadyMessage {
 
 impl<R: ChildRunner> SubagentCoordinator<R> {
     pub(super) fn handle_send_active_message(&mut self, ingress: ActiveMessageIngress) {
-        let ActiveMessageIngress { request, permit } = ingress;
-        let crate::implementations::grok_build::task::types::SubagentActiveMessageRequest {
-            request,
-            parent_session_id,
-            respond_to,
-        } = request;
-        if self.active.contains_key(request.subagent_id()) {
-            self.admit_active_message(ActiveMessageIngress {
-                request:
-                    crate::implementations::grok_build::task::types::SubagentActiveMessageRequest {
-                        request,
-                        parent_session_id,
-                        respond_to,
-                    },
-                permit,
-            });
+        if let Err(outcome) = self.verify_message_sender(&ingress.request.sender_context) {
+            let _ = ingress.request.respond_to.send(outcome);
             return;
         }
-
-        let subagent_id = request.subagent_id().to_owned();
-        let spawning = self.owned_spawning_child(&subagent_id, &parent_session_id);
-        if let Some(spawning) = spawning {
-            // Cancel and workflow stay fail-fast, matching the active path.
-            if spawning.workflow || spawning.cancelled {
-                let _ = respond_to.send(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
-                return;
-            }
-            // Release the ingress permit while waiting on spawn so a stuck
-            // child cannot pin the global admission budget.
-            drop(permit);
-            self.spawn_ready.push(ParkedSpawnReadyMessage {
-                subagent_id,
-                parent_session_id,
-                request,
-                respond_to: Some(respond_to),
-                deadline: tokio::time::Instant::now() + ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT,
-            });
+        if let Err(outcome) = self
+            .agent_message_quotas
+            .admit_outbound(&ingress.request.sender_context)
+        {
+            let _ = ingress.request.respond_to.send(outcome);
             return;
         }
-
-        let completed_owned = self
-            .completed
-            .get(&subagent_id)
-            .is_some_and(|child| child.request.parent_session_id == parent_session_id);
-        let outcome = if completed_owned {
-            ActiveAgentMessageOutcome::NotActiveOrFinalizing
-        } else {
-            ActiveAgentMessageOutcome::NotFoundOrNotOwned
-        };
-        let _ = respond_to.send(outcome);
+        let (decision, route) = self.resolve_active_message_target(&ingress.request, None);
+        self.handle_resolved_send(decision, route, None, ingress);
     }
 
-    fn owned_spawning_child(&self, id: &str, parent_session_id: &str) -> Option<SpawningChild> {
-        if let Some(child) = self.pending.get(id)
-            && child.request.parent_session_id == parent_session_id
+    pub(super) fn resolve_active_message_target(
+        &mut self,
+        request: &SubagentActiveMessageRequest,
+        resolved_target: Option<&TargetIncarnationKey>,
+    ) -> (ResolvedSend, ActiveMessageRoute) {
+        match request.request.target() {
+            ActiveMessageTarget::Address(_) | ActiveMessageTarget::ChildId(_)
+                if matches!(
+                    &request.sender_context,
+                    ActiveMessageSenderContext::GrantedChild { .. }
+                ) =>
+            {
+                self.resolve_agent_target(
+                    &request.sender_context,
+                    request.request.target(),
+                    resolved_target,
+                )
+            }
+            ActiveMessageTarget::Address(_) | ActiveMessageTarget::ChildId(_) => (
+                self.resolve_send(
+                    request.request.target(),
+                    Self::message_sender_session(&request.sender_context),
+                    resolved_target,
+                ),
+                ActiveMessageRoute::ParentToOwnedDescendant,
+            ),
+            ActiveMessageTarget::Parent | ActiveMessageTarget::Agent { .. } => self
+                .resolve_agent_target(
+                    &request.sender_context,
+                    request.request.target(),
+                    resolved_target,
+                ),
+        }
+    }
+
+    pub(super) fn handle_resolved_send(
+        &mut self,
+        decision: ResolvedSend,
+        route: ActiveMessageRoute,
+        quota_admission: Option<ActiveMessageQuotaAdmission>,
+        ingress: ActiveMessageIngress,
+    ) {
+        let begin_pair =
+            |this: &mut Self, target: TargetIncarnationKey, ingress: &ActiveMessageIngress| {
+                quota_admission.map_or_else(
+                    || {
+                        this.agent_message_quotas
+                            .begin_pair(&ingress.request.sender_context, target)
+                    },
+                    |admission| Ok(Some(admission)),
+                )
+            };
+        match decision {
+            ResolvedSend::Admit {
+                subagent_id,
+                target,
+            } => match begin_pair(self, target, &ingress) {
+                Ok(quota_admission) => {
+                    self.admit_active_message(subagent_id, route, quota_admission, ingress);
+                }
+                Err(outcome) => {
+                    let _ = ingress.request.respond_to.send(outcome);
+                }
+            },
+            ResolvedSend::Park {
+                subagent_id,
+                target,
+            } => match begin_pair(self, target, &ingress) {
+                Ok(quota_admission) => {
+                    self.park_until_spawn_ready(subagent_id, route, quota_admission, ingress);
+                }
+                Err(outcome) => {
+                    let _ = ingress.request.respond_to.send(outcome);
+                }
+            },
+            ResolvedSend::Wake {
+                subagent_id,
+                target,
+                authorization,
+            } => match begin_pair(self, target.clone(), &ingress) {
+                Ok(quota_admission) => {
+                    self.wake_completed_child(
+                        subagent_id,
+                        route,
+                        target,
+                        authorization,
+                        quota_admission,
+                        ingress,
+                    );
+                }
+                Err(outcome) => {
+                    let _ = ingress.request.respond_to.send(outcome);
+                }
+            },
+            ResolvedSend::Root { key } => self.admit_root_message(key, route, ingress),
+            ResolvedSend::Fail(outcome) => {
+                let _ = ingress.request.respond_to.send(outcome);
+            }
+        }
+    }
+
+    fn park_until_spawn_ready(
+        &mut self,
+        subagent_id: String,
+        route: ActiveMessageRoute,
+        quota_admission: Option<ActiveMessageQuotaAdmission>,
+        ingress: ActiveMessageIngress,
+    ) {
+        let ActiveMessageIngress { request, permit } = ingress;
+        let SubagentActiveMessageRequest {
+            request,
+            sender_context,
+            respond_to,
+        } = request;
+        self.spawn_ready.push(ParkedSpawnReadyMessage {
+            subagent_id,
+            sender_context,
+            route,
+            request,
+            respond_to: Some(respond_to),
+            deadline: Some(tokio::time::Instant::now() + ACTIVE_MESSAGE_SPAWN_READY_TIMEOUT),
+            initial_message_id: None,
+            quota_admission,
+            permit: Some(permit),
+        });
+    }
+
+    /// `resolved_target` is the incarnation a replayed send already holds permits on; the key
+    /// belongs to the resolution, not the sender kind, so a root replay must not mint a new one.
+    pub(super) fn resolve_send(
+        &mut self,
+        target: &ActiveMessageTarget,
+        sender_session_id: &str,
+        resolved_target: Option<&TargetIncarnationKey>,
+    ) -> ResolvedSend {
+        match target {
+            ActiveMessageTarget::Address(address) => {
+                self.resolve_address_send(address, sender_session_id, resolved_target)
+            }
+            ActiveMessageTarget::ChildId(id) => {
+                self.resolve_owned_child_id(id, sender_session_id, resolved_target)
+            }
+            ActiveMessageTarget::Parent | ActiveMessageTarget::Agent { .. } => {
+                ResolvedSend::Fail(ActiveAgentMessageOutcome::Unsupported)
+            }
+        }
+    }
+
+    pub(super) fn resolve_owned_child_id(
+        &mut self,
+        id: &str,
+        sender_session_id: &str,
+        resolved_target: Option<&TargetIncarnationKey>,
+    ) -> ResolvedSend {
+        if !self.graph.is_reachable_from(id, sender_session_id) {
+            return ResolvedSend::Fail(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
+        }
+        if self.active.contains_key(id) {
+            return ResolvedSend::Admit {
+                subagent_id: id.to_owned(),
+                target: resolved_target
+                    .cloned()
+                    .unwrap_or_else(|| self.current_target_incarnation(id)),
+            };
+        }
+        self.resolve_inactive_child_id(id, resolved_target, WakeAuthorization::SenderLineage)
+    }
+
+    pub(super) fn resolve_address_send(
+        &mut self,
+        address: &crate::implementations::grok_build::task::types::AgentAddress,
+        sender_session_id: &str,
+        resolved_target: Option<&TargetIncarnationKey>,
+    ) -> ResolvedSend {
+        use xai_message_delivery_core::{AddressCandidate, AddressDecision, AddressPresence};
+
+        let presented = address.as_str();
+        let address_hit =
+            |stored: &Option<crate::implementations::grok_build::task::types::AgentAddress>| {
+                stored
+                    .as_ref()
+                    .is_some_and(|value| value.as_str() == presented)
+            };
+
+        let active = self
+            .active
+            .iter()
+            .find(|(_, child)| address_hit(&child.agent_address));
+        let pending = self
+            .pending
+            .values()
+            .find(|child| address_hit(&child.agent_address));
+        let queued = self
+            .queued
+            .iter()
+            .find(|child| address_hit(&child.agent_address));
+        let active_by_id = self.active.iter().find(|(_, child)| {
+            child.request.id == presented || child.child_session_id == presented
+        });
+        let pending_by_id = self
+            .pending
+            .values()
+            .find(|child| child.request.id == presented);
+        let completed = self
+            .completed
+            .iter()
+            .find(|(_, child)| address_hit(&child.agent_address));
+
+        let hit = if let Some((id, child)) = active {
+            Some((
+                id.as_str(),
+                child.agent_address.as_ref().map(|value| value.as_str()),
+                child.request.id.as_str(),
+                child.request.owner.is_workflow(),
+                AddressPresence::Active,
+            ))
+        } else if let Some(child) = pending {
+            Some((
+                child.request.id.as_str(),
+                child.agent_address.as_ref().map(|value| value.as_str()),
+                child.request.id.as_str(),
+                child.request.owner.is_workflow(),
+                if child.cancellation.is_cancelled() || child.explicitly_killed {
+                    AddressPresence::Gone
+                } else {
+                    AddressPresence::Pending
+                },
+            ))
+        } else if let Some(child) = queued {
+            Some((
+                child.request.id.as_str(),
+                child.agent_address.as_ref().map(|value| value.as_str()),
+                child.request.id.as_str(),
+                child.request.owner.is_workflow(),
+                if child.request.cancel_token.is_cancelled() {
+                    AddressPresence::Gone
+                } else {
+                    AddressPresence::Pending
+                },
+            ))
+        } else if let Some((id, child)) = active_by_id {
+            Some((
+                id.as_str(),
+                child.agent_address.as_ref().map(|value| value.as_str()),
+                if child.request.id == presented {
+                    child.request.id.as_str()
+                } else {
+                    child.child_session_id.as_str()
+                },
+                child.request.owner.is_workflow(),
+                AddressPresence::Active,
+            ))
+        } else if let Some(child) = pending_by_id {
+            Some((
+                child.request.id.as_str(),
+                child.agent_address.as_ref().map(|value| value.as_str()),
+                child.request.id.as_str(),
+                child.request.owner.is_workflow(),
+                AddressPresence::Pending,
+            ))
+        } else {
+            completed.map(|(id, child)| {
+                (
+                    id.as_str(),
+                    child.agent_address.as_ref().map(|value| value.as_str()),
+                    child.request.id.as_str(),
+                    child.request.owner.is_workflow(),
+                    AddressPresence::Gone,
+                )
+            })
+        };
+
+        let candidate = hit
+            .as_ref()
+            .map(
+                |(id, stored_address, session_id, workflow, presence)| AddressCandidate {
+                    stored_address: *stored_address,
+                    session_id,
+                    owner_match: self.graph.is_reachable_from(id, sender_session_id),
+                    generation_current: true,
+                    workflow: *workflow,
+                    presence: *presence,
+                },
+            );
+        let decision = xai_message_delivery_core::resolve_address(presented, candidate.as_ref());
+        let hit = hit.map(|(id, ..)| id.to_owned());
+        match (decision, hit.as_deref()) {
+            (
+                AddressDecision::Owned {
+                    presence: AddressPresence::Active,
+                },
+                Some(subagent_id),
+            ) => ResolvedSend::Admit {
+                subagent_id: subagent_id.to_owned(),
+                target: resolved_target
+                    .cloned()
+                    .unwrap_or_else(|| self.current_target_incarnation(subagent_id)),
+            },
+            (
+                AddressDecision::Owned {
+                    presence: AddressPresence::Pending,
+                },
+                Some(subagent_id),
+            ) => ResolvedSend::Park {
+                subagent_id: subagent_id.to_owned(),
+                target: resolved_target
+                    .cloned()
+                    .unwrap_or_else(|| self.current_target_incarnation(subagent_id)),
+            },
+            (AddressDecision::Stale, Some(subagent_id))
+                if self.completed.contains_key(subagent_id) =>
+            {
+                ResolvedSend::Wake {
+                    subagent_id: subagent_id.to_owned(),
+                    target: resolved_target
+                        .cloned()
+                        .or_else(|| {
+                            self.pending_wakes
+                                .get(subagent_id)
+                                .and_then(|pending| pending.first())
+                                .map(|pending| pending.incarnation.clone())
+                        })
+                        .unwrap_or_else(|| self.begin_wake_incarnation(subagent_id)),
+                    authorization: WakeAuthorization::SenderLineage,
+                }
+            }
+            _ => ResolvedSend::Fail(ActiveAgentMessageOutcome::NotFoundOrNotOwned),
+        }
+    }
+
+    /// Ownership was already established by the caller.
+    pub(super) fn resolve_inactive_child_id(
+        &mut self,
+        id: &str,
+        resolved_target: Option<&TargetIncarnationKey>,
+        authorization: WakeAuthorization,
+    ) -> ResolvedSend {
+        if let Some(spawning) = self.spawning_child(id) {
+            // Cancel and workflow stay fail-fast, matching the active path.
+            if spawning.workflow || spawning.cancelled {
+                return ResolvedSend::Fail(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+            }
+            return ResolvedSend::Park {
+                subagent_id: id.to_owned(),
+                target: resolved_target
+                    .cloned()
+                    .unwrap_or_else(|| self.current_target_incarnation(id)),
+            };
+        }
+        // Caller already established ownership via the lineage graph.
+        if self
+            .completed
+            .get(id)
+            .is_some_and(|child| !child.request.owner.is_workflow())
         {
+            let target = resolved_target
+                .cloned()
+                .or_else(|| {
+                    self.pending_wakes
+                        .get(id)
+                        .and_then(|pending| pending.first())
+                        .map(|pending| pending.incarnation.clone())
+                })
+                .unwrap_or_else(|| self.begin_wake_incarnation(id));
+            ResolvedSend::Wake {
+                subagent_id: id.to_owned(),
+                target,
+                authorization,
+            }
+        } else {
+            ResolvedSend::Fail(if self.completed.contains_key(id) {
+                ActiveAgentMessageOutcome::NotActiveOrFinalizing
+            } else {
+                ActiveAgentMessageOutcome::NotFoundOrNotOwned
+            })
+        }
+    }
+
+    fn spawning_child(&self, id: &str) -> Option<SpawningChild> {
+        if let Some(child) = self.pending.get(id) {
             return Some(SpawningChild {
                 workflow: child.request.owner.is_workflow(),
                 cancelled: child.cancellation.is_cancelled(),
             });
         }
         self.queued.iter().find_map(|queued| {
-            (queued.request.id == id && queued.request.parent_session_id == parent_session_id)
-                .then_some(SpawningChild {
-                    workflow: queued.request.owner.is_workflow(),
-                    cancelled: queued.request.cancel_token.is_cancelled(),
-                })
+            (queued.request.id == id).then_some(SpawningChild {
+                workflow: queued.request.owner.is_workflow(),
+                cancelled: queued.request.cancel_token.is_cancelled(),
+            })
         })
     }
 
     pub(super) fn admit_spawn_ready_messages(&mut self, subagent_id: &str) {
-        for ingress in self.spawn_ready.admit(subagent_id) {
-            self.admit_active_message(ingress);
+        for (route, quota_admission, ingress) in self.spawn_ready.admit(subagent_id) {
+            // The holder may have been killed, completed, or replaced while parked.
+            if let Err(outcome) = self.verify_message_sender(&ingress.request.sender_context) {
+                let _ = ingress.request.respond_to.send(outcome);
+                continue;
+            }
+            self.admit_active_message(subagent_id.to_owned(), route, quota_admission, ingress);
         }
     }
 
     pub(super) fn reject_spawn_ready_ids(&mut self, ids: &[String]) {
         for id in ids {
-            self.spawn_ready
-                .reject(id, ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+            // Cancelled pending children never become active. Human parked
+            // sends are terminal; agent sends stay retryable not_active.
+            self.spawn_ready.reject_terminal(id);
         }
-    }
-
-    pub(super) fn reject_spawn_ready_messages(
-        &mut self,
-        subagent_id: &str,
-        outcome: ActiveAgentMessageOutcome,
-    ) {
-        self.spawn_ready.reject(subagent_id, outcome);
     }
 
     pub(super) fn expire_spawn_ready_messages(&mut self, now: tokio::time::Instant) {
         self.spawn_ready.expire(now);
     }
 
-    fn admit_active_message(&mut self, ingress: ActiveMessageIngress) {
+    fn admit_active_message(
+        &mut self,
+        canonical_subagent_id: String,
+        route: ActiveMessageRoute,
+        quota_admission: Option<ActiveMessageQuotaAdmission>,
+        ingress: ActiveMessageIngress,
+    ) {
         let ActiveMessageIngress { request, permit } = ingress;
-        let crate::implementations::grok_build::task::types::SubagentActiveMessageRequest {
+        let SubagentActiveMessageRequest {
             request,
-            parent_session_id,
+            sender_context,
             respond_to,
         } = request;
-        let Some(child) = self.active.get_mut(request.subagent_id()) else {
+        let source = Self::message_source(&sender_context);
+        let owned = matches!(
+            &sender_context,
+            ActiveMessageSenderContext::GrantedChild { .. }
+                | ActiveMessageSenderContext::RootSession { .. }
+        ) || self.graph.is_reachable_from(
+            &canonical_subagent_id,
+            Self::message_sender_session(&sender_context),
+        );
+        let Some(child) = self.active.get_mut(&canonical_subagent_id) else {
             let _ = respond_to.send(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
             return;
         };
-        if child.request.parent_session_id != parent_session_id {
+        if !owned {
             let _ = respond_to.send(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
             return;
         }
         if child.request.owner.is_workflow() || child.cancellation.is_cancelled() {
-            let _ = respond_to.send(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+            let _ = respond_to.send(refused_active_outcome(source));
+            return;
+        }
+        if source == ActiveAgentMessageSource::Human && child.explicitly_killed {
+            let _ = respond_to.send(ActiveAgentMessageOutcome::NotFoundOrNotOwned);
             return;
         }
         match child.active_messages.begin_admission() {
             BeginAdmission::Started => {}
             BeginAdmission::Finalizing => {
-                let _ = respond_to.send(ActiveAgentMessageOutcome::NotActiveOrFinalizing);
+                let _ = respond_to.send(refused_active_outcome(source));
                 return;
             }
             BeginAdmission::Saturated => {
@@ -572,22 +972,23 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             .send_active_message(ActiveAgentMessageDelivery::new(
                 ActiveAgentMessage {
                     message_id: message_id.clone(),
-                    sender_session_id: parent_session_id.clone(),
+                    sender_session_id: Self::message_sender_session(&sender_context).to_owned(),
                     text: request.text().clone(),
                 },
                 request.operation(),
+                source,
+                route,
                 Arc::clone(&lease),
             ));
         self.active_messages.push(ActiveMessageFuture {
-            subagent_id: request.subagent_id().to_owned(),
-            generation: child.generation,
-            parent_session_id,
+            target: ActiveMessageCompletionTarget::Child(canonical_subagent_id, child.generation),
             message_id,
             future: admission,
             cancellation: Box::pin(child.cancellation.clone().cancelled_owned()),
             deadline: Box::pin(tokio::time::sleep(ACTIVE_MESSAGE_ADMISSION_TIMEOUT)),
             lease,
             ingress_permit: Some(permit),
+            quota_admission,
             respond_to: Some(respond_to),
         });
     }
@@ -596,33 +997,38 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let Some(respond_to) = completion.respond_to.take() else {
             return;
         };
-        let Some(child) = self
-            .active
-            .get_mut(&completion.subagent_id)
-            .filter(|child| {
-                child.generation == completion.generation
-                    && child.request.parent_session_id == completion.parent_session_id
-            })
-        else {
-            let _ = respond_to.send(lost_completion_outcome(
-                completion.outcome,
-                completion.is_settled,
-            ));
-            return;
-        };
         let protocol_outcome = protocol_outcome_from_completion(
             completion.outcome,
             completion.is_settled,
             &completion.message_id,
         );
-        let _ = respond_to.send(protocol_outcome);
-        let terminal_disposition = child
-            .active_messages
-            .finish_admission(completion.is_settled);
-        if let Some(is_clean) = terminal_disposition
-            && let Some(output) = self.terminal_outputs.remove(&completion.subagent_id)
-        {
-            self.finish_terminalized_child(&completion.subagent_id, output, is_clean);
+        match &completion.target {
+            ActiveMessageCompletionTarget::Child(subagent_id, generation) => {
+                let Some(child) = self
+                    .active
+                    .get_mut(subagent_id)
+                    .filter(|child| child.generation == *generation)
+                else {
+                    let _ = respond_to.send(lost_completion_outcome(
+                        completion.outcome,
+                        completion.is_settled,
+                    ));
+                    return;
+                };
+                let _ = respond_to.send(protocol_outcome);
+                let terminal_disposition = child
+                    .active_messages
+                    .finish_admission(completion.is_settled);
+                if let Some(is_clean) = terminal_disposition
+                    && let Some(output) = self.terminal_outputs.remove(subagent_id)
+                {
+                    self.finish_terminalized_child(subagent_id, output, is_clean);
+                }
+            }
+            ActiveMessageCompletionTarget::Root(key) => {
+                let _ = respond_to.send(protocol_outcome);
+                self.finish_root_admission(key, completion.is_settled);
+            }
         }
     }
 
@@ -641,4 +1047,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
 #[cfg(test)]
 #[path = "active_message_tests.rs"]
-mod tests;
+pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "active_message_lineage_tests.rs"]
+mod lineage_tests;

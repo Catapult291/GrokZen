@@ -18,7 +18,7 @@ pub struct Config {
     pub client: &'static str,
     pub client_version: &'static str,
     pub release: &'static str,
-    /// When `true`, [`init`] returns a no-op guard regardless of `SENTRY_DSN`.
+    /// When `true`, [`init`] returns `None` regardless of `SENTRY_DSN`.
     pub disabled: bool,
 }
 
@@ -28,12 +28,14 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 
 /// Init Sentry and apply the process-wide scope tags.
 /// Call once at process start; the returned guard must outlive the process.
-/// Returns a no-op guard when `config.disabled`.
-pub fn init(config: Config) -> ClientInitGuard {
+/// Returns `None` when disabled by the build policy or host configuration.
+pub fn init(config: Config) -> Option<ClientInitGuard> {
     let config = CONFIG.get_or_init(|| config);
 
-    if config.disabled {
-        return sentry::init(ClientOptions::default());
+    if !xai_grok_product::TELEMETRY_UPLOADS_ALLOWED || config.disabled {
+        // Even sentry::init(ClientOptions::default()) reads SENTRY_DSN and can
+        // install a transport. Do not initialize the SDK on the disabled path.
+        return None;
     }
 
     // Privacy build: Sentry is off unless the user explicitly sets SENTRY_DSN
@@ -41,7 +43,7 @@ pub fn init(config: Config) -> ClientInitGuard {
     // reporting cannot ship by default.
     let dsn = std::env::var("SENTRY_DSN").unwrap_or_default();
     if dsn.is_empty() {
-        return sentry::init(ClientOptions::default());
+        return None;
     }
 
     let scrubber = Scrubber::from_env();
@@ -67,14 +69,22 @@ pub fn init(config: Config) -> ClientInitGuard {
         scope.set_tag("arch", std::env::consts::ARCH);
     });
 
-    guard
+    Some(guard)
 }
 
 /// Flush in-flight events. Call before `std::process::exit` in signal handlers.
 pub fn flush_on_shutdown() {
+    let flush_span = crate::region::Region::from_span(tracing::info_span!(
+        "teardown.sentry_flush",
+        elapsed_ms = tracing::field::Empty,
+    ));
+    let started = std::time::Instant::now();
     if let Some(client) = sentry::Hub::current().client() {
         client.flush(Some(FLUSH_TIMEOUT));
     }
+    flush_span
+        .span()
+        .record("elapsed_ms", started.elapsed().as_millis() as i64);
 }
 
 // ─── Internals ─────────────────────────────────────────────────────────────
@@ -168,7 +178,7 @@ fn replace_home_prefix(input: &str, home: &str) -> String {
     while let Some(idx) = rest.find(home) {
         let (before, tail) = rest.split_at(idx);
         out.push_str(before);
-        let after = &tail[home.len()..];
+        let after = tail.get(home.len()..).unwrap_or("");
         let prev_ok = before.chars().last().is_none_or(is_segment_boundary_char);
         let next_ok = after
             .chars()
@@ -340,13 +350,20 @@ mod tests {
 
         let out = before_send(event, &s).unwrap();
         assert_eq!(out.message.as_deref(), Some("error in ~/foo"));
-        let ex = &out.exception.values[0];
+        let Some(ex) = out.exception.values.first() else {
+            panic!("expected an exception");
+        };
         assert_eq!(ex.value.as_deref(), Some("~/x failed"));
-        let frame = &ex.stacktrace.as_ref().unwrap().frames[0];
+        let Some(frame) = ex.stacktrace.as_ref().and_then(|st| st.frames.first()) else {
+            panic!("expected a stack frame");
+        };
         assert_eq!(frame.filename.as_deref(), Some("~/src/lib.rs"));
         assert_eq!(frame.abs_path.as_deref(), Some("~/src/lib.rs"));
         assert_eq!(
-            out.breadcrumbs.values[0].message.as_deref(),
+            out.breadcrumbs
+                .values
+                .first()
+                .and_then(|b| b.message.as_deref()),
             Some("opened /srv/<user>/log"),
         );
     }
@@ -380,9 +397,10 @@ mod tests {
 
         let out = before_send(event, &s).unwrap();
         assert_eq!(
-            out.breadcrumbs.values[0]
-                .data
-                .get("path")
+            out.breadcrumbs
+                .values
+                .first()
+                .and_then(|b| b.data.get("path"))
                 .and_then(|v| v.as_str()),
             Some("~/foo"),
         );

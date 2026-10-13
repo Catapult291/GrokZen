@@ -14,10 +14,6 @@ use crate::scrollback::types::SelectionBoundary;
 use crate::theme::Theme;
 use xai_grok_markdown::{CellJoin, TableCopyMeta};
 
-// ---------------------------------------------------------------------------
-// Auto-scroll types
-// ---------------------------------------------------------------------------
-
 /// Direction for drag auto-scroll.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutoScrollDirection {
@@ -25,11 +21,9 @@ pub enum AutoScrollDirection {
     Down,
 }
 
-/// State for timer-driven drag auto-scroll.
-///
-/// While active, `tick_drag_autoscroll` scrolls by `speed` rows per tick in the given direction.
-/// The direction and speed are recomputed from the mouse position each time the pointer moves.
-/// The state is cleared when the pointer returns inside the content area or the drag ends.
+/// State for timer-driven drag auto-scroll. While active, `tick_drag_autoscroll` scrolls by `speed` rows per tick
+/// in the given direction. The direction and speed are recomputed from the mouse position each time the pointer
+/// moves. The state is cleared when the pointer returns inside the content area or the drag ends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DragAutoScrollState {
     pub direction: AutoScrollDirection,
@@ -41,7 +35,6 @@ pub struct DragAutoScrollState {
 const EDGE_THRESHOLD: u16 = 2;
 
 /// Compute autoscroll direction and speed from mouse position relative to the scrollback content area.
-///
 /// Returns `Some(state)` when the pointer is above, below, or within [`EDGE_THRESHOLD`] rows of the content boundary.
 /// Returns `None` when the pointer is comfortably inside the viewport.
 pub fn compute_autoscroll(mouse_row: u16, content_area: Rect) -> Option<DragAutoScrollState> {
@@ -166,11 +159,9 @@ pub struct ResolvedSelectableLine {
 }
 
 impl ResolvedSelectableLine {
-    /// `(col distance, clamped col-within-range)` for a pointer at screen `col` on this line.
-    /// Distance is 0 with the exact offset inside the selectable span, otherwise the gap to the nearer edge with the offset clamped to that edge.
-    /// `None` when the line has no selectable width.
-    ///
-    /// Every hit test resolves columns through this, so their same-row behavior cannot diverge.
+    /// `(col distance, clamped col-within-range)` for a pointer at screen `col` on this line. Distance is 0 with the
+    /// exact offset inside the selectable span, otherwise the gap to the nearer edge with the offset clamped to that
+    /// edge. Every hit test resolves columns through this, so their same-row behavior cannot diverge.
     fn col_metrics(&self, col: u16) -> Option<(u16, u16)> {
         let start = self.screen_x.saturating_add(self.selectable_cols.start);
         let end = self.screen_x.saturating_add(self.selectable_cols.end);
@@ -338,15 +329,9 @@ impl ResolvedSelectionModel {
         best.map(|(_, hit)| hit)
     }
 
-    /// Nearest line of the anchor's `(entry_idx, range_id)` to `(col, row)`, by `(|screen_y - row|, then col distance)`: the drag-head resolver.
-    ///
-    /// Unlike [`Self::hit_test_selectable_range`] this never lands on another range and never misses while the anchor's range has visible lines.
-    /// So the head tracks the pointer across gap/vpad/chrome rows and past the range's last line, like a native drag.
-    /// Same-row behavior is identical to `hit_test_selectable_range` restricted to that range.
-    /// Full ties (a pointer row equidistant between two lines) resolve to the line farther from the anchor.
-    /// That way a drag over a dead row keeps extending the selection instead of retreating.
-    ///
-    /// `None` only when the range has no selectable lines in this model (scrolled fully out); callers keep the previous head then.
+    /// Unlike [`Self::hit_test_selectable_range`] this never lands on another range and never misses while the anchor's
+    /// range has visible lines. That way a drag over a dead row keeps extending the selection instead of retreating.
+    /// `None` only when the range has no selectable lines in this model (scrolled fully out).
     pub fn hit_test_nearest_in_range(
         &self,
         anchor: RangeHit,
@@ -550,7 +535,6 @@ pub fn render_active_selection_overlay(
 }
 
 /// Render a persistent text selection overlay (after mouse-up).
-///
 /// Unlike [`render_active_selection_overlay`], which reads from [`ActiveTextDrag`], this reads from [`PersistentTextSelection`].
 /// It maps stable `block_line_idx` coordinates back to screen positions using the current frame's [`ResolvedSelectionModel`].
 pub fn render_persistent_selection_overlay(
@@ -886,10 +870,8 @@ fn selection_slice_for_line_by_block_idx(
         .selectable_cols
         .end
         .saturating_sub(line.selectable_cols.start);
-    // Columns are visual cells of the painted row
-    // Slice the painted region (the exact drawn cells) back to logical order for the clipboard
-    // Otherwise a trailing-trimmed or overridden `text` could drift from the cells the user dragged
-    // When reordering is off this falls back to `text` unchanged
+    // Columns are visual cells of the painted row. Otherwise a trailing-trimmed or overridden `text` could drift from
+    // the cells the user dragged.
     let selected = if crate::render::bidi::is_enabled() {
         match line.painted_region.as_deref() {
             // Override rows (tool headers) paint a display that differs from the stored copy text
@@ -931,16 +913,9 @@ pub(crate) fn apply_selection_boundary(
     boundary.apply(selected, include_prefix, include_suffix)
 }
 
-/// Compute the selected column range for a given line based on anchor/head endpoints.
-///
-/// Shared implementation used by both active drag and persistent selection overlays.
-/// Endpoints snap to grapheme boundaries: starts floor onto the grapheme under the anchor, ends advance past the grapheme under the head.
-/// - Single-line: `floor(min(anchor_col, head_col))..past(max(anchor_col, head_col))`
-/// - Multi-line first: `floor(start_col)..width`
-/// - Multi-line last: `0..past(end_col)`
-/// - Multi-line middle: `0..width` (full line)
-///
-/// Returns `None` if the line falls outside the anchor/head range.
+/// Compute the selected column range for a given line based on anchor/head endpoints. Single-line:
+/// `floor(min(anchor_col, head_col)).past(max(anchor_col, head_col))`. Multi-line first: `floor(start_col).width`.
+/// Multi-line last: `0.past(end_col)`. Multi-line middle: `0.width` (full line).
 fn selected_cols_for_endpoints(
     anchor_block_line: usize,
     anchor_col: u16,
@@ -1025,7 +1000,6 @@ fn selected_cols_for_line_by_block_idx(
 }
 
 /// Reconstruct the full selected text from the block's complete output lines.
-///
 /// Unlike [`reconstruct_selection_text`], which only sees lines currently visible on screen, this reads the block's full output.
 /// Copy produces the complete selection even when the anchor or head has scrolled off-screen.
 pub fn reconstruct_full_selection_text(
@@ -1170,9 +1144,7 @@ fn rect_contains(rect: Rect, col: u16, row: u16) -> bool {
         && row < rect.y.saturating_add(rect.height)
 }
 
-// ---------------------------------------------------------------------------
 // Word / URL boundary detection (for double-click selection)
-// ---------------------------------------------------------------------------
 
 /// All printable ASCII punctuation except underscore, matching tmux's `word-separators` default from `options-table.c`.
 pub const DEFAULT_WORD_SEPARATORS: &str = "!\"#$%&'()*+,-./:;<=>?@[\\]^`{|}~";
@@ -1239,19 +1211,33 @@ pub fn word_boundaries_at_col(text: &str, col: u16, separators: &str) -> Range<u
         .position(|(start, end, _)| col >= *start && col < *end)
         .unwrap_or(segments.len() - 1);
 
-    let target_class = segments[target_idx].2;
+    let Some(&(_, _, target_class)) = segments.get(target_idx) else {
+        return 0..0;
+    };
 
     let mut left = target_idx;
-    while left > 0 && segments[left - 1].2 == target_class {
+    while left > 0
+        && left
+            .checked_sub(1)
+            .and_then(|j| segments.get(j))
+            .is_some_and(|seg| seg.2 == target_class)
+    {
         left -= 1;
     }
 
     let mut right = target_idx;
-    while right + 1 < segments.len() && segments[right + 1].2 == target_class {
+    while right + 1 < segments.len()
+        && segments
+            .get(right + 1)
+            .is_some_and(|seg| seg.2 == target_class)
+    {
         right += 1;
     }
 
-    segments[left].0..segments[right].1
+    match (segments.get(left), segments.get(right)) {
+        (Some(&(start, _, _)), Some(&(_, end, _))) => start..end,
+        _ => 0..0,
+    }
 }
 
 /// Pre-compiled regex for URL detection, cached for the process lifetime.
@@ -1269,7 +1255,10 @@ fn strip_trailing_url_punctuation(url: &str) -> &str {
     let mut end = url.len();
 
     loop {
-        let last = match url[..end].chars().next_back() {
+        let Some(prefix) = url.get(..end) else {
+            break;
+        };
+        let last = match prefix.chars().next_back() {
             Some(c) if TRAILING_URL_PUNCT.contains(&c) => c,
             _ => break,
         };
@@ -1281,8 +1270,8 @@ fn strip_trailing_url_punctuation(url: &str) -> &str {
             '>' => Some('<'),
             _ => None,
         } {
-            let opens = url[..end].chars().filter(|&c| c == open).count();
-            let closes = url[..end].chars().filter(|&c| c == last).count();
+            let opens = prefix.chars().filter(|&c| c == open).count();
+            let closes = prefix.chars().filter(|&c| c == last).count();
             if opens >= closes {
                 break;
             }
@@ -1291,7 +1280,7 @@ fn strip_trailing_url_punctuation(url: &str) -> &str {
         end -= last.len_utf8();
     }
 
-    &url[..end]
+    url.get(..end).unwrap_or("")
 }
 
 /// Compute the display-column width of a string via grapheme clusters.
@@ -1301,19 +1290,23 @@ fn display_width(text: &str) -> u16 {
     })
 }
 
-/// Try to find a URL that spans the given display column in `text`.
-///
-/// Scans `text` for URLs matching common schemes (`https?://`, `ftp://`, `file://`).
-/// Returns the display-column range of the URL containing `col`, or `None` if `col` is not within any URL.
-///
-/// Trailing punctuation (`.`, `,`, `)`, etc.) is stripped when unbalanced, handling prose contexts like `"see https://example.com."`.
+/// Try to find a URL that spans the given display column in `text`. Scans `text` for URLs matching common schemes
+/// (`https?://`, `ftp://`, `file://`). Trailing punctuation (`.`, `,`, `)`, etc.) is stripped when unbalanced,
+/// handling prose contexts like `"see https://example.com."`.
 pub fn url_range_at_col(text: &str, col: u16) -> Option<Range<u16>> {
     for m in URL_RE.find_iter(text) {
-        let col_start = display_width(&text[..m.start()]);
+        let Some(prefix) = text.get(..m.start()) else {
+            continue;
+        };
+        let col_start = display_width(prefix);
         let url = strip_trailing_url_punctuation(m.as_str());
 
         // Skip degenerate URLs reduced to just the scheme (e.g. "https://").
-        if url.find("://").is_some_and(|i| url[i + 3..].is_empty()) {
+        if url
+            .find("://")
+            .and_then(|i| url.get(i + 3..))
+            .is_some_and(str::is_empty)
+        {
             continue;
         }
 
@@ -1351,13 +1344,8 @@ enum JoinerColSnap {
     Backward,
 }
 
-/// Select the wrap-group word or URL at `hit`.
-///
-/// The wrap group is the maximal run of `Some` joiners inside one range.
-/// `head` is inclusive; `text` is the joined fragment text and is never empty.
-/// `None` means nothing selectable.
-///
-/// `joiner_to_previous: None` is a hard source-line break and is not crossed, even though `'\n'` is not in `word_separators`.
+/// Select the wrap-group word or URL at `hit`. `head` is inclusive; `text` is the joined fragment text and is never
+/// empty.
 #[must_use]
 pub fn semantic_selection_at(
     model: &ResolvedSelectionModel,
@@ -1371,18 +1359,27 @@ pub fn semantic_selection_at(
         .position(|line| line.block_line_idx == hit.block_line_idx)?;
 
     let mut lo = hit_pos;
-    while lo > 0 && lines[lo].joiner_to_previous.is_some() {
+    while lo > 0
+        && lines
+            .get(lo)
+            .is_some_and(|line| line.joiner_to_previous.is_some())
+    {
         lo -= 1;
     }
     let mut hi = hit_pos;
-    while hi + 1 < lines.len() && lines[hi + 1].joiner_to_previous.is_some() {
+    while hi + 1 < lines.len()
+        && lines
+            .get(hi + 1)
+            .is_some_and(|line| line.joiner_to_previous.is_some())
+    {
         hi += 1;
     }
 
     // Single-row case (and, under reordering, the wrap-group case too; see below)
     // The hit column is a visual cell of the painted row and `word_or_url_slice` maps it against that same row
     if lo == hi || (crate::render::bidi::is_enabled() && wrap_group_needs_bidi(lines, lo, hi)) {
-        let line = &lines[if lo == hi { lo } else { hit_pos }];
+        let line_idx = if lo == hi { lo } else { hit_pos };
+        let line = lines.get(line_idx)?;
         // The hit column is a visual cell of the painted row, so resolve the word against the painted region (identity/`text` when reordering off)
         let src = if crate::render::bidi::is_enabled() {
             line.painted_region.as_deref().unwrap_or(line.text.as_str())
@@ -1405,7 +1402,8 @@ pub fn semantic_selection_at(
 
     let mut concat = String::new();
     let mut text_byte_ranges = Vec::with_capacity(hi - lo + 1);
-    for (offset, line) in lines[lo..=hi].iter().enumerate() {
+    let group = lines.get(lo..=hi)?;
+    for (offset, line) in group.iter().enumerate() {
         if offset > 0
             && let Some(joiner) = line.joiner_to_previous.as_deref()
         {
@@ -1420,16 +1418,25 @@ pub fn semantic_selection_at(
     let mut fragments = Vec::with_capacity(text_byte_ranges.len());
     let mut hit_concat_col = None;
     for (block_line_idx, text_byte_start, text_byte_end) in text_byte_ranges {
-        let text_start = display_width(&concat[..text_byte_start]);
-        let text_end = display_width(&concat[..text_byte_end]);
+        let Some(start_prefix) = concat.get(..text_byte_start) else {
+            continue;
+        };
+        let Some(end_prefix) = concat.get(..text_byte_end) else {
+            continue;
+        };
+        let text_start = display_width(start_prefix);
+        let text_end = display_width(end_prefix);
         fragments.push(ConcatFragment {
             block_line_idx,
             text_start,
             text_end,
         });
         if block_line_idx == hit.block_line_idx {
+            let Some(local_text) = concat.get(text_byte_start..text_byte_end) else {
+                continue;
+            };
             hit_concat_col = Some(map_local_hit_to_concat_col(
-                &concat[text_byte_start..text_byte_end],
+                local_text,
                 text_start,
                 text_end,
                 hit.col_within_range,
@@ -1451,7 +1458,6 @@ pub fn semantic_selection_at(
 }
 
 /// Map a fragment-local click column into concat display columns.
-///
 /// When a wrap splits a grapheme, the continuation still has local width but adds little or none in concat.
 /// Those absorbed columns snap to the last concat column of the split cluster instead of drifting into later text.
 fn map_local_hit_to_concat_col(
@@ -1474,8 +1480,10 @@ fn map_local_hit_to_concat_col(
 /// Rows are painted per row, so a whole-group concat would reorder differently than the screen.
 /// When reordering applies we resolve the word on the hit row alone.
 fn wrap_group_needs_bidi(lines: &[ResolvedSelectableLine], lo: usize, hi: usize) -> bool {
-    lines[lo..=hi]
-        .iter()
+    lines
+        .get(lo..=hi)
+        .into_iter()
+        .flatten()
         .any(|l| crate::render::bidi::needs_bidi(&l.text))
 }
 
@@ -1604,10 +1612,9 @@ mod tests {
         }
     }
 
-    // Serialize the process-global bidi latch
-    // Restore it on scope exit even if `f` panics, so a failed assertion can't leak `rtl_bidi = true` into other tests in the process
-    // LTR cases need no reorder so only these RTL cases need the guard
-    // "خوب" avoids the lam-alef ligature so columns map 1:1
+    // Serialize the process-global bidi latch. Restore it on scope exit even if `f` panics, so a failed assertion
+    // can't leak `rtl_bidi = true` into other tests in the process. LTR cases need no reorder so only these RTL cases
+    // need the guard.
     static BIDI_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     struct BidiLatchGuard(bool);
     impl Drop for BidiLatchGuard {
@@ -2003,10 +2010,6 @@ mod tests {
         assert_eq!(right.col_within_range, 3);
     }
 
-    // -----------------------------------------------------------------------
-    // hit_test_nearest_in_range tests
-    // -----------------------------------------------------------------------
-
     /// One selectable line for the nearest-in-range fixtures.
     fn nearest_line(
         range_id: u16,
@@ -2375,10 +2378,6 @@ mod tests {
         assert!(!text.contains("line nine"), "off-screen line not in model");
     }
 
-    // -----------------------------------------------------------------------
-    // word_boundaries_at_col tests
-    // -----------------------------------------------------------------------
-
     /// Shorthand for tests using the default tmux separator set.
     fn wb(text: &str, col: u16) -> Range<u16> {
         word_boundaries_at_col(text, col, DEFAULT_WORD_SEPARATORS)
@@ -2584,10 +2583,6 @@ mod tests {
         assert_eq!(word_boundaries_at_col("user@host", 0, seps), 0..9);
     }
 
-    // -----------------------------------------------------------------------
-    // strip_trailing_url_punctuation tests
-    // -----------------------------------------------------------------------
-
     #[test]
     fn strip_trailing_no_punctuation() {
         assert_eq!(
@@ -2671,10 +2666,6 @@ mod tests {
             "https://example.com"
         );
     }
-
-    // -----------------------------------------------------------------------
-    // url_range_at_col tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn url_range_simple_https() {
@@ -3263,21 +3254,24 @@ mod tests {
         let expected = SemanticSelection {
             anchor: ep(0, 0),
             head: ep(
-                model.ranges[0].lines.len() - 1,
+                model
+                    .ranges
+                    .first()
+                    .map(|r| r.lines.len() - 1)
+                    .unwrap_or_else(|| panic!("expected a selection range")),
                 last_width.saturating_sub(1),
             ),
             text: "hello_world_identifier".to_string(),
         };
-        for line in &model.ranges[0].lines {
+        let Some(range) = model.ranges.first() else {
+            panic!("expected a selection range: {model:?}");
+        };
+        for line in &range.lines {
             if !line.text.is_empty() {
                 assert_eq!(semantic(&model, line.block_line_idx, 0), expected);
             }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // selected_cols_for_endpoints tests
-    // -----------------------------------------------------------------------
 
     fn make_test_line(
         block_line_idx: usize,
@@ -3446,10 +3440,6 @@ mod tests {
         assert_eq!(via_wrapper, via_direct);
         assert_eq!(via_wrapper, Some(0..20));
     }
-
-    // -----------------------------------------------------------------------
-    // render_persistent_selection_overlay tests
-    // -----------------------------------------------------------------------
 
     /// Marker foreground: test themes quantize to no color, so the highlight takes its reverse-video path (a modifier change).
     fn paint_marker(buf: &mut Buffer) {
@@ -3788,8 +3778,6 @@ mod tests {
         assert_eq!(hit.entry_idx, 1);
         assert_eq!(hit.col_within_range, 2);
     }
-
-    // ── Table-aware selection ────────────────────────────────────────────
 
     const TABLE_LINES: &[&str] = &[
         "┌─────────┬────────┐",

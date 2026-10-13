@@ -23,10 +23,7 @@ pub struct RenderedLine {
     pub plain: String,
 }
 
-/// Parse a raw terminal stream (ANSI SGR, cursor/erase, carriage return) into styled lines.
-/// `base` is the default style for text without an SGR override.
-///
-/// Deterministic and idempotent: a fresh emulator per call, safe to invoke from both the render path and the height-cache path.
+/// Fresh emulator per call, so render and height-cache paths stay deterministic and idempotent.
 pub fn render_terminal_lines(raw: &str, base: Style) -> Vec<RenderedLine> {
     if raw.is_empty() {
         return Vec::new();
@@ -90,14 +87,18 @@ impl TermSink {
             ch: ' ',
             style: self.base,
         };
-        let line = &mut self.rows[self.row];
+        let Some(line) = self.rows.get_mut(self.row) else {
+            return;
+        };
         if self.col >= line.len() {
             line.resize(self.col + 1, blank);
         }
-        line[self.col] = Cell {
-            ch,
-            style: self.cur,
-        };
+        if let Some(slot) = line.get_mut(self.col) {
+            *slot = Cell {
+                ch,
+                style: self.cur,
+            };
+        }
         self.col += 1;
     }
 
@@ -113,12 +114,16 @@ impl TermSink {
             ch: ' ',
             style: self.base,
         };
-        let line = &mut self.rows[self.row];
+        let Some(line) = self.rows.get_mut(self.row) else {
+            return;
+        };
         match mode {
             0 => line.truncate(self.col.min(line.len())),
             1 => {
                 let end = (self.col + 1).min(line.len());
-                line[..end].fill(blank);
+                if let Some(prefix) = line.get_mut(..end) {
+                    prefix.fill(blank);
+                }
             }
             2 => line.clear(),
             _ => {}
@@ -129,8 +134,11 @@ impl TermSink {
         match mode {
             0 => {
                 self.ensure_row();
-                let len = self.rows[self.row].len();
-                self.rows[self.row].truncate(self.col.min(len));
+                let Some(line) = self.rows.get_mut(self.row) else {
+                    return;
+                };
+                let len = line.len();
+                line.truncate(self.col.min(len));
                 self.rows.truncate(self.row + 1);
             }
             2 | 3 => {
@@ -151,7 +159,7 @@ impl TermSink {
         let groups: Vec<&[u16]> = params.iter().collect();
         let mut i = 0;
         while i < groups.len() {
-            let code = groups[i].first().copied().unwrap_or(0);
+            let code = groups.get(i).and_then(|g| g.first()).copied().unwrap_or(0);
             match code {
                 0 => self.cur = self.base,
                 1 => self.cur = self.cur.add_modifier(Modifier::BOLD),
@@ -280,9 +288,10 @@ fn ansi16_bright(n: u16) -> Color {
 /// Resolve an extended color (`38`/`48`) in either `;` (advancing `i` over the consumed groups) or `:` subparameter form.
 /// Returns an un-quantized color.
 fn ext_color(groups: &[&[u16]], i: &mut usize) -> Option<Color> {
-    let g = groups[*i];
+    let g = groups.get(*i).copied()?;
     if g.len() >= 2 {
-        return parse_ext(&g[1..]);
+        let rest = g.get(1..)?;
+        return parse_ext(rest);
     }
     match groups.get(*i + 1).and_then(|p| p.first().copied())? {
         5 => {
@@ -307,10 +316,10 @@ fn parse_ext(sub: &[u16]) -> Option<Color> {
     match sub.first().copied()? {
         5 => sub.get(1).map(|n| Color::Indexed(*n as u8)),
         2 => {
-            let vals = &sub[1..];
-            let (r, g, b) = match vals.len() {
-                3 => (vals[0], vals[1], vals[2]),
-                n if n >= 4 => (vals[n - 3], vals[n - 2], vals[n - 1]),
+            let vals = sub.get(1..)?;
+            let (r, g, b) = match vals {
+                [r, g, b] => (*r, *g, *b),
+                [.., r, g, b] => (*r, *g, *b),
                 _ => return None,
             };
             Some(Color::Rgb(r as u8, g as u8, b as u8))
@@ -321,10 +330,22 @@ fn parse_ext(sub: &[u16]) -> Option<Color> {
 
 fn row_to_line(cells: Vec<Cell>, base: Style) -> RenderedLine {
     let mut end = cells.len();
-    while end > 0 && cells[end - 1].ch == ' ' && cells[end - 1].style == base {
-        end -= 1;
+    while end > 0 {
+        let Some(cell) = end.checked_sub(1).and_then(|i| cells.get(i)) else {
+            break;
+        };
+        if cell.ch == ' ' && cell.style == base {
+            end -= 1;
+        } else {
+            break;
+        }
     }
-    let cells = &cells[..end];
+    let Some(cells) = cells.get(..end) else {
+        return RenderedLine {
+            line: Line::default(),
+            plain: String::new(),
+        };
+    };
     if cells.is_empty() {
         return RenderedLine {
             line: Line::default(),
@@ -334,7 +355,13 @@ fn row_to_line(cells: Vec<Cell>, base: Style) -> RenderedLine {
     let plain: String = cells.iter().map(|c| c.ch).collect();
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut buf = String::new();
-    let mut style = cells[0].style;
+    let Some(first) = cells.first() else {
+        return RenderedLine {
+            line: Line::default(),
+            plain,
+        };
+    };
+    let mut style = first.style;
     for c in cells {
         if c.style != style {
             spans.push(Span::styled(std::mem::take(&mut buf), style));
@@ -352,6 +379,13 @@ fn row_to_line(cells: Vec<Cell>, base: Style) -> RenderedLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nth<T>(xs: &[T], i: usize) -> &T {
+        let Some(x) = xs.get(i) else {
+            panic!("expected item {i}, got {} items", xs.len());
+        };
+        x
+    }
 
     fn plain(raw: &str) -> String {
         render_terminal_plain(raw)
@@ -411,12 +445,15 @@ mod tests {
     fn sgr_splits_into_styled_spans() {
         let rendered = render_terminal_lines("plain \x1b[31mred\x1b[0m", Style::default());
         assert_eq!(rendered.len(), 1);
-        let spans = &rendered[0].line.spans;
+        let spans = &nth(&rendered, 0).line.spans;
         assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content.as_ref(), "plain ");
-        assert_eq!(spans[1].content.as_ref(), "red");
-        assert!(spans[1].style.fg.is_some());
-        assert_eq!(rendered[0].plain, "plain red");
+        let [a, b] = spans.as_slice() else {
+            panic!("expected two spans: {spans:?}");
+        };
+        assert_eq!(a.content.as_ref(), "plain ");
+        assert_eq!(b.content.as_ref(), "red");
+        assert!(b.style.fg.is_some());
+        assert_eq!(nth(&rendered, 0).plain, "plain red");
     }
 
     #[test]
@@ -448,11 +485,8 @@ mod tests {
         assert_eq!(parse_ext(&[2, 1]), None);
     }
 
-    // Cross-platform robustness
-    // Bash/terminal output is captured via pipes (non-TTY) on macOS, Linux, and Windows alike
-    // The input is plain text plus line endings plus optionally forced SGR, never a ConPTY screen stream
-    // Windows uses CRLF, and unsupported control sequences must be ignored without corrupting surrounding text
-    // Those include DEC private modes, OSC, cursor save/restore, and absolute positioning
+    // Pipe capture is plain text plus line endings, never a ConPTY screen stream.
+    // CRLF and unsupported controls (DEC modes, OSC, cursor save) must be ignored without corrupting text.
 
     #[test]
     fn windows_crlf_line_endings() {
@@ -475,9 +509,15 @@ mod tests {
         let rendered =
             render_terminal_lines("\x1b[01;31mmatch\x1b[0m\r\nplain\r\n", Style::default());
         assert_eq!(rendered.len(), 2);
-        assert_eq!(rendered[0].plain, "match");
-        assert_eq!(rendered[1].plain, "plain");
-        assert!(rendered[0].line.spans.iter().any(|s| s.style.fg.is_some()));
+        assert_eq!(nth(&rendered, 0).plain, "match");
+        assert_eq!(nth(&rendered, 1).plain, "plain");
+        assert!(
+            nth(&rendered, 0)
+                .line
+                .spans
+                .iter()
+                .any(|s| s.style.fg.is_some())
+        );
     }
 
     // Real Windows shell output samples
@@ -491,14 +531,17 @@ mod tests {
         let rendered =
             render_terminal_lines("\x1b[01;31m\x1b[Kfoo\x1b[m\x1b[Kbar\n", Style::default());
         assert_eq!(rendered.len(), 1);
-        assert_eq!(rendered[0].plain, "foobar");
-        let spans = &rendered[0].line.spans;
+        assert_eq!(nth(&rendered, 0).plain, "foobar");
+        let spans = &nth(&rendered, 0).line.spans;
         assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content.as_ref(), "foo");
-        assert!(spans[0].style.fg.is_some());
-        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(spans[1].content.as_ref(), "bar");
-        assert_eq!(spans[1].style, Style::default());
+        let [a, b] = spans.as_slice() else {
+            panic!("expected two spans: {spans:?}");
+        };
+        assert_eq!(a.content.as_ref(), "foo");
+        assert!(a.style.fg.is_some());
+        assert!(a.style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(b.content.as_ref(), "bar");
+        assert_eq!(b.style, Style::default());
     }
 
     // PowerShell 7 (`$PSStyle`) emits 24-bit color in the semicolon form `\x1b[38;2;R;G;Bm`
@@ -511,11 +554,14 @@ mod tests {
             Style::default(),
         );
         assert_eq!(rendered.len(), 1);
-        assert_eq!(rendered[0].plain, "WARNING: low disk");
-        let spans = &rendered[0].line.spans;
-        assert_eq!(spans[0].content.as_ref(), "WARNING");
-        assert!(spans[0].style.fg.is_some());
-        assert_eq!(spans[1].style, Style::default());
+        assert_eq!(nth(&rendered, 0).plain, "WARNING: low disk");
+        let spans = &nth(&rendered, 0).line.spans;
+        let [a, b, ..] = spans.as_slice() else {
+            panic!("expected two spans: {spans:?}");
+        };
+        assert_eq!(a.content.as_ref(), "WARNING");
+        assert!(a.style.fg.is_some());
+        assert_eq!(b.style, Style::default());
     }
 
     // Progress output (cargo/npm/pip style under cmd/PowerShell) wipes the status line with EL mode 2 (`\x1b[2K`) regardless of cursor column

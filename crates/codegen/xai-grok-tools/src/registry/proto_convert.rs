@@ -10,12 +10,9 @@ use super::types::{ToolConfig, ToolServerConfig};
 
 pub use xai_grok_tools_api::config_validation::{ToolConfigEntryError, ToolConfigEntryErrorKind};
 
-/// Convert one wire [`xai_grok_tools_api::ToolConfigEntry`] to a runtime
-/// [`ToolConfig`].
-///
-/// `index` is only used for error reporting. The result always has
-/// `kind: None`: the wire format carries no capability kind, and
-/// capability-mode filtering intentionally keeps baseline `kind: None` tools.
+/// Convert one wire [`xai_grok_tools_api::ToolConfigEntry`] to a runtime [`ToolConfig`]. `index` is
+/// only used for error reporting. The result always has `kind: None`: the wire format carries no
+/// capability kind, and capability-mode filtering intentionally keeps baseline `kind: None` tools.
 pub fn tool_config_from_entry(
     index: usize,
     entry: xai_grok_tools_api::ToolConfigEntry,
@@ -53,11 +50,9 @@ pub fn tool_config_from_entry(
     })
 }
 
-/// Convert a wire tool-config list to a runtime [`ToolServerConfig`].
-/// Fails on the first invalid entry.
-///
-/// `behavior_preset` is always `None` (the `"current"` default); per-tool
-/// `behavior_version` overrides on individual entries still apply.
+/// Convert a wire tool-config list to a runtime [`ToolServerConfig`]. Fails on the first invalid
+/// entry. `behavior_preset` is always `None` (the `"current"` default); per-tool `behavior_version`
+/// overrides on individual entries still apply.
 pub fn tool_server_config_from_entries(
     entries: Vec<xai_grok_tools_api::ToolConfigEntry>,
 ) -> Result<ToolServerConfig, ToolConfigEntryError> {
@@ -121,8 +116,11 @@ mod tests {
         );
         assert_eq!(cfg.name_override.as_deref(), Some("search"));
         assert_eq!(
-            cfg.params_name_overrides.as_ref().unwrap()["pattern"],
-            "query"
+            cfg.params_name_overrides
+                .as_ref()
+                .and_then(|m| m.get("pattern"))
+                .map(String::as_str),
+            Some("query")
         );
         assert_eq!(cfg.behavior_version.as_deref(), Some("legacy-0.4.10"));
         assert_eq!(
@@ -207,8 +205,11 @@ mod tests {
         a.name_override = Some("search".to_owned());
         let cfg = tool_server_config_from_entries(vec![a, entry("GrokBuild:bash")]).unwrap();
         assert_eq!(cfg.tools.len(), 2);
-        assert_eq!(cfg.tools[0].name_override.as_deref(), Some("search"));
-        assert_eq!(cfg.tools[1].name_override, None);
+        let [first, second] = cfg.tools.as_slice() else {
+            panic!("expected 2 tools: {:?}", cfg.tools);
+        };
+        assert_eq!(first.name_override.as_deref(), Some("search"));
+        assert_eq!(second.name_override, None);
     }
 
     #[test]

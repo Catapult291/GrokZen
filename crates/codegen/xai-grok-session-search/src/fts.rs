@@ -102,14 +102,9 @@ pub fn with_index<R>(
 }
 
 impl SessionSearchIndex {
-    /// Open (or create) the FTS index at `db_path`.
-    ///
-    /// Creates the schema and triggers on first use.
-    /// When the stored schema version is older than [`SCHEMA_VERSION`], drops and recreates all tables (the index can be rebuilt).
-    /// The drop also deletes the `last_bootstrap_at` marker so the wipe is visible to bootstrap and staleness checks.
-    /// A newer stored version is tolerated read/write without dropping.
-    ///
-    /// If the existing file is corrupt or not a database, quarantines it and opens a fresh empty index (see `recovery::heal_unusable`).
+    /// When the stored schema version is older than [`SCHEMA_VERSION`], drops and recreates all tables (the index can be
+    /// rebuilt). A newer stored version is tolerated read/write without dropping. If the existing file is corrupt or not a
+    /// database, quarantines it and opens a fresh empty index (see `recovery::heal_unusable`).
     pub fn open_or_create(db_path: &Path) -> Result<Self, rusqlite::Error> {
         if let Some(parent) = db_path.parent() {
             // The parent is usually the sessions root; never (re)create it with loose permissions
@@ -155,22 +150,18 @@ impl SessionSearchIndex {
             .optional()
             .unwrap_or(None);
 
-        // One-way ratchet: drop only on UPGRADE (stored < current)
-        // Multiple grok generations share this DB (stable vs alpha)
-        // An equality check made each binary wipe the other's index in turn, leaving search empty mid-rebootstrap
-        // A newer index is safe to read: bumps regenerate content only (the table schema is column-identical)
-        // The newer binary re-upserts any rows we write via content-hash mismatch
-        // `None` means a fresh DB; a non-integer stored value is legacy or corrupt and parses as 0
+        // One-way ratchet: drop only on UPGRADE (stored < current). A newer index is safe to read: bumps regenerate content only
+        // (the table schema is column-identical). The newer binary re-upserts any rows we write via content-hash mismatch `None`
+        // means a fresh DB; a non-integer stored value is legacy or corrupt and parses as 0
         let current: u64 = SCHEMA_VERSION
             .parse()
             .expect("SCHEMA_VERSION is an integer");
         let stored: Option<u64> = stored_version.as_deref().map(|v| v.parse().unwrap_or(0));
         let owned_by_newer = stored.is_some_and(|s| s > current);
         if stored.is_some_and(|s| s < current) {
-            // The marker and claim die with the tables
-            // A surviving marker reads as "bootstrap complete" over an empty index, and a stale claim blocks the rebuild until the lease expires
-            // Other `meta` keys are preserved
-            // Immediate: a deferred begin can fail with SQLITE_BUSY_SNAPSHOT, which skips the busy handler
+            // The marker and claim die with the tables A surviving marker reads as "bootstrap complete" over an empty index, and a
+            // stale claim blocks the rebuild until the lease expires. Other `meta` keys are preserved. Immediate: a deferred begin
+            // can fail with SQLITE_BUSY_SNAPSHOT, which skips the busy handler
             let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             tx.execute_batch(
                 "
@@ -274,10 +265,9 @@ impl SessionSearchIndex {
         Ok(())
     }
 
-    /// Insert a session document only if no row exists for its `session_id`.
-    ///
-    /// Atomic alternative to a check-then-insert: the index DB is shared across processes.
-    /// A separate check and insert could clobber a full-content row written between them.
+    /// Insert a session document only if no row exists for its `session_id`. Atomic alternative to a check-then-insert: the
+    /// index DB is shared across processes. A separate check and insert could clobber a full-content row written between
+    /// them.
     pub fn insert_doc_if_absent(&self, doc: &SessionDoc) -> Result<(), rusqlite::Error> {
         self.db.execute(
             "INSERT INTO session_docs(session_id, cwd, updated_at, title, content, content_hash)
@@ -449,14 +439,9 @@ impl SessionSearchIndex {
         Ok(ids)
     }
 
-    /// Run a BM25-ranked FTS5 query over indexed sessions.
-    ///
-    /// Multi-token queries require every token (AND) first.
-    /// When that intersection matches nothing the query reruns as an OR, so partial matches still show up.
-    ///
-    /// A query shaped like a session id (a full UUID or a hyphenated hex prefix) matches `session_docs.session_id` directly.
-    /// FTS only indexes title and content, and a hyphenated UUID `MATCH` looks for tokens that were never indexed.
-    /// So `/resume` search by id returned nothing while `grok --resume <id>` still loaded the session.
+    /// When that intersection matches nothing the query reruns as an OR, so partial matches still show up. A query shaped
+    /// like a session id (a full UUID or a hyphenated hex prefix) matches `session_docs.session_id` directly. FTS only
+    /// indexes title and content, and a hyphenated UUID `MATCH` looks for tokens that were never indexed.
     pub fn query(
         &self,
         query: &str,
@@ -671,12 +656,9 @@ impl SessionSearchIndex {
             .filter(|part| part.chars().any(|c| c.is_ascii_alphanumeric()))
     }
 
-    /// One quoted FTS5 prefix per token, stemmed on the query side only.
-    ///
-    /// Plural queries reach singular docs by searching the shorter stem (`sessions` becomes `session*`, `caches` becomes `cach*`).
-    /// The trailing `*` covers the reverse direction and typed stems like `ing`/`ed`, so no OR-group is needed.
-    /// A `(base OR stem)` group double-counts bm25 and ranks inflected docs above exact matches.
-    /// Words shorter than four letters, identifiers with digits/`_`/`-`, and words ending in `ss` (`pass`, `class`) stay exact.
+    /// One quoted FTS5 prefix per token, stemmed on the query side only. Plural queries reach singular docs by searching the
+    /// shorter stem (`sessions` becomes `session*`, `caches` becomes `cach*`). Words shorter than four letters, identifiers
+    /// with digits/`_`/`-`, and words ending in `ss` (`pass`, `class`) stay exact.
     fn token_prefix(token: &str) -> String {
         let stem = if token.len() < 4 || !token.chars().all(|c| c.is_ascii_alphabetic()) {
             token
@@ -684,9 +666,15 @@ impl SessionSearchIndex {
             let lower = token.to_ascii_lowercase();
             if lower.ends_with("es") {
                 // Stemming `caches` to `cach` still finds `cache`: the trailing `*` covers the dropped `e`
-                &token[..token.len() - 2]
+                match token.len().checked_sub(2).and_then(|n| token.get(..n)) {
+                    Some(s) => s,
+                    None => token,
+                }
             } else if lower.ends_with('s') && !lower.ends_with("ss") {
-                &token[..token.len() - 1]
+                match token.len().checked_sub(1).and_then(|n| token.get(..n)) {
+                    Some(s) => s,
+                    None => token,
+                }
             } else {
                 token
             }
@@ -923,7 +911,10 @@ mod tests {
             .unwrap();
         let qr = reopened.query("python", None, 10, 0, false).unwrap();
         assert_eq!(qr.total_estimate, Some(1));
-        assert_eq!(qr.results[0].session_id, "s2");
+        assert_eq!(
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s2")
+        );
     }
 
     #[test]
@@ -960,7 +951,10 @@ mod tests {
         );
         // The tolerated index must stay fully usable for the older binary.
         let qr = reopened.query("borrow", None, 10, 0, false).unwrap();
-        assert_eq!(qr.results[0].session_id, "s1");
+        assert_eq!(
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s1")
+        );
     }
 
     #[test]
@@ -1003,7 +997,10 @@ mod tests {
         .expect("with_index self-heals then upserts");
         let qr = with_index(&path, |index| index.query("works", None, 10, 0, false))
             .expect("query after heal");
-        assert_eq!(qr.results[0].session_id, "s1");
+        assert_eq!(
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s1")
+        );
 
         // Original path is a real DB again; a quarantine sibling should exist.
         assert!(path.is_file());
@@ -1055,10 +1052,9 @@ mod tests {
         assert_eq!(qr.results.len(), 1, "the retried op's write is persisted");
     }
 
-    /// Repro: the on-disk state left behind by a pre-ratchet binary that wiped the shared DB and ran its own bootstrap.
-    /// That leaves a v3-stamped index with a *recent* bootstrap marker.
-    /// Pins that the current binary's open drops the tables and deletes the marker together (see the drop batch in `open_or_create`).
-    /// A surviving marker would suppress re-bootstrap over empty tables.
+    /// Repro: the on-disk state left behind by a pre-ratchet binary that wiped the shared DB and ran its own bootstrap. Pins
+    /// that the current binary's open drops the tables and deletes the marker together (see the drop batch in
+    /// `open_or_create`). A surviving marker would suppress re-bootstrap over empty tables.
     #[test]
     fn test_upgrade_drop_invalidates_completed_bootstrap_marker() {
         let tmp = TempDir::new().unwrap();
@@ -1099,7 +1095,10 @@ mod tests {
             .set_meta("last_bootstrap_at", "1783393999")
             .unwrap();
         let qr = reopened.query("fresh", None, 10, 0, false).unwrap();
-        assert_eq!(qr.results[0].session_id, "s2");
+        assert_eq!(
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s2")
+        );
     }
 
     #[test]
@@ -1116,9 +1115,16 @@ mod tests {
 
         let qr = index.query("rust", None, 10, 0, false).unwrap();
         assert_eq!(qr.total_estimate, Some(1));
-        assert_eq!(qr.results[0].session_id, "s1");
-        assert!(qr.results[0].score > 0.0);
-        assert!(qr.results[0].matched_fields.contains(&"title".to_string()));
+        assert_eq!(
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s1")
+        );
+        assert!(qr.results.first().is_some_and(|r| r.score > 0.0));
+        assert!(
+            qr.results
+                .first()
+                .is_some_and(|r| r.matched_fields.contains(&"title".to_string()))
+        );
     }
 
     #[test]
@@ -1181,7 +1187,8 @@ mod tests {
         );
         let qr = index.query("borrow", None, 10, 0, false).unwrap();
         assert_eq!(
-            qr.results[0].session_id, "s1",
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s1"),
             "full content must remain FTS-queryable after the no-op insert"
         );
 
@@ -1191,7 +1198,10 @@ mod tests {
             .unwrap();
         let qr = index.query("python", None, 10, 0, false).unwrap();
         assert_eq!(qr.total_estimate, Some(1));
-        assert_eq!(qr.results[0].session_id, "s2");
+        assert_eq!(
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s2")
+        );
     }
 
     /// `/resume` search types a session UUID; CLI `--resume <id>` works because it looks up by id globally.
@@ -1211,17 +1221,19 @@ mod tests {
 
         let qr = index.query(id, None, 10, 0, false).unwrap();
         assert_eq!(qr.results.len(), 1, "full session id must match");
-        assert_eq!(qr.results[0].session_id, id);
+        assert_eq!(qr.results.first().map(|r| r.session_id.as_str()), Some(id));
         assert!(
-            qr.results[0]
-                .matched_fields
-                .iter()
-                .any(|f| f == "session_id")
+            qr.results
+                .first()
+                .is_some_and(|r| r.matched_fields.iter().any(|f| f == "session_id"))
         );
 
         let prefix = index.query("019f870d-6976", None, 10, 0, false).unwrap();
         assert_eq!(prefix.results.len(), 1, "session id prefix must match");
-        assert_eq!(prefix.results[0].session_id, id);
+        assert_eq!(
+            prefix.results.first().map(|r| r.session_id.as_str()),
+            Some(id)
+        );
 
         let mut other_cwd = test_doc("019f870d-6976-7d73-a12a-ffffffffffff", "other", "unrelated");
         other_cwd.cwd = "/other".to_string();
@@ -1230,7 +1242,10 @@ mod tests {
             .query(id, Some("/test/workspace"), 10, 0, false)
             .unwrap();
         assert_eq!(scoped.results.len(), 1);
-        assert_eq!(scoped.results[0].session_id, id);
+        assert_eq!(
+            scoped.results.first().map(|r| r.session_id.as_str()),
+            Some(id)
+        );
     }
 
     #[test]
@@ -1252,7 +1267,10 @@ mod tests {
             .query("rust", Some("/workspace/a"), 10, 0, false)
             .unwrap();
         assert_eq!(filtered.results.len(), 1);
-        assert_eq!(filtered.results[0].session_id, "s1");
+        assert_eq!(
+            filtered.results.first().map(|r| r.session_id.as_str()),
+            Some("s1")
+        );
     }
 
     #[test]
@@ -1292,7 +1310,7 @@ mod tests {
 
         let qr = index.query("borrow checker", None, 10, 0, true).unwrap();
         assert_eq!(qr.results.len(), 1);
-        assert!(qr.results[0].snippet.is_some());
+        assert!(qr.results.first().is_some_and(|r| r.snippet.is_some()));
     }
 
     #[test]
@@ -1333,7 +1351,11 @@ mod tests {
 
         let qr = index.query("kubernetes", None, 10, 0, false).unwrap();
         assert_eq!(qr.results.len(), 1);
-        assert!(qr.results[0].matched_fields.contains(&"title".to_string()));
+        assert!(
+            qr.results
+                .first()
+                .is_some_and(|r| r.matched_fields.contains(&"title".to_string()))
+        );
     }
 
     /// cwd is a filter dimension, not a search dimension.
@@ -1373,7 +1395,10 @@ mod tests {
             .query("session_picker.rs", None, 10, 0, false)
             .unwrap();
         assert_eq!(qr.total_estimate, Some(1));
-        assert_eq!(qr.results[0].session_id, "s1");
+        assert_eq!(
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s1")
+        );
     }
 
     #[test]
@@ -1400,12 +1425,18 @@ mod tests {
         // AND has hits: only the doc matching every token is returned, so partial matches cannot dilute the result set
         let qr = index.query("borrow checker", None, 10, 0, false).unwrap();
         assert_eq!(qr.total_estimate, Some(1));
-        assert_eq!(qr.results[0].session_id, "s1");
+        assert_eq!(
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s1")
+        );
 
         // A separator-only word (`->`) must be dropped, not become an empty phrase that silently makes the whole AND match nothing
         let qr = index.query("fix -> borrow", None, 10, 0, false).unwrap();
         assert_eq!(qr.total_estimate, Some(1));
-        assert_eq!(qr.results[0].session_id, "s1");
+        assert_eq!(
+            qr.results.first().map(|r| r.session_id.as_str()),
+            Some("s1")
+        );
 
         // No doc has both tokens: the OR rerun returns the partial matches
         let qr = index.query("tokio sqlite", None, 10, 0, false).unwrap();

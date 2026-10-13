@@ -27,6 +27,9 @@ pub(super) struct TrackedTask {
     command: String,
     display_command: Option<String>,
     cwd: String,
+    /// The client's terminal id, set when a foreground command was moved to the background under its tool call id.
+    /// `None` means the task id is the terminal id.
+    terminal_id: Option<acp::TerminalId>,
     output_file: PathBuf,
     start_time: std::time::SystemTime,
     /// Stamped once when the task completes, so repeated snapshots agree.
@@ -55,6 +58,7 @@ impl Default for TrackedTask {
             command: String::new(),
             display_command: None,
             cwd: String::new(),
+            terminal_id: None,
             output_file: PathBuf::new(),
             start_time: std::time::SystemTime::now(),
             end_time: None,
@@ -149,6 +153,7 @@ fn wrap_command(command: &str) -> Result<String, ComputerError> {
         let _ = command;
         Ok(command.to_string())
     }
+
     #[cfg(unix)]
     {
         let quoted = shlex::try_quote(command).map_err(|_| ComputerError::CommandNotQuoted)?;
@@ -204,19 +209,154 @@ impl AcpTerminalAdapter {
             .map_err(|e| ComputerError::io(e.to_string()))
     }
 
+    /// The client terminal id for `task_id`, read from the tracked task when it has one.
     fn terminal_id(&self, task_id: &str) -> acp::TerminalId {
-        acp::TerminalId::new(task_id)
+        self.tasks
+            .lock()
+            .unwrap()
+            .get(task_id)
+            .and_then(|task| task.terminal_id.clone())
+            .unwrap_or_else(|| acp::TerminalId::new(task_id))
+    }
+
+    /// How long `run` waits before it moves a still-running command to the background.
+    /// This is the shorter of the request's timeout and its block budget (unset means the shared 15s default).
+    fn auto_background_wait(request: &TerminalRunRequest) -> Duration {
+        let budget = request.foreground_block_budget.unwrap_or_else(
+            xai_grok_tools::computer::local::terminal::foreground_block_budget_from_env,
+        );
+        request.timeout.min(budget)
+    }
+
+    /// Moves a foreground terminal that is still running into the background under its tool call id.
+    /// The result carries `signal = "auto_backgrounded"`, the output so far, and no exit code.
+    async fn auto_background(
+        &self,
+        request: TerminalRunRequest,
+        terminal_id: acp::TerminalId,
+        started_at: std::time::SystemTime,
+    ) -> TerminalRunResult {
+        let task_id = request.tool_call_id.clone();
+        // Bounded: the block has already elapsed, so a stalled client must not hold the turn.
+        let partial = match tokio::time::timeout(
+            TERMINAL_OUTPUT_RPC_BUDGET,
+            self.gateway.send(acp::TerminalOutputRequest::new(
+                self.session_id.clone(),
+                terminal_id.clone(),
+            )),
+        )
+        .await
+        {
+            Ok(Ok(output)) => output,
+            Ok(Err(_)) | Err(_) => acp::TerminalOutputResponse::new(String::new(), false),
+        };
+
+        // The wait can lose the race with exit; report the completion instead of tracking a finished command.
+        if partial.exit_status.is_some() {
+            release_terminal(&self.gateway, &self.session_id, &terminal_id).await;
+            let (exit_code, signal) = parse_exit(&partial.exit_status);
+            let mut recorder =
+                OutputRecorder::new(request.output_file.clone(), request.output_byte_limit);
+            recorder.initialize().await;
+            if let Err(e) = recorder.append(&partial.output).await {
+                tracing::warn!(task_id, error = %e, "output recorder failed to write foreground output");
+            }
+            let total_bytes = partial.output.len();
+            return TerminalRunResult {
+                combined_output: partial.output,
+                exit_code,
+                truncated: partial.truncated,
+                signal,
+                timed_out: false,
+                output_file: request.output_file,
+                total_bytes,
+                pid: None,
+            };
+        }
+
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            tasks.insert(
+                task_id.clone(),
+                TrackedTask {
+                    command: request.command.clone(),
+                    display_command: request.display_command.clone(),
+                    cwd: request.working_directory.to_string_lossy().to_string(),
+                    terminal_id: Some(terminal_id.clone()),
+                    output_file: request.output_file.clone(),
+                    start_time: started_at,
+                    kind: request.kind,
+                    owner_session_id: request.owner_session_id.clone(),
+                    description: request.description.clone(),
+                    output_byte_limit: request.output_byte_limit,
+                    ..Default::default()
+                },
+            );
+        }
+
+        let mut recorder =
+            OutputRecorder::new(request.output_file.clone(), request.output_byte_limit);
+        recorder.initialize().await;
+        if let Err(e) = recorder.append(&partial.output).await {
+            tracing::warn!(task_id, error = %e, "output recorder failed to write pre-background output");
+        }
+        tokio::spawn(watch_for_exit(
+            self.gateway.clone(),
+            self.session_id.clone(),
+            task_id,
+            terminal_id,
+            Arc::clone(&self.tasks),
+            request.notification_handle.clone(),
+            recorder,
+        ));
+
+        let total_bytes = partial.output.len();
+        TerminalRunResult {
+            combined_output: partial.output,
+            exit_code: None,
+            truncated: partial.truncated,
+            signal: Some("auto_backgrounded".to_string()),
+            timed_out: false,
+            output_file: request.output_file,
+            total_bytes,
+            pid: None,
+        }
+    }
+
+    fn local_snapshot(&self, task_id: &str) -> Option<TaskSnapshot> {
+        let tasks = self.tasks.lock().unwrap();
+        let tracked = tasks.get(task_id)?;
+        Some(tracked.to_snapshot(
+            task_id,
+            SnapshotOutput {
+                output: tracked.last_output.clone(),
+                truncated: tracked.last_truncated,
+                exit_code: tracked.exit_code,
+                signal: tracked.signal.clone(),
+            },
+        ))
     }
 }
+
+/// Per-task budget for live `terminal/output` during `list_tasks` (task/list).
+/// After this expires that id falls back to local metadata; remaining ids still
+/// get their own live attempt with a fresh budget.
+const TERMINAL_OUTPUT_RPC_BUDGET: Duration = Duration::from_secs(2);
 
 #[async_trait::async_trait]
 impl TerminalBackend for AcpTerminalAdapter {
     async fn run(&self, request: TerminalRunRequest) -> Result<TerminalRunResult, ComputerError> {
         let command = wrap_command(&request.command)?;
+        let started_at = std::time::SystemTime::now();
         let create_res = self.create_terminal(command, &request).await?;
 
+        let wait = if request.auto_background_on_timeout {
+            Self::auto_background_wait(&request)
+        } else {
+            request.timeout
+        };
         let timed_out = match tokio::time::timeout(
-            request.timeout,
+            wait,
             self.gateway.send(acp::WaitForTerminalExitRequest::new(
                 self.session_id.clone(),
                 create_res.terminal_id.clone(),
@@ -228,6 +368,11 @@ impl TerminalBackend for AcpTerminalAdapter {
             Ok(Err(e)) => {
                 release_terminal(&self.gateway, &self.session_id, &create_res.terminal_id).await;
                 return Err(ComputerError::io(e.to_string()));
+            }
+            Err(_) if request.auto_background_on_timeout => {
+                return Ok(self
+                    .auto_background(request, create_res.terminal_id, started_at)
+                    .await);
             }
             Err(_) => {
                 let _ = self
@@ -318,6 +463,7 @@ impl TerminalBackend for AcpTerminalAdapter {
             self.gateway.clone(),
             self.session_id.clone(),
             task_id.clone(),
+            create_res.terminal_id,
             Arc::clone(&self.tasks),
             notification_handle,
             recorder,
@@ -534,11 +680,8 @@ impl TerminalBackend for AcpTerminalAdapter {
         match start {
             WaitStart::Immediate => return self.get_task(task_id).await,
             WaitStart::ProbeThenMaybeBlock => {
-                // Not tracked as running: one output probe
-                // A dead or unknown terminal must not burn the wait budget on WaitForTerminalExit
-                // Match kill's untracked probe: `get_task` maps every TerminalOutput error to None
-                // So a transport/channel blip on a still-live resumed terminal must not look like not-found
-                // Only a client that answered and disowned the id is a definitive miss
+                // Not tracked as running: one output probe A dead or unknown terminal must not burn the wait budget on WaitForTerminalExit Match kill's untracked probe: `get_task` maps every TerminalOutput error to None
+                // So a transport/channel blip on a still-live resumed terminal must not look like not-found Only a client that answered and disowned the id is a definitive miss
                 let probe = self
                     .gateway
                     .send(acp::TerminalOutputRequest::new(
@@ -615,17 +758,50 @@ impl TerminalBackend for AcpTerminalAdapter {
     }
 
     async fn list_tasks(&self) -> Vec<TaskSnapshot> {
+        // Preserve x.ai/task/list output for running rows via get_task (live terminal/output or log tail).
+        // Bound each RPC so a hung client cannot stall enumeration indefinitely; only the timed-out id
+        // falls back, and the remaining ids still get a live attempt with their own budget.
         let task_ids: Vec<String> = {
             let tasks = self.tasks.lock().unwrap();
             tasks.keys().cloned().collect()
         };
         let mut snapshots = Vec::new();
         for task_id in task_ids {
-            if let Some(snapshot) = self.get_task(&task_id).await {
-                snapshots.push(snapshot);
+            match tokio::time::timeout(TERMINAL_OUTPUT_RPC_BUDGET, self.get_task(&task_id)).await {
+                Ok(Some(snapshot)) => snapshots.push(snapshot),
+                Ok(None) => {}
+                Err(_) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        budget_ms = TERMINAL_OUTPUT_RPC_BUDGET.as_millis() as u64,
+                        "terminal/output RPC timed out; using local snapshot for this id only"
+                    );
+                    if let Some(local) = self.local_snapshot(&task_id) {
+                        snapshots.push(local);
+                    }
+                }
             }
         }
         snapshots
+    }
+
+    async fn list_tasks_metadata(&self) -> Vec<TaskSnapshot> {
+        // Snapshot path: one lock, no terminal/output RPCs, no log reads.
+        let tasks = self.tasks.lock().unwrap();
+        tasks
+            .iter()
+            .map(|(task_id, tracked)| {
+                tracked.to_snapshot(
+                    task_id,
+                    SnapshotOutput {
+                        output: String::new(),
+                        truncated: false,
+                        exit_code: tracked.exit_code,
+                        signal: tracked.signal.clone(),
+                    },
+                )
+            })
+            .collect()
     }
 
     async fn kill_all_background_tasks(&self) {

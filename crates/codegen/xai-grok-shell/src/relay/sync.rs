@@ -33,7 +33,6 @@ pub(crate) fn build_share_url(session_id: &str) -> String {
 }
 
 /// Connection state for the relay sync.
-///
 /// Reconnection is handled internally by `run_relay_loop` in relay.rs.
 /// The sync task only observes the transitions from Disconnected through Connecting to Connected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +88,6 @@ pub struct RelaySyncState {
 }
 
 /// Status of relay sync for a session.
-///
 /// This status is based solely on the relay sync state file (`relay_sync.json`), not on comparing against `updates.jsonl` line counts.
 /// Those two numbers measure different things and can diverge (e.g., sessions created before relay sync was enabled, filtered event types).
 #[derive(Debug, Clone)]
@@ -114,7 +112,6 @@ impl RelaySyncState {
     }
 
     /// Save sync state to disk atomically.
-    ///
     /// Writes to a temporary file then renames to avoid corruption on crash.
     /// Creates the session directory if it doesn't exist.
     pub fn save(&self, session_dir: &std::path::Path) -> std::io::Result<()> {
@@ -147,11 +144,8 @@ impl RelaySyncState {
         self.synced_count += 1;
     }
 
-    /// Get the sync status for a session based on its relay sync state file.
-    ///
-    /// This reads only the `relay_sync.json` file and does **not** compare against `updates.jsonl` line counts.
-    /// `synced_count` and the line count measure different things (relay-queued events vs. all session updates).
-    /// They can diverge for sessions created before relay sync was enabled.
+    /// Get the sync status for a session based on its relay sync state file. This reads only the `relay_sync.json` file and does **not** compare against `updates.jsonl` line counts.
+    /// `synced_count` and the line count measure different things (relay-queued events vs. all session updates). They can diverge for sessions created before relay sync was enabled.
     pub fn get_sync_status(session_dir: &std::path::Path) -> SyncStatus {
         let has_sync_state = Self::exists(session_dir);
         let sync_state = Self::load(session_dir);
@@ -177,18 +171,9 @@ enum RelaySyncMsg {
     Shutdown,
 }
 
-/// Syncs session updates to the relay via WebSocket.
-///
-/// Provides a non-blocking API for queuing notifications.
-/// WebSocket communication happens in a background task, so the main session loop never blocks.
-///
-/// Reconnection is handled by `run_relay_loop` in relay.rs.
-/// This struct only manages the queue/flush lifecycle and connection state observation.
-///
-/// # Features
-/// - The sync cursor persists to disk so a session can pick up after being offline
-/// - Connection state observation via [`Self::connection_state`]
-/// - Backpressure with configurable buffer limits
+/// Syncs session updates to the relay via WebSocket. Provides a non-blocking API for queuing notifications. WebSocket communication happens in a background task, so the main session loop never blocks.
+/// Reconnection is handled by `run_relay_loop` in relay.rs. This struct only manages the queue/flush lifecycle and connection state observation. The sync cursor persists to disk so a session can pick up after being offline
+/// Connection state observation via [`Self::connection_state`] Backpressure with configurable buffer limits
 pub struct RelaySync {
     /// Channel to send messages to the sync task.
     tx: mpsc::UnboundedSender<RelaySyncMsg>,
@@ -414,7 +399,9 @@ async fn relay_sync_task(
                         // We iterate by index so that on send failure the remaining items stay in `pending` instead of being consumed by drain
                         let mut sent_count = 0;
                         while sent_count < pending.len() {
-                            let notification = &pending[sent_count];
+                            let Some(notification) = pending.get(sent_count) else {
+                                break;
+                            };
                             // The {sessionId}-{counter} format matches the agent's event IDs
                             let event_id = resolve_event_id(notification);
 
@@ -479,7 +466,6 @@ async fn relay_sync_task(
 }
 
 /// Resolve the event ID for a notification being flushed to the relay.
-///
 /// Preserves the `eventId` from the notification's meta if present; otherwise generates a `{sessionId}-{counter}` ID via the global event_id counter.
 /// Event IDs stay monotonically increasing and comparable by the relay, avoiding gaps caused by random UUIDs.
 fn resolve_event_id(notification: &acp::SessionNotification) -> String {
@@ -790,7 +776,10 @@ mod tests {
                 "agentType": AgentType::Tui,
             }
         });
-        assert_eq!(json["_meta"]["agentType"].as_str(), Some("tui"));
+        assert_eq!(
+            json.pointer("/_meta/agentType").and_then(|v| v.as_str()),
+            Some("tui")
+        );
     }
 
     #[test]
@@ -948,12 +937,10 @@ mod tests {
 
         // Verify strictly increasing (the global counter is shared across parallel tests, so gaps are expected; only monotonicity matters)
         for window in counters.windows(2) {
+            let [a, b] = window else { continue };
             assert!(
-                window[1] > window[0],
-                "counters not monotonically increasing: {} -> {} (ids: {:?})",
-                window[0],
-                window[1],
-                ids
+                *b > *a,
+                "counters not monotonically increasing: {a} -> {b} (ids: {ids:?})",
             );
         }
     }
@@ -995,11 +982,29 @@ mod tests {
             serde_json::from_str(&response_str).expect("response should be valid JSON");
 
         // Verify response structure
-        assert_eq!(response["jsonrpc"], "2.0");
-        assert_eq!(response["id"], 1);
-        assert_eq!(response["result"]["protocolVersion"], "1");
-        assert_eq!(response["result"]["_meta"]["sessionId"], "test-session");
-        assert_eq!(response["result"]["_meta"]["agentType"], "tui");
+        assert_eq!(
+            response.get("jsonrpc").and_then(|v| v.as_str()),
+            Some("2.0")
+        );
+        assert_eq!(response.get("id"), Some(&serde_json::json!(1)));
+        assert_eq!(
+            response
+                .pointer("/result/protocolVersion")
+                .and_then(|v| v.as_str()),
+            Some("1")
+        );
+        assert_eq!(
+            response
+                .pointer("/result/_meta/sessionId")
+                .and_then(|v| v.as_str()),
+            Some("test-session")
+        );
+        assert_eq!(
+            response
+                .pointer("/result/_meta/agentType")
+                .and_then(|v| v.as_str()),
+            Some("tui")
+        );
     }
 
     #[test]

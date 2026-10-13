@@ -186,10 +186,8 @@ impl HunkTrackerActor {
         }
     }
 
-    /// Spawn the actor and return a handle to communicate with it.
-    ///
-    /// If `mode` is `AllDirty`, the actor automatically loads all uncommitted
-    /// git changes at startup.
+    /// Spawn the actor and return a handle to communicate with it. If `mode` is `AllDirty`, the actor automatically loads all
+    /// uncommitted git changes at startup.
     pub fn spawn(
         session_id: String,
         working_dir: PathBuf,
@@ -207,7 +205,6 @@ impl HunkTrackerActor {
             cancellation_token,
         );
 
-        // Spawn the actor task
         tokio::spawn(actor.run());
 
         HunkTrackerHandle::new(cmd_tx)
@@ -597,10 +594,8 @@ impl HunkTrackerActor {
         }
     }
 
-    /// Take a snapshot of all hunk tracker state for preservation across
-    /// session kill/reload cycles.
-    /// Preserves the full FileContentState (including Binary/TooLarge) for correctness
-    /// in fork and cross-session sync flows.
+    /// Take a snapshot of all hunk tracker state for preservation across session kill/reload cycles. Preserves the full
+    /// FileContentState (including Binary/TooLarge) for correctness in fork and cross-session sync flows.
     fn take_snapshot(&self) -> HunkTrackerSnapshot {
         let file_states = self
             .file_states
@@ -659,11 +654,9 @@ impl HunkTrackerActor {
         self.turn_index = snapshot.turn_index;
         self.session_stats = snapshot.session_stats;
 
-        // TODO: Re-emit HunkEvent::FileAdded / HunkEvent::HunkAdded for
-        // all restored files and hunks so that connected clients (TUI, VSCode
-        // extension) see the restored state without requiring a manual refresh.
-        // Alternative: emit a single HunkEvent::StateRestored { file_count }
-        // that clients use as a signal to do a full refresh.
+        // TODO: Re-emit HunkEvent::FileAdded / HunkEvent::HunkAdded for all restored files and hunks so that connected clients
+        // (TUI, VSCode extension) see the restored state without requiring a manual refresh. Alternative: emit a single
+        // HunkEvent::StateRestored { file_count } that clients use as a signal to do a full refresh.
 
         debug!(
             files = self.file_states.len(),

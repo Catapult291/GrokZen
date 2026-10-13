@@ -33,6 +33,7 @@ pub(crate) fn fake_caps(control_v1: bool, relaunch_v1: bool) -> LeaderCapabiliti
         profile_formats: Vec::new(),
         workspace_exposure: false,
         relaunch_v1,
+        cursor_worker: false,
     }
 }
 /// Wire behavior of a [`spawn_fake_leader`] instance.
@@ -65,7 +66,6 @@ impl FakeLeaderHandle {
     }
 }
 /// Bind a fake leader at `socket_path` behaving per `behavior`.
-///
 /// Returns once the listener is bound (readiness signalled via oneshot, no fixed startup sleep), so callers can connect immediately.
 /// Serves clients sequentially: the point of a fake is wire shape, not concurrency.
 pub(crate) async fn spawn_fake_leader(
@@ -125,7 +125,9 @@ async fn serve_client(
         FakeLeaderBehavior::PartialFrame { bytes } => {
             let prefix = 1024u32.to_be_bytes();
             let n = (*bytes).min(prefix.len());
-            let _ = writer.write_all(&prefix[..n]).await;
+            if let Some(frame) = prefix.get(..n) {
+                let _ = writer.write_all(frame).await;
+            }
             let _ = writer.flush().await;
             cancel.cancelled().await;
         }

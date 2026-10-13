@@ -39,13 +39,9 @@ pub const SAMPLE_CHECK_EVENT_DATA: &str = r#"{"sequence_number":4176,"type":"res
 /// Companion fixture to [`SAMPLE_CHECK_EVENT_DATA`]: the follow-up frame from the same wire sample, carrying the grown **cumulative** trigger set.
 pub const SAMPLE_CHECK_EVENT_DATA_CUMULATIVE: &str = r#"{"sequence_number":4178,"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:4@response","tail_repetition:2@response"]}}"#;
 
-/// Resolved runtime tunables for doom-loop recovery.
-///
-/// Produced once per session by the shell's config resolver (env > config.toml > remote settings > default).
-/// The resolver returns `None` when the check is disabled: absence IS the off state, so there is no separate enabled flag to keep in sync.
-/// When present on `SamplerConfig`, the sampler both sends the opt-in request header and parses the reported triggers.
-/// The tunables are consumed by the recovery decision logic.
-/// Per-field serde defaults keep configs persisted by older versions deserializing when future fields are added.
+/// The resolver returns `None` when the check is disabled: absence IS the off state, so there is no separate enabled flag
+/// to keep in sync. When present on `SamplerConfig`, the sampler both sends the opt-in request header and parses the
+/// reported triggers. The tunables are consumed by the recovery decision logic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DoomLoopRecoveryPolicy {
     /// Act only on `tail_repetition:{t}@thinking` triggers with `t` at or below this value.
@@ -235,10 +231,9 @@ pub enum DoomLoopPeek {
     None,
 }
 
-/// Tolerantly peek a raw SSE `data:` JSON payload for doom-loop content.
-///
-/// Cheap for the common case: payloads that don't mention `doom_loop_check` return [`DoomLoopPeek::None`] without a JSON parse.
-/// Anything malformed (non-JSON, wrong types, missing keys) degrades to `None` or an empty trigger vec, never an error.
+/// Tolerantly peek a raw SSE `data:` JSON payload for doom-loop content. Cheap for the common case: payloads that don't
+/// mention `doom_loop_check` return [`DoomLoopPeek::None`] without a JSON parse. Anything malformed (non-JSON, wrong
+/// types, missing keys) degrades to `None` or an empty trigger vec, never an error.
 pub fn peek_doom_loop(data: &str) -> DoomLoopPeek {
     if !data.contains("doom_loop_check") {
         return DoomLoopPeek::None;
@@ -256,10 +251,9 @@ pub fn peek_doom_loop(data: &str) -> DoomLoopPeek {
     }
 }
 
-/// Matches the doom-loop check event by its SSE `event:` name, or (for servers that omit the name) by a tolerant peek of the payload's `"type"` tag.
-/// A cheap substring precheck gates the peek so normal traffic never pays a JSON parse.
-/// The type confirmation prevents swallowing a legitimate event whose content text merely quotes the event-type string.
-/// An unnamed frame with an unparseable payload is NOT the check event; a real server frame always carries the name or a parseable `type` tag.
+/// A cheap substring precheck gates the peek so normal traffic never pays a JSON parse. The type confirmation prevents
+/// swallowing a legitimate event whose content text merely quotes the event-type string. An unnamed frame with an
+/// unparseable payload is NOT the check event; a real server frame always carries the name or a parseable `type` tag.
 pub fn is_check_event(event_name: &str, data: &str) -> bool {
     if event_name == DOOM_LOOP_CHECK_EVENT_TYPE {
         return true;
@@ -388,18 +382,22 @@ mod tests {
     fn sample_wire_frames_parse_byte_exactly() {
         match peek_doom_loop(SAMPLE_CHECK_EVENT_DATA) {
             DoomLoopPeek::CheckEvent(signals) => {
-                assert_eq!(signals.len(), 1);
-                assert_eq!(signals[0].kind, DoomLoopSignalKind::TailRepetition(4));
-                assert_eq!(signals[0].channel, "response");
-                assert_eq!(signals[0].raw, "tail_repetition:4@response");
+                let [signal] = signals.as_slice() else {
+                    panic!("expected one signal: {signals:?}");
+                };
+                assert_eq!(signal.kind, DoomLoopSignalKind::TailRepetition(4));
+                assert_eq!(signal.channel, "response");
+                assert_eq!(signal.raw, "tail_repetition:4@response");
             }
             other => panic!("expected CheckEvent, got {other:?}"),
         }
         match peek_doom_loop(SAMPLE_CHECK_EVENT_DATA_CUMULATIVE) {
             DoomLoopPeek::CheckEvent(signals) => {
-                assert_eq!(signals.len(), 2);
-                assert_eq!(signals[0].raw, "tail_repetition:4@response");
-                assert_eq!(signals[1].kind, DoomLoopSignalKind::TailRepetition(2));
+                let [first, second] = signals.as_slice() else {
+                    panic!("expected two signals: {signals:?}");
+                };
+                assert_eq!(first.raw, "tail_repetition:4@response");
+                assert_eq!(second.kind, DoomLoopSignalKind::TailRepetition(2));
             }
             other => panic!("expected CheckEvent, got {other:?}"),
         }
@@ -410,9 +408,11 @@ mod tests {
         let data = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":["tail_repetition:8@thinking","low_logprob@thinking"]}}"#;
         match peek_doom_loop(data) {
             DoomLoopPeek::CheckEvent(signals) => {
-                assert_eq!(signals.len(), 2);
-                assert_eq!(signals[0].kind, DoomLoopSignalKind::TailRepetition(8));
-                assert_eq!(signals[1].kind, DoomLoopSignalKind::LowLogprob);
+                let [first, second] = signals.as_slice() else {
+                    panic!("expected two signals: {signals:?}");
+                };
+                assert_eq!(first.kind, DoomLoopSignalKind::TailRepetition(8));
+                assert_eq!(second.kind, DoomLoopSignalKind::LowLogprob);
             }
             other => panic!("expected CheckEvent, got {other:?}"),
         }
@@ -441,8 +441,10 @@ mod tests {
         let data = r#"{"type":"response.doom_loop_check","doom_loop_check":{"triggers":[7,"tail_repetition:8@thinking",null]}}"#;
         match peek_doom_loop(data) {
             DoomLoopPeek::CheckEvent(signals) => {
-                assert_eq!(signals.len(), 1);
-                assert_eq!(signals[0].raw, "tail_repetition:8@thinking");
+                let [signal] = signals.as_slice() else {
+                    panic!("expected one signal: {signals:?}");
+                };
+                assert_eq!(signal.raw, "tail_repetition:8@thinking");
             }
             other => panic!("expected CheckEvent, got {other:?}"),
         }
@@ -453,8 +455,10 @@ mod tests {
         let data = r#"{"type":"response.completed","response":{"id":"r1","doom_loop_check":{"triggers":["tail_repetition:16@thinking"]}}}"#;
         match peek_doom_loop(data) {
             DoomLoopPeek::ResponseField(signals) => {
-                assert_eq!(signals.len(), 1);
-                assert_eq!(signals[0].kind, DoomLoopSignalKind::TailRepetition(16));
+                let [signal] = signals.as_slice() else {
+                    panic!("expected one signal: {signals:?}");
+                };
+                assert_eq!(signal.kind, DoomLoopSignalKind::TailRepetition(16));
             }
             other => panic!("expected ResponseField, got {other:?}"),
         }

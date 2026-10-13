@@ -10,6 +10,8 @@
 //!   l / Right    — grow render width    (when unfocused)
 //!   Esc          — quit (always)
 
+#![deny(clippy::indexing_slicing)]
+
 use std::io::{self, stdout};
 use std::time::Duration;
 
@@ -254,7 +256,6 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
     let size = f.area();
 
     // Layout: header (1) | textarea (flexible) | full render | streaming render
-    //
     // We compute the heights we need for the render panels, then give the rest
     // to the textarea.
 
@@ -280,6 +281,9 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
         Constraint::Length(stream_height),
     ])
     .split(size);
+    let [header_area, textarea_chunk, full_area, stream_area] = &*chunks else {
+        return;
+    };
 
     // ── Header ──
     let focus_indicator = if app.textarea_focused {
@@ -337,7 +341,7 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
         ]),
         Line::from(keys),
     ]);
-    f.render_widget(header, chunks[0]);
+    f.render_widget(header, *header_area);
 
     // ── Textarea ──
     let border_color = if app.textarea_focused {
@@ -354,8 +358,8 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ));
-    let textarea_inner = textarea_block.inner(chunks[1]);
-    f.render_widget(textarea_block, chunks[1]);
+    let textarea_inner = textarea_block.inner(*textarea_chunk);
+    f.render_widget(textarea_block, *textarea_chunk);
     app.textarea_area = textarea_inner;
     (&app.textarea).render_ref(textarea_inner, f.buffer_mut(), &mut app.textarea_state);
 
@@ -369,13 +373,13 @@ fn draw(f: &mut ratatui::Frame, app: &mut App) {
 
     // ── Full render panel ──
     let full_title = format!(" full: {} ", app.render_width);
-    render_panel(f, chunks[2], &full_title, &app.full_lines, render_w, false);
+    render_panel(f, *full_area, &full_title, &app.full_lines, render_w, false);
 
     // ── Streaming render panel ──
     let stream_title = format!(" stream: {} ", app.render_width);
     render_panel(
         f,
-        chunks[3],
+        *stream_area,
         &stream_title,
         &app.streaming_lines,
         render_w,
@@ -410,10 +414,8 @@ fn wrapped_line_count(lines: &[Line<'_>], width: u16) -> u16 {
 }
 
 /// Render a bordered panel whose *inner* width is exactly `inner_w`.
-///
-/// Content is soft-wrapped with `Wrap { trim: false }` so long non-table
-/// lines fold inside the box.  The box is left-aligned within the available
-/// `area`.  If `is_error` is true the border turns red.
+/// Content is soft-wrapped with `Wrap { trim: false }` so long non-table lines fold inside the box. The box is left-aligned within the available
+/// `area`. If `is_error` is true the border turns red.
 fn render_panel(
     f: &mut ratatui::Frame,
     area: Rect,

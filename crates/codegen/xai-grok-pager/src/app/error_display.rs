@@ -180,14 +180,8 @@ fn classified_retry_headline(
     }
 }
 
-/// Format a terminal request / API error for the TUI.
-///
-/// `status` is preferred when the caller already parsed it (ACP `http_status` field).
 /// Otherwise the status is recovered from the message text.
-///
-/// Shape: `Headline (code): optional why. What to do.`
 /// Server text is kept only when it adds information.
-/// It is dropped for server faults (5xx bodies are internal detail like "upstream exploded") and when it echoes the headline.
 /// A status-level next step is always kept when we have one.
 pub(crate) fn format_request_failure(
     status: Option<u16>,
@@ -244,8 +238,9 @@ pub(crate) fn format_request_failure_with_locale(
     }
 }
 
-/// Whether a fully untyped raw is `SamplingError::MaxTokensTruncation`'s
-/// flattened text. A present-but-unknown typed error is never reclassified.
+/// A present-but-unknown error type is a newer shell's kind and is never reclassified.
+/// TODO: error-kind-fallback-removal — this recovery is a version shim for terminals that predate the typed `errorKind`/`error_kind` fields.
+/// It is also the only truncation classifier for the exhausted-retry path, which passes no error type at all.
 fn truncation_recovered_from_untyped_raw(error_type: Option<WireErrorType>, raw: &str) -> bool {
     error_type.is_none()
         && parse_http_status(raw).is_none()
@@ -573,9 +568,11 @@ fn normalize_phrase(s: &str) -> String {
 pub(crate) fn parse_http_status(raw: &str) -> Option<u16> {
     // Every "status " occurrence, so "status unknown; … status 503" still finds the code
     let mut from = 0;
-    while let Some(i) = find_ignore_ascii_case(&raw[from..], "status ") {
+    while let Some(tail) = raw.get(from..)
+        && let Some(i) = find_ignore_ascii_case(tail, "status ")
+    {
         let after = from + i + "status ".len();
-        if let Some(code) = parse_status_digits(&raw[after..], false) {
+        if let Some(code) = raw.get(after..).and_then(|s| parse_status_digits(s, false)) {
             return Some(code);
         }
         from = after;
@@ -606,7 +603,9 @@ pub(crate) fn parse_http_status(raw: &str) -> Option<u16> {
     ];
     for marker in MARKERS {
         if let Some(i) = find_ignore_ascii_case(raw, marker)
-            && let Some(code) = parse_status_digits(&raw[i + marker.len()..], true)
+            && let Some(code) = raw
+                .get(i + marker.len()..)
+                .and_then(|s| parse_status_digits(s, true))
         {
             return Some(code);
         }
@@ -617,7 +616,10 @@ pub(crate) fn parse_http_status(raw: &str) -> Option<u16> {
 /// Exactly three digits in 400..600. `require_close_paren` for the `"… ("` markers, so prose like "merge conflict (300 files" can't match.
 fn parse_status_digits(s: &str, require_close_paren: bool) -> Option<u16> {
     let bytes = s.as_bytes();
-    if bytes.len() < 3 || !bytes[..3].iter().all(u8::is_ascii_digit) {
+    if !bytes
+        .get(..3)
+        .is_some_and(|p| p.iter().all(u8::is_ascii_digit))
+    {
         return None;
     }
     if bytes.get(3).is_some_and(u8::is_ascii_digit) {
@@ -626,7 +628,7 @@ fn parse_status_digits(s: &str, require_close_paren: bool) -> Option<u16> {
     if require_close_paren && bytes.get(3) != Some(&b')') {
         return None;
     }
-    let code: u16 = s[..3].parse().ok()?;
+    let code: u16 = s.get(..3)?.parse().ok()?;
     (400..600).contains(&code).then_some(code)
 }
 
@@ -653,7 +655,7 @@ fn extract_error_detail(raw: &str) -> Option<String> {
 
     // JSON before the URL-clause strip: a URL inside a JSON string would otherwise split the body at its own ": " and leave garbage
     if let Some(json_start) = s.find('{')
-        && let Some(extracted) = extract_from_json(&s[json_start..])
+        && let Some(extracted) = s.get(json_start..).and_then(extract_from_json)
     {
         s = extracted;
     }
@@ -662,9 +664,17 @@ fn extract_error_detail(raw: &str) -> Option<String> {
 
     // Prefer the "X is not in your available models" sentence when present (before dropping the Model/Auth/Version dump that contains it)
     if let Some(idx) = s.find("is not in your available models") {
-        let line_start = s[..idx].rfind('\n').map(|i| i + 1).unwrap_or(0);
-        let line_end = s[idx..].find('\n').map(|i| idx + i).unwrap_or(s.len());
-        let snippet = s[line_start..line_end].trim();
+        let line_start = s
+            .get(..idx)
+            .and_then(|h| h.rfind('\n'))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let line_end = s
+            .get(idx..)
+            .and_then(|t| t.find('\n'))
+            .map(|i| idx + i)
+            .unwrap_or(s.len());
+        let snippet = s.get(line_start..line_end).map_or("", str::trim);
         if !snippet.is_empty() {
             s = snippet.to_string();
         }
@@ -683,27 +693,28 @@ fn extract_error_detail(raw: &str) -> Option<String> {
 fn strip_retry_prefix(s: &str) -> Option<String> {
     let rest = s.strip_prefix("failed after ")?;
     let idx = rest.find(" retries: ")?;
-    Some(rest[idx + " retries: ".len()..].to_string())
+    rest.get(idx + " retries: ".len()..).map(str::to_string)
 }
 
 fn strip_api_error_prefix(s: &str) -> Option<String> {
     let start = find_ignore_ascii_case(s, "API error (status ")?;
-    let after = &s[start + "API error (status ".len()..];
+    let after = s.get(start + "API error (status ".len()..)?;
     let colon = after.find("): ")?;
-    Some(after[colon + 3..].trim().to_string())
+    Some(after.get(colon + 3..)?.trim().to_string())
 }
 
 fn strip_from_url_clause(s: &str) -> String {
     // For "Unauthorized (401) from https://…: body", keep the body when present, otherwise drop the URL clause
     if let Some(from) = find_ignore_ascii_case(s, " from http") {
-        let after_from = &s[from + " from ".len()..];
-        if let Some(colon) = after_from.find(": ") {
-            let body = after_from[colon + 2..].trim();
-            if !body.is_empty() && !body.starts_with("http") {
-                return body.to_string();
-            }
+        if let Some(after_from) = s.get(from + " from ".len()..)
+            && let Some(colon) = after_from.find(": ")
+            && let Some(body) = after_from.get(colon + 2..).map(str::trim)
+            && !body.is_empty()
+            && !body.starts_with("http")
+        {
+            return body.to_string();
         }
-        return s[..from].trim().to_string();
+        return s.get(..from).map_or(s, str::trim).to_string();
     }
     s.to_string()
 }
@@ -757,18 +768,18 @@ fn strip_urls(s: &str) -> String {
             out.push_str(rest);
             break;
         };
-        let url_end = rest[i..]
-            .find(|c: char| c.is_whitespace() || c == ')')
+        let url_end = rest
+            .get(i..)
+            .and_then(|t| t.find(|c: char| c.is_whitespace() || c == ')'))
             .map_or(rest.len(), |e| i + e);
-        let head = &rest[..i];
+        let head = rest.get(..i).unwrap_or("");
         let head = head
             .strip_suffix("for url (")
             .or_else(|| head.strip_suffix('('))
             .unwrap_or(head);
         out.push_str(head);
-        rest = rest[url_end..]
-            .strip_prefix(')')
-            .unwrap_or(&rest[url_end..]);
+        let tail = rest.get(url_end..).unwrap_or("");
+        rest = tail.strip_prefix(')').unwrap_or(tail);
     }
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }

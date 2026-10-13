@@ -1,5 +1,7 @@
 # Agent Dashboard
 
+[简体中文](zh-CN/23-dashboard.md)
+
 The Agent Dashboard lists every top-level session in this pager process —
 local sessions and forks — grouped by state. From one screen you can peek,
 reply, attach, pin, rename, stop, or dispatch a new agent. Subagents are not
@@ -7,7 +9,7 @@ listed; they run under their parent, which already shows when work is in
 flight.
 
 Not the agents modal (`/config-agents` / `/agents` — definitions and
-personas), the session picker (`/resume` / `F3`, past conversations on
+personas), the session picker (`/resume` / `Ctrl+R`, past conversations on
 disk), or the workflows run UI (`/workflow runs`).
 
 ---
@@ -27,7 +29,10 @@ Hidden in minimal mode. Set `GROK_AGENT_DASHBOARD=0` or
 ## What you see
 
 ```
- Grok Build · Dashboard — 4 agents · 2 awaiting
+  main ~/xai [Choose Ctrl+l]                    ◆ 2 awaiting │ ⋮ 1 working │ ◇ 1 idle
+
+  + New Agent                                Open Previous /resume │ Worktree Ctrl+w
+
 ▌● reviewer · audit token flow    Awaiting your input            2m
  ● implementer · fix login bug    Running: cargo test           12m
  ⋅ refactor · feat/login          Responding…                   24m
@@ -39,11 +44,34 @@ Hidden in minimal mode. Set `GROK_AGENT_DASHBOARD=0` or
  ↑/↓ select (peek) · Enter open · Ctrl+R rename · Ctrl+T pin · Ctrl+X stop · ? help · Esc new
 ```
 
+The **header** shows where a new agent will run — the git branch and the
+working directory — with state-count chips on the right (the same glyph
+and colour as the rows, plus a label). Click the location
+(or press `Ctrl+L`) to **choose** another directory; `/cd <path>` does the
+same from the dispatch box.
+
+The **actions row** below it holds `+ New Agent` (the default cursor target
+when no row is selected) and, on the right, `Open Previous` (the session
+picker; workspace dashboard only) and the **worktree toggle**. `→` / `←`
+move the cursor along the row in that order, stopping at either end. Like
+every arrow on the dashboard, they navigate while the list has focus (`Tab`)
+or while the dispatch box is empty, and edit the draft once you've typed
+something; in search mode the empty box is still the query, so they edit. In
+vim mode `l` / `h` do the same but need the list focused, and stay inert in
+search mode. `Enter` acts like a click on the focused item — create, open the
+picker, or toggle worktree mode — and `Esc` steps back to `+ New Agent`. The
+same actions are always a click or `/resume` / `Ctrl+W` away. With worktree mode on inside a git repo, the row
+reads `+ New Agent in Worktree` / `Disable Worktree`, and the next dispatch
+creates the agent in a fresh git worktree.
+
 Each row is a top-level agent. Sort by state (Needs input → Working → Idle →
 Inactive → Completed → Failed) so same-state rows sit together, or by working
 directory (`Ctrl+G` toggles). **Inactive** is roster-only sessions owned by
 other pager processes that this process has not loaded — background noise, so
 the section **starts collapsed** (expand with `→` / click).
+
+Pinned rows keep their manual order in both grouping modes. Agent activity
+and recent updates do not move them; `Shift+↑` / `Shift+↓` changes their order.
 
 To keep **Idle** scannable, only the most recent idle agents stay visible —
 the 8 freshest, plus any active within the last hour. The rest fold into a
@@ -65,6 +93,14 @@ has finished — a background task, a `monitor`, or an active scheduled
 
 There are no inline group headers; sort order keeps same-state rows adjacent,
 and the per-row dot + color shows the group.
+
+**Dashboard preview** is under **Appearance** in `/settings` (search for "preview").
+The list gains space when you turn off the preview and reply panel.
+You must open a session to reply or answer permissions with the preview off.
+The new-agent prompt stays available.
+The setting persists across restarts.
+You can turn it back on in the same place.
+`[ui] dashboard_preview = true` in `config.toml` also enables it.
 
 The dispatch input uses the same prompt chrome as the agent view. Press
 `Ctrl+/` to flip it into **search mode**: the `❯` prefix becomes a yellow
@@ -103,13 +139,19 @@ brightens. Collapse state is remembered while the dashboard stays open.
 **Inactive** starts collapsed each time the pager starts; expanding it sticks
 until you quit.
 
-Opening a row shows the agent's conversation in the **details view**: a top
-header (agent name; `{i}/{n}` cycle chips and `[Dashboard]` on the right)
-above a full-width conversation — no bordered modal — so padding matches the
-list view. Keys go to the attached agent; `Esc` / `Ctrl+\` (or `[Dashboard]`)
-return to the dashboard; `[‹]` / `[›]` cycle agents. The shortcuts bar shows
+Opening a row shows the agent's conversation in the **details view**. The
+session's own header row does the work — no extra title band: the agent's
+name leads it (`name │ main ~/xai`; omitted for an unnamed session), and on
+the right, after the usual chips, sit `‹ 2/5 ›` (your position among the
+dashboard's agents; hidden when there is only one) and `[Dashboard]`. Keys
+go to the attached agent; `Esc` / `Ctrl+\` (or `[Dashboard]`) return to the
+dashboard; `‹` / `›` cycle agents. The shortcuts bar shows
 `Ctrl+\: back to dashboard`. Gotcha: `Esc` only returns; `/exit` inside the
 agent closes the session (dashboard toast: "Session closed").
+
+Every session with the dashboard enabled shows `[Dashboard]` in its header,
+not just ones opened from the dashboard; clicking it is the same as `Ctrl+\`.
+Disabling the dashboard (see the top of this page) removes the button too.
 
 `Ctrl+X` in the details view is state-dependent. While a **turn is running**
 it cancels the turn (same as `Ctrl+C`, including the keep-subagents prompt)
@@ -153,7 +195,13 @@ navigation cursor, not a reply target — open an agent to talk to it.
   filtering is `Ctrl+/` search mode. A leading `/` runs a pager-global slash
   command.
 - Empty input → open the selected row, or create a new agent when
-  `[+ New Agent]` is focused.
+  `+ New Agent` is focused.
+
+`/usage` opens the usage modal over the dashboard. The dashboard has no
+session, so the **Usage limit** tab shows your account allowance while the
+two session tabs read "No active session"; open an agent for its context and
+token totals (`/context` and `/session-info` only work inside a session).
+`Esc` or `[✗]` closes it.
 
 `Ctrl+S` after typing dispatches **and** attaches; plain `Enter` stays on the
 dashboard so you can dispatch several sessions. `Shift+Enter` / `Alt+Enter`
@@ -170,15 +218,15 @@ toggles between them; the inactive input dims its border and hides its caret.
 On open, focus defaults to the **overview list** when at least one agent
 exists (so `↑`/`↓` / vim `j`/`k` navigate immediately). With **no** agents,
 focus stays on the **dispatch input**. Either way, the cursor starts on
-`[+ New Agent]` (no agent row pre-selected).
+`+ New Agent` (no agent row pre-selected).
 
 - **Input focused**: type a new-session prompt. Empty prompt: `↑`/`↓`
   navigate rows; non-empty: move the caret. `Esc` unfocuses to the list
   (draft kept).
 - **Overview focused**: `↑`/`↓` (and vim `j`/`k`) move between rows. `Enter`
-  opens the highlighted agent (on `[+ New Agent]`, sends a typed draft or
+  opens the highlighted agent (on `+ New Agent`, sends a typed draft or
   creates a new session). `Esc` stays on the list and steps back — clear
-  filter, then unselect (→ `[+ New Agent]`), then exit. `Tab`, `i` (vim), or
+  filter, then unselect (→ `+ New Agent`), then exit. `Tab`, `i` (vim), or
   any printable key returns to the input.
 
 ---
@@ -186,7 +234,7 @@ focus stays on the **dispatch input**. Either way, the cursor starts on
 ## Peek panel
 
 Selecting an agent row shows the **peek panel** in place of the dispatch box.
-With no row selected (`[+ New Agent]`, or after `Esc`), the dispatch box
+With no row selected (`+ New Agent`, or after `Esc`), the dispatch box
 returns. Select a row to talk to an existing agent; deselect to start a new
 one.
 
@@ -200,7 +248,7 @@ The selected agent's **model** and, in always-approve (yolo) mode, an
 the dispatch box), including while answering questions. List rows no longer
 repeat model or always-approve badges.
 
-**`Shift+Tab` cycles the peeked agent's mode** (Normal → Plan → Auto
+**`Shift+Tab` cycles the peeked agent's mode** (Normal → Plan → Auto-review
 (when enabled) → Always-approve → Normal) on the **live** agent. On the dispatch box,
 Shift+Tab only stages mode for the *next* agent.
 
@@ -217,7 +265,7 @@ agent**:
   follows, and a half-typed draft is cleared so it cannot land on the wrong
   agent. (`Tab` to the list to navigate while a draft is in the reply.)
 - **`Esc` unselects**: clear a typed reply first, then deselect and focus
-  `[+ New Agent]`.
+  `+ New Agent`.
 - **`Tab`** toggles focus between reply and row list; a printable key
   re-focuses the reply.
 - Full prompt editor (same as dispatch / agent prompt): multi-line paste
@@ -265,7 +313,7 @@ Per-user preferences under `[dashboard]` in `~/.grok/config.toml`:
 [dashboard]
 enabled = true
 grouping = "state"   # or "directory"
-pinned   = ["top:<session_id>", "sub:<parent_session_id>:<child_session_id>"]
+pinned   = ["top:<session_id>"]
 reorder  = ["top:<session_id>"]
 ```
 

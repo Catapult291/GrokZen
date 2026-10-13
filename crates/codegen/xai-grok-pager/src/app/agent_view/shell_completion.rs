@@ -674,7 +674,6 @@ mod shell_suggestion_key_tests {
     }
 
     /// The sibling hole: the OPEN-dropdown accept (Tab/Enter/mouse all share the helper) used to consume the candidates.
-    /// It closed before the write path declined the chip-clipping splice, leaving nothing.
     /// The probe now makes it an honest no-op: nothing consumed, dropdown up, chip/draft/generation untouched, no kick.
     /// Enter must not fall through to send either.
     #[test]

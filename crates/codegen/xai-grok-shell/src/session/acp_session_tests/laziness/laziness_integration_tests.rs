@@ -29,7 +29,9 @@ fn detector_entry(
     };
     crate::agent::config::ModelEntry {
         bundled_catalog_entry: false,
+        official_catalog_entry: false,
         info,
+        mtls_cert_dir: None,
         api_key: None,
         env_key: None,
         auth_provider: None,
@@ -39,7 +41,6 @@ fn detector_entry(
 
 /// Construct a test actor with events.jsonl rerouted into a tempdir and `current_model_id` pointing at a per-model config supplied by the caller.
 /// The sampling config points at a `http://localhost` base URL with nothing listening.
-/// `prepare_chat_completion().conversation_collect()` therefore fails with a connect error, enough to exercise every abort/idle path.
 /// Returns the actor wrapped in `Arc` and the owned tempdir (so the file outlives the actor).
 async fn make_laziness_actor(
     detector: LazinessDetectorPerModelConfig,
@@ -66,15 +67,6 @@ async fn make_laziness_actor(
 
 fn events_log(tmp: &tempfile::TempDir) -> String {
     std::fs::read_to_string(tmp.path().join("events.jsonl")).unwrap_or_default()
-}
-
-fn has_event_with(log: &str, ty: &str, predicate: impl Fn(&serde_json::Value) -> bool) -> bool {
-    log.lines().any(|line| {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
-            return false;
-        };
-        v.get("type").and_then(|t| t.as_str()) == Some(ty) && predicate(&v)
-    })
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -129,7 +121,7 @@ async fn user_input_bump_during_idle_wait_aborts_with_user_input() {
             drop(Arc::try_unwrap(actor).ok().unwrap());
             let log = events_log(&tmp);
             assert!(
-                has_event_with(&log, "laziness_classifier_aborted", |v| v["reason"]
+                has_event_with(&log, "laziness_classifier_aborted", |v| j(v, "reason")
                     == crate::session::events::LAZINESS_ABORT_USER_INPUT),
                 "expected user_input abort:\n{log}"
             );
@@ -163,7 +155,7 @@ async fn model_switch_during_idle_wait_aborts_with_model_switch() {
             drop(Arc::try_unwrap(actor).ok().unwrap());
             let log = events_log(&tmp);
             assert!(
-                has_event_with(&log, "laziness_classifier_aborted", |v| v["reason"]
+                has_event_with(&log, "laziness_classifier_aborted", |v| j(v, "reason")
                     == crate::session::events::LAZINESS_ABORT_MODEL_SWITCH),
                 "expected model_switch abort:\n{log}"
             );
@@ -256,7 +248,7 @@ async fn sampler_error_aborts_with_classifier_error() {
             );
             let log = events_log(&tmp);
             assert!(
-                has_event_with(&log, "laziness_classifier_aborted", |v| v["reason"]
+                has_event_with(&log, "laziness_classifier_aborted", |v| j(v, "reason")
                     == crate::session::events::LAZINESS_ABORT_CLASSIFIER_ERROR),
                 "expected classifier_error abort:\n{log}"
             );
@@ -334,11 +326,8 @@ async fn idle_recheck_after_sleep_short_circuits_silently() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn laziness_abort_check_detects_bumps_between_snapshot_and_recheck() {
-    // Contract: a generation bump between the function-entry snapshot and any later re-check must surface as the matching `LazinessAbortReason`
-    // The re-checks are the idle-wait poll, the sampler-call poll, and the final state-lock-guarded re-check inside `maybe_fire_laziness_check`
-    // The helper itself is lock-independent; only its production caller invokes it inside the locked block
-    // To make the test honest about that contract, the final check below ALSO acquires `state.lock().await` before invoking the helper
-    // A future helper change that introduces a state dependency would then surface as a deadlock here
+    // After the idle wait expires, `prepare_chat_completion(false).await?.conversation_collect(...)` hits a non-listening `http://localhost`.
+    // The connection failure surfaces as `SamplingError`, exercising the classifier-error abort arm of the unified path.
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -407,10 +396,9 @@ async fn model_switch_resets_nudges_used_this_session() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn emit_laziness_abort_writes_each_reason_with_the_correct_const() {
-    // Every `LazinessAbortReason` variant routes through the central `emit_laziness_abort` helper
-    // At the actor level, emitting each variant must produce a `LazinessClassifierAborted` event
-    // Its `reason` field must be byte-identical to the corresponding `LAZINESS_ABORT_*` const
-    // This covers `Timeout`, which is otherwise hard to exercise end-to-end (it would require a hanging sampler stub)
+    // At the actor level, emitting each variant must produce a `LazinessClassifierAborted` event.
+    // Its `reason` field must be byte-identical to the corresponding `LAZINESS_ABORT_*` const.
+    // This covers `Timeout`, which is otherwise hard to exercise end-to-end (it would require a hanging sampler stub).
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
@@ -430,7 +418,7 @@ async fn emit_laziness_abort_writes_each_reason_with_the_correct_const() {
             for reason in LazinessAbortReason::all() {
                 let expected = reason.as_const_str();
                 assert!(
-                    has_event_with(&log, "laziness_classifier_aborted", |v| v["reason"]
+                    has_event_with(&log, "laziness_classifier_aborted", |v| j(v, "reason")
                         == expected),
                     "missing classifier_aborted event for reason={expected}:\n{log}"
                 );
@@ -510,7 +498,6 @@ async fn make_debug_actor(
 /// Dev-flag contract gate 1: `cfg.enabled = false` MUST NOT short-circuit when `laziness_debug_log = Some(_)`.
 /// The classifier must reach the sampler, which fails in the test fixture against a non-listening `http://localhost`.
 /// The JSONL log must record exactly one line with `decision: aborted`.
-/// This prevents a future change that flips `&& !debug_mode` to `||` from silently disabling debug mode.
 #[tokio::test(flavor = "current_thread")]
 async fn debug_mode_fires_classifier_even_with_per_model_enable_false() {
     let local = tokio::task::LocalSet::new();
@@ -539,11 +526,13 @@ async fn debug_mode_fires_classifier_even_with_per_model_enable_false() {
                 1,
                 "expected exactly one JSONL line, got:\n{contents}",
             );
+            let first_line: &str = lines.first().copied().unwrap_or_default();
             let parsed: serde_json::Value =
-                serde_json::from_str(lines[0]).expect("line parses as JSON");
-            assert_eq!(parsed["decision"], "aborted");
+                serde_json::from_str(first_line).expect("line parses as JSON");
+            assert_eq!(j(&parsed, "decision"), "aborted");
             assert_eq!(
-                parsed["abort_reason"], "classifier_error",
+                j(&parsed, "abort_reason"),
+                "classifier_error",
                 "non-listening localhost sampler must surface as classifier_error",
             );
             assert_eq!(nudges, 0, "no nudge possible when sampler fails");
@@ -593,8 +582,6 @@ async fn debug_mode_bypasses_idle_wait() {
 /// Dev-flag contract gate 3, the sampler-error variant.
 /// When the classifier fails before producing a verdict, debug mode MUST still write exactly one JSONL line and MUST NOT touch `pending_inputs`.
 /// The "stalled verdict also fires a nudge" half of this property needs a successful sampler stub, which is heavyweight to set up here.
-/// It is covered by the unit-level `evaluate_laziness_passes_when_all_gates_pass` and `build_laziness_debug_line` tests in `laziness_debug_tests`.
-/// TODO: add an end-to-end test for a stalled verdict firing a nudge once this module has a mock sampler responder.
 #[tokio::test(flavor = "current_thread")]
 async fn debug_mode_writes_log_and_does_not_inject_synthetic_turn() {
     let local = tokio::task::LocalSet::new();

@@ -2,15 +2,703 @@
 use super::*;
 use crate::app::app_view::InputOutcome;
 use crate::app::dispatch::queue::maybe_drain_queue;
+use crate::app::workspace_test_fixtures::{
+    member, new_member, snapshot as workspace_snapshot, temp_store,
+};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+#[test]
+fn dashboard_resume_owns_picker_lifecycle_and_leaves_welcome_untouched() {
+    use crate::views::session_picker::SourceFilter;
+    use crate::views::session_picker_surface::SessionPickerHost;
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    app.active_view = ActiveView::AgentDashboard;
+    app.cwd = std::path::PathBuf::from("/process-cwd");
+    ensure_dashboard_state(&mut app);
+    let dashboard_cwd = std::path::PathBuf::from("/dashboard-cwd");
+    app.dashboard.as_mut().unwrap().cwd = dashboard_cwd.clone();
+    app.session_picker_entries = Some(vec![make_picker_entry("welcome-marker", "/welcome")]);
+    app.session_picker_state.set_query("welcome query");
+    let welcome_generation = app.session_picker_generation;
+    let welcome_seq = app.session_picker_list_seq;
+    let effects = dispatch(
+        Action::DashboardDispatchSlash {
+            text: "/resume".to_owned(),
+        },
+        &mut app,
+    );
+    let [
+        Effect::FetchSessionList {
+            host,
+            cwd_override,
+            generation,
+            seq,
+            kind_filter,
+            query,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("dashboard /resume must issue one list fetch: {effects:?}");
+    };
+    assert_eq!(*host, SessionPickerHost::Dashboard);
+    assert_eq!(cwd_override.as_ref(), Some(&dashboard_cwd));
+    assert_eq!(
+        kind_filter.as_deref(),
+        Some(["build".to_owned()].as_slice())
+    );
+    assert!(query.is_none());
+    let generation = *generation;
+    let seq = *seq;
+    let surface = app.dashboard_session_picker.as_ref().expect("picker");
+    assert_eq!(surface.generation, generation);
+    assert_eq!(surface.list_seq, seq);
+    assert_eq!(surface.source_filter, SourceFilter::Local);
+    assert!(surface.loading);
+    assert_eq!(app.session_picker_generation, welcome_generation);
+    assert_eq!(app.session_picker_list_seq, welcome_seq);
+    assert_eq!(app.session_picker_state.query(), "welcome query");
+    assert_eq!(
+        app.session_picker_entries
+            .as_ref()
+            .and_then(|entries| entries.first())
+            .map(|entry| entry.id.as_str()),
+        Some("welcome-marker")
+    );
+    assert!(
+        dispatch(Action::ShowSessionPicker, &mut app).is_empty(),
+        "open is idempotent"
+    );
+    assert_eq!(
+        app.dashboard_session_picker
+            .as_ref()
+            .map(|surface| surface.generation),
+        Some(generation)
+    );
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Dashboard,
+            generation: generation + 1,
+            sessions: vec![],
+            partial: None,
+            scope: xai_grok_shell::session::unified_list::ListScope::Cwd,
+            seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(
+        app.dashboard_session_picker
+            .as_ref()
+            .is_some_and(|surface| surface.loading && surface.entries.is_none()),
+        "a mismatched generation must not mutate the live dashboard surface"
+    );
+    let close = app.handle_input(&Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    assert!(matches!(
+        close,
+        InputOutcome::Action(Action::DashboardCloseSessionPicker)
+    ));
+    let _ = dispatch(
+        match close {
+            InputOutcome::Action(action) => action,
+            _ => unreachable!(),
+        },
+        &mut app,
+    );
+    assert!(app.dashboard_session_picker.is_none());
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Dashboard,
+            generation,
+            sessions: vec![make_picker_entry("late-dashboard", "/late")],
+            partial: None,
+            scope: xai_grok_shell::session::unified_list::ListScope::Cwd,
+            seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(app.session_picker_state.query(), "welcome query");
+    assert_eq!(
+        app.session_picker_entries
+            .as_ref()
+            .and_then(|entries| entries.first())
+            .map(|entry| entry.id.as_str()),
+        Some("welcome-marker"),
+        "late dashboard results must not fall through to Welcome"
+    );
+}
+#[test]
+fn session_picker_routing_remains_unchanged_outside_dashboard_v2() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::session_picker_surface::SessionPickerHost;
+    let mut v1 = test_app();
+    v1.active_view = ActiveView::AgentDashboard;
+    ensure_dashboard_state(&mut v1);
+    let effects = dispatch(Action::ShowSessionPicker, &mut v1);
+    assert!(v1.dashboard_session_picker.is_none());
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::FetchSessionList {
+            host: SessionPickerHost::Welcome,
+            cwd_override: None,
+            ..
+        }]
+    ));
+    let mut agent_view = test_app_with_agent();
+    agent_view.workspace_dashboard_enabled = true;
+    let effects = dispatch(Action::ShowSessionPicker, &mut agent_view);
+    assert!(agent_view.dashboard_session_picker.is_none());
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::FetchSessionList {
+            host: SessionPickerHost::AgentModal,
+            cwd_override: None,
+            ..
+        }]
+    ));
+    assert!(matches!(
+        get_active_agent(&agent_view).and_then(|agent| agent.active_modal.as_ref()),
+        Some(ActiveModal::SessionPicker { .. })
+    ));
+}
+#[test]
+fn dashboard_picker_result_routing_uses_dashboard_cwd() {
+    use crate::views::session_picker::repo_name_from_cwd;
+    use crate::views::session_picker_surface::{SessionPickerHost, SessionPickerSurface};
+    let mut app = test_app();
+    app.cwd = "/tmp/process-cwd".into();
+    app.active_view = ActiveView::AgentDashboard;
+    let mut dashboard = crate::views::dashboard::DashboardState::new();
+    dashboard.cwd = "/tmp/dashboard-cwd".into();
+    app.dashboard = Some(dashboard);
+    app.dashboard_session_picker = Some(SessionPickerSurface::new(1));
+    let target = crate::app::dispatch::session::picker_routing::picker_for_host(
+        &mut app,
+        SessionPickerHost::Dashboard,
+    )
+    .expect("dashboard picker");
+    assert_eq!(
+        target.current_repo,
+        repo_name_from_cwd("/tmp/dashboard-cwd")
+    );
+}
+#[test]
+fn workspace_identity_rebind_only_activates_for_live_v2_dashboard_state() {
+    let mut app = test_app_with_agent();
+    assert!(!super::super::dashboard::WorkspaceIdentityRebind::capture(&app).is_active());
+    app.workspace_dashboard_enabled = true;
+    assert!(!super::super::dashboard::WorkspaceIdentityRebind::capture(&app).is_active());
+    ensure_dashboard_state(&mut app);
+    assert!(super::super::dashboard::WorkspaceIdentityRebind::capture(&app).is_active());
+}
+#[test]
+fn dashboard_picker_filters_workspace_members_and_strict_loads_fuzzy_pick() {
+    use crate::views::session_picker::SourceFilter;
+    use crate::views::session_picker_surface::{SessionPickerHost, SessionPickerSurface};
+    let cwd = std::env::current_dir().expect("cwd");
+    let visible_id = format!("dash-visible-{}", uuid::Uuid::new_v4());
+    let recoverable_id = format!("dash-recoverable-{}", uuid::Uuid::new_v4());
+    let pinned_id = format!("dash-pinned-{}", uuid::Uuid::new_v4());
+    let optimistic_pinned_id = format!("dash-optimistic-pinned-{}", uuid::Uuid::new_v4());
+    let alpha_id = format!("dash-alpha-{}", uuid::Uuid::new_v4());
+    let beta_id = format!("dash-beta-{}", uuid::Uuid::new_v4());
+    let planted = [
+        plant_local_build_session(&cwd, &visible_id),
+        plant_local_build_session(&cwd, &recoverable_id),
+        plant_local_build_session(&cwd, &pinned_id),
+        plant_local_build_session(&cwd, &optimistic_pinned_id),
+        plant_local_build_session(&cwd, &alpha_id),
+        plant_local_build_session(&cwd, &beta_id),
+    ];
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    app.active_view = ActiveView::AgentDashboard;
+    ensure_dashboard_state(&mut app);
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![
+                xai_grok_dashboard_store::Member {
+                    session_id: xai_grok_dashboard_store::SessionId::new(visible_id.clone())
+                        .unwrap(),
+                    kind: xai_grok_dashboard_store::MemberKind::Build,
+                    origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    title: Some("visible member".into()),
+                    model: None,
+                    last_turn_summary: None,
+                    is_worktree: false,
+                    last_change_unix_ms: 1,
+                    pin_rank: None,
+                    order_rank: None,
+                },
+                xai_grok_dashboard_store::Member {
+                    session_id: xai_grok_dashboard_store::SessionId::new(recoverable_id.clone())
+                        .unwrap(),
+                    kind: xai_grok_dashboard_store::MemberKind::Build,
+                    origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    title: None,
+                    model: None,
+                    last_turn_summary: None,
+                    is_worktree: false,
+                    last_change_unix_ms: 1,
+                    pin_rank: None,
+                    order_rank: None,
+                },
+                xai_grok_dashboard_store::Member {
+                    session_id: xai_grok_dashboard_store::SessionId::new(pinned_id.clone())
+                        .unwrap(),
+                    kind: xai_grok_dashboard_store::MemberKind::Build,
+                    origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    title: None,
+                    model: None,
+                    last_turn_summary: None,
+                    is_worktree: false,
+                    last_change_unix_ms: 1,
+                    pin_rank: Some(xai_grok_dashboard_store::RANK_GAP),
+                    order_rank: None,
+                },
+                xai_grok_dashboard_store::Member {
+                    session_id: xai_grok_dashboard_store::SessionId::new(
+                        optimistic_pinned_id.clone(),
+                    )
+                    .unwrap(),
+                    kind: xai_grok_dashboard_store::MemberKind::Build,
+                    origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                    cwd: Some(cwd.to_string_lossy().into_owned()),
+                    title: None,
+                    model: None,
+                    last_turn_summary: None,
+                    is_worktree: false,
+                    last_change_unix_ms: 1,
+                    pin_rank: None,
+                    order_rank: None,
+                },
+            ],
+            data_version: 1,
+        });
+    app.workspace_membership
+        .request_pin(
+            xai_grok_dashboard_store::MemberKey {
+                session_id: xai_grok_dashboard_store::SessionId::new(optimistic_pinned_id.clone())
+                    .unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+            },
+            true,
+        )
+        .unwrap();
+    app.workspace_membership
+        .request_pin(
+            xai_grok_dashboard_store::MemberKey {
+                session_id: xai_grok_dashboard_store::SessionId::new(pinned_id.clone()).unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+            },
+            false,
+        )
+        .unwrap();
+    let generation = app.alloc_picker_generation();
+    let mut surface = SessionPickerSurface::new(generation);
+    surface.source_filter = SourceFilter::Local;
+    surface.loading = true;
+    surface.list_seq = 1;
+    app.dashboard_session_picker = Some(surface);
+    let mut visible = make_picker_entry(&visible_id, &cwd.to_string_lossy());
+    visible.summary = "visible member".to_owned();
+    let mut recoverable = make_picker_entry(&recoverable_id, &cwd.to_string_lossy());
+    recoverable.summary = "metadata-poor member".to_owned();
+    let mut pinned = make_picker_entry(&pinned_id, &cwd.to_string_lossy());
+    pinned.summary = "pinned member".to_owned();
+    let mut optimistic_pinned = make_picker_entry(&optimistic_pinned_id, &cwd.to_string_lossy());
+    optimistic_pinned.summary = "optimistically pinned member".to_owned();
+    let mut alpha = make_picker_entry(&alpha_id, &cwd.to_string_lossy());
+    alpha.summary = "alpha task".to_owned();
+    let mut beta = make_picker_entry(&beta_id, &cwd.to_string_lossy());
+    beta.summary = "beta target".to_owned();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Dashboard,
+            generation,
+            sessions: vec![visible, recoverable, pinned, optimistic_pinned, alpha, beta],
+            partial: None,
+            scope: xai_grok_shell::session::unified_list::ListScope::Cwd,
+            seq: 1,
+            query: None,
+        }),
+        &mut app,
+    );
+    let entries = app
+        .dashboard_session_picker
+        .as_ref()
+        .and_then(|surface| surface.entries.as_ref())
+        .expect("filtered entries");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            recoverable_id.as_str(),
+            pinned_id.as_str(),
+            alpha_id.as_str(),
+            beta_id.as_str()
+        ]
+    );
+    app.dashboard_session_picker
+        .as_mut()
+        .unwrap()
+        .state
+        .search_active = true;
+    for ch in "beta".chars() {
+        assert!(matches!(
+            app.handle_input(&Event::Key(KeyEvent::new(
+                KeyCode::Char(ch),
+                KeyModifiers::NONE,
+            ))),
+            InputOutcome::Changed
+        ));
+    }
+    let pick = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    )));
+    let InputOutcome::Action(Action::DashboardPickSession(index)) = pick else {
+        panic!("Enter must pick the fuzzy result: {pick:?}");
+    };
+    assert_eq!(index, 3, "beta is the fourth filtered entry");
+    let effects = dispatch(Action::DashboardPickSession(index), &mut app);
+    assert!(app.dashboard_session_picker.is_none());
+    assert!(effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::LoadSession { session_id, .. } if session_id == &beta_id
+        )
+    }));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::RestoreAndLoadSession { .. })),
+        "dashboard picks must never enter remote restore"
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::WriteWorkspace { .. })),
+        "membership stays load-first and is not pre-written by the picker"
+    );
+    assert!(matches!(app.active_view, ActiveView::Agent(_)));
+    for dir in planted {
+        std::fs::remove_dir_all(dir).expect("remove planted session");
+    }
+}
+#[test]
+fn v1_dashboard_picker_does_not_consult_workspace_view() {
+    use crate::views::session_picker_surface::{SessionPickerHost, SessionPickerSurface};
+    let mut app = test_app();
+    let session_id = format!("v1-picker-{}", uuid::Uuid::new_v4());
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![xai_grok_dashboard_store::Member {
+                session_id: xai_grok_dashboard_store::SessionId::new(session_id.clone()).unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+                origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                cwd: Some("/tmp".into()),
+                title: Some("visible only to v2".into()),
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+                pin_rank: Some(xai_grok_dashboard_store::RANK_GAP),
+                order_rank: None,
+            }],
+            data_version: 1,
+        });
+    let generation = app.alloc_picker_generation();
+    let mut surface = SessionPickerSurface::new(generation);
+    surface.loading = true;
+    surface.list_seq = 1;
+    app.dashboard_session_picker = Some(surface);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            host: SessionPickerHost::Dashboard,
+            generation,
+            sessions: vec![make_picker_entry(&session_id, "/tmp")],
+            partial: None,
+            scope: xai_grok_shell::session::unified_list::ListScope::Cwd,
+            seq: 1,
+            query: None,
+        }),
+        &mut app,
+    );
+    let entries = app
+        .dashboard_session_picker
+        .as_ref()
+        .and_then(|surface| surface.entries.as_ref())
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.first().map(|e| &e.id), Some(&session_id));
+}
+#[test]
+fn dashboard_picker_mouse_selection_uses_surface_hit_areas() {
+    use crate::views::picker::PickerHitAreas;
+    use crate::views::session_picker_surface::SessionPickerSurface;
+    use ratatui::layout::Rect;
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    app.active_view = ActiveView::AgentDashboard;
+    ensure_dashboard_state(&mut app);
+    let mut surface = SessionPickerSurface::new(app.alloc_picker_generation());
+    surface.entries = Some(vec![make_picker_entry("mouse-session", "/repo")]);
+    surface.state.hit_areas = Some(PickerHitAreas {
+        close_button: Rect::new(1, 1, 1, 1),
+        search_bar: Rect::new(2, 2, 10, 1),
+        item_rects: vec![Rect::new(5, 5, 20, 1)],
+        entry_indices: vec![1],
+        tab_rects: vec![],
+        filter_rect: None,
+    });
+    app.dashboard_session_picker = Some(surface);
+    let outcome = app.handle_input(&Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: 6,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    }));
+    assert!(matches!(
+        outcome,
+        InputOutcome::Action(Action::DashboardPickSession(0))
+    ));
+}
+#[test]
+fn zh_localization_missing_workspace_row_toasts_without_remote_restore() {
+    for chinese in [false, true] {
+        use crate::views::dashboard::DashboardRowId;
+        let session_id = format!("dash-missing-{}", uuid::Uuid::new_v4());
+        let mut app = test_app();
+        app.locale = std::sync::Arc::new(crate::locale::LocaleContext::new(
+            crate::locale::ResolvedLocale {
+                locale: if chinese {
+                    crate::locale::UiLocale::ZhCn
+                } else {
+                    crate::locale::UiLocale::EnUs
+                },
+                source: crate::locale::LocaleSource::Cli,
+            },
+        ));
+        app.workspace_dashboard_enabled = true;
+        app.active_view = ActiveView::AgentDashboard;
+        ensure_dashboard_state(&mut app);
+        app.workspace_membership.set_snapshot_for_test(
+            xai_grok_dashboard_store::WorkspaceSnapshot {
+                grouping: xai_grok_dashboard_store::Grouping::State,
+                members: vec![xai_grok_dashboard_store::Member {
+                    session_id: xai_grok_dashboard_store::SessionId::new(session_id.clone())
+                        .unwrap(),
+                    kind: xai_grok_dashboard_store::MemberKind::Build,
+                    origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                    cwd: Some("/definitely/missing".to_owned()),
+                    title: None,
+                    model: None,
+                    last_turn_summary: None,
+                    is_worktree: false,
+                    last_change_unix_ms: 1,
+                    pin_rank: None,
+                    order_rank: None,
+                }],
+                data_version: 1,
+            },
+        );
+        let effects = dispatch(
+            Action::DashboardAttach(DashboardRowId::Workspace {
+                session_id: session_id.clone(),
+            }),
+            &mut app,
+        );
+        assert!(effects.is_empty());
+        assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+        assert_eq!(
+            app.dashboard
+                .as_ref()
+                .and_then(|dashboard| dashboard.error_toast.as_deref()),
+            Some(if chinese {
+                "在本地找不到该会话"
+            } else {
+                "Session not found locally"
+            })
+        );
+    }
+}
+/// `app` as a dashboard v2 client over `store`, ready for writes.
+fn ready_workspace_app(
+    mut app: AppView,
+    store: xai_grok_dashboard_store::WorkspaceStore,
+) -> AppView {
+    let snapshot = store.snapshot().unwrap();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership.set_ready_for_test(store, snapshot);
+    app
+}
+#[test]
+fn local_workspace_row_uses_the_same_strict_load_path() {
+    use crate::views::dashboard::DashboardRowId;
+    let cwd = std::env::current_dir().expect("cwd");
+    let session_id = format!("dash-workspace-{}", uuid::Uuid::new_v4());
+    let planted = plant_local_build_session(&cwd, &session_id);
+    let (_temp, mut store) = temp_store();
+    store
+        .insert_member(xai_grok_dashboard_store::NewMember {
+            key: xai_grok_dashboard_store::MemberKey {
+                session_id: xai_grok_dashboard_store::SessionId::new(session_id.clone()).unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+            },
+            origin: xai_grok_dashboard_store::MemberOrigin::Remote,
+            metadata: xai_grok_dashboard_store::MemberMetadata {
+                cwd: Some(cwd.to_string_lossy().into_owned()),
+                title: None,
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+            },
+        })
+        .unwrap();
+    let snapshot = store.snapshot().unwrap();
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    app.active_view = ActiveView::AgentDashboard;
+    #[cfg(feature = "local-workspace")]
+    {
+        app.chat_mode = true;
+    }
+    ensure_dashboard_state(&mut app);
+    app.workspace_membership.set_ready_for_test(store, snapshot);
+    let effects = dispatch(
+        Action::DashboardAttach(DashboardRowId::Workspace {
+            session_id: session_id.clone(),
+        }),
+        &mut app,
+    );
+    assert!(effects.iter().any(|effect| {
+        matches!(
+            effect,
+            Effect::LoadSession {
+                session_id: loaded,
+                ..
+            } if loaded == &session_id
+        )
+    }));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::RestoreAndLoadSession { .. }))
+    );
+    let loaded_agent = effects.iter().find_map(|effect| match effect {
+        Effect::LoadSession { agent_id, .. } => Some(*agent_id),
+        _ => None,
+    });
+    assert_eq!(
+        app.dashboard
+            .as_ref()
+            .and_then(|dashboard| dashboard.attached_agent),
+        loaded_agent
+    );
+    assert!(matches!(app.active_view, ActiveView::Agent(_)));
+    #[cfg(feature = "local-workspace")]
+    {
+        let loaded = loaded_agent.expect("strict load agent");
+        assert!(test_agent(&app, loaded).chat_kind);
+        assert!(!test_agent(&app, loaded).conversation_entry);
+        assert!(
+            app.welcome_history_load_as_build,
+            "dispatch must leave the bypass armed for LoadSession effect metadata"
+        );
+        let flags = crate::app::event_loop::session_flags_for_effects(&mut app, &effects);
+        assert!(
+            !flags.chat_mode,
+            "dashboard Build load must strip sticky chat from ACP metadata"
+        );
+        assert!(
+            !app.welcome_history_load_as_build,
+            "effect metadata capture must consume the one-shot bypass"
+        );
+    }
+    app.active_view = ActiveView::AgentDashboard;
+    let agent_count = app.agents.len();
+    let effects = dispatch(
+        Action::DashboardAttach(DashboardRowId::Workspace {
+            session_id: session_id.clone(),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert_eq!(app.agents.len(), agent_count);
+    assert!(matches!(app.active_view, ActiveView::Agent(id) if Some(id) == loaded_agent));
+    #[cfg(feature = "local-workspace")]
+    {
+        assert!(!app.welcome_history_load_as_build);
+    }
+    let loaded_agent = loaded_agent.expect("strict load agent");
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: loaded_agent,
+            session_id: acp::SessionId::new(session_id.clone()),
+            models: None,
+            modes: None,
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            running_prompt_id: None,
+        }),
+        &mut app,
+    );
+    let mut effects = crate::app::workspace_sync::drain(&mut app);
+    let Effect::WriteWorkspace {
+        mut store,
+        mutation: WorkspaceMutation::Upsert(members),
+    } = effects.pop().expect("workspace upsert")
+    else {
+        panic!("SessionLoaded must produce a workspace upsert");
+    };
+    assert!(effects.is_empty());
+    assert_eq!(members.len(), 1);
+    let Some(member) = members.first() else {
+        panic!("expected workspace member");
+    };
+    assert_eq!(member.key.session_id.as_ref(), session_id);
+    assert!(matches!(
+        member.origin,
+        xai_grok_dashboard_store::MemberOrigin::Local
+    ));
+    store
+        .insert_member(members.into_iter().next().unwrap())
+        .unwrap();
+    let stored = store.snapshot().unwrap();
+    let Some(stored_member) = stored.members.first() else {
+        panic!("expected stored member");
+    };
+    assert!(matches!(
+        stored_member.origin,
+        xai_grok_dashboard_store::MemberOrigin::Remote
+    ));
+    std::fs::remove_dir_all(planted).expect("remove planted session");
+}
 #[test]
 fn voice_final_appends_to_dashboard_dispatch() {
     let mut app = test_app_with_agent();
     app.active_view = ActiveView::AgentDashboard;
     ensure_dashboard_state(&mut app);
-    app.dashboard.as_mut().unwrap().dispatch.set_text("fix");
+    let dispatch = &mut app.dashboard.as_mut().unwrap().dispatch;
+    dispatch.set_text("fix");
+    dispatch.set_cursor("fix".len());
     app.voice_state = VoiceState::Stopping {
         target: VoiceTarget::DashboardDispatch,
-        interim: None,
+        partial: Partial::None,
+        route: None,
     };
     crate::voice::handle_voice_event(
         &mut app,
@@ -46,9 +734,11 @@ fn voice_final_appends_to_peek_reply_when_peek_open() {
         },
     ));
     dash.peek_reply.set_text("reply");
+    dash.peek_reply.set_cursor("reply".len());
     app.voice_state = VoiceState::Stopping {
         target: VoiceTarget::DashboardPeekReply(id),
-        interim: None,
+        partial: Partial::None,
+        route: None,
     };
     crate::voice::handle_voice_event(
         &mut app,
@@ -92,7 +782,8 @@ fn voice_final_discarded_when_peek_row_changed_after_stop() {
     ensure_dashboard_state(&mut app);
     app.voice_state = VoiceState::Stopping {
         target: VoiceTarget::DashboardPeekReply(AgentId(0)),
-        interim: None,
+        partial: Partial::None,
+        route: None,
     };
     app.dashboard.as_mut().unwrap().peek = Some(peek_for(DashboardRowId::TopLevel(AgentId(1))));
     crate::voice::handle_voice_event(
@@ -118,7 +809,8 @@ fn voice_dashboard_dispatch_submit_tears_down_voice() {
     app.voice_state = VoiceState::Recording {
         hold: false,
         target: VoiceTarget::DashboardDispatch,
-        interim: Some("the build".into()),
+        partial: Partial::Shown("the build".into()),
+        route: Some(xai_grok_voice::VoiceRoute::Streaming),
     };
     let _ = dispatch_dashboard_dispatch(&mut app, "fix the build".into(), false);
     assert!(!app.voice_listening(), "submit stops capture");
@@ -129,7 +821,7 @@ fn voice_dashboard_dispatch_submit_tears_down_voice() {
     assert!(app.voice_interim().is_none());
     assert!(matches!(
         rx.try_recv(),
-        Ok(xai_grok_voice::VoiceCommand::PttRelease)
+        Ok(xai_grok_voice::VoiceCommand::Abort)
     ));
     crate::voice::handle_voice_event(
         &mut app,
@@ -160,7 +852,7 @@ fn submit_cancels_pending_voice_cold_start() {
     };
     let _ = dispatch_dashboard_dispatch(&mut app, "ship it".into(), false);
     assert!(
-        !app.voice_state.pending_cold_start(),
+        !app.voice_state.is_pending_cold_start(),
         "submit cancels the queued spawn"
     );
     assert!(app.voice_recording_target().is_none());
@@ -176,7 +868,8 @@ fn voice_dashboard_peek_reply_submit_tears_down_voice() {
     app.voice_state = VoiceState::Recording {
         hold: false,
         target: VoiceTarget::DashboardPeekReply(AgentId(0)),
-        interim: None,
+        partial: Partial::None,
+        route: Some(xai_grok_voice::VoiceRoute::Streaming),
     };
     let _ = dispatch_dashboard_peek_reply(
         &mut app,
@@ -191,7 +884,7 @@ fn voice_dashboard_peek_reply_submit_tears_down_voice() {
     );
     assert!(matches!(
         rx.try_recv(),
-        Ok(xai_grok_voice::VoiceCommand::PttRelease)
+        Ok(xai_grok_voice::VoiceCommand::Abort)
     ));
 }
 #[test]
@@ -263,7 +956,8 @@ fn voice_auto_stops_when_peek_row_changes() {
     app.voice_state = VoiceState::Recording {
         hold: false,
         target: VoiceTarget::DashboardPeekReply(AgentId(0)),
-        interim: None,
+        partial: Partial::None,
+        route: None,
     };
     app.dashboard.as_mut().unwrap().peek = Some(peek_for(DashboardRowId::TopLevel(AgentId(0))));
     app.enforce_voice_session_bound();
@@ -293,7 +987,8 @@ fn voice_suppressed_while_dashboard_popup_open() {
     app.voice_state = VoiceState::Recording {
         hold: false,
         target: VoiceTarget::DashboardDispatch,
-        interim: None,
+        partial: Partial::None,
+        route: None,
     };
     app.enforce_voice_session_bound();
     assert!(
@@ -320,14 +1015,11 @@ fn voice_off_target_surface_does_not_enable_or_record() {
     );
     assert!(!app.voice_ui_active, "voice mode must not arm off-target");
     assert!(!app.voice_listening());
-    assert!(!app.voice_state.pending_cold_start());
+    assert!(!app.voice_state.is_pending_cold_start());
     assert!(rx.try_recv().is_err(), "no PttPress without a target");
 }
-/// `grok dashboard` before login: the startup hook consumes the
-/// `GROK_OPEN_DASHBOARD_AT_STARTUP` env var and stashes
-/// `deferred_startup.open_dashboard`; `AuthComplete` must then open the
-/// dashboard view. Regression test for the silent drop where the
-/// user landed on the welcome screen / agent view instead.
+/// `grok dashboard` before login: the startup hook consumes the `GROK_OPEN_DASHBOARD_AT_STARTUP` env var and stashes
+/// `deferred_startup.open_dashboard`; `AuthComplete` must then open the dashboard view. Regression test for the silent drop where the user landed on the welcome screen / agent view instead.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn auth_complete_opens_deferred_dashboard() {
@@ -356,7 +1048,7 @@ fn auth_complete_opens_deferred_dashboard() {
         "the deferred-dashboard flag must be consumed",
     );
 }
-/// Mid-session re-auth completed from the dashboard still consumes the
+/// Mid-session re-auth completed from the dashboard still consumes the stash on the agent that 401'd (auth is global, not per-view).
 /// stash on the agent that 401'd (auth is global, not per-view).
 #[test]
 fn auth_complete_retries_stashed_prompt_from_dashboard() {
@@ -390,7 +1082,7 @@ fn auth_complete_retries_stashed_prompt_from_dashboard() {
         &mut app,
     );
     assert_eq!(app.active_view, ActiveView::AgentDashboard);
-    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert!(test_agent(&app, id).reauth_stashed_prompt.is_none());
     assert!(
         effects
             .iter()
@@ -398,7 +1090,7 @@ fn auth_complete_retries_stashed_prompt_from_dashboard() {
         "stash must be retried even when login returns to the dashboard, got: {effects:?}"
     );
 }
-/// Cancelling a mid-session re-auth from the dashboard also drops the
+/// Cancelling a mid-session re-auth from the dashboard also drops the stash (auth is global, not per-view).
 /// stash (auth is global, not per-view).
 #[test]
 fn cancel_login_from_dashboard_drops_reauth_stashed_prompt() {
@@ -415,7 +1107,7 @@ fn cancel_login_from_dashboard_drops_reauth_stashed_prompt() {
     app.active_view = ActiveView::AgentDashboard;
     dispatch(Action::Login, &mut app);
     dispatch(Action::CancelLogin, &mut app);
-    assert!(app.agents[&id].reauth_stashed_prompt.is_none());
+    assert!(test_agent(&app, id).reauth_stashed_prompt.is_none());
 }
 #[test]
 fn resolve_location_input_expands_and_joins() {
@@ -440,12 +1132,8 @@ fn open_location_picker_without_dashboard_is_noop() {
     assert!(effects.is_empty());
     assert!(app.dashboard.is_none());
 }
-/// Regression: `/cd` is gated on the dashboard being the FOREGROUND view,
-/// not merely existing. `app.dashboard` stays `Some` for the rest of the
-/// session once opened, so a stale `is_some()` check would let `/cd <path>`
-/// silently change the process cwd from an agent session. With the
-/// dashboard open but an agent in front, `DashboardChangeLocation` must be
-/// a no-op (cwd unchanged, no `SetWorkingDir`) even for a valid directory.
+/// Regression: `/cd` is gated on the dashboard being the FOREGROUND view, not merely existing. `app.dashboard` stays `Some` for the rest of the session once opened, so a stale `is_some()` check would let `/cd <path>`
+/// silently change the process cwd from an agent session. With the dashboard open but an agent in front, `DashboardChangeLocation` must be a no-op (cwd unchanged, no `SetWorkingDir`) even for a valid directory.
 #[test]
 fn dashboard_change_location_blocked_when_not_foreground() {
     let mut app = test_app();
@@ -606,7 +1294,7 @@ async fn dashboard_change_location_to_non_git_clears_worktree_toggle() {
         "worktree mode must be forced off outside a git repo",
     );
 }
-/// `Ctrl+W` (DashboardToggleWorktree) flips worktree-dispatch mode on and
+/// `Ctrl+W` (DashboardToggleWorktree) flips worktree-dispatch mode on and off when the cwd is a git repo.
 /// off when the cwd is a git repo.
 #[test]
 fn dashboard_toggle_worktree_in_git_repo_flips_flag() {
@@ -625,7 +1313,7 @@ fn dashboard_toggle_worktree_in_git_repo_flips_flag() {
         "toggle disarms worktree mode",
     );
 }
-/// Outside a git repo the toggle is inert (worktrees require a repo) and
+/// Outside a git repo the toggle is inert (worktrees require a repo) and surfaces an explanatory toast instead of arming worktree mode.
 /// surfaces an explanatory toast instead of arming worktree mode.
 #[test]
 fn dashboard_toggle_worktree_outside_git_repo_is_noop_with_toast() {
@@ -643,7 +1331,7 @@ fn dashboard_toggle_worktree_outside_git_repo_is_noop_with_toast() {
         "a toast must explain why the toggle is unavailable",
     );
 }
-/// `[+ New Agent]` with worktree mode armed opens the worktree-label
+/// `+ New Agent` with worktree mode armed opens the worktree-label
 /// dialog instead of creating a plain session (no prompt stashed).
 #[test]
 fn dashboard_create_new_agent_with_worktree_mode_opens_dialog() {
@@ -712,9 +1400,9 @@ fn dashboard_dispatch_with_worktree_mode_stashes_prompt_and_opens_dialog() {
         "a plain Enter prompt-send stashes attach=false (stay on dashboard)",
     );
 }
-/// Confirming the worktree dialog with `attach` set (Ctrl+S / the
-/// `[+ New Agent]` button) creates a worktree session, replays the stashed
-/// prompt, and opens the new agent as the dashboard's detail view.
+/// Confirming the worktree dialog with `attach` set (Ctrl+S / the new-agent button)
+/// creates a worktree session, replays the stashed prompt, and opens the new agent
+/// as the dashboard's detail view.
 #[test]
 fn dashboard_confirm_worktree_creates_session_with_prompt() {
     let mut app = test_app_with_agent();
@@ -739,7 +1427,7 @@ fn dashboard_confirm_worktree_creates_session_with_prompt() {
         })
         .expect("expected a CreateWorktreeSession effect");
     assert_eq!(
-        app.agents[&wt_id].session.queue_len(),
+        test_agent(&app, wt_id).session.queue_len(),
         1,
         "the stashed prompt must be enqueued on the worktree agent",
     );
@@ -784,7 +1472,7 @@ fn dashboard_confirm_worktree_without_attach_stays_on_dashboard() {
         })
         .expect("expected a CreateWorktreeSession effect");
     assert_eq!(
-        app.agents[&wt_id].session.queue_len(),
+        test_agent(&app, wt_id).session.queue_len(),
         1,
         "the stashed prompt must still be enqueued on the worktree agent",
     );
@@ -799,7 +1487,7 @@ fn dashboard_confirm_worktree_without_attach_stays_on_dashboard() {
         app.active_view,
     );
 }
-/// Confirming the worktree dialog outside a git repo creates nothing and
+/// Confirming the worktree dialog outside a git repo creates nothing and surfaces a dashboard error instead.
 /// surfaces a dashboard error instead.
 #[test]
 fn dashboard_confirm_worktree_without_git_repo_creates_nothing() {
@@ -831,11 +1519,7 @@ fn dashboard_confirm_worktree_without_git_repo_creates_nothing() {
         "the stash must be consumed",
     );
 }
-/// The worktree dispatch path threads the dashboard's staged `/model` and
-/// `/plan` through the same way the normal path does: the model id rides on
-/// the `CreateWorktreeSession` effect, the effort is stashed as a deferred
-/// switch, and plan mode is deferred and optimistic. Regression: the worktree
-/// branch used to drop the staged config entirely.
+/// The worktree dispatch path threads the dashboard's staged `/model` and `/plan` through the same way the normal path does: the model id rides on the `CreateWorktreeSession` effect, the effort is stashed as a deferred switch, and plan mode is deferred and optimistic. Regression: the worktree branch used to drop the staged config entirely.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
@@ -869,7 +1553,7 @@ fn dashboard_confirm_worktree_applies_pending_model_and_plan() {
         Some(model_id.clone()),
         "the staged model id must ride on the worktree effect",
     );
-    let agent = &app.agents[&wt_id];
+    let agent = test_agent(&app, wt_id);
     assert_eq!(
         agent.session.deferred_model_switch,
         Some(crate::app::agent::DeferredModelSwitch {
@@ -911,14 +1595,12 @@ fn dashboard_confirm_worktree_carries_auto_permission_override() {
             _ => None,
         })
         .expect("Auto must ride on the worktree create effect");
-    assert!(app.agents[&agent_id].session.is_auto());
+    assert!(test_agent(&app, agent_id).session.is_auto());
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
     assert!(!app.default_yolo);
 }
 /// Images pasted into the dispatch input survive a worktree dispatch:
-/// stashed when the dialog opens, replayed onto the worktree agent's queued
-/// prompt on confirm. Regression: the worktree branch dropped them while
-/// the normal dispatch path carried them.
+/// stashed when the dialog opens, replayed onto the worktree agent's queued prompt on confirm. Regression: the worktree branch dropped them while the normal dispatch path carried them.
 #[test]
 fn dashboard_confirm_worktree_replays_pasted_images() {
     let mut app = test_app_with_agent();
@@ -941,7 +1623,7 @@ fn dashboard_confirm_worktree_replays_pasted_images() {
             _ => None,
         })
         .expect("expected a CreateWorktreeSession effect");
-    let entry = app.agents[&wt_id]
+    let entry = test_agent(&app, wt_id)
         .session
         .pending_prompts
         .back()
@@ -1005,7 +1687,9 @@ fn dashboard_image_dispatch_cancel_rewind_resends_attachment() {
         agent.session.session_id = Some(acp::SessionId::new("dashboard-image"));
         agent.session.state = AgentState::Idle;
         assert!(matches!(
-            maybe_drain_queue(agent).effects.as_slice(),
+            maybe_drain_queue(agent, &mut app.pending_image_notices)
+                .effects
+                .as_slice(),
             [Effect::SendPromptBlocks { .. }]
         ));
     }
@@ -1030,7 +1714,7 @@ fn dashboard_image_dispatch_cancel_rewind_resends_attachment() {
         [Effect::SendPromptBlocks { .. }]
     ));
     assert_eq!(
-        app.agents[&new_id]
+        test_agent(&app, new_id)
             .session
             .in_flight_prompt
             .as_ref()
@@ -1123,7 +1807,7 @@ fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
         before + 1,
         "the re-issued dispatch created the session"
     );
-    let entry = app.agents[&AgentId(1)]
+    let entry = test_agent(&app, AgentId(1))
         .session
         .pending_prompts
         .back()
@@ -1134,9 +1818,7 @@ fn dashboard_dispatch_send_before_paste_probe_keeps_image() {
         "the dispatched prompt carries the pasted image"
     );
 }
-/// Per-surface stashes: a dispatch send AND a peek reply stashed during the
-/// same probe window must both survive (the old single slot let the second
-/// stash silently overwrite the first) and both re-issue on completion:
+/// Per-surface stashes: a dispatch send AND a peek reply stashed during the same probe window must both survive (the old single slot let the second stash silently overwrite the first) and both re-issue on completion:
 /// dispatch first, then peek.
 #[test]
 fn dashboard_second_stash_does_not_overwrite_first() {
@@ -1271,7 +1953,7 @@ fn apply_pending_dispatch_config_auto_sets_classifier_mode() {
     assert!(agent.session.is_auto());
     assert!(!agent.session.is_yolo());
 }
-/// Dashboard per-agent toggle under the pin: refused, warning lands on
+/// Dashboard per-agent toggle under the pin: refused, warning lands on the dashboard's OWN error slot (the user is looking at the dashboard, not the agent). OFF stays allowed.
 /// the dashboard's OWN error slot (the user is looking at the
 /// dashboard, not the agent). OFF stays allowed.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -1336,9 +2018,7 @@ fn dashboard_peek_cycle_mode_cycles_peeked_agent() {
     );
 }
 /// A dashboard-peek Shift+Tab cycles the peeked agent into plan mode but must
-/// NOT attribute a plan-nudge acceptance: the user is on the dashboard, not
-/// that agent's prompt, so the nudge (still within TTL) is left intact. This
-/// pins that the peek routes through the telemetry-free cycle body.
+/// NOT attribute a plan-nudge acceptance: the user is on the dashboard, not that agent's prompt, so the nudge (still within TTL) is left intact. This pins that the peek routes through the telemetry-free cycle body.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_peek_cycle_does_not_retire_the_nudge() {
@@ -1388,7 +2068,7 @@ fn dashboard_open_or_merges_session_is_worktree_when_probe_is_plain() {
     }
     app.active_view = ActiveView::Agent(id);
     let _ = dispatch_open_dashboard(&mut app);
-    let agent = &app.agents[&id];
+    let agent = test_agent(&app, id);
     assert!(
         agent.is_worktree,
         "session.is_worktree must not be clobbered by a plain-repo probe"
@@ -1409,7 +2089,7 @@ fn dashboard_open_clears_stale_agent_is_worktree_when_probe_and_session_false() 
     }
     app.active_view = ActiveView::Agent(id);
     let _ = dispatch_open_dashboard(&mut app);
-    let agent = &app.agents[&id];
+    let agent = test_agent(&app, id);
     assert!(
         !agent.is_worktree,
         "stale agent.is_worktree must clear when probe and session are false"
@@ -1432,7 +2112,7 @@ fn dashboard_open_detects_standalone_grok_worktree() {
     }
     app.active_view = ActiveView::Agent(id);
     let _ = dispatch_open_dashboard(&mut app);
-    let agent = &app.agents[&id];
+    let agent = test_agent(&app, id);
     assert!(agent.is_worktree);
     assert_eq!(agent.current_branch.as_deref(), Some("wt-branch"));
     assert_eq!(
@@ -1440,11 +2120,8 @@ fn dashboard_open_detects_standalone_grok_worktree() {
         Some(crate::test_util::collapsed_path_display(&main.path).as_str())
     );
 }
-/// Leader-mode independence: opening the dashboard works even when NOT in
-/// leader mode. The dashboard renders local sessions regardless; leader
-/// mode only adds the roster poll. Every entry point funnels through
-/// `Action::OpenDashboard`, so this covers `/dashboard`, `Ctrl+\`,
-/// `grok dashboard`, and the startup hook.
+/// Leader-mode independence: opening the dashboard works even when NOT in leader mode. The dashboard renders local sessions regardless; leader mode only adds the roster poll. Every entry point funnels through
+/// `Action::OpenDashboard`, so this covers `/dashboard`, `Ctrl+\`, `grok dashboard`, and the startup hook.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_works_without_leader() {
@@ -1468,6 +2145,7 @@ fn idle_roster_entry(session_id: &str, title: &str) -> crate::app::roster::Roste
         title: Some(title.to_string()),
         cwd: "/repo".to_string(),
         is_worktree: false,
+        session_kind: None,
         model_id: None,
         yolo: false,
         activity: crate::app::roster::RosterActivity::Dormant,
@@ -1477,7 +2155,7 @@ fn idle_roster_entry(session_id: &str, title: &str) -> crate::app::roster::Roste
         origin: crate::app::roster::RosterOrigin::default(),
     }
 }
-/// Without a leader there is no live roster to poll, so opening the
+/// Without a leader there is no live roster to poll, so opening the dashboard must kick off a fetch of the local on-disk idle sessions so the view isn't empty.
 /// dashboard must kick off a fetch of the local on-disk idle sessions so
 /// the view isn't empty.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -1495,6 +2173,17 @@ fn dashboard_open_without_leader_fetches_local_sessions() {
     );
 }
 #[test]
+fn workspace_sync_request_before_dashboard_does_not_activate_store() {
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    crate::app::workspace_sync::request(&mut app);
+    assert!(
+        crate::app::workspace_sync::drain(&mut app).is_empty(),
+        "ordinary ACP/task activity must not activate workspace persistence"
+    );
+    assert!(app.workspace_membership.snapshot().is_none());
+}
+#[test]
 fn workspace_dashboard_open_loads_one_snapshot_and_skips_rosters() {
     let mut app = test_app_with_agent();
     app.workspace_dashboard_enabled = true;
@@ -1504,7 +2193,6 @@ fn workspace_dashboard_open_loads_one_snapshot_and_skips_rosters() {
         effects.as_slice(),
         [Effect::LoadWorkspaceSnapshot { .. }]
     ));
-    assert!(app.workspace_store_loading);
     assert!(app.dashboard_sessions_loading);
     assert!(
         !effects
@@ -1519,284 +2207,740 @@ fn workspace_dashboard_open_loads_one_snapshot_and_skips_rosters() {
     );
 }
 #[test]
+fn workspace_busy_open_retry_stays_loading_and_defers_failure_toast() {
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    app.active_view = ActiveView::Agent(AgentId(0));
+    assert!(matches!(
+        dispatch_open_dashboard(&mut app).as_slice(),
+        [Effect::LoadWorkspaceSnapshot { .. }]
+    ));
+    let retry = dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceSnapshotFailed {
+            error: "busy".into(),
+            retryable: true,
+        }),
+        &mut app,
+    );
+    assert!(matches!(
+        retry.as_slice(),
+        [Effect::LoadWorkspaceSnapshot { .. }]
+    ));
+    assert!(app.dashboard_sessions_loading);
+    assert!(app.dashboard.as_ref().unwrap().error_toast.is_none());
+    let parked = dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceSnapshotFailed {
+            error: "still busy".into(),
+            retryable: true,
+        }),
+        &mut app,
+    );
+    assert!(parked.is_empty());
+    assert!(!app.dashboard_sessions_loading);
+    assert!(
+        app.dashboard
+            .as_ref()
+            .unwrap()
+            .error_toast
+            .as_deref()
+            .is_some_and(|toast| toast.contains("Could not load dashboard workspace"))
+    );
+}
+#[test]
 fn workspace_snapshot_load_requests_live_adoption() {
-    let temp = tempfile::tempdir().unwrap();
-    let store =
-        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
+    let (_temp, store) = temp_store();
     let snapshot = store.snapshot().unwrap();
     let mut app = test_app_with_agent();
     app.workspace_dashboard_enabled = true;
-    app.workspace_store_loading = true;
+    crate::app::workspace_sync::activate(&mut app);
     let effects = dispatch(
         Action::TaskComplete(TaskResult::WorkspaceSnapshotLoaded { store, snapshot }),
         &mut app,
     );
     assert!(effects.is_empty());
-    assert!(app.workspace_store.is_some());
-    assert!(app.workspace_snapshot.is_some());
-    assert!(app.workspace_sync_requested);
+    assert!(matches!(
+        crate::app::workspace_sync::drain(&mut app).as_slice(),
+        [Effect::WriteWorkspace {
+            mutation: WorkspaceMutation::Upsert(members),
+            ..
+        }] if members.len() == 1
+    ));
+}
+#[test]
+fn initial_workspace_snapshot_ignores_config_backed_pin() {
+    let (_temp, mut store) = temp_store();
+    store.insert_member(new_member("saved", "Saved")).unwrap();
+    let snapshot = store.snapshot().unwrap();
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    let mut persisted = crate::views::dashboard::PersistedDashboard::defaults();
+    persisted
+        .pinned
+        .insert(crate::views::dashboard::PersistedRowId::TopLevel {
+            session_id: "saved".into(),
+        });
+    app.dashboard_persisted = Some(persisted);
+    ensure_dashboard_state(&mut app);
+    assert!(app.dashboard.as_ref().unwrap().pinned.is_empty());
+    crate::app::workspace_sync::activate(&mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceSnapshotLoaded { store, snapshot }),
+        &mut app,
+    );
+    assert!(app.dashboard.as_ref().unwrap().pinned.is_empty());
+    let view = app.workspace_membership.view().unwrap();
+    let [member] = view.members.as_slice() else {
+        panic!("expected one member, got {}", view.members.len())
+    };
+    assert_eq!(member.pin_rank, None);
+}
+#[test]
+fn workspace_grouping_toggle_emits_sqlite_layout_write_not_config_write() {
+    let (_temp, store) = temp_store();
+    let mut app = ready_workspace_app(test_app_with_agent(), store);
+    let mut persisted = crate::views::dashboard::PersistedDashboard::defaults();
+    persisted.grouping = crate::views::dashboard::Grouping::Directory;
+    app.dashboard_persisted = Some(persisted);
+    ensure_dashboard_state(&mut app);
+    let dashboard = app.dashboard.as_mut().unwrap();
+    dashboard.focus_section(crate::views::dashboard::SectionKey::State(
+        crate::views::dashboard::RowState::Idle,
+    ));
+    dashboard.manual_scroll_active = true;
+    let effects = dispatch(Action::DashboardToggleGrouping, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::WriteWorkspace {
+            mutation: WorkspaceMutation::Layout(patch),
+            ..
+        }] if patch.grouping == Some(xai_grok_dashboard_store::LayoutGrouping::Directory)
+    ));
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::PersistDashboard(_)))
+    );
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert!(dashboard.new_agent_button_focused());
+    assert!(!dashboard.manual_scroll_active);
+}
+#[test]
+fn v1_grouping_toggle_emits_config_write_not_sqlite_layout_write() {
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = false;
+    ensure_dashboard_state(&mut app);
+    let effects = dispatch(Action::DashboardToggleGrouping, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::PersistDashboard(persisted)]
+            if persisted.grouping == crate::views::dashboard::Grouping::Directory
+    ));
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::WriteWorkspace { .. }))
+    );
+}
+#[test]
+fn v2_pin_gesture_updates_overlay_and_emits_only_layout_write() {
+    let (_temp, store) = temp_store();
+    let snapshot = workspace_snapshot(vec![member("test-session", "Saved")]);
+    let mut app = test_app_with_agent();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership.set_ready_for_test(store, snapshot);
+    ensure_dashboard_state(&mut app);
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
+            0,
+        )));
+    let effects = dispatch(Action::DashboardTogglePin, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::WriteWorkspace {
+            mutation: WorkspaceMutation::Layout(patch),
+            ..
+        }] if patch.pin_assignments.len() == 1
+            && patch.pin_assignments.first().is_some_and(|a| a.pinned)
+    ));
+    assert!(
+        app.workspace_membership
+            .view()
+            .unwrap()
+            .members
+            .first()
+            .is_some_and(|m| m.pin_rank.is_some())
+    );
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::PersistDashboard(_)))
+    );
+}
+#[test]
+fn closing_loaded_workspace_agent_rebinds_selection_to_unloaded_row() {
+    let (_temp, mut store) = temp_store();
+    store
+        .insert_member(new_member("test-session", "Saved"))
+        .unwrap();
+    assert!(matches!(
+        store.apply_layout_patch(&xai_grok_dashboard_store::LayoutPatch {
+            pin_assignments: vec![xai_grok_dashboard_store::PinAssignment {
+                key: xai_grok_dashboard_store::MemberKey {
+                    session_id: xai_grok_dashboard_store::SessionId::new("test-session").unwrap(),
+                    kind: xai_grok_dashboard_store::MemberKind::Build,
+                },
+                pinned: true,
+            }],
+            manual_order: Some(vec![xai_grok_dashboard_store::MemberKey {
+                session_id: xai_grok_dashboard_store::SessionId::new("test-session").unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+            }]),
+            grouping: None,
+        }),
+        xai_grok_dashboard_store::LayoutApplyOutcome::Committed(_)
+    ));
+    let snapshot = store.snapshot().unwrap();
+    let mut app = test_app_with_agent();
+    insert_second_agent(&mut app);
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership.set_ready_for_test(store, snapshot);
+    ensure_dashboard_state(&mut app);
+    let loaded = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
+    {
+        let dashboard = app.dashboard.as_mut().unwrap();
+        dashboard.focus_row(loaded);
+    }
+    dispatch_sessions_confirm_close(&mut app, AgentId(0));
+    let unloaded = crate::views::dashboard::DashboardRowId::Workspace {
+        session_id: "test-session".into(),
+    };
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert!(dashboard.pinned.is_empty());
+    assert!(dashboard.reorder.is_empty());
+    assert_eq!(dashboard.selected, Some(unloaded));
+    assert!(
+        app.workspace_membership
+            .view()
+            .unwrap()
+            .members
+            .first()
+            .is_some_and(|m| m.pin_rank.is_some())
+    );
+}
+#[test]
+fn workspace_refresh_result_does_not_request_an_upsert() {
+    let (_temp, store) = temp_store();
+    let mut app = ready_workspace_app(test_app_with_agent(), store);
+    let Effect::RefreshWorkspace { store, .. } =
+        crate::app::workspace_sync::refresh(&mut app).pop().unwrap()
+    else {
+        panic!("expected refresh effect");
+    };
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceRefreshed {
+            store,
+            snapshot: Ok(None),
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty());
+    assert!(crate::app::workspace_sync::drain(&mut app).is_empty());
 }
 #[test]
 fn workspace_dashboard_reopens_store_when_only_stale_snapshot_remains() {
     let mut app = test_app_with_agent();
     app.workspace_dashboard_enabled = true;
-    app.workspace_snapshot = Some(xai_grok_dashboard_store::WorkspaceSnapshot {
-        grouping: xai_grok_dashboard_store::Grouping::State,
-        members: vec![],
-        data_version: 1,
-    });
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![],
+            data_version: 1,
+        });
     app.active_view = ActiveView::Agent(AgentId(0));
     let effects = dispatch_open_dashboard(&mut app);
     assert!(matches!(
         effects.as_slice(),
         [Effect::LoadWorkspaceSnapshot { .. }]
     ));
-    assert!(app.workspace_store_loading);
 }
 #[test]
 fn workspace_session_created_becomes_an_upsert_candidate() {
-    let temp = tempfile::tempdir().unwrap();
-    let store =
-        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
-    let snapshot = store.snapshot().unwrap();
-    let mut app = test_app_with_agent();
-    app.workspace_dashboard_enabled = true;
-    app.workspace_store = Some(store);
-    app.workspace_snapshot = Some(snapshot);
+    let (_temp, store) = temp_store();
+    let mut app = ready_workspace_app(test_app_with_agent(), store);
     app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionCreated {
             agent_id: AgentId(0),
             session_id: acp::SessionId::new("created"),
             models: None,
-            scheduler_background_loops: None,
+            modes: None,
         }),
         &mut app,
     );
     let effects = crate::app::workspace_sync::drain(&mut app);
     assert!(matches!(
         effects.as_slice(),
-        [Effect::UpsertWorkspaceMembers { members, .. }]
-            if members.len() == 1 && members[0].key.session_id.as_ref() == "created"
+        [Effect::WriteWorkspace {
+            mutation: WorkspaceMutation::Upsert(members),
+            ..
+        }]
+            if members.len() == 1 && members.first().is_some_and(|m| m.key.session_id.as_ref() == "created")
     ));
 }
+/// A dashboard dispatch is visible on the next frame as a provisional row under its `TopLevel` id.
+/// The id does not change when the session id binds or when the store upsert lands, so the selection and an open
+/// peek follow the row through both handoffs.
 #[test]
-fn workspace_busy_write_retries_only_once() {
-    let temp = tempfile::tempdir().unwrap();
-    let store =
-        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
-    let snapshot = store.snapshot().unwrap();
-    let mut app = test_app();
-    app.workspace_dashboard_enabled = true;
-    app.workspace_snapshot = Some(snapshot.clone());
-    app.workspace_write_in_flight = true;
-    let attempted = xai_grok_dashboard_store::NewMember {
-        key: xai_grok_dashboard_store::MemberKey {
-            session_id: xai_grok_dashboard_store::SessionId::new("saved").unwrap(),
-            kind: xai_grok_dashboard_store::MemberKind::Build,
-        },
-        origin: xai_grok_dashboard_store::MemberOrigin::Local,
-        metadata: xai_grok_dashboard_store::MemberMetadata {
-            cwd: Some("/tmp".into()),
-            title: None,
-            model: None,
-            last_turn_summary: None,
-            is_worktree: false,
-            last_change_unix_ms: 1,
-        },
-    };
-    let mut permanent = attempted.clone();
-    permanent.key.session_id = xai_grok_dashboard_store::SessionId::new("permanent").unwrap();
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::WorkspaceMembersUpserted {
-            store,
-            snapshot: Ok(snapshot.clone()),
-            failures: vec![
-                WorkspaceMemberUpsertFailure {
-                    session_id: "saved".into(),
-                    error: "busy".into(),
-                    retryable: true,
-                },
-                WorkspaceMemberUpsertFailure {
-                    session_id: "permanent".into(),
-                    error: "all pinned".into(),
-                    retryable: false,
-                },
-            ],
-            attempted: vec![attempted.clone(), permanent.clone()],
-        }),
-        &mut app,
-    );
-    assert!(app.workspace_sync_requested);
-    assert_eq!(
-        app.workspace_retry_metadata.get(&attempted.key.session_id),
-        Some(&attempted.metadata)
-    );
-    assert!(
-        !app.workspace_retry_metadata
-            .contains_key(&permanent.key.session_id)
-    );
-    assert_eq!(
-        app.workspace_failed_metadata.get(&permanent.key.session_id),
-        Some(&permanent.metadata)
-    );
-    app.workspace_sync_requested = false;
-    app.workspace_write_in_flight = true;
-    let store = app.workspace_store.take().unwrap();
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::WorkspaceMembersUpserted {
-            store,
-            snapshot: Ok(snapshot),
-            failures: vec![WorkspaceMemberUpsertFailure {
-                session_id: "saved".into(),
-                error: "busy again".into(),
-                retryable: true,
-            }],
-            attempted: vec![attempted.clone()],
-        }),
-        &mut app,
-    );
-    assert!(!app.workspace_sync_requested);
-    assert!(
-        !app.workspace_retry_metadata
-            .contains_key(&attempted.key.session_id)
-    );
-    assert_eq!(
-        app.workspace_failed_metadata.get(&attempted.key.session_id),
-        Some(&attempted.metadata)
-    );
-    app.workspace_sync_requested = false;
-    app.workspace_write_in_flight = true;
-    let store = app.workspace_store.take().unwrap();
-    let mut changed = attempted;
-    changed.metadata.title = Some("changed".into());
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::WorkspaceMembersUpserted {
-            store,
-            snapshot: Ok(xai_grok_dashboard_store::WorkspaceSnapshot {
-                grouping: xai_grok_dashboard_store::Grouping::State,
-                members: vec![],
-                data_version: 1,
-            }),
-            failures: vec![WorkspaceMemberUpsertFailure {
-                session_id: "saved".into(),
-                error: "busy changed".into(),
-                retryable: true,
-            }],
-            attempted: vec![changed.clone()],
-        }),
-        &mut app,
-    );
-    assert!(app.workspace_sync_requested);
-    assert_eq!(
-        app.workspace_retry_metadata.get(&changed.key.session_id),
-        Some(&changed.metadata)
-    );
-}
-
-#[test]
-fn workspace_load_failure_toast_localizes_chrome_and_preserves_error() {
-    let mut app = test_app_with_agent();
-    app.locale = std::sync::Arc::new(crate::locale::LocaleContext::new(
-        crate::locale::ResolvedLocale {
-            locale: crate::locale::UiLocale::ZhCn,
-            source: crate::locale::LocaleSource::Cli,
-        },
-    ));
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::WorkspaceSnapshotFailed {
-            error: "opaque storage error".into(),
-        }),
-        &mut app,
-    );
-    assert_eq!(
-        app.agents[&AgentId(0)]
-            .toast
-            .as_ref()
-            .map(|(message, _)| message.as_str()),
-        Some("无法加载智能体面板工作区：opaque storage error")
-    );
-}
-
-#[test]
-fn workspace_snapshot_failure_reopens_without_suppressing_attempted_member() {
-    let temp = tempfile::tempdir().unwrap();
-    let store =
-        xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db")).unwrap();
-    let mut app = test_app();
-    app.workspace_dashboard_enabled = true;
-    app.workspace_snapshot = Some(store.snapshot().unwrap());
-    app.workspace_write_in_flight = true;
-    let attempted = xai_grok_dashboard_store::NewMember {
-        key: xai_grok_dashboard_store::MemberKey {
-            session_id: xai_grok_dashboard_store::SessionId::new("saved").unwrap(),
-            kind: xai_grok_dashboard_store::MemberKind::Build,
-        },
-        origin: xai_grok_dashboard_store::MemberOrigin::Local,
-        metadata: xai_grok_dashboard_store::MemberMetadata {
-            cwd: Some("/tmp".into()),
-            title: None,
-            model: None,
-            last_turn_summary: None,
-            is_worktree: false,
-            last_change_unix_ms: 1,
-        },
-    };
-    let effects = dispatch(
-        Action::TaskComplete(TaskResult::WorkspaceMembersUpserted {
-            store,
-            snapshot: Err("snapshot failed".into()),
-            failures: vec![],
-            attempted: vec![attempted.clone()],
-        }),
-        &mut app,
-    );
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::LoadWorkspaceSnapshot { .. }]
-    ));
-    assert!(app.workspace_store.is_none());
-    assert!(app.workspace_store_loading);
-    assert!(
-        !app.workspace_failed_metadata
-            .contains_key(&attempted.key.session_id)
-    );
-}
-#[test]
-fn workspace_row_never_arms_permanent_delete() {
-    let mut app = test_app_with_agent();
+fn workspace_dispatch_shows_row_before_session_created_and_keeps_its_id() {
+    use crate::views::dashboard::DashboardRowId;
+    use crate::views::dashboard::peek::{PeekFields, PeekPanelState};
+    let (_temp, store) = temp_store();
+    let mut app = ready_workspace_app(test_app(), store);
     ensure_dashboard_state(&mut app);
-    app.dashboard.as_mut().unwrap().selected =
-        Some(crate::views::dashboard::DashboardRowId::Workspace {
+    app.active_view = ActiveView::AgentDashboard;
+    let effects = dispatch_dashboard_dispatch(&mut app, "fix the login bug".into(), false);
+    let new_id = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::CreateSession { agent_id, .. } => Some(*agent_id),
+            _ => None,
+        })
+        .expect("dispatch creates a session");
+    assert!(test_agent(&app, new_id).session.session_id.is_none());
+    assert_eq!(
+        dashboard_row_order(&app),
+        vec![DashboardRowId::TopLevel(new_id)],
+        "the dispatched agent must show before its session id binds",
+    );
+    let row = DashboardRowId::TopLevel(new_id);
+    {
+        let dashboard = app.dashboard.as_mut().unwrap();
+        dashboard.focus_row(row.clone());
+        dashboard.peek = Some(PeekPanelState::new(
+            row.clone(),
+            PeekFields {
+                label: "fix the login bug".into(),
+                time_ago: String::new(),
+                response_type: "Working".into(),
+                last_user_message: None,
+                question: None,
+                options: vec![],
+                request_id: None,
+                reject_option: None,
+            },
+        ));
+    }
+    let assert_follows = |app: &AppView, stage: &str| {
+        let dashboard = app.dashboard.as_ref().unwrap();
+        assert_eq!(dashboard.selected.as_ref(), Some(&row), "selection {stage}");
+        assert_eq!(
+            dashboard.peek.as_ref().map(|peek| &peek.row),
+            Some(&row),
+            "peek {stage}"
+        );
+    };
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionCreated {
+            agent_id: new_id,
+            session_id: acp::SessionId::new("created"),
+            models: None,
+            modes: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        dashboard_row_order(&app),
+        vec![DashboardRowId::TopLevel(new_id)],
+        "binding the session id must not add or drop a row",
+    );
+    assert_follows(&app, "after the session id binds");
+    let mut effects = crate::app::workspace_sync::drain(&mut app);
+    assert_eq!(effects.len(), 1, "expected one workspace write");
+    let Some(Effect::WriteWorkspace {
+        mut store,
+        mutation: WorkspaceMutation::Upsert(members),
+    }) = effects.pop()
+    else {
+        panic!("expected the upsert for the bound session");
+    };
+    for member in members.iter().cloned() {
+        store.insert_member(member).unwrap();
+    }
+    let snapshot = store.snapshot().unwrap();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::WorkspaceWriteCompleted {
+            store,
+            completion: WorkspaceWriteCompletion::Upsert {
+                members,
+                snapshot: Ok(snapshot),
+                failures: vec![],
+            },
+        }),
+        &mut app,
+    );
+    assert!(
+        app.workspace_membership
+            .snapshot()
+            .is_some_and(|snapshot| snapshot.members.len() == 1),
+        "the member must be committed",
+    );
+    assert_eq!(
+        dashboard_row_order(&app),
+        vec![DashboardRowId::TopLevel(new_id)],
+        "the committed member must render under the same id, once",
+    );
+    assert_follows(&app, "after the upsert commits");
+}
+#[test]
+fn workspace_dispatch_with_attach_selects_the_provisional_row() {
+    use crate::views::dashboard::DashboardRowId;
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    ensure_dashboard_state(&mut app);
+    app.active_view = ActiveView::AgentDashboard;
+    let _ = dispatch_dashboard_dispatch(&mut app, "open me".into(), true);
+    let ActiveView::Agent(new_id) = app.active_view else {
+        panic!("attach must open the new agent");
+    };
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert_eq!(dashboard.selected, Some(DashboardRowId::TopLevel(new_id)));
+    assert_eq!(dashboard.attached_agent, Some(new_id));
+    assert_eq!(
+        dashboard_row_order(&app),
+        vec![DashboardRowId::TopLevel(new_id)],
+        "live rows render even before the store snapshot has loaded",
+    );
+}
+#[test]
+fn workspace_worktree_dispatch_shows_row_while_worktree_is_created() {
+    use crate::views::dashboard::DashboardRowId;
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    app.cwd_has_git_ancestor = true;
+    ensure_dashboard_state(&mut app);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard.as_mut().unwrap().dispatch_worktree = true;
+    assert!(
+        dispatch_dashboard_dispatch(&mut app, "in a worktree".into(), false).is_empty(),
+        "worktree mode stashes the prompt behind the label dialog",
+    );
+    let effects = dispatch_dashboard_confirm_worktree(&mut app, Some("wt".into()));
+    let new_id = effects
+        .iter()
+        .find_map(|e| match e {
+            Effect::CreateWorktreeSession { agent_id, .. } => Some(*agent_id),
+            _ => None,
+        })
+        .expect("confirm creates a worktree session");
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+    let (rows, _) =
+        super::super::dashboard::workspace_rows(&app, &crate::views::dashboard::Filter::None);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows.first().map(|r| &r.id),
+        Some(&DashboardRowId::TopLevel(new_id))
+    );
+    assert_eq!(
+        rows.first().map(|r| r.state),
+        Some(crate::views::dashboard::RowState::Working)
+    );
+    assert_eq!(
+        rows.first().and_then(|r| r.activity.as_deref()),
+        Some("Creating worktree…")
+    );
+}
+/// An archive in flight hides the live agent's row even though the agent is still loaded.
+#[test]
+fn workspace_live_row_hidden_while_archive_is_in_flight() {
+    let (_temp, mut store) = temp_store();
+    store.insert_member(new_member("saved", "Saved")).unwrap();
+    let mut app = ready_workspace_app(test_app_with_agent(), store);
+    {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("saved"));
+        agent.display_name = Some("Saved".into());
+    }
+    ensure_dashboard_state(&mut app);
+    assert_eq!(dashboard_row_order(&app).len(), 1);
+    assert!(crate::app::workspace_sync::request_removal(
+        &mut app,
+        "saved",
+        crate::app::workspace_membership::RemovalCause::HistoryDeletedWithRetainedView,
+    ));
+    assert!(
+        dashboard_row_order(&app).is_empty(),
+        "a pending removal must hide both the member row and any provisional row",
+    );
+}
+/// Pin and reorder on a provisional row explain why nothing happened instead of failing silently.
+/// The wording follows the store: "yet" while the upsert can still land, read-only when it never will.
+#[test]
+fn zh_localization_workspace_layout_on_provisional_row_toasts() {
+    for chinese in [false, true] {
+        use crate::views::dashboard::DashboardRowId;
+        let (temp, store) = temp_store();
+        let snapshot = store.snapshot().unwrap();
+        let mut app = ready_workspace_app(test_app(), store);
+        app.locale = std::sync::Arc::new(crate::locale::LocaleContext::new(
+            crate::locale::ResolvedLocale {
+                locale: if chinese {
+                    crate::locale::UiLocale::ZhCn
+                } else {
+                    crate::locale::UiLocale::EnUs
+                },
+                source: crate::locale::LocaleSource::Cli,
+            },
+        ));
+        ensure_dashboard_state(&mut app);
+        app.active_view = ActiveView::AgentDashboard;
+        let _ = dispatch_dashboard_dispatch(&mut app, "pin me".into(), false);
+        let new_id = *app.agents.keys().last().unwrap();
+        app.dashboard
+            .as_mut()
+            .unwrap()
+            .focus_row(DashboardRowId::TopLevel(new_id));
+        let order_before = app.workspace_membership.effective_manual_order();
+        assert!(dispatch_dashboard_toggle_pin(&mut app).is_empty());
+        assert_eq!(
+            app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+            Some(if chinese {
+                "会话尚未保存到工作区"
+            } else {
+                "Session isn't saved to the workspace yet"
+            }),
+        );
+        app.dashboard.as_mut().unwrap().error_toast = None;
+        assert!(dispatch(Action::DashboardReorderDown, &mut app).is_empty());
+        assert_eq!(
+            app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+            Some(if chinese {
+                "会话尚未保存到工作区"
+            } else {
+                "Session isn't saved to the workspace yet"
+            }),
+        );
+        assert_eq!(
+            app.workspace_membership.effective_manual_order(),
+            order_before,
+            "a provisional row must not take a manual-order slot",
+        );
+        let store =
+            xai_grok_dashboard_store::WorkspaceStore::open(&temp.path().join("workspace.db"))
+                .unwrap();
+        app.workspace_membership
+            .set_read_only_for_test(store, snapshot);
+        app.dashboard.as_mut().unwrap().error_toast = None;
+        assert!(dispatch_dashboard_toggle_pin(&mut app).is_empty());
+        assert_eq!(
+            app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+            Some(if chinese {
+                "当前 Grok 版本中的智能体面板工作区为只读"
+            } else {
+                "Dashboard workspace is read-only"
+            }),
+        );
+    }
+}
+#[test]
+fn zh_localization_workspace_layout_on_vanished_row_toasts_no_longer_in_workspace() {
+    for chinese in [false, true] {
+        use crate::views::dashboard::DashboardRowId;
+        let (_temp, store) = temp_store();
+        let mut app = ready_workspace_app(test_app(), store);
+        app.locale = std::sync::Arc::new(crate::locale::LocaleContext::new(
+            crate::locale::ResolvedLocale {
+                locale: if chinese {
+                    crate::locale::UiLocale::ZhCn
+                } else {
+                    crate::locale::UiLocale::EnUs
+                },
+                source: crate::locale::LocaleSource::Cli,
+            },
+        ));
+        ensure_dashboard_state(&mut app);
+        app.active_view = ActiveView::AgentDashboard;
+        app.dashboard
+            .as_mut()
+            .unwrap()
+            .focus_row(DashboardRowId::Workspace {
+                session_id: "gone".into(),
+            });
+        assert!(dispatch_dashboard_toggle_pin(&mut app).is_empty());
+        assert_eq!(
+            app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+            Some(if chinese {
+                "会话已不在工作区中"
+            } else {
+                "Session is no longer in the workspace"
+            }),
+        );
+        app.dashboard.as_mut().unwrap().error_toast = None;
+        assert!(dispatch(Action::DashboardReorderUp, &mut app).is_empty());
+        assert_eq!(
+            app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+            Some(if chinese {
+                "会话已不在工作区中"
+            } else {
+                "Session is no longer in the workspace"
+            }),
+        );
+    }
+}
+#[test]
+fn workspace_row_ctrl_x_archives_membership_without_deleting_history() {
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![xai_grok_dashboard_store::Member {
+                session_id: xai_grok_dashboard_store::SessionId::new("saved").unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+                origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                cwd: Some("/tmp".into()),
+                title: Some("Saved".into()),
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+                pin_rank: None,
+                order_rank: None,
+            }],
+            data_version: 1,
+        });
+    ensure_dashboard_state(&mut app);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::Workspace {
             session_id: "saved".to_owned(),
         });
     assert!(dispatch_dashboard_stop(&mut app).is_empty());
-    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_some());
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DeleteSession { .. })),
+        "archive must preserve history: {effects:?}"
+    );
+    assert!(
+        app.workspace_membership
+            .removal_pending_for_test(&xai_grok_dashboard_store::SessionId::new("saved").unwrap())
+    );
+    assert!(
+        app.workspace_membership.view().unwrap().members.is_empty(),
+        "the row should disappear optimistically"
+    );
+    assert_eq!(
+        app.workspace_membership.snapshot().unwrap().members.len(),
+        1,
+        "optimism must not mutate the committed snapshot"
+    );
+    assert!(app.dashboard.as_ref().unwrap().error_toast.is_none());
 }
 #[test]
-fn workspace_overlay_cycle_omits_unadopted_live_agents() {
+fn workspace_overlay_closes_unbound_agent_without_store_removal() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.workspace_dashboard_enabled = true;
+    app.agents.get_mut(&id).unwrap().session.session_id = None;
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(id);
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
+    app.active_view = ActiveView::Agent(id);
+    let effects = dispatch_dashboard_overlay_stop(&mut app);
+    assert!(effects.is_empty());
+    assert!(app.agents.is_empty());
+    assert_eq!(app.active_view, ActiveView::AgentDashboard);
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert!(dashboard.attached_agent.is_none());
+    assert!(dashboard.new_agent_button_focused());
+}
+#[test]
+fn workspace_list_allows_archiving_waiting_for_user_row() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.workspace_dashboard_enabled = true;
+    ensure_dashboard_state(&mut app);
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
+    app.active_view = ActiveView::AgentDashboard;
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .permission_queue
+        .push_back(crate::app::agent_view::test_fixtures::make_followup_permission_state());
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(effects.is_empty());
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_some());
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::DeleteSession { .. }))
+    );
+    assert!(!app.agents.contains_key(&id));
+}
+#[test]
+fn workspace_list_silently_blocks_archive_during_replay() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.workspace_dashboard_enabled = true;
+    ensure_dashboard_state(&mut app);
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
+    app.active_view = ActiveView::AgentDashboard;
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.loading_replay = true;
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(effects.is_empty());
+    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
+    assert!(app.agents.contains_key(&id));
+}
+/// The overlay cycle follows the rows the user sees, so a live agent whose upsert has not landed yet is reachable
+/// while one under a removal in flight is not.
+#[test]
+fn workspace_overlay_cycle_reaches_provisional_but_not_hidden_live_agents() {
     let mut app = test_app_with_agent();
     mark_agent_nonempty(&mut app, AgentId(0));
     let second = insert_second_agent(&mut app);
     mark_agent_nonempty(&mut app, second);
     app.workspace_dashboard_enabled = true;
-    app.workspace_snapshot = Some(xai_grok_dashboard_store::WorkspaceSnapshot {
-        grouping: xai_grok_dashboard_store::Grouping::State,
-        members: vec![xai_grok_dashboard_store::Member {
-            session_id: xai_grok_dashboard_store::SessionId::new("test-session").unwrap(),
-            kind: xai_grok_dashboard_store::MemberKind::Build,
-            origin: xai_grok_dashboard_store::MemberOrigin::Local,
-            cwd: Some("/tmp".to_owned()),
-            title: Some("Saved".to_owned()),
-            model: None,
-            last_turn_summary: None,
-            is_worktree: false,
-            last_change_unix_ms: 1,
-            pin_rank: None,
-            order_rank: None,
-        }],
-        data_version: 1,
-    });
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![xai_grok_dashboard_store::Member {
+                session_id: xai_grok_dashboard_store::SessionId::new("test-session").unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+                origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                cwd: Some("/tmp".to_owned()),
+                title: Some("Saved".to_owned()),
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+                pin_rank: None,
+                order_rank: None,
+            }],
+            data_version: 1,
+        });
+    app.active_view = ActiveView::Agent(AgentId(0));
+    assert!(dispatch_dashboard_overlay_cycle(&mut app, 1).is_empty());
+    assert_eq!(app.active_view, ActiveView::Agent(second));
+    app.workspace_membership
+        .suppress_for_test(xai_grok_dashboard_store::SessionId::new("second").unwrap());
     app.active_view = ActiveView::Agent(AgentId(0));
     assert!(dispatch_dashboard_overlay_cycle(&mut app, 1).is_empty());
     assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
@@ -1853,7 +2997,7 @@ fn roster_failed_clears_dashboard_sessions_loading() {
     );
     assert!(!app.dashboard_sessions_loading);
 }
-/// `DashboardSessionsLoaded` stores the local idle sessions, and
+/// `DashboardSessionsLoaded` stores the local idle sessions, and `dashboard_roster()` surfaces them when not in leader mode.
 /// `dashboard_roster()` surfaces them when not in leader mode.
 #[test]
 fn dashboard_sessions_loaded_feeds_non_leader_roster() {
@@ -1868,7 +3012,10 @@ fn dashboard_sessions_loaded_feeds_non_leader_roster() {
     assert_eq!(app.dashboard_local_sessions.len(), 1);
     let roster = app.dashboard_roster();
     assert_eq!(roster.len(), 1, "non-leader roster uses local sessions");
-    assert_eq!(roster[0].session_id, "sess-idle");
+    assert_eq!(
+        roster.first().map(|r| r.session_id.as_str()),
+        Some("sess-idle")
+    );
 }
 /// `dashboard_roster()` switches source on `leader_mode`: the live leader
 /// roster in leader mode, the local idle-session list otherwise.
@@ -1878,9 +3025,19 @@ fn dashboard_roster_switches_on_leader_mode() {
     app.leader_roster = vec![idle_roster_entry("leader-sess", "Leader")];
     app.dashboard_local_sessions = vec![idle_roster_entry("local-sess", "Local")];
     app.leader_mode = true;
-    assert_eq!(app.dashboard_roster()[0].session_id, "leader-sess");
+    assert_eq!(
+        app.dashboard_roster()
+            .first()
+            .map(|r| r.session_id.as_str()),
+        Some("leader-sess")
+    );
     app.leader_mode = false;
-    assert_eq!(app.dashboard_roster()[0].session_id, "local-sess");
+    assert_eq!(
+        app.dashboard_roster()
+            .first()
+            .map(|r| r.session_id.as_str()),
+        Some("local-sess")
+    );
 }
 /// Seed a model into the app catalog for `/model` tests.
 fn seed_model(app: &mut AppView, id: &str, name: &str) {
@@ -1926,10 +3083,39 @@ fn dashboard_slash_model_stages_pending_model() {
         "staging must update the snapshot's current selection",
     );
 }
-/// A tier-restricted command typed into the dashboard dispatch input must
-/// upsell via the feedback toast, not execute, and not fall
-/// through the unknown-command path, which would spawn a session whose
-/// first prompt is the raw slash text.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_model_with_a_window_stages_the_model_and_explains_the_window() {
+    let mut app = test_app();
+    let model_id = acp::ModelId::new(std::sync::Arc::from("grok-4.7"));
+    app.models.available.insert(
+        model_id.clone(),
+        acp::ModelInfo::new(model_id, "Grok 4.7".to_string()).meta(
+            serde_json::json!({
+                "totalContextTokens": 256_000,
+                "contextWindows": [256_000, 500_000],
+            })
+            .as_object()
+            .cloned(),
+        ),
+    );
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/model grok-4.7 500k".into());
+    assert!(effects.is_empty());
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert_eq!(
+        Some("grok-4.7"),
+        dashboard
+            .pending_model
+            .as_ref()
+            .map(|pending| pending.id.0.as_ref())
+    );
+    assert_eq!(
+        Some("Context window applies per session; run /context-window after spawn"),
+        dashboard.error_toast.as_deref()
+    );
+}
+/// A tier-restricted command typed into the dashboard dispatch input must upsell via the feedback toast, not execute, and not fall through the unknown-command path, which would spawn a session whose first prompt is the raw slash text.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_slash_restricted_command_upsells_via_toast() {
@@ -1954,11 +3140,7 @@ fn dashboard_slash_restricted_command_upsells_via_toast() {
         "toast must carry the upsell: {toast}"
     );
 }
-/// A slash command that fails (`CommandResult::Error`) surfaces on
-/// the dashboard with the `✗` error prefix: command error strings
-/// carry no glyph of their own, and the feedback badge paints the
-/// toast verbatim in a neutral colour, so without the prefix an
-/// error would be indistinguishable from a success message.
+/// A slash command that fails (`CommandResult::Error`) surfaces on the dashboard with the `✗` error prefix: command error strings carry no glyph of their own, and the feedback badge paints the toast verbatim in a neutral colour, so without the prefix an error would be indistinguishable from a success message.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_slash_command_error_gets_error_glyph_prefix() {
@@ -2110,7 +3292,7 @@ fn dashboard_does_not_advertise_or_dispatch_doctor() {
 fn dashboard_slash_usage_hidden_for_external_auth() {
     let mut app = three_agent_app();
     app.has_external_auth_provider = true;
-    app.apply_auth_meta(&xai_grok_shell::auth::AuthMeta::default());
+    app.apply_auth_meta(&xai_grok_login::AuthMeta::default());
     open_dashboard(&mut app);
     let before = app.agents.len();
     let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
@@ -2135,6 +3317,247 @@ fn dashboard_slash_usage_hidden_for_external_auth() {
     assert!(
         !toast.contains("SuperGrok"),
         "must not upsell billing on external auth: {toast}"
+    );
+}
+/// The dashboard modal's own fetch generation and its open state.
+fn dashboard_usage_modal(app: &AppView) -> &crate::views::usage_modal::UsageInfoModalState {
+    app.dashboard
+        .as_ref()
+        .unwrap()
+        .usage_modal
+        .as_ref()
+        .expect("usage modal open on the dashboard")
+}
+/// Regression: the dispatcher used to require an agent view and silently dropped `/usage` on the dashboard.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_usage_opens_dashboard_modal() {
+    use crate::views::usage_modal::UsageInfoTab;
+    let mut app = three_agent_app();
+    open_dashboard(&mut app);
+    let before = app.agents.len();
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let [Effect::FetchAppBilling { nonce }] = effects.as_slice() else {
+        panic!("session-less open refreshes only the account allowance, got: {effects:?}");
+    };
+    assert_ne!(
+        *nonce, 0,
+        "a modal-driven fetch must carry a real generation"
+    );
+    assert_eq!(app.agents.len(), before, "must not add an agent");
+    assert!(
+        matches!(app.active_view, ActiveView::AgentDashboard),
+        "must stay on dashboard"
+    );
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert_eq!(dashboard.dispatch.text(), "");
+    assert!(
+        dashboard.error_toast.is_none(),
+        "{:?}",
+        dashboard.error_toast
+    );
+    let modal = dashboard_usage_modal(&app);
+    assert_eq!(modal.active_tab, UsageInfoTab::UsageLimit);
+    assert_eq!(modal.fetch_nonce, *nonce);
+    assert!(modal.ctx.session_id.is_none());
+    assert!(modal.ctx.usage_visible);
+    assert!(!modal.ctx.chat_kind);
+    assert!(modal.billing_loading);
+    for agent in app.agents.values() {
+        assert!(
+            agent.active_modal.is_none(),
+            "modal must not land on a background agent"
+        );
+    }
+}
+/// A second open re-tabs the existing modal without a second fetch; the tab really changes when the action asks for another one.
+/// The session-scoped `/context` slash stays refused on the dashboard and leaves the modal alone.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_usage_modal_reopen_retabs_without_refetch_and_session_slashes_stay_refused() {
+    use crate::views::usage_modal::UsageInfoTab;
+    let mut app = three_agent_app();
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let nonce = dashboard_usage_modal(&app).fetch_nonce;
+    let effects = dispatch(Action::ShowContextInfo, &mut app);
+    assert!(
+        effects.is_empty(),
+        "re-open must not refetch, got: {effects:?}"
+    );
+    let modal = dashboard_usage_modal(&app);
+    assert_eq!(modal.active_tab, UsageInfoTab::ContextUsage);
+    assert_eq!(
+        modal.fetch_nonce, nonce,
+        "re-tab keeps the in-flight generation"
+    );
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    assert_eq!(
+        dashboard_usage_modal(&app).active_tab,
+        UsageInfoTab::UsageLimit
+    );
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/context".into());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    assert_eq!(
+        dashboard_usage_modal(&app).active_tab,
+        UsageInfoTab::UsageLimit
+    );
+    let toast = app
+        .dashboard
+        .as_ref()
+        .unwrap()
+        .error_toast
+        .as_deref()
+        .expect("session-scoped /context toasts on the dashboard");
+    assert!(
+        toast.contains("/context only works in a session"),
+        "unexpected toast: {toast}"
+    );
+}
+/// The reply that carries the modal's generation settles it; a background reply (nonce 0) updates the cache but not the modal.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_usage_modal_settles_only_on_its_own_app_billing_generation() {
+    let mut app = three_agent_app();
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let nonce = dashboard_usage_modal(&app).fetch_nonce;
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::AppBillingFetched {
+            balance: Some(test_bal(10.0)),
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            nonce: 0,
+        }),
+        &mut app,
+    );
+    assert!(
+        dashboard_usage_modal(&app).billing_loading,
+        "a startup/login refresh must not settle the modal's fetch"
+    );
+    assert_eq!(app.credit_balance.as_ref().map(|b| b.usage_pct), Some(10.0));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AppBillingFetched {
+            balance: Some(test_bal(42.0)),
+            autotopup: crate::views::credit_bar::AutoTopupFetch::Unchanged,
+            nonce,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty(), "got: {effects:?}");
+    let modal = dashboard_usage_modal(&app);
+    assert!(!modal.billing_loading);
+    assert!(modal.billing_error.is_none());
+    assert_eq!(app.credit_balance.as_ref().map(|b| b.usage_pct), Some(42.0));
+}
+/// A failed fetch surfaces its error in the modal and keeps the last-known-good balance (the welcome warning and new-agent seed read it).
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_usage_modal_billing_error_keeps_cached_balance() {
+    let mut app = three_agent_app();
+    app.credit_balance = Some(test_bal(63.0));
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let nonce = dashboard_usage_modal(&app).fetch_nonce;
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::AppBillingError {
+            error: "proxy unreachable".to_string(),
+            nonce,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty(), "got: {effects:?}");
+    let modal = dashboard_usage_modal(&app);
+    assert!(!modal.billing_loading);
+    assert_eq!(modal.billing_error.as_deref(), Some("proxy unreachable"));
+    assert_eq!(
+        app.credit_balance.as_ref().map(|b| b.usage_pct),
+        Some(63.0),
+        "a transport failure must not wipe the cached balance"
+    );
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_usage_redirect_url_skips_billing_fetch() {
+    let mut app = three_agent_app();
+    app.usage_billing_redirect_url = Some("https://billing.example.com/me".to_string());
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    let modal = dashboard_usage_modal(&app);
+    assert!(!modal.billing_loading);
+    assert_eq!(modal.fetch_nonce, 0);
+    assert_eq!(
+        modal.ctx.billing_redirect_url.as_deref(),
+        Some("https://billing.example.com/me")
+    );
+}
+/// Team / API-key accounts have no consumer billing surface: no fetch, and the modal explains who manages the limits.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_usage_team_account_skips_billing_fetch() {
+    let mut app = three_agent_app();
+    app.usage_visible = false;
+    app.sync_billing_surface_to_agents();
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(effects.is_empty(), "got: {effects:?}");
+    let modal = dashboard_usage_modal(&app);
+    assert!(!modal.ctx.usage_visible);
+    assert!(!modal.billing_loading);
+    assert_eq!(modal.fetch_nonce, 0);
+}
+/// `--chat` processes carry `chat_kind` on every session; the dashboard modal follows so it hides Build coding credits the same way.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_slash_usage_in_chat_mode_marks_modal_chat_kind() {
+    let mut app = three_agent_app();
+    app.chat_mode = true;
+    open_dashboard(&mut app);
+    let effects = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(
+        effects.is_empty(),
+        "chat kind never fetches Build billing, got: {effects:?}"
+    );
+    let modal = dashboard_usage_modal(&app);
+    assert!(modal.ctx.chat_kind);
+    assert!(!modal.billing_loading);
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_reopen_clears_usage_modal() {
+    let mut app = three_agent_app();
+    open_dashboard(&mut app);
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    assert!(app.dashboard.as_ref().unwrap().usage_modal.is_some());
+    let _ = dispatch(Action::ExitDashboard, &mut app);
+    open_dashboard(&mut app);
+    assert!(app.dashboard.as_ref().unwrap().usage_modal.is_none());
+}
+/// Ctrl+\ passes through the open modal into the overlay; coming back through either overlay exit must not resurrect it.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_overlay_exits_clear_usage_modal() {
+    let mut app = three_agent_app();
+    mark_agent_nonempty(&mut app, AgentId(0));
+    open_dashboard(&mut app);
+    let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let _ = dispatch_dashboard_attach(&mut app, row.clone());
+    assert!(matches!(app.active_view, ActiveView::Agent(_)));
+    let _ = dispatch_dashboard_overlay_exit(&mut app);
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+    assert!(
+        app.dashboard.as_ref().unwrap().usage_modal.is_none(),
+        "overlay exit must drop the modal"
+    );
+    let _ = dispatch_dashboard_dispatch_slash(&mut app, "/usage".into());
+    let _ = dispatch_dashboard_attach(&mut app, row);
+    let _ = dispatch_dashboard_overlay_stop(&mut app);
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+    assert!(
+        app.dashboard.as_ref().unwrap().usage_modal.is_none(),
+        "overlay stop must drop the modal"
     );
 }
 /// Session-scoped Action builtins must not spawn an agent whose first
@@ -2185,7 +3608,7 @@ fn dashboard_slash_compact_does_not_spawn() {
         "unexpected toast: {toast}"
     );
 }
-/// Extensions / config-agents modals only mount on an agent view. From the
+/// Extensions / config-agents modals only mount on an agent view. From the dashboard they must toast (not silently clear the dispatch input).
 /// dashboard they must toast (not silently clear the dispatch input).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -2240,7 +3663,7 @@ fn dashboard_slash_session_modals_toast_instead_of_noop() {
         }
     }
 }
-/// Shift+Tab (`DashboardCycleMode`) rotates Normal to Plan to Auto to
+/// Shift+Tab (`DashboardCycleMode`) rotates Normal to Plan to Auto to Always-Approve and back to Normal when Auto is enabled.
 /// Always-Approve and back to Normal when Auto is enabled.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -2378,12 +3801,7 @@ fn dashboard_open_seeds_auto_from_app_permission_mode() {
         "a gated-off Auto default must seed Normal"
     );
 }
-/// Peek status follows the LIVE turn activity while running: a turn that's
-/// running with no live activity (e.g. permission just granted, waiting for
-/// tool results) reports "Working" even though a prior agent message is the
-/// newest scrollback block, never the stale "Response". When the turn goes
-/// idle the same message becomes the final "Response". An actively
-/// streaming message (tracker `Responding`) reads "Response".
+/// Peek status follows the LIVE turn activity while running: a turn that's running with no live activity (e.g. permission just granted, waiting for tool results) reports "Working" even though a prior agent message is the newest scrollback block, never the stale "Response". When the turn goes idle the same message becomes the final "Response". An actively streaming message (tracker `Responding`) reads "Response".
 #[test]
 fn extract_response_type_running_no_activity_is_working() {
     use crate::acp::meta::NotificationMeta;
@@ -2415,10 +3833,7 @@ fn extract_response_type_running_no_activity_is_working() {
     assert_eq!(extract_last_response_type(agent), "Response");
 }
 /// Peek status: when a tool is actively running (`turn_activity()` is
-/// `ToolRunning`) the live activity overrides the scrollback scan: even a
-/// still-streaming agent message that's the newest block reports "Working"
-/// rather than the stale "Response", because the agent has moved on to the
-/// (granted) tool whose own block isn't the newest entry yet.
+/// `ToolRunning`) the live activity overrides the scrollback scan: even a still-streaming agent message that's the newest block reports "Working" rather than the stale "Response", because the agent has moved on to the (granted) tool whose own block isn't the newest entry yet.
 #[test]
 fn extract_response_type_tool_running_overrides_stale_response() {
     use crate::acp::meta::NotificationMeta;
@@ -2468,7 +3883,7 @@ fn dashboard_dispatch_always_approve_sets_yolo() {
     let effects = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     let new_id = *app.agents.keys().next().unwrap();
     assert!(
-        app.agents[&new_id].session.is_yolo(),
+        test_agent(&app, new_id).session.is_yolo(),
         "Always-Approve must spawn the agent in auto-approve"
     );
     assert!(effects.iter().any(|effect| matches!(
@@ -2490,8 +3905,8 @@ fn dashboard_dispatch_auto_sets_classifier_without_changing_globals() {
     app.dashboard.as_mut().unwrap().pending_mode = DashboardDispatchMode::Auto;
     let effects = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     let new_id = *app.agents.keys().next().unwrap();
-    assert!(app.agents[&new_id].session.is_auto());
-    assert!(!app.agents[&new_id].session.is_yolo());
+    assert!(test_agent(&app, new_id).session.is_auto());
+    assert!(!test_agent(&app, new_id).session.is_yolo());
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::CreateSession {
@@ -2514,7 +3929,7 @@ fn dashboard_dispatch_auto_attach_syncs_mirror_and_new_inherits_auto() {
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
     let _ = dispatch_new_session_inner(&mut app, None);
     assert!(
-        app.agents[&AgentId(1)].session.is_auto(),
+        test_agent(&app, AgentId(1)).session.is_auto(),
         "/new must inherit the active attached agent's Auto mirror"
     );
 }
@@ -2532,7 +3947,7 @@ fn dashboard_dispatch_stale_auto_degrades_when_gate_is_off() {
         app.dashboard.as_ref().unwrap().pending_mode,
         DashboardDispatchMode::Normal
     );
-    assert!(!app.agents[&new_id].session.is_auto());
+    assert!(!test_agent(&app, new_id).session.is_auto());
     assert!(effects.iter().any(|effect| matches!(
         effect,
         Effect::CreateSession {
@@ -2554,7 +3969,7 @@ fn auto_gate_kill_switch_clears_staged_dashboard_auto() {
         DashboardDispatchMode::Normal
     );
 }
-/// Always-Approve staged but pinned off: plain-Send (stays on the
+/// Always-Approve staged but pinned off: plain-Send (stays on the dashboard) must clamp yolo off AND surface the warning on the dashboard's OWN error slot; the new agent's toast is invisible here.
 /// dashboard) must clamp yolo off AND surface the warning on the
 /// dashboard's OWN error slot; the new agent's toast is invisible here.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -2570,7 +3985,7 @@ fn dashboard_dispatch_always_approve_blocked_warns_on_dashboard() {
     let _ = dispatch_dashboard_dispatch(&mut app, "do the thing".into(), false);
     let new_id = *app.agents.keys().next().unwrap();
     assert!(
-        !app.agents[&new_id].session.is_yolo(),
+        !test_agent(&app, new_id).session.is_yolo(),
         "pinned always-approve must spawn the agent in Normal"
     );
     assert_eq!(
@@ -2580,30 +3995,29 @@ fn dashboard_dispatch_always_approve_blocked_warns_on_dashboard() {
     );
 }
 /// A freshly dispatched agent (queued prompt, session not yet created)
-/// classifies as `Working`, so it lands in the Working group right away,
-/// and keeps the prompt preview as its title rather than a session-id
-/// fallback.
+/// classifies as `Working`, so it lands in the Working group right away, and keeps the prompt preview as its title rather than a session-id fallback.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_dispatch_new_agent_is_working_with_prompt_title() {
-    use crate::views::dashboard::row::{build_rows, classify_top_level};
+    use crate::views::dashboard::row::{build_rows_with_roster, classify_top_level};
     use crate::views::dashboard::{DashboardRowId, Filter, Grouping, RowState};
     let mut app = test_app();
     open_dashboard(&mut app);
     let _ = dispatch_dashboard_dispatch(&mut app, "fix the login bug".into(), false);
     let new_id = *app.agents.keys().next().unwrap();
     assert_eq!(
-        classify_top_level(&app.agents[&new_id]),
+        classify_top_level(test_agent(&app, new_id)),
         RowState::Working,
         "a queued-prompt agent must classify as Working",
     );
-    let rows = build_rows(
+    let rows = build_rows_with_roster(
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
         Grouping::State,
         &Filter::None,
         None,
+        &[],
     );
     let row = rows
         .iter()
@@ -2612,7 +4026,7 @@ fn dashboard_dispatch_new_agent_is_working_with_prompt_title() {
     assert_eq!(row.state, RowState::Working);
     assert_eq!(row.label, "fix the login bug");
 }
-/// A staged model and plan mode are applied to the agent spawned by the
+/// A staged model and plan mode are applied to the agent spawned by the next dispatch: the model id threads into `CreateSession`, the effort is stashed as a deferred switch, and plan mode is deferred and optimistic.
 /// next dispatch: the model id threads into `CreateSession`, the effort
 /// is stashed as a deferred switch, and plan mode is deferred and optimistic.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -2637,7 +4051,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
         e,
         Effect::CreateSession { model_id: Some(m), .. } if *m == model_id
     )));
-    let agent = &app.agents[&new_id];
+    let agent = test_agent(&app, new_id);
     assert_eq!(
         agent.session.deferred_model_switch,
         Some(crate::app::agent::DeferredModelSwitch {
@@ -2653,10 +4067,7 @@ fn dashboard_dispatch_applies_pending_model_and_plan() {
     );
     assert_eq!(agent.plan_mode_pending, Some(true));
 }
-/// The `[+ New Agent]` button path (`DashboardCreateNewAgentWithDetail`,
-/// no queued prompt) applies the same staged model and mode as the dispatch
-/// path: the model id threads into `CreateSession`, the effort is stashed
-/// as a deferred switch, and plan mode is deferred and optimistic.
+/// The `[+ New Agent]` button path (`DashboardCreateNewAgentWithDetail`, no queued prompt) applies the same staged model and mode as the dispatch path: the model id threads into `CreateSession`, the effort is stashed as a deferred switch, and plan mode is deferred and optimistic.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_new_agent_button_applies_pending_model_and_plan() {
@@ -2679,7 +4090,7 @@ fn dashboard_new_agent_button_applies_pending_model_and_plan() {
         e,
         Effect::CreateSession { model_id: Some(m), .. } if *m == model_id
     )));
-    let agent = &app.agents[&new_id];
+    let agent = test_agent(&app, new_id);
     assert_eq!(
         agent.session.deferred_model_switch,
         Some(crate::app::agent::DeferredModelSwitch {
@@ -2705,7 +4116,7 @@ fn dashboard_new_agent_button_carries_auto_permission_override() {
     app.dashboard.as_mut().unwrap().pending_mode = DashboardDispatchMode::Auto;
     let effects = dispatch(Action::DashboardCreateNewAgentWithDetail, &mut app);
     let new_id = *app.agents.keys().next().unwrap();
-    assert!(app.agents[&new_id].session.is_auto());
+    assert!(test_agent(&app, new_id).session.is_auto());
     assert_eq!(app.current_ui.permission_mode.as_deref(), Some("auto"));
     assert!(effects.iter().any(|effect| matches!(
         effect,
@@ -2715,7 +4126,7 @@ fn dashboard_new_agent_button_carries_auto_permission_override() {
         }
     )));
 }
-/// The deferred plan `SessionMode` is emitted (and cleared) once the
+/// The deferred plan `SessionMode` is emitted (and cleared) once the session exists, mirroring the deferred model switch.
 /// session exists, mirroring the deferred model switch.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -2731,12 +4142,12 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
             agent_id: id,
             session_id: session_id.clone(),
             models: None,
-            scheduler_background_loops: None,
+            modes: None,
         }),
         &mut app,
     );
     assert!(
-        app.agents[&id].deferred_session_mode.is_none(),
+        test_agent(&app, id).deferred_session_mode.is_none(),
         "deferred mode must be consumed"
     );
     assert!(
@@ -2746,7 +4157,7 @@ fn dashboard_deferred_plan_mode_applied_on_session_created() {
         "SessionCreated must emit SetSessionMode for the deferred plan mode"
     );
 }
-/// Any non-empty prompt, even a single character, dispatches a
+/// Any non-empty prompt, even a single character, dispatches a new session (the old 4-char floor was relaxed to 1 char).
 /// new session (the old 4-char floor was relaxed to 1 char).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -2767,11 +4178,7 @@ fn dashboard_dispatch_single_char_creates_session() {
     );
 }
 /// A normal prompt creates a session.
-///
-/// The dispatch path does not auto-select the freshly created row;
-/// selection stays where the user left it (None in this empty-state
-/// test). Selection is the overview navigation cursor, kept distinct
-/// from the freshly-spawned agent.
+/// The dispatch path does not auto-select the freshly created row; selection stays where the user left it (None in this empty-state test). Selection is the overview navigation cursor, kept distinct from the freshly-spawned agent.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_dispatch_prompt_creates_session() {
@@ -2806,12 +4213,7 @@ fn dashboard_dispatch_empty_prompt_rejected() {
         "no agent created for an empty prompt"
     );
 }
-/// The dispatch input ALWAYS spawns a new session, even when a
-/// top-level row is selected. The selection is the overview
-/// navigation cursor, NOT a reply target; conflating the two
-/// trapped the user "stuck replying to the same agent". To talk to
-/// an existing agent the user opens it (navigate, then Enter) and
-/// replies inside its own view.
+/// The dispatch input ALWAYS spawns a new session, even when a top-level row is selected. The selection is the overview navigation cursor, NOT a reply target; conflating the two trapped the user "stuck replying to the same agent". To talk to an existing agent the user opens it (navigate, then Enter) and replies inside its own view.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_dispatch_with_top_level_selection_creates_new_session() {
@@ -2822,7 +4224,7 @@ fn dashboard_dispatch_with_top_level_selection_creates_new_session() {
         d.selected = Some(crate::views::dashboard::DashboardRowId::TopLevel(selected));
     }
     let before = app.agents.len();
-    let queue_before = app.agents[&selected].session.pending_prompts.len();
+    let queue_before = test_agent(&app, selected).session.pending_prompts.len();
     let _ = dispatch_dashboard_dispatch(&mut app, "spawn a brand new agent".into(), false);
     assert_eq!(
         app.agents.len(),
@@ -2830,7 +4232,7 @@ fn dashboard_dispatch_with_top_level_selection_creates_new_session() {
         "dispatch with a selected row must create a NEW session, not reply",
     );
     assert_eq!(
-        app.agents[&selected].session.pending_prompts.len(),
+        test_agent(&app, selected).session.pending_prompts.len(),
         queue_before,
         "the selected agent's queue must be untouched (no reply enqueued)",
     );
@@ -2847,7 +4249,7 @@ fn dashboard_dispatch_with_top_level_selection_creates_new_session() {
 fn dashboard_enter_button_focused_with_text_creates_and_stays() {
     let mut app = test_app();
     open_dashboard(&mut app);
-    assert!(app.dashboard.as_ref().unwrap().new_agent_button_focused);
+    assert!(app.dashboard.as_ref().unwrap().new_agent_button_focused());
     let agents_before = app.agents.len();
     let _ = dispatch_dashboard_dispatch(&mut app, "kick off a fresh session".into(), false);
     assert_eq!(
@@ -2866,16 +4268,13 @@ fn dashboard_enter_button_focused_with_text_creates_and_stays() {
         "Enter (no Shift) must NOT set attached_agent",
     );
 }
-/// Case 3: button focused, non-empty, Ctrl+S. New
-/// session AND open detail AND set attached_agent so the
-/// overlay chrome paints. Was broken before the new-session
-/// attach path got the `attached_agent` write.
+/// Case 3: button focused, non-empty, Ctrl+S. New session AND open detail AND set attached_agent so the overlay chrome paints. Was broken before the new-session attach path got the `attached_agent` write.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_ctrl_s_button_focused_with_text_creates_and_opens() {
     let mut app = test_app();
     open_dashboard(&mut app);
-    assert!(app.dashboard.as_ref().unwrap().new_agent_button_focused);
+    assert!(app.dashboard.as_ref().unwrap().new_agent_button_focused());
     let _ = dispatch_dashboard_dispatch(&mut app, "kick off and open".into(), true);
     let new_id = *app.agents.keys().last().unwrap();
     assert!(
@@ -2895,15 +4294,13 @@ fn dashboard_ctrl_s_button_focused_with_text_creates_and_opens() {
         "Ctrl+S must snap selection onto the new row (overlay anchor)",
     );
     assert!(
-        !app.dashboard.as_ref().unwrap().new_agent_button_focused,
+        !app.dashboard.as_ref().unwrap().new_agent_button_focused(),
         "selection on the new row implies the button is no longer focused",
     );
 }
 /// Case 4: row selected, empty prompt, Enter. Open detail
-/// (no send). Emitted as `DashboardAttach` from the state
-/// handler, which the dispatcher routes through
-/// `dispatch_dashboard_attach` (sets attached_agent and
-/// switches view).
+/// (no send). Emitted as `DashboardAttach` from the state handler, which the dispatcher routes through
+/// `dispatch_dashboard_attach` (sets attached_agent and switches view).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_enter_row_selected_empty_prompt_opens_detail() {
@@ -2913,7 +4310,7 @@ fn dashboard_enter_row_selected_empty_prompt_opens_detail() {
     if let Some(d) = app.dashboard.as_mut() {
         d.focus_row(crate::views::dashboard::DashboardRowId::TopLevel(target));
     }
-    let queue_before = app.agents[&target].session.pending_prompts.len();
+    let queue_before = test_agent(&app, target).session.pending_prompts.len();
     let _ = dispatch_dashboard_attach(
         &mut app,
         crate::views::dashboard::DashboardRowId::TopLevel(target),
@@ -2925,42 +4322,12 @@ fn dashboard_enter_row_selected_empty_prompt_opens_detail() {
     );
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(target),);
     assert_eq!(
-        app.agents[&target].session.pending_prompts.len(),
+        test_agent(&app, target).session.pending_prompts.len(),
         queue_before,
         "Enter + empty prompt must NOT enqueue anything",
     );
 }
-/// Selecting a SUBAGENT row falls through to the
-/// new-session path. Subagents have no user prompt channel,
-/// so "reply" doesn't apply. Belt-and-braces: a future
-/// regression that broadened the reply target match to all
-/// `DashboardRowId` variants would hijack the new-session
-/// path here.
-#[serial_test::serial(GROK_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_dispatch_with_subagent_selection_creates_new_session() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.selected = Some(crate::views::dashboard::DashboardRowId::Subagent {
-            parent: AgentId(0),
-            child_session_id: "child-1".into(),
-        });
-    }
-    let agents_before = app.agents.len();
-    let _ = dispatch_dashboard_dispatch(&mut app, "a fresh task for a new agent".into(), false);
-    assert_eq!(
-        app.agents.len(),
-        agents_before + 1,
-        "subagent selection must NOT redirect dispatch to its parent — \
-             reply only applies to top-level rows",
-    );
-}
-/// When nothing is selected, dispatch reaches the
-/// new-session path AND leaves selection at None. Combined
-/// with `dashboard_dispatch_4_chars_creates_session` this
-/// pins the post-dispatch state contract: the user can
-/// immediately press Enter again to spawn another session.
+/// When nothing is selected, dispatch reaches the new-session path AND leaves selection at None. Combined with `dashboard_dispatch_4_chars_creates_session` this pins the post-dispatch state contract: the user can immediately press Enter again to spawn another session.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_dispatch_with_no_selection_creates_new_and_leaves_selection_empty() {
@@ -2974,10 +4341,8 @@ fn dashboard_dispatch_with_no_selection_creates_new_and_leaves_selection_empty()
         "post-dispatch selection must remain None — next Enter spawns another session",
     );
 }
-/// Attaching a top-level row switches the whole
-/// view to the agent's fullscreen view AND sets
-/// `attached_agent` as the signal for the session-overlay
-/// chrome (bordered frame and Prev/Next/Close).
+/// Attaching a top-level row switches the whole view to the agent's fullscreen view AND sets
+/// `attached_agent` as the signal for the session-overlay chrome (bordered frame and Prev/Next/Close).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_attach_top_level_switches_to_agent_view() {
@@ -3004,10 +4369,7 @@ fn dashboard_attach_top_level_switches_to_agent_view() {
         Some(crate::views::dashboard::DashboardRowId::TopLevel(id)),
     );
 }
-/// Attach routes through `focus_row`, so a previously selected
-/// section header is cleared; the row and section cursors stay
-/// mutually exclusive (a bare `selected` assignment used to leave
-/// both active).
+/// Attach routes through `focus_row`, so a previously selected section header is cleared; the row and section cursors stay mutually exclusive (a bare `selected` assignment used to leave both active).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_attach_clears_selected_section() {
@@ -3032,186 +4394,6 @@ fn dashboard_attach_clears_selected_section() {
         d.selected_section.is_none(),
         "attach must clear the section cursor",
     );
-}
-/// Attaching a subagent row switches to the
-/// parent agent's view AND sets the parent's `active_subagent`
-/// so the subagent's takeover is rendered immediately.
-#[serial_test::serial(GROK_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_attach_subagent_switches_to_parent_with_subagent_focused() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    let parent = AgentId(0);
-    let child_sid = "child-1".to_string();
-    {
-        let agent = app.agents.get_mut(&parent).unwrap();
-        agent
-            .subagent_sessions
-            .insert(child_sid.clone(), make_test_subagent(&child_sid, "sa-1"));
-    }
-    let child_session = make_test_agent_session(&app, AgentId(1), "child-session");
-    let mut child_view = AgentView::new(child_session, ScrollbackState::new());
-    crate::app::agent_view::test_fixtures::add_running_execute(&mut child_view);
-    assert!(!child_view.is_subagent_view);
-    app.agents
-        .get_mut(&parent)
-        .unwrap()
-        .subagent_views
-        .insert(child_sid.clone(), Box::new(child_view));
-    crate::app::agent_view::test_fixtures::add_running_execute(
-        app.agents.get_mut(&parent).unwrap(),
-    );
-    let _ = dispatch_dashboard_attach(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::Subagent {
-            parent,
-            child_session_id: child_sid.clone(),
-        },
-    );
-    assert!(
-        matches!(app.active_view, ActiveView::Agent(a) if a == parent),
-        "expected ActiveView::Agent({parent:?}), got: {:?}",
-        app.active_view,
-    );
-    let parent_view = app.agents.get_mut(&parent).unwrap();
-    assert_eq!(parent_view.active_subagent, Some(child_sid.clone()));
-    assert!(parent_view.subagent_views[&child_sid].is_subagent_view);
-    assert!(
-        parent_view.subagent_views[&child_sid]
-            .session
-            .tracker
-            .running_execute_tool_call_id()
-            .is_some()
-    );
-    assert!(
-        !parent_view.subagent_views[&child_sid]
-            .current_shortcut_hints(&app.registry, false)
-            .iter()
-            .any(|hint| hint.label == "send to bg")
-    );
-    let child = parent_view.subagent_views.get_mut(&child_sid).unwrap();
-    let area = ratatui::layout::Rect::new(0, 0, 80, 30);
-    let mut buf = ratatui::buffer::Buffer::empty(area);
-    let mut scratch = crate::scrollback::render::ScratchBuffer::new();
-    let _ = child.draw(
-        area,
-        &mut buf,
-        &app.registry,
-        &mut scratch,
-        None,
-        false,
-        crate::app::agent_view::BannerSlotParams::none(),
-        &crate::app::bundle::BundleState::default(),
-        false,
-        false,
-        &mut Vec::new(),
-        crate::app::agent_view::AppRenderParams::default(),
-    );
-    assert!(child.hit_bg_button.rect.is_none());
-    let parent_tool = parent_view
-        .session
-        .tracker
-        .running_execute_tool_call_id()
-        .map(str::to_owned);
-    let child_tool = parent_view.subagent_views[&child_sid]
-        .session
-        .tracker
-        .running_execute_tool_call_id()
-        .map(str::to_owned);
-    let outcome = app.handle_input(&crossterm::event::Event::Key(
-        crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('b'),
-            crossterm::event::KeyModifiers::CONTROL,
-        ),
-    ));
-    assert!(matches!(outcome, InputOutcome::Changed));
-    let parent_view = app.agents.get(&parent).unwrap();
-    assert_eq!(
-        parent_view
-            .session
-            .tracker
-            .running_execute_tool_call_id()
-            .map(str::to_owned),
-        parent_tool
-    );
-    assert_eq!(
-        parent_view.subagent_views[&child_sid]
-            .session
-            .tracker
-            .running_execute_tool_call_id()
-            .map(str::to_owned),
-        child_tool
-    );
-    assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(parent),);
-}
-/// Regression: attaching to a subagent from the dashboard must lazily load
-/// its (resume-deferred) transcript, just like `open_subagent_fullscreen`.
-#[serial_test::serial(GROK_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
-    let child_sid = "child-dash-defer".to_string();
-    let home = tempfile::tempdir().unwrap();
-    // The replay fast path resolves hints against the parent session cwd
-    // (`make_test_agent_session` uses `std::env::temp_dir()`), so the fixture
-    // must live under that same cwd's encoded dirname. A hardcoded `/tmp`
-    // only matches on Unix, where temp_dir() == "/tmp".
-    let session_dir = home
-        .path()
-        .join("sessions")
-        .join(xai_grok_config::encode_cwd_dirname(
-            &std::env::temp_dir().to_string_lossy(),
-        ))
-        .join(&child_sid);
-    std::fs::create_dir_all(&session_dir).unwrap();
-    std::fs::write(session_dir.join("summary.json"), "{}").unwrap();
-    let tool_line = format!(
-        r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
-    );
-    std::fs::write(session_dir.join("updates.jsonl"), tool_line + "\n").unwrap();
-    crate::app::subagent::set_replay_grok_home_for_tests(Some(home.path().to_path_buf()));
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    let parent = AgentId(0);
-    app.agents
-        .get_mut(&parent)
-        .unwrap()
-        .subagent_sessions
-        .insert(child_sid.clone(), make_test_subagent(&child_sid, "sa-1"));
-    let child_session = make_test_agent_session(&app, AgentId(1), &child_sid);
-    let child_view = AgentView::new(child_session, ScrollbackState::new());
-    app.agents
-        .get_mut(&parent)
-        .unwrap()
-        .insert_subagent_view(child_sid.clone(), Box::new(child_view));
-    let _ = dispatch_dashboard_attach(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::Subagent {
-            parent,
-            child_session_id: child_sid.clone(),
-        },
-    );
-    let agent = app.agents.get(&parent).unwrap();
-    let child = agent.subagent_views.get(&child_sid).unwrap();
-    let tool_calls = (0..child.scrollback.len())
-        .filter(|i| {
-            child
-                .scrollback
-                .entry(*i)
-                .is_some_and(|e| matches!(e.block, RenderBlock::ToolCall(_)))
-        })
-        .count();
-    assert_eq!(
-        tool_calls, 1,
-        "dashboard attach must lazily replay the deferred subagent transcript"
-    );
-    assert!(
-        agent
-            .subagent_sessions
-            .get(&child_sid)
-            .is_some_and(|i| !i.transcript.needs_replay()),
-        "dashboard attach must record the child transcript state"
-    );
-    crate::app::subagent::set_replay_grok_home_for_tests(None);
 }
 /// `/dashboard` opens to the dashboard view ONLY.
 /// No auto-attached popup. The user reaches an agent's view by
@@ -3242,15 +4424,15 @@ fn dashboard_open_does_not_auto_attach_to_focused_agent() {
         d.selected,
     );
     assert!(
-        d.new_agent_button_focused,
-        "open must default to the `[+ New Agent]` button (new-session mode)",
+        d.new_agent_button_focused(),
+        "open must default to the `+ New Agent` button (new-session mode)",
     );
     assert!(
         d.list_focused,
         "open with agents must list-focus for navigation",
     );
 }
-/// Open with at least one agent: overview list focused (nav mode); `[+ New Agent]`
+/// Open with at least one agent: overview list focused (nav mode); `+ New Agent`
 /// stays the cursor target so no row is pre-selected (no silent reply mode).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -3260,7 +4442,7 @@ fn dashboard_open_with_agents_list_focused() {
     open_dashboard(&mut app);
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.list_focused, "nonempty open must focus the overview list");
-    assert!(d.new_agent_button_focused);
+    assert!(d.new_agent_button_focused());
     assert!(d.selected.is_none());
     app.dashboard.as_mut().unwrap().list_focused = false;
     app.dashboard
@@ -3274,7 +4456,7 @@ fn dashboard_open_with_agents_list_focused() {
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.list_focused, "reopen with agents must re-list-focus");
     assert!(
-        d.new_agent_button_focused,
+        d.new_agent_button_focused(),
         "reopen resets to new-agent button",
     );
     assert!(d.selected.is_none());
@@ -3291,7 +4473,7 @@ fn dashboard_open_empty_input_focused() {
         !d.list_focused,
         "empty open must keep dispatch input focused",
     );
-    assert!(d.new_agent_button_focused);
+    assert!(d.new_agent_button_focused());
     assert!(d.selected.is_none());
     app.dashboard.as_mut().unwrap().list_focused = true;
     let _ = dispatch_exit_dashboard(&mut app);
@@ -3301,9 +4483,7 @@ fn dashboard_open_empty_input_focused() {
         "reopen while empty must keep input focused",
     );
 }
-/// Regression: opening the dashboard from an agent and then typing
-/// a prompt must DISPATCH A NEW agent, not reply to the agent we came
-/// from; and rapid back-to-back dispatches keep spawning new agents
+/// Regression: opening the dashboard from an agent and then typing a prompt must DISPATCH A NEW agent, not reply to the agent we came from; and rapid back-to-back dispatches keep spawning new agents
 /// (no "stuck to the same agent" from a sticky reply selection).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -3326,10 +4506,7 @@ fn dashboard_dispatch_after_open_from_agent_spawns_new_sessions() {
     );
 }
 /// Opening from Welcome leaves the `[+ New Agent]`
-/// button as the default focus. Previously the dashboard
-/// seeded selection to the first agent so Enter would attach
-/// without navigating; with the button taking that role,
-/// selection stays empty and the button signals what Enter
+/// button as the default focus. Previously the dashboard seeded selection to the first agent so Enter would attach without navigating; with the button taking that role, selection stays empty and the button signals what Enter
 /// (on an empty prompt) will do.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -3349,8 +4526,8 @@ fn dashboard_open_from_welcome_focuses_new_agent_button() {
         d.selected,
     );
     assert!(
-        d.new_agent_button_focused,
-        "the `[+ New Agent]` button must be focused as the default",
+        d.new_agent_button_focused(),
+        "the `+ New Agent` button must be focused as the default",
     );
 }
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -3375,7 +4552,7 @@ fn dashboard_arrow_keys_clear_manual_scroll_flag_even_with_no_selection() {
     open_dashboard(&mut app);
     let d = app.dashboard.as_mut().unwrap();
     d.manual_scroll_active = true;
-    assert!(d.new_agent_button_focused);
+    assert!(d.new_agent_button_focused());
     assert!(d.selected.is_none());
     let _ = dispatch(Action::DashboardSelectNext, &mut app);
     assert!(!app.dashboard.as_ref().unwrap().manual_scroll_active);
@@ -3411,7 +4588,7 @@ fn dashboard_exit_alias_clears_dispatch_text() {
     let _ = dispatch_open_dashboard(&mut app);
     assert_eq!(app.dashboard.as_ref().unwrap().dispatch.text(), "");
 }
-/// Bare exit aliases in the dashboard dispatch box quit the CLI (same as
+/// Bare exit aliases in the dashboard dispatch box quit the CLI (same as agent-prompt send) and must not spawn a session.
 /// agent-prompt send) and must not spawn a session.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -3431,7 +4608,7 @@ fn dashboard_bare_exit_quits_cli() {
         assert_eq!(app.agents.len(), before, "{text:?} must not spawn");
     }
 }
-/// `/exit` / `/quit` on the dashboard also quit the CLI (not spawn, not
+/// `/exit` / `/quit` on the dashboard also quit the CLI (not spawn, not merely leave the dashboard).
 /// merely leave the dashboard).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -3451,10 +4628,8 @@ fn dashboard_slash_exit_quits_cli() {
         assert_eq!(app.agents.len(), before, "{cmd} must not spawn");
     }
 }
-/// Ctrl+\ from the dashboard exits back to
-/// whichever agent view was active before. Since `/dashboard`
-/// no longer auto-attaches a popup, the previous "close popup,
-/// stay in dashboard" intermediate step is gone.
+/// Ctrl+\ from the dashboard exits back to whichever agent view was active before. Since `/dashboard`
+/// no longer auto-attaches a popup, the previous "close popup, stay in dashboard" intermediate step is gone.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_ctrl_backslash_exits_dashboard() {
@@ -3504,7 +4679,11 @@ fn dashboard_open_from_welcome_clears_stale_return_agent() {
     app.active_view = ActiveView::Welcome;
     let _ = dispatch_open_dashboard(&mut app);
     let _ = dispatch_exit_dashboard(&mut app);
-    assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
+    assert_eq!(
+        app.active_view,
+        ActiveView::Welcome,
+        "open from Welcome must return to Welcome, not a leftover agent"
+    );
 }
 /// Attach, then overlay exit, then dashboard exit restores the agent and overlay chrome.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -3526,36 +4705,27 @@ fn dashboard_overlay_exit_then_exit_returns_to_attached_agent() {
         Some(id2)
     );
 }
-/// Subagent attach round-trip keeps child takeover and Subagent row cursor.
+/// Leaving the dashboard back into an overlay keeps a live subagent takeover and selects the
+/// parent's top-level row.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
-fn dashboard_overlay_exit_then_exit_restores_subagent_row() {
+fn dashboard_overlay_return_keeps_takeover_on_top_level_row() {
     let mut app = test_app_with_agent();
     open_dashboard(&mut app);
     let parent = AgentId(0);
     mark_agent_nonempty(&mut app, parent);
     let child_sid = "child-return".to_string();
-    app.agents
-        .get_mut(&parent)
-        .unwrap()
-        .subagent_sessions
-        .insert(child_sid.clone(), make_test_subagent(&child_sid, "sa-ret"));
-    let child_view = AgentView::new(
-        make_test_agent_session(&app, AgentId(1), "child-session"),
-        ScrollbackState::new(),
-    );
-    app.agents
-        .get_mut(&parent)
-        .unwrap()
-        .subagent_views
-        .insert(child_sid.clone(), Box::new(child_view));
-    let _ = dispatch_dashboard_attach(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::Subagent {
-            parent,
-            child_session_id: child_sid.clone(),
-        },
-    );
+    {
+        let agent = app.agents.get_mut(&parent).unwrap();
+        agent
+            .subagent_sessions
+            .insert(child_sid.clone(), make_test_subagent(&child_sid, "sa-ret"));
+        agent.active_subagent = Some(child_sid.clone());
+    }
+    app.active_view = ActiveView::Agent(parent);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.attached_agent = Some(parent);
+    }
     let _ = dispatch_dashboard_overlay_exit(&mut app);
     let _ = dispatch_exit_dashboard(&mut app);
     assert_eq!(app.active_view, ActiveView::Agent(parent));
@@ -3564,15 +4734,37 @@ fn dashboard_overlay_exit_then_exit_restores_subagent_row() {
         Some(parent)
     );
     assert_eq!(
-        app.agents[&parent].active_subagent.as_deref(),
+        test_agent(&app, parent).active_subagent.as_deref(),
         Some(child_sid.as_str())
     );
     assert_eq!(
         app.dashboard.as_ref().and_then(|d| d.selected.clone()),
-        Some(crate::views::dashboard::DashboardRowId::Subagent {
-            parent,
-            child_session_id: child_sid,
-        })
+        Some(crate::views::dashboard::DashboardRowId::TopLevel(parent))
+    );
+}
+/// A stale takeover (child id absent from `subagent_sessions`) is cleared on the same overlay
+/// return, and the dashboard selection is still the parent's top-level row.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_overlay_return_clears_stale_takeover_on_top_level_row() {
+    let mut app = test_app_with_agent();
+    open_dashboard(&mut app);
+    let parent = AgentId(0);
+    mark_agent_nonempty(&mut app, parent);
+    {
+        let agent = app.agents.get_mut(&parent).unwrap();
+        agent.active_subagent = Some("missing-child".to_string());
+    }
+    app.active_view = ActiveView::Agent(parent);
+    if let Some(d) = app.dashboard.as_mut() {
+        d.attached_agent = Some(parent);
+    }
+    let _ = dispatch_dashboard_overlay_exit(&mut app);
+    let _ = dispatch_exit_dashboard(&mut app);
+    assert!(test_agent(&app, parent).active_subagent.is_none());
+    assert_eq!(
+        app.dashboard.as_ref().and_then(|d| d.selected.clone()),
+        Some(crate::views::dashboard::DashboardRowId::TopLevel(parent))
     );
 }
 /// Dead overlay return target: fall back without painting overlay chrome.
@@ -3593,7 +4785,7 @@ fn dashboard_exit_does_not_overlay_fallback_when_return_agent_dead() {
     assert_eq!(app.active_view, ActiveView::Agent(AgentId(0)));
     assert_eq!(app.dashboard.as_ref().and_then(|d| d.attached_agent), None);
 }
-/// `DashboardOverlayExit` returns the user to
+/// `DashboardOverlayExit` returns the user to the dashboard from an attached agent view and clears the overlay state.
 /// the dashboard from an attached agent view and clears the
 /// overlay state.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -3613,9 +4805,7 @@ fn dashboard_overlay_exit_returns_to_dashboard() {
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, None);
 }
 /// Overlay Ctrl+X (confirmed second press): `DashboardOverlayStop`
-/// closes the attached session and lands on the DASHBOARD, not on
-/// the fallback agent the generic close path would pick while the
-/// closed agent is the active view.
+/// closes the attached session and lands on the DASHBOARD, not on the fallback agent the generic close path would pick while the closed agent is the active view.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_overlay_stop_closes_session_and_returns_to_dashboard() {
@@ -3655,10 +4845,7 @@ fn dashboard_overlay_stop_closes_session_and_returns_to_dashboard() {
         Some(format!("{} Session closed", crate::glyphs::check_mark()).as_str()),
     );
 }
-/// Overlay stop on the ONLY session: the close is refused (same
-/// guard as session close), but the user still lands on the
-/// dashboard with the refusal toast surfaced there; the session
-/// itself survives.
+/// Overlay stop on the ONLY session: the close is refused (same guard as session close), but the user still lands on the dashboard with the refusal toast surfaced there; the session itself survives.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_overlay_stop_only_session_refused_lands_on_dashboard() {
@@ -3687,10 +4874,7 @@ fn dashboard_overlay_stop_only_session_refused_lands_on_dashboard() {
         "the refusal toast must surface on the dashboard",
     );
 }
-/// The close confirm is armed while idle, but a turn can start
-/// inside the 2s window (queue drain, a sent prompt). The
-/// confirmed press must then CANCEL the turn instead of closing
-/// the session: Ctrl+X only ever closes an idle session.
+/// The close confirm is armed while idle, but a turn can start inside the 2s window (queue drain, a sent prompt). The confirmed press must then CANCEL the turn instead of closing the session: Ctrl+X only ever closes an idle session.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_overlay_stop_busy_agent_cancels_instead_of_closing() {
@@ -3729,7 +4913,7 @@ fn dashboard_overlay_stop_busy_agent_cancels_instead_of_closing() {
         "the overlay attachment must survive",
     );
 }
-/// `/compact` in flight: overlay stop cancels compaction instead of
+/// `/compact` in flight: overlay stop cancels compaction instead of closing the session (same as a running turn).
 /// closing the session (same as a running turn).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -3773,11 +4957,7 @@ fn dashboard_overlay_stop_compact_running_cancels() {
         "stop during /compact must emit CancelTurn, got {effects:?}",
     );
 }
-/// An armed overlay stop-confirm is bound to "this overlay, this
-/// agent": overlay exits / agent switches that happen WITHOUT a
-/// key press (mouse clicks on `[Dashboard]` / `[‹]` / `[›]`) must
-/// disarm it, while an unrelated pending action (e.g. quit) is
-/// left alone.
+/// An armed overlay stop-confirm is bound to "this overlay, this agent": overlay exits / agent switches that happen WITHOUT a key press (mouse clicks on `[Dashboard]` / `‹` / `›`) must disarm it, while an unrelated pending action (e.g. quit) is left alone.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_overlay_mouse_exit_and_cycle_disarm_pending_stop() {
@@ -3864,10 +5044,7 @@ fn dashboard_overlay_cycle_wraps_through_agents() {
     let _ = dispatch_dashboard_overlay_cycle(&mut app, -1);
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(id2));
 }
-/// Cycle respects the dashboard's filter. With a state
-/// filter that hides one of two agents, the cycle becomes a
-/// no-op (only one visible row to walk through); the user
-/// can clear the filter to reach the other agent.
+/// Cycle respects the dashboard's filter. With a state filter that hides one of two agents, the cycle becomes a no-op (only one visible row to walk through); the user can clear the filter to reach the other agent.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_overlay_cycle_respects_filter() {
@@ -3893,16 +5070,9 @@ fn dashboard_overlay_cycle_respects_filter() {
         "cycle through a filter that hides all rows must NOT walk",
     );
 }
-/// `overlay_cycle_order` returns top-level agents in the
-/// same order `render_dashboard` paints them, NOT the agent
-/// map's insertion order. The cycle dispatcher reads from
-/// this helper, so the `[‹]` / `[›]` chips walk the user
-/// through what they actually see.
-///
-/// `AgentView::new` stamps `last_active_at = Instant::now()`,
-/// so freshly-created agents sort DESCENDING by creation
-/// (most-recent first), matching the dashboard's "Idle"
-/// group ordering.
+/// `overlay_cycle_order` returns top-level agents in the same order `render_dashboard` paints them, NOT the agent map's insertion order. The cycle dispatcher reads from this helper, so the `‹` / `›` chips walk the user through what they actually see.
+/// `AgentView::new` stamps `last_active_at = Instant::now()`, so freshly-created agents sort DESCENDING by creation
+/// (most-recent first), matching the dashboard's "Idle" group ordering.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_overlay_cycle_order_matches_visible_rows() {
@@ -3961,39 +5131,41 @@ fn dashboard_overlay_cycle_anchors_on_visible_agent_not_stale_attach() {
     let d = app.dashboard.as_ref().unwrap();
     let order = crate::views::dashboard::overlay_cycle_order(d, &app.agents);
     assert_eq!(order, vec![AgentId(2), AgentId(1), AgentId(0)]);
+    let [first, _, third] = order.as_slice() else {
+        panic!("expected 3 cycle agents: {order:?}");
+    };
+    let first = *first;
+    let third = *third;
     let _ = dispatch_dashboard_attach(
         &mut app,
-        crate::views::dashboard::DashboardRowId::TopLevel(order[0]),
+        crate::views::dashboard::DashboardRowId::TopLevel(first),
     );
+    assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(first));
+    assert!(matches!(app.active_view, ActiveView::Agent(a) if a == first));
+    switch_to_agent(&mut app, third, SwitchCause::Picker);
     assert_eq!(
         app.dashboard.as_ref().unwrap().attached_agent,
-        Some(order[0])
-    );
-    assert!(matches!(app.active_view, ActiveView::Agent(a) if a == order[0]));
-    switch_to_agent(&mut app, order[2], SwitchCause::Picker);
-    assert_eq!(
-        app.dashboard.as_ref().unwrap().attached_agent,
-        Some(order[0]),
+        Some(first),
         "precondition: external switch leaves attached_agent stale on the first row",
     );
-    assert!(matches!(app.active_view, ActiveView::Agent(a) if a == order[2]));
+    assert!(matches!(app.active_view, ActiveView::Agent(a) if a == third));
     let _ = dispatch_dashboard_overlay_cycle(&mut app, 1);
     let landed = match app.active_view {
         ActiveView::Agent(a) => a,
         other => panic!("active_view not an agent: {other:?}"),
     };
     assert_eq!(
-        landed, order[0],
+        landed, first,
         "cycle must anchor on the visible agent (order[2] → wrap → order[0]), \
              not the stale attached_agent (which would land on order[1])",
     );
     assert_eq!(
         app.dashboard.as_ref().unwrap().attached_agent,
-        Some(order[0]),
+        Some(first),
         "the cycle re-attaches the overlay chrome to the landed agent",
     );
 }
-/// Cycling with only one agent is a no-op (no
+/// Cycling with only one agent is a no-op (no view switch, no state mutation).
 /// view switch, no state mutation).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -4105,7 +5277,7 @@ fn dashboard_overlay_cycle_works_through_handle_input_after_dashboard_esc_exit()
         "the cycle must attach the overlay chrome to the next agent",
     );
 }
-/// A dashboard first materialized by cycling must be fully configured (not
+/// A dashboard first materialized by cycling must be fully configured (not just seeded from persisted state), else it renders bare on back-out.
 /// just seeded from persisted state), else it renders bare on back-out.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -4287,9 +5459,7 @@ fn dashboard_overlay_cycle_non_overlay_noop_when_current_agent_hidden() {
         "a filtered-out current agent must not attach overlay chrome",
     );
 }
-/// `DashboardToggleAutoApprove` flips `yolo_mode` on
-/// the selected row's owning agent. Reuses `set_yolo_mode` by
-/// temporarily switching `active_view`, so the existing toast
+/// `DashboardToggleAutoApprove` flips `yolo_mode` on the selected row's owning agent. Reuses `set_yolo_mode` by temporarily switching `active_view`, so the existing toast
 /// / persist / queue-drain logic all apply.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -4328,8 +5498,7 @@ fn dashboard_toggle_auto_approve_with_no_selection_toasts() {
     );
 }
 /// End-to-end rename flow: begin rename, type characters, then commit.
-/// Untitled fixture agent has no display_name / generated title, so the
-/// draft prefills empty; typing then commit emit `RenameSession` and stamp
+/// Untitled fixture agent has no display_name / generated title, so the draft prefills empty; typing then commit emit `RenameSession` and stamp
 /// `display_name`.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -4396,7 +5565,7 @@ fn dashboard_rename_end_to_end_top_level_row() {
         "commit must clear the rename overlay",
     );
 }
-/// Dashboard rename of a chat-kind agent must stamp `kind: Chat` so the
+/// Dashboard rename of a chat-kind agent must stamp `kind: Chat` so the shell takes the conversations fork.
 /// shell takes the conversations fork.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -4428,13 +5597,9 @@ fn dashboard_rename_chat_kind_stamps_kind_chat() {
         "chat-lane dashboard rename must send kind=chat, got {effects:?}",
     );
 }
-/// `DashboardCancelRename` emits no effects and
-/// leaves `display_name` untouched. Previously named
-/// `dashboard_rename_cancel_via_esc_does_not_emit_effect`
-/// but that name implied Esc keystroke routing; the test
-/// actually dispatches `Action::DashboardCancelRename` directly.
+/// `DashboardCancelRename` emits no effects and leaves `display_name` untouched. Previously named
+/// `dashboard_rename_cancel_via_esc_does_not_emit_effect` but that name implied Esc keystroke routing; the test actually dispatches `Action::DashboardCancelRename` directly.
 /// The Esc-keystroke routing is now pinned by the sibling test
-/// `dashboard_rename_esc_keystroke_routes_to_cancel`.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_rename_cancel_action_emits_no_effect() {
@@ -4465,10 +5630,7 @@ fn dashboard_rename_cancel_action_emits_no_effect() {
     );
 }
 /// Drive Esc through `state.handle_input`
-/// (the real keystroke path) to verify rename-mode wiring. A
-/// future change that rewires Esc to a different action in
-/// rename mode would silently break user expectation; the
-/// action-level test wouldn't catch it.
+/// (the real keystroke path) to verify rename-mode wiring. A future change that rewires Esc to a different action in rename mode would silently break user expectation; the action-level test wouldn't catch it.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_rename_esc_keystroke_routes_to_cancel() {
@@ -4493,11 +5655,8 @@ fn dashboard_rename_esc_keystroke_routes_to_cancel() {
         "Esc in rename mode must produce DashboardCancelRename, got {outcome:?}",
     );
 }
-/// The dashboard header upgrade CTA: a pinned promo paints `[label]` (plus its
-/// configured `cta.caption`, bare when none), arms the click rect (dispatching
-/// `AnnouncementsOpenCta(Dashboard)`), and lights the `Ctrl+O` override; a
-/// dismissible promo shows the button but keeps Ctrl+O falling through and
-/// suppresses any caption; no promo shows nothing.
+/// The dashboard header upgrade CTA: a pinned promo paints `[label]` (plus its configured `cta.caption`, bare when none), arms the click rect (dispatching
+/// `AnnouncementsOpenCta(Dashboard)`), and lights the `Ctrl+O` override; a dismissible promo shows the button but keeps Ctrl+O falling through and suppresses any caption; no promo shows nothing.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
@@ -4534,6 +5693,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
+        crate::views::dashboard::WorkspaceRowInputs::default(),
         None,
         false,
         Some(HeaderUpgradeCta {
@@ -4541,6 +5701,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
             pinned: true,
             caption: Some(CAPTION),
         }),
+        None,
     );
     assert!(
         state.pinned_upgrade_cta_live,
@@ -4585,6 +5746,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
+        crate::views::dashboard::WorkspaceRowInputs::default(),
         None,
         false,
         Some(HeaderUpgradeCta {
@@ -4592,6 +5754,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
             pinned: true,
             caption: None,
         }),
+        None,
     );
     assert!(state.pinned_upgrade_cta_live);
     let rect = state
@@ -4615,6 +5778,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
+        crate::views::dashboard::WorkspaceRowInputs::default(),
         None,
         false,
         Some(HeaderUpgradeCta {
@@ -4622,6 +5786,7 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
             pinned: false,
             caption: Some(CAPTION),
         }),
+        None,
     );
     assert!(!state.pinned_upgrade_cta_live);
     let rect = state
@@ -4652,8 +5817,10 @@ fn dashboard_upgrade_cta_paints_arms_rect_and_ctrl_o_override() {
         None,
         &[],
         false,
+        crate::views::dashboard::WorkspaceRowInputs::default(),
         None,
         false,
+        None,
         None,
     );
     assert!(state.upgrade_cta_hit.rect.is_none());
@@ -4680,23 +5847,6 @@ fn dashboard_commit_rename_empty_does_not_emit_effect() {
         "empty draft must not produce a RenameSession effect"
     );
     assert!(app.dashboard.as_ref().unwrap().rename.is_none());
-}
-/// Rename on subagent row toasts and refuses.
-#[serial_test::serial(GROK_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_begin_rename_on_subagent_row_sets_error_toast() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.selected = Some(crate::views::dashboard::DashboardRowId::Subagent {
-            parent: AgentId(0),
-            child_session_id: "child".into(),
-        });
-    }
-    dispatch_dashboard_begin_rename(&mut app);
-    let d = app.dashboard.as_ref().unwrap();
-    assert!(d.rename.is_none());
-    assert!(d.error_toast.is_some());
 }
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -4904,7 +6054,7 @@ fn dashboard_row_stop_cancels_wake_turn_with_gesture_trigger() {
         "the row stop must cancel the wake turn with the gesture trigger, got {effects:?}"
     );
     assert!(
-        app.agents[&target].wake_turn_cancelling(),
+        test_agent(&app, target).wake_turn_cancelling(),
         "the wake marker must record the cancelling phase"
     );
 }
@@ -4939,7 +6089,7 @@ fn dashboard_row_stop_during_send_over_wake_cancels_wake_not_local_turn() {
         ),
         "row stop must still emit cancel, got {effects:?}"
     );
-    let agent = &app.agents[&target];
+    let agent = test_agent(&app, target);
     assert!(
         agent.session.state.is_turn_running(),
         "local user turn is queued behind the wake, not cancelled"
@@ -4977,7 +6127,289 @@ fn dashboard_stop_double_press_deletes_top_level() {
         Some(crate::app::actions::Effect::DeleteSession { .. })
     ));
 }
-/// Closing the selected agent moves the cursor DOWN one row (onto the
+#[test]
+fn workspace_dashboard_stop_archives_loaded_row_and_repairs_selection() {
+    let mut app = test_app();
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let ids = app.agents.keys().copied().collect::<Vec<_>>();
+    for (index, id) in ids.iter().copied().enumerate() {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.display_name = Some(format!("agent-{index}"));
+        agent.session.session_id = Some(acp::SessionId::new(format!("archive-{index}")));
+    }
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: ids
+                .iter()
+                .enumerate()
+                .map(|(index, _)| xai_grok_dashboard_store::Member {
+                    session_id: xai_grok_dashboard_store::SessionId::new(format!(
+                        "archive-{index}"
+                    ))
+                    .unwrap(),
+                    kind: xai_grok_dashboard_store::MemberKind::Build,
+                    origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                    cwd: Some("/tmp".into()),
+                    title: Some(format!("agent-{index}")),
+                    model: None,
+                    last_turn_summary: None,
+                    is_worktree: false,
+                    last_change_unix_ms: index as i64,
+                    pin_rank: None,
+                    order_rank: None,
+                })
+                .collect(),
+            data_version: 1,
+        });
+    open_dashboard(&mut app);
+    let order = dashboard_row_order(&app);
+    let [target, neighbor, ..] = order.as_slice() else {
+        panic!("expected two dashboard rows: {order:?}");
+    };
+    let target = target.clone();
+    let neighbor = neighbor.clone();
+    let crate::views::dashboard::DashboardRowId::TopLevel(target_id) = target.clone() else {
+        panic!("workspace live member must enrich to a top-level row");
+    };
+    let archived_session_id = test_agent(&app, target_id)
+        .session
+        .session_id
+        .as_ref()
+        .unwrap()
+        .0
+        .to_string();
+    app.dashboard.as_mut().unwrap().focus_row(target);
+    assert!(dispatch_dashboard_stop(&mut app).is_empty());
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(!app.agents.contains_key(&target_id));
+    assert_eq!(app.dashboard.as_ref().unwrap().selected, Some(neighbor));
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::UnregisterActiveSession { .. }))
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DeleteSession { .. })),
+        "v2 Ctrl+X must preserve history: {effects:?}"
+    );
+    assert!(
+        app.workspace_membership.removal_pending_for_test(
+            &xai_grok_dashboard_store::SessionId::new(archived_session_id).unwrap()
+        ),
+        "the archived id must remain queued for SQLite removal"
+    );
+    assert!(app.dashboard.as_ref().unwrap().error_toast.is_none());
+}
+#[test]
+fn workspace_archive_keeps_conversation_twin_open_and_registered() {
+    let mut app = test_app();
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let _ = dispatch_new_session_inner(&mut app, None);
+    let ids = app.agents.keys().copied().collect::<Vec<_>>();
+    let [build_id, conversation_id, ..] = ids.as_slice() else {
+        panic!("expected two agents: {ids:?}");
+    };
+    let build_id = *build_id;
+    let conversation_id = *conversation_id;
+    for id in &ids {
+        let agent = app.agents.get_mut(id).unwrap();
+        agent.display_name = Some(format!("agent-{}", id.0));
+        agent.session.session_id = Some(acp::SessionId::new("shared-session"));
+    }
+    app.agents
+        .get_mut(&conversation_id)
+        .unwrap()
+        .conversation_entry = true;
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![xai_grok_dashboard_store::Member {
+                session_id: xai_grok_dashboard_store::SessionId::new("shared-session").unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+                origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                cwd: Some("/tmp".into()),
+                title: Some("shared build".into()),
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+                pin_rank: None,
+                order_rank: None,
+            }],
+            data_version: 1,
+        });
+    ensure_dashboard_state(&mut app);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(build_id));
+    assert!(dispatch_dashboard_stop(&mut app).is_empty());
+    let effects = dispatch_dashboard_stop(&mut app);
+    assert!(!app.agents.contains_key(&build_id));
+    assert!(app.agents.contains_key(&conversation_id));
+    assert!(
+        effects
+            .iter()
+            .all(|effect| !matches!(effect, Effect::UnregisterActiveSession { .. }))
+    );
+    assert!(app.workspace_membership.removal_pending_for_test(
+        &xai_grok_dashboard_store::SessionId::new("shared-session").unwrap()
+    ));
+}
+#[test]
+fn zh_localization_confirmed_workspace_archive_reports_when_session_became_busy() {
+    for chinese in [false, true] {
+        let mut app = test_app_with_agent();
+        app.locale = std::sync::Arc::new(crate::locale::LocaleContext::new(
+            crate::locale::ResolvedLocale {
+                locale: if chinese {
+                    crate::locale::UiLocale::ZhCn
+                } else {
+                    crate::locale::UiLocale::EnUs
+                },
+                source: crate::locale::LocaleSource::Cli,
+            },
+        ));
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.session_id =
+            Some(acp::SessionId::new("archive-race"));
+        app.workspace_dashboard_enabled = true;
+        app.workspace_membership.set_snapshot_for_test(
+            xai_grok_dashboard_store::WorkspaceSnapshot {
+                grouping: xai_grok_dashboard_store::Grouping::State,
+                members: vec![xai_grok_dashboard_store::Member {
+                    session_id: xai_grok_dashboard_store::SessionId::new("archive-race").unwrap(),
+                    kind: xai_grok_dashboard_store::MemberKind::Build,
+                    origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                    cwd: Some("/tmp".into()),
+                    title: Some("archive race".into()),
+                    model: None,
+                    last_turn_summary: None,
+                    is_worktree: false,
+                    last_change_unix_ms: 1,
+                    pin_rank: None,
+                    order_rank: None,
+                }],
+                data_version: 1,
+            },
+        );
+        ensure_dashboard_state(&mut app);
+        app.active_view = ActiveView::AgentDashboard;
+        app.dashboard
+            .as_mut()
+            .unwrap()
+            .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
+        assert!(dispatch_dashboard_stop(&mut app).is_empty());
+        app.agents.get_mut(&id).unwrap().session.loading_replay = true;
+        let effects = dispatch_dashboard_delete(&mut app);
+        assert!(effects.is_empty());
+        assert!(app.agents.contains_key(&id));
+        assert!(!app.workspace_membership.removal_pending_for_test(
+            &xai_grok_dashboard_store::SessionId::new("archive-race").unwrap()
+        ));
+        let dashboard = app.dashboard.as_ref().unwrap();
+        assert!(dashboard.delete_confirm.is_none());
+        assert_eq!(
+            dashboard.error_toast.as_deref(),
+            Some(if chinese {
+                "会话已恢复活动，请先停止再归档"
+            } else {
+                "Session became active; stop it before archiving"
+            })
+        );
+    }
+}
+#[test]
+fn workspace_overlay_ctrl_x_archives_settled_only_agent() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.display_name = Some("only agent".into());
+        agent.session.session_id = Some(acp::SessionId::new("only-archive"));
+    }
+    app.workspace_dashboard_enabled = true;
+    app.workspace_membership
+        .set_snapshot_for_test(xai_grok_dashboard_store::WorkspaceSnapshot {
+            grouping: xai_grok_dashboard_store::Grouping::State,
+            members: vec![xai_grok_dashboard_store::Member {
+                session_id: xai_grok_dashboard_store::SessionId::new("only-archive").unwrap(),
+                kind: xai_grok_dashboard_store::MemberKind::Build,
+                origin: xai_grok_dashboard_store::MemberOrigin::Local,
+                cwd: Some("/tmp".into()),
+                title: Some("only agent".into()),
+                model: None,
+                last_turn_summary: None,
+                is_worktree: false,
+                last_change_unix_ms: 1,
+                pin_rank: None,
+                order_rank: None,
+            }],
+            data_version: 1,
+        });
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(id);
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
+    app.active_view = ActiveView::Agent(id);
+    let effects = dispatch_dashboard_overlay_stop(&mut app);
+    assert!(app.agents.is_empty());
+    assert!(matches!(app.active_view, ActiveView::AgentDashboard));
+    assert!(app.dashboard.as_ref().unwrap().attached_agent.is_none());
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::UnregisterActiveSession { .. }))
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DeleteSession { .. }))
+    );
+    assert!(app.dashboard.as_ref().unwrap().error_toast.is_none());
+}
+#[test]
+fn workspace_overlay_ctrl_x_stops_background_work_before_archive() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.scheduled_tasks.insert(
+        "loop-1".into(),
+        crate::app::agent::ScheduledTaskInfo {
+            task_id: "loop-1".into(),
+            prompt: "keep going".into(),
+            human_schedule: "every 5m".into(),
+            created_at: std::time::Instant::now(),
+            next_fire_at: None,
+            tag: "loop".into(),
+            last_subagent_id: None,
+        },
+    );
+    app.workspace_dashboard_enabled = true;
+    ensure_dashboard_state(&mut app);
+    app.dashboard.as_mut().unwrap().attached_agent = Some(id);
+    app.active_view = ActiveView::Agent(id);
+    let effects = dispatch_dashboard_overlay_stop(&mut app);
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DeleteScheduledTask { .. })),
+        "background work must stop before archive can arm: {effects:?}"
+    );
+    assert!(app.agents.contains_key(&id));
+    assert!(!app.workspace_membership.has_pending_removals_for_test());
+    assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(id));
+}
+/// Closing the selected agent moves the cursor DOWN one row (onto the agent that shifts up into its place) instead of dropping it to `None`, which would bounce the next Up/Down back to the top of the list.
 /// agent that shifts up into its place) instead of dropping it to
 /// `None`, which would bounce the next Up/Down back to the top of the list.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -4994,8 +6426,11 @@ fn dashboard_stop_moves_selection_down_one() {
     open_dashboard(&mut app);
     let order = dashboard_row_order(&app);
     assert!(order.len() >= 3, "need >=3 rows, got {}", order.len());
-    let first = order[0].clone();
-    let second = order[1].clone();
+    let [first, second, ..] = order.as_slice() else {
+        panic!("need >=2 rows, got {order:?}");
+    };
+    let first = first.clone();
+    let second = second.clone();
     if let Some(d) = app.dashboard.as_mut() {
         d.focus_row(first.clone());
     }
@@ -5004,7 +6439,7 @@ fn dashboard_stop_moves_selection_down_one() {
     let crate::views::dashboard::DashboardRowId::TopLevel(first_id) = &first else {
         panic!("first row should be top-level");
     };
-    let session_id = app.agents[first_id]
+    let session_id = test_agent(&app, *first_id)
         .session
         .session_id
         .as_ref()
@@ -5044,8 +6479,17 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
     open_dashboard(&mut app);
     let order = dashboard_row_order(&app);
     assert!(order.len() >= 3, "need >=3 rows, got {}", order.len());
-    let last = order[order.len() - 1].clone();
-    let prev = order[order.len() - 2].clone();
+    let Some(last) = order.last().cloned() else {
+        panic!("need a last row");
+    };
+    let Some(prev) = order
+        .len()
+        .checked_sub(2)
+        .and_then(|i| order.get(i))
+        .cloned()
+    else {
+        panic!("need a previous row");
+    };
     if let Some(d) = app.dashboard.as_mut() {
         d.focus_row(last.clone());
     }
@@ -5054,7 +6498,7 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
     let crate::views::dashboard::DashboardRowId::TopLevel(last_id) = &last else {
         panic!("last row should be top-level");
     };
-    let session_id = app.agents[last_id]
+    let session_id = test_agent(&app, *last_id)
         .session
         .session_id
         .as_ref()
@@ -5075,13 +6519,8 @@ fn dashboard_stop_last_row_falls_back_to_previous() {
     assert!(!app.agents.contains_key(last_id));
     assert_eq!(app.dashboard.as_ref().unwrap().selected, Some(prev));
 }
-/// First Ctrl+X must NOT plant an `error_toast`. The
-/// dispatch-input placeholder is reserved for the user's typing
-/// target; the footer's `ShortcutsBar::with_pending` already
-/// surfaces the "press Ctrl+X again to close this session"
-/// hint via `delete_confirm` and is the canonical place for it.
-/// Two copies of the same hint in two different surfaces
-/// confused the user (the prompt one stole visual weight).
+/// First Ctrl+X must NOT plant an `error_toast`. The dispatch-input placeholder is reserved for the user's typing target; the footer's `ShortcutsBar::with_pending` already surfaces the "press Ctrl+X again to close this session" hint via `delete_confirm` and is the canonical place for it.
+/// Two copies of the same hint in two different surfaces confused the user (the prompt one stole visual weight).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_stop_does_not_plant_error_toast() {
@@ -5107,10 +6546,7 @@ fn dashboard_stop_does_not_plant_error_toast() {
         d.error_toast,
     );
 }
-/// `DashboardOpenShortcutsHelp` builds the modal state on
-/// `DashboardState`. Subsequent presses while the modal is
-/// open are no-ops (idempotent) so the user's search query
-/// and scroll position survive a stray Ctrl+. tap.
+/// `DashboardOpenShortcutsHelp` builds the modal state on `DashboardState`. Subsequent presses while the modal is open are no-ops (idempotent) so the user's search query and scroll position survive a stray Ctrl+. tap.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_open_shortcuts_help_builds_modal_idempotently() {
@@ -5152,7 +6588,7 @@ fn dashboard_open_shortcuts_help_builds_modal_idempotently() {
         "re-dispatch must NOT rebuild the modal — user's query would vanish",
     );
 }
-/// `DashboardCloseShortcutsHelp` clears the modal. Mirrors the
+/// `DashboardCloseShortcutsHelp` clears the modal. Mirrors the modal-chrome `CloseRequested` outcome routed through the dashboard-state input handler.
 /// modal-chrome `CloseRequested` outcome routed through the
 /// dashboard-state input handler.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -5164,6 +6600,117 @@ fn dashboard_close_shortcuts_help_clears_modal() {
     assert!(app.dashboard.as_ref().unwrap().shortcuts_modal.is_some());
     let _ = dispatch(Action::DashboardCloseShortcutsHelp, &mut app);
     assert!(app.dashboard.as_ref().unwrap().shortcuts_modal.is_none());
+}
+/// A dashboard send leaves `+ New Agent` focused over an empty input.
+/// The dashboard must ignore the repeated Enter from a held key.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_double_enter_after_dispatch_does_not_create_second_session() {
+    let mut app = test_app();
+    open_dashboard(&mut app);
+    assert!(
+        app.dashboard
+            .as_ref()
+            .expect("dashboard is open")
+            .new_agent_button_focused()
+    );
+    send_dashboard_draft(&mut app, "fix the bug");
+    let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(
+        app.dashboard
+            .as_ref()
+            .expect("dashboard is open")
+            .dispatch
+            .text()
+            .is_empty()
+    );
+    assert!(
+        matches!(app.handle_input(&enter), InputOutcome::Unchanged),
+        "the echoed Enter must not act on the focused `+ New Agent`"
+    );
+    let tab = Event::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let _ = app.handle_input(&tab);
+    assert!(matches!(
+        app.handle_input(&enter),
+        InputOutcome::Action(Action::DashboardCreateNewAgentWithDetail)
+    ));
+}
+/// Types `text` into the dashboard input and sends it with Enter.
+fn send_dashboard_draft(app: &mut AppView, text: &str) {
+    for ch in text.chars() {
+        app.handle_input(&Event::Key(KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::NONE,
+        )));
+    }
+    let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let InputOutcome::Action(send @ Action::DashboardDispatch { .. }) = app.handle_input(&enter)
+    else {
+        panic!("Enter with a draft must send");
+    };
+    let _ = dispatch(send, app);
+}
+/// A send such as `/usage` can open a modal that takes the next keys.
+/// The Esc that closes the modal must end the send echo guard.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_modal_esc_after_send_ends_echo_guard() {
+    let mut app = test_app();
+    open_dashboard(&mut app);
+    send_dashboard_draft(&mut app, "fix the bug");
+    let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let _ = dispatch(Action::DashboardOpenShortcutsHelp, &mut app);
+    assert!(
+        app.dashboard
+            .as_ref()
+            .expect("dashboard is open")
+            .shortcuts_modal
+            .is_some()
+    );
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let InputOutcome::Action(close @ Action::DashboardCloseShortcutsHelp) = app.handle_input(&esc)
+    else {
+        panic!("Esc must close the modal");
+    };
+    let _ = dispatch(close, &mut app);
+    assert!(
+        matches!(
+            app.handle_input(&enter),
+            InputOutcome::Action(Action::DashboardCreateNewAgentWithDetail)
+        ),
+        "Enter after a modal-consumed Esc is deliberate and must create"
+    );
+}
+/// `AppView` handles the `/resume` picker's Esc before it reaches the dashboard.
+/// That Esc must still end the send echo guard.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_session_picker_esc_after_send_ends_echo_guard() {
+    let mut app = test_app();
+    app.workspace_dashboard_enabled = true;
+    open_dashboard(&mut app);
+    send_dashboard_draft(&mut app, "fix the bug");
+    let enter = Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let _ = dispatch(
+        Action::DashboardDispatchSlash {
+            text: "/resume".to_owned(),
+        },
+        &mut app,
+    );
+    assert!(app.dashboard_session_picker.is_some());
+    let esc = Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let InputOutcome::Action(close @ Action::DashboardCloseSessionPicker) = app.handle_input(&esc)
+    else {
+        panic!("Esc must close the picker");
+    };
+    let _ = dispatch(close, &mut app);
+    assert!(
+        matches!(
+            app.handle_input(&enter),
+            InputOutcome::Action(Action::DashboardCreateNewAgentWithDetail)
+        ),
+        "Enter after a picker-consumed Esc is deliberate and must create"
+    );
 }
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -5188,7 +6735,7 @@ fn dashboard_new_agent_button_create_with_detail_switches_view() {
         Some(new_id),
         "create-with-detail must set attached_agent so the overlay paints",
     );
-    assert!(!app.dashboard.as_ref().unwrap().new_agent_button_focused);
+    assert!(!app.dashboard.as_ref().unwrap().new_agent_button_focused());
     assert!(!effects.is_empty(), "session creation must emit effects");
 }
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -5205,7 +6752,7 @@ fn dashboard_focus_new_agent_button_action_clears_selection() {
     let _ = dispatch(Action::DashboardFocusNewAgentButton, &mut app);
     let d = app.dashboard.as_ref().unwrap();
     assert!(
-        d.new_agent_button_focused,
+        d.new_agent_button_focused(),
         "FocusNewAgentButton must light up the button flag",
     );
     assert!(
@@ -5213,10 +6760,7 @@ fn dashboard_focus_new_agent_button_action_clears_selection() {
         "FocusNewAgentButton must clear `selected` so the invariant holds",
     );
 }
-/// Up-arrow on the FIRST row hands focus over to the
-/// `[+ New Agent]` button: the button behaves as a virtual
-/// row at index -1 so the user can walk straight off the top
-/// of the list onto it without an extra Esc.
+/// Up-arrow on the FIRST row hands focus over to the `[+ New Agent]` button: the button behaves as a virtual row at index -1 so the user can walk straight off the top of the list onto it without an extra Esc.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_up_arrow_from_first_row_focuses_button() {
@@ -5229,12 +6773,12 @@ fn dashboard_up_arrow_from_first_row_focuses_button() {
     let _ = dispatch(Action::DashboardSelectPrev, &mut app);
     let d = app.dashboard.as_ref().unwrap();
     assert!(
-        d.new_agent_button_focused,
+        d.new_agent_button_focused(),
         "Up from the first row must focus the button",
     );
     assert!(d.selected.is_none());
 }
-/// Up-arrow on the button is a no-op (no wrap). Mirrors the
+/// Up-arrow on the button is a no-op (no wrap). Mirrors the agents modal: the cursor sits on the button and stays there until you press Down or click a row.
 /// agents modal: the cursor sits on the button and stays
 /// there until you press Down or click a row.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -5248,15 +6792,12 @@ fn dashboard_up_arrow_on_button_is_noop() {
     let _ = dispatch(Action::DashboardSelectPrev, &mut app);
     let d = app.dashboard.as_ref().unwrap();
     assert!(
-        d.new_agent_button_focused,
+        d.new_agent_button_focused(),
         "Up on button must stay on button"
     );
     assert!(d.selected.is_none());
 }
-/// Down-arrow on the button walks to the first focusable. With state
-/// grouping ON (the default), that's the first section header; a
-/// second Down steps into the first row inside it. When there are no
-/// rows the cursor stays on the button.
+/// Down-arrow on the button walks to the first focusable. With state grouping ON (the default), that's the first section header; a second Down steps into the first row inside it. When there are no rows the cursor stays on the button.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_down_arrow_on_button_selects_first_focusable() {
@@ -5274,7 +6815,7 @@ fn dashboard_down_arrow_on_button_selects_first_focusable() {
         "Down on button must land on the first section header",
     );
     assert!(d.selected.is_none());
-    assert!(!d.new_agent_button_focused);
+    assert!(!d.new_agent_button_focused());
     let _ = dispatch(Action::DashboardSelectNext, &mut app);
     let d = app.dashboard.as_ref().unwrap();
     assert_eq!(
@@ -5286,14 +6827,28 @@ fn dashboard_down_arrow_on_button_selects_first_focusable() {
 }
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
+fn dashboard_down_arrow_from_open_session_selects_first_focusable() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    mark_agent_nonempty(&mut app, id);
+    open_dashboard(&mut app);
+    app.dashboard.as_mut().unwrap().focus_open_session_button();
+    let _ = dispatch(Action::DashboardSelectNext, &mut app);
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert!(dashboard.selected_section.is_some());
+    assert!(!dashboard.open_session_button_focused());
+    assert!(!dashboard.new_agent_button_focused());
+}
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
 fn dashboard_down_arrow_on_button_with_no_rows_is_noop() {
     let mut app = test_app();
     open_dashboard(&mut app);
-    assert!(app.dashboard.as_ref().unwrap().new_agent_button_focused);
+    assert!(app.dashboard.as_ref().unwrap().new_agent_button_focused());
     let _ = dispatch(Action::DashboardSelectNext, &mut app);
     let d = app.dashboard.as_ref().unwrap();
     assert!(
-        d.new_agent_button_focused,
+        d.new_agent_button_focused(),
         "Down on button with empty row list must keep the button focused",
     );
     assert!(d.selected.is_none());
@@ -5335,10 +6890,7 @@ fn extract_recent_lines_empty_scrollback() {
     let out = crate::views::dashboard::peek::extract_recent_lines(agent, 6);
     assert!(out.is_empty());
 }
-/// Pin the placeholder strings for the "no
-/// meaningful body" `RenderBlock` variants. A regression that
-/// changed `"(tool call)"` to `"(tool)"` would otherwise slip
-/// through.
+/// Pin the placeholder strings for the "no meaningful body" `RenderBlock` variants. A regression that changed `"(tool call)"` to `"(tool)"` would otherwise slip through.
 #[test]
 fn extract_recent_lines_tool_call_placeholder() {
     use crate::scrollback::block::RenderBlock;
@@ -5365,10 +6917,7 @@ fn extract_recent_lines_bg_task_placeholder() {
     let out = crate::views::dashboard::peek::extract_recent_lines(agent, 6);
     assert_eq!(out, vec!["(background task)".to_string()]);
 }
-/// Explicit first-line projection assertion for
-/// `RenderBlock::AgentMessage` (no UserPrompt prefix). Asserts
-/// the exact result vector to catch regressions that the
-/// "evidence by absence" test below would miss.
+/// Explicit first-line projection assertion for `RenderBlock::AgentMessage` (no UserPrompt prefix). Asserts the exact result vector to catch regressions that the "evidence by absence" test below would miss.
 #[test]
 fn extract_recent_lines_agent_message_explicit_first_line() {
     use crate::scrollback::block::RenderBlock;
@@ -5395,20 +6944,20 @@ fn extract_recent_lines_first_line_only() {
         .push_block(RenderBlock::user_prompt("line one\nline two\nline three"));
     let out = crate::views::dashboard::peek::extract_recent_lines(agent, 6);
     assert_eq!(out.len(), 1);
+    let Some(line) = out.first() else {
+        panic!("expected extracted line: {out:?}");
+    };
     assert!(
-        out[0].contains("line one"),
-        "first line must be present, got {:?}",
-        out[0]
+        line.contains("line one"),
+        "first line must be present, got {line:?}"
     );
     assert!(
-        !out[0].contains("line two"),
-        "second line must not appear, got {:?}",
-        out[0]
+        !line.contains("line two"),
+        "second line must not appear, got {line:?}"
     );
     assert!(
-        !out[0].contains("line three"),
-        "third line must not appear, got {:?}",
-        out[0]
+        !line.contains("line three"),
+        "third line must not appear, got {line:?}"
     );
 }
 /// Two entries returned in chronological order
@@ -5426,8 +6975,11 @@ fn extract_recent_lines_chronological_order() {
         .push_block(RenderBlock::user_prompt("second"));
     let out = crate::views::dashboard::peek::extract_recent_lines(agent, 6);
     assert_eq!(out.len(), 2);
-    assert!(out[0].contains("first"));
-    assert!(out[1].contains("second"));
+    let [first, second] = out.as_slice() else {
+        panic!("expected two extracted lines: {out:?}");
+    };
+    assert!(first.contains("first"));
+    assert!(second.contains("second"));
 }
 /// ANSI escapes in scrollback content are stripped.
 #[test]
@@ -5440,12 +6992,14 @@ fn extract_recent_lines_strips_ansi() {
         .push_block(RenderBlock::user_prompt("hello \x1b[31mevil\x1b[0m world"));
     let out = crate::views::dashboard::peek::extract_recent_lines(agent, 6);
     assert_eq!(out.len(), 1);
+    let Some(line) = out.first() else {
+        panic!("expected extracted line: {out:?}");
+    };
     assert!(
-        !out[0].contains('\x1b'),
-        "ANSI must be stripped, got: {:?}",
-        out[0]
+        !line.contains('\x1b'),
+        "ANSI must be stripped, got: {line:?}"
     );
-    assert!(out[0].contains("evil"));
+    assert!(line.contains("evil"));
 }
 /// A press > 2s after the first re-arms (does NOT close).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -5470,30 +7024,6 @@ fn dashboard_stop_double_press_after_2s_rearms() {
     let _ = dispatch_dashboard_stop(&mut app);
     assert_eq!(app.agents.len(), before_count);
     assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_some());
-}
-/// Subagent Ctrl+X bypasses confirm and emits KillSubagent.
-#[serial_test::serial(GROK_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_stop_subagent_emits_kill_subagent_effect() {
-    let mut app = test_app_with_agent();
-    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
-    let info = make_test_subagent("child-xyz", "sa-xyz");
-    agent
-        .subagent_sessions
-        .insert(info.child_session_id.to_string(), info);
-    open_dashboard(&mut app);
-    if let Some(d) = app.dashboard.as_mut() {
-        d.selected = Some(crate::views::dashboard::DashboardRowId::Subagent {
-            parent: AgentId(0),
-            child_session_id: "child-xyz".to_string(),
-        });
-    }
-    let effects = dispatch_dashboard_stop(&mut app);
-    assert!(matches!(
-        effects.as_slice(),
-        [Effect::KillSubagent { subagent_id, .. }] if subagent_id == "sa-xyz"
-    ));
-    assert!(app.dashboard.as_ref().unwrap().delete_confirm.is_none());
 }
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -5535,6 +7065,34 @@ fn dashboard_stop_busy_roster_toasts_without_arming() {
         Some("Stop the session before deleting"),
     );
 }
+#[test]
+fn workspace_dashboard_unbound_row_arms_local_close() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = None;
+        agent.session.state = AgentState::CommandCancelling {
+            command: crate::app::agent::AgentCommand::Compact,
+        };
+    }
+    app.workspace_dashboard_enabled = true;
+    ensure_dashboard_state(&mut app);
+    app.active_view = ActiveView::AgentDashboard;
+    app.dashboard
+        .as_mut()
+        .unwrap()
+        .focus_row(crate::views::dashboard::DashboardRowId::TopLevel(id));
+    assert!(dispatch_dashboard_stop(&mut app).is_empty());
+    let dashboard = app.dashboard.as_ref().unwrap();
+    assert!(matches!(
+        dashboard.delete_confirm.as_ref().map(|(row, _)| row),
+        Some(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
+            0
+        )))
+    ));
+    assert!(dashboard.error_toast.is_none());
+}
 /// A busy top-level row: Ctrl+X cancels the turn and never arms delete.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -5570,10 +7128,7 @@ fn dashboard_stop_busy_top_level_cancels_without_arming() {
     );
     assert!(app.agents.contains_key(&target), "busy row must survive");
 }
-/// A row that's `Working` only due to background work (turn idle, a
-/// scheduled `/loop` live): Ctrl+X stops the background work rather than
-/// toasting, and never arms delete, so the row can settle to idle and
-/// then be deleted.
+/// A row that's `Working` only due to background work (turn idle, a scheduled `/loop` live): Ctrl+X stops the background work rather than toasting, and never arms delete, so the row can settle to idle and then be deleted.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_stop_bg_work_row_stops_without_arming() {
@@ -5692,14 +7247,14 @@ fn dashboard_stop_queued_prompt_row_drops_queue_without_arming() {
         "must not delete a queued-prompt row, got {effects:?}",
     );
     assert!(
-        app.agents[&target].session.pending_prompts.is_empty(),
+        test_agent(&app, target).session.pending_prompts.is_empty(),
         "the queued prompt must be dropped",
     );
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.delete_confirm.is_none(), "must not arm delete");
     assert!(d.error_toast.is_none(), "dropped the queue, so no toast");
 }
-/// The `y` / second-`[✗]` confirm re-checks deletability: a row that
+/// The `y` / second-`[✗]` confirm re-checks deletability: a row that became busy between arming and confirming must not be deleted.
 /// became busy between arming and confirming must not be deleted.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -5782,9 +7337,7 @@ fn dashboard_delete_top_level_without_session_id_toasts() {
     );
 }
 /// Happy path: matching ids, so no panic and the queue is popped.
-/// Also assert the response was actually sent through
-/// the oneshot (not just popped). A regression that pops without
-/// sending the response would otherwise slip through this test.
+/// Also assert the response was actually sent through the oneshot (not just popped). A regression that pops without sending the response would otherwise slip through this test.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_permission_select_happy_path() {
@@ -5798,7 +7351,7 @@ fn dashboard_permission_select_happy_path() {
         42,
         acp::PermissionOptionId::new(std::sync::Arc::from("allow")),
     );
-    assert!(app.agents[&AgentId(0)].permission_queue.is_empty());
+    assert!(test_agent(&app, AgentId(0)).permission_queue.is_empty());
     let resp = rx
         .try_recv()
         .expect("response oneshot must have a value after dispatch");
@@ -5846,7 +7399,7 @@ fn dashboard_permission_select_drops_stale_request() {
         123,
         acp::PermissionOptionId::new(std::sync::Arc::from("allow")),
     );
-    assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 1);
+    assert_eq!(test_agent(&app, AgentId(0)).permission_queue.len(), 1);
     let d = app.dashboard.as_ref().unwrap();
     assert!(d.peek.is_none(), "peek must be closed");
     assert!(d.error_toast.is_some(), "toast must surface the mismatch");
@@ -5883,6 +7436,51 @@ fn dashboard_permission_select_for_missing_row_clears_peek() {
     assert!(d.peek.is_none());
     assert!(d.error_toast.is_some());
 }
+/// A workspace (or roster) row is not a loaded session, so a peek reply is refused.
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_peek_reply_to_non_top_level_row_toasts() {
+    let mut app = test_app_with_agent();
+    open_dashboard(&mut app);
+    let row = crate::views::dashboard::DashboardRowId::Workspace {
+        session_id: "ws-not-loaded".to_string(),
+    };
+    if let Some(d) = app.dashboard.as_mut() {
+        d.focus_row(row.clone());
+    }
+    let queued = test_agent(&app, AgentId(0)).session.queue_len();
+    let effects = dispatch_dashboard_peek_reply(&mut app, row, "hi".into(), false);
+    assert!(effects.is_empty());
+    assert_eq!(test_agent(&app, AgentId(0)).session.queue_len(), queued);
+    assert_eq!(
+        app.dashboard.as_ref().unwrap().error_toast.as_deref(),
+        Some(
+            format!(
+                "{} Load the session before replying",
+                crate::glyphs::ballot_x()
+            )
+            .as_str()
+        ),
+    );
+}
+/// A tab whose session never opened refuses a peek reply and keeps nothing queued
+#[serial_test::serial(GROK_AGENT_DASHBOARD)]
+#[test]
+fn dashboard_peek_reply_to_failed_load_tab_toasts() {
+    let mut app = test_app_with_agent();
+    open_dashboard(&mut app);
+    app.agents.get_mut(&AgentId(0)).unwrap().load_failed = true;
+    let row = crate::views::dashboard::DashboardRowId::TopLevel(AgentId(0));
+    let effects = dispatch_dashboard_peek_reply(&mut app, row, "hi".into(), false);
+    assert!(effects.is_empty());
+    assert_eq!(0, test_agent(&app, AgentId(0)).session.queue_len());
+    assert!(
+        app.dashboard
+            .as_ref()
+            .and_then(|d| d.error_toast.as_deref())
+            .is_some_and(|toast| toast.contains("didn't open"))
+    );
+}
 /// Peek reply to an IDLE agent sends immediately: the prompt drains
 /// (one `SendPrompt` effect), the turn starts, and the reply draft
 /// is cleared.
@@ -5917,9 +7515,11 @@ fn dashboard_peek_reply_to_idle_agent_sends() {
         false,
     );
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::SendPrompt { text, .. } if text == "please continue"));
-    assert!(app.agents[&AgentId(0)].session.state.is_turn_running());
-    assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 0);
+    assert!(
+        matches!(effects.first(), Some(Effect::SendPrompt { text, .. }) if text == "please continue")
+    );
+    assert!(test_agent(&app, AgentId(0)).session.state.is_turn_running());
+    assert_eq!(test_agent(&app, AgentId(0)).session.queue_len(), 0);
     assert!(app.dashboard.as_ref().unwrap().peek_reply.text().is_empty());
 }
 /// Peek reply to a RUNNING agent queues the prompt (no effect) so it
@@ -5971,8 +7571,8 @@ fn dashboard_peek_reply_to_running_agent_queues() {
         false,
     );
     assert!(effects.is_empty());
-    assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 1);
-    assert!(app.agents[&AgentId(0)].session.state.is_turn_running());
+    assert_eq!(test_agent(&app, AgentId(0)).session.queue_len(), 1);
+    assert!(test_agent(&app, AgentId(0)).session.state.is_turn_running());
     let dashboard = app.dashboard.as_ref().unwrap();
     assert!(dashboard.peek_reply.text().is_empty());
     assert!(
@@ -6033,14 +7633,14 @@ fn dashboard_peek_reply_with_image_sends_blocks() {
     );
     assert_eq!(effects.len(), 1);
     assert!(
-        matches!(&effects[0], Effect::SendPromptBlocks { .. }),
+        matches!(effects.first(), Some(Effect::SendPromptBlocks { .. })),
         "image reply must send blocks, got {:?}",
-        effects[0]
+        effects.first()
     );
     assert!(app.dashboard.as_ref().unwrap().peek_reply.text().is_empty());
     assert!(app.dashboard.as_ref().unwrap().peek_reply.images.is_empty());
 }
-/// Regression: whitespace around a peek-reply image chip must not
+/// Regression: whitespace around a peek-reply image chip must not desync chip ranges from the stored text (panicked on rewind restore).
 /// desync chip ranges from the stored text (panicked on rewind restore).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -6088,7 +7688,7 @@ fn dashboard_peek_reply_image_with_whitespace_survives_rewind_restore() {
         reply_text,
         false,
     );
-    let stashed = app.agents[&AgentId(0)]
+    let stashed = test_agent(&app, AgentId(0))
         .session
         .in_flight_prompt
         .clone()
@@ -6109,7 +7709,7 @@ fn dashboard_peek_reply_image_with_whitespace_survives_rewind_restore() {
     assert!(agent.prompt.text().contains("[Image #1]"));
     assert_eq!(agent.prompt.images.len(), 1);
 }
-/// Image on peek reply is preserved on the queued entry when
+/// Image on peek reply is preserved on the queued entry when the agent is mid-turn.
 /// the agent is mid-turn.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -6157,7 +7757,7 @@ fn dashboard_peek_reply_with_image_queues_images() {
         false,
     );
     assert!(effects.is_empty());
-    let queued = app.agents[&AgentId(0)]
+    let queued = test_agent(&app, AgentId(0))
         .session
         .pending_prompts
         .front()
@@ -6168,26 +7768,6 @@ fn dashboard_peek_reply_with_image_queues_images() {
         "peek send must snapshot chips for cancel-restore"
     );
     assert!(app.dashboard.as_ref().unwrap().peek_reply.images.is_empty());
-}
-/// Replying to a subagent row is rejected with a toast (subagents are
-/// driven by their parent turn).
-#[serial_test::serial(GROK_AGENT_DASHBOARD)]
-#[test]
-fn dashboard_peek_reply_to_subagent_toasts() {
-    let mut app = test_app_with_agent();
-    open_dashboard(&mut app);
-    let effects = dispatch_dashboard_peek_reply(
-        &mut app,
-        crate::views::dashboard::DashboardRowId::Subagent {
-            parent: AgentId(0),
-            child_session_id: "child-1".to_string(),
-        },
-        "hi".into(),
-        false,
-    );
-    assert!(effects.is_empty());
-    assert_eq!(app.agents[&AgentId(0)].session.queue_len(), 0);
-    assert!(app.dashboard.as_ref().unwrap().error_toast.is_some());
 }
 /// Peek "No, type to add feedback" path: resolves the front
 /// permission with the `RejectOnce` option and attaches the typed
@@ -6225,9 +7805,9 @@ fn dashboard_permission_followup_rejects_with_message() {
         meta.get("followup_message").and_then(|v| v.as_str()),
         Some("do it differently"),
     );
-    assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 0);
+    assert_eq!(test_agent(&app, AgentId(0)).permission_queue.len(), 0);
 }
-/// Peek answering of the Ask tool (`AskUserQuestion`): selecting an
+/// Peek answering of the Ask tool (`AskUserQuestion`): selecting an option sends the ext-response and clears the question view.
 /// option sends the ext-response and clears the question view.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
@@ -6268,9 +7848,9 @@ fn dashboard_question_answer_sends_and_clears() {
     );
     assert!(effects.is_empty());
     assert!(rx.try_recv().is_ok(), "ext-response must be sent");
-    assert!(app.agents[&AgentId(0)].question_view.is_none());
+    assert!(test_agent(&app, AgentId(0)).question_view.is_none());
 }
-/// A multi-question Ask form is walked one question at a time in the
+/// A multi-question Ask form is walked one question at a time in the peek: answering advances to the next question (no submit yet) and resets the panel's per-question draft; the last answer submits.
 /// peek: answering advances to the next question (no submit yet) and
 /// resets the panel's per-question draft; the last answer submits.
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
@@ -6328,7 +7908,7 @@ fn dashboard_question_answer_walks_multiple_questions() {
         rx.try_recv().is_err(),
         "must not submit until the last question"
     );
-    let qv = app.agents[&AgentId(0)].question_view.as_ref().unwrap();
+    let qv = test_agent(&app, AgentId(0)).question_view.as_ref().unwrap();
     assert_eq!(qv.active_tab, 1, "advanced to the second question");
     let d = app.dashboard.as_ref().unwrap();
     assert_eq!(d.peek.as_ref().unwrap().selected_option, None);
@@ -6336,12 +7916,12 @@ fn dashboard_question_answer_walks_multiple_questions() {
     let effects = dispatch_dashboard_question_answer(&mut app, row, Some(0), String::new());
     assert!(effects.is_empty());
     assert!(rx.try_recv().is_ok(), "ext-response sent after last answer");
-    assert!(app.agents[&AgentId(0)].question_view.is_none());
+    assert!(test_agent(&app, AgentId(0)).question_view.is_none());
     assert!(app.dashboard.as_ref().unwrap().peek.is_none());
 }
-/// The peek panel auto-opens when a row is selected (replacing the
+/// The peek panel auto-opens when a row is selected (replacing the new-session input) and closes when the selection clears (e.g. the `[+ New Agent]` button is focused).
 /// new-session input) and closes when the selection clears (e.g. the
-/// `[+ New Agent]` button is focused).
+/// `+ New Agent` button is focused).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_peek_auto_opens_for_selected_row() {
@@ -6368,8 +7948,10 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         None,
         &[],
         false,
+        crate::views::dashboard::WorkspaceRowInputs::default(),
         None,
         false,
+        None,
         None,
     );
     assert!(
@@ -6387,8 +7969,10 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         None,
         &[],
         false,
+        crate::views::dashboard::WorkspaceRowInputs::default(),
         None,
         false,
+        None,
         None,
     );
     assert!(
@@ -6396,10 +7980,7 @@ fn dashboard_peek_auto_opens_for_selected_row() {
         "peek must close when no row is selected",
     );
 }
-/// End-to-end: a multi-line peek reply grows the peek box. Rendering
-/// the dashboard with a 3-line `peek_reply` draft produces a TALLER
-/// dispatch (peek) rect than the same dashboard with a single-line
-/// draft: the box sizes to the reply content (Shift+Enter newlines).
+/// End-to-end: a multi-line peek reply grows the peek box. Rendering the dashboard with a 3-line `peek_reply` draft produces a TALLER dispatch (peek) rect than the same dashboard with a single-line draft: the box sizes to the reply content (Shift+Enter newlines).
 #[serial_test::serial(GROK_AGENT_DASHBOARD)]
 #[test]
 fn dashboard_peek_box_grows_for_multiline_reply() {
@@ -6425,8 +8006,10 @@ fn dashboard_peek_box_grows_for_multiline_reply() {
                 None,
                 &[],
                 false,
+                crate::views::dashboard::WorkspaceRowInputs::default(),
                 None,
                 false,
+                None,
                 None,
             );
         };
@@ -6457,15 +8040,16 @@ fn dashboard_peek_box_grows_for_multiline_reply() {
 /// exactly the "New session" created on every pager launch.
 #[test]
 fn build_rows_hides_empty_idle_local_session() {
-    use crate::views::dashboard::build_rows;
+    use crate::views::dashboard::build_rows_with_roster;
     let app = test_app_with_agent();
-    let rows = build_rows(
+    let rows = build_rows_with_roster(
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
+        &[],
     );
     assert!(rows.is_empty(), "an empty idle session must not render");
 }
@@ -6473,52 +8057,55 @@ fn build_rows_hides_empty_idle_local_session() {
 /// user message may not be in scrollback yet, but it is doing real work.
 #[test]
 fn build_rows_keeps_empty_working_local_session() {
-    use crate::views::dashboard::build_rows;
+    use crate::views::dashboard::build_rows_with_roster;
     let mut app = test_app_with_agent();
     app.agents.get_mut(&AgentId(0)).unwrap().session.state = AgentState::TurnRunning;
-    let rows = build_rows(
+    let rows = build_rows_with_roster(
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
+        &[],
     );
     assert_eq!(rows.len(), 1, "an actively-working session stays visible");
 }
 /// A session with a generated title renders normally.
 #[test]
 fn build_rows_keeps_titled_local_session() {
-    use crate::views::dashboard::build_rows;
+    use crate::views::dashboard::build_rows_with_roster;
     let mut app = test_app_with_agent();
     mark_agent_nonempty(&mut app, AgentId(0));
-    let rows = build_rows(
+    let rows = build_rows_with_roster(
         &app.agents,
         &std::collections::BTreeSet::new(),
         &[],
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
+        &[],
     );
     assert_eq!(rows.len(), 1, "a titled session renders");
 }
-/// A pinned empty session is kept (explicit user intent overrides the
+/// A pinned empty session is kept (explicit user intent overrides the empty-session hide).
 /// empty-session hide).
 #[test]
 fn build_rows_keeps_pinned_empty_local_session() {
-    use crate::views::dashboard::build_rows;
+    use crate::views::dashboard::build_rows_with_roster;
     let app = test_app_with_agent();
     let mut pinned = std::collections::BTreeSet::new();
     pinned.insert(crate::views::dashboard::DashboardRowId::TopLevel(AgentId(
         0,
     )));
-    let rows = build_rows(
+    let rows = build_rows_with_roster(
         &app.agents,
         &pinned,
         &[],
         crate::views::dashboard::Grouping::State,
         &crate::views::dashboard::Filter::None,
         None,
+        &[],
     );
     assert_eq!(rows.len(), 1, "a pinned empty session is kept");
 }
@@ -6532,7 +8119,7 @@ fn dashboard_attach_roster_focuses_existing_local_agent() {
             agent_id: id,
             session_id: "local-owned".into(),
             models: None,
-            scheduler_background_loops: None,
+            modes: None,
         }),
         &mut app,
     );
@@ -6555,7 +8142,7 @@ fn dashboard_attach_roster_focuses_existing_local_agent() {
     assert!(effects.is_empty());
     assert!(matches!(app.active_view, ActiveView::Agent(a) if a == id));
     assert_eq!(app.agents.len(), count_before);
-    assert!(app.agents[&id].active_subagent.is_none());
+    assert!(test_agent(&app, id).active_subagent.is_none());
     assert_eq!(app.dashboard.as_ref().unwrap().attached_agent, Some(id));
 }
 /// A conversation-origin roster row attaches via the direct chat load,
@@ -6576,7 +8163,7 @@ fn dashboard_attach_conversation_roster_row_loads_as_chat() {
     );
     assert!(
         matches!(
-            &effects[..],
+            effects.as_slice(),
             [Effect::LoadSession {
                 session_id,
                 session_cwd: None,
@@ -6601,7 +8188,7 @@ fn dashboard_attach_build_roster_row_keeps_disk_resume() {
     );
     assert!(
         matches!(
-            &effects[..],
+            effects.as_slice(),
             [Effect::LoadSession {
                 session_id,
                 session_cwd: Some(cwd),
@@ -6611,4 +8198,77 @@ fn dashboard_attach_build_roster_row_keeps_disk_resume() {
         ),
         "expected Build disk resume with roster cwd, got {effects:?}"
     );
+}
+/// The allocation-free readiness predicate must agree with the owned plan a stop would build, in every state that flips it.
+#[test]
+fn stop_readiness_predicate_matches_the_built_plan() {
+    use crate::app::dispatch::dashboard::DashboardStopPlan;
+    let mut app = test_app_with_agent();
+    let agree = |agent: &AgentView| {
+        assert_eq!(
+            DashboardStopPlan::would_stop_anything(agent),
+            !DashboardStopPlan::for_agent(agent).is_empty()
+        );
+    };
+    let agent = test_agent_mut(&mut app, AgentId(0));
+    agent.session.session_id = Some("bound".into());
+    assert!(!DashboardStopPlan::would_stop_anything(agent));
+    agree(agent);
+    agent.session.state = crate::app::agent::AgentState::TurnRunning;
+    assert!(DashboardStopPlan::would_stop_anything(agent));
+    agree(agent);
+    agent.session.state = crate::app::agent::AgentState::Idle;
+    agent.running_wake_turn = Some(crate::app::agent_view::RunningWakeTurn {
+        prompt_id: "wake-1".into(),
+        cancel_sent: false,
+    });
+    assert!(DashboardStopPlan::would_stop_anything(agent));
+    agree(agent);
+    agent.running_wake_turn = None;
+    let mut done = super::make_bg_task("bg-done");
+    done.status = crate::app::agent::BgTaskStatus::Done;
+    agent.session.bg_tasks.insert("bg-done".into(), done);
+    assert!(!DashboardStopPlan::would_stop_anything(agent));
+    agree(agent);
+    agent.session.bg_tasks.clear();
+    agent
+        .session
+        .bg_tasks
+        .insert("bg-1".into(), super::make_bg_task("bg-1"));
+    assert!(DashboardStopPlan::would_stop_anything(agent));
+    agree(agent);
+    agent.session.bg_tasks.clear();
+    agent.session.scheduled_tasks.insert(
+        "loop-1".into(),
+        crate::app::agent::ScheduledTaskInfo {
+            task_id: "loop-1".into(),
+            prompt: "keep going".into(),
+            human_schedule: "every 5m".into(),
+            created_at: std::time::Instant::now(),
+            next_fire_at: None,
+            tag: "loop".into(),
+            last_subagent_id: None,
+        },
+    );
+    assert!(DashboardStopPlan::would_stop_anything(agent));
+    agree(agent);
+    agent.session.scheduled_tasks.clear();
+    agent.session.session_id = None;
+    agent
+        .session
+        .pending_prompts
+        .push_back(crate::app::agent::QueuedPrompt::plain(
+            1,
+            "later",
+            crate::app::agent::QueueEntryKind::Prompt,
+        ));
+    assert!(DashboardStopPlan::would_stop_anything(agent));
+    agree(agent);
+    agent.session.pending_prompts.clear();
+    agent
+        .session
+        .bg_tasks
+        .insert("bg-2".into(), super::make_bg_task("bg-2"));
+    assert!(!DashboardStopPlan::would_stop_anything(agent));
+    agree(agent);
 }

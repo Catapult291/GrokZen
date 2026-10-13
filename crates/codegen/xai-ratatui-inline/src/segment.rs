@@ -23,10 +23,9 @@ impl fmt::Display for LineSegment<'_> {
     }
 }
 
-/// The parse events `split_into_line_segments` distinguishes. Everything the
-/// splitter cares about: printable characters (visual width), CR, LF; every
-/// other action (SGR colors, cursor moves, OSC, …) merely extends the current
-/// segment byte range.
+/// The parse events `split_into_line_segments` distinguishes. Everything the splitter cares about: printable characters
+/// (visual width), CR, LF; every other action (SGR colors, cursor moves, OSC, …) merely extends the current segment byte
+/// range.
 enum SegmentEvent {
     Print(char),
     CarriageReturn,
@@ -35,12 +34,9 @@ enum SegmentEvent {
     Other,
 }
 
-/// `anstyle_parse::Perform` implementor that records the single event (if
-/// any) produced by the byte just fed to the parser.
-///
-/// The VTE state machine dispatches at most one action per input byte, so a
-/// one-slot buffer is sufficient. Print events are dispatched on the *final*
-/// byte of a UTF-8 sequence; the char itself tells us how many bytes it spans.
+/// `anstyle_parse::Perform` implementor that records the single event (if any) produced by the byte just fed to the
+/// parser. The VTE state machine dispatches at most one action per input byte, so a one-slot buffer is sufficient. Print
+/// events are dispatched on the *final* byte of a UTF-8 sequence; the char itself tells us how many bytes it spans.
 #[derive(Default)]
 struct EventCollector {
     event: Option<SegmentEvent>,
@@ -100,10 +96,12 @@ pub fn split_into_line_segments<'a>(input: &'a str, term_width: usize) -> Vec<Li
         ($end:expr, $crlf:expr) => {
             #[allow(unused_assignments)]
             {
-                segments.push(LineSegment {
-                    content: &input[segment_start..$end],
-                    ends_with_crlf: $crlf,
-                });
+                if let Some(content) = input.get(segment_start..$end) {
+                    segments.push(LineSegment {
+                        content,
+                        ends_with_crlf: $crlf,
+                    });
+                }
                 visual_width = 0;
                 has_visual = false;
             }
@@ -123,10 +121,8 @@ pub fn split_into_line_segments<'a>(input: &'a str, term_width: usize) -> Vec<Li
 
         match event {
             SegmentEvent::LineFeed => {
-                // Emit current segment but strip \r if the segment ended with it.
-                // Note: `segment_end` (not `index`) is deliberate — a LF can
-                // fire mid-escape-sequence ("\x1b[3\n1m"), and the pending
-                // escape bytes must not leak into the emitted segment.
+                // Emit current segment but strip \r if the segment ended with it. Note: `segment_end` (not `index`) is deliberate — a LF
+                // can fire mid-escape-sequence ("\x1b[3\n1m"), and the pending escape bytes must not leak into the emitted segment.
                 push_segment!(segment_end - usize::from(prev_is_cr), true);
                 // We skip \n itself (and possibly the preceding \r, and any
                 // pending escape bytes) so they don't end up in segments
@@ -140,10 +136,8 @@ pub fn split_into_line_segments<'a>(input: &'a str, term_width: usize) -> Vec<Li
                 is_cr = true;
             }
             SegmentEvent::Print(ch) => {
-                // Input is a valid &str, so print fires on the last byte of
-                // the char's UTF-8 encoding; anything unclaimed before the
-                // char (e.g. an aborted escape) folds into the current
-                // segment so the wrap point lands on the char boundary.
+                // Input is a valid &str, so print fires on the last byte of the char's UTF-8 encoding; anything unclaimed before the
+                // char (e.g. an aborted escape) folds into the current segment so the wrap point lands on the char boundary.
                 let char_bytes = ch.len_utf8();
                 segment_end = index + 1 - char_bytes;
 
@@ -194,7 +188,9 @@ pub fn split_into_line_segments<'a>(input: &'a str, term_width: usize) -> Vec<Li
                 // Last segment doesn't end with crlf and the current one has no visual actions, concatenate
                 debug_assert_eq!(segment_start, (last_end as usize - input_start as usize));
                 let last_offset = last_start as usize - input_start as usize;
-                last.content = &input[last_offset..segment_end];
+                if let Some(content) = input.get(last_offset..segment_end) {
+                    last.content = content;
+                }
             } else {
                 // There's last segment but either it ends with lf or pending segment has visual width
                 // note: pending segment can't have lf because otherwise we would have matched on it
@@ -213,6 +209,20 @@ pub fn split_into_line_segments<'a>(input: &'a str, term_width: usize) -> Vec<Li
 mod tests {
     use super::*;
 
+    fn only_seg<'a, 'b>(segments: &'a [LineSegment<'b>]) -> &'a LineSegment<'b> {
+        let Some(s) = segments.first() else {
+            panic!("expected a segment: {segments:?}");
+        };
+        s
+    }
+
+    fn seg_at<'a, 'b>(segments: &'a [LineSegment<'b>], i: usize) -> &'a LineSegment<'b> {
+        let Some(s) = segments.get(i) else {
+            panic!("expected segment {i}: {segments:?}");
+        };
+        s
+    }
+
     #[test]
     fn test_empty_string() {
         let segments = split_into_line_segments("", 10);
@@ -224,8 +234,8 @@ mod tests {
         let input = "hello";
         let segments = split_into_line_segments(input, 10);
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].content, "hello");
-        assert!(!segments[0].ends_with_crlf);
+        assert_eq!(only_seg(&segments).content, "hello");
+        assert!(!only_seg(&segments).ends_with_crlf);
     }
 
     #[test]
@@ -233,10 +243,10 @@ mod tests {
         let input = "hello world";
         let segments = split_into_line_segments(input, 8);
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].content, "hello wo");
-        assert!(!segments[0].ends_with_crlf);
-        assert_eq!(segments[1].content, "rld");
-        assert!(!segments[1].ends_with_crlf);
+        assert_eq!(only_seg(&segments).content, "hello wo");
+        assert!(!only_seg(&segments).ends_with_crlf);
+        assert_eq!(seg_at(&segments, 1).content, "rld");
+        assert!(!seg_at(&segments, 1).ends_with_crlf);
     }
 
     #[test]
@@ -244,10 +254,10 @@ mod tests {
         let input = "line1\nline2";
         let segments = split_into_line_segments(input, 20);
         assert_eq!(segments.len(), 2);
-        assert_eq!(segments[0].content, "line1");
-        assert!(segments[0].ends_with_crlf);
-        assert_eq!(segments[1].content, "line2");
-        assert!(!segments[1].ends_with_crlf);
+        assert_eq!(only_seg(&segments).content, "line1");
+        assert!(only_seg(&segments).ends_with_crlf);
+        assert_eq!(seg_at(&segments, 1).content, "line2");
+        assert!(!seg_at(&segments, 1).ends_with_crlf);
     }
 
     #[test]
@@ -256,14 +266,14 @@ mod tests {
         let segments = split_into_line_segments(input, 20);
         assert_eq!(segments.len(), 3);
         // First segment: "line1" (the \r\n is stripped)
-        assert_eq!(segments[0].content, "line1");
-        assert!(segments[0].ends_with_crlf);
+        assert_eq!(only_seg(&segments).content, "line1");
+        assert!(only_seg(&segments).ends_with_crlf);
         // Second segment: "line2"
-        assert_eq!(segments[1].content, "line2");
-        assert!(segments[1].ends_with_crlf);
+        assert_eq!(seg_at(&segments, 1).content, "line2");
+        assert!(seg_at(&segments, 1).ends_with_crlf);
         // Third segment: "line3"
-        assert_eq!(segments[2].content, "line3");
-        assert!(!segments[2].ends_with_crlf);
+        assert_eq!(seg_at(&segments, 2).content, "line3");
+        assert!(!seg_at(&segments, 2).ends_with_crlf);
     }
 
     #[test]
@@ -272,8 +282,8 @@ mod tests {
         let input = "12345\r67";
         let segments = split_into_line_segments(input, 10);
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].content, "12345\r67");
-        assert!(!segments[0].ends_with_crlf);
+        assert_eq!(only_seg(&segments).content, "12345\r67");
+        assert!(!only_seg(&segments).ends_with_crlf);
     }
 
     #[test]
@@ -283,7 +293,7 @@ mod tests {
         let segments = split_into_line_segments(input, 1);
         // Should still create one segment even though it exceeds width
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].content, "😊");
+        assert_eq!(only_seg(&segments).content, "😊");
     }
 
     #[test]
@@ -293,17 +303,17 @@ mod tests {
         let segments = split_into_line_segments(input, 20);
         // The color code should be in the same segment
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].content, "line1\x1b[31m");
-        assert!(!segments[0].ends_with_crlf);
+        assert_eq!(only_seg(&segments).content, "line1\x1b[31m");
+        assert!(!only_seg(&segments).ends_with_crlf);
 
         // Test that ANSI after newline creates a separate segment
         let input2 = "line1\n\x1b[31m";
         let segments2 = split_into_line_segments(input2, 20);
         assert_eq!(segments2.len(), 2);
-        assert_eq!(segments2[0].content, "line1");
-        assert!(segments2[0].ends_with_crlf);
-        assert_eq!(segments2[1].content, "\x1b[31m");
-        assert!(!segments2[1].ends_with_crlf);
+        assert_eq!(only_seg(&segments2).content, "line1");
+        assert!(only_seg(&segments2).ends_with_crlf);
+        assert_eq!(seg_at(&segments2, 1).content, "\x1b[31m");
+        assert!(!seg_at(&segments2, 1).ends_with_crlf);
     }
 
     #[test]
@@ -311,7 +321,7 @@ mod tests {
         let input = "\x1b[1m\x1b[31mBold Red\x1b[0m";
         let segments = split_into_line_segments(input, 20);
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].content, input);
+        assert_eq!(only_seg(&segments).content, input);
     }
 
     #[test]
@@ -319,7 +329,7 @@ mod tests {
         let input = "12345678"; // exactly 8 chars
         let segments = split_into_line_segments(input, 8);
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].content, "12345678");
+        assert_eq!(only_seg(&segments).content, "12345678");
     }
 
     #[test]
@@ -329,8 +339,8 @@ mod tests {
         let segments = split_into_line_segments(input, 8);
         assert_eq!(segments.len(), 2);
         // First segment gets the reset code since no visual content follows it on same line
-        assert_eq!(segments[0].content, "12345678\x1b[0m");
-        assert_eq!(segments[1].content, "90");
+        assert_eq!(only_seg(&segments).content, "12345678\x1b[0m");
+        assert_eq!(seg_at(&segments, 1).content, "90");
     }
 
     #[test]
@@ -339,8 +349,8 @@ mod tests {
         let input = "test\r\n";
         let segments = split_into_line_segments(input, 10);
         assert_eq!(segments.len(), 1);
-        assert_eq!(segments[0].content, "test");
-        assert!(segments[0].ends_with_crlf);
+        assert_eq!(only_seg(&segments).content, "test");
+        assert!(only_seg(&segments).ends_with_crlf);
     }
 
     #[test]
@@ -349,14 +359,14 @@ mod tests {
         let segments = split_into_line_segments(input, 20);
         assert_eq!(segments.len(), 3);
 
-        assert!(segments[0].content.starts_with("\x1b[32m"));
-        assert!(segments[0].ends_with_crlf);
+        assert!(only_seg(&segments).content.starts_with("\x1b[32m"));
+        assert!(only_seg(&segments).ends_with_crlf);
 
-        assert_eq!(segments[1].content, "line2");
-        assert!(segments[1].ends_with_crlf);
+        assert_eq!(seg_at(&segments, 1).content, "line2");
+        assert!(seg_at(&segments, 1).ends_with_crlf);
 
-        assert!(segments[2].content.ends_with("\x1b[0m"));
-        assert!(!segments[2].ends_with_crlf);
+        assert!(seg_at(&segments, 2).content.ends_with("\x1b[0m"));
+        assert!(!seg_at(&segments, 2).ends_with_crlf);
     }
 
     #[test]

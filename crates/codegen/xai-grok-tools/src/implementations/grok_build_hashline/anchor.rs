@@ -8,11 +8,9 @@ pub use super::scheme::{
     ParsedAnchor, ShiftResult, ValidationResult,
 };
 
-/// Split file content into lines suitable for anchor generation.
-///
-/// Strips trailing newlines from each line (matching the convention used by
-/// `AnchorScheme::generate_anchors`). The returned `Vec<&str>` has one entry
-/// per logical line.
+/// Split file content into lines suitable for anchor generation. Strips trailing newlines from each
+/// line (matching the convention used by `AnchorScheme::generate_anchors`). The returned
+/// `Vec<&str>` has one entry per logical line.
 pub fn split_lines(content: &str) -> Vec<&str> {
     if content.is_empty() {
         return vec![""];
@@ -30,19 +28,15 @@ pub fn split_lines(content: &str) -> Vec<&str> {
     lines
 }
 
-/// Generate anchors for file content using the given scheme.
-///
-/// Convenience wrapper: splits `content` into lines and calls
-/// `scheme.generate_anchors()`.
+/// Generate anchors for file content using the given scheme. Convenience wrapper: splits `content`
+/// into lines and calls `scheme.generate_anchors()`.
 pub fn generate_for_content(scheme: &dyn AnchorScheme, content: &str) -> Vec<Anchor> {
     let lines = split_lines(content);
     scheme.generate_anchors(&lines)
 }
 
-/// Validate a parsed anchor against file content.
-///
-/// Convenience wrapper: splits `content` into lines and calls
-/// `scheme.validate()`.
+/// Validate a parsed anchor against file content. Convenience wrapper: splits `content` into lines
+/// and calls `scheme.validate()`.
 pub fn validate_against_content(
     scheme: &dyn AnchorScheme,
     anchor: &ParsedAnchor,
@@ -52,10 +46,8 @@ pub fn validate_against_content(
     scheme.validate(anchor, &lines)
 }
 
-/// Search for a shifted anchor in file content.
-///
-/// Convenience wrapper: splits `content` into lines and calls
-/// `scheme.find_shifted()`.
+/// Search for a shifted anchor in file content. Convenience wrapper: splits `content` into lines
+/// and calls `scheme.find_shifted()`.
 pub fn find_shifted_in_content(
     scheme: &dyn AnchorScheme,
     anchor: &ParsedAnchor,
@@ -96,8 +88,14 @@ mod tests {
         let scheme = ContentOnly::new();
         let anchors = generate_for_content(&scheme, content);
         assert_eq!(anchors.len(), 4); // 3 content lines + trailing empty
-        assert_eq!(anchors[0].line, 1);
-        assert_eq!(anchors[3].line, 4);
+        let Some(first) = anchors.first() else {
+            panic!("expected anchors: {anchors:?}");
+        };
+        let Some(last) = anchors.get(3) else {
+            panic!("expected 4 anchors: {anchors:?}");
+        };
+        assert_eq!(first.line, 1);
+        assert_eq!(last.line, 4);
     }
 
     #[test]
@@ -106,9 +104,12 @@ mod tests {
         let scheme = ContentOnly::new();
         let anchors = generate_for_content(&scheme, content);
 
+        let Some(anchor) = anchors.first() else {
+            panic!("expected an anchor: {anchors:?}");
+        };
         let parsed = ParsedAnchor {
-            line: anchors[0].line,
-            local: anchors[0].local.clone(),
+            line: anchor.line,
+            local: anchor.local.clone(),
             context: None,
         };
         assert_eq!(
@@ -124,9 +125,12 @@ mod tests {
         let anchors = generate_for_content(&scheme, original);
 
         let modified = "let x = 999;\nlet y = 2;\n";
+        let Some(anchor) = anchors.first() else {
+            panic!("expected an anchor: {anchors:?}");
+        };
         let parsed = ParsedAnchor {
-            line: anchors[0].line,
-            local: anchors[0].local.clone(),
+            line: anchor.line,
+            local: anchor.local.clone(),
             context: None,
         };
         assert_eq!(
@@ -143,9 +147,12 @@ mod tests {
 
         // Insert a line at the top → "b" shifts from line 2 to line 3.
         let modified = "new\na\nb\nc\n";
+        let Some(anchor) = anchors.get(1) else {
+            panic!("expected line-2 anchor: {anchors:?}");
+        };
         let parsed = ParsedAnchor {
-            line: anchors[1].line, // originally line 2 ("b")
-            local: anchors[1].local.clone(),
+            line: anchor.line, // originally line 2 ("b")
+            local: anchor.local.clone(),
             context: None,
         };
 

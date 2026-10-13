@@ -59,11 +59,9 @@ impl FocusTracker {
         self.focused.get()
     }
 
-    /// `true` if an automatic session recap request should be sent.
-    /// That means unfocused past the recap threshold, no recap shown this away period, and no attempt within the retry backoff.
-    ///
-    /// The shell's own conditions (at least 3 turns, at least 3 min since the last main turn, never twice in a row) are authoritative.
-    /// Early attempts may no-op, so we retry every 90s until a recap is shown or focus returns.
+    /// `true` if an automatic session recap request should be sent. The shell's own conditions (at least 3 turns, at
+    /// least 3 min since the last main turn, never twice in a row) are authoritative. Early attempts may no-op, so we
+    /// retry every 90s until a recap is shown or focus returns.
     pub fn recap_due(&self) -> bool {
         if self.focused.get() || self.recap_shown_this_away.get() {
             return false;
@@ -184,8 +182,6 @@ mod tests {
         tracker.on_focus_lost();
         assert!(!tracker.should_notify());
     }
-
-    // --- Auto session-recap (recap_due) tests ---
 
     #[test]
     fn recap_not_due_while_focused() {

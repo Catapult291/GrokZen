@@ -242,12 +242,16 @@ impl AgentView {
                 InputOutcome::Changed
             }
             KeyCode::Enter => {
-                let choice = CancelTurnChoice::ALL[ctv.active_idx];
+                let Some(&choice) = CancelTurnChoice::ALL.get(ctv.active_idx) else {
+                    return InputOutcome::Unchanged;
+                };
                 InputOutcome::Action(Action::CancelTurnChoice(choice))
             }
             KeyCode::Char(c @ '1'..='4') => {
                 let idx = (c as usize) - ('1' as usize);
-                let choice = CancelTurnChoice::ALL[idx];
+                let Some(&choice) = CancelTurnChoice::ALL.get(idx) else {
+                    return InputOutcome::Unchanged;
+                };
                 InputOutcome::Action(Action::CancelTurnChoice(choice))
             }
             _ => InputOutcome::Unchanged,
@@ -286,7 +290,9 @@ impl AgentView {
                     if let Some(ctv) = self.cancel_turn_view.as_mut() {
                         ctv.active_idx = idx;
                     }
-                    let choice = CancelTurnChoice::ALL[idx];
+                    let Some(&choice) = CancelTurnChoice::ALL.get(idx) else {
+                        return InputOutcome::Unchanged;
+                    };
                     return InputOutcome::Action(Action::CancelTurnChoice(choice));
                 }
                 InputOutcome::Unchanged
@@ -324,18 +330,12 @@ impl AgentView {
         } else if let Some(slot) = qv.per_question_freeform.get_mut(idx) {
             slot.clear();
         }
-        if !qv.is_feedback_report() {
-            qv.focus = QuestionFocus::Navigation;
-        }
+        qv.focus = QuestionFocus::Navigation;
         self.last_prompt_click_ms = None;
     }
     /// Handle key input when the question view is active.
-    ///
-    /// Two modes:
-    /// - **Navigation**: j/k move the cursor between answers and Tab/Shift+Tab walk the same rows in a loop.
-    ///   Space toggles, Enter advances or edits freeform, h/l/[/] cycle questions, 1-9/a-f jump and toggle.
-    ///   Esc unselects, Shift-X kills the question tool.
-    /// - **InputMode**: all keys go to the prompt widget; Esc exits input mode.
+    /// **Navigation**: j/k move the cursor between answers and Tab/Shift+Tab walk the same rows in a loop.
+    /// Space toggles, Enter advances or edits freeform, h/l/[/] cycle questions, 1-9/a-f jump and toggle.
     pub(super) fn handle_question_key(&mut self, key: &KeyEvent) -> InputOutcome {
         use crate::views::question_view::{CursorMotion, QuestionFocus};
         if key.code == KeyCode::Esc {
@@ -354,9 +354,6 @@ impl AgentView {
                     return self.dismiss_question_view();
                 }
                 if key!('c', CONTROL).matches(key) {
-                    if qv.is_feedback_report() {
-                        return self.clear_feedback_then_dismiss();
-                    }
                     qv.focus = QuestionFocus::Navigation;
                     self.last_prompt_click_ms = None;
                     return InputOutcome::Changed;
@@ -375,23 +372,7 @@ impl AgentView {
                         return InputOutcome::Changed;
                     }
                     EnterOutcome::Submit => {
-                        if self.paste_probe_in_flight > 0
-                            && self.question_view.as_ref().is_some_and(
-                                crate::views::question_view::QuestionViewState::is_feedback_report,
-                            )
-                        {
-                            self.deferred_send =
-                                Some(crate::app::agent_view::AgentDeferredSend::SubmitFeedback);
-                            return InputOutcome::Changed;
-                        }
                         self.commit_question_freeform();
-                        if self
-                            .question_view
-                            .as_ref()
-                            .is_some_and(|qv| qv.is_feedback_report())
-                        {
-                            return self.submit_question_answers(false);
-                        }
                         let on_last = self
                             .question_view
                             .as_ref()
@@ -628,17 +609,7 @@ impl AgentView {
             }
         }
     }
-    /// The feedback pane has no navigation to return to, so it follows the composer: clear the report, then dismiss once it is empty.
-    fn clear_feedback_then_dismiss(&mut self) -> InputOutcome {
-        if self.prompt.text().trim().is_empty() {
-            return self.submit_question_answers(true);
-        }
-        self.prompt.set_text("");
-        self.commit_question_freeform();
-        InputOutcome::Changed
-    }
     /// Handle mouse events when the question view is active.
-    ///
     /// Scroll wheel scrolls the options list. Clicks on option rows move the cursor and toggle or select.
     /// Everything else is consumed (modal-ish).
     pub(super) fn handle_question_mouse(&mut self, mouse: &MouseEvent) -> InputOutcome {
@@ -1119,10 +1090,7 @@ impl AgentView {
         }
     }
     /// Dismiss (hide) the question view without submitting answers.
-    ///
-    /// Restores the original prompt text that was stashed when the question
-    /// view opened, so typed "additional context" doesn't leak into the
-    /// main prompt. Also clears any stashed (tab-hidden) question view.
+    /// Restores the original prompt text that was stashed when the question view opened, so typed "additional context" doesn't leak into the main prompt. Also clears any stashed (tab-hidden) question view.
     fn dismiss_question_view(&mut self) -> InputOutcome {
         if self.question_view.as_ref().is_some_and(|qv| {
             matches!(
@@ -1145,7 +1113,6 @@ impl AgentView {
             matches!(
                 qv.local_kind,
                 Some(crate::views::question_view::LocalQuestionKind::DoctorFix { .. })
-                    | Some(crate::views::question_view::LocalQuestionKind::FeedbackTrace { .. })
             )
         });
         if follows_skip_submit {
@@ -1163,13 +1130,8 @@ impl AgentView {
         InputOutcome::Changed
     }
     /// Retract an interaction modal (permission, question, or plan approval) that another connected client already resolved.
-    ///
-    /// In a shared (leader-hosted) session the agent broadcasts the interactive reverse-request to every pane and resolves first-answer-wins.
-    /// When any pane answers, the agent broadcasts `InteractionResolved{tool_call_id}` and every other pane calls this to drop its copy.
     /// Returns `true` if a modal was dismissed (so the caller redraws).
     /// Idempotent: a `tool_call_id` this pane isn't showing is a silent no-op, including on the pane that answered.
-    /// The answering pane already cleared its own modal locally.
-    /// Dropping a dismissed modal's `response_tx` is harmless: the agent has already resolved, so any late response is ignored by its gateway.
     pub(crate) fn dismiss_resolved_interaction(&mut self, tool_call_id: &str) -> bool {
         if self
             .question_view
@@ -1185,7 +1147,9 @@ impl AgentView {
             if ev.is_url_waiting() {
                 return false;
             }
-            if let Some(mut ev) = self.elicitation_view.take() {
+            if let Some(mut ev) = self.take_unanswered_elicitation(
+                crate::app::agent_view::UnansweredElicitation::ClosedElsewhere,
+            ) {
                 let _ = ev.take_response_tx();
                 self.restore_elicitation_prompt(ev.stashed_prompt);
             }
@@ -1207,16 +1171,10 @@ impl AgentView {
             .is_some_and(|pav| pav.tool_call_id == tool_call_id)
         {
             let mut pav = self
-                .plan_approval_view
-                .take()
+                .unmount_plan_review()
                 .expect("plan_approval_view is Some (just checked)");
             pav.send_stale_cancel();
-            self.latest_inline_plan_content = None;
-            self.plan_next_comment_id = pav.next_comment_id;
-            self.prompt.restore(pav.stashed_prompt);
-            self.line_viewer = None;
-            self.casual_commenting_range = None;
-            self.casual_editing_comment_id = None;
+            self.clear_kept_plan();
             return true;
         }
         if let Some(pos) = self
@@ -1243,17 +1201,9 @@ impl AgentView {
     pub(crate) fn handle_question_key_for_test(&mut self, key: &KeyEvent) -> InputOutcome {
         self.handle_question_key(key)
     }
-    #[cfg(test)]
-    pub(crate) fn handle_question_mouse_for_test(&mut self, mouse: &MouseEvent) -> InputOutcome {
-        self.handle_question_mouse(mouse)
-    }
-    /// Give back the draft a card displaced when it opened.
-    ///
-    /// Permission open: write into `permission_stashed_prompt`.
     /// Question open: write into its stash, because the question owns the live composer as freeform and its close puts the stash back.
     /// Writing through would first clobber the freeform and then be clobbered by the question's own restore.
     /// Otherwise restore the live composer.
-    /// Restoring plan freeform while approval is parked is deliberate; the session draft is already on `plan_approval_view.stashed_prompt`.
     pub(crate) fn restore_card_prompt(
         &mut self,
         stashed: crate::views::prompt_widget::StashedPrompt,
@@ -1265,79 +1215,6 @@ impl AgentView {
         } else {
             self.prompt.restore(stashed);
         }
-    }
-    /// Close out the `/feedback` report pane: Enter advances to the trace question (when offered) or sends, Esc drops the report.
-    fn submit_feedback_pane(
-        &mut self,
-        mut qv: crate::views::question_view::QuestionViewState,
-        skipped: bool,
-    ) -> InputOutcome {
-        let report = qv.feedback_report();
-        if !skipped && report.is_empty() && self.prompt.images.is_empty() {
-            crate::unified_log::info(
-                "feedback.submit",
-                None,
-                Some(serde_json::json!({"branch": "empty"})),
-            );
-            let freeform = qv.activate_freeform_input();
-            self.prompt.set_text_preserving(&freeform);
-            self.question_view = Some(qv);
-            return InputOutcome::Changed;
-        }
-        if !skipped && qv.feedback_offer_trace {
-            let images = self.prompt.drain_images();
-            crate::unified_log::info(
-                "feedback.submit",
-                None,
-                Some(serde_json::json!({
-                    "branch": "trace_question",
-                    "chars": report.chars().count(),
-                    "images": images.len(),
-                })),
-            );
-            xai_grok_telemetry::session_ctx::log_event(
-                xai_grok_telemetry::events::FeedbackTraceCardShown {
-                    reenables_sharing: qv.feedback_offer_reenables_sharing,
-                },
-            );
-            qv.begin_feedback_trace_stage_with_locale(
-                report,
-                images,
-                Some(self.scrollback.locale()),
-            );
-            self.prompt.set_text_preserving("");
-            self.question_view = Some(qv);
-            return InputOutcome::Changed;
-        }
-        let images = if skipped {
-            Vec::new()
-        } else {
-            self.prompt.drain_images()
-        };
-        crate::unified_log::info(
-            "feedback.submit",
-            None,
-            Some(serde_json::json!({
-                "branch": "send",
-                "skipped": skipped,
-                "chars": report.chars().count(),
-                "images": images.len(),
-            })),
-        );
-        self.record_question_pause(&qv);
-        self.restore_card_prompt(qv.stashed_prompt);
-        self.cleanup_question_state();
-        if self.question_view.is_none() {
-            crate::app::turn_completion::reopen_blocked_card_if_held(self);
-        }
-        if skipped {
-            return InputOutcome::Changed;
-        }
-        InputOutcome::Action(Action::SendFeedback {
-            text: report,
-            images: images.into(),
-            trace: None,
-        })
     }
     pub(super) fn submit_question_answers(&mut self, skipped: bool) -> InputOutcome {
         use xai_grok_tools::implementations::grok_build::ask_user_question::AskUserQuestionExtResponse;
@@ -1361,9 +1238,6 @@ impl AgentView {
         let Some(mut qv) = self.question_view.take() else {
             return InputOutcome::Changed;
         };
-        if qv.is_feedback_report() {
-            return self.submit_feedback_pane(qv, skipped);
-        }
         self.record_question_pause(&qv);
         if let Some(kind) = qv.local_kind.take() {
             use crate::views::question_view::LocalQuestionKind;
@@ -1385,13 +1259,6 @@ impl AgentView {
                 }
                 (true, LocalQuestionKind::DoctorFix { target, .. }) => {
                     InputOutcome::Action(Action::DoctorFixCancelled(target))
-                }
-                (true, LocalQuestionKind::FeedbackTrace { report, images }) => {
-                    InputOutcome::Action(Action::SendFeedback {
-                        text: report,
-                        images,
-                        trace: Some(crate::app::actions::FeedbackTraceChoice::NoUpload),
-                    })
                 }
                 (skipped, kind) => translate_local_submit(&qv, kind, skipped),
             };
@@ -1424,9 +1291,7 @@ impl AgentView {
         InputOutcome::Changed
     }
     /// Map a screen position to a permission option index.
-    ///
-    /// Uses the prompt area and permission chrome height to determine which
-    /// option row the mouse is over. Returns `None` if outside the options.
+    /// Uses the prompt area and permission chrome height to determine which option row the mouse is over. Returns `None` if outside the options.
     pub(super) fn permission_item_at(&self, _col: u16, row: u16) -> Option<usize> {
         let perm = self.permission_queue.front()?;
         let prompt_area = self.pane_areas.prompt;
@@ -1454,10 +1319,7 @@ impl AgentView {
     pub(crate) fn cleanup_question_state(&mut self) {
         if matches!(
             self.deferred_send,
-            Some(
-                crate::app::agent_view::AgentDeferredSend::SubmitFeedback
-                    | crate::app::agent_view::AgentDeferredSend::SubmitQuestion(_)
-            )
+            Some(crate::app::agent_view::AgentDeferredSend::SubmitQuestion(_))
         ) {
             self.deferred_send = None;
         }
@@ -1469,12 +1331,7 @@ impl AgentView {
         self.last_prompt_click_ms = None;
     }
     /// Answer the active question of this agent's pending `AskUserQuestion` from the dashboard peek panel.
-    ///
     /// Mirrors the agent view's own Enter handling but sources the freeform text from the peek (a `freeform` argument) instead of this view's prompt.
-    /// `option_idx` selects an option; `None` with non-empty `freeform` records the "Other" free-text answer.
-    /// When more questions remain it advances to the next one ([`PeekAnswerOutcome::Advanced`]).
-    /// On the last question it builds and sends the accepted ext-response, restores the stashed prompt, and clears question state.
-    /// That path returns [`PeekAnswerOutcome::Submitted`].
     /// Only valid for an ext ask (`None` `local_kind`); an empty "Other" or a non-ext question is a [`PeekAnswerOutcome::NoOp`].
     pub(crate) fn dashboard_answer_question(
         &mut self,
@@ -2275,7 +2132,6 @@ mod question_no_freeform_tests {
     pub(super) fn draw_frame(agent: &mut AgentView) {
         let area = Rect::new(0, 0, 80, 30);
         let reg = ActionRegistry::defaults();
-        let bundle = crate::app::bundle::BundleState::default();
         let mut buf = Buffer::empty(area);
         let mut scratch = crate::scrollback::render::ScratchBuffer::new();
         agent.last_terminal_size = (80, 30);
@@ -2287,8 +2143,6 @@ mod question_no_freeform_tests {
             None,
             false,
             crate::app::agent_view::BannerSlotParams::none(),
-            &bundle,
-            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -2332,11 +2186,21 @@ mod question_no_freeform_tests {
                 "row {row}: click below options must not enter InputMode"
             );
             assert!(
-                !state.per_question_freeform_selected[0],
+                !state
+                    .per_question_freeform_selected
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| panic!("missing index")),
                 "row {row}: freeform must not get selected"
             );
             assert!(
-                matches!(state.selections[0], QuestionSelection::Single(None)),
+                matches!(
+                    state
+                        .selections
+                        .first()
+                        .unwrap_or_else(|| panic!("missing index")),
+                    QuestionSelection::Single(None)
+                ),
                 "row {row}: no option may get selected"
             );
             assert_eq!(state.cursor(), 0, "row {row}: cursor must not move");
@@ -2357,11 +2221,26 @@ mod question_no_freeform_tests {
         assert_eq!(state.focus, QuestionFocus::Navigation);
         assert_eq!(state.cursor(), 1, "cursor lands on the last option");
         assert!(
-            matches!(state.selections[0], QuestionSelection::Single(Some(1))),
+            matches!(
+                state
+                    .selections
+                    .first()
+                    .unwrap_or_else(|| panic!("missing index")),
+                QuestionSelection::Single(Some(1))
+            ),
             "click selects the last option, got {:?}",
-            state.selections[0]
+            state
+                .selections
+                .first()
+                .unwrap_or_else(|| panic!("missing index"))
         );
-        assert!(!state.per_question_freeform_selected[0]);
+        assert!(
+            !state
+                .per_question_freeform_selected
+                .first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index"))
+        );
     }
     /// Hovering the rows below the options must not highlight the (nonexistent) freeform row on a `no_freeform` modal.
     #[test]
@@ -2388,7 +2267,13 @@ mod question_no_freeform_tests {
         let state = qv(&agent);
         assert_eq!(state.focus, QuestionFocus::Navigation);
         assert_eq!(state.cursor(), 0, "z must not move the cursor");
-        assert!(!state.per_question_freeform_selected[0]);
+        assert!(
+            !state
+                .per_question_freeform_selected
+                .first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index"))
+        );
     }
     /// Control group: on a regular modal (freeform present) the sticky freeform row sits one row below the options.
     /// Clicking it still selects freeform and enters InputMode, and `z` still works.
@@ -2407,7 +2292,13 @@ mod question_no_freeform_tests {
                 QuestionFocus::InputMode,
                 "clicking the sticky freeform row enters InputMode"
             );
-            assert!(state.per_question_freeform_selected[0]);
+            assert!(
+                state
+                    .per_question_freeform_selected
+                    .first()
+                    .copied()
+                    .unwrap_or_else(|| panic!("missing index"))
+            );
         }
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let _ = agent.handle_question_key(&esc);
@@ -2451,8 +2342,20 @@ mod question_freeform_chip_tests {
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let _ = agent.handle_question_key(&esc);
         assert_eq!(qv(&agent).focus, QuestionFocus::Navigation);
-        assert_eq!(qv(&agent).per_question_freeform[0], PASTE);
-        assert!(qv(&agent).per_question_freeform_selected[0]);
+        assert_eq!(
+            qv(&agent)
+                .per_question_freeform
+                .first()
+                .unwrap_or_else(|| panic!("missing index")),
+            PASTE
+        );
+        assert!(
+            qv(&agent)
+                .per_question_freeform_selected
+                .first()
+                .copied()
+                .unwrap_or_else(|| panic!("missing index"))
+        );
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let _ = agent.handle_question_key(&enter);
         assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
@@ -2474,7 +2377,16 @@ mod question_freeform_chip_tests {
         let _ = agent.prompt.handle_paste(PASTE);
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         let _ = agent.handle_question_key(&esc);
-        agent.question_view.as_mut().unwrap().per_question_freeform[0] = "peek answer".to_string();
+        let Some(slot) = agent
+            .question_view
+            .as_mut()
+            .unwrap()
+            .per_question_freeform
+            .get_mut(0)
+        else {
+            panic!("missing freeform slot");
+        };
+        *slot = "peek answer".to_string();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         let _ = agent.handle_question_key(&enter);
         assert_eq!(qv(&agent).focus, QuestionFocus::InputMode);
@@ -2953,7 +2865,7 @@ mod question_answer_focus_tests {
     }
     fn hint_labels(agent: &AgentView) -> Vec<String> {
         agent
-            .current_shortcut_hints(&ActionRegistry::defaults(), false)
+            .current_shortcut_hints(&ActionRegistry::defaults())
             .iter()
             .map(|hint| hint.label.to_string())
             .collect()
@@ -3047,12 +2959,24 @@ mod question_answer_focus_tests {
         open_two_questions(&mut agent);
         press(&mut agent, KeyCode::Char(' '), KeyModifiers::NONE);
         assert!(
-            matches!(qv(&agent).selections[0], QuestionSelection::Single(Some(0))),
+            matches!(
+                qv(&agent)
+                    .selections
+                    .first()
+                    .unwrap_or_else(|| panic!("missing index")),
+                QuestionSelection::Single(Some(0))
+            ),
             "Space marks the focused answer"
         );
         press(&mut agent, KeyCode::Esc, KeyModifiers::NONE);
         assert!(
-            matches!(qv(&agent).selections[0], QuestionSelection::Single(None)),
+            matches!(
+                qv(&agent)
+                    .selections
+                    .first()
+                    .unwrap_or_else(|| panic!("missing index")),
+                QuestionSelection::Single(None)
+            ),
             "Esc clears the answer"
         );
         assert_eq!(

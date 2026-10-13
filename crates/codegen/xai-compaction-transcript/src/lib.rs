@@ -6,6 +6,8 @@
 //! [`ConversationItem`]) — but headers, sections, detail levels, and INDEX
 //! columns match.
 
+#![deny(clippy::indexing_slicing)]
+
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -17,8 +19,9 @@ pub const COMPACTION_DIR: &str = "compaction";
 pub const INDEX_FILE: &str = "INDEX.md";
 const SEGMENT_PREFIX: &str = "segment_";
 
-/// Whole-turn-boundary truncation cap for one segment's verbatim section.
-const SEGMENT_MAX_BYTES: usize = 512 * 1024;
+/// Segment verbatim-section cap, kept at grep's file-size ceiling in
+/// crates/codegen/xai-grok-tools/src/implementations/grok_build/grep/mod.rs.
+const SEGMENT_MAX_BYTES: usize = 5 * 1024 * 1024;
 const TRUNCATION_NOTICE: &str =
     "\n\n[... TRUNCATED at {limit} bytes, {omitted} turns omitted ...]\n";
 /// Per-turn text/arg caps for the `balanced` detail level (chars, like the Python implementation).
@@ -144,7 +147,7 @@ pub fn classify_compaction_path(path: &str) -> Option<CompactionArtifact> {
 /// the Python `text[:n]`). Char boundaries are respected so we never panic.
 fn truncate_chars(s: &str, max: usize, marker: &str) -> String {
     match s.char_indices().nth(max) {
-        Some((byte_idx, _)) => format!("{}{marker}", &s[..byte_idx]),
+        Some((byte_idx, _)) => format!("{}{marker}", s.get(..byte_idx).unwrap_or(s)),
         None => s.to_string(),
     }
 }
@@ -296,7 +299,11 @@ fn render_stats_block(stats: &TurnStats) -> String {
     } else if uf.len() <= 8 {
         uf.join(", ")
     } else {
-        format!("{}, ... and {} more", uf[..5].join(", "), uf.len() - 5)
+        format!(
+            "{}, ... and {} more",
+            uf.get(..5).unwrap_or(uf).join(", "),
+            uf.len() - 5
+        )
     };
     let _ = writeln!(out, "- Unique target files ({}): {uf_str}", uf.len());
     let _ = writeln!(out, "- Tool errors: {}", stats.tool_error_count);
@@ -429,11 +436,9 @@ fn render_turn_signature(item: &ConversationItem, index: usize) -> String {
     }
 }
 
-/// Render one segment: header, metadata, stats, curated summary, and (unless
-/// `detail == None`) verbatim turns truncated at a whole-turn boundary before
-/// [`SEGMENT_MAX_BYTES`]. `summary` must already be cleaned of analysis tags;
-/// `items` is the segment view — tool calls + results kept, images/reasoning
-/// stripped (see `xai_chat_state::compaction_utils::prepare_conversation_for_segment`).
+/// Render one segment: header, metadata, stats, curated summary, and verbatim turns unless `detail == None`.
+/// Turns truncate at a whole-turn boundary before [`SEGMENT_MAX_BYTES`].
+/// `summary` must already be cleaned of analysis tags; `items` is the prepared segment view.
 pub fn render_segment_md(
     items: &[ConversationItem],
     summary: &str,
@@ -566,10 +571,9 @@ const KEYWORD_STOPWORDS: [&str; 28] = [
 /// "8. Current Work" section (falling back to the whole summary), minus
 /// stopwords, deduped, capped at 8. Heuristic only — feeds the INDEX table.
 pub fn extract_keywords(summary: &str) -> Vec<String> {
-    // Rust's regex has no look-ahead, so scope section 8 with two anchored
-    // matches: its header, then the next `N. Capital` header (or end of text).
-    // `#{0,6}` tolerates our `## 8. Current Work` markdown headers as well as
-    // the Python implementation's bare `8. Current Work`.
+    // Rust's regex has no look-ahead, so scope section 8 with two anchored matches.
+    // Header, then the next `N. Capital` header (or end of text).
+    // `#{0,6}` tolerates markdown headers as well as the bare Python form.
     let start_re =
         SECTION8_START_RE.get_or_init(|| Regex::new(r"(?m)^#{0,6}\s*8\.\s+Current Work").unwrap());
     let header_re =
@@ -583,7 +587,7 @@ pub fn extract_keywords(summary: &str) -> Vec<String> {
                 .find_at(summary, m.end())
                 .map(|h| h.start())
                 .unwrap_or(summary.len());
-            &summary[m.start()..end]
+            summary.get(m.start()..end).unwrap_or(summary)
         }
         None => summary,
     };
@@ -666,8 +670,8 @@ mod tests {
     /// is exceeded, with a notice naming how many turns were omitted.
     #[test]
     fn verbatim_turns_truncate_at_turn_boundary() {
-        // Each turn renders ~200 KB, so the 3rd turn blows the 512 KB budget.
-        let big = "x".repeat(200 * 1024);
+        // Each turn renders ~2 MiB, so the 3rd turn blows the 5 MiB budget.
+        let big = "x".repeat(2 * 1024 * 1024);
         let items = [user(&big), user(&big), user(&big), user(&big)];
         let md = render_segment_md(&items, "s", 0, CompactionDetail::Verbose, "t");
         assert!(md.contains("### Turn 0 (Human)"));

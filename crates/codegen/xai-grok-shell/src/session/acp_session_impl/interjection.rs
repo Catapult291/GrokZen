@@ -3,11 +3,9 @@
 
 use super::*;
 
-// Buffer, entry type, and formatting live in the shared xai-interjection-core crate so the server-side agent loop can adopt the same behaviour
-// The shell keeps arrival (ACP ext methods), persistence, and pager echo
-//
-// Re-exported for `acp_session.rs`, which does `pub(crate) use interjection::*;`
-// Retained code and co-located tests keep resolving by `acp_session::` path
+// Buffer, entry type, and formatting live in the shared xai-interjection-core crate so the server-side agent loop can adopt the same behaviour.
+// The shell keeps arrival (ACP ext methods), persistence, and pager echo.
+// Re-exported for `acp_session.rs`, which does `pub(crate) use interjection::*;`.
 #[allow(unused_imports)]
 pub(crate) use xai_interjection_core::{
     INTERRUPT_NOTE, InterjectionBuffer, drain_formatted, format_interjection, frame_user_turn,
@@ -17,7 +15,6 @@ pub(crate) use xai_interjection_core::{
 pub(crate) type PendingInterjection = xai_interjection_core::PendingInterjection<acp::ImageContent>;
 
 /// Prompt-id prefix for interjections that missed their turn and were converted into standalone prompt turns.
-/// They arrived while the session was idle, or after the running turn's final drain.
 /// The prefix keeps the turn's user echo persist-only.
 /// Every pane already rendered the text from the `x.ai/session/interjection` broadcast, so a live echo would duplicate it.
 pub(crate) const INTERJECT_FALLBACK_PROMPT_PREFIX: &str = "interject-fallback-";
@@ -27,17 +24,9 @@ pub(crate) fn is_interject_fallback(prompt_id: &str) -> bool {
 }
 
 impl SessionActor {
-    /// Convert a stranded interjection into a queued prompt turn.
-    ///
     /// An interjection is only merged into a *running* turn (`drain_pending_interjections`).
     /// One that arrives while the session is idle, or lands after the running turn's final drain, would sit in `pending_interjections` forever.
     /// The user's message would be silently lost (the pager already rendered it and said "Interjection sent").
-    /// Queue it as its own prompt turn instead; the caller kicks `maybe_start_running_task`.
-    ///
-    /// `front` puts the converted turn ahead of already-queued prompts: the user asked for "now", queued rows asked for "later".
-    /// Front placement is re-validated under the state lock, because the caller's "no turn running" check ran unlocked.
-    /// A concurrent promotion (MCP-init release, plan-approval resume) may have pinned a running prompt at the front in the meantime.
-    /// Displacing it would desync `handle_completion`'s front pop, so in that case the item lands right behind the running front.
     pub(super) async fn queue_interjection_fallback_prompt(
         &self,
         text: String,
@@ -108,8 +97,7 @@ impl SessionActor {
     /// Normalize interjection images for injection (shared pipeline above); notices append to `wrapped` (TEXT side only).
     /// Returns the images to attach structurally.
     /// Sessions whose template rejects inline images instead transcribe normalized survivors into the text via the describe pipeline.
-    /// Failing that, the images are dropped with a notice.
-    async fn prepare_interjection_images(
+    pub(super) async fn prepare_interjection_images(
         &self,
         wrapped: &mut String,
         images: Vec<acp::ImageContent>,
@@ -122,6 +110,26 @@ impl SessionActor {
             .normalize_images_with_notices(wrapped, images, is_cursor)
             .await;
         if !is_cursor {
+            // The `<image_files>` block is the only durable record of where these images live.
+            // An interjection still goes through when the assets dir cannot be written.
+            if !images.is_empty() {
+                let persisted =
+                    crate::session::persistence::ensure_owner_only_session_dir(&self.session_info)
+                        .and_then(|session_dir| {
+                            crate::session::image_describe::persist_and_prepend_image_files(
+                                &session_dir,
+                                &images,
+                                wrapped.as_str(),
+                            )
+                        });
+                match persisted {
+                    Ok(with_files) => *wrapped = with_files,
+                    Err(error) => tracing::warn!(
+                        ?error,
+                        "interjection images not saved to assets; sending without <image_files>"
+                    ),
+                }
+            }
             return images;
         }
         if !images.is_empty() {
@@ -146,8 +154,10 @@ impl SessionActor {
             "sessionId": self.session_info.id.0.as_ref(),
             "text": text,
         });
-        if let Some(id) = id {
-            payload["interjectionId"] = serde_json::json!(id);
+        if let Some(id) = id
+            && let Some(obj) = payload.as_object_mut()
+        {
+            obj.insert("interjectionId".into(), serde_json::json!(id));
         }
         if let Ok(params) = serde_json::value::to_raw_value(&payload) {
             self.notifications
@@ -167,7 +177,7 @@ impl SessionActor {
         images: &[acp::ImageContent],
     ) {
         let model_id = self.current_model_id().await;
-        self.persist_synthetic_user_message_with_model(text, images, &model_id);
+        self.persist_synthetic_user_message_with_model(text, None, images, &model_id);
 
         // Notify pager (skipped for interjections; the pager has a local block)
         if notify_pager {
@@ -187,23 +197,32 @@ impl SessionActor {
         }
     }
 
-    /// Persistence half of `persist_synthetic_user_message`, synchronous (model id
-    /// pre-fetched) so the interjection drain can keep the batch submit and its
+    /// Persistence half of `persist_synthetic_user_message`, synchronous (model id.
+    /// pre-fetched) so the interjection drain can keep the batch submit and its.
     /// persisted user chunks on the same side of any cancellation point.
     fn persist_synthetic_user_message_with_model(
         &self,
         text: &str,
+        interjection_display_text: Option<&str>,
         images: &[acp::ImageContent],
         model_id: &str,
     ) {
-        let user_chunk_meta = serde_json::json!({ "modelId": model_id })
-            .as_object()
-            .cloned();
+        let mut user_chunk_meta = serde_json::Map::new();
+        user_chunk_meta.insert("modelId".into(), serde_json::json!(model_id));
+        let mut text_block = acp::TextContent::new(text.to_string());
+        if let Some(display_text) = interjection_display_text {
+            user_chunk_meta.insert(
+                crate::session::storage::INTERJECTION_META_KEY.into(),
+                serde_json::json!(true),
+            );
+            let mut text_meta = serde_json::Map::new();
+            text_meta.insert("displayText".into(), serde_json::json!(display_text));
+            text_block = text_block.meta(Some(text_meta));
+        }
+        let user_chunk_meta = Some(user_chunk_meta);
 
         // Persist to updates.jsonl: one UserMessageChunk per content block (text first, then any images; Image chunks already round-trip)
-        let mut content_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-            text.to_string(),
-        ))];
+        let mut content_blocks = vec![acp::ContentBlock::Text(text_block)];
         content_blocks.extend(images.iter().cloned().map(acp::ContentBlock::Image));
         let notification_meta = self.build_notification_meta();
         for content_block in content_blocks {
@@ -234,10 +253,8 @@ impl SessionActor {
     }
 
     /// Expand skill slash references in interjection text into the `<skill_information>` envelope (loaded and substituted SKILL.md bodies).
-    ///
     /// Interjections bypass turn-start slash resolution (`slash_commands::resolve`).
     /// Without this, a queued `/skill` row force-sent mid-turn, or a typed `/skill` interjection, reaches the model as a bare, unexpanded slash command.
-    /// Returns `None` when the text references no known skill.
     async fn interjection_skill_information(&self, text: &str) -> Option<String> {
         // Mirror turn-start gating (`parse_slash_prefix`): only a leading slash invokes skills
         // "don't run /commit yet" is steering text, not an invocation
@@ -260,11 +277,15 @@ impl SessionActor {
                     args_provided: !sk.args.is_empty(),
                 },
             );
+            let skill_source =
+                crate::session::telemetry::skill_source(sk.scope, sk.plugin_name.as_deref());
             xai_grok_telemetry::session_ctx::log_event(
                 xai_grok_telemetry::events::SkillDispatched {
                     skill_name: sk.name.clone(),
                     plugin_source: sk.plugin_name.clone(),
                     trigger: xai_grok_telemetry::events::SkillTrigger::SlashCommand,
+                    skill_source: Some(skill_source.to_owned()),
+                    skill_origin: sk.origin.clone(),
                 },
             );
         }
@@ -309,12 +330,9 @@ impl SessionActor {
     }
 
     pub(super) async fn drain_pending_interjections(&self) -> bool {
-        // Manual drain (not `drain_formatted`): skill parsing needs the raw text
-        // Parsed after wrapping, the envelope's closing `</user_query>` tag would pollute the trailing skill's args
-        //
-        // The guard owns the drained entries until the batch is submitted: every await below is a
-        // point where a turn abort (send-now or cancel) can drop this future, and entries gone
-        // from the buffer but never handed to chat state would be unrecoverable
+        // Manual drain (not `drain_formatted`): skill parsing needs the raw text.
+        // Parsed after wrapping, the envelope's closing `</user_query>` tag would pollute the trailing skill's args.
+        // The guard owns the drained entries until the batch is submitted: every await below is a.
         let guard = RestoreOnCancel {
             buffer: self.pending_interjections.clone(),
             entries: self.pending_interjections.drain_all(),
@@ -332,15 +350,14 @@ impl SessionActor {
                 text.clone(),
             );
             let skill_information = self.interjection_skill_information(&sanitized).await;
-            let mut wrapped = format_interjection(sanitized);
+            let mut wrapped = format_interjection(sanitized.clone());
             // The pipeline consumes a clone; the guard keeps the original attachments restorable
             let images = self
                 .prepare_interjection_images(&mut wrapped, attachments.clone())
                 .await;
             // Model-visible text: <skill_information> follows the wrapped <user_query>, the same order as turn-start prompt assembly
             // It is appended after the image pipeline so the template-specific transcription rewrite cannot mangle the envelope
-            // The persisted user chunk stays envelope-free so session replay renders the compact interjection, not the SKILL.md body
-            // (Mirrors turn-start skills, which replay via `displayText`.)
+            // The persisted user chunk stays envelope-only (no SKILL.md body); the typed text rides in `displayText` for replay
             let model_text = match &skill_information {
                 Some(skill_information) => {
                     tracing::info!("expanded skill references in mid-turn interjection");
@@ -352,14 +369,14 @@ impl SessionActor {
             for img in &images {
                 item.add_image(pick_user_image_url(img));
             }
-            prepared.push((wrapped, images, item));
+            prepared.push((wrapped, sanitized, images, item));
         }
         // Last await before the submit; from here persistence is deliberately synchronous so no
         // cancellation point can separate the submitted batch from its persisted user chunks
         let model_id = self.current_model_id().await;
         let (persist_parts, chat_items): (Vec<_>, Vec<_>) = prepared
             .into_iter()
-            .map(|(wrapped, images, item)| ((wrapped, images), item))
+            .map(|(wrapped, typed, images, item)| ((wrapped, typed, images), item))
             .unzip();
         if self
             .chat_state_handle
@@ -376,8 +393,13 @@ impl SessionActor {
         // Persist only after the submit succeeded: on the failure/cancel paths the entries go back
         // to the buffer and the fallback-prompt turn persists them, so persisting here too would
         // duplicate the user chunks in updates.jsonl
-        for (wrapped, images) in persist_parts {
-            self.persist_synthetic_user_message_with_model(&wrapped, &images, &model_id);
+        for (wrapped, typed, images) in persist_parts {
+            self.persist_synthetic_user_message_with_model(
+                &wrapped,
+                Some(&typed),
+                &images,
+                &model_id,
+            );
         }
         guard.defuse();
         tracing::info!("Injected mid-turn interjections as standalone synthetic user messages");
@@ -387,11 +409,9 @@ impl SessionActor {
     }
 }
 
-/// Cancel-safety guard for `drain_pending_interjections`: a turn abort drops the drain future at
-/// one of its awaits (skill resolution, image pipeline, model-id fetch). Entries already drained
-/// but not yet submitted to chat state would vanish — `flush_stranded_interjections` would find an
-/// empty buffer with nothing to convert into fallback prompts. On drop, unsubmitted entries go
-/// back to the front of the buffer, ahead of anything pushed since, keeping arrival order.
+/// Cancel-safety guard for `drain_pending_interjections`: a turn abort drops the drain future at one of its awaits (skill resolution, image pipeline, model-id fetch).
+/// Entries already drained but not yet submitted to chat state would vanish — `flush_stranded_interjections` would find an empty buffer with nothing to convert into fallback prompts.
+/// On drop, unsubmitted entries go back to the front of the buffer, ahead of anything pushed since, keeping arrival order.
 #[must_use]
 struct RestoreOnCancel {
     buffer: InterjectionBuffer<acp::ImageContent>,

@@ -227,6 +227,9 @@ try {
         Assert-True (Test-Path -LiteralPath (Join-Path $legacyInstall $relativeLicense) -PathType Leaf) `
             "7 项桥接安装丢失许可证文件：$relativeLicense"
     }
+    & $installer -PackageDir $package -InstallDir $legacyInstall `
+        -GrokHome (Join-Path $testRoot 'unused-legacy-home') -NoPathUpdate -Confirm:$false
+    Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Directory -Filter 'legacy-package-install.previous.*').Count -eq 0) '旧桥接包的额外许可证不阻碍成功清理'
 
     Assert-Throws {
         & $installer -PackageDir $package -InstallDir $testRoot `
@@ -277,6 +280,56 @@ try {
     $installedManifestText = Get-Content -LiteralPath $installedManifestPath -Raw -Encoding UTF8
     Assert-True (!$installedManifestText.Contains('一键安装.cmd')) '安装目录校验清单不应引用仅位于解压包根的一键入口'
     Assert-True (!$installedManifestText.Contains('[可选]替换原始启动方式.cmd')) '安装目录校验清单不应引用仅位于解压包根的可选入口'
+
+    # A successful update removes program backups but preserves historical
+    # official-command recovery data in the active installation.
+    $historicalOfficial = Join-Path $defaultInstall 'official-backup'
+    New-Item -ItemType Directory -Path $historicalOfficial | Out-Null
+    Set-Content -LiteralPath (Join-Path $historicalOfficial 'grok.exe') -Value 'official-recovery' -Encoding Ascii
+    & $installer -PackageDir $package -InstallDir $defaultInstall `
+        -GrokHome (Join-Path $testRoot 'unused-home') -NoPathUpdate -Confirm:$false
+    Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Directory -Filter 'default-install.previous.*').Count -eq 0) '升级成功不保留旧版目录'
+    Assert-True ((Get-Content -LiteralPath (Join-Path $historicalOfficial 'grok.exe') -Raw).Contains('official-recovery')) '历史官方程序备份在活动目录保留'
+
+    Set-Content -LiteralPath (Join-Path $defaultInstall 'grok-zh.exe.update.lock') -Value ''
+    & {
+        $occupiedBackup = @{ Handle = $null; Path = $null }
+        function Move-Item {
+            param([string]$LiteralPath, [string]$Destination)
+            Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination
+            if ($LiteralPath -eq $defaultInstall) {
+                # Lock the backup after the directory switch. Windows Server can
+                # refuse to rename a parent with open child files even when the
+                # child handle allows delete; that is not the cleanup under test.
+                $occupiedBackup.Path = $Destination
+                $occupiedBackup.Handle = [IO.File]::Open(
+                    (Join-Path $Destination 'grok-zh.exe.update.lock'), 'Open', 'Read', [IO.FileShare]::ReadWrite)
+            }
+        }
+        try {
+            & $installer -PackageDir $package -InstallDir $defaultInstall `
+                -GrokHome (Join-Path $testRoot 'unused-home') -NoPathUpdate -Confirm:$false
+            Assert-True ($null -ne $occupiedBackup.Handle) '未在目录切换后占用旧备份'
+            Assert-True (Test-Path -LiteralPath (Join-Path $defaultInstall 'grok-zh.exe')) '旧备份被占用时仍应完成新版本安装'
+            $pendingMarker = Get-Content -LiteralPath (Join-Path $defaultInstall '.grok-zh-install.json') -Raw | ConvertFrom-Json
+            Assert-True ($pendingMarker.previous_install_backup -eq $occupiedBackup.Path) '待清理记录未指向被占用的旧备份'
+            Assert-True (Test-Path -LiteralPath (Join-Path $occupiedBackup.Path 'grok-zh.exe')) '占用旧程序时保留备份待重试'
+        } finally {
+            if ($null -ne $occupiedBackup.Handle) { $occupiedBackup.Handle.Dispose() }
+        }
+    }
+    & $installer -PackageDir $package -InstallDir ($defaultInstall.ToUpperInvariant()) `
+        -GrokHome (Join-Path $testRoot 'unused-home') -NoPathUpdate -Confirm:$false
+    Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Directory -Filter 'default-install.previous.*').Count -eq 0) '下一次升级清理已释放的整条旧备份链'
+
+    Set-Content -LiteralPath (Join-Path $defaultInstall '个人文件.txt') -Value 'keep-me' -Encoding UTF8
+    & $installer -PackageDir $package -InstallDir $defaultInstall `
+        -GrokHome (Join-Path $testRoot 'unused-home') -NoPathUpdate -Confirm:$false
+    $personalBackup = (Get-Content -LiteralPath (Join-Path $defaultInstall '.grok-zh-install.json') -Raw | ConvertFrom-Json).previous_install_backup
+    Assert-True (Test-Path -LiteralPath (Join-Path $personalBackup '个人文件.txt')) '非程序文件不会被备份清理删除'
+    & $installer -PackageDir $package -InstallDir $defaultInstall `
+        -GrokHome (Join-Path $testRoot 'unused-home') -NoPathUpdate -Confirm:$false
+    Assert-True (@(Get-ChildItem -LiteralPath $testRoot -Directory -Filter 'default-install.previous.*').Count -eq 1) '需保留的历史目录不导致后续旧程序备份继续累积'
 
     $progressInstall = Join-Path $testRoot 'progress-install'
     $progressOutput = @(& $installer -PackageDir $package -InstallDir $progressInstall `

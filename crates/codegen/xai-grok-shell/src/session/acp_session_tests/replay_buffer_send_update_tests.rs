@@ -32,6 +32,8 @@ pub(super) struct ReplaySendUpdateFixture {
     pub(super) actor: SessionActor,
     pub(super) event_rx: mpsc::UnboundedReceiver<SessionEvent>,
     pub(super) sent: Arc<tokio::sync::Mutex<Vec<acp::SessionNotification>>>,
+    /// `x.ai/*` extension notifications such as `ModelChanged`.
+    pub(super) sent_ext: Arc<tokio::sync::Mutex<Vec<acp::ExtNotification>>>,
     pub(super) persistence_rx: mpsc::UnboundedReceiver<PersistenceMsg>,
 }
 pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture {
@@ -40,12 +42,21 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
     let sent = Arc::new(tokio::sync::Mutex::new(
         Vec::<acp::SessionNotification>::new(),
     ));
+    let sent_ext = Arc::new(tokio::sync::Mutex::new(Vec::<acp::ExtNotification>::new()));
     let sent_for_task = sent.clone();
+    let sent_ext_for_task = sent_ext.clone();
     tokio::task::spawn_local(async move {
         while let Some(msg) = gateway_rx.recv().await {
-            if let xai_acp_lib::AcpClientMessage::SessionNotification(args) = msg {
-                sent_for_task.lock().await.push(args.request);
-                let _ = args.response_tx.send(Ok(()));
+            match msg {
+                xai_acp_lib::AcpClientMessage::SessionNotification(args) => {
+                    sent_for_task.lock().await.push(args.request);
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                xai_acp_lib::AcpClientMessage::ExtNotification(args) => {
+                    sent_ext_for_task.lock().await.push(args.request);
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                _ => {}
             }
         }
     });
@@ -78,8 +89,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let actor = SessionActor {
         late_delivery_claimed: std::cell::Cell::new(false),
-        repo_status_prefetch: crate::session::repo_status_prefix::RepoStatusPrefetchState::default(
-        ),
+        vcs_root: None,
         transient_retry_enabled: true,
         transient_retries_prompt_total: std::cell::Cell::new(0),
         transient_episode_start: std::cell::Cell::new(None),
@@ -99,6 +109,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             persistence_tx,
             disk_full: crate::session::notifications::idle_disk_full_rx(),
+            client_caps: crate::session::notifications::SessionClientCaps::new(false, true),
         },
         permissions: PermissionHandle::allow_all(),
         tool_context,
@@ -126,23 +137,26 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         rewind_pending_prompt: std::sync::Mutex::new(None),
         startup_hints: StartupHints::default(),
         forked_tool_override: None,
-        compaction: crate::session::compaction_config::CompactionConfig {
-            threshold_percent: std::cell::Cell::new(85),
-            force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            context_window_override: None,
-            count: std::sync::atomic::AtomicU64::new(0),
-            auto_compact_suppressed: std::sync::atomic::AtomicU8::new(0),
-            previous_model: std::cell::Cell::new(None),
-            compaction_mode: xai_chat_state::CompactionMode::Transcript,
-            verbatim_input: true,
-            tool_choice: crate::util::config::CompactionToolChoice::Auto,
-            prefire: crate::session::compaction_config::PrefireState::default(),
-            prefix_released: std::sync::atomic::AtomicBool::new(false),
-            cancel: Default::default(),
+        compaction: test_compaction_config(85),
+        long_reasoning_reminder: crate::session::long_reasoning_reminder::LongReasoningReminder {
+            enabled: false,
+            tokens: crate::session::long_reasoning_reminder::DEFAULT_TOKENS,
+            delay: crate::session::long_reasoning_reminder::DEFAULT_DELAY,
         },
+        long_reasoning_turn_state: Default::default(),
         memory: crate::session::memory_state::SessionMemory {
+            configured_mode: None,
+            v2_config: Default::default(),
+            configured_storage: None,
+            process_disabled: false,
+            config_opt_out: false,
+            v2_legacy_carryover: false,
+            prompt_sync_pending: std::sync::atomic::AtomicBool::new(false),
             flush_config: crate::config::MemoryFlushConfig::default(),
-            is_flushing: std::sync::atomic::AtomicBool::new(false),
+            is_flushing: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            capture_worker: std::cell::RefCell::new(None),
+            dream_workers: crate::session::memory_state::V2DreamWorkers::default(),
+            last_capture_failure: std::cell::RefCell::new(None),
             last_flush_compaction: std::sync::atomic::AtomicU64::new(0),
             storage: std::cell::RefCell::new(None),
             save_on_end: true,
@@ -162,9 +176,11 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
             dream_count: std::sync::atomic::AtomicU64::new(0),
             dream_success_count: std::sync::atomic::AtomicU64::new(0),
             dream_error_count: std::sync::atomic::AtomicU64::new(0),
+            token_totals: Default::default(),
         },
         session_start: std::time::Instant::now(),
         inference_idle_timeout: Duration::from_secs(300),
+        uncharged_401_park_enabled: true,
         max_retries: 3,
         rate_limit_waits: crate::session::acp_session::RateLimitWaitConfig::default(),
         max_turns: None,
@@ -192,6 +208,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         display_cwd: std::sync::OnceLock::new(),
         active_agent_type: parking_lot::Mutex::new(None),
         queue_exit_reminder_on_approved_exit: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        emit_local_background_tasks: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         active_skill: parking_lot::Mutex::new(None),
         current_prompt_mode: Arc::new(parking_lot::Mutex::new(PromptMode::Agent)),
         turn_start_prompt_mode: parking_lot::Mutex::new(PromptMode::Agent),
@@ -231,35 +248,40 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         pending_classifier_completions: parking_lot::Mutex::new(std::collections::VecDeque::new()),
         goal_classifier_in_flight: std::sync::atomic::AtomicBool::new(false),
         managed_mcp_handle: Default::default(),
-        initial_client_mcp_servers: vec![],
+        initial_client_mcp_servers: Default::default(),
         tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
         mcp_announcements: Default::default(),
         mcp_reminder_mode: McpReminderMode::Delta,
         mcp_reminder_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         mcp_connecting_reminder_injected: std::cell::Cell::new(false),
-        mcp_handshakes_done: Arc::new(tokio::sync::Notify::new()),
+        mcp_refresh_gate: Arc::new(tokio::sync::Mutex::new(())),
         user_input_generation: std::sync::atomic::AtomicU64::new(0),
         laziness_debug_log: None,
         last_live_orphan_reconcile: std::cell::Cell::new(None),
-        deferred_prefix: TaskSlot::new(),
+        deferred_prefix: DeferredPrefix::new(),
+        mcp_startup_waits: Default::default(),
+        mcp_init_tasks: Default::default(),
+        weak_self: std::sync::Weak::new(),
+        startup_tasks: Default::default(),
         extension_registry: xai_agent_lifecycle::LocalExtensionRegistry::default(),
         last_announced_local_date: std::cell::Cell::new(chrono::Local::now().date_naive()),
         prefix_carries_fallback_date: std::cell::Cell::new(false),
         last_search_prompt_index: std::sync::atomic::AtomicI64::new(-1),
         last_api_request_at: std::sync::atomic::AtomicI64::new(0),
         hook_registry: std::cell::RefCell::new(None),
+        hook_disabled: Default::default(),
         turn_report: Default::default(),
         turn_abort: Default::default(),
         turn_end_tx: Default::default(),
         client_hooks: Default::default(),
         hook_resolved_workspace_root: String::new(),
-        vcs_kind: xai_grok_workspace::session::git::VcsKind::Git,
         hook_load_errors: std::cell::RefCell::new(Vec::new()),
         plugin_registry: std::cell::RefCell::new(None),
         plugin_registry_handle: None,
         events: crate::session::events::EventTracker::new(std::path::Path::new("/tmp")),
         observability_bridge: noop_observability_bridge(),
         current_turn_number: std::cell::Cell::new(0),
+        turn_phases: std::sync::Arc::default(),
         last_recap_main_turn: std::cell::Cell::new(0),
         recap_in_flight: std::cell::Cell::new(false),
         recap_epoch: std::cell::Cell::new(0),
@@ -272,6 +294,8 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         title_refresh_enabled: false,
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         streaming_turn_capture: parking_lot::Mutex::new(StreamingTurnCapture::default()),
+        stream_apply_span: parking_lot::Mutex::new(None),
+        current_turn_span_id: parking_lot::Mutex::new(None),
         turn_stream_drained: parking_lot::Mutex::new(std::collections::HashMap::new()),
         pending_image_strip: parking_lot::Mutex::new(HashMap::new()),
         image_strip_rewrite_barrier: ImageStripRewriteBarrier::new(),
@@ -288,6 +312,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         actor,
         event_rx,
         sent,
+        sent_ext,
         persistence_rx,
     }
 }
@@ -300,6 +325,7 @@ async fn send_update_buffers_streaming_chunks_and_flush_sends_merged_notificatio
                 actor,
                 mut event_rx,
                 sent,
+                sent_ext: _,
                 mut persistence_rx,
             } = make_replay_send_update_fixture().await;
             actor.send_update(agent_msg_update("he"), Some(1)).await;
@@ -326,7 +352,10 @@ async fn send_update_buffers_streaming_chunks_and_flush_sends_merged_notificatio
             tokio::task::yield_now().await;
             let sent_msgs = sent.lock().await.clone();
             assert_eq!(sent_msgs.len(), 1);
-            assert_eq!(extract_text(&sent_msgs[0]).as_deref(), Some("hello"));
+            let Some(first) = sent_msgs.first() else {
+                panic!("expected one sent message: {sent_msgs:?}");
+            };
+            assert_eq!(extract_text(first).as_deref(), Some("hello"));
             let mut persisted = vec![];
             while let Ok(msg) = persistence_rx.try_recv() {
                 persisted.push(msg);
@@ -341,11 +370,7 @@ async fn send_update_buffers_streaming_chunks_and_flush_sends_merged_notificatio
 }
 /// Regression test: a cancel during a long reasoning stream must not lose buffered chunks from the trace upload.
 /// The `SessionCommand::Cancel` and `SessionCommand::CopyFile` handlers in `run_session` must flush the actor-owned `ReplayBuffer`.
-/// That persists chunks still pending at cancel time (notably `AgentThoughtChunk` reasoning) to `updates.jsonl`.
-/// The flush must land before `mvp_agent` issues `CopyFile` to snapshot the session directory for the trace upload.
-///
 /// Without the flush, the tail of a long reasoning stream sitting in the buffer at Ctrl+C never reaches disk.
-/// `copy_session_dir_to_memory` then reads an `updates.jsonl` missing that tail.
 #[tokio::test(flavor = "current_thread")]
 async fn cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence() {
     let local = tokio::task::LocalSet::new();
@@ -355,6 +380,7 @@ async fn cancel_and_copyfile_handlers_flush_buffered_chunks_to_persistence() {
                 actor,
                 mut event_rx,
                 sent: _sent,
+                sent_ext: _,
                 mut persistence_rx,
             } = make_replay_send_update_fixture().await;
             actor
@@ -411,6 +437,7 @@ async fn buffered_chunk_does_not_reach_persistence_without_explicit_flush() {
                 actor,
                 mut event_rx,
                 sent: _sent,
+                sent_ext: _,
                 mut persistence_rx,
             } = make_replay_send_update_fixture().await;
             actor
@@ -449,6 +476,7 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
                 actor,
                 event_rx: _event_rx,
                 sent,
+                sent_ext: _,
                 mut persistence_rx,
             } = make_replay_send_update_fixture().await;
             let session_id = acp::SessionId::new("test-session");
@@ -492,10 +520,155 @@ async fn available_commands_update_is_forwarded_but_not_persisted() {
                 "exactly one update must be persisted; available_commands_update must be skipped",
             );
             assert!(
-                matches!(persisted[0].update, acp::SessionUpdate::AgentMessageChunk(_)),
+                matches!(persisted.first(), Some(n) if matches!(n.update, acp::SessionUpdate::AgentMessageChunk(_))),
                 "the persisted update must be the agent message, not available_commands_update",
             );
             drop(actor);
         })
         .await;
+}
+#[tokio::test]
+async fn server_overflow_clears_a_larger_context_window_selection() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let ReplaySendUpdateFixture {
+                actor,
+                event_rx: _event_rx,
+                sent: _sent,
+                sent_ext,
+                mut persistence_rx,
+            } = make_replay_send_update_fixture().await;
+            actor.models_manager.insert_test_entry(
+                "catalog-key",
+                crate::agent::config::ModelEntry::fallback(
+                    "test-model",
+                    &crate::agent::config::EndpointsConfig::default(),
+                ),
+            );
+            let cfg = selected_window_config(&actor, 500_000);
+            actor.context_window_after_overflow(&cfg, std::num::NonZeroU64::new(256_000).unwrap());
+            assert_eq!(
+                0,
+                actor
+                    .compaction
+                    .context_window_selection
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            );
+            let Ok(PersistenceMsg::CurrentModel { model_id, .. }) = persistence_rx.try_recv()
+            else {
+                panic!("the cleared selection is saved");
+            };
+            assert_eq!("catalog-key", model_id.0.as_ref());
+            for _ in 0..50 {
+                if !sent_ext.lock().await.is_empty() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            let ext = sent_ext
+                .lock()
+                .await
+                .first()
+                .cloned()
+                .expect("ModelChanged broadcast reached the gateway");
+            let value: serde_json::Value =
+                serde_json::from_str(ext.params.get()).expect("notification payload is JSON");
+            assert_eq!(
+                Some(&serde_json::json!({
+                    "sessionUpdate": "model_changed",
+                    "model_id": "catalog-key",
+                    "reasoning_effort": "high",
+                })),
+                value.get("update")
+            );
+        })
+        .await;
+}
+#[tokio::test]
+async fn server_overflow_keeps_a_smaller_context_window_selection() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let fixture = make_replay_send_update_fixture().await;
+            let cfg = selected_window_config(&fixture.actor, 256_000);
+            assert_eq!(
+                cfg.context_window,
+                fixture.actor.context_window_after_overflow(
+                    &cfg,
+                    std::num::NonZeroU64::new(500_000).unwrap()
+                )
+            );
+        })
+        .await;
+}
+#[tokio::test]
+async fn preserve_switch_applies_the_live_selection_while_supported() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let w256 = std::num::NonZeroU64::new(256_000).unwrap();
+            let w500 = std::num::NonZeroU64::new(500_000).unwrap();
+            for (overflowed, supported, applied, selection) in [
+                (true, vec![w256, w500], 256_000, 0),
+                (false, vec![w256, w500], 500_000, 500_000),
+                (false, vec![w256], 256_000, 500_000),
+            ] {
+                let (actor, _gateway_rx) = build_actor().await;
+                let cfg = selected_window_config(&actor, 500_000);
+                if overflowed {
+                    actor.context_window_after_overflow(&cfg, w256);
+                }
+                actor
+                    .handle_set_session_model(crate::session::SessionModelSwitch {
+                        sampling_config: xai_grok_sampler::SamplerConfig {
+                            model: "test-model".to_owned(),
+                            context_window: 256_000,
+                            ..xai_grok_sampler::SamplerConfig::default()
+                        },
+                        use_concise: false,
+                        is_family_switch: false,
+                        apply_prompt_override: false,
+                        skip_prompt_rewrite: true,
+                        auto_compact_threshold_percent: 85,
+                        system_prompt_label: xai_grok_agent::DEFAULT_SYSTEM_PROMPT_LABEL.to_owned(),
+                        context_window_selection: crate::session::SwitchContextWindow::Preserve,
+                        supported_context_windows: supported,
+                    })
+                    .await
+                    .expect("model switch succeeds");
+                let config = actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("the switch sets a sampling config");
+                assert_eq!(
+                    (applied, selection),
+                    (
+                        config.context_window.get(),
+                        actor
+                            .compaction
+                            .context_window_selection
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                    )
+                );
+            }
+        })
+        .await;
+}
+/// Stores `window` as the selection and returns a config that uses it.
+fn selected_window_config(
+    actor: &SessionActor,
+    window: u64,
+) -> xai_grok_sampling_types::SamplingConfig {
+    actor
+        .compaction
+        .context_window_selection
+        .store(window, std::sync::atomic::Ordering::Relaxed);
+    xai_grok_sampling_types::SamplingConfig {
+        model: "test-model".to_owned(),
+        reasoning_effort: Some(xai_grok_sampling_types::ReasoningEffort::High),
+        context_window: std::num::NonZeroU64::new(window).unwrap(),
+        ..Default::default()
+    }
 }

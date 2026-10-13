@@ -17,7 +17,6 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::app::subagent::format_subagent_meta;
 use crate::appearance::AppearanceConfig;
-use crate::render::color::blend_color;
 use crate::render::line_utils::truncate_str;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput, DisplayMode};
@@ -60,11 +59,8 @@ pub struct SubagentBlock {
     pub is_background: bool,
     /// Lifecycle kind.
     pub kind: SubagentBlockKind,
-    /// Live activity label from the child session's turn tracker.
-    ///
-    /// Updated on each `SubagentProgress` tick while the subagent is running.
-    /// Shown inline in the collapsed scrollback line (e.g. "Thinking", "Running: cargo build").
-    /// The user sees interactive progress without opening the subagent view.
+    /// Live activity label from the child session's turn tracker. The user sees interactive progress without opening
+    /// the subagent view.
     pub activity_label: Option<String>,
 }
 
@@ -599,10 +595,7 @@ impl BlockContent for SubagentBlock {
         match &self.kind {
             SubagentBlockKind::Started => {
                 if ctx.is_running {
-                    let dim = ctx.appearance.scrollback.display.dim_accent;
-                    let dimmed = blend_color(theme.bg_base, theme.accent_running, dim)
-                        .unwrap_or(theme.accent_running);
-                    Some(AccentStyle::animated(dimmed))
+                    Some(AccentStyle::animated_running(ctx, &theme))
                 } else {
                     // Finished: gray bullet (same as bg task "started" after completion)
                     None

@@ -18,10 +18,6 @@ use unicode_width::UnicodeWidthStr;
 use crate::render::line_utils::byte_offset_at_width;
 use crate::theme::Theme;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 pub use crate::modal_window_state::{ModalWindowState, ShortcutHitArea};
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,12 +38,11 @@ pub fn embedded() -> bool {
     EMBEDDED.load(Ordering::Relaxed)
 }
 
-/// Resolved list-row styling for the embedded ("resume-list") look shared by the dropdown / picker widgets.
-/// Rows stay transparent and the selected row recolors its text with the selection accent (fzf-style).
-/// A painted selection band is not expressible on the terminal-native palette.
+/// Resolved list-row styling for the embedded ("resume-list") look shared by the dropdown / picker
+/// widgets.
 #[derive(Clone, Copy)]
 pub struct EmbeddedRowStyle {
-    /// Row background: always transparent (`Color::Reset`).
+    /// Row background (`Color::Reset` in the embedded look).
     pub bg: Color,
     /// True when this row is the selected row.
     pub selected: bool,
@@ -161,11 +156,7 @@ impl ModalSizing {
     }
 }
 
-/// Fold state of the currently focused entry, provided by the caller so [`handle_modal_key`] can make fold decisions generically.
-///
-/// When present in [`ModalWindowConfig`], Left/Right/h/l keys return specific fold outcomes ([`ModalWindowOutcome::CollapseGroup`], etc.).
 /// Without it they return the default [`ModalWindowOutcome::Unhandled`].
-/// `Unhandled` is still returned when no fold action applies (e.g. Left on a top-level collapsed header with no parent).
 #[derive(Debug, Clone, Copy)]
 pub struct FoldInfo {
     /// Whether the focused entry is a collapsible group header.
@@ -251,21 +242,7 @@ pub enum ModalWindowOutcome {
     Unhandled,
 }
 
-// ---------------------------------------------------------------------------
-// Rendering
-// ---------------------------------------------------------------------------
-
 /// Render the modal window chrome and return the content area for the caller to render into.
-///
-/// Draws:
-/// 1. `Clear` over the popup rect (no dimming).
-/// 2. Accent-colored square border with bold title on the top border.
-/// 3. `[✗]` close button on the top-right border with hover brightening.
-/// 4. Optional tab bar below the top border.
-/// 5. Inner padding (`h_pad` x `v_pad`).
-/// 6. Footer shortcut row (inline centered, clickable bold, hints dim, hover highlight).
-///
-/// Returns `None` if the area is too small to render a meaningful popup.
 pub fn render_modal_window(
     buf: &mut Buffer,
     area: Rect,
@@ -518,24 +495,32 @@ fn render_tab_bar(
         if y >= inner.y + inner.height {
             // Mark remaining tabs as not rendered.
             for &tab_idx in row_indices {
-                state.tab_rects[tab_idx] = None;
+                if let Some(slot) = state.tab_rects.get_mut(tab_idx) {
+                    *slot = None;
+                }
             }
             break;
         }
 
         let mut cur_x = inner.x + left_margin;
         for (local_idx, &tab_idx) in row_indices.iter().enumerate() {
-            let label = tabs[tab_idx];
+            let Some(&label) = tabs.get(tab_idx) else {
+                continue;
+            };
             let remaining = right_edge.saturating_sub(cur_x) as usize;
             if remaining == 0 {
-                state.tab_rects[tab_idx] = None;
+                if let Some(slot) = state.tab_rects.get_mut(tab_idx) {
+                    *slot = None;
+                }
                 continue;
             }
 
             let is_active = tab_idx == state.active_tab;
             // Minimal renders every element background-free, so the focused active tab uses accent text instead of a highlight band
             let is_embedded = embedded();
-            let display = &label[..byte_offset_at_width(label, remaining)];
+            let display = label
+                .get(..byte_offset_at_width(label, remaining))
+                .unwrap_or("");
             let label_w = display.width();
             // Inactive tab labels use `theme.gray` (secondary-text tier), not `theme.gray_dim`
             // At ANSI16 `gray_dim` collapses to the softer slot (silver on White), leaving text at ~1.2:1 contrast
@@ -555,17 +540,21 @@ fn render_tab_bar(
                 Style::default().fg(theme.gray)
             };
             buf.set_string(cur_x, y, display, style);
-            state.tab_rects[tab_idx] = Some(Rect {
-                x: cur_x,
-                y,
-                width: label_w as u16,
-                height: 1,
-            });
+            if let Some(slot) = state.tab_rects.get_mut(tab_idx) {
+                *slot = Some(Rect {
+                    x: cur_x,
+                    y,
+                    width: label_w as u16,
+                    height: 1,
+                });
+            }
             cur_x += label_w as u16;
             if local_idx + 1 < row_indices.len() {
                 let sep_remaining = right_edge.saturating_sub(cur_x) as usize;
                 if sep_remaining > 0 {
-                    let sep_display = &separator[..byte_offset_at_width(separator, sep_remaining)];
+                    let sep_display = separator
+                        .get(..byte_offset_at_width(separator, sep_remaining))
+                        .unwrap_or("");
                     buf.set_string(cur_x, y, sep_display, Style::default().fg(theme.gray));
                     cur_x += sep_display.width() as u16;
                 }
@@ -634,15 +623,8 @@ pub(crate) fn shortcuts_rows_needed(shortcuts: &[Shortcut<'_>], width: u16) -> u
     rows
 }
 
-/// Split a shortcut label into its `(key, label)` parts at the first ASCII space character.
-///
-/// Returns `(full_label, "")` for single-token labels (no space).
-/// The leading space stays attached to the label half so the gap between key and label is rendered with the label style.
-/// That keeps the spacing visually contiguous when the label has a hover background.
-///
-/// We split on ASCII `' '` rather than `char::is_whitespace`.
-/// Interpolated labels can contain tabs, NBSP (`\u{00A0}`), or other Unicode whitespace.
-/// Splitting on those would put the boundary in a surprising place and style part of the label text as the bold "key".
+/// Split a shortcut label into its `(key, label)` parts at the first ASCII space character. We
+/// split on ASCII `' '` rather than `char::is_whitespace`.
 fn split_shortcut_label(label: &str) -> (&str, &str) {
     match label.find(' ') {
         Some(i) => label.split_at(i),
@@ -650,17 +632,8 @@ fn split_shortcut_label(label: &str) -> (&str, &str) {
     }
 }
 
-/// Render inline centered footer shortcuts with multi-row wrapping.
-///
-/// Returns hit-test areas for all rendered shortcuts (both clickable and hint-only).
-/// When shortcuts don't fit on a single row, they wrap onto additional rows within the `area` height.
-/// Rows are placed bottom-aligned so a single row sits on the last line.
-///
-/// Each shortcut label is split at the first whitespace.
-/// The leading token (the "key", e.g. `Esc`, `Enter`, `↑/↓`) is rendered bold in `text_secondary`.
-/// The trailing label text (e.g. `cancel`, `import 3`) is rendered in `gray`, the tertiary text shade (see `shortcuts_bar.rs` for the same hierarchy).
-/// Single-token labels render entirely as the key.
-/// Hovered shortcuts get a `bg_highlight` underlay across the whole label.
+/// Returns hit-test areas for all rendered shortcuts (both clickable and hint-only). When shortcuts
+/// don't fit on a single row, they wrap onto additional rows within the `area` height.
 pub fn render_modal_shortcuts(
     buf: &mut Buffer,
     area: Rect,
@@ -710,7 +683,7 @@ pub fn render_modal_shortcuts(
         // Compute this row's total width for centering.
         let row_total: usize = row_indices
             .iter()
-            .map(|&i| shortcuts[i].label.width())
+            .map(|&i| shortcuts.get(i).map(|s| s.label.width()).unwrap_or(0))
             .sum::<usize>()
             + sep_w * row_indices.len().saturating_sub(1);
         let start_x = if row_total > avail {
@@ -722,13 +695,18 @@ pub fn render_modal_shortcuts(
         let mut cur_x = start_x;
 
         for (local_idx, &shortcut_idx) in row_indices.iter().enumerate() {
-            let shortcut = &shortcuts[shortcut_idx];
+            let Some(shortcut) = shortcuts.get(shortcut_idx) else {
+                continue;
+            };
             let remaining = row_end.saturating_sub(cur_x) as usize;
             if remaining == 0 {
                 break;
             }
 
-            let display = &shortcut.label[..byte_offset_at_width(shortcut.label, remaining)];
+            let display = shortcut
+                .label
+                .get(..byte_offset_at_width(shortcut.label, remaining))
+                .unwrap_or("");
             let visible_w = display.width() as u16;
             let is_hovered = hovered == Some(shortcut_idx);
 
@@ -757,11 +735,27 @@ pub fn render_modal_shortcuts(
 
             if !label_part.is_empty() {
                 let key_w = key_part.width() as u16;
-                let mut label_style = Style::default().fg(theme.gray);
+                // muted(): DIM where `gray` is Reset (terminal theme).
+                let mut label_style = theme.muted();
                 if is_hovered {
                     label_style = label_style.bg(theme.bg_highlight);
                 }
                 buf.set_string(cur_x + key_w, y, label_part, label_style);
+            }
+
+            // Terminal theme (Reset band slots): the bg_highlight hover
+            // underlay is invisible — reverse video carries the cue.
+            if is_hovered && theme.is_bandless() {
+                let hover_rect = Rect {
+                    x: cur_x,
+                    y,
+                    width: visible_w,
+                    height: 1,
+                };
+                buf.set_style(
+                    hover_rect,
+                    Style::default().add_modifier(Modifier::REVERSED),
+                );
             }
 
             hits.push(ShortcutHitArea {
@@ -783,7 +777,9 @@ pub fn render_modal_shortcuts(
                 if sep_remaining == 0 {
                     break;
                 }
-                let sep_display = &separator[..byte_offset_at_width(separator, sep_remaining)];
+                let sep_display = separator
+                    .get(..byte_offset_at_width(separator, sep_remaining))
+                    .unwrap_or("");
                 buf.set_string(cur_x, y, sep_display, Style::default().fg(theme.gray_dim));
                 cur_x += sep_display.width() as u16;
             }
@@ -792,10 +788,6 @@ pub fn render_modal_shortcuts(
 
     hits
 }
-
-// ---------------------------------------------------------------------------
-// Centered tip footer (Settings / How-to Guides)
-// ---------------------------------------------------------------------------
 
 /// First candidate that fits `width`, else truncate the last.
 pub(crate) fn fit_tip_line<'a>(candidates: &[&'a str], width: usize) -> std::borrow::Cow<'a, str> {
@@ -867,21 +859,7 @@ pub(crate) fn footer_lines_with_tip_gap(
         .max(2)
 }
 
-// ---------------------------------------------------------------------------
-// Fold indicator
-// ---------------------------------------------------------------------------
-
 /// Render a fold indicator glyph at position `(x, y)`.
-///
-/// Draws `▶ ` (collapsed) or `▼ ` (expanded) in `gray_dim` with optional hover brightening (bold and `text_primary`).
-/// The style matches both the import-claude modal's header rows and the picker's expandable rows.
-///
-/// - `collapsed`: which glyph to show.
-/// - `hovered`: brighten the glyph for hover feedback.
-/// - `bg`: optional background color (e.g. `bg_highlight` for focused rows).
-///
-/// Returns a [`Span`] containing the indicator and trailing space (2 columns wide).
-/// The caller is responsible for placing it via `buf.set_span` or including it in a [`Line`].
 pub fn fold_indicator_span(
     collapsed: bool,
     hovered: bool,
@@ -928,18 +906,8 @@ pub fn render_fold_indicator(
     width
 }
 
-// ---------------------------------------------------------------------------
-// Input handling
-// ---------------------------------------------------------------------------
-
-/// Process a key event against the modal chrome.
-///
-/// Returns:
-/// - `CloseRequested` for Esc.
-/// - When tab bar is focused (`state.tabs_focused`): Left/Right/h/l return `Unhandled` (picker/caller handles tab switching).
-/// - When `config.fold_info` is `Some` and tabs not focused: Left/Right/h/l return specific fold outcomes based on the focused entry's state.
-/// - Otherwise `Unhandled` for Left/Right etc so the caller can handle.
-/// - `Unhandled` for everything else.
+/// Process a key event against the modal chrome. Otherwise `Unhandled` for Left/Right etc so the
+/// caller can handle.
 pub fn handle_modal_key(
     state: &mut ModalWindowState,
     key: &KeyEvent,
@@ -1068,10 +1036,96 @@ pub fn handle_modal_mouse(
     }
 }
 
+/// Word-wrap text into lines that fit within `max_w` display columns. Measures display width (wide
+/// CJK/emoji are 2 columns), not chars, so a fitting line never overflows the modal border; all
+/// slicing uses `char_indices`.
+pub(crate) fn word_wrap(text: &str, max_w: usize) -> Vec<&str> {
+    if max_w == 0 {
+        return vec![text];
+    }
+    let mut result = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            result.push(line);
+            continue;
+        }
+        let mut remaining = line;
+        while !remaining.is_empty() {
+            // Byte index of the first char that no longer fits, if any.
+            let mut width = 0usize;
+            let mut overflow_at = None;
+            for (i, ch) in remaining.char_indices() {
+                width += unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if width > max_w {
+                    overflow_at = Some(i);
+                    break;
+                }
+            }
+            let Some(byte_limit) = overflow_at else {
+                result.push(remaining);
+                break;
+            };
+            let cut = remaining
+                .get(..byte_limit)
+                .and_then(|s| s.rfind(' '))
+                .filter(|&i| i > 0)
+                .map(|i| i + 1)
+                .unwrap_or(byte_limit)
+                // A first char wider than max_w must still make progress.
+                .max(remaining.chars().next().map_or(0, char::len_utf8));
+            let Some((head, tail)) = remaining.split_at_checked(cut) else {
+                break;
+            };
+            result.push(head.trim_end());
+            remaining = tail.trim_start();
+        }
+    }
+    result
+}
+
+/// Content rect for a full-window overlay inside a modal popup: one column in from each side,
+/// from the row below the tab bar (`y + 2`) down to `bottom` (exclusive).
+pub(crate) fn overlay_content_rect(popup: Rect, bottom: u16) -> Option<Rect> {
+    let y = popup.y.saturating_add(2);
+    let height = bottom.saturating_sub(y);
+    let x = popup.x.saturating_add(1);
+    let width = popup.width.saturating_sub(2);
+    (height > 0 && width > 0).then_some(Rect::new(x, y, width, height))
+}
+
+/// Paint `area` with the base background. `Buffer::set_string` merges styles, so `Style::reset`
+/// is needed to drop UNDERLINED/BOLD left by whatever the overlay covers.
+pub(crate) fn fill_overlay_content(buf: &mut Buffer, area: Rect, theme: &Theme) {
+    let clear_style = Style::reset().bg(theme.bg_base);
+    for y in area.y..area.y + area.height {
+        buf.set_string(area.x, y, " ".repeat(area.width as usize), clear_style);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventKind};
+
+    /// Wrapping by display width (not char count) keeps wide CJK/emoji lines inside the border.
+    #[test]
+    fn word_wrap_bounds_lines_by_display_width() {
+        let text = format!("拒否-Sërver-🚫-{}", "a".repeat(60));
+        for line in word_wrap(&text, 20) {
+            let w = UnicodeWidthStr::width(line);
+            assert!(w <= 20, "line {line:?} is {w} columns wide (max 20)");
+        }
+    }
+
+    #[test]
+    fn overlay_content_rect_is_none_when_popup_too_short() {
+        assert_eq!(overlay_content_rect(Rect::new(0, 0, 40, 2), 2), None);
+        assert_eq!(overlay_content_rect(Rect::new(0, 0, 2, 20), 10), None);
+        assert_eq!(
+            overlay_content_rect(Rect::new(5, 3, 40, 20), 15),
+            Some(Rect::new(6, 5, 38, 10))
+        );
+    }
 
     fn dummy_config<'a>() -> ModalWindowConfig<'a> {
         ModalWindowConfig {
@@ -1219,8 +1273,6 @@ mod tests {
         assert!(fit_tip_line(&["abcdef", "xy"], 1).as_ref().width() <= 1);
     }
 
-    // -- ModalSizing::with_compact tests --
-
     #[test]
     fn modal_sizing_with_compact_reduces_margins_aggressively() {
         let base = ModalSizing {
@@ -1261,8 +1313,6 @@ mod tests {
         assert_eq!(unchanged.h_pad, 3);
     }
 
-    // -- compute_modal_dims --
-
     #[test]
     fn modal_width_never_exceeds_narrow_terminal() {
         // Regression: the min_width floor used to re-inflate the modal past a narrow buffer.
@@ -1273,8 +1323,6 @@ mod tests {
             }
         }
     }
-
-    // -- ModalWindowState construction --
 
     #[test]
     fn new_defaults() {
@@ -1304,8 +1352,6 @@ mod tests {
         assert_eq!(a.tab_count, b.tab_count);
         assert_eq!(a.close_hovered, b.close_hovered);
     }
-
-    // -- handle_modal_key --
 
     #[test]
     fn key_esc_returns_close_requested() {
@@ -1372,8 +1418,6 @@ mod tests {
             ModalWindowOutcome::Unhandled
         );
     }
-
-    // -- handle_modal_key with FoldInfo --
 
     fn config_with_fold<'a>(fold_info: FoldInfo) -> ModalWindowConfig<'a> {
         ModalWindowConfig {
@@ -1555,8 +1599,6 @@ mod tests {
         );
     }
 
-    // -- FoldInfo precedence & edge cases --
-
     #[test]
     fn left_collapse_group_wins_over_collapse_details() {
         // When the entry is collapsible and expanded, and also has expanded details, CollapseGroup takes priority (group collapse first)
@@ -1663,8 +1705,6 @@ mod tests {
             ModalWindowOutcome::CloseRequested
         );
     }
-
-    // -- handle_modal_mouse --
 
     #[test]
     fn click_on_close_button_returns_close_requested() {
@@ -1829,8 +1869,6 @@ mod tests {
         assert_eq!(state.hovered_shortcut, Some(3));
     }
 
-    // -- ModalSizing presets --
-
     #[test]
     fn modal_sizing_medium_has_expected_values() {
         let m = ModalSizing::medium();
@@ -1847,8 +1885,6 @@ mod tests {
     fn modal_sizing_large_matches_default() {
         assert_eq!(ModalSizing::large(), ModalSizing::default());
     }
-
-    // -- split_shortcut_label --
 
     #[test]
     fn split_shortcut_label_basic_ascii() {

@@ -1,16 +1,14 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
 
-    /// Regression (resume sync): the on-disk replay stream re-emits persisted notifications through the generic `x.ai/session/update` envelope.
     /// A background `monitor`/bash task (`TaskBackgrounded`) must restore into `bg_tasks` on a resumed / second terminal.
     /// It must not be dropped by the default match arm.
-    /// The idle "watching" status line and the Tasks pane then match the originating terminal.
     /// (Before this routing only subagents survived resume.)
     #[test]
     fn ext_session_update_replay_restores_bg_task() {
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
-        assert!(app.agents[&id].session.bg_tasks.is_empty());
+        assert!(test_agent(&app, id).session.bg_tasks.is_empty());
 
         let update = XaiSessionUpdate::TaskBackgrounded {
             tool_call_id: "tc-mon".into(),
@@ -27,7 +25,7 @@
             &mut app,
         );
 
-        let task = app.agents[&id]
+        let task = test_agent(&app, id)
             .session
             .bg_tasks
             .get("mon-1")
@@ -39,12 +37,11 @@
     /// Companion for scheduled `/loop`s: a replayed `ScheduledTaskCreated` must restore `scheduled_tasks`.
     /// A later `ScheduledTaskDeleted` must net it back out.
     /// A resumed terminal's loop count then matches instead of staying empty until the next live fire.
-    /// (Pairs with the shell-side persistence of these notifications in `notification_bridge.rs`.)
     #[test]
     fn ext_session_update_replay_restores_then_removes_scheduled_task() {
         let mut app = make_app_with_agent("sess-1");
         let id = AgentId(0);
-        assert!(app.agents[&id].session.scheduled_tasks.is_empty());
+        assert!(test_agent(&app, id).session.scheduled_tasks.is_empty());
 
         handle(
             make_ext_session_notification_with_method(
@@ -60,7 +57,7 @@
             &mut app,
         );
         assert!(
-            app.agents[&id]
+            test_agent(&app, id)
                 .session
                 .scheduled_tasks
                 .contains_key("loop-1"),
@@ -79,7 +76,7 @@
             &mut app,
         );
         assert!(
-            app.agents[&id].session.scheduled_tasks.is_empty(),
+            test_agent(&app, id).session.scheduled_tasks.is_empty(),
             "replayed ScheduledTaskDeleted must remove the loop on resume"
         );
     }
@@ -414,7 +411,9 @@
             !agent.scrollback.needs_animation(),
             "the replayed started entry must be finished (no running accent)"
         );
-        let task = &agent.session.bg_tasks["task-r"];
+        let Some(task) = agent.session.bg_tasks.get("task-r") else {
+            panic!("expected task-r");
+        };
         assert_eq!(
             task.status,
             BgTaskStatus::Failed,
@@ -673,11 +672,19 @@
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert!(
-            agent.session.bg_tasks["task-r"].restored_from_replay,
+            agent
+                .session
+                .bg_tasks
+                .get("task-r")
+                .is_some_and(|t| t.restored_from_replay),
             "isReplay-stamped TaskBackgrounded must mark restored_from_replay"
         );
         assert!(
-            !agent.session.bg_tasks["task-l"].restored_from_replay,
+            agent
+                .session
+                .bg_tasks
+                .get("task-l")
+                .is_some_and(|t| !t.restored_from_replay),
             "live TaskBackgrounded must not mark restored_from_replay"
         );
     }
@@ -778,7 +785,9 @@
         assert!(handle_task_backgrounded(&late, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        let task = &agent.session.bg_tasks["task-race"];
+        let Some(task) = agent.session.bg_tasks.get("task-race") else {
+            panic!("expected task-race");
+        };
         assert_eq!(
             task.status,
             BgTaskStatus::Done,
@@ -819,10 +828,10 @@
         assert!(handle_task_completed(&done, &mut app));
         {
             let agent = app.agents.get(&AgentId(0)).unwrap();
-            assert_eq!(
-                agent.session.bg_tasks["task-demote"].status,
-                BgTaskStatus::Failed
-            );
+            let Some(task) = agent.session.bg_tasks.get("task-demote") else {
+                panic!("expected task-demote");
+            };
+            assert_eq!(task.status, BgTaskStatus::Failed);
             assert_eq!(agent.scrollback.len(), 2, "Execute block + failed block");
         }
 
@@ -830,7 +839,9 @@
         assert!(handle_task_backgrounded(&late, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        let task = &agent.session.bg_tasks["task-demote"];
+        let Some(task) = agent.session.bg_tasks.get("task-demote") else {
+            panic!("expected task-demote");
+        };
         assert_eq!(
             task.status,
             BgTaskStatus::Failed,
@@ -864,7 +875,11 @@
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
         assert_eq!(
-            agent.session.bg_tasks["task-desc"].description.as_deref(),
+            agent
+                .session
+                .bg_tasks
+                .get("task-desc")
+                .and_then(|t| t.description.as_deref()),
             Some("build the app")
         );
     }
@@ -880,7 +895,13 @@
         assert!(handle_task_completed(&done, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(agent.session.bg_tasks["task-mon"].is_monitor);
+        assert!(
+            agent
+                .session
+                .bg_tasks
+                .get("task-mon")
+                .is_some_and(|t| t.is_monitor)
+        );
     }
 
     /// A tombstone from a replayed completion is historical context: it must not read as new activity (mirrors restored `TaskBackgrounded`s).
@@ -893,6 +914,11 @@
         assert!(handle_task_completed(&done, &mut app));
 
         let agent = app.agents.get(&AgentId(0)).unwrap();
-        assert!(agent.session.bg_tasks["task-replay"].restored_from_replay);
+        assert!(
+            agent
+                .session
+                .bg_tasks
+                .get("task-replay")
+                .is_some_and(|t| t.restored_from_replay)
+        );
     }
-

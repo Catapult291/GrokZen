@@ -6,11 +6,7 @@ const fn rgb(r: u8, g: u8, b: u8) -> Color {
     Color::Rgb(r, g, b)
 }
 
-/// The backgrounds are deep and dark with a subtle purple/blue tint (OKLCH hue 265), inspired by the Oscura Midnight palette (narative/oscura).
-/// Accent colors lean purple to give the theme its distinctive identity.
-///
-/// Base colors were converted from OKLCH to sRGB programmatically via the `coloraide` Python library.
-/// Purple accent colors are hand-picked to complement the hue-265 background tint.
+/// Deep backgrounds with OKLCH hue 265; accents are hand-picked purple to match that tint.
 #[allow(dead_code)]
 mod palette {
     use super::*;
@@ -19,6 +15,7 @@ mod palette {
     pub const BASE: Color = rgb(3, 3, 4); // #030304  oklch(0.1 0.005 265)
     pub const SURFACE: Color = rgb(4, 5, 7); // #040507  oklch(0.115 0.005 265)
     pub const ELEVATED: Color = rgb(15, 18, 22); // #0F1216  oklch(0.18 0.01 265)
+    pub const CODE_BG: Color = rgb(38, 41, 47); // #26292F  oklch(0.28 0.012 265)
     pub const PANEL: Color = rgb(4, 4, 6); // #040406  oklch(0.11 0.006 265)
 
     // -- text (neutral, no color cast) ----------------------------------------
@@ -131,7 +128,7 @@ impl Theme {
             md_task_checked: TEAL,
             md_task_unchecked: TEXT_DIM,
             md_muted: MUTED,
-            md_code_bg: SURFACE,
+            md_code_bg: CODE_BG,
             md_text: TEXT,
             link_fg: CYAN,
         }

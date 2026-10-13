@@ -1,4 +1,6 @@
 use super::*;
+use crate::scrollback::blocks::KILLED_SIGNAL;
+use xai_grok_tools::computer::types::SESSION_RESTART_SIGNAL;
 
 /// Route a `ToolCallUpdate` stdout chunk to the central bg task store.
 ///
@@ -56,10 +58,7 @@ pub(super) fn route_bg_task_stdout(
 }
 
 /// Handle `x.ai/task_backgrounded`: a bash command transitioned to background.
-///
 /// Creates a `BgTaskState` in the central store and maps `tool_call_id` to `task_id` for stdout routing.
-///
-/// If the tool already has an Execute block in scrollback (demotion), that block becomes a `BgTask` in place and the entry's running state is cleared.
 /// Otherwise a fresh `BgTask` block is pushed.
 pub(super) fn handle_task_backgrounded(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     let Ok(session_notif) = serde_json::from_str::<SessionNotification>(notif.params.get()) else {
@@ -447,77 +446,7 @@ fn expired_task_notice(info: &crate::app::agent::ScheduledTaskInfo) -> String {
         xai_grok_tools::implementations::grok_build::scheduler::types::RECURRING_TASK_TTL_DAYS,
     )
 }
-
-pub(super) fn handle_scheduled_task_inject_prompt(
-    notif: &acp::ExtNotification,
-    app: &mut AppView,
-) -> bool {
-    let payload: serde_json::Value = match serde_json::from_str(notif.params.get()) {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "Failed to parse x.ai/scheduled_task_inject_prompt");
-            return false;
-        }
-    };
-    let Some(session_id) = payload["sessionId"].as_str() else {
-        tracing::warn!("x.ai/scheduled_task_inject_prompt: missing or non-string sessionId");
-        return false;
-    };
-    let Some(prompt) = payload["prompt"].as_str().filter(|s| !s.is_empty()) else {
-        tracing::warn!("x.ai/scheduled_task_inject_prompt: missing or empty prompt");
-        return false;
-    };
-    let task_id = payload["taskId"].as_str().unwrap_or("unknown");
-    let human_schedule = payload["humanSchedule"].as_str().unwrap_or("unknown");
-    tracing::debug!(task_id, human_schedule, "Enqueuing scheduled cron prompt");
-
-    // Only the driver enqueues and runs the scheduled prompt
-    // In leader mode the leader routes this notification to the single session driver (`is_scheduled_task_inject_prompt` in leader/server.rs)
-    // Any client that receives it is therefore the driver, including one that attached via `session/load` (`attached_as_viewer == true`)
-    // Do not skip on `attached_as_viewer`: that latched flag once suppressed cron on such an attached driver, leaving the loop stuck with no output
-    // The other clients render the resulting turn from the broadcast deltas, and the de-dup guards below still prevent a double enqueue
-    let agent_id = {
-        let agent = app.agents.values_mut().find(|a| {
-            a.session
-                .session_id
-                .as_ref()
-                .is_some_and(|sid| sid.0.as_ref() == session_id)
-        });
-        let Some(agent) = agent else {
-            return false;
-        };
-
-        // Skip if this specific task is already running or queued.
-        if agent.cron_task_id.as_deref() == Some(task_id) {
-            tracing::debug!(task_id, "cron prompt skipped: task already running");
-            return true;
-        }
-        let already_queued = agent
-            .session
-            .pending_prompts
-            .iter()
-            .any(|p| p.task_id.as_deref() == Some(task_id));
-        if already_queued {
-            tracing::debug!(task_id, "cron prompt already queued, skipping duplicate");
-            return true;
-        }
-
-        let agent_id = agent.session.id;
-        agent.session.enqueue_cron_prompt(
-            prompt.to_string(),
-            task_id.to_string(),
-            human_schedule.to_string(),
-        );
-        agent_id
-    };
-    let effects = super::super::dispatch::maybe_drain_queue_and_note_peek(app, agent_id);
-    app.pending_effects.extend(effects);
-
-    true
-}
-
 /// Derive the effective CWD and worktree flag for a child session.
-///
 /// Each field is derived independently: `child_cwd` controls the path, `worktree_path` controls the worktree flag.
 /// Either can be present without the other.
 pub(super) fn derive_child_cwd(
@@ -607,7 +536,7 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
 
     let task_id = &task_snapshot.task_id;
     let exit_code = task_snapshot.exit_code;
-    let signal = task_snapshot.signal.clone();
+    let mut signal = task_snapshot.signal.clone();
 
     tracing::info!(
         task_id = %task_id,
@@ -622,7 +551,7 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     // A synthetic completion from cold-load reconciliation (`reconcile_stale_background_tasks`): the process died in an earlier session, not now
     // Finalize the pane and state quietly instead of pushing a fresh red "Task failed" block into the resumed scrollback
     // That block would repeat for every dead task on every resume, pure noise
-    let stale_on_load = signal.as_deref() == Some("session_restart");
+    let stale_on_load = signal.as_deref() == Some(SESSION_RESTART_SIGNAL);
 
     let child_sid: &str = session_notif.session_id.0.as_ref();
     let Some((session, scrollback)) = resolve_target_view(agent, matched, child_sid) else {
@@ -634,6 +563,11 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
     // Fall back to the raw command only when no description was supplied
     let (command, elapsed, mut description, scrollback_entry_id) =
         if let Some(bg_task) = session.bg_tasks.get_mut(task_id) {
+            // Some backends report a stopped subagent shell as a plain non-zero exit
+            if bg_task.pending_kill && !success && signal.is_none() {
+                signal = Some(KILLED_SIGNAL.to_owned());
+            }
+
             bg_task.status = if success {
                 BgTaskStatus::Done
             } else {
@@ -654,7 +588,6 @@ pub(super) fn handle_task_completed(notif: &acp::ExtNotification, app: &mut AppV
             // A task we didn't know about: its `TaskBackgrounded` hasn't arrived yet
             // Label from the model-supplied description, else from display_command when it differs from the raw command
             // (display_command differs for monitors and isolation-wrapped shells.)
-            // Equal values are not labels
             let command = task_snapshot.command.clone();
             let elapsed = task_snapshot
                 .end_time

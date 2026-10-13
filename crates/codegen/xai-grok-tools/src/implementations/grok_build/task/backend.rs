@@ -13,45 +13,34 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 
 use super::types::{
-    ActiveAgentMessageOutcome, ActiveAgentMessageRequest, SpawnedSubagentRef,
-    SubagentActiveMessageRequest, SubagentCancelOutcome, SubagentCancelRequest,
-    SubagentCancelTarget, SubagentDescribeOutcome, SubagentDescribeRequest, SubagentEvent,
-    SubagentEventSender, SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest,
-    SubagentQueryRequest, SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest,
-    SubagentResult, SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
+    ActiveAgentMessageOutcome, ActiveAgentMessageRequest, ActiveMessageSenderContext,
+    HandedOffForegroundSubagent, SpawnedSubagentRef, SubagentActiveMessageRequest,
+    SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget, SubagentDescribeOutcome,
+    SubagentDescribeRequest, SubagentEvent, SubagentEventSender, SubagentHandOffForegroundRequest,
+    SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest, SubagentQueryRequest,
+    SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest, SubagentResult,
+    SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
     SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
 };
 use crate::register_resource;
 use xai_tool_runtime::ToolError;
 
-/// Abstraction over the mechanism used to spawn, query, and cancel subagents.
-///
-/// Injected into `Resources` as [`SubagentBackendResource`] so that
-/// `TaskTool`, `TaskOutputTool`, and `KillTaskTool` can operate
-/// identically regardless of the underlying transport.
+/// Abstraction over the mechanism used to spawn, query, and cancel subagents. Injected into
+/// `Resources` as [`SubagentBackendResource`] so that `TaskTool`, `TaskOutputTool`, and
+/// `KillTaskTool` can operate identically regardless of the underlying transport.
 #[async_trait::async_trait]
 pub trait SubagentBackend: Send + Sync + 'static {
-    /// Spawn a subagent and await its terminal result.
-    ///
-    /// The returned value is completion, cancellation, a foreground-budget
-    /// handoff, or a definite reject — never a Task background start ack.
-    ///
-    /// `registered_tx`, when `Some`, is signaled once the child is recorded
-    /// pending or queued. Callers that send to a spawning child must pass
-    /// this oneshot; `None` means there is no registration signal and a
-    /// later send can fail immediately. The signal is independent of the
-    /// returned [`SubagentResult`]. A drop without a send means the spawn
-    /// was rejected before registration (the error is on the returned future).
+    /// Spawn a subagent and await its terminal result. The returned value is completion, cancellation, a foreground-budget handoff, or a definite
+    /// reject — never a Task background start ack. `registered_tx`, when `Some`, is signaled once the child is recorded pending or queued. Callers
+    /// that send to a spawning child must pass this oneshot; `None` means there is no registration signal and a later send can fail immediately.
     async fn spawn(
         &self,
         request: SubagentRequest,
         registered_tx: Option<oneshot::Sender<()>>,
     ) -> Result<SubagentResult, ToolError>;
 
-    /// Query the current state of a subagent by ID.
-    ///
-    /// When `block` is true the backend waits (up to `timeout_ms`) for the
-    /// subagent to reach a terminal state before responding.
+    /// Query the current state of a subagent by ID. When `block` is true the backend waits (up to
+    /// `timeout_ms`) for the subagent to reach a terminal state before responding.
     async fn query(
         &self,
         id: &str,
@@ -81,19 +70,9 @@ pub trait SubagentBackend: Send + Sync + 'static {
         parent_session_id: &str,
     ) -> SubagentValidateTypeOutcome;
 
-    /// Describe a subagent type's resolved toolset (tool names + capability
-    /// flags) before spawning. Read-only: builds the agent definition and
-    /// applies the same parent-dependent toolset re-selection a spawn would,
-    /// then reports the result without starting a child session.
-    ///
-    /// Returns [`SubagentDescribeOutcome::Unavailable`] on channel close /
-    /// responder drop / timeout (modeled exactly on [`Self::validate_type`]).
-    ///
-    /// `harness_agent_type` is the `/goal`-only harness override (see
-    /// [`super::types::SubagentRuntimeOverrides::harness_agent_type`]); the
-    /// coordinator resolves the toolset for `(subagent_type,
-    /// harness_agent_type)`. `None` (every non-goal caller) defers the flavor
-    /// to the parent agent.
+    /// Describe a subagent type's resolved toolset (tool names + capability flags) before spawning. Read-only: builds the agent definition and
+    /// applies the same parent-dependent toolset re-selection a spawn would, then reports the result without starting a child session. Returns
+    /// [`SubagentDescribeOutcome::Unavailable`] on channel close / responder drop / timeout (modeled exactly on [`Self::validate_type`]).
     async fn describe_subagent_type(
         &self,
         subagent_type: &str,
@@ -102,10 +81,8 @@ pub trait SubagentBackend: Send + Sync + 'static {
     ) -> SubagentDescribeOutcome;
 }
 
-/// Resource wrapper injected into every session's `Resources`.
-///
-/// Wraps an `Arc<dyn SubagentBackend>` so the backend can be shared across
-/// concurrent tool invocations within the same session.
+/// Resource wrapper injected into every session's `Resources`. Wraps an `Arc<dyn SubagentBackend>`
+/// so the backend can be shared across concurrent tool invocations within the same session.
 #[derive(Clone)]
 pub struct SubagentBackendResource(pub Arc<dyn SubagentBackend>);
 
@@ -236,6 +213,7 @@ impl ChannelBackendSender {
 pub struct ChannelBackend {
     tx: ChannelBackendSender,
     parent_session_id: Option<Arc<str>>,
+    root_targets: bool,
 }
 
 impl ChannelBackend {
@@ -243,13 +221,7 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Legacy(SubagentEventSender(tx)),
             parent_session_id: None,
-        }
-    }
-
-    pub fn from_event_sender(sender: SubagentEventSender) -> Self {
-        Self {
-            tx: ChannelBackendSender::Legacy(sender),
-            parent_session_id: None,
+            root_targets: false,
         }
     }
 
@@ -257,6 +229,7 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Coordinator(sender),
             parent_session_id: None,
+            root_targets: false,
         }
     }
 
@@ -268,16 +241,7 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Legacy(SubagentEventSender(tx)),
             parent_session_id: Some(parent_session_id.into()),
-        }
-    }
-
-    pub fn for_event_sender_session(
-        sender: SubagentEventSender,
-        parent_session_id: impl Into<Arc<str>>,
-    ) -> Self {
-        Self {
-            tx: ChannelBackendSender::Legacy(sender),
-            parent_session_id: Some(parent_session_id.into()),
+            root_targets: false,
         }
     }
 
@@ -288,6 +252,23 @@ impl ChannelBackend {
         Self {
             tx: ChannelBackendSender::Coordinator(sender),
             parent_session_id: Some(parent_session_id.into()),
+            root_targets: false,
+        }
+    }
+
+    #[must_use]
+    pub fn with_root_targets(mut self) -> Self {
+        self.root_targets = true;
+        self
+    }
+
+    /// Same transport, with lookups bound to `parent_session_id` so the coordinator only answers for children reachable from that session.
+    #[must_use]
+    pub fn scoped_to_session(&self, parent_session_id: impl Into<Arc<str>>) -> Self {
+        Self {
+            tx: self.tx.clone(),
+            parent_session_id: Some(parent_session_id.into()),
+            root_targets: self.root_targets,
         }
     }
 
@@ -330,10 +311,9 @@ impl ChannelBackend {
         response_rx.await.unwrap_or(SubagentCancelOutcome::NotFound)
     }
 
-    /// User Stop: cancel all non-workflow children for this parent session.
-    ///
-    /// Requires [`Self::for_session`]; unbound backends return `NotFound` and
-    /// do not broadcast a wildcard cancel.
+    /// User Stop: cancel all non-workflow children for this parent session. Requires
+    /// [`Self::for_session`]; unbound backends return `NotFound` and do not broadcast a wildcard
+    /// cancel.
     pub async fn cancel_parent_session(&self) -> SubagentCancelOutcome {
         let (respond_to, response_rx) = oneshot::channel();
         if !self.request_cancel_parent_session(respond_to) {
@@ -372,11 +352,9 @@ impl ChannelBackend {
             .is_ok()
     }
 
-    /// Delete-path teardown: cancel `parent_session_id`'s children and wait, up
-    /// to `budget`, for the coordinator to drain them. Owns the event shape and
-    /// the wait policy so the host does not rebuild them. Best-effort: on a
-    /// closed channel or an elapsed budget it logs and returns (the coordinator
-    /// keeps admission closed until its own backstop deadline).
+    /// Delete-path teardown: cancel `parent_session_id`'s children and wait, up to `budget`, for the coordinator to drain
+    /// them. Owns the event shape and the wait policy so the host does not rebuild them. Best-effort: on a closed channel
+    /// or an elapsed budget it logs and returns (the coordinator keeps admission closed until its own backstop deadline).
     pub async fn teardown_session_and_drain(
         &self,
         parent_session_id: &str,
@@ -449,6 +427,30 @@ impl ChannelBackend {
                 prompt_id: prompt_id.to_owned(),
                 respond_to,
             }))
+            .is_err()
+        {
+            return Vec::new();
+        }
+        response_rx.await.unwrap_or_default()
+    }
+
+    pub async fn hand_off_foreground_for_prompt(
+        &self,
+        prompt_id: &str,
+    ) -> Vec<HandedOffForegroundSubagent> {
+        let Some(parent_session_id) = self.parent_session_id() else {
+            return Vec::new();
+        };
+        let (respond_to, response_rx) = oneshot::channel();
+        if self
+            .tx
+            .send(SubagentEvent::HandOffForeground(
+                SubagentHandOffForegroundRequest {
+                    parent_session_id,
+                    prompt_id: prompt_id.to_owned(),
+                    respond_to,
+                },
+            ))
             .is_err()
         {
             return Vec::new();
@@ -568,13 +570,37 @@ impl SubagentBackend for ChannelBackend {
         &self,
         request: ActiveAgentMessageRequest,
     ) -> ActiveAgentMessageOutcome {
+        if matches!(request.target(), super::types::ActiveMessageTarget::Parent)
+            || matches!(
+                request.target(),
+                super::types::ActiveMessageTarget::Agent { .. }
+            ) && !self.root_targets
+        {
+            return ActiveAgentMessageOutcome::Unsupported;
+        }
         let Some(parent_session_id) = self.parent_session_id() else {
             return ActiveAgentMessageOutcome::NotFoundOrNotOwned;
         };
         let (respond_to, response_rx) = oneshot::channel();
+        let sender_context = match request.target() {
+            super::types::ActiveMessageTarget::Address(_) => {
+                ActiveMessageSenderContext::HumanRoot {
+                    session_id: Arc::from(parent_session_id),
+                }
+            }
+            super::types::ActiveMessageTarget::ChildId(_)
+            | super::types::ActiveMessageTarget::Agent { .. } => {
+                ActiveMessageSenderContext::RootSession {
+                    session_id: Arc::from(parent_session_id),
+                }
+            }
+            super::types::ActiveMessageTarget::Parent => {
+                return ActiveAgentMessageOutcome::Unsupported;
+            }
+        };
         let command = SubagentActiveMessageRequest {
             request,
-            parent_session_id,
+            sender_context,
             respond_to,
         };
         match self.tx.send_active_message(command) {
@@ -719,10 +745,9 @@ async fn await_validate_reply(
 /// coordinator still fails instantly on the closed channel.
 pub const VALIDATE_TYPE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Default `describe_subagent_type` timeout. Kept short: the `/goal` role gate
-/// awaits describe serially per distinct agent type before failing open, so a
-/// long budget multiplies into a turn-start stall. Override via
-/// [`DESCRIBE_TYPE_TIMEOUT_ENV_VAR`].
+/// Default `describe_subagent_type` timeout. Kept short: the `/goal` role gate awaits describe
+/// serially per distinct agent type before failing open, so a long budget multiplies into a
+/// turn-start stall. Override via [`DESCRIBE_TYPE_TIMEOUT_ENV_VAR`].
 pub const DESCRIBE_TYPE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Env-var override for [`VALIDATE_TYPE_TIMEOUT`] (positive milliseconds).

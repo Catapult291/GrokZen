@@ -9,13 +9,7 @@ use crate::scrollback::block::RenderBlock;
 
 /// Send a mid-turn interjection.
 /// Pushes a standard user prompt block locally for instant feedback, records the text in prompt history, and clears the prompt.
-/// Fires the `x.ai/interject` ext method carrying a client-minted id.
-///
-/// The shell broadcasts `x.ai/session/interjection` to every attached pane so other clients viewing the same session render it too.
-/// (Multi-client / dashboard mode.)
-/// Our own broadcast echoes back carrying the same id.
 /// The id is recorded in `self_interjection_ids` so `handle_interjection` drops the echo instead of rendering a duplicate.
-/// Other panes lack the id and render it. (An optimistic echo reconciled by id, mirroring the shared prompt queue.)
 pub(super) fn dispatch_interject(
     app: &mut AppView,
     text: String,
@@ -35,6 +29,26 @@ pub(super) fn dispatch_interject_on(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
+    dispatch_interject_on_inner(app, id, text, images, /* user_submit */ true)
+}
+
+/// Wait-start / Enter flush: same wire send, without submit side effects (voice stop, history, toast).
+pub(super) fn dispatch_interject_from_held_queue(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    dispatch_interject_on_inner(app, id, text, images, /* user_submit */ false)
+}
+
+fn dispatch_interject_on_inner(
+    app: &mut AppView,
+    id: AgentId,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+    user_submit: bool,
+) -> Vec<Effect> {
     let no_session = app
         .locale
         .named_static_text("session.no_active", "No active session")
@@ -43,10 +57,9 @@ pub(super) fn dispatch_interject_on(
         .locale
         .named_static_text("interject.sent", "Interjection sent")
         .to_string();
-    // Voice is app-wide and bound to the focused composer. A /btw answer
-    // on another session must not commit interim text or kill dictation
-    // on the pane the user is actually talking into.
-    if matches!(app.active_view, ActiveView::Agent(active) if active == id) {
+    // Voice is app-wide and bound to the focused composer
+    // A /btw answer on another session must not commit interim text or kill dictation on the pane the user is actually talking into
+    if user_submit && matches!(app.active_view, ActiveView::Agent(active) if active == id) {
         // Hard-reset only; `text` may not be from the composer
         let _ = voice_stop_on_submit(app);
     }
@@ -54,42 +67,53 @@ pub(super) fn dispatch_interject_on(
         return vec![];
     };
 
-    // Submitting an interjection retires any edit-contextual ephemeral tip, even when there is no active session
-    // Matches the prompt/bash/feedback/remember paths
-    agent.ephemeral_tip.clear_on_submit();
-    agent.release_hook_block_hold();
+    if user_submit {
+        agent.ephemeral_tip.clear_on_submit();
+        agent.release_hook_block_hold();
+    }
 
     let Some(session_id) = agent.session.session_id.clone() else {
         agent.show_toast(&no_session);
         return vec![];
     };
 
-    agent.record_prompt_in_history(&text);
+    if user_submit {
+        agent.record_prompt_in_history(&text);
+    }
 
     // Push a standard user prompt block locally for instant feedback
     // Record its id so the broadcast echo (`x.ai/session/interjection`) is deduped instead of rendering a second copy on this pane
     let interjection_id = uuid::Uuid::new_v4().to_string();
     agent.self_interjection_ids.insert(interjection_id.clone());
-    agent
+    let entry_id = agent
         .scrollback
         .push_block(RenderBlock::interjection_prompt(&text));
+    agent
+        .interjection_painted_blocks
+        .insert(interjection_id.clone(), entry_id);
+    agent
+        .interjection_retry_images
+        .insert(interjection_id.clone(), images.clone());
 
-    // The composer is NOT touched here: the producer that consumed composer
-    // text (the InterjectPrompt registry arm) clears it at the call site;
-    // every other producer (Send now, edit-interject, plan review comments)
-    // carries non-composer text and must keep the user's draft/stash.
-    agent.show_toast(&interjection_sent);
+    // The composer is NOT touched here: the producer that consumed composer text (the InterjectPrompt registry arm) clears it at the call site
+    // Every other producer (Send now, edit-interject, plan review comments) carries non-composer text and must keep the user's draft/stash
+    if user_submit {
+        agent.show_toast(&interjection_sent);
+    }
 
     // Image-bearing interjection: build text and image content blocks via the same helper as the queued-prompt drain path
     // The helper covers orphan-placeholder recovery, the allowlist, and the size cap. Text-only stays on the legacy wire.
     let blocks = if images.is_empty() {
         None
     } else {
-        Some(crate::prompt_images::build_content_blocks_with_workspace(
+        let build = crate::prompt_images::build_content_blocks_with_workspace_report(
             text.clone(),
             images,
             Some(std::path::Path::new(&agent.session.cwd)),
-        ))
+        );
+        app.pending_image_notices
+            .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
+        Some(build.blocks)
     };
 
     vec![Effect::SendInterject {
@@ -107,7 +131,10 @@ pub(super) fn dispatch_send_prompt_now(
     app: &mut AppView,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
+    image_notice: Option<String>,
 ) -> Vec<Effect> {
+    // The composer that raised the notice is already cleared, so it shows even when the send bails below.
+    app.pending_image_notices.extend(image_notice);
     // Hard-reset only; `text` may be a queue row, not the composer
     let _ = voice_stop_on_submit(app);
     let no_session = app
@@ -125,7 +152,7 @@ pub(super) fn dispatch_send_prompt_now(
         return vec![];
     };
     agent.release_hook_block_hold();
-    // Composer / queue-row / paste Send now all land here, not in
+    // Composer / queue-row / paste Send now all land here, not in dispatch_send_prompt_inner. Drop the credit-limit stash so Try Again cannot resubmit the blocked prompt after the user has moved on.
     // dispatch_send_prompt_inner. Drop the credit-limit stash so Try Again
     // cannot resubmit the blocked prompt after the user has moved on.
     agent.credit_limit_stashed_prompt = None;
@@ -166,11 +193,14 @@ pub(super) fn dispatch_send_prompt_now(
     // Expect the shell's send-now cancel so the turn-end handling suppresses its marker
     super::queue::arm_send_now_and_paint_dispatched(agent, &prompt_id, &text);
 
-    let blocks = crate::prompt_images::build_content_blocks_with_workspace(
+    let build = crate::prompt_images::build_content_blocks_with_workspace_report(
         text.clone(),
         images,
         Some(std::path::Path::new(&agent.session.cwd)),
     );
+    app.pending_image_notices
+        .extend(agent.skipped_image_send_notice(&build.skipped_display_numbers));
+    let blocks = build.blocks;
 
     // Optimistic queue-pane echo, reconciled by the shell's queue broadcast.
     let sid_str = session_id.0.to_string();
@@ -201,7 +231,6 @@ mod tests {
     /// Composer-clear ownership: dispatch NEVER touches the composer.
     /// The only composer-text producer (the InterjectPrompt registry arm) clears it at the call site.
     /// Every other producer (Send now, edit-interject, plan review comments) carries non-composer text whose draft/stash must survive dispatch.
-    /// That holds even when the draft happens to equal the interjected text (provenance is not inferred by value equality).
     #[test]
     fn interject_dispatch_never_touches_the_composer() {
         let mut app = test_app_with_agent();
@@ -343,13 +372,16 @@ mod tests {
             ] => {
                 assert_eq!(text, "look at [Image #1] please");
                 assert_eq!(blocks.len(), 2);
-                match &blocks[0] {
+                match &blocks.first().unwrap_or_else(|| panic!("missing index")) {
                     acp::ContentBlock::Text(tb) => {
                         assert!(tb.text.contains("[Image #1]"), "got {:?}", tb.text)
                     }
                     other => panic!("expected Text first, got {other:?}"),
                 }
-                assert!(matches!(&blocks[1], acp::ContentBlock::Image(_)));
+                assert!(matches!(
+                    &blocks.get(1).unwrap_or_else(|| panic!("missing index")),
+                    acp::ContentBlock::Image(_)
+                ));
             }
             other => panic!("expected SendInterject with blocks, got {other:?}"),
         }

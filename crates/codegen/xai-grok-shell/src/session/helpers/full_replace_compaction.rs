@@ -46,13 +46,7 @@ impl SamplerState {
 }
 
 /// Wraps `generate_session_compact` as the shared engine's [`CompactionSampler`] for grok-build's full-replace pass.
-///
 /// Holds the per-call request context the trait call does not carry (tools, client, session, config).
-/// It also stashes the last successful [`CompactOutput`] so the caller can recover the streaming telemetry not modeled by [`LlmCompactionOutput`].
-///
-/// The summarization prompt is selected here by `use_short_prompt`.
-/// The short-prompt harness uses the short self-summarization prompt; everyone else gets the structured grok-build prompt.
-/// The shared `CompactionPrompt` the engine passes is therefore ignored.
 /// The engine's prompt equals what [`build_compaction_chat_history`] appends, and the short-prompt harness needs a variant the engine can't produce.
 pub(crate) struct ShellCompactionSampler {
     use_short_prompt: bool,
@@ -132,6 +126,7 @@ impl CompactionSampler for ShellCompactionSampler {
             turns.to_vec(),
             self.user_context.as_deref(),
             self.use_short_prompt,
+            self.sampling_config.max_request_bytes,
             self.compaction_tool_tokens,
         );
         self.state.lock().unwrap().record_attempt(&chat_history);
@@ -165,14 +160,8 @@ impl CompactionSampler for ShellCompactionSampler {
 }
 
 /// Map grok-build's [`CompactFailure`] onto the shared engine's [`CompactionSampleError`].
-/// The shared retry loop then classifies it the same way the in-shell loop did:
-///
-/// - `Overflow` → [`CompactionSampleError::ContextOverflow`] — sets the
-///   engine's `context_overflow` flag (input ladder) regardless of text.
-/// - `Deterministic` → [`CompactionSampleError::Build`] (whose
-///   `is_deterministic()` is `true`).
-/// - `Transient` → [`CompactionSampleError::Other`] (`is_deterministic()` is
-///   `false`), so the engine retries it.
+/// `Overflow` → [`CompactionSampleError::ContextOverflow`] — sets the.
+/// `false`), so the engine retries it.
 fn compact_failure_to_sample_error(failure: CompactFailure) -> CompactionSampleError {
     match failure {
         CompactFailure::Overflow(err) => {

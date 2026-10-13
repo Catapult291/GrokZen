@@ -47,6 +47,18 @@ impl PluginScope {
     }
 }
 
+/// A project's `[plugins].paths` can name a `ConfigPath` plugin, and the plugin does not record
+/// which config named it, so its servers are project servers.
+impl From<PluginScope> for xai_grok_config::mcp_servers::McpServerScope {
+    fn from(scope: PluginScope) -> xai_grok_config::mcp_servers::McpServerScope {
+        use xai_grok_config::mcp_servers::McpServerScope;
+        match scope {
+            PluginScope::Project | PluginScope::ConfigPath => McpServerScope::Project,
+            PluginScope::User | PluginScope::CliOverride => McpServerScope::User,
+        }
+    }
+}
+
 impl std::fmt::Display for PluginScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -59,9 +71,7 @@ impl std::fmt::Display for PluginScope {
 }
 
 /// The concrete discovery source a plugin came from.
-///
-/// Finer-grained than [`PluginScope`]: recorded at scan time so consumers (e.g. the pager's plugins list) don't have to re-derive it from paths.
-/// Not part of [`PluginId`], which stays scope-based.
+/// Recorded at scan time so consumers do not re-derive it from paths. Not part of [`PluginId`], which stays scope-based.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginOrigin {
     /// CLI `--plugin-dir`.
@@ -96,11 +106,7 @@ pub enum PluginOrigin {
 }
 
 /// Stable internal identity for a plugin.
-///
-/// Format: `<scope>/<hex8>/<name>`
-/// - `<scope>`: lowercase scope string (cli, project, user, config)
-/// - `<hex8>`: first 8 hex chars of SHA-256 of the canonical plugin root path
-/// - `<name>`: the plugin_name
+/// Format: `<scope>/<hex8>/<name>`, where hex8 is the first 8 hex chars of SHA-256 of the canonical plugin root.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PluginId(pub String);
 
@@ -111,10 +117,7 @@ impl PluginId {
         let mut hasher = Sha256::new();
         hasher.update(path_str.as_bytes());
         let hash = hasher.finalize();
-        let hex8 = format!(
-            "{:02x}{:02x}{:02x}{:02x}",
-            hash[0], hash[1], hash[2], hash[3]
-        );
+        let hex8: String = hash.iter().take(4).map(|b| format!("{b:02x}")).collect();
         Self(format!("{}/{}/{}", scope.id_label(), hex8, name))
     }
 }
@@ -179,9 +182,7 @@ pub struct DiscoveryConfig {
 
 impl DiscoveryConfig {
     /// Ensure every discovered plugin appears in either `enabled` or `disabled`.
-    ///
-    /// Plugins from auto-enabled scopes (`CliOverride`, `ConfigPath`) are added to `enabled`.
-    /// All others (`User`, `Project`) are added to `disabled`.
+    /// Auto-enabled scopes (`CliOverride`, `ConfigPath`) go to `enabled`; `User` and `Project` go to `disabled`.
     /// Plugins already present in either list are left untouched.
     pub fn populate_plugin_lists(&mut self, discovered: &[DiscoveredPlugin]) {
         for dp in discovered {
@@ -235,11 +236,9 @@ fn project_plugins_dir_origin(plugins_dir: &Path) -> PluginOrigin {
     }
 }
 
-/// Project plugin parent dirs (`.grok/plugins`, `.claude/plugins`) existing along the walk from `cwd` to the git worktree root, plus that root.
-/// Outside a git repo only `cwd` itself is checked.
-/// This is the exact set [`discover_plugins`] scans for `PluginScope::Project`.
-/// The folder-trust gate reuses the same chain via [`project_plugin_dirs_in`] so detection and discovery can never drift.
-/// The returned root lets `discover_plugins` reuse it for the marketplace `resolve(root)` branch instead of resolving the repo a second time.
+/// Project plugin parent dirs along the walk from `cwd` to the git worktree root, plus that root.
+/// Outside a git repo only `cwd` is checked. The folder-trust gate reuses this chain so detection cannot drift from discovery.
+/// The returned root lets marketplace resolve reuse it instead of resolving the repo a second time.
 pub fn project_plugin_dirs(cwd: Option<&Path>) -> (Vec<PathBuf>, Option<PathBuf>) {
     let Some(cwd) = cwd else {
         return (Vec::new(), None);
@@ -714,7 +713,9 @@ fn resolve_name_conflicts(candidates: &mut Vec<DiscoveredPlugin>) {
         let name = candidate.manifest.name.clone();
         match name_map.get(&name) {
             Some(&existing_idx) => {
-                let existing = &candidates[existing_idx];
+                let Some(existing) = candidates.get(existing_idx) else {
+                    continue;
+                };
                 // A lower scope ordinal means higher priority
                 if (candidate.scope as u8) < (existing.scope as u8) {
                     // New candidate wins
@@ -757,7 +758,9 @@ fn resolve_name_conflicts(candidates: &mut Vec<DiscoveredPlugin>) {
 
     // Apply conflict messages to winners.
     for (idx, msg) in conflict_msgs {
-        candidates[idx].conflict = Some(msg);
+        if let Some(candidate) = candidates.get_mut(idx) {
+            candidate.conflict = Some(msg);
+        }
     }
 
     // Remove losers (reverse order to preserve indices)
@@ -787,11 +790,8 @@ struct ClaudeInstalledEntry {
 }
 
 /// Whether a compat install entry is visible for this session's `cwd`.
-///
-/// The `local` and `project` scopes are project-tied, as is any entry with a non-empty `projectPath`.
-/// Those entries are only visible when `cwd` is under `project_path` (path-component prefix).
-/// A missing or empty project path or cwd cannot prove the session is in the project, so those entries stay hidden.
-/// User-scoped and unscoped entries with no project path are always visible.
+/// Project-tied entries are visible only when `cwd` is under `project_path`.
+/// A missing project path cannot prove the session is in the project, so those entries stay hidden.
 fn claude_install_visible(
     scope: Option<&str>,
     project_path: Option<&Path>,
@@ -814,11 +814,8 @@ fn claude_install_visible(
 }
 
 /// Read plugin names and install paths from compat `installed_plugins.json`.
-///
-/// Keys are `"plugin-name@marketplace"`: the plugin name comes from before the `@`, the marketplace name from after it (when present).
-/// Returns `(name, marketplace, path)` tuples, or an empty vec on any error.
-///
-/// Project-tied entries are filtered by `cwd` vs `projectPath` (see [`claude_install_visible`]).
+/// Keys are `"plugin-name@marketplace"`. Returns empty on any error.
+/// Project-tied entries are filtered by `cwd` vs `projectPath`.
 fn read_claude_installed_plugins(
     json_path: &Path,
     cwd: Option<&Path>,
@@ -882,6 +879,25 @@ mod tests {
     }
 
     #[test]
+    fn mcp_server_scope_follows_the_plugin_install_scope() {
+        use xai_grok_config::mcp_servers::McpServerScope;
+        let cases = [
+            (PluginScope::Project, McpServerScope::Project),
+            (PluginScope::ConfigPath, McpServerScope::Project),
+            (PluginScope::User, McpServerScope::User),
+            (PluginScope::CliOverride, McpServerScope::User),
+        ];
+
+        for (plugin_scope, expected) in cases {
+            assert_eq!(
+                expected,
+                McpServerScope::from(plugin_scope),
+                "{plugin_scope}"
+            );
+        }
+    }
+
+    #[test]
     fn user_plugin_dirs_do_not_add_a_second_default_grok_home() {
         let home = Path::new("/home/u");
         let grok = Path::new("/custom/grokhome");
@@ -923,10 +939,13 @@ mod tests {
         );
 
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].plugin_name(), "cli-tool");
-        assert_eq!(candidates[0].scope, PluginScope::CliOverride);
-        assert_eq!(candidates[0].origin, PluginOrigin::CliOverride);
-        assert!(candidates[0].trusted);
+        let Some(c) = candidates.first() else {
+            panic!("expected one candidate: {candidates:?}");
+        };
+        assert_eq!(c.plugin_name(), "cli-tool");
+        assert_eq!(c.scope, PluginScope::CliOverride);
+        assert_eq!(&c.origin, &PluginOrigin::CliOverride);
+        assert!(c.trusted);
     }
 
     #[test]
@@ -965,8 +984,11 @@ mod tests {
         );
 
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].plugin_name(), "user-tool");
-        assert!(candidates[0].trusted);
+        let Some(c) = candidates.first() else {
+            panic!("expected one candidate: {candidates:?}");
+        };
+        assert_eq!(c.plugin_name(), "user-tool");
+        assert!(c.trusted);
     }
 
     #[test]
@@ -989,7 +1011,7 @@ mod tests {
         );
 
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].plugin_name(), "my-tool");
+        assert_eq!(candidates.first().map(|c| c.plugin_name()), Some("my-tool"));
     }
 
     #[test]
@@ -1365,7 +1387,10 @@ mod tests {
         resolve_name_conflicts(&mut candidates);
 
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].scope, PluginScope::CliOverride);
+        assert_eq!(
+            candidates.first().map(|c| c.scope),
+            Some(PluginScope::CliOverride)
+        );
     }
 
     #[test]
@@ -1379,10 +1404,12 @@ mod tests {
         assert!(id.0.ends_with("/my-plugin"));
         // Format: user/<hex8>/my-plugin
         let parts: Vec<&str> = id.0.split('/').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(parts[0], "user");
-        assert_eq!(parts[1].len(), 8);
-        assert_eq!(parts[2], "my-plugin");
+        let [scope, hex, name] = parts.as_slice() else {
+            panic!("expected three id parts: {parts:?}");
+        };
+        assert_eq!(*scope, "user");
+        assert_eq!(hex.len(), 8);
+        assert_eq!(*name, "my-plugin");
     }
 
     #[test]
@@ -1442,7 +1469,7 @@ mod tests {
         );
 
         assert_eq!(candidates.len(), 1);
-        assert!(!candidates[0].trusted);
+        assert!(!candidates.first().is_some_and(|c| c.trusted));
     }
 
     #[test]
@@ -1465,7 +1492,7 @@ mod tests {
         );
 
         assert_eq!(candidates.len(), 1);
-        assert!(candidates[0].trusted);
+        assert!(candidates.first().is_some_and(|c| c.trusted));
     }
 
     #[test]
@@ -1630,8 +1657,11 @@ mod tests {
 
         let results = read_claude_installed_plugins(&json_path, None);
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "bare");
-        assert_eq!(results[0].1, None);
+        let Some(r) = results.first() else {
+            panic!("expected one result: {results:?}");
+        };
+        assert_eq!(r.0, "bare");
+        assert_eq!(r.1, None);
     }
 
     #[test]
@@ -1656,8 +1686,11 @@ mod tests {
 
         let results = read_claude_installed_plugins(&json_path, Some(&nested));
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "local-plug");
-        assert_eq!(results[0].2, plugin);
+        let Some(r) = results.first() else {
+            panic!("expected one result: {results:?}");
+        };
+        assert_eq!(r.0, "local-plug");
+        assert_eq!(r.2, plugin);
     }
 
     #[test]
@@ -1803,7 +1836,7 @@ mod tests {
         assert!(read_claude_installed_plugins(&json_path, Some(&other)).is_empty());
         let results = read_claude_installed_plugins(&json_path, Some(&project));
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "team-plug");
+        assert_eq!(results.first().map(|r| r.0.as_str()), Some("team-plug"));
     }
 
     #[test]

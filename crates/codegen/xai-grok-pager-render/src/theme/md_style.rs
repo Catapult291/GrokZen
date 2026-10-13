@@ -4,10 +4,7 @@
 use anstyle::{Ansi256Color, AnsiColor, Color, Style};
 use xai_grok_markdown::MarkdownStyle;
 
-/// Convert `ratatui::style::Color` to `anstyle::Color`.
-///
-/// [`Theme::current()`] already handles quantization, so this just bridges the two color types.
-/// Returns `None` for `Reset`: `anstyle::Color` has no "terminal default" variant, and downstream an unset color renders as the terminal default.
+/// Bridge after [`Theme::current()`] quantization. `None` for `Reset`: anstyle has no terminal-default, and unset renders as that default.
 fn to_anstyle(c: ratatui::style::Color) -> Option<Color> {
     Some(match c {
         ratatui::style::Color::Reset => return None,
@@ -71,8 +68,14 @@ fn heading_inner_styles(
     mods: [ratatui::style::Modifier; 6],
 ) -> [Style; 6] {
     std::array::from_fn(|i| {
-        let color_style = fg(colors[i]);
-        let mod_style = modifier_to_anstyle(mods[i]);
+        let Some(&color) = colors.get(i) else {
+            return Style::new();
+        };
+        let Some(&m) = mods.get(i) else {
+            return Style::new();
+        };
+        let color_style = fg(color);
+        let mod_style = modifier_to_anstyle(m);
         // Combine fg color with modifier effects.
         let mut s = color_style;
         let effects = mod_style.get_effects();

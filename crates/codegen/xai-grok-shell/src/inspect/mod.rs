@@ -18,11 +18,11 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::auth::ForceLoginTeam;
+use xai_grok_login::ForceLoginTeam;
 use xai_grok_tools::types::config_source::ConfigSource;
 use xai_grok_tools::util::truncate::estimate_tokens;
 use xai_grok_workspace::permission::resolution::{
-    ManagedSettingsFeatures, YoloPolicyLock, claude_bypass_lock_request,
+    ManagedSettings, YoloPolicyLock, claude_bypass_lock_request,
 };
 
 const TREE: &str = "\u{2514}";
@@ -62,7 +62,7 @@ pub(crate) struct InspectReport {
     pub channel: String,
     pub cwd: String,
     pub project_root: Option<String>,
-    /// Folder-trust verdict for `cwd`: when false, repo-local project hooks, plugins, and MCP/LSP entries are gated out of the listings below.
+    /// Folder-trust verdict for `cwd`: when false, repo-local project hooks, plugins, MCP/LSP, instructions, and skills are gated out of the listings below.
     pub project_trusted: bool,
     pub project_instructions: Vec<InstructionFile>,
     pub permissions: PermissionsReport,
@@ -101,6 +101,53 @@ pub(crate) struct InstructionFile {
     pub compatibility_status: Option<CompatEntryStatus>,
 }
 
+/// How the `allowManagedMcpServersOnly` lockdown binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ManagedOnlyScope {
+    /// No source pins the lockdown.
+    Off,
+    /// Only the advisory Claude file pins it: binds foreign-defined servers,
+    /// grok-native servers exempt.
+    Advisory,
+    /// A grok TOML layer pins it: binds every server.
+    Enforced,
+}
+
+impl ManagedOnlyScope {
+    fn resolve(policy: &xai_grok_workspace::permission::resolution::McpServerPolicy) -> Self {
+        use xai_grok_workspace::permission::resolution::PolicySubjectOrigin;
+        // Order is load-bearing: managed_only(Foreign) is true for native sources too.
+        if policy.managed_only(PolicySubjectOrigin::GrokNative) {
+            Self::Enforced
+        } else if policy.managed_only(PolicySubjectOrigin::Foreign) {
+            Self::Advisory
+        } else {
+            Self::Off
+        }
+    }
+}
+
+/// One full-lockdown policy source and how it binds.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LockdownSource {
+    pub source: String,
+    /// The advisory vendor file: binds foreign-defined subjects only, grok-native exempt.
+    pub advisory: bool,
+}
+
+impl LockdownSource {
+    /// Human row; `exempt` names what an advisory source does not bind.
+    fn human_row(&self, exempt: &str) -> String {
+        if self.advisory {
+            format!("{} (advisory; grok-native {exempt} exempt)", self.source)
+        } else {
+            self.source.clone()
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PermissionsReport {
@@ -108,7 +155,18 @@ pub(crate) struct PermissionsReport {
     pub loaded: usize,
     pub skipped: Vec<SkippedRule>,
     pub mcp_server_allowlist: Vec<String>,
+    /// Sources whose MCP policy is a full lockdown: every server they bind is
+    /// blocked, even if a valid sibling key still contributes allow entries.
+    pub mcp_lockdown_sources: Vec<LockdownSource>,
+    /// `allowManagedMcpServersOnly` lockdown and how it binds.
+    pub mcp_managed_servers_only: ManagedOnlyScope,
     pub marketplace_allowlist: Vec<String>,
+    /// Sources whose strict marketplace list has zero usable URLs (explicit
+    /// `[]`, malformed, or every entry unsupported): a marketplace lockdown.
+    pub marketplace_lockdown_sources: Vec<LockdownSource>,
+    /// Marketplaces pinned via managed `extraKnownMarketplaces` (`name (url[@ref])`).
+    /// Always emitted, like the allowlists above, so the JSON schema is stable.
+    pub managed_marketplaces: Vec<String>,
     /// Platform path for managed-settings.json vendor policy (None on unsupported OS).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub managed_settings_path: Option<String>,
@@ -118,13 +176,10 @@ pub(crate) struct PermissionsReport {
     /// Whether the runtime actually loaded that file into policy (`exists` can be true while this is false for an unreadable/malformed file).
     /// Always emitted.
     pub managed_settings_active: bool,
-    /// Only managed-settings.json telemetry/feedback plus the requirements
-    /// always-approve lock; other requirements-pinned fields are not listed.
+    /// One row per active policy clamp; other requirements-pinned fields are not listed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub enforced: Vec<EnforcedPolicy>,
-    /// A Claude managed-settings `disableBypassPermissionsMode` request, which grok
-    /// deliberately does not enforce
-    /// ([`claude_bypass_lock_request`](xai_grok_workspace::permission::resolution::claude_bypass_lock_request)).
+    /// A Claude managed-settings `disableBypassPermissionsMode` request, which grok deliberately does not enforce ([`claude_bypass_lock_request`](xai_grok_workspace::permission::resolution::claude_bypass_lock_request)).
     /// Always emitted so "no request" is distinguishable from an old binary.
     pub claude_bypass_lock_advisory: bool,
 }
@@ -150,6 +205,12 @@ pub(crate) enum EnforcedSetting {
     AlwaysApprove,
     Telemetry,
     Feedback,
+    /// `enableAllProjectMcpServers = false` pin: project MCP sources ignored.
+    ProjectMcpServers,
+    /// `plugin_auto_update = false` pin: session-start plugin auto-update off.
+    PluginAutoUpdate,
+    /// `allow_managed_hooks_only = true` pin: hooks that are not managed policy do not run.
+    NonManagedHooks,
 }
 
 #[derive(Debug, Serialize)]
@@ -339,18 +400,21 @@ async fn build_report(cwd: &Path) -> InspectReport {
         .and_then(|r| r.workdir().map(|p| p.to_path_buf()));
 
     // Route through the live folder-trust gate rather than a raw store read; no session resolve has run for a one-shot `inspect`
-    // The single verdict drives the top-level flag and gates the hooks, plugins, and MCP/LSP listings so they reflect runtime gating
     // `remote = None`: env/user/managed opt-out is honored, but a remote kill-switch is not consulted on this report-only path
     crate::agent::folder_trust::resolve_and_record(cwd, None, false);
     let project_trusted = crate::agent::folder_trust::project_scope_allowed(cwd);
 
     let trust_store = xai_grok_agent::plugins::TrustStore::load();
-    let mut plugins_cfg: crate::agent::config::PluginsConfig = effective_config
-        .get("plugins")
-        .and_then(|v| v.clone().try_into().ok())
-        .unwrap_or_default();
-    plugins_cfg.merge_claude_enabled_plugins(Some(cwd));
-    let mut plugin_config = plugins_cfg.to_discovery_config();
+    let mut plugin_config = xai_grok_workspace::plugins::resolve_effective_plugins_config(
+        xai_grok_workspace::plugins::PluginConfigInputs {
+            effective_config: effective_config_result.as_ref().ok(),
+            home: xai_dirs::home_dir().as_deref(),
+            grok_home: xai_grok_config::user_grok_home().as_deref(),
+            cwd,
+            trust: xai_grok_hooks::trust::Trust::from_verdict(project_trusted),
+            claude_import: crate::claude_import::import_marker(),
+        },
+    );
     // Project plugins gate on the same folder-trust verdict as hooks and the live session/doctor sites
     // The listing's `enabled` flags therefore match runtime gating
     let discovered_plugins = xai_grok_agent::plugins::discover_plugins(
@@ -367,16 +431,20 @@ async fn build_report(cwd: &Path) -> InspectReport {
         &plugin_config.enabled,
     );
 
-    let external_compat = resolve_inspect_compat(effective_config_result.as_ref().map_err(|_| ()));
+    let external_compat = resolve_inspect_compat(effective_config_result.as_ref().ok());
 
     // This is the same `[skills]` table the runtime loads: `paths` skills appear, `ignore`d ones are hidden, `disabled` ones show as disabled
     let skills_config = crate::config::parse_skills_config(&effective_config);
+    // Same for `[paths]`: rules from `extra_rule_dirs` appear, as they do in a session
+    let paths_config: crate::agent::config::PathsConfig = effective_config
+        .get("paths")
+        .and_then(|v| v.clone().try_into().ok())
+        .unwrap_or_default();
 
-    // Discover with all vendors ON so inspect shows the full set on disk.
     let (mut instructions, permissions, mut skills) = tokio::join!(
-        list_instructions(cwd),
+        list_instructions(cwd, &paths_config, project_trusted),
         list_permissions(cwd, project_trusted),
-        list_skills(cwd, &plugin_registry, &skills_config),
+        list_skills(cwd, &plugin_registry, &skills_config, project_trusted),
     );
 
     // Attach local compatibility status to each discovered vendor entry.
@@ -445,23 +513,6 @@ async fn build_report(cwd: &Path) -> InspectReport {
     }
 }
 
-/// Read `[paths] extra_rule_dirs` from the effective config.
-/// Returns empty on any read/parse failure so misconfiguration never breaks classification.
-fn extra_rule_dirs_from_config() -> Vec<String> {
-    let Ok(root) = crate::config::load_effective_config() else {
-        return Vec::new();
-    };
-    root.get("paths")
-        .and_then(|v| v.get("extra_rule_dirs"))
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 fn has_rules_directory(file_path: &str, config_dir: &str) -> bool {
     let mut previous = None;
     for component in file_path
@@ -494,12 +545,7 @@ fn instruction_scope(
     }
 }
 
-fn instruction_file_type(
-    file_path: &str,
-    grok_home: &Path,
-    claude_imported: bool,
-    extra_rule_prefixes: &[PathBuf],
-) -> &'static str {
+fn instruction_file_type(file_path: &str, grok_home: &Path, claude_imported: bool) -> &'static str {
     let path = Path::new(file_path);
     if path
         .parent()
@@ -507,9 +553,6 @@ fn instruction_file_type(
         || has_rules_directory(file_path, ".grok")
         || has_rules_directory(file_path, ".cursor")
         || (!claude_imported && has_rules_directory(file_path, ".claude"))
-        || extra_rule_prefixes
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
     {
         "rules"
     } else {
@@ -518,11 +561,17 @@ fn instruction_file_type(
 }
 
 /// Wraps the production instruction discovery (`agents_md::read_agents_config_with_paths`).
-async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
-    // Discover with all vendors ON so inspect shows the full set.
+/// `paths` is the same `[paths]` table a session loads, so inspect lists exactly the rules the model receives.
+async fn list_instructions(
+    cwd: &Path,
+    paths: &crate::agent::config::PathsConfig,
+    project_trusted: bool,
+) -> Vec<InstructionFile> {
     let configs = xai_grok_agent::prompt::agents_md::read_agents_config_with_paths(
         &cwd.display().to_string(),
         xai_grok_agent::prompt::skills::CompatConfig::default(),
+        paths,
+        project_trusted,
     )
     .await;
 
@@ -543,32 +592,21 @@ async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
     // Phase 2 cutoff: when imported, stop classifying `.claude/rules/` paths as rules
     // Equivalent dirs come in via `[paths] extra_rule_dirs`
     let imported = crate::claude_import::is_claude_import_marked();
-    let extra_rule_dirs = extra_rule_dirs_from_config();
-    // Pre-expand `~/` and resolve once, so the per-config-file matching loop
-    // can use a clean prefix check. Empty/invalid paths fall
-    // through to a no-op match.
-    //
-    // TODO(phase-3): `extra_rule_dirs` only re-classifies files that
-    // `xai_grok_agent::prompt::agents_md::read_agents_config_with_paths`
-    // has already discovered. Plumbing `extra_rule_dirs` through to that
-    // discovery (so files in arbitrary user-configured dirs are surfaced as
-    // rules instead of being missed entirely) is out of scope for this stack
-    // (intentional wontfix for now).
-    // Skills (`extensions/skills.rs`) take the typed-scan path so they don't
-    // have this limitation; rules need the same treatment in a follow-up.
-    let extra_rule_prefixes: Vec<std::path::PathBuf> = extra_rule_dirs
-        .iter()
-        .map(|d| crate::util::expand_home(d))
-        .collect();
 
     configs
         .into_iter()
         .map(|c| {
-            let file_type =
-                instruction_file_type(&c.file_path, &grok_home, imported, &extra_rule_prefixes);
-            let scope = instruction_scope(&c.file_path, &grok_home, &vendor_homes, &workspace_root);
+            let (scope, file_type, vendor) =
+                if c.source == xai_grok_agent::prompt::agents_md::InstructionSource::Configured {
+                    (Scope::Global, "rules", None)
+                } else {
+                    (
+                        instruction_scope(&c.file_path, &grok_home, &vendor_homes, &workspace_root),
+                        instruction_file_type(&c.file_path, &grok_home, imported),
+                        derive_vendor(&c.file_path).map(String::from),
+                    )
+                };
             let size = c.content.len();
-            let vendor = derive_vendor(&c.file_path).map(String::from);
             InstructionFile {
                 size_bytes: size,
                 approx_tokens: estimate_tokens(&c.content),
@@ -583,6 +621,35 @@ async fn list_instructions(cwd: &Path) -> Vec<InstructionFile> {
         .collect()
 }
 
+/// The full-lockdown sources (MCP, marketplace): they block everything they
+/// bind while listing no entries, so an unnamed lockdown is invisible.
+fn policy_lockdown_sources(
+    ms: &xai_grok_workspace::permission::resolution::ManagedSettings,
+) -> (Vec<LockdownSource>, Vec<LockdownSource>) {
+    use xai_grok_workspace::permission::resolution::PolicySourceAuthority;
+    let lockdown = |path: Option<&Path>, authority: PolicySourceAuthority| LockdownSource {
+        source: path
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "(unknown source)".to_string()),
+        advisory: authority == PolicySourceAuthority::Advisory,
+    };
+    let mcp = ms
+        .mcp_allowlist
+        .sources
+        .iter()
+        .filter(|s| s.is_lockdown())
+        .map(|s| lockdown(s.source_path.as_deref(), s.authority()))
+        .collect();
+    let marketplace = ms
+        .marketplace_allowlist
+        .sources
+        .iter()
+        .filter(|s| s.is_lockdown())
+        .map(|s| lockdown(s.source_path.as_deref(), s.authority))
+        .collect();
+    (mcp, marketplace)
+}
+
 /// Builds the report from the production permission resolver.
 async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsReport {
     use xai_grok_workspace::permission::resolution;
@@ -591,21 +658,36 @@ async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsRepor
     let format_entry = |e: &resolution::AllowedMcpServer| match e {
         resolution::AllowedMcpServer::Http { url_pattern } => url_pattern.clone(),
         resolution::AllowedMcpServer::Stdio { command } => format!("command:{command}"),
+        resolution::AllowedMcpServer::StdioArgv { argv } => {
+            format!("command:{}", argv.join(" "))
+        }
         resolution::AllowedMcpServer::Name { name } => format!("name:{name}"),
     };
     let mcp_server_allowlist: Vec<String> = ms
         .mcp_allowlist
-        .entries
+        .sources
         .iter()
-        .map(format_entry)
-        .chain(
-            ms.mcp_allowlist
-                .deny_entries
-                .iter()
-                .map(|e| format!("deny:{}", format_entry(e))),
-        )
+        .flat_map(|source| {
+            source.entries().map(format_entry).chain(
+                source
+                    .deny_entries()
+                    .map(|e| format!("deny:{}", format_entry(e))),
+            )
+        })
         .collect();
-    let marketplace_allowlist = ms.marketplace_allowlist.allowed_urls.clone();
+    let (mcp_lockdown_sources, marketplace_lockdown_sources) = policy_lockdown_sources(ms);
+    let marketplace_allowlist = ms.marketplace_allowlist.allowed_urls();
+    let managed_marketplaces: Vec<String> = ms
+        .extra_marketplaces
+        .iter()
+        .map(|m| match &m.kind {
+            resolution::ManagedMarketplaceKind::Git { url, git_ref } => match git_ref {
+                Some(r) => format!("{} ({url}@{r})", m.name),
+                None => format!("{} ({url})", m.name),
+            },
+            resolution::ManagedMarketplaceKind::Local { path } => format!("{} ({path})", m.name),
+        })
+        .collect();
 
     // Independent of the rule resolver: a managed-settings.json containing only
     // e.g. disableBypassPermissionsMode still surfaces its path and effects.
@@ -616,10 +698,7 @@ async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsRepor
     // `source_path` is set only when the file was read and parsed successfully, so it signals "actually loaded" rather than merely present
     let managed_settings_active = ms.features.source_path.is_some();
 
-    // The resolution carries the always-approve pin it applied, even when
-    // nothing resolves, so the enforced row and the resolved rules can't
-    // disagree about the pin. This covers only the pin: `ms.features` rows
-    // come from a separate `managed_settings()` read.
+    // The resolution carries the always-approve pin it applied, even when nothing resolves, so the enforced row and the resolved rules can't disagree about the pin. This covers only the pin: `ms.features` rows come from a separate `managed_settings()` read.
     let resolution::ProvenanceResolution {
         yolo_lock,
         resolved,
@@ -644,14 +723,18 @@ async fn list_permissions(cwd: &Path, project_trusted: bool) -> PermissionsRepor
     let PermissionPolicyReport {
         enforced,
         claude_bypass_lock_advisory,
-    } = permission_policy_report(&ms.features, yolo_lock.as_ref());
+    } = permission_policy_report(ms, yolo_lock.as_ref());
 
     PermissionsReport {
         sources,
         loaded,
         skipped,
         mcp_server_allowlist,
+        mcp_lockdown_sources,
+        mcp_managed_servers_only: ManagedOnlyScope::resolve(&ms.mcp_allowlist),
         marketplace_allowlist,
+        marketplace_lockdown_sources,
+        managed_marketplaces,
         managed_settings_path,
         managed_settings_exists,
         managed_settings_active,
@@ -666,12 +749,10 @@ struct PermissionPolicyReport {
     claude_bypass_lock_advisory: bool,
 }
 
-/// Build the managed-policy report: one enforced row per active clamp (the
-/// always-approve pin, telemetry, feedback) and the Claude bypass-lock
-/// advisory flag. A Claude bypass-lock request must never appear as an
-/// enforced row — see [`PermissionsReport::claude_bypass_lock_advisory`].
+/// Build the managed-policy report: one enforced row per active clamp; a
+/// Claude bypass-lock request must never appear as an enforced row.
 fn permission_policy_report(
-    features: &ManagedSettingsFeatures,
+    ms: &ManagedSettings,
     yolo_lock: Option<&YoloPolicyLock>,
 ) -> PermissionPolicyReport {
     let mut enforced = Vec::new();
@@ -682,12 +763,12 @@ fn permission_policy_report(
             source: lock.source_label.clone(),
         });
     }
-    if let Some(src) = &features.source_path {
+    if let Some(src) = &ms.features.source_path {
         // Full path, matching the alwaysApprove row's granularity.
         let source = src.display().to_string();
         for (flag, setting) in [
-            (features.disable_telemetry, EnforcedSetting::Telemetry),
-            (features.disable_feedback, EnforcedSetting::Feedback),
+            (ms.features.disable_telemetry, EnforcedSetting::Telemetry),
+            (ms.features.disable_feedback, EnforcedSetting::Feedback),
         ] {
             if flag == Some(true) {
                 enforced.push(EnforcedPolicy {
@@ -698,9 +779,22 @@ fn permission_policy_report(
             }
         }
     }
+    for (pin, setting) in [
+        (&ms.project_mcp, EnforcedSetting::ProjectMcpServers),
+        (&ms.plugin_auto_update, EnforcedSetting::PluginAutoUpdate),
+        (&ms.non_managed_hooks, EnforcedSetting::NonManagedHooks),
+    ] {
+        if let Some(source) = pin.source() {
+            enforced.push(EnforcedPolicy {
+                setting,
+                enabled: false,
+                source: source.display().to_string(),
+            });
+        }
+    }
     PermissionPolicyReport {
         enforced,
-        claude_bypass_lock_advisory: claude_bypass_lock_request(features),
+        claude_bypass_lock_advisory: claude_bypass_lock_request(&ms.features),
     }
 }
 
@@ -727,9 +821,12 @@ fn list_hooks(
     // Route through the same assembly as session startup
     // Config-layer hooks (config.toml / managed_config.toml / requirements.toml) then appear in `/hooks` status alongside file hooks
     // Each carries its provenance name prefix
-    let config_layers = xai_grok_config::hook_config_layers();
-    let (registry, _errors) =
-        crate::util::hooks::assemble_hooks(&config_layers, git_root, &all_on, project_trusted);
+    let (registry, _errors) = crate::util::hooks::discover_hooks(
+        &crate::util::hooks::process_hook_inputs(),
+        git_root,
+        &all_on,
+        xai_grok_hooks::trust::Trust::from_verdict(project_trusted),
+    );
 
     let mut entries: Vec<HookEntry> = registry
         .all_hooks()
@@ -758,7 +855,7 @@ fn list_hooks(
             let vendor = derive_vendor(&h.source_dir.display().to_string()).map(String::from);
             HookEntry {
                 event: h.event.to_string(),
-                hook_type: h.handler_type.as_str().to_string(),
+                hook_type: h.handler_type.as_ref().to_string(),
                 target: h
                     .command
                     .as_ref()
@@ -815,13 +912,14 @@ async fn list_skills(
     cwd: &Path,
     plugin_registry: &xai_grok_agent::plugins::PluginRegistry,
     skills_config: &xai_grok_agent::prompt::skills::SkillsConfig,
+    project_trusted: bool,
 ) -> Vec<SkillEntry> {
-    // Discover with all vendors ON so inspect shows the full set.
     let skills = xai_grok_agent::prompt::skills::list_skills_with_plugins(
         Some(&cwd.display().to_string()),
         skills_config,
         Some(plugin_registry),
         xai_grok_agent::prompt::skills::CompatConfig::default(),
+        project_trusted,
     )
     .await;
 
@@ -983,11 +1081,12 @@ fn list_mcp_servers(
         Some(plugin_registry),
         &all_on,
     );
-    let allowlist = &resolution::managed_settings().mcp_allowlist;
+    let ms = resolution::managed_settings();
+    let project = crate::agent::folder_trust::project_scoped_mcp_names(cwd);
 
     sourced
         .into_iter()
-        .map(|(server, source)| {
+        .map(|(server, origin)| {
             let (name, transport, target) =
                 match &server {
                     agent_client_protocol::McpServer::Stdio(
@@ -1002,12 +1101,14 @@ fn list_mcp_servers(
                     // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
                     _ => ("unknown".to_string(), "unknown", String::new()),
                 };
-            let disabled_reason = (!allowlist.is_server_allowed(&server)).then(|| {
-                crate::session::managed_mcp::McpDisabledReason::for_blocked_server(
-                    allowlist, &server,
-                )
-                .to_string()
-            });
+            let subject = crate::session::managed_mcp::mcp_subject(&server, &origin, &project);
+            let source = ConfigSource::from(origin);
+            // The verdict mirrors the merge's deny/allow and project-MCP pin
+            // so the report matches what actually loads.
+            let disabled_reason = match ms.mcp_verdict(&server, subject) {
+                resolution::McpVerdict::Blocked(reason) => Some(reason.to_string()),
+                resolution::McpVerdict::Allowed => None,
+            };
             let vendor = match &source {
                 ConfigSource::ClaudeJson { .. } => Some("claude".to_owned()),
                 ConfigSource::McpJson { path } => {
@@ -1088,13 +1189,7 @@ fn list_lsp_servers(
 
 /// Locates the config files that contribute to the effective config, probing the locations `ConfigLayers::load` and `requirements_layers` use.
 /// Probed: system and user `managed_config.toml`, user `config.toml`, and user and system `requirements.toml`.
-/// Project `.grok/config.toml` files come via `find_project_configs`.
-/// The macOS MDM managed-preferences layer has no file on disk, so it is sourced directly from `requirements_layers()` rather than a path probe.
-///
-/// Only on-disk files (plus the synthetic MDM layer) are emitted.
-/// The primary user `config.toml` is the exception: when absent it still gets a "User: (none)" line in the human view.
-/// `note` distinguishes files that exist but contribute nothing after the real loader's processing (stripping, version overrides, fail_closed, etc).
-/// Parse errors are reported distinctly rather than as "empty".
+/// The macOS MDM managed-preferences layer has no file on disk, so it is sourced directly from `requirements_layers()` rather than a path probe. Only on-disk files (plus the synthetic MDM layer) are emitted. `note` distinguishes files that exist but contribute nothing after the real loader's processing (stripping, version overrides, fail_closed, etc).
 fn list_config_sources(cwd: &Path) -> ConfigSources {
     let mut layers: Vec<ConfigLayer> = vec![];
 
@@ -1327,6 +1422,9 @@ fn enforced_label(p: &EnforcedPolicy) -> String {
         EnforcedSetting::AlwaysApprove => "Permissions mode: always-approve",
         EnforcedSetting::Telemetry => "Telemetry",
         EnforcedSetting::Feedback => "Feedback",
+        EnforcedSetting::ProjectMcpServers => "Project MCP servers",
+        EnforcedSetting::PluginAutoUpdate => "Plugin auto-update",
+        EnforcedSetting::NonManagedHooks => "Hooks outside managed policy",
     };
     let state = if p.enabled { "enabled" } else { "disabled" };
     format!("{name} {state}")
@@ -1487,6 +1585,26 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
             writeln!(out, "    {TREE} {}", pat)?;
         }
     }
+    if !r.permissions.mcp_lockdown_sources.is_empty() {
+        writeln!(
+            out,
+            "  {TREE} MCP servers locked down (empty/malformed allowedMcpServers or malformed deniedMcpServers)"
+        )?;
+        for src in &r.permissions.mcp_lockdown_sources {
+            writeln!(out, "    {TREE} {}", src.human_row("servers"))?;
+        }
+    }
+    match r.permissions.mcp_managed_servers_only {
+        ManagedOnlyScope::Off => {}
+        ManagedOnlyScope::Enforced => writeln!(
+            out,
+            "  {TREE} MCP managed servers only: enforced (allowManagedMcpServersOnly)"
+        )?,
+        ManagedOnlyScope::Advisory => writeln!(
+            out,
+            "  {TREE} MCP managed servers only: advisory (Claude managed-settings; grok-native servers exempt)"
+        )?,
+    }
     if !r.permissions.marketplace_allowlist.is_empty() {
         writeln!(
             out,
@@ -1495,6 +1613,25 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
         )?;
         for url in &r.permissions.marketplace_allowlist {
             writeln!(out, "    {TREE} {}", url)?;
+        }
+    }
+    if !r.permissions.marketplace_lockdown_sources.is_empty() {
+        writeln!(
+            out,
+            "  {TREE} Marketplaces locked down (empty or malformed strictKnownMarketplaces)"
+        )?;
+        for src in &r.permissions.marketplace_lockdown_sources {
+            writeln!(out, "    {TREE} {}", src.human_row("marketplaces"))?;
+        }
+    }
+    if !r.permissions.managed_marketplaces.is_empty() {
+        writeln!(
+            out,
+            "  {TREE} Managed marketplaces ({} pinned)",
+            r.permissions.managed_marketplaces.len()
+        )?;
+        for m in &r.permissions.managed_marketplaces {
+            writeln!(out, "    {TREE} {}", m)?;
         }
     }
 
@@ -1703,14 +1840,22 @@ fn print_human(r: &InspectReport, out: &mut impl Write) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::config::PathsConfig;
     use xai_grok_agent::prompt::skills::{SkillInfo, SkillsConfig};
     use xai_grok_tools::implementations::skills::types::SkillScope;
+
+    fn paths_config(extra_rule_dir: &Path) -> PathsConfig {
+        PathsConfig {
+            extra_rule_dirs: vec![extra_rule_dir.to_string_lossy().into_owned()],
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn harness_compatibility_human_output_stays_compact() {
         let effective_config: toml::Value =
             toml::from_str("[compat.cursor]\nrules = false").unwrap();
-        let report = compat::resolve_inspect_compat_with_env(Ok(&effective_config), |_| None);
+        let report = compat::resolve_inspect_compat_with_env(Some(&effective_config), |_| None);
 
         let human = render_harness_compatibility(&report);
 
@@ -1756,6 +1901,96 @@ mod tests {
     }
 
     #[test]
+    fn managed_only_scope_classifies_each_policy_origin() {
+        use xai_grok_workspace::permission::resolution::{
+            McpServerAllowlist, McpServerPolicy, PolicySourceAuthority,
+        };
+        let lockdown = || McpServerAllowlist::new(vec![], vec![], None).with_managed_only();
+
+        let native = McpServerPolicy::single(lockdown());
+        assert_eq!(
+            ManagedOnlyScope::resolve(&native),
+            ManagedOnlyScope::Enforced
+        );
+
+        let advisory =
+            McpServerPolicy::single(lockdown().with_authority(PolicySourceAuthority::Advisory));
+        assert_eq!(
+            ManagedOnlyScope::resolve(&advisory),
+            ManagedOnlyScope::Advisory
+        );
+
+        // A native source alongside an advisory one must classify as enforced.
+        let both = McpServerPolicy {
+            sources: vec![
+                lockdown().with_authority(PolicySourceAuthority::Advisory),
+                lockdown(),
+            ],
+        };
+        assert_eq!(ManagedOnlyScope::resolve(&both), ManagedOnlyScope::Enforced);
+
+        let unpinned = McpServerPolicy::single(McpServerAllowlist::new(vec![], vec![], None));
+        assert_eq!(ManagedOnlyScope::resolve(&unpinned), ManagedOnlyScope::Off);
+    }
+
+    #[test]
+    fn permissions_report_policy_fields_serialize_stably() {
+        let report = PermissionsReport {
+            sources: vec!["managed-settings.json".to_owned()],
+            loaded: 0,
+            skipped: vec![],
+            mcp_server_allowlist: vec![],
+            mcp_lockdown_sources: vec![],
+            mcp_managed_servers_only: ManagedOnlyScope::Advisory,
+            marketplace_allowlist: vec![],
+            marketplace_lockdown_sources: vec![],
+            managed_marketplaces: vec![],
+            managed_settings_path: None,
+            managed_settings_exists: true,
+            managed_settings_active: false,
+            enforced: vec![EnforcedPolicy {
+                setting: EnforcedSetting::ProjectMcpServers,
+                enabled: false,
+                source: "/etc/grok/managed-settings.json".to_owned(),
+            }],
+            claude_bypass_lock_advisory: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&report).unwrap(),
+            serde_json::json!({
+                "sources": ["managed-settings.json"],
+                "loaded": 0,
+                "skipped": [],
+                "mcpServerAllowlist": [],
+                "mcpLockdownSources": [],
+                "mcpManagedServersOnly": "advisory",
+                "marketplaceAllowlist": [],
+                "marketplaceLockdownSources": [],
+                "managedMarketplaces": [],
+                "managedSettingsExists": true,
+                "managedSettingsActive": false,
+                "enforced": [{
+                    "setting": "projectMcpServers",
+                    "enabled": false,
+                    "source": "/etc/grok/managed-settings.json"
+                }],
+                "claudeBypassLockAdvisory": true
+            })
+        );
+        for (scope, wire) in [
+            (ManagedOnlyScope::Off, "off"),
+            (ManagedOnlyScope::Advisory, "advisory"),
+            (ManagedOnlyScope::Enforced, "enforced"),
+        ] {
+            assert_eq!(serde_json::to_value(scope).unwrap(), wire);
+        }
+        assert_eq!(
+            serde_json::to_value(EnforcedSetting::PluginAutoUpdate).unwrap(),
+            "pluginAutoUpdate"
+        );
+    }
+
+    #[test]
     fn vendor_rule_paths_select_rules_compatibility_cells() {
         let cell = |vendor: &str, surface: &str, enabled: bool| ExternalCompatEntry {
             vendor: vendor.to_owned(),
@@ -1779,7 +2014,7 @@ mod tests {
             ("claude", "/repo/.claude/rules/team.md"),
             ("claude", r"C:\repo\.claude\rules\team.md"),
         ] {
-            let file_type = instruction_file_type(path, Path::new("/home/user/.grok"), false, &[]);
+            let file_type = instruction_file_type(path, Path::new("/home/user/.grok"), false);
             assert_eq!(file_type, "rules");
             assert_eq!(
                 instruction_compat_status(&Some(vendor.to_owned()), file_type, &report),
@@ -1789,7 +2024,7 @@ mod tests {
 
         for path in ["/repo/.grok/rules/team.md", r"C:\repo\.grok\rules\team.md"] {
             assert_eq!(
-                instruction_file_type(path, Path::new("/home/user/.grok"), false, &[]),
+                instruction_file_type(path, Path::new("/home/user/.grok"), false),
                 "rules"
             );
         }
@@ -1798,7 +2033,7 @@ mod tests {
             r"C:\repo\.cursor\rules\team.md",
         ] {
             assert_eq!(
-                instruction_file_type(path, Path::new("/home/user/.grok"), true, &[]),
+                instruction_file_type(path, Path::new("/home/user/.grok"), true),
                 "rules"
             );
         }
@@ -1806,7 +2041,7 @@ mod tests {
             "/repo/.claude/rules/team.md",
             r"C:\repo\.claude\rules\team.md",
         ] {
-            let file_type = instruction_file_type(path, Path::new("/home/user/.grok"), true, &[]);
+            let file_type = instruction_file_type(path, Path::new("/home/user/.grok"), true);
             assert_eq!(file_type, "agents_md");
             assert_eq!(
                 instruction_compat_status(&Some("claude".to_owned()), file_type, &report),
@@ -1818,7 +2053,7 @@ mod tests {
             r"C:\repo\.cursor\ruleset\team.md",
         ] {
             assert_eq!(
-                instruction_file_type(path, Path::new("/home/user/.grok"), false, &[]),
+                instruction_file_type(path, Path::new("/home/user/.grok"), false),
                 "agents_md"
             );
         }
@@ -1892,7 +2127,6 @@ mod tests {
                 "/custom/config/rules/team.md",
                 Path::new("/custom/config"),
                 false,
-                &[],
             ),
             "rules"
         );
@@ -1901,7 +2135,6 @@ mod tests {
                 "/custom/config/AGENTS.md",
                 Path::new("/custom/config"),
                 false,
-                &[],
             ),
             "agents_md"
         );
@@ -1985,6 +2218,13 @@ mod tests {
             "Permissions mode: always-approve disabled"
         );
         assert!(!enforced_label(&p).contains("yolo"));
+
+        let p = EnforcedPolicy {
+            setting: EnforcedSetting::NonManagedHooks,
+            enabled: false,
+            source: "requirements.toml".into(),
+        };
+        assert_eq!(enforced_label(&p), "Hooks outside managed policy disabled");
     }
 
     fn permissions_report(
@@ -1996,7 +2236,11 @@ mod tests {
             loaded: 0,
             skipped: vec![],
             mcp_server_allowlist: vec![],
+            mcp_lockdown_sources: vec![],
+            mcp_managed_servers_only: ManagedOnlyScope::Off,
             marketplace_allowlist: vec![],
+            marketplace_lockdown_sources: vec![],
+            managed_marketplaces: vec![],
             managed_settings_path: None,
             managed_settings_exists: false,
             managed_settings_active: false,
@@ -2010,7 +2254,10 @@ mod tests {
     #[test]
     fn permissions_report_pins_advisory_and_enforced_wire_contract() {
         let json = serde_json::to_value(permissions_report(false, vec![])).unwrap();
-        assert_eq!(json["claudeBypassLockAdvisory"], serde_json::json!(false));
+        assert_eq!(
+            json.get("claudeBypassLockAdvisory"),
+            Some(&serde_json::json!(false))
+        );
         assert!(
             json.get("enforced").is_none(),
             "empty enforced list must be omitted: {json}"
@@ -2022,14 +2269,17 @@ mod tests {
             source: "/etc/grok/requirements.toml".to_string(),
         };
         let json = serde_json::to_value(permissions_report(true, vec![row])).unwrap();
-        assert_eq!(json["claudeBypassLockAdvisory"], serde_json::json!(true));
         assert_eq!(
-            json["enforced"],
-            serde_json::json!([{
+            json.get("claudeBypassLockAdvisory"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            json.get("enforced"),
+            Some(&serde_json::json!([{
                 "setting": "alwaysApprove",
                 "enabled": false,
                 "source": "/etc/grok/requirements.toml",
-            }])
+            }]))
         );
     }
 
@@ -2051,15 +2301,17 @@ mod tests {
         disable_yolo: Option<bool>,
         disable_telemetry: Option<bool>,
         disable_feedback: Option<bool>,
-    ) -> xai_grok_workspace::permission::resolution::ManagedSettingsFeatures {
-        xai_grok_workspace::permission::resolution::ManagedSettingsFeatures {
+    ) -> ManagedSettings {
+        let mut ms = ManagedSettings::default();
+        ms.features = xai_grok_workspace::permission::resolution::ManagedSettingsFeatures {
             disable_telemetry,
             disable_feedback,
             disable_yolo,
             source_path: Some(std::path::PathBuf::from(
                 "/etc/claude-code/managed-settings.json",
             )),
-        }
+        };
+        ms
     }
 
     /// A Claude bypass-lock request surfaces as the advisory flag, never as an
@@ -2082,12 +2334,14 @@ mod tests {
             claude_bypass_lock_advisory: advisory,
         } = permission_policy_report(&managed_features(Some(true), Some(true), Some(true)), None);
         assert!(advisory);
-        assert_eq!(enforced.len(), 2);
-        assert_eq!(enforced[0].setting, EnforcedSetting::Telemetry);
-        assert_eq!(enforced[1].setting, EnforcedSetting::Feedback);
+        let [tel, fb] = enforced.as_slice() else {
+            panic!("expected telemetry and feedback rows: {enforced:?}");
+        };
+        assert_eq!(tel.setting, EnforcedSetting::Telemetry);
+        assert_eq!(fb.setting, EnforcedSetting::Feedback);
         // Same granularity as the alwaysApprove row: the full file path.
-        assert_eq!(enforced[0].source, "/etc/claude-code/managed-settings.json");
-        assert_eq!(enforced[1].source, "/etc/claude-code/managed-settings.json");
+        assert_eq!(tel.source, "/etc/claude-code/managed-settings.json");
+        assert_eq!(fb.source, "/etc/claude-code/managed-settings.json");
     }
 
     /// The enforced alwaysApprove row comes from grok's own requirements lock,
@@ -2104,10 +2358,12 @@ mod tests {
             claude_bypass_lock_advisory: advisory,
         } = permission_policy_report(&Default::default(), Some(&lock));
         assert!(!advisory);
-        assert_eq!(enforced.len(), 1);
-        assert_eq!(enforced[0].setting, EnforcedSetting::AlwaysApprove);
-        assert!(!enforced[0].enabled);
-        assert_eq!(enforced[0].source, "/etc/grok/requirements.toml");
+        let [row] = enforced.as_slice() else {
+            panic!("expected one alwaysApprove row: {enforced:?}");
+        };
+        assert_eq!(row.setting, EnforcedSetting::AlwaysApprove);
+        assert!(!row.enabled);
+        assert_eq!(row.source, "/etc/grok/requirements.toml");
 
         // Both present: the real lock row + the advisory flag, no duplicate row.
         let PermissionPolicyReport {
@@ -2115,8 +2371,10 @@ mod tests {
             claude_bypass_lock_advisory: advisory,
         } = permission_policy_report(&managed_features(Some(true), None, None), Some(&lock));
         assert!(advisory);
-        assert_eq!(enforced.len(), 1);
-        assert_eq!(enforced[0].source, "/etc/grok/requirements.toml");
+        let [row] = enforced.as_slice() else {
+            panic!("expected one alwaysApprove row: {enforced:?}");
+        };
+        assert_eq!(row.source, "/etc/grok/requirements.toml");
     }
 
     /// An MDM-only lockdown has no requirements.toml; the enforced row must
@@ -2133,9 +2391,56 @@ mod tests {
             claude_bypass_lock_advisory: advisory,
         } = permission_policy_report(&Default::default(), Some(&lock));
         assert!(!advisory);
-        assert_eq!(enforced.len(), 1);
-        assert_eq!(enforced[0].setting, EnforcedSetting::AlwaysApprove);
-        assert_eq!(enforced[0].source, crate::config::MDM_REQUIREMENTS_SOURCE);
+        let [row] = enforced.as_slice() else {
+            panic!("expected one alwaysApprove row: {enforced:?}");
+        };
+        assert_eq!(row.setting, EnforcedSetting::AlwaysApprove);
+        assert_eq!(row.source, crate::config::MDM_REQUIREMENTS_SOURCE);
+    }
+
+    /// The pins report as enforced rows with stable camelCase setting keys.
+    #[test]
+    fn managed_pins_report_enforced_rows_with_sources() {
+        use xai_grok_workspace::permission::resolution::{PolicyLayerOwnership, PolicyPin};
+        let mut ms = ManagedSettings::default();
+        ms.project_mcp = PolicyPin::Disabled {
+            source: "/etc/grok/managed_config.toml".into(),
+            ownership: PolicyLayerOwnership::Admin,
+        };
+        ms.plugin_auto_update = PolicyPin::Disabled {
+            source: "/etc/grok/requirements.toml".into(),
+            ownership: PolicyLayerOwnership::Admin,
+        };
+        ms.non_managed_hooks = PolicyPin::Disabled {
+            source: "/Users/me/.grok/requirements.toml".into(),
+            ownership: PolicyLayerOwnership::User,
+        };
+        let PermissionPolicyReport { enforced, .. } = permission_policy_report(&ms, None);
+        assert_eq!(
+            serde_json::to_value(&enforced).unwrap(),
+            serde_json::json!([
+                {
+                    "setting": "projectMcpServers",
+                    "enabled": false,
+                    "source": "/etc/grok/managed_config.toml",
+                },
+                {
+                    "setting": "pluginAutoUpdate",
+                    "enabled": false,
+                    "source": "/etc/grok/requirements.toml",
+                },
+                {
+                    "setting": "nonManagedHooks",
+                    "enabled": false,
+                    "source": "/Users/me/.grok/requirements.toml",
+                },
+            ])
+        );
+
+        // Unpinned settings produce no row.
+        let PermissionPolicyReport { enforced, .. } =
+            permission_policy_report(&ManagedSettings::default(), None);
+        assert!(enforced.is_empty(), "{enforced:?}");
     }
 
     /// Model-override warnings flow from an effective config through `Config` to the human renderer and the JSON report.
@@ -2210,14 +2515,24 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .find(|w| w["field"] == "send_compactions_remaining")
+            .find(|w| w.get("field").and_then(|v| v.as_str()) == Some("send_compactions_remaining"))
             .expect("alias warning present in JSON");
-        assert_eq!(alias_warning["target"], "model");
-        assert_eq!(alias_warning["key"], "grok-4.5");
-        assert_eq!(alias_warning["kind"], "duplicate-alias");
+        assert_eq!(
+            alias_warning.get("target").and_then(|v| v.as_str()),
+            Some("model")
+        );
+        assert_eq!(
+            alias_warning.get("key").and_then(|v| v.as_str()),
+            Some("grok-4.5")
+        );
+        assert_eq!(
+            alias_warning.get("kind").and_then(|v| v.as_str()),
+            Some("duplicate-alias")
+        );
         assert!(
-            alias_warning["reason"]
-                .as_str()
+            alias_warning
+                .get("reason")
+                .and_then(|v| v.as_str())
                 .is_some_and(|r| !r.is_empty())
         );
     }
@@ -2301,18 +2616,18 @@ mod tests {
         );
         login.plugin_name = Some("acme".into());
         let deploy = skill_fixture("deploy", "/tmp/deploy/SKILL.md", SkillScope::Local);
-        // Gated builtins like /flush stay untagged: inspect must not invent /local:flush while the live catalog may still advertise /flush
-        let flush = skill_fixture("flush", "/tmp/flush/SKILL.md", SkillScope::Local);
+        // Gated builtins like /goal stay untagged: inspect must not invent /local:goal while the live catalog may still advertise /goal
+        let goal = skill_fixture("goal", "/tmp/goal/SKILL.md", SkillScope::Local);
         let commit_local = skill_fixture("commit", "/tmp/l/commit/SKILL.md", SkillScope::Local);
         let commit_user = skill_fixture("commit", "/tmp/u/commit/SKILL.md", SkillScope::User);
-        let all = [login, deploy, flush, commit_local, commit_user];
-        let [login, deploy, flush, commit_local, commit_user] = &all;
+        let all = [login, deploy, goal, commit_local, commit_user];
+        let [login, deploy, goal, commit_local, commit_user] = &all;
 
         let entry = collision_entry(login, &all);
         assert_eq!(entry.collides_with.as_deref(), Some("login"));
         assert_eq!(entry.invocable_as.as_deref(), Some("acme:login"));
 
-        for skill in [deploy, flush] {
+        for skill in [deploy, goal] {
             let entry = collision_entry(skill, &all);
             assert_eq!(entry.collides_with, None, "{}", skill.name);
             assert_eq!(entry.invocable_as, None, "{}", skill.name);
@@ -2338,7 +2653,10 @@ mod tests {
         let a = skill_fixture("commit", "/tmp/a/commit/SKILL.md", SkillScope::Local);
         let b = skill_fixture("commit", "/tmp/b/commit/SKILL.md", SkillScope::Local);
         let all = [a, b];
-        let entry = collision_entry(&all[0], &all);
+        let Some(first) = all.first() else {
+            panic!("expected a skill fixture");
+        };
+        let entry = collision_entry(first, &all);
         assert_eq!(entry.collides_with.as_deref(), Some("commit"));
         assert_eq!(entry.invocable_as, None);
     }
@@ -2391,7 +2709,13 @@ mod tests {
         };
         let registry = xai_grok_agent::plugins::PluginRegistry::from_discovered(vec![], &[], &[]);
 
-        let entries = list_skills(cwd.path(), &registry, &config).await;
+        let entries = list_skills(
+            cwd.path(),
+            &registry,
+            &config,
+            /*project_trusted*/ true,
+        )
+        .await;
 
         let extra_entry = entries
             .iter()
@@ -2409,6 +2733,57 @@ mod tests {
         assert!(
             !entries.iter().any(|e| e.name == "inspect-cfg-ignored"),
             "[skills].ignore must hide the skill"
+        );
+    }
+
+    /// A vendor on a listed dir's entry would let `build_report` mark it disabled when that compat cell is off.
+    #[tokio::test]
+    async fn list_instructions_reports_configured_dirs_as_global_rules_without_vendor() {
+        // Discovery also reads this machine's real home dirs, so assert only on the scratch entries.
+        let home = tempfile::tempdir().unwrap();
+        let rules = home.path().join(".claude").join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        let rule = rules.join("imported.md");
+        std::fs::write(&rule, "imported rule").unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+
+        let without = list_instructions(
+            cwd.path(),
+            &PathsConfig::default(),
+            /*project_trusted*/ true,
+        )
+        .await;
+        assert!(
+            !without.iter().any(|e| Path::new(&e.path) == rule),
+            "an unlisted dir must not be scanned"
+        );
+
+        let with = list_instructions(
+            cwd.path(),
+            &paths_config(&rules),
+            /*project_trusted*/ true,
+        )
+        .await;
+        let entry = with
+            .iter()
+            .find(|e| Path::new(&e.path) == rule)
+            .expect("[paths].extra_rule_dirs rule should be listed");
+        assert_eq!("rules", entry.file_type);
+        assert!(matches!(entry.scope, Scope::Global), "{:?}", entry.scope);
+        assert_eq!(None, entry.vendor);
+
+        let claude_rules_off = ExternalCompatReport {
+            remote_settings_loaded: false,
+            cells: vec![ExternalCompatEntry {
+                vendor: "claude".to_owned(),
+                surface: "rules".to_owned(),
+                enabled: false,
+                source: CompatSource::Config,
+            }],
+        };
+        assert_eq!(
+            None,
+            instruction_compat_status(&entry.vendor, &entry.file_type, &claude_rules_off)
         );
     }
 
@@ -2445,7 +2820,11 @@ mod tests {
                 loaded: 0,
                 skipped: vec![],
                 mcp_server_allowlist: vec![],
+                mcp_lockdown_sources: vec![],
+                mcp_managed_servers_only: ManagedOnlyScope::Off,
                 marketplace_allowlist: vec![],
+                marketplace_lockdown_sources: vec![],
+                managed_marketplaces: vec![],
                 managed_settings_path: None,
                 managed_settings_exists: false,
                 managed_settings_active: false,
@@ -2483,6 +2862,189 @@ mod tests {
                 kind: std::io::ErrorKind::BrokenPipe,
             };
             write_inspect(&report, json, &mut out).expect("broken pipe is a clean stop");
+        }
+    }
+
+    /// The managed-policy lines must go through the injected writer, never `println!`.
+    #[test]
+    fn print_human_policy_lines_use_the_injected_writer() {
+        let mut report = empty_report();
+        report.permissions.mcp_managed_servers_only = ManagedOnlyScope::Enforced;
+        report.permissions.enforced = vec![
+            EnforcedPolicy {
+                setting: EnforcedSetting::ProjectMcpServers,
+                enabled: false,
+                source: "/etc/grok/managed_config.toml".into(),
+            },
+            EnforcedPolicy {
+                setting: EnforcedSetting::PluginAutoUpdate,
+                enabled: false,
+                source: "/etc/grok/managed_config.toml".into(),
+            },
+        ];
+        report.permissions.managed_marketplaces =
+            vec!["approved-plugins (https://github.com/corp/approved.git@stable)".into()];
+
+        let mut out = Vec::new();
+        print_human(&report, &mut out).expect("buffer write succeeds");
+        let text = String::from_utf8(out).unwrap();
+        for needle in [
+            "MCP managed servers only: enforced",
+            "Project MCP servers disabled (/etc/grok/managed_config.toml)",
+            "Plugin auto-update disabled (/etc/grok/managed_config.toml)",
+            "Managed marketplaces (1 pinned)",
+            "approved-plugins (https://github.com/corp/approved.git@stable)",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+
+        // An advisory-only lockdown must not read as "enforced".
+        report.permissions.mcp_managed_servers_only = ManagedOnlyScope::Advisory;
+        let mut out = Vec::new();
+        print_human(&report, &mut out).expect("buffer write succeeds");
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            text.contains("MCP managed servers only: advisory"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("MCP managed servers only: enforced"),
+            "{text}"
+        );
+    }
+
+    fn native_lockdown(source: &str) -> LockdownSource {
+        LockdownSource {
+            source: source.to_string(),
+            advisory: false,
+        }
+    }
+
+    /// A zero-entry lockdown blocks everything while contributing no entries;
+    /// the human report must name the enforcing file, not render unrestricted.
+    #[test]
+    fn print_human_surfaces_zero_entry_lockdowns() {
+        let mut report = empty_report();
+        report.permissions.mcp_lockdown_sources =
+            vec![native_lockdown("/etc/grok/managed_config.toml")];
+        report.permissions.marketplace_lockdown_sources =
+            vec![native_lockdown("/etc/grok/managed_config.toml")];
+
+        let mut out = Vec::new();
+        print_human(&report, &mut out).expect("buffer write succeeds");
+        let text = String::from_utf8(out).unwrap();
+        for needle in [
+            "MCP servers locked down",
+            "Marketplaces locked down",
+            "/etc/grok/managed_config.toml",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+        }
+        assert!(
+            !text.contains("advisory"),
+            "native sources carry no tag:\n{text}"
+        );
+    }
+
+    /// JSON consumers see each lockdown source with its authority under camelCase names.
+    #[test]
+    fn json_output_carries_lockdown_fields() {
+        let mut report = empty_report();
+        report.permissions.mcp_lockdown_sources =
+            vec![native_lockdown("/etc/grok/managed_config.toml")];
+        report.permissions.marketplace_lockdown_sources = vec![LockdownSource {
+            source: "managed-settings.json".into(),
+            advisory: true,
+        }];
+        let json = serde_json::to_value(&report).unwrap();
+        let Some(json) = json.get("permissions") else {
+            panic!("expected permissions in report JSON");
+        };
+        assert_eq!(
+            json.get("mcpLockdownSources"),
+            Some(
+                &serde_json::json!([{ "source": "/etc/grok/managed_config.toml", "advisory": false }])
+            )
+        );
+        assert_eq!(
+            json.get("marketplaceLockdownSources"),
+            Some(&serde_json::json!([{ "source": "managed-settings.json", "advisory": true }]))
+        );
+    }
+
+    /// The report's lockdown lists come from the loaded policy: a zero-entry
+    /// lockdown source surfaces, a populated source does not.
+    #[test]
+    fn lockdown_sources_derive_from_policy() {
+        use xai_grok_workspace::permission::resolution::{
+            AllowedMcpServer, ManagedSettings, MarketplaceAllowlist, McpServerAllowlist,
+            McpServerPolicy, PolicySourceAuthority,
+        };
+        let mut ms = ManagedSettings::default();
+        ms.mcp_allowlist = McpServerPolicy::single(
+            McpServerAllowlist::new(
+                vec![],
+                vec![],
+                Some(std::path::PathBuf::from("/etc/grok/managed_config.toml")),
+            )
+            .with_lockdown(),
+        );
+        ms.mcp_allowlist.sources.push(McpServerAllowlist::new(
+            vec![AllowedMcpServer::Http {
+                url_pattern: "https://ok.example.com/*".into(),
+            }],
+            vec![],
+            Some(std::path::PathBuf::from("/etc/grok/requirements.toml")),
+        ));
+        ms.marketplace_allowlist.sources.push(MarketplaceAllowlist {
+            allowed_urls: vec![],
+            source_path: Some(std::path::PathBuf::from("/etc/grok/managed_config.toml")),
+            authority: PolicySourceAuthority::Native,
+        });
+
+        let (mcp, marketplace) = policy_lockdown_sources(&ms);
+        for sources in [mcp, marketplace] {
+            let [src] = sources.as_slice() else {
+                panic!("expected one lockdown source: {sources:?}");
+            };
+            assert_eq!(src.source, "/etc/grok/managed_config.toml");
+            assert!(!src.advisory);
+        }
+    }
+
+    /// An advisory lockdown binds foreign-defined subjects only; the report must
+    /// say so instead of announcing a lockdown grok-native servers are exempt from.
+    #[test]
+    fn advisory_lockdown_sources_are_tagged() {
+        use xai_grok_workspace::permission::resolution::{
+            ManagedSettings, MarketplaceAllowlist, McpServerAllowlist, McpServerPolicy,
+            PolicySourceAuthority,
+        };
+        let vendor = || Some(std::path::PathBuf::from("managed-settings.json"));
+        let mut ms = ManagedSettings::default();
+        ms.mcp_allowlist = McpServerPolicy::single(
+            McpServerAllowlist::new(vec![], vec![], vendor())
+                .with_lockdown()
+                .with_authority(PolicySourceAuthority::Advisory),
+        );
+        ms.marketplace_allowlist.sources.push(MarketplaceAllowlist {
+            allowed_urls: vec![],
+            source_path: vendor(),
+            authority: PolicySourceAuthority::Advisory,
+        });
+
+        let (mcp, marketplace) = policy_lockdown_sources(&ms);
+        let mut report = empty_report();
+        report.permissions.mcp_lockdown_sources = mcp;
+        report.permissions.marketplace_lockdown_sources = marketplace;
+        let mut out = Vec::new();
+        print_human(&report, &mut out).expect("buffer write succeeds");
+        let text = String::from_utf8(out).unwrap();
+        for needle in [
+            "managed-settings.json (advisory; grok-native servers exempt)",
+            "managed-settings.json (advisory; grok-native marketplaces exempt)",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
         }
     }
 

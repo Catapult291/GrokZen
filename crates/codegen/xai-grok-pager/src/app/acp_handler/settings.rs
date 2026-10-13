@@ -5,7 +5,11 @@ use serde::Deserialize;
 pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     if let Ok(model_state) = serde_json::from_str::<acp::SessionModelState>(notif.params.get()) {
         use crate::acp::model_state::ModelState;
-        let new_models = ModelState::from(Some(model_state));
+        let mut new_models = ModelState::from(Some(model_state));
+        new_models.retain_shell_presentation(app.is_grok_shell);
+        if app.leader_mode && new_models.has_official_catalog() {
+            xai_grok_locale::dynamic::Domain::Models.notify_load();
+        }
         tracing::info!(
             count = new_models.available.len(),
             "models updated via x.ai/models/update"
@@ -35,6 +39,7 @@ pub(super) fn handle_models_update(notif: &acp::ExtNotification, app: &mut AppVi
                 .session
                 .models
                 .update_catalog(new_models.available.clone());
+            agent.refresh_context_total();
         }
         true
     } else {
@@ -49,18 +54,29 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         tracing::warn!("Failed to parse x.ai/settings/update");
         return false;
     };
+    if app.leader_mode {
+        xai_grok_locale::dynamic::Domain::Settings.notify_load();
+    }
 
     // Reseed this process's remote-campaign cache
-    // In leader mode no in-process agent seeds the TUI process, and the bounded startup prefetch can miss
     // Without this reseed a remote campaign stays invisible to `resolve_dismissable_campaigns`
     // A `/model` pick then never records its dismissal and the leader re-nudges every new session
-    // Idempotent in embedded mode, where the in-process agent seeds the same cache
     if let Some(campaigns) = update.campaigns.clone() {
         let rs = xai_grok_shell::util::config::RemoteSettings {
             campaigns,
             ..Default::default()
         };
         xai_grok_shell::util::config::set_remote_campaigns_from_settings(Some(&rs));
+        // The settings row read its campaign layer at startup; the same re-read the shell does on `/new` keeps its value and lock current
+        match xai_grok_shell::config::load_effective_config_with_layers() {
+            Ok(loaded) => {
+                app.subagent_model_inheritance.reseed_config_layers(&loaded);
+                crate::app::dispatch::refresh_open_settings_modals(app);
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "config layers not re-read after a campaign update")
+            }
+        }
     }
 
     if let Some(v) = update.auto_permission_mode_enabled {
@@ -70,7 +86,6 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         xai_grok_shell::util::config::cache_remote_auto_permission_mode_enabled(Some(v));
         app.auto_mode_gate = xai_grok_shell::util::config::auto_permission_mode_enabled_from_disk();
         // Mid-session kill switch: when the gate just went off, drop displayed Auto to Ask and clear every agent's per-session flag
-        // That downgrade is shared with the startup reconcile; live sessions are ALSO told to leave Auto
         // Clearing only the display would let the agent keep classifier-approving while the UI shows "Ask"
         // The emergency-off must actually disable enforcement
         if !app.auto_mode_gate {
@@ -135,7 +150,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         let was_api_key = app.is_api_key_auth;
         let is_key = super::super::app_view::is_api_key_label(&v);
         app.is_api_key_auth = is_key;
-        app.usage_visible = !is_key && app.team_name.is_none() && !app.has_external_auth_provider;
+        app.usage_visible = app.team_name.is_none() && app.consumer_account();
         app.sync_billing_surface_to_agents();
         app.subscription_tier = Some(v);
         app.apply_tier_restrictions();
@@ -156,6 +171,27 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
     }
     if let Some(remote_v) = update.dock_enabled {
         crate::views::dock::set_enabled(crate::app::resolve_dock_enabled(Some(remote_v)));
+    }
+    // Presence-aware: omit (an older shell, or one without settings yet) keeps the seeded tier, null means fetched settings cleared it
+    // Only the settings row reads it; running agents keep the mode they latched when built
+    if let Some(remote) = update.subagent_model_inheritance_enabled {
+        app.subagent_model_inheritance.other_tiers.remote = remote;
+        crate::app::dispatch::refresh_open_settings_modals(app);
+    }
+    if let Some(remote_v) = update.terminal_theme_enabled {
+        let enabled = crate::app::resolve_terminal_theme_enabled(Some(remote_v));
+        crate::theme::cache::set_terminal_theme_enabled(enabled);
+        // Kill switch: a selected terminal theme falls back to what config resolves to without it (its name no longer parses, and the flip dropped the cached auto overrides), matching the next startup.
+        // `selected_kind` sees through the minimal lock's `current_kind()` masking so a locked session can't revive the theme when the lock lifts; under the lock only the stored kind needs correcting (`apply_kind` no-ops there), the visual stays pinned.
+        // The reveal direction is deliberately restart-only for an explicit `theme = "terminal"` (no surprise swap mid-session); auto mode picks it up on the next appearance change via the invalidated auto cache.
+        if !enabled && crate::theme::cache::selected_kind().is_terminal_native() {
+            let fallback = crate::theme::cache::resolve_initial_theme_no_osc11();
+            if crate::theme::cache::terminal_native_locked() {
+                crate::theme::cache::set(fallback);
+            } else {
+                crate::theme::Theme::apply_kind(fallback);
+            }
+        }
     }
     if let Some(remote_v) = update.voice_mode_enabled {
         let v = crate::app::resolve_voice_mode_live(Some(remote_v), app.is_api_key_auth);
@@ -189,21 +225,27 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         app.subscription_watch_interval_secs = Some(v);
     }
 
-    // Gate update logic:
-    // - allow_access == Some(true): explicitly granted, so lift the gate
-    // - gate_message.is_some(): the server sent a new message, so impose or update the gate
-    // - Neither condition met: don't touch the gate
-    //   In particular, allow_access=Some(false) without a gate_message must NOT clear the gate
-    //   (gate_from_settings returns None when gate_message is absent, which would incorrectly lift an existing gate.)
+    // Neither condition met: don't touch the gate
+    // In particular, allow_access=Some(false) without a gate_message must NOT clear the gate
+    // (gate_from_settings returns None when gate_message is absent, which would incorrectly lift an existing gate.)
 
     // A fresh machine has no auth at startup, so the prefetch never runs and the startup seed sees no settings
     // Welcome only: seeding the gate behind a session would block new sessions on an unseen screen
     if let Some(gate) = update.consent_gate.as_ref()
         && matches!(app.consent_state, crate::app::consent::ConsentState::Done)
         && matches!(app.active_view, crate::app::app_view::ActiveView::Welcome)
-        && app.agents.is_empty()
+        && app.only_unused_home_or_empty()
     {
         crate::app::event_loop::seed_consent_state_from_gate(app, Some(gate));
+        if matches!(
+            app.consent_state,
+            crate::app::consent::ConsentState::Pending { .. }
+        ) {
+            // The husk was created while consent still looked Done. Drop it
+            // so accept recreates after the gate, and decline does not keep it.
+            let abandoned = crate::app::dispatch::abandon_unused_home_session(app);
+            app.pending_effects.extend(abandoned);
+        }
     }
 
     if update.allow_access == Some(true) {
@@ -213,7 +255,7 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         && !msg.is_empty()
     {
         // (An empty gate_message would only clear the gate message text, NOT access, so it does not touch the gate here.)
-        let effs = app.impose_gate(xai_grok_shell::auth::GateInfo {
+        let effs = app.impose_gate(xai_grok_login::GateInfo {
             message: msg.clone(),
             url: update.gate_url.clone(),
             label: update.gate_label.clone(),
@@ -230,11 +272,9 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         xai_grok_shell::config::load_managed_config().ok(),
     );
 
-    // Local layers may beat remote, so re-resolve the full chain into the render cache (mirrors the event_loop.rs startup resolve)
     // Runs on None too: the shell always publishes this field from its live remote tier
     // So None means remote settings cleared it, or an older shell cannot deliver the remote tier at all
     // Either way resolving without a remote value is correct
-    // It reverts a previously cached remote enable back to the local/default (off) resolution instead of leaving Some(true) stuck until restart
     let remote = xai_grok_shell::util::config::RemoteSettings {
         group_tool_verbs: update.group_tool_verbs,
         ..Default::default()
@@ -291,31 +331,23 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         }
     }
 
-    // `scheduler_background_loops` is deliberately absent from this handler, unlike the flags above
     // A live session's scheduled fires keep the mode the shell pinned when the session's actor spawned
     // Applying a pushed flip here would make `/loop` promise a runtime those fires never get
-    // The per-session value arrives on the `session/new` / `session/load` response instead (`AgentView::scheduler_background_loops`)
 
     // Re-resolve tips from config layers and the updated remote tips
     if let Some(remote_tips) = update.tips {
-        use xai_grok_shell::util::config::resolve_tips;
+        use xai_grok_shell::util::config::resolve_tips_with_origins;
 
-        app.tips = resolve_tips(
+        app.tips = resolve_tips_with_origins(
             requirements.as_ref(),
             user_config.as_ref(),
             managed_config.as_ref(),
             Some(&remote_tips),
         );
-        if !app.tips.is_empty() {
-            let grok_home = xai_grok_tools::util::grok_home::grok_home();
-            app.tip = xai_grok_shell::util::tips::pick_and_advance(&app.tips, &grok_home);
-        } else {
-            app.tip = None;
-        }
+        app.pick_next_tip();
     }
 
     // Re-resolve dropdown tags only when the update carries the field
-    // Some(None) means remote cleared (drop the remote layer); Some(Some(map)) means set
     // Outer None means the field is absent (older shell), so keep the tags resolved at startup
     // Env and local [slash_command_tags] always apply via resolve_slash_command_tags
     if let Some(remote_tags) = update.slash_command_tags.as_ref() {
@@ -325,6 +357,12 @@ pub(super) fn handle_settings_update(notif: &acp::ExtNotification, app: &mut App
         let tags_config = effective_config.as_ref().unwrap_or(&empty_toml);
         *app.command_tags.borrow_mut() =
             resolve_slash_command_tags(tags_config, remote_tags.as_ref());
+        app.locale.set_remote_command_tags(
+            xai_grok_shell::util::config::resolve_remote_slash_command_tags(
+                tags_config,
+                remote_tags.as_ref(),
+            ),
+        );
     }
 
     tracing::info!("settings updated via x.ai/settings/update");
@@ -362,30 +400,29 @@ pub(super) fn apply_soft_default_permission_mode(
 }
 
 /// Tell live sessions to leave Auto on the mid-session kill-switch.
-/// Fires the `x.ai/yolo_mode_changed` notification the agent maps to `SetAutoMode { enabled: false }`, fire-and-forget over the shared ACP channel.
-/// The notification is CLIENT-scoped (the agent applies it to every session of the sending client), so one send covers all affected sessions.
 /// `yolo_mode` is deliberately OMITTED: the agent skips the yolo branch when the key is absent.
 /// A sibling tab's always-approve is thus preserved; only auto is cleared.
 pub(super) fn notify_sessions_leave_auto(app: &AppView, session_ids: &[acp::SessionId]) {
-    if session_ids.is_empty() {
-        return;
+    for session_id in session_ids {
+        let params = serde_json::json!({
+            "sessionId": session_id,
+            "auto_mode": false,
+            "permission_mode": "ask",
+        });
+        let notification = acp::ExtNotification::new(
+            "x.ai/yolo_mode_changed",
+            serde_json::value::to_raw_value(&params)
+                .expect("serialize yolo_mode_changed params")
+                .into(),
+        );
+
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let args = xai_acp_lib::AcpArgs {
+            request: notification,
+            response_tx,
+        };
+        let _ = app.acp_tx.send(args.into());
     }
-    let params = serde_json::json!({
-        "auto_mode": false,
-        "permission_mode": "ask",
-    });
-    let notification = acp::ExtNotification::new(
-        "x.ai/yolo_mode_changed",
-        serde_json::value::to_raw_value(&params)
-            .expect("serialize yolo_mode_changed params")
-            .into(),
-    );
-    let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
-    let args = xai_acp_lib::AcpArgs {
-        request: notification,
-        response_tx,
-    };
-    let _ = app.acp_tx.send(args.into());
 }
 
 /// Handle `x.ai/sessions/changed`: the leader broadcasts roster upserts/removals to all clients (FleetView dashboard).
@@ -423,6 +460,7 @@ pub(super) fn handle_announcements_update(notif: &acp::ExtNotification, app: &mu
     // Embedded agents already signal before fetching; do not check twice.
     if app.leader_mode {
         xai_grok_announcements::load_events::notify_started();
+        xai_grok_locale::dynamic::Domain::Settings.notify_load();
     }
 
     // Re-merge config layers like startup does: the push carries the remote list only
@@ -495,14 +533,8 @@ pub(super) fn pick_random_announcement(
 }
 
 /// Deserialization type for the `x.ai/settings/update` notification payload.
-///
-/// Deliberately separate from `SettingsUpdateNotification` in `xai-grok-shell/src/agent/mvp_agent.rs`.
-/// The shell side derives `Serialize` and owns the canonical field set from `RemoteSettings`.
 /// This side derives `Deserialize` and consumes only the fields the TUI uses.
 /// Separate structs keep the pager decoupled from shell internals (a shell-only field needs no pager change).
-/// All fields are `Option` with `#[serde(default)]` so partial updates and unknown additions still parse.
-///
-/// **Keep in sync** with field names/types in `SettingsUpdateNotification` when adding fields that both sides need.
 #[derive(serde::Deserialize)]
 pub(super) struct PagerSettingsUpdate {
     #[serde(default)]
@@ -518,6 +550,12 @@ pub(super) struct PagerSettingsUpdate {
     #[serde(default)]
     dock_enabled: Option<bool>,
     #[serde(default)]
+    terminal_theme_enabled: Option<bool>,
+    /// Tri-state like `permission_mode`: the key is omitted by an older shell or one without settings yet, and `null`
+    /// when fetched settings lack the value.
+    #[serde(default, deserialize_with = "deserialize_presence_aware")]
+    subagent_model_inheritance_enabled: Option<Option<bool>>,
+    #[serde(default)]
     session_picker_grouped: Option<bool>,
     #[serde(default)]
     tips: Option<Vec<String>>,
@@ -528,11 +566,7 @@ pub(super) struct PagerSettingsUpdate {
     slash_command_tags: Option<Option<std::collections::BTreeMap<String, String>>>,
     // `announcements` is deliberately NOT consumed here
     // Every shell writer of remote_settings also emits gen-ordered `x.ai/announcements/update` (emit_announcements_if_changed)
-    // A gen-less apply on this path could clobber a newer push
-    // Single ingest path: handle_announcements_update
-    /// Remote campaigns snapshot.
-    /// `Some` whenever the shell has settings (empty means campaigns withdrawn).
-    /// `None`/omitted (settings-less push, older shell) must leave this process's campaign cache untouched.
+    // `None`/omitted (settings-less push, older shell) must leave this process's campaign cache untouched.
     #[serde(default)]
     campaigns: Option<Vec<xai_grok_shell::util::config::CampaignOverride>>,
     #[serde(default)]
@@ -550,10 +584,9 @@ pub(super) struct PagerSettingsUpdate {
     #[serde(default)]
     prompt_suggestions_enabled: Option<bool>,
     /// Soft-default permission mode.
-    /// Presence-aware: omit means no update, `null` means recompute with no remote value, and a string is that soft-default.
     /// Omission happens with older shells that predate the field (they can never clear a mode they don't know about).
     /// That version skew is why this is tri-state instead of a plain `Option`.
-    #[serde(default, deserialize_with = "deserialize_presence_aware_string")]
+    #[serde(default, deserialize_with = "deserialize_presence_aware")]
     permission_mode: Option<Option<String>>,
     #[serde(default)]
     group_tool_verbs: Option<bool>,
@@ -570,21 +603,18 @@ pub(super) struct PagerSettingsUpdate {
     consent_gate: Option<xai_grok_shell::util::config::ConsentGate>,
 }
 
-/// Presence-aware string: omit gives `None` (`#[serde(default)]`), null gives `Some(None)`, and a string gives `Some(Some(_))`.
-fn deserialize_presence_aware_string<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<String>>, D::Error>
+/// Presence-aware value: omit gives `None` (`#[serde(default)]`), null gives `Some(None)`, and a value gives `Some(Some(_))`.
+fn deserialize_presence_aware<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
 {
-    Ok(Some(Option::<String>::deserialize(deserializer)?))
+    Ok(Some(Option::<T>::deserialize(deserializer)?))
 }
 
 /// Presence-aware and tolerant tags map for live settings updates.
 /// Only invoked when the field is present (`#[serde(default)]` covers omit).
-/// - JSON null gives `Some(None)` (explicit remote clear)
-/// - a valid object gives `Some(Some(map))`
-/// - malformed input warns and gives `Ok(None)` (leave tags alone; do not fail the struct)
+/// malformed input warns and gives `Ok(None)` (leave tags alone; do not fail the struct)
 fn deserialize_settings_update_tags<'de, D>(
     deserializer: D,
 ) -> Result<Option<Option<std::collections::BTreeMap<String, String>>>, D::Error>
@@ -613,7 +643,7 @@ mod presence_aware_dto_tests {
 
     #[derive(Deserialize)]
     struct Probe {
-        #[serde(default, deserialize_with = "deserialize_presence_aware_string")]
+        #[serde(default, deserialize_with = "deserialize_presence_aware")]
         permission_mode: Option<Option<String>>,
     }
 
@@ -657,7 +687,7 @@ mod presence_aware_dto_tests {
         assert!(update.consent_gate.is_none());
         assert_eq!(
             update.tips.as_deref(),
-            Some(&["still applied".to_string()][..]),
+            Some(["still applied".to_string()].as_slice()),
         );
     }
 
@@ -669,7 +699,10 @@ mod presence_aware_dto_tests {
         }))
         .expect("absent slash_command_tags must not fail parse");
         assert_eq!(absent.slash_command_tags, None, "omit must be None");
-        assert_eq!(absent.tips.as_deref(), Some(&["hello".to_string()][..]));
+        assert_eq!(
+            absent.tips.as_deref(),
+            Some(["hello".to_string()].as_slice())
+        );
 
         // 2. Explicit null: Some(None) (remote cleared)
         let null_v: PagerSettingsUpdate = serde_json::from_value(serde_json::json!({
@@ -708,7 +741,7 @@ mod presence_aware_dto_tests {
         );
         assert_eq!(
             bad.tips.as_deref(),
-            Some(&["still-applied".to_string()][..]),
+            Some(["still-applied".to_string()].as_slice()),
             "sibling tips must still parse"
         );
         assert_eq!(

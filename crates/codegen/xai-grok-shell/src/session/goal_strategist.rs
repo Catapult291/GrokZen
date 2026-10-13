@@ -11,14 +11,14 @@
 
 use crate::session::events::{Event, GoalStrategistFailReason, GoalStrategistRestoreFailReason};
 use crate::session::goal_planner::{
-    GOAL_ROLE_AWAIT_BUDGET_EXCEEDED, GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt,
-    RoleSpawnOverride, SpawnError, parse_terminal_response, spawn_with_fail_open_retry,
+    GOAL_ROLE_SUBAGENT_TYPE, RoleRenderedPrompt, RoleSpawnOverride, SpawnError,
+    parse_terminal_response, spawn_with_fail_open_retry,
 };
 use crate::session::goal_role_tools::RoleToolNames;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use xai_grok_session_events::EventWriter;
-use xai_grok_tools::implementations::grok_build::task::backend::{ChannelBackend, SubagentBackend};
+use xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend;
 use xai_grok_tools::implementations::grok_build::task::types::{
     SubagentOwner, SubagentRequest, SubagentRuntimeOverrides,
 };
@@ -76,9 +76,7 @@ pub(crate) trait GoalStrategistSpawner: Send + Sync {
 
 // Trigger predicate
 
-/// Fires when the consecutive-failure count has advanced at least `every` (N) past the count at which the strategist last fired (`last_fired`).
 /// Using `>= last_fired + N` rather than a strict `consecutive % N == 0` makes the trigger SKIP-ROBUST.
-/// The synthetic concurrent-in-flight path can bump the streak by more than one at a time (e.g. from N-1 to N+1).
 /// An exact-equality check would miss the `== N` fire entirely.
 /// `every` must be at least 1 (the resolver clamps it).
 pub(crate) fn strategist_should_fire(consecutive: u32, last_fired: u32, every: u32) -> bool {
@@ -178,10 +176,13 @@ impl ChannelSpawner {
             run_in_background: false,
             // Harness-internal: never surface to the model's idle reminder.
             surface_completion: false,
-            await_to_completion: false,
+            // Goal roles are never auto-backgrounded: the child runs until it finishes.
+            await_to_completion: true,
             fork_context: false,
             owner: SubagentOwner::Task,
             cancel_token: tokio_util::sync::CancellationToken::new(),
+            spawn_root: Default::default(),
+            tool_call_id: None,
         };
         let backend = ChannelBackend::new(self.event_tx.clone());
         let result = backend
@@ -189,9 +190,8 @@ impl ChannelSpawner {
             .await
             .map_err(|error| SpawnError::Transport(error.to_string()))?;
         if result.backgrounded {
-            let _ = backend.cancel(&result.subagent_id).await;
             return Err(SpawnError::Runtime {
-                message: GOAL_ROLE_AWAIT_BUDGET_EXCEEDED.to_owned(),
+                message: "engine bug: goal role subagent was auto-backgrounded despite await_to_completion".into(),
                 cancelled: true,
             });
         }
@@ -402,7 +402,6 @@ enum PlanSnapshot {
     Unsafe,
 }
 
-/// RAII guard that restores plan.md to its pre-strategist bytes.
 /// Restores once via [`Self::restore`] on the normal path, and again on `Drop` as a cancellation safety net.
 /// The runner future may be dropped mid-`.await`.
 /// Uses sync `std::fs` (so `Drop` can call it; plan.md is small, this is rare) and `symlink_metadata` everywhere (never follows a planted symlink).
@@ -573,6 +572,10 @@ mod tests {
             "strategist subagent must not surface to the idle reminder"
         );
         assert_eq!(request.description, GOAL_STRATEGIST_SUBAGENT_DESCRIPTION);
+        assert!(
+            request.await_to_completion,
+            "strategist subagent must never be auto-backgrounded"
+        );
         let _ = request.result_tx.send(SubagentResult::default());
         handle.await.unwrap();
     }

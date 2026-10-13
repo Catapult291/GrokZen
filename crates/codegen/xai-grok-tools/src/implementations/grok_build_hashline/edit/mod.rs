@@ -123,9 +123,14 @@ fn to_search_replace(
                         // Lines before the edit in the old file.
                         let before_start = old_idx.saturating_sub(ctx_count);
                         let context_before = if before_start < old_idx {
-                            let mut cb = old_lines[before_start..old_idx].join("\n");
-                            cb.push('\n');
-                            cb
+                            match old_lines.get(before_start..old_idx) {
+                                Some(span) => {
+                                    let mut cb = span.join("\n");
+                                    cb.push('\n');
+                                    cb
+                                }
+                                None => String::new(),
+                            }
                         } else {
                             String::new()
                         };
@@ -139,9 +144,14 @@ fn to_search_replace(
                         let after_start = old_idx + old_text_line_count;
                         let after_end = (after_start + ctx_count).min(old_lines.len());
                         let context_after = if after_start < after_end {
-                            let mut ca = old_lines[after_start..after_end].join("\n");
-                            ca.push('\n');
-                            ca
+                            match old_lines.get(after_start..after_end) {
+                                Some(span) => {
+                                    let mut ca = span.join("\n");
+                                    ca.push('\n');
+                                    ca
+                                }
+                                None => String::new(),
+                            }
                         } else {
                             String::new()
                         };
@@ -217,6 +227,10 @@ impl crate::types::tool_metadata::ToolMetadata for HashlineEditTool {
 
     fn tool_namespace(&self) -> ToolNamespace {
         ToolNamespace::GrokBuildHashline
+    }
+
+    fn lock_path_param(&self) -> Option<&'static str> {
+        Some("file_path")
     }
 
     fn description_template(&self) -> &str {
@@ -317,6 +331,9 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
 
         let display_dcwd = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
         let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.file_path);
+        // Memory v2 classifies the logical path (as search_replace does), not
+        // the canonicalized one, so aliases resolve inside the policy.
+        let policy_path = joined_path.clone();
         // Error-preserving variant: the Err arm drives new-file creation.
         let path = match crate::util::fs::try_canonicalize(&joined_path).await {
             Ok(p) => p,
@@ -329,9 +346,26 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
                 } else {
                     // For Write ops on new files, allow creation.
                     if input.edits.len() == 1
-                        && let HashlineOp::Write { ref content } = input.edits[0]
+                        && let Some(HashlineOp::Write { content }) = input.edits.first()
                     {
-                        if let Err(e) = fs.write_file(&joined_path, content.as_bytes()).await {
+                        let is_memory_write = match crate::types::memory_v2::write_memory_v2_file(
+                            &resources,
+                            &policy_path,
+                            content.as_bytes(),
+                        )
+                        .await
+                        {
+                            Ok(crate::types::memory_v2::MemoryV2Write::Written { .. }) => true,
+                            Ok(crate::types::memory_v2::MemoryV2Write::Outside) => false,
+                            Err(error) => {
+                                return Ok(
+                                    crate::types::output::SearchReplaceOutput::InvalidInput(error),
+                                );
+                            }
+                        };
+                        if !is_memory_write
+                            && let Err(e) = fs.write_file(&joined_path, content.as_bytes()).await
+                        {
                             let display_path = display_dcwd.join(&input.file_path);
                             return Ok(match e.io_error_kind() {
                                 Some(std::io::ErrorKind::NotFound) => {
@@ -400,7 +434,29 @@ impl xai_tool_runtime::Tool for HashlineEditTool {
 
         let apply_result = apply::apply_edits(&old_content, &input.edits, &path, &*scheme);
 
-        if let Some(ref new_content) = apply_result.new_content
+        let is_memory_write = match apply_result.new_content {
+            Some(ref new_content) => {
+                match crate::types::memory_v2::write_memory_v2_file(
+                    &resources,
+                    &policy_path,
+                    new_content.as_bytes(),
+                )
+                .await
+                {
+                    Ok(crate::types::memory_v2::MemoryV2Write::Written { .. }) => true,
+                    Ok(crate::types::memory_v2::MemoryV2Write::Outside) => false,
+                    Err(error) => {
+                        return Ok(crate::types::output::SearchReplaceOutput::InvalidInput(
+                            error,
+                        ));
+                    }
+                }
+            }
+            None => false,
+        };
+
+        if !is_memory_write
+            && let Some(ref new_content) = apply_result.new_content
             && let Err(e) = fs.write_file(&path, new_content.as_bytes()).await
         {
             let err_output = HashlineEditOutput::Error(types::HashlineEditError {
@@ -448,6 +504,20 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
+    fn nth<T: Clone>(items: &[T], i: usize) -> T {
+        let Some(item) = items.get(i) else {
+            panic!("expected item {i}, len {}", items.len());
+        };
+        item.clone()
+    }
+
+    fn nth_ref<T>(items: &[T], i: usize) -> &T {
+        let Some(item) = items.get(i) else {
+            panic!("expected item {i}, len {}", items.len());
+        };
+        item
+    }
+
     fn test_resources(cwd: &std::path::Path) -> Resources {
         test_resources_with_hints(cwd, false)
     }
@@ -459,6 +529,209 @@ mod tests {
         resources.insert(NotificationHandle(ToolNotificationHandle::noop()));
         resources.insert(PathNotFoundHints(hints_enabled));
         resources
+    }
+
+    /// Resources with a memory v2 scope rooted at `<cwd>/memory`.
+    fn memory_test_resources(
+        cwd: &std::path::Path,
+    ) -> (
+        Resources,
+        Arc<
+            crate::implementations::grok_build_hashline::memory_v2_test_support::FakeMemoryV2Access,
+        >,
+    ) {
+        use crate::implementations::grok_build_hashline::memory_v2_test_support::FakeMemoryV2Access;
+        use crate::types::memory_v2::MemoryV2AccessResource;
+
+        let access = Arc::new(FakeMemoryV2Access::new(&cwd.join("memory")));
+        let mut resources = test_resources(cwd);
+        resources.insert(MemoryV2AccessResource(access.clone()));
+        (resources, access)
+    }
+
+    async fn run_edit(
+        resources: Resources,
+        file_path: &str,
+        edits: Vec<HashlineOp>,
+    ) -> SearchReplaceOutput {
+        let input = HashlineEditInput {
+            file_path: file_path.to_string(),
+            edits,
+        };
+        xai_tool_runtime::Tool::run(&HashlineEditTool, test_ctx(resources.into_shared()), input)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn memory_v2_rejects_manifest_write() {
+        let tmp = TempDir::new().unwrap();
+        let (resources, access) = memory_test_resources(tmp.path());
+        let manifest = tmp.path().join("memory/MEMORY.md");
+        let before = std::fs::read_to_string(&manifest).unwrap();
+
+        let result = run_edit(
+            resources,
+            "memory/MEMORY.md",
+            vec![HashlineOp::Write {
+                content: "# Overwritten\n".to_owned(),
+            }],
+        )
+        .await;
+
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("protected"), "msg: {msg}");
+            }
+            other => panic!("Expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), before);
+        assert!(access.policy_writes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_v2_rejects_new_file_outside_writable_roots() {
+        let tmp = TempDir::new().unwrap();
+        let (resources, _access) = memory_test_resources(tmp.path());
+
+        let result = run_edit(
+            resources,
+            "memory/notes.md",
+            vec![HashlineOp::Write {
+                content: "stray\n".to_owned(),
+            }],
+        )
+        .await;
+
+        assert!(
+            matches!(result, SearchReplaceOutput::InvalidInput(_)),
+            "expected InvalidInput, got {result:?}"
+        );
+        assert!(!tmp.path().join("memory/notes.md").exists());
+    }
+
+    #[tokio::test]
+    async fn memory_v2_topic_write_goes_through_policy_and_refreshes_manifest() {
+        let tmp = TempDir::new().unwrap();
+        let (resources, access) = memory_test_resources(tmp.path());
+        let topic = tmp.path().join("memory/topics/style.md");
+
+        let result = run_edit(
+            resources,
+            "memory/topics/style.md",
+            vec![HashlineOp::Write {
+                content: "# Style\n\nUse Rust.\n".to_owned(),
+            }],
+        )
+        .await;
+
+        assert!(
+            matches!(result, SearchReplaceOutput::EditsApplied(_)),
+            "expected EditsApplied, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&topic).unwrap(),
+            "# Style\n\nUse Rust.\n"
+        );
+        assert_eq!(access.policy_writes(), vec![topic]);
+        assert!(
+            std::fs::read_to_string(tmp.path().join("memory/MEMORY.md"))
+                .unwrap()
+                .contains("topics/style.md")
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_v2_edit_without_prior_read_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let (resources, access) = memory_test_resources(tmp.path());
+        let topic = tmp.path().join("memory/topics/facts.md");
+        let original = "one\ntwo\nthree\n";
+        std::fs::write(&topic, original).unwrap();
+        let anchors = anchors_for(original);
+
+        let result = run_edit(
+            resources,
+            "memory/topics/facts.md",
+            vec![HashlineOp::Replace {
+                anchor: nth(&anchors, 1),
+                end_anchor: None,
+                content: "TWO".to_owned(),
+            }],
+        )
+        .await;
+
+        match result {
+            SearchReplaceOutput::InvalidInput(msg) => {
+                assert!(msg.contains("read"), "msg: {msg}");
+            }
+            other => panic!("Expected InvalidInput, got {other:?}"),
+        }
+        assert_eq!(std::fs::read_to_string(&topic).unwrap(), original);
+        assert!(access.policy_writes().is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_v2_edit_after_hashline_read_succeeds() {
+        use crate::implementations::grok_build::read_file::ReadFileInput;
+        use crate::implementations::grok_build_hashline::HashlineReadTool;
+
+        let tmp = TempDir::new().unwrap();
+        let (resources, access) = memory_test_resources(tmp.path());
+        let shared = resources.into_shared();
+        let topic = tmp.path().join("memory/topics/facts.md");
+        let original = "one\ntwo\nthree\n";
+        std::fs::write(&topic, original).unwrap();
+        let anchors = anchors_for(original);
+
+        let read = xai_tool_runtime::Tool::run(
+            &HashlineReadTool,
+            test_ctx(shared.clone()),
+            ReadFileInput {
+                path: "memory/topics/facts.md".to_string(),
+                offset: None,
+                limit: None,
+                pages: None,
+                format: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(read, crate::types::output::ReadFileOutput::FileContent(_)),
+            "expected FileContent, got {read:?}"
+        );
+        assert_eq!(access.recorded_reads(), vec![topic.clone()]);
+
+        let result = xai_tool_runtime::Tool::run(
+            &HashlineEditTool,
+            test_ctx(shared),
+            HashlineEditInput {
+                file_path: "memory/topics/facts.md".to_string(),
+                edits: vec![HashlineOp::Replace {
+                    anchor: nth(&anchors, 1),
+                    end_anchor: None,
+                    content: "TWO".to_owned(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            matches!(result, SearchReplaceOutput::EditsApplied(_)),
+            "expected EditsApplied, got {result:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&topic).unwrap(),
+            "one\nTWO\nthree\n"
+        );
+        assert_eq!(access.policy_writes(), vec![topic]);
+        assert!(
+            std::fs::read_to_string(tmp.path().join("memory/MEMORY.md"))
+                .unwrap()
+                .contains("topics/facts.md")
+        );
     }
 
     #[test]
@@ -544,11 +817,11 @@ mod tests {
             file_path: "test.txt".to_string(),
             edits: vec![
                 HashlineOp::InsertAfter {
-                    anchor: anchors[0].clone(), // after line 1
+                    anchor: nth(&anchors, 0), // after line 1
                     content: "first_insert".to_owned(),
                 },
                 HashlineOp::InsertAfter {
-                    anchor: anchors[0].clone(), // same anchor
+                    anchor: nth(&anchors, 0), // same anchor
                     content: "second_insert".to_owned(),
                 },
             ],
@@ -628,7 +901,7 @@ mod tests {
         let input = HashlineEditInput {
             file_path: "test.txt".to_string(),
             edits: vec![HashlineOp::Replace {
-                anchor: a[0].clone(),
+                anchor: nth(&a, 0),
                 end_anchor: None,
                 content: "changed".to_owned(),
             }],
@@ -668,12 +941,12 @@ mod tests {
         let ops = vec![
             // Insert near the top — changes line count.
             HashlineOp::InsertAfter {
-                anchor: anchors[4].clone(),
+                anchor: nth(&anchors, 4),
                 content: "INSERTED_LINE".to_owned(),
             },
             // Replace near the bottom.
             HashlineOp::Replace {
-                anchor: anchors[90].clone(),
+                anchor: nth(&anchors, 90),
                 end_anchor: None,
                 content: "REPLACED_LINE".to_owned(),
             },
@@ -702,12 +975,18 @@ mod tests {
                 );
 
                 // Detail 0: insertion (empty old, "INSERTED_LINE" new)
-                assert_eq!(applied.edits.details[0].old_string, "");
-                assert_eq!(applied.edits.details[0].new_string, "INSERTED_LINE");
+                assert_eq!(nth_ref(&applied.edits.details, 0).old_string, "");
+                assert_eq!(
+                    nth_ref(&applied.edits.details, 0).new_string,
+                    "INSERTED_LINE"
+                );
 
                 // Detail 1: replacement
-                assert_eq!(applied.edits.details[1].old_string, "line_90");
-                assert_eq!(applied.edits.details[1].new_string, "REPLACED_LINE");
+                assert_eq!(nth_ref(&applied.edits.details, 1).old_string, "line_90");
+                assert_eq!(
+                    nth_ref(&applied.edits.details, 1).new_string,
+                    "REPLACED_LINE"
+                );
 
                 // Total detail size should be very small — NOT the entire file.
                 let total_detail_bytes: usize = applied
@@ -731,7 +1010,7 @@ mod tests {
         let anchors = anchors_for(content);
 
         let ops = vec![HashlineOp::Replace {
-            anchor: anchors[1].clone(),
+            anchor: nth(&anchors, 1),
             end_anchor: None,
             content: "    let x = 42;".to_owned(),
         }];
@@ -751,10 +1030,16 @@ mod tests {
         match sr {
             crate::types::output::SearchReplaceOutput::EditsApplied(applied) => {
                 assert_eq!(applied.edits.details.len(), 1);
-                assert_eq!(applied.edits.details[0].old_string, "    let x = 1;");
-                assert_eq!(applied.edits.details[0].new_string, "    let x = 42;");
-                assert_eq!(applied.edits.details[0].old_line, 2);
-                assert_eq!(applied.edits.details[0].new_line, 2);
+                assert_eq!(
+                    nth_ref(&applied.edits.details, 0).old_string,
+                    "    let x = 1;"
+                );
+                assert_eq!(
+                    nth_ref(&applied.edits.details, 0).new_string,
+                    "    let x = 42;"
+                );
+                assert_eq!(nth_ref(&applied.edits.details, 0).old_line, 2);
+                assert_eq!(nth_ref(&applied.edits.details, 0).new_line, 2);
             }
             _ => panic!("Expected EditsApplied"),
         }
@@ -772,16 +1057,16 @@ mod tests {
 
         let ops = vec![
             HashlineOp::InsertAfter {
-                anchor: anchors[2].clone(),
+                anchor: nth(&anchors, 2),
                 content: "TOP_INSERT".to_owned(),
             },
             HashlineOp::Replace {
-                anchor: anchors[250].clone(),
+                anchor: nth(&anchors, 250),
                 end_anchor: None,
                 content: "MID_REPLACE".to_owned(),
             },
             HashlineOp::Replace {
-                anchor: anchors[498].clone(),
+                anchor: nth(&anchors, 498),
                 end_anchor: None,
                 content: String::new(), // delete
             },
@@ -818,12 +1103,12 @@ mod tests {
                 );
 
                 // Verify each detail has the correct content.
-                assert_eq!(applied.edits.details[0].old_string, "");
-                assert_eq!(applied.edits.details[0].new_string, "TOP_INSERT");
-                assert_eq!(applied.edits.details[1].old_string, "line_250");
-                assert_eq!(applied.edits.details[1].new_string, "MID_REPLACE");
-                assert_eq!(applied.edits.details[2].old_string, "line_498");
-                assert_eq!(applied.edits.details[2].new_string, "");
+                assert_eq!(nth_ref(&applied.edits.details, 0).old_string, "");
+                assert_eq!(nth_ref(&applied.edits.details, 0).new_string, "TOP_INSERT");
+                assert_eq!(nth_ref(&applied.edits.details, 1).old_string, "line_250");
+                assert_eq!(nth_ref(&applied.edits.details, 1).new_string, "MID_REPLACE");
+                assert_eq!(nth_ref(&applied.edits.details, 2).old_string, "line_498");
+                assert_eq!(nth_ref(&applied.edits.details, 2).new_string, "");
             }
             _ => panic!("Expected EditsApplied"),
         }
@@ -837,12 +1122,12 @@ mod tests {
         let ops = vec![
             // Insert after line 1 — adds a line, shifting everything below by 1.
             HashlineOp::InsertAfter {
-                anchor: anchors[0].clone(),
+                anchor: nth(&anchors, 0),
                 content: "inserted".to_owned(),
             },
             // Replace line 4 — in the new file, this is at line 5 due to the insertion.
             HashlineOp::Replace {
-                anchor: anchors[3].clone(),
+                anchor: nth(&anchors, 3),
                 end_anchor: None,
                 content: "replaced".to_owned(),
             },
@@ -865,12 +1150,12 @@ mod tests {
                 assert_eq!(applied.edits.details.len(), 2);
 
                 // First edit: insert after line 1
-                let d0 = &applied.edits.details[0];
+                let d0 = &nth_ref(&applied.edits.details, 0);
                 assert_eq!(d0.old_string, ""); // insertion has no old content
                 assert_eq!(d0.new_string, "inserted");
 
                 // Second edit: replace line 4
-                let d1 = &applied.edits.details[1];
+                let d1 = &nth_ref(&applied.edits.details, 1);
                 assert_eq!(d1.old_line, 4); // line 4 in old file
                 assert_eq!(d1.old_string, "line4");
                 assert_eq!(d1.new_string, "replaced");
@@ -907,10 +1192,16 @@ mod tests {
                     1,
                     "Write op should produce 1 whole-file detail"
                 );
-                assert_eq!(applied.edits.details[0].old_string, "old content\n");
-                assert_eq!(applied.edits.details[0].new_string, "new content\n");
-                assert_eq!(applied.edits.details[0].old_line, 1);
-                assert_eq!(applied.edits.details[0].new_line, 1);
+                assert_eq!(
+                    nth_ref(&applied.edits.details, 0).old_string,
+                    "old content\n"
+                );
+                assert_eq!(
+                    nth_ref(&applied.edits.details, 0).new_string,
+                    "new content\n"
+                );
+                assert_eq!(nth_ref(&applied.edits.details, 0).old_line, 1);
+                assert_eq!(nth_ref(&applied.edits.details, 0).new_line, 1);
             }
             _ => panic!("Expected EditsApplied"),
         }
@@ -947,13 +1238,13 @@ mod tests {
         let applied = apply_and_convert(
             RENDER_SAMPLE,
             vec![HashlineOp::Replace {
-                anchor: anchors[4].clone(),
+                anchor: nth(&anchors, 4),
                 end_anchor: None,
                 content: "    println!(\"total = {z}\");".to_owned(),
             }],
         );
 
-        let d = &applied.edits.details[0];
+        let d = &nth_ref(&applied.edits.details, 0);
         assert_eq!(d.old_string, "    println!(\"sum = {z}\");");
         assert_eq!(d.new_string, "    println!(\"total = {z}\");");
 
@@ -989,12 +1280,12 @@ mod tests {
         let applied = apply_and_convert(
             RENDER_SAMPLE,
             vec![HashlineOp::InsertAfter {
-                anchor: anchors[2].clone(),
+                anchor: nth(&anchors, 2),
                 content: "    let a = 99;".to_owned(),
             }],
         );
 
-        let d = &applied.edits.details[0];
+        let d = &nth_ref(&applied.edits.details, 0);
         assert_eq!(d.old_string, "");
         assert_eq!(d.new_string, "    let a = 99;");
 
@@ -1025,13 +1316,13 @@ mod tests {
         let applied = apply_and_convert(
             RENDER_SAMPLE,
             vec![HashlineOp::Replace {
-                anchor: anchors[4].clone(),
+                anchor: nth(&anchors, 4),
                 end_anchor: None,
                 content: String::new(),
             }],
         );
 
-        let d = &applied.edits.details[0];
+        let d = &nth_ref(&applied.edits.details, 0);
         assert_eq!(d.old_string, "    println!(\"sum = {z}\");");
         assert_eq!(d.new_string, "");
 
@@ -1059,12 +1350,12 @@ mod tests {
             RENDER_SAMPLE,
             vec![
                 HashlineOp::Replace {
-                    anchor: anchors[1].clone(),
+                    anchor: nth(&anchors, 1),
                     end_anchor: None,
                     content: "    let x = 42;".to_owned(),
                 },
                 HashlineOp::Replace {
-                    anchor: anchors[9].clone(),
+                    anchor: nth(&anchors, 9),
                     end_anchor: None,
                     content: "    println!(\"quadruple = {w}\");".to_owned(),
                 },
@@ -1074,7 +1365,7 @@ mod tests {
         assert_eq!(applied.edits.details.len(), 2);
 
         // First edit (line 2): context_before has only line 1 (fn main).
-        let d0 = &applied.edits.details[0];
+        let d0 = &nth_ref(&applied.edits.details, 0);
         assert_eq!(d0.old_string, "    let x = 1;");
         assert!(
             d0.context_before.contains("fn main()"),
@@ -1088,7 +1379,7 @@ mod tests {
         );
 
         // Second edit (line 10): context_before has lines 7-9, context_after has line 11.
-        let d1 = &applied.edits.details[1];
+        let d1 = &nth_ref(&applied.edits.details, 1);
         assert_eq!(d1.old_string, "    println!(\"double = {w}\");");
         assert!(
             d1.context_before.contains("let w = z * 2;"),
@@ -1112,12 +1403,12 @@ mod tests {
         let applied = apply_and_convert(
             content,
             vec![HashlineOp::Replace {
-                anchor: anchors[0].clone(),
+                anchor: nth(&anchors, 0),
                 end_anchor: None,
                 content: "FIRST".to_owned(),
             }],
         );
-        let d = &applied.edits.details[0];
+        let d = &nth_ref(&applied.edits.details, 0);
         assert!(
             d.context_before.is_empty(),
             "first line should have no context_before"
@@ -1132,12 +1423,12 @@ mod tests {
         let applied = apply_and_convert(
             content,
             vec![HashlineOp::Replace {
-                anchor: anchors[2].clone(),
+                anchor: nth(&anchors, 2),
                 end_anchor: None,
                 content: "THIRD".to_owned(),
             }],
         );
-        let d = &applied.edits.details[0];
+        let d = &nth_ref(&applied.edits.details, 0);
         assert!(
             d.context_before.contains("second"),
             "context_before: {}",

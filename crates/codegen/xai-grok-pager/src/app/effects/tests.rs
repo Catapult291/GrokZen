@@ -1,5 +1,48 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
+fn nth<T>(xs: &[T], i: usize) -> &T {
+    let Some(x) = xs.get(i) else {
+        panic!("expected index {i}, len {}", xs.len());
+    };
+    x
+}
+/// Test-only key lookup over either a JSON object or a bare `Map`.
+trait JsonKeyed {
+    fn key(&self, key: &str) -> Option<&serde_json::Value>;
+    fn describe(&self) -> String;
+}
+impl JsonKeyed for serde_json::Value {
+    fn key(&self, key: &str) -> Option<&serde_json::Value> {
+        self.get(key)
+    }
+    fn describe(&self) -> String {
+        self.to_string()
+    }
+}
+impl JsonKeyed for serde_json::Map<String, serde_json::Value> {
+    fn key(&self, key: &str) -> Option<&serde_json::Value> {
+        self.get(key)
+    }
+    fn describe(&self) -> String {
+        serde_json::Value::Object(self.clone()).to_string()
+    }
+}
+impl<T: JsonKeyed + ?Sized> JsonKeyed for &T {
+    fn key(&self, key: &str) -> Option<&serde_json::Value> {
+        (**self).key(key)
+    }
+    fn describe(&self) -> String {
+        (**self).describe()
+    }
+}
+fn j<'a, V: JsonKeyed + ?Sized>(v: &'a V, key: &str) -> &'a serde_json::Value {
+    let Some(got) = v.key(key) else {
+        panic!("missing json key {key}: {}", v.describe());
+    };
+    got
+}
+use std::path::PathBuf;
+use actions::ProbedAttachment;
 use xai_grok_shell::extensions::billing::{BillingConfig, Cent, UsagePeriod};
 /// The invalid-params server detail survives `attach_prompt_usage` wrapping `error.data` as `{message, promptUsage}`.
 #[test]
@@ -137,7 +180,7 @@ fn plain_prompt_block_stamps_skill_token_ranges_meta() {
     };
     assert_eq!(tb.text, "great /pr-workflow go");
     let meta = tb.meta.expect("meta stamped when ranges non-empty");
-    assert_eq!(meta["skillTokenRanges"], serde_json::json!([[6, 18]]));
+    assert_eq!(j(&meta, "skillTokenRanges"), &serde_json::json!([[6, 18]]));
 }
 /// Empty ranges keep `meta: None`; the legacy wire shape is unchanged.
 #[test]
@@ -171,240 +214,10 @@ fn interject_params_omit_content_when_no_blocks() {
     let params = build_interject_params(&sid, "steer", "i1", None);
     let obj = params.as_object().unwrap();
     assert!(!obj.contains_key("content"), "content key must be absent");
-    assert_eq!(obj["sessionId"], "s1");
-    assert_eq!(obj["text"], "steer");
-    assert_eq!(obj["interjectionId"], "i1");
+    assert_eq!(j(&obj, "sessionId"), "s1");
+    assert_eq!(j(&obj, "text"), "steer");
+    assert_eq!(j(&obj, "interjectionId"), "i1");
     assert_eq!(obj.len(), 3, "no extra keys on the legacy shape");
-}
-#[test]
-fn picker_keeps_conversation_with_empty_cwd_and_missing_updated_at() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_abc",
-                "cwd": "",
-                "summary": "Compare GPU vendors",
-                "source": "conversation",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "conversation must not vanish");
-    assert_eq!(entries[0].id, "conv_abc");
-    assert_eq!(entries[0].cwd, "");
-    assert_eq!(entries[0].source, "conversation");
-}
-#[test]
-fn picker_keeps_old_conversation_past_cutoff() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_old",
-                "cwd": "",
-                "summary": "Ancient chat",
-                "source": "conversation",
-                "updatedAt": "2020-01-01T00:00:00Z",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "old conversation must still render");
-    assert_eq!(entries[0].source, "conversation");
-}
-#[test]
-fn picker_drops_local_with_missing_updated_at() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "local_no_ts",
-                "cwd": "/Users/me/xai",
-                "summary": "no timestamp",
-                "source": "local"
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert!(
-            entries.is_empty(),
-            "local rows still require a parseable updatedAt"
-        );
-}
-/// Untitled grok.com chats must stay listed, rendered as "Untitled".
-#[test]
-fn picker_keeps_untitled_conversation_as_untitled() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "conv_untitled",
-                "cwd": "",
-                "summary": "",
-                "source": "conversation",
-                "updatedAt": "2026-07-01T00:00:00Z",
-                "_meta": { "x.ai/session": { "kind": "chat" } }
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1, "untitled conversation must not vanish");
-    assert_eq!(entries[0].summary, "Untitled");
-    assert_eq!(entries[0].source, "conversation");
-}
-/// The recap and last-turn summary ride the session-list wire and land on the picker entry so the expanded card can show them.
-#[test]
-fn picker_parses_last_recap_and_last_turn_summary() {
-    let recent = chrono::Utc::now().to_rfc3339();
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "s_recap",
-                "cwd": "/Users/me/xai",
-                "summary": "Auth refactor",
-                "source": "local",
-                "updatedAt": recent,
-                "lastTurnSummary": "Wired retries into billing",
-                "lastRecap": "Where we left off: auth refactor across the API"
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 1);
-    assert_eq!(
-            entries[0].last_turn_summary.as_deref(),
-            Some("Wired retries into billing")
-        );
-    assert_eq!(
-            entries[0].last_recap.as_deref(),
-            Some("Where we left off: auth refactor across the API")
-        );
-}
-/// `sessionKind` rides the session-list wire onto the entry; the picker's Headless page filter keys on it.
-#[test]
-fn picker_parses_session_kind() {
-    let recent = chrono::Utc::now().to_rfc3339();
-    let payload = serde_json::json!({
-            "sessions": [
-                {
-                    "sessionId": "s_headless",
-                    "cwd": "/Users/me/xai",
-                    "summary": "Classify clip",
-                    "source": "local",
-                    "updatedAt": recent,
-                    "sessionKind": "headless"
-                },
-                {
-                    "sessionId": "s_plain",
-                    "cwd": "/Users/me/xai",
-                    "summary": "Interactive work",
-                    "source": "local",
-                    "updatedAt": recent
-                }
-            ]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].session_kind.as_deref(), Some("headless"));
-    assert_eq!(entries[1].session_kind, None);
-}
-/// The empty-summary drop still applies to Build rows.
-#[test]
-fn picker_still_drops_build_row_with_empty_summary() {
-    let payload = serde_json::json!({
-            "sessions": [{
-                "sessionId": "local_empty",
-                "cwd": "/nonexistent/effects-test",
-                "summary": "",
-                "source": "local",
-                "updatedAt": "2026-07-01T00:00:00Z"
-            }]
-        });
-    let entries = parse_session_picker_entries(&payload);
-    assert!(entries.is_empty(), "empty-summary Build rows stay dropped");
-}
-#[test]
-fn session_list_partial_parses_reasons() {
-    let payload = |reason: &str| {
-        serde_json::json!({
-                "sessions": [],
-                "_meta": { "x.ai/partial": { "conversations": true, "reason": reason } }
-            })
-    };
-    assert_eq!(
-            parse_session_list_partial(&payload("no_oauth")),
-            Some(ConversationsPartial::NoOauth)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("timeout")),
-            Some(ConversationsPartial::Timeout)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("error")),
-            Some(ConversationsPartial::Error)
-        );
-    assert_eq!(
-            parse_session_list_partial(&payload("something_new")),
-            Some(ConversationsPartial::Error)
-        );
-}
-#[test]
-fn format_acp_error_localizes_exact_model_policy_denials_only() {
-    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
-        locale: crate::locale::UiLocale::ZhCn,
-        source: crate::locale::LocaleSource::Cli,
-    });
-    let denial = "This model isn't allowed by your organization's policy. Contact your administrator.";
-    let exact = acp::Error::invalid_params().data(denial);
-    assert_eq!(
-        format_acp_error_with_locale(&exact, false, &locale),
-        "组织策略不允许使用此模型。请联系管理员。"
-    );
-
-    let near_miss = acp::Error::invalid_params().data(format!("{denial} extra"));
-    assert_eq!(
-        format_acp_error_with_locale(&near_miss, false, &locale),
-        format!("{denial} extra")
-    );
-}
-
-#[test]
-fn switch_model_error_localizes_policy_denial_at_direct_effect_boundary() {
-    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
-        locale: crate::locale::UiLocale::ZhCn,
-        source: crate::locale::LocaleSource::Cli,
-    });
-    let denial =
-        "This model isn't allowed by your organization's policy. Contact your administrator.";
-    let error = acp::Error::invalid_params().data(denial);
-    let mapped = switch_model_error_from_acp(&error, &None, false, &locale);
-    match mapped {
-        SwitchModelError::Other(message) => {
-            assert_eq!(message, "组织策略不允许使用此模型。请联系管理员。");
-        }
-        SwitchModelError::IncompatibleAgent { .. } => {
-            panic!("policy denial must remain a regular switch-model error")
-        }
-    }
-}
-
-#[test]
-fn session_list_partial_notices_localize_only_the_fixed_copy() {
-    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
-        locale: crate::locale::UiLocale::ZhCn,
-        source: crate::locale::LocaleSource::Cli,
-    });
-    assert_eq!(
-        ConversationsPartial::NoOauth.picker_notice_with_locale(Some(&locale)),
-        "无法加载聊天：请使用 /login 登录"
-    );
-    assert_eq!(
-        ConversationsPartial::Timeout.picker_notice_with_locale(Some(&locale)),
-        "无法加载会话：请重试"
-    );
-    assert_eq!(
-        ConversationsPartial::Error.picker_notice(),
-        "Couldn't load conversations: retry"
-    );
-}
-#[test]
-fn session_list_partial_absent_for_healthy_or_meta_less_responses() {
-    let healthy = serde_json::json!({
-            "sessions": [],
-            "_meta": { "x.ai/partial": { "conversations": false } }
-        });
-    assert_eq!(parse_session_list_partial(&healthy), None);
-    let legacy = serde_json::json!({ "sessions": [] });
-    assert_eq!(parse_session_list_partial(&legacy), None);
 }
 /// The agent serializes `ExtMethodResult<KillTaskResponse>`: the outcome lives at `result.outcome`.
 /// Probing the top level instead was why the tasks-pane ✗ never removed stale (`not_found`) rows after a session resume.
@@ -554,9 +367,9 @@ fn interject_params_carry_content_when_blocks_present() {
         "i1",
         Some(blocks.as_slice()),
     );
-    let content = params["content"].as_array().expect("content array");
+    let content = j(&params, "content").as_array().expect("content array");
     assert_eq!(content.len(), 1);
-    assert_eq!(content[0]["text"], "look at [Image #1]");
+    assert_eq!(j(nth(content, 0), "text"), "look at [Image #1]");
 }
 /// A billing config with every field unset, for use as a base in `credit_balance_from_config` tests via struct-update syntax.
 fn empty_billing_config() -> BillingConfig {
@@ -858,6 +671,26 @@ fn parse_worktree_restore_payload_rejects_unknown_degree() {
     assert!(degree.is_none(), "typo must produce None");
 }
 #[test]
+fn parse_worktree_strategy_summary_grove_success_and_empty() {
+    let value = serde_json::json!({
+            "strategy": {
+                "requestedStrategy": "grove",
+                "resolvedStrategy": "grove-fuse",
+                "transport": "fuse",
+                "sourceMode": "local",
+                "daemonCapabilityClass": "current"
+            }
+        });
+    assert_eq!(
+            parse_worktree_strategy_summary(&value).as_deref(),
+            Some("Requested Grove; using `grove-fuse` (local objects).")
+        );
+    assert!(parse_worktree_strategy_summary(&serde_json::json!({})).is_none());
+    assert!(
+            parse_worktree_strategy_summary(&serde_json::json!({ "strategy": {} })).is_none()
+        );
+}
+#[test]
 fn parse_session_load_restore_meta_full_shape() {
     use xai_grok_workspace::session::git::RestoreDegree;
     let meta = serde_json::json!({
@@ -895,6 +728,257 @@ fn parse_session_load_restore_meta_rejects_unknown_degree() {
         });
     let (_, _, degree) = parse_session_load_restore_meta(meta.as_object());
     assert!(degree.is_none());
+}
+/// A deadline is `Timeout` and a decode/persist panic is `Panicked`, never `ReadFailed`; the deadline arm returns without waiting on the stalled thread.
+#[tokio::test]
+async fn clipboard_probe_stage_names_a_deadline_and_a_panic_apart_from_a_read_failure() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    let started = std::time::Instant::now();
+    let late = clipboard_probe_stage(
+            std::time::Duration::from_millis(20),
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                Ok((ProbedAttachment::NoRaster, None))
+            },
+        )
+        .await;
+    assert!(started.elapsed() < std::time::Duration::from_millis(250), "the deadline must not wait on the stall");
+    assert_eq!(late.expect_err("the stage outlives the deadline").reason, Reason::Timeout);
+    let panicked = clipboard_probe_stage(
+            std::time::Duration::from_secs(5),
+            || panic!("decoder bug"),
+        )
+        .await;
+    assert_eq!(panicked.expect_err("a panicking stage drops").reason, Reason::Panicked);
+}
+fn probe_raster() -> crate::clipboard::ImageData {
+    crate::clipboard::ImageData {
+        data: vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3],
+        mime_type: "image/png".to_owned(),
+    }
+}
+/// Each drop reason maps to exactly one completion; a failed persist keeps its error text for the toast.
+#[tokio::test]
+async fn bounded_clipboard_probe_maps_each_drop_reason_to_its_completion() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    for (reason, image, expected) in [
+        (Reason::PasteboardChangedBeforeRead, None, "ProbeDropped"),
+        (Reason::PasteboardChangedAfterRead, Some(probe_raster()), "ProbeDropped"),
+        (Reason::BracketedPayloadMismatch, None, "ProbeDropped"),
+        (Reason::BracketedOriginReadFailed, None, "ProbeDropped"),
+        (Reason::PersistFailed, Some(probe_raster()), "PersistFailed(disk full)"),
+        (Reason::ReadFailed, None, "ProbeFailed"),
+        (Reason::Timeout, None, "ProbeFailed"),
+        (Reason::Panicked, None, "ProbeFailed"),
+    ] {
+        let message = (reason == Reason::PersistFailed).then(|| "disk full".to_owned());
+        let (attachment, file_urls) = bounded_clipboard_probe(
+                std::time::Duration::from_secs(5),
+                move || Err(crate::clipboard::ProbeDrop {
+                    reason,
+                    image,
+                    message,
+                }),
+            )
+            .await;
+        let got = match attachment {
+            ProbedAttachment::ProbeDropped => "ProbeDropped".to_owned(),
+            ProbedAttachment::PersistFailed(message) => {
+                format!("PersistFailed({message})")
+            }
+            ProbedAttachment::ProbeFailed => "ProbeFailed".to_owned(),
+            other => panic!("{reason:?} completed as {other:?}"),
+        };
+        assert_eq!(got, expected, "{reason:?}");
+        assert!(file_urls.is_none(), "{reason:?} must attach nothing");
+    }
+    let (attachment, file_urls) = bounded_clipboard_probe(
+            std::time::Duration::from_secs(5),
+            || Ok((ProbedAttachment::NoRaster, Some("/tmp/a".to_owned()))),
+        )
+        .await;
+    assert!(matches!(attachment, ProbedAttachment::NoRaster));
+    assert_eq!(file_urls.as_deref(), Some("/tmp/a"));
+}
+/// Runs the blocking stage against a canned pasteboard (baseline changeCount 1) with no session images dir.
+fn probe_stage(
+    hook: crate::clipboard::ClipboardProbeHook,
+) -> (ClipboardProbeStage, u32) {
+    crate::clipboard::set_clipboard_probe_hook(hook);
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("caption".to_owned()),
+        false,
+        None,
+    );
+    let probe_calls = crate::clipboard::clipboard_probe_call_count();
+    crate::clipboard::clear_clipboard_probe_hook();
+    (outcome, probe_calls)
+}
+/// A board that moved since enqueue drops before any pasteboard read.
+#[test]
+fn probe_stage_drops_before_reading_when_the_board_moved_since_the_keypress() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    let (outcome, probe_calls) = probe_stage(crate::clipboard::ClipboardProbeHook {
+        snapshot: Some((Some(2), true)),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let drop = outcome.expect_err("the board moved since the keypress");
+    assert_eq!(drop.reason, Reason::PasteboardChangedBeforeRead);
+    assert!(drop.image.is_none());
+    assert_eq!(probe_calls, 0, "a stale board must not be read at all");
+}
+/// A copy landing during the read (GB-5461) discards the raster that read returned and names the move.
+#[test]
+fn probe_stage_drops_the_raster_when_the_board_moved_during_the_read() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    let (outcome, probe_calls) = probe_stage(crate::clipboard::ClipboardProbeHook {
+        snapshot_after_read: Some((Some(2), true)),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let drop = outcome.expect_err("the board moved under the read");
+    assert_eq!(drop.reason, Reason::PasteboardChangedAfterRead);
+    assert_eq!(drop.image.map(|img| img.data), Some(probe_raster().data));
+    assert_eq!(probe_calls, 1);
+}
+/// A read error keeps its own reason: the deadline kill stays `Timeout`, anything else `ReadFailed`.
+#[test]
+fn probe_stage_keeps_the_read_error_reason() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    for reason in [Reason::Timeout, Reason::ReadFailed] {
+        let (outcome, _) = probe_stage(crate::clipboard::ClipboardProbeHook {
+            attachment_probe_error: Some(reason),
+            ..crate::clipboard::ClipboardProbeHook::with_raster(None)
+        });
+        let drop = outcome.expect_err("the read failed");
+        assert_eq!(drop.reason, reason);
+        assert!(drop.image.is_none(), "{reason:?}");
+    }
+}
+/// An unchanged board passes its raster through decoded, or reports that none was there.
+#[test]
+fn probe_stage_attaches_the_raster_or_reports_none() {
+    let (outcome, _) = probe_stage(
+        crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster())),
+    );
+    let (attachment, file_urls) = outcome.expect("the read stands");
+    assert!(matches!(attachment, ProbedAttachment::Image(_)), "got {attachment:?}");
+    assert!(file_urls.is_none());
+    let (outcome, _) = probe_stage(
+        crate::clipboard::ClipboardProbeHook::with_raster(None),
+    );
+    let (attachment, _) = outcome.expect("the read stands");
+    assert!(matches!(attachment, ProbedAttachment::NoRaster), "got {attachment:?}");
+}
+#[test]
+fn non_bracketed_probe_attaches_even_when_text_does_not_match() {
+    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+        text: Some("screenshot".to_owned()),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("中".to_owned()),
+        false,
+        None,
+    );
+    crate::clipboard::clear_clipboard_probe_hook();
+    let (attachment, _) = outcome.expect("an explicit paste key still attaches");
+    assert!(matches!(attachment, ProbedAttachment::Image(_)), "got {attachment:?}");
+}
+#[test]
+fn bracketed_probe_drops_a_mismatched_payload_before_reading_the_raster() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+        text: Some("screenshot".to_owned()),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("中".to_owned()),
+        true,
+        None,
+    );
+    let probe_calls = crate::clipboard::clipboard_probe_call_count();
+    crate::clipboard::clear_clipboard_probe_hook();
+    let drop = outcome.expect_err("mismatched bracketed payload");
+    assert_eq!(Reason::BracketedPayloadMismatch, drop.reason);
+    assert!(drop.image.is_none());
+    assert_eq!(0, probe_calls);
+}
+#[test]
+fn bracketed_probe_attaches_when_the_payload_matches_clipboard_text() {
+    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+        text: Some("caption".to_owned()),
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("caption".to_owned()),
+        true,
+        None,
+    );
+    crate::clipboard::clear_clipboard_probe_hook();
+    let (attachment, file_urls) = outcome.expect("a matching caption still probes");
+    assert!(matches!(attachment, ProbedAttachment::Image(_)), "got {attachment:?}");
+    assert!(file_urls.is_none());
+}
+#[test]
+fn bracketed_probe_attaches_an_image_only_paste() {
+    crate::clipboard::set_clipboard_probe_hook(
+        crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster())),
+    );
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some(String::new()),
+        true,
+        None,
+    );
+    crate::clipboard::clear_clipboard_probe_hook();
+    let (attachment, _) = outcome
+        .expect("empty payload with no clipboard text still matches");
+    assert!(matches!(attachment, ProbedAttachment::Image(_)), "got {attachment:?}");
+}
+/// Origin-text read failure on a bracketed probe is its own silent drop, not the toasting `ReadFailed`.
+#[test]
+fn bracketed_probe_names_a_clipboard_text_read_failure() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    crate::clipboard::set_clipboard_probe_hook(crate::clipboard::ClipboardProbeHook {
+        text_read_failed: true,
+        ..crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster()))
+    });
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        Some("中".to_owned()),
+        true,
+        None,
+    );
+    let probe_calls = crate::clipboard::clipboard_probe_call_count();
+    crate::clipboard::clear_clipboard_probe_hook();
+    let drop = outcome.expect_err("clipboard text read failed");
+    assert_eq!(Reason::BracketedOriginReadFailed, drop.reason);
+    assert!(drop.image.is_none());
+    assert_eq!(0, probe_calls);
+}
+/// A failed session persist keeps the raster (for the drop's hash) and the error text (for the toast).
+#[test]
+fn probe_stage_reports_a_failed_persist_with_its_error() {
+    use xai_grok_telemetry::events::ClipboardProbeDropReason as Reason;
+    let not_a_dir = tempfile::NamedTempFile::new().expect("temp file");
+    crate::clipboard::set_clipboard_probe_hook(
+        crate::clipboard::ClipboardProbeHook::with_raster(Some(probe_raster())),
+    );
+    let outcome = probe_clipboard_attachment_blocking(
+        Some(1),
+        None,
+        false,
+        Some(not_a_dir.path().to_path_buf()),
+    );
+    crate::clipboard::clear_clipboard_probe_hook();
+    let drop = outcome.expect_err("persisting under a plain file must fail");
+    assert_eq!(drop.reason, Reason::PersistFailed);
+    assert_eq!(drop.image.map(|img| img.data), Some(probe_raster().data));
+    assert!(drop.message.is_some_and(|message| !message.is_empty()));
 }
 /// Unknown keys return a descriptive error.
 #[tokio::test]
@@ -959,6 +1043,17 @@ async fn persist_setting_type_mismatch_errors_show_timeline() {
         );
 }
 #[tokio::test]
+async fn persist_setting_type_mismatch_errors_dashboard_preview() {
+    use crate::settings::SettingValue;
+    let error = persist_setting(
+            "dashboard_preview",
+            SettingValue::String("nope".to_owned()),
+        )
+        .await
+        .expect_err("dashboard preview rejects a non-boolean value");
+    assert!(error.contains("persist_setting(dashboard_preview) expected Bool"), "{error}");
+}
+#[tokio::test]
 async fn persist_setting_type_mismatch_errors_page_flip_on_send() {
     use crate::settings::SettingValue;
     let r = persist_setting("page_flip_on_send", SettingValue::String("nope".into()))
@@ -1018,6 +1113,15 @@ fn spawn_fake_acp_agent(
         while let Some(msg) = rx.recv().await {
             if let xai_acp_lib::AcpAgentMessage::ExtNotification(args) = msg {
                 if args.request.method.as_ref() == "x.ai/yolo_mode_changed" {
+                    let params: serde_json::Value = serde_json::from_str(
+                            args.request.params.get(),
+                        )
+                        .expect("permission notification payload");
+                    assert_eq!(
+                            Some("test-session"),
+                            params.get("sessionId").and_then(serde_json::Value::as_str),
+                            "permission notifications must name their session"
+                        );
                     counter_clone.fetch_add(1, Ordering::SeqCst);
                 }
                 let _ = args.response_tx.send(Ok(()));
@@ -1098,7 +1202,7 @@ fn unregister_best_effort_is_nonblocking_under_lock_contention() {
                 .expect("list")
                 .len(),
             1,
-            "contended unregister must leave the entry for collect_crashed",
+            "contended unregister must leave the entry for the next register to prune",
         );
 }
 /// A real I/O error (uncreatable registry root) is swallowed: the best-effort helper logs and returns instead of panicking.
@@ -1569,6 +1673,48 @@ async fn check_marketplace_updates_dispatches_update_and_skips_failed_notificati
     assert!(!saw_wrong_action.load(Ordering::SeqCst));
     assert!(!saw_success_notification.load(Ordering::SeqCst));
 }
+/// A refused interjection shows the refusal's own sentence, as a refused prompt does
+#[tokio::test]
+async fn refused_interjection_shows_the_refusal_sentence() {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let xai_acp_lib::AcpAgentMessage::ExtMethod(args) = msg {
+                let refusal = acp::Error::invalid_params()
+                    .data("Update Grok on \"desk\" to send images.");
+                let _ = args.response_tx.send(Err(refusal));
+            }
+        }
+    });
+    let mut tasks = JoinSet::new();
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::unbounded_channel();
+    execute(
+        Effect::SendInterject {
+            agent_id: AgentId(4),
+            session_id: acp::SessionId::new("test-session"),
+            text: "look".to_owned(),
+            interjection_id: "i-1".to_owned(),
+            blocks: None,
+        },
+        &mut tasks,
+        &tx,
+        Path::new("."),
+        &SessionFlags::default(),
+        &progress_tx,
+    );
+    let result = tasks
+        .join_next()
+        .await
+        .expect("task should complete")
+        .expect("task should not panic");
+    let TaskResult::InterjectFailed { error, .. } = result else {
+        panic!("expected InterjectFailed, got {result:?}");
+    };
+    assert_eq!(
+            "couldn't send interjection: Update Grok on \"desk\" to send images.",
+            error
+        );
+}
 #[tokio::test]
 async fn foreign_scan_task_echoes_sequence_without_enabled_sources() {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1711,6 +1857,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     use crate::views::session_picker_surface::SessionPickerHost;
     let mut tasks = run(Effect::FetchSessionList {
         host: SessionPickerHost::AgentModal,
+        cwd_override: None,
         generation: 41,
         query: Some("hit".into()),
         seq: 7,
@@ -1741,6 +1888,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     }
     let mut tasks = run(Effect::FetchSessionList {
         host: SessionPickerHost::Welcome,
+        cwd_override: None,
         generation: 42,
         query: None,
         seq: 8,
@@ -1759,7 +1907,24 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
     let mut tasks = run(Effect::FetchSessionList {
+        host: SessionPickerHost::Dashboard,
+        cwd_override: Some("/dashboard-cwd".into()),
+        generation: 44,
+        query: None,
+        seq: 10,
+        kind_filter: Some(vec!["build".into()]),
+        headless_policy: Default::default(),
+    });
+    assert!(matches!(
+            tasks.join_next().await.expect("task").expect("no panic"),
+            TaskResult::SessionListLoaded {
+                host: SessionPickerHost::Dashboard,
+                ..
+            }
+        ));
+    let mut tasks = run(Effect::FetchSessionList {
         host: SessionPickerHost::Welcome,
+        cwd_override: None,
         generation: 43,
         query: Some("fail-me".into()),
         seq: 9,
@@ -1781,28 +1946,32 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         other => panic!("expected SessionListFailed, got {other:?}"),
     }
     let captured = captured.lock().unwrap();
-    assert_eq!(captured.len(), 3);
-    assert_eq!(captured[0]["query"], "hit");
-    assert_eq!(captured[0]["limit"], 100);
-    assert_eq!(captured[0]["headless"], "exclude");
-    assert_eq!(captured[1]["headless"], "exclude");
-    assert_eq!(captured[2]["headless"], "exclude");
-    assert!(captured[0]["cwd"].is_string());
+    assert_eq!(captured.len(), 4);
+    assert_eq!(j(nth(&captured, 0), "query"), "hit");
+    // This build fetches 100 rows on every host, not just the dashboard.
+    assert_eq!(j(nth(&captured, 0), "limit"), 100);
+    assert_eq!(j(nth(&captured, 0), "headless"), "exclude");
+    assert_eq!(j(nth(&captured, 1), "headless"), "exclude");
+    assert_eq!(j(nth(&captured, 2), "headless"), "exclude");
+    assert_eq!(j(nth(&captured, 2), "limit"), 100);
+    assert_eq!(j(nth(&captured, 2), "cwd"), "/dashboard-cwd");
+    assert_eq!(j(nth(&captured, 3), "headless"), "exclude");
+    assert_eq!(j(nth(&captured, 0), "cwd"), ".");
     assert!(
-            captured[0].get("allowRelax").is_none(),
+            nth(&captured, 0).get("allowRelax").is_none(),
             "search fetches must not opt into relaxing: {:?}",
-            captured[0]
+            nth(&captured, 0)
         );
     assert!(
-            captured[1].get("query").is_none(),
+            nth(&captured, 1).get("query").is_none(),
             "plain fetch must not send a query key: {:?}",
-            captured[1]
+            nth(&captured, 1)
         );
     assert_eq!(
-            captured[1]["allowRelax"], true,
+            j(nth(&captured, 1), "allowRelax"), true,
             "browse fetches opt into relaxing"
         );
-    assert_eq!(captured[2]["query"], "fail-me");
+    assert_eq!(j(nth(&captured, 3), "query"), "fail-me");
 }
 #[tokio::test]
 async fn fetch_dashboard_sessions_explicitly_excludes_headless() {
@@ -1841,7 +2010,10 @@ async fn fetch_dashboard_sessions_explicitly_excludes_headless() {
         other => panic!("expected DashboardSessionsLoaded, got {other:?}"),
     }
     let captured = captured.lock().unwrap();
-    assert_eq!(captured.as_ref().unwrap()["headless"], "exclude");
+    let Some(params) = captured.as_ref() else {
+        panic!("captured params");
+    };
+    assert_eq!(j(params, "headless"), "exclude");
 }
 #[tokio::test]
 async fn fetch_session_list_sends_kind_facet_filter() {
@@ -1870,6 +2042,7 @@ async fn fetch_session_list_sends_kind_facet_filter() {
     execute(
         Effect::FetchSessionList {
             host: crate::views::session_picker_surface::SessionPickerHost::Welcome,
+            cwd_override: None,
             generation: 1,
             query: None,
             seq: 1,
@@ -1886,8 +2059,8 @@ async fn fetch_session_list_sends_kind_facet_filter() {
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
     assert_eq!(
-            captured[0]["_meta"]["x.ai/facetFilters"]["kind"],
-            serde_json::json!(["build"])
+            j(j(j(nth(&captured, 0), "_meta"), "x.ai/facetFilters"), "kind"),
+            &serde_json::json!(["build"])
         );
 }
 #[tokio::test]
@@ -1941,8 +2114,8 @@ async fn fetch_workflows_list_sends_session_id() {
     }
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0]["sessionId"], "test-session");
-    assert!(captured[0].get("cwd").is_none());
+    assert_eq!(j(nth(&captured, 0), "sessionId"), "test-session");
+    assert!(nth(&captured, 0).get("cwd").is_none());
 }
 /// The debounce arm must echo `query` and `seq` exactly.
 /// Awaits the real 250 ms debounce (tokio's paused clock needs `test-util`, not enabled in this crate).
@@ -2029,8 +2202,8 @@ async fn deep_search_sessions_echoes_routing_and_policy() {
     }
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
-    assert_eq!(captured[0].0, "x.ai/session/search");
-    assert_eq!(captured[0].1["headless"], "only");
+    assert_eq!(nth(&captured, 0).0, "x.ai/session/search");
+    assert_eq!(j(&nth(&captured, 0).1, "headless"), "only");
 }
 /// The card-detail executor must echo host, generation, seq, and the row identity verbatim; a session missing on disk zeroes the stats.
 #[tokio::test]
@@ -2169,9 +2342,7 @@ fn subagents_without_plan_produces_no_profile() {
     assert_eq!(flags.agent_profile(), None);
 }
 /// Neutralize `GROK_AGENT` for the profile-matrix tests below.
-/// Agent-driven dev shells export it, which flips `to_meta` into the defer-to-shell escape hatch and drops `agentProfile`.
 /// The tests would then assert the wrong branch.
-/// Empty string counts as unset (`!s.trim().is_empty()`).
 /// Callers must be `#[serial_test::serial(GROK_AGENT)]` (process-global env).
 fn without_grok_agent() -> crate::test_util::EnvVarGuard {
     crate::test_util::EnvVarGuard::set("GROK_AGENT", "")
@@ -2189,9 +2360,9 @@ fn runtime_default_flags_produce_plan_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan");
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan");
     assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
 /// --plan alone produces meta with `agentProfile` only and a `askUserQuestion: false` since `ask_user` is off here.
 #[serial_test::serial(GROK_AGENT)]
@@ -2205,9 +2376,9 @@ fn plan_only_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan-no-subagents");
-    assert_eq!(meta["askUserQuestion"], false);
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan-no-subagents");
+    assert_eq!(j(&meta, "askUserQuestion"), false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
 /// --plan --subagents selects the full plan profile.
 #[serial_test::serial(GROK_AGENT)]
@@ -2221,9 +2392,9 @@ fn plan_with_subagents_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan");
-    assert_eq!(meta["askUserQuestion"], false);
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan");
+    assert_eq!(j(&meta, "askUserQuestion"), false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
 /// --ask-user alone selects the grok-build-ask-user profile.
 #[serial_test::serial(GROK_AGENT)]
@@ -2237,9 +2408,9 @@ fn ask_user_alone_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-ask-user");
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-ask-user");
     assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
 /// --plan --ask-user: plan already includes ask-user; profile is plan.
 #[serial_test::serial(GROK_AGENT)]
@@ -2253,9 +2424,9 @@ fn plan_with_ask_user_uses_plan_profile() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan-no-subagents");
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan-no-subagents");
     assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
 /// --no-plan --no-subagents --no-ask-user picks the default profile.
 /// It must still emit `askUserQuestion: false` so the shell can strip the tool at the builder.
@@ -2270,7 +2441,7 @@ fn subagents_alone_emits_only_ask_user_question_disable() {
     };
     let meta = flags.to_meta().expect("askUserQuestion=false must produce meta");
     assert!(meta.get("agentProfile").is_none());
-    assert_eq!(meta["askUserQuestion"], false);
+    assert_eq!(j(&meta, "askUserQuestion"), false);
 }
 /// All three flags on at the runtime default produce grok-build-plan and no `askUserQuestion` field.
 #[serial_test::serial(GROK_AGENT)]
@@ -2284,9 +2455,9 @@ fn all_flags_meta() {
         ..Default::default()
     };
     let meta = flags.to_meta().unwrap();
-    assert_eq!(meta["agentProfile"], "grok-build-plan");
+    assert_eq!(j(&meta, "agentProfile"), "grok-build-plan");
     assert!(meta.get("askUserQuestion").is_none());
-    assert_eq!(meta["yoloMode"], false);
+    assert_eq!(j(&meta, "yoloMode"), false);
 }
 /// `--no-ask-user` must land as `_meta.askUserQuestion = false` regardless of which profile (if any) the other flags select.
 #[test]
@@ -2307,7 +2478,7 @@ fn to_meta_emits_ask_user_question_false_when_disabled() {
                     )
                 });
             assert_eq!(
-                    meta["askUserQuestion"], false,
+                    j(&meta, "askUserQuestion"), false,
                     "askUserQuestion must be false (plan={plan}, subagents={subagents}); meta={meta:?}"
                 );
         }
@@ -2342,9 +2513,9 @@ fn to_meta_emits_auto_mode_when_enabled() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("auto_mode must emit meta");
-    assert_eq!(meta["autoMode"], true);
+    assert_eq!(j(&meta, "autoMode"), true);
     assert_eq!(
-            meta["yoloMode"], false,
+            j(&meta, "yoloMode"), false,
             "yoloMode must be explicitly false, not omitted (absent key falls \
              back to the shell's connect-time default / leader injection)"
         );
@@ -2359,8 +2530,8 @@ fn create_permission_override_replaces_global_permission_seeds() {
     let mut meta = flags.to_meta();
     apply_permission_mode_override(&mut meta, Some(PermissionModeKind::Auto));
     let meta = meta.expect("permission metadata");
-    assert_eq!(meta["yoloMode"], false);
-    assert_eq!(meta["autoMode"], true);
+    assert_eq!(j(&meta, "yoloMode"), false);
+    assert_eq!(j(&meta, "autoMode"), true);
 }
 /// yoloMode must ride the meta explicitly for both polarities; an absent key does not mean off (see the emit-site comment in `to_meta`).
 /// Cycling Always-Approve back to Normal before the session starts must not create a yolo session.
@@ -2373,8 +2544,8 @@ fn to_meta_always_emits_yolo_mode_explicitly() {
         };
         let meta = flags.to_meta().expect("permission seeds must always emit meta");
         assert_eq!(
-                meta["yoloMode"],
-                serde_json::json!(yolo),
+                j(&meta, "yoloMode"),
+                &serde_json::json!(yolo),
                 "yoloMode must be explicit (yolo={yolo}); meta={meta:?}"
             );
     }
@@ -2389,7 +2560,7 @@ fn to_meta_chat_mode_stamps_kind_and_omits_agent_profile() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("chat_mode must emit meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
     assert!(
             meta.get("agentProfile").is_none(),
             "K12: chat mode must omit Build agentProfile"
@@ -2415,7 +2586,7 @@ fn load_meta_chat_kind_alone_stamps_kind_and_strips_profile() {
         scrub_chat_workspace_bind_meta(&mut meta);
     }
     let meta = meta.expect("chat_kind must produce meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
     assert!(
             meta.get("agentProfile").is_none(),
             "entry chat_kind must strip Build agentProfile"
@@ -2448,7 +2619,7 @@ fn chat_create_meta_never_includes_workspace_bind_keys_when_cloud_fields_set() {
     apply_chat_kind_meta(&mut meta);
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat create must emit meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
@@ -2472,7 +2643,7 @@ fn chat_load_meta_never_includes_workspace_bind_keys() {
     }
     scrub_chat_workspace_bind_meta(&mut meta);
     let meta = meta.expect("chat load must emit meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
     assert_chat_meta_has_no_workspace_bind_keys(
         &serde_json::Value::Object(meta.clone()),
     );
@@ -2519,12 +2690,12 @@ fn scrub_chat_workspace_matrix_attach_exception() {
             "Direct hub must stay scrubbed"
         );
     assert_eq!(
-            scrubbed["x.ai/cloud_existing_workspace"]["server_id"],
+            j(j(&scrubbed, "x.ai/cloud_existing_workspace"), "server_id"),
             "srv-dogfood"
         );
-    assert_eq!(scrubbed["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(scrubbed["x.ai/local_workspace"]["server_id"], "srv-dogfood");
-    assert_eq!(scrubbed["x.ai/local_workspace"]["cwd"], "/tmp/repo");
+    assert_eq!(j(j(&scrubbed, "x.ai/local_workspace"), "mode"), "attach");
+    assert_eq!(j(j(&scrubbed, "x.ai/local_workspace"), "server_id"), "srv-dogfood");
+    assert_eq!(j(j(&scrubbed, "x.ai/local_workspace"), "cwd"), "/tmp/repo");
 }
 #[cfg(feature = "local-workspace")]
 #[test]
@@ -2540,9 +2711,9 @@ fn to_meta_chat_attach_stamps_local_and_existing() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
-    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-1");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
+    assert_eq!(j(j(&meta, "x.ai/local_workspace"), "mode"), "attach");
+    assert_eq!(j(j(&meta, "x.ai/cloud_existing_workspace"), "server_id"), "srv-1");
     assert!(meta.get("envId").is_none());
     assert!(meta.get("x.ai/cloud_server_id").is_none());
 }
@@ -2560,9 +2731,9 @@ fn to_meta_chat_own_stamps_intent_without_existing() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("meta");
-    assert_eq!(meta["x.ai/local_workspace"]["mode"], "own");
-    assert_eq!(meta["x.ai/local_workspace"]["cwd"], "/tmp/repo-own");
-    assert!(meta["x.ai/local_workspace"].get("server_id").is_none());
+    assert_eq!(j(j(&meta, "x.ai/local_workspace"), "mode"), "own");
+    assert_eq!(j(j(&meta, "x.ai/local_workspace"), "cwd"), "/tmp/repo-own");
+    assert!(j(&meta, "x.ai/local_workspace").get("server_id").is_none());
     assert!(
             meta.get("x.ai/cloud_existing_workspace").is_none(),
             "own must not stamp existing; shell mints server_id"
@@ -2573,19 +2744,20 @@ fn to_meta_chat_own_stamps_intent_without_existing() {
 #[test]
 fn reject_non_fs_only_advertised_tools_matrix() {
     let fs_only = ["workspace.fs_list", "workspace.fs_read_file", "workspace.put_files"];
-    assert!(reject_non_fs_only_advertised_tools(Some(&fs_only[..])).is_ok());
+    assert!(reject_non_fs_only_advertised_tools(Some(fs_only.as_slice())).is_ok());
     assert!(
             reject_non_fs_only_advertised_tools(None)
                 .unwrap_err()
                 .contains("uncheckable")
         );
     assert!(
-            reject_non_fs_only_advertised_tools(Some(&[][..]))
+            reject_non_fs_only_advertised_tools(Some(&[] as &[_]))
                 .unwrap_err()
                 .contains("empty")
         );
     let with_exec = ["workspace.fs_list", "workspace.bash", "terminal.exec"];
-    let err = reject_non_fs_only_advertised_tools(Some(&with_exec[..])).unwrap_err();
+    let err = reject_non_fs_only_advertised_tools(Some(with_exec.as_slice()))
+        .unwrap_err();
     assert!(err.contains("FS-only"), "{err}");
     assert!(err.contains("workspace.bash"), "{err}");
     assert!(err.contains("terminal.exec"), "{err}");
@@ -2606,9 +2778,9 @@ fn finalize_chat_session_meta_stamps_attach_on_worktree_path() {
     let mut meta = flags.to_meta();
     finalize_chat_session_meta(&mut meta, true, &flags);
     let meta = meta.expect("meta");
-    assert_eq!(meta["x.ai/session"]["kind"], "chat");
-    assert_eq!(meta["x.ai/local_workspace"]["mode"], "attach");
-    assert_eq!(meta["x.ai/cloud_existing_workspace"]["server_id"], "srv-wt");
+    assert_eq!(j(j(&meta, "x.ai/session"), "kind"), "chat");
+    assert_eq!(j(j(&meta, "x.ai/local_workspace"), "mode"), "attach");
+    assert_eq!(j(j(&meta, "x.ai/cloud_existing_workspace"), "server_id"), "srv-wt");
     assert!(meta.get("envId").is_none());
 }
 #[test]
@@ -2619,9 +2791,9 @@ fn to_meta_yolo_suppresses_auto_mode() {
         ..Default::default()
     };
     let meta = flags.to_meta().expect("yolo must emit meta");
-    assert_eq!(meta["yoloMode"], true);
+    assert_eq!(j(&meta, "yoloMode"), true);
     assert_eq!(
-            meta["autoMode"], false,
+            j(&meta, "autoMode"), false,
             "yolo wins; autoMode must be explicitly false (not omitted)"
         );
 }
@@ -2886,6 +3058,7 @@ fn sanitize_user_error_collapses_disk_full() {
 /// Sanitizing the composed message would collapse a disk-full chain whole and erase the title hint for a deferred local-miss target.
 #[test]
 fn worktree_resume_failure_sanitizes_detail_before_hint() {
+    use crate::app::session_title_resolve::worktree_resume_failure_message;
     let raw = "failed to copy index: No space left on device (os error 28)";
     let msg = worktree_resume_failure_message(
         Some("typo title"),
@@ -2900,48 +3073,6 @@ fn worktree_resume_failure_sanitizes_detail_before_hint() {
         );
     let id_msg = worktree_resume_failure_message(None, &sanitize_user_error(raw));
     assert_eq!(id_msg, "couldn't resume worktree session: No space left on device");
-}
-/// A resume-picker entry converts to a dormant dashboard roster row (the non-leader idle source).
-/// It preserves title, cwd, model, worktree flag, origin, and last-change time.
-#[test]
-fn session_picker_entry_maps_to_dormant_roster_row() {
-    use crate::app::app_view::SessionPickerEntry;
-    use crate::app::roster::RosterActivity;
-    let updated = chrono::Utc::now();
-    let entry = SessionPickerEntry {
-        id: "sess-1".to_string(),
-        summary: "Wire up dashboard".to_string(),
-        updated_at: updated,
-        created_at: updated,
-        cwd: "/repo/app".to_string(),
-        hostname: Some("box".to_string()),
-        source: "local".to_string(),
-        model_id: Some("grok-4".to_string()),
-        num_messages: 3,
-        last_active_at: Some(updated),
-        branch: None,
-        repo_name: "repo-app".to_string(),
-        worktree_label: Some("wt".to_string()),
-        last_turn_summary: Some("Fixed the parser".to_string()),
-        last_recap: None,
-        session_kind: None,
-        card_detail: None,
-    };
-    let roster = session_picker_entry_to_roster(&entry);
-    assert_eq!(roster.session_id, "sess-1");
-    assert_eq!(roster.title.as_deref(), Some("Wire up dashboard"));
-    assert_eq!(roster.cwd, "/repo/app");
-    assert!(roster.is_worktree, "worktree_label present → is_worktree");
-    assert_eq!(roster.model_id.as_deref(), Some("grok-4"));
-    assert_eq!(roster.activity, RosterActivity::Dormant);
-    assert_eq!(
-            roster.last_turn_summary.as_deref(),
-            Some("Fixed the parser")
-        );
-    assert!(!roster.resident);
-    assert_eq!(roster.last_change_unix_ms, updated.timestamp_millis());
-    assert_eq!(roster.origin.kind, "local");
-    assert_eq!(roster.origin.host.as_deref(), Some("box"));
 }
 #[test]
 fn rewind_execute_params_carry_the_selected_mode_with_force() {
@@ -2959,4 +3090,236 @@ fn rewind_execute_params_carry_the_selected_mode_with_force() {
         assert_eq!(params["force"], true);
         assert_eq!(params["mode"], wire, "{mode:?} must go out as its shell wire value");
     }
+}
+fn rewind_execute_params_sends_conversation_only_with_force() {
+    let params = rewind_execute_params(
+        "sess-1",
+        3,
+        crate::views::rewind::RewindMode::ConversationOnly,
+    );
+    assert_eq!(j(&params, "sessionId"), "sess-1");
+    assert_eq!(j(&params, "targetPromptIndex"), 3);
+    assert_eq!(j(&params, "force"), true);
+    assert_eq!(j(&params, "mode"), REWIND_MODE_WIRE);
+    assert_eq!(j(&params, "mode"), "conversation_only");
+}
+#[tokio::test]
+async fn rewind_points_are_asked_only_after_the_cancel_is_answered() {
+    use std::sync::Arc;
+    use xai_acp_lib::AcpAgentMessage;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let listing = tokio::spawn(async move {
+        cancel_then_fetch_rewind_points(&tx, AgentId(0), acp::SessionId::new("sess-1"))
+            .await
+    });
+    let Some(AcpAgentMessage::Cancel(cancel)) = rx.recv().await else {
+        panic!("the cancel goes out first")
+    };
+    tokio::task::yield_now().await;
+    assert!(rx.try_recv().is_err(), "points waits for the cancel's answer");
+    cancel.response_tx.send(Ok(())).expect("the listing waits on the cancel");
+    let Some(AcpAgentMessage::ExtMethod(points)) = rx.recv().await else {
+        panic!("points follows the answered cancel")
+    };
+    let body = serde_json::value::RawValue::from_string(
+            r#"{"rewind_points":[]}"#.to_owned(),
+        )
+        .expect("valid JSON");
+    points
+        .response_tx
+        .send(Ok(acp::ExtResponse::new(Arc::from(body))))
+        .expect("the listing waits on points");
+    assert_eq!("sess-1", cancel.request.session_id.0.as_ref());
+    assert_eq!("x.ai/rewind/points", points.request.method.as_ref());
+    match listing.await.expect("the listing task finishes") {
+        TaskResult::RewindPointsLoaded { agent_id, points } => {
+            assert_eq!((AgentId(0), 0), (agent_id, points.len()));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+#[rstest::rstest]
+#[case::error_envelope(
+    r#"{"error":"the session is answering"}"#,
+    "the session is answering"
+)]
+#[case::not_json("not json", "invalid response: expected ident at line 1 column 2")]
+fn a_failed_rewind_points_reply_names_the_failure(
+    #[case]
+    body: &str,
+    #[case]
+    expected: &str,
+) {
+    match parse_rewind_points_response(AgentId(0), body) {
+        TaskResult::RewindPointsFailed { error, .. } => assert_eq!(expected, error),
+        other => panic!("{other:?}"),
+    }
+}
+/// Exact wire bytes of the one-shot request: the shell's `upload_trace_offer_gate_allows`
+/// relaxation keys off this exact snake_case value, so the shape is a cross-crate contract.
+#[test]
+fn upload_trace_request_with_intent_exact_wire_shape() {
+    let request = UploadTraceRequest {
+        session_id: "sess-1".to_string(),
+        intent: Some(
+            crate::views::feedback_modal::FeedbackTraceUploadIntent::SendThisSession,
+        ),
+        trace_upload_token: Some("grant-1".to_string()),
+    };
+    assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"sessionId":"sess-1","intent":"send_this_session","traceUploadToken":"grant-1"}"#
+        );
+}
+/// A legacy trace-card upload must stay byte-identical to the pre-intent request
+/// (no `"intent":null`), so an older shell's strict parsing cannot regress.
+#[test]
+fn upload_trace_request_without_intent_keeps_legacy_wire_shape() {
+    let request = UploadTraceRequest {
+        session_id: "sess-1".to_string(),
+        intent: None,
+        trace_upload_token: None,
+    };
+    assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"sessionId":"sess-1"}"#
+        );
+}
+
+#[test]
+fn format_acp_error_localizes_exact_model_policy_denials_only() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let denial = "This model isn't allowed by your organization's policy. Contact your administrator.";
+    let exact = acp::Error::invalid_params().data(denial);
+    assert_eq!(
+        format_acp_error_with_locale(&exact, false, &locale),
+        "组织策略不允许使用此模型。请联系管理员。"
+    );
+
+    let near_miss = acp::Error::invalid_params().data(format!("{denial} extra"));
+    assert_eq!(
+        format_acp_error_with_locale(&near_miss, false, &locale),
+        format!("{denial} extra")
+    );
+}
+
+
+#[test]
+fn switch_model_error_localizes_policy_denial_at_direct_effect_boundary() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    let denial =
+        "This model isn't allowed by your organization's policy. Contact your administrator.";
+    let error = acp::Error::invalid_params().data(denial);
+    let mapped = switch_model_error_from_acp(&error, &None, false, &locale);
+    match mapped {
+        SwitchModelError::Other(message) => {
+            assert_eq!(message, "组织策略不允许使用此模型。请联系管理员。");
+        }
+        SwitchModelError::IncompatibleAgent { .. } => {
+            panic!("policy denial must remain a regular switch-model error")
+        }
+    }
+}
+
+
+#[test]
+fn session_list_partial_notices_localize_only_the_fixed_copy() {
+    let locale = crate::locale::LocaleContext::new(crate::locale::ResolvedLocale {
+        locale: crate::locale::UiLocale::ZhCn,
+        source: crate::locale::LocaleSource::Cli,
+    });
+    assert_eq!(
+        ConversationsPartial::NoOauth.picker_notice_with_locale(Some(&locale)),
+        "无法加载聊天：请使用 /login 登录"
+    );
+    assert_eq!(
+        ConversationsPartial::Timeout.picker_notice_with_locale(Some(&locale)),
+        "无法加载会话：请重试"
+    );
+    assert_eq!(
+        ConversationsPartial::Error.picker_notice(),
+        "Couldn't load conversations: retry"
+    );
+}
+
+
+#[test]
+fn zh_localization_review135_usage_unsupported_is_typed_not_a_text_rewrite() {
+    use crate::locale::{LocaleContext, LocaleSource, ResolvedLocale, UiLocale};
+    let zh = LocaleContext::new(ResolvedLocale { locale: UiLocale::ZhCn, source: LocaleSource::Cli });
+    assert_eq!(unsupported_or_sanitized(acp::Error::method_not_found(), &zh), "当前智能体版本不支持此功能");
+    assert_eq!(unsupported_or_sanitized(acp::Error::method_not_found(), &LocaleContext::default()), "not supported by this agent version");
+    let expected = sanitize_user_error(&acp::Error::internal_error().to_string());
+    assert_eq!(unsupported_or_sanitized(acp::Error::internal_error(), &zh), expected);
+}
+
+/// Every answer the shell can give, plus a dead channel and a broken peer, comes back as `TeamCapabilityHydrated` for the identity that asked.
+/// The serialization arm is not in the table: `HydrateTeamCapabilityRequest` is two `Option<String>`s, whose `Serialize` cannot fail, so no input reaches it.
+#[tokio::test]
+async fn hydrate_team_capability_adapter_maps_every_reply_to_the_asking_identity() {
+    use std::sync::Arc;
+    use xai_acp_lib::AcpAgentMessage;
+    use xai_grok_shell::extensions::auth::HydrateTeamCapabilityResponse;
+    let identity = crate::app::app_view::AuthIdentity {
+        email: Some("a@acme.test".into()),
+        team_id: Some("team-a".into()),
+        team_principal: true,
+    };
+    type ScriptedReply = (Option<Result<&'static str, acp::Error>>, Option<bool>);
+    let replies: [ScriptedReply; 8] = [
+        (Some(Ok(r#"{"canAdministerTeam":true}"#)), Some(true)),
+        (Some(Ok(r#"{"canAdministerTeam":false}"#)), Some(false)),
+        (Some(Ok(r#"{"canAdministerTeam":null,"extra":1}"#)), None),
+        (Some(Err(acp::Error::method_not_found())), None),
+        (Some(Ok(r#"{"canAdministerTeam":"yes"}"#)), None),
+        (Some(Ok(r#"{}"#)), None),
+        (Some(Ok(r#"{"canadministerteam":true}"#)), None),
+        (None, None),
+    ];
+    for (reply, expected) in replies {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let asked = identity.clone();
+        tokio::spawn(async move {
+            let Some(AcpAgentMessage::ExtMethod(args)) = rx.recv().await else {
+                panic!("one ext request")
+            };
+            assert_eq!(args.request.method.as_ref(), "x.ai/auth/hydrate_team_capability");
+            assert_eq!(
+                    args.request.params.get(),
+                    r#"{"email":"a@acme.test","teamId":"team-a"}"#
+                );
+            if let Some(reply) = reply {
+                let response = reply
+                    .map(|body| {
+                        let raw = serde_json::value::RawValue::from_string(
+                                body.to_owned(),
+                            )
+                            .unwrap();
+                        acp::ExtResponse::new(Arc::from(raw))
+                    });
+                let _ = args.response_tx.send(response);
+            }
+        });
+        match send_hydrate_team_capability(&tx, asked).await {
+            TaskResult::TeamCapabilityHydrated {
+                identity: answered,
+                can_administer_team,
+            } => {
+                assert_eq!((answered, can_administer_team), (identity.clone(), expected))
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(serde_json::from_str::<HydrateTeamCapabilityResponse>("{}").is_err());
+    assert!(
+            serde_json::from_str::<HydrateTeamCapabilityResponse>(r#"{"canadministerteam":true}"#)
+                .is_err()
+        );
+
 }

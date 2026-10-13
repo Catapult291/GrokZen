@@ -4,6 +4,7 @@ use crate::config::{
     AgentSessionConfig, BindMcpConfig, DEFAULT_EVENT_BUFFER_CAPACITY, WorkspaceConfig,
 };
 use crate::error::WorkspaceError;
+use crate::mcp::tests::RecordingGate;
 use crate::session::tool_config::resolve_session_toolset;
 use crate::session::tool_config::test_support::{TestSessionContextFactory, baseline_config, tc};
 use axum::response::IntoResponse;
@@ -23,6 +24,17 @@ pub(crate) fn make_strict_handle() -> WorkspaceHandle {
 /// [`make_handle`] with fs confinement on (mirrors a remote-sandbox server).
 pub(crate) fn make_confining_handle() -> WorkspaceHandle {
     make_handle_inner(false, false, Default::default(), true)
+}
+/// [`make_handle`] with the tool-approval gate enforced, as a daemon host has it.
+pub(crate) fn make_enforced_handle() -> WorkspaceHandle {
+    make_handle_with_factory(
+        Arc::new(TestSessionContextFactory::new()),
+        false,
+        false,
+        Default::default(),
+        false,
+        crate::permission::ToolApprovalGate::Enforced,
+    )
 }
 /// [`make_handle`] with an explicit `workspace_rewind_all_outcomes` value.
 pub(crate) fn make_handle_with_rewind_all_outcomes(enabled: bool) -> WorkspaceHandle {
@@ -54,6 +66,7 @@ pub(crate) fn make_handle_without_tool_state() -> WorkspaceHandle {
         false,
         Default::default(),
         false,
+        crate::permission::ToolApprovalGate::Off,
     )
 }
 fn make_handle_inner(
@@ -68,6 +81,7 @@ fn make_handle_inner(
         require_explicit_toolset,
         status_config,
         confine_fs_to_workspace_root,
+        crate::permission::ToolApprovalGate::Off,
     )
 }
 fn make_handle_with_factory(
@@ -76,6 +90,7 @@ fn make_handle_with_factory(
     require_explicit_toolset: bool,
     status_config: crate::StatusConfig,
     confine_fs_to_workspace_root: bool,
+    tool_approval: crate::permission::ToolApprovalGate,
 ) -> WorkspaceHandle {
     let cwd = factory.temp.path().to_path_buf();
     let config = WorkspaceConfig {
@@ -99,6 +114,9 @@ fn make_handle_with_factory(
         require_explicit_toolset,
         confine_fs_to_workspace_root,
         bind_mcp: None,
+        tool_approval,
+        host_kind: Default::default(),
+        sandbox: None,
     };
     let handle = WorkspaceHandle::build(
         config,
@@ -283,9 +301,9 @@ fn rewind_outcome_label_maps_each_variant() {
 }
 #[test]
 fn rewind_domain_and_result_labels_are_stable() {
-    assert_eq!(RewindDomain::Fs.as_str(), "fs");
-    assert_eq!(RewindDomain::Hunk.as_str(), "hunk");
-    assert_eq!(RewindDomain::Git.as_str(), "git");
+    assert_eq!(RewindDomain::Fs.as_ref(), "fs");
+    assert_eq!(RewindDomain::Hunk.as_ref(), "hunk");
+    assert_eq!(RewindDomain::Git.as_ref(), "git");
     assert_eq!(rewind_result_label(true), "success");
     assert_eq!(rewind_result_label(false), "failure");
 }
@@ -395,10 +413,8 @@ async fn build_session_routed_handlers_skips_invalid_client_name_without_panic()
         })
         .await;
 }
-/// Regression for the deleted catalog intersection.
-/// Reproduces the `session.bind` resolver tail: `build_session_routed_handlers` for the session toolset, plus the one RPC handler from the catalog.
+/// Regression for the deleted catalog intersection. Reproduces the `session.bind` resolver tail: `build_session_routed_handlers` for the session toolset, plus the one RPC handler from the catalog.
 /// It proves a session tool whose client name is ABSENT from that (grok-build) catalog is still advertised.
-/// The old catalog-intersection filter silently dropped exactly such tools (grok-build renames: 6 of 11).
 #[tokio::test]
 async fn resolver_advertises_tool_absent_from_connect_catalog() {
     let local = tokio::task::LocalSet::new();
@@ -482,8 +498,6 @@ fn session_tool_names(session: &Arc<crate::session::WorkspaceSession>) -> Vec<St
 }
 /// The sandbox-resume regression (`workspace_tool_coverage_incomplete`): a session created by a metadata-less bind resolves the workspace default.
 /// A later rebind that carries the client's explicit toolset must re-resolve and swap it in rather than silently reuse the default.
-/// The bind response then advertises the configured (renamed) tools.
-/// A repeat rebind with the identical config is a no-op reuse.
 #[tokio::test]
 async fn rebind_with_changed_explicit_toolset_reresolves_and_swaps() {
     let local = tokio::task::LocalSet::new();
@@ -563,9 +577,7 @@ async fn rebind_without_explicit_toolset_reuses_existing() {
         })
         .await;
 }
-/// The create arm's fingerprint write is set-if-unset.
-/// A concurrent rebind may already have swapped in its toolset and recorded its fingerprint under `update_lock`.
-/// The create task's deferred write must not clobber that fingerprint.
+/// The create arm's fingerprint write is set-if-unset. The create task's deferred write must not clobber that fingerprint.
 /// Otherwise a later identical rebind would `Reused`-skip against a fingerprint that no longer describes the live toolset.
 #[tokio::test]
 async fn create_fingerprint_write_does_not_clobber_concurrent_rebind() {
@@ -1442,7 +1454,10 @@ fn make_persistent_shell_handle() -> WorkspaceHandle {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     WorkspaceHandle::build(
         config,
@@ -1787,10 +1802,10 @@ async fn restarted_workspace_rediscovers_durable_task() {
 #[test]
 fn rewind_metric_helpers_record_observable_effects() {
     let capture_labels = [
-        RewindDomain::Git.as_str(),
+        RewindDomain::Git.as_ref(),
         rewind_outcome_label(TurnHookOutcome::Cancelled),
     ];
-    let restore_labels = [RewindDomain::Fs.as_str(), rewind_result_label(true)];
+    let restore_labels = [RewindDomain::Fs.as_ref(), rewind_result_label(true)];
     let canary_label = [rewind_outcome_label(TurnHookOutcome::Error)];
     let capture_before = REWIND_CHECKPOINT_CAPTURE_TOTAL
         .with_label_values(&capture_labels)
@@ -1932,7 +1947,10 @@ pub(crate) fn make_handle_with_events() -> (WorkspaceHandle, tempfile::TempDir) 
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     let home = tempfile::tempdir().unwrap();
     let handle = WorkspaceHandle::build(
@@ -2008,30 +2026,96 @@ async fn events_jsonl_captures_turn_tool_toggle_and_mcp_variants() {
     let by_type = |t: &str| {
         events
             .iter()
-            .find(|e| e["type"] == t)
+            .find(|e| e.get("type").unwrap_or(&serde_json::Value::Null) == t)
             .unwrap_or_else(|| panic!("{t} event missing from events.jsonl"))
     };
     let ts = by_type("turn_started");
-    assert_eq!(ts["session_id"], sid);
-    assert_eq!(ts["turn_number"], 7);
-    assert_eq!(ts["model_id"], "grok-4");
-    assert_eq!(ts["yolo_mode"], false);
-    assert_eq!(ts["conversation_message_count"], 5);
-    assert_eq!(ts["session_relationship"], "subagent");
-    assert_eq!(ts["schema_version"], "1.0");
-    assert_eq!(by_type("tool_started")["tool_name"], "read_file");
+    assert_eq!(
+        ts.get("session_id").unwrap_or(&serde_json::Value::Null),
+        sid
+    );
+    assert_eq!(ts.get("turn_number").unwrap_or(&serde_json::Value::Null), 7);
+    assert_eq!(
+        ts.get("model_id").unwrap_or(&serde_json::Value::Null),
+        "grok-4"
+    );
+    assert_eq!(
+        ts.get("yolo_mode").unwrap_or(&serde_json::Value::Null),
+        false
+    );
+    assert_eq!(
+        ts.get("conversation_message_count")
+            .unwrap_or(&serde_json::Value::Null),
+        5
+    );
+    assert_eq!(
+        ts.get("session_relationship")
+            .unwrap_or(&serde_json::Value::Null),
+        "subagent"
+    );
+    assert_eq!(
+        ts.get("schema_version").unwrap_or(&serde_json::Value::Null),
+        "1.0"
+    );
+    assert_eq!(
+        by_type("tool_started")
+            .get("tool_name")
+            .unwrap_or(&serde_json::Value::Null),
+        "read_file"
+    );
     let tc = by_type("tool_completed");
-    assert_eq!(tc["tool_name"], "read_file");
-    assert_eq!(tc["outcome"], "success");
-    assert_eq!(by_type("yolo_toggled")["enabled"], true);
+    assert_eq!(
+        tc.get("tool_name").unwrap_or(&serde_json::Value::Null),
+        "read_file"
+    );
+    assert_eq!(
+        tc.get("outcome").unwrap_or(&serde_json::Value::Null),
+        "success"
+    );
+    assert_eq!(
+        by_type("yolo_toggled")
+            .get("enabled")
+            .unwrap_or(&serde_json::Value::Null),
+        true
+    );
     let mcp_toggle = by_type("mcp_server_toggled");
-    assert_eq!(mcp_toggle["server_name"], "linear");
-    assert_eq!(mcp_toggle["enabled"], false);
+    assert_eq!(
+        mcp_toggle
+            .get("server_name")
+            .unwrap_or(&serde_json::Value::Null),
+        "linear"
+    );
+    assert_eq!(
+        mcp_toggle
+            .get("enabled")
+            .unwrap_or(&serde_json::Value::Null),
+        false
+    );
     let mcp_call = by_type("mcp_tool_call_started");
-    assert_eq!(mcp_call["server_name"], "linear");
-    assert_eq!(mcp_call["tool_name"], "list_issues");
-    assert_eq!(by_type("turn_ended")["outcome"], "completed");
-    let pos = |t: &str| events.iter().position(|e| e["type"] == t).unwrap();
+    assert_eq!(
+        mcp_call
+            .get("server_name")
+            .unwrap_or(&serde_json::Value::Null),
+        "linear"
+    );
+    assert_eq!(
+        mcp_call
+            .get("tool_name")
+            .unwrap_or(&serde_json::Value::Null),
+        "list_issues"
+    );
+    assert_eq!(
+        by_type("turn_ended")
+            .get("outcome")
+            .unwrap_or(&serde_json::Value::Null),
+        "completed"
+    );
+    let pos = |t: &str| {
+        events
+            .iter()
+            .position(|e| e.get("type").unwrap_or(&serde_json::Value::Null) == t)
+            .unwrap()
+    };
     assert!(
         pos("turn_started") < pos("tool_started"),
         "turn_started must precede tool_started"
@@ -2420,9 +2504,7 @@ fn spawn_test_queue(home: &std::path::Path) -> Arc<xai_file_utils::queue::Upload
     ))
 }
 /// `WorkspaceHandle::new` (the test/default path, not `connect_local_workspace`) must use an ephemeral temp `workspace_home`.
-/// It must never use the real `$GROK_WORKSPACE_HOME` and must NOT configure an upload queue.
-/// The legacy inline-upload path stays inert (no storage config).
-/// This pins the flag-off defaults so uploads never start implicitly and `new` stays runtime-light (no queue worker spawned).
+/// It must never use the real `$GROK_WORKSPACE_HOME` and must NOT configure an upload queue. This pins the flag-off defaults so uploads never start implicitly and `new` stays runtime-light (no queue worker spawned).
 #[tokio::test]
 async fn new_defaults_to_ephemeral_home_and_inert_legacy_upload() {
     let local = tokio::task::LocalSet::new();
@@ -2494,7 +2576,7 @@ async fn tool_state_upload_is_noop_when_flag_off() {
             let handle = WorkspaceHandle::new_with_data_collection(
                 WorkspaceHandle::test_config(cwd, factory),
                 queue_home.path().to_path_buf(),
-                queue.clone(),
+                Some(queue.clone()),
                 false,
                 false,
                 crate::upload::environment::WorkspaceIdentity::default(),
@@ -2537,7 +2619,7 @@ async fn tool_state_upload_is_noop_when_data_collection_disabled() {
             let handle = WorkspaceHandle::new_with_data_collection(
                 WorkspaceHandle::test_config(cwd, factory),
                 queue_home.path().to_path_buf(),
-                queue.clone(),
+                Some(queue.clone()),
                 true,
                 true,
                 Default::default(),
@@ -2599,7 +2681,10 @@ fn make_queue_backed_handle_with(
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     let home = tempfile::tempdir().expect("workspace home tempdir");
     let auth: xai_computer_hub_sdk::SharedAuthProvider = Arc::new(
@@ -2624,7 +2709,7 @@ fn make_queue_backed_handle_with(
     let handle = WorkspaceHandle::new_with_data_collection(
         config,
         home.path().to_path_buf(),
-        queue,
+        Some(queue),
         true,
         data_collection_disabled,
         identity,
@@ -3380,7 +3465,10 @@ async fn hook_registry_loads_from_settings_file() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     let registry = handle.hook_registry();
@@ -3416,7 +3504,10 @@ async fn hook_registry_loads_from_directory() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     let registry = handle.hook_registry();
@@ -3479,7 +3570,10 @@ async fn hook_load_errors_reported_for_bad_file() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("construction must still succeed");
     assert!(
@@ -3521,7 +3615,10 @@ async fn hook_registry_global_and_project_sources_merge() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     let registry = handle.hook_registry();
@@ -3550,7 +3647,10 @@ async fn hook_registry_missing_source_is_non_fatal() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("must not panic on missing source");
     assert!(handle.hook_registry().is_empty());
@@ -3583,7 +3683,10 @@ async fn hook_registry_empty_directory_yields_empty_registry() {
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     let handle = WorkspaceHandle::new(config).expect("ok");
     assert!(handle.hook_registry().is_empty());
@@ -3901,6 +4004,7 @@ fn workspace_shared_auth_provider_uses_workspace_config() {
         alpha_test_key: None,
         allow_insecure_ws: true,
         diag: None,
+        on_handshake_refused: None,
     };
     let config = WorkspaceConfig::new_for_proxy(
         temp.path().to_path_buf(),
@@ -4432,7 +4536,9 @@ async fn fork_session_inherits_viewer_ctx_from_parent() {
         .await;
 }
 /// Build the resolver exactly the way `connect_hub` does: session catalog handlers and the workspace RPC handler.
-fn bind_resolver_fixture(handle: &WorkspaceHandle) -> xai_computer_hub_sdk::SessionHandlerResolver {
+pub(crate) fn bind_resolver_fixture(
+    handle: &WorkspaceHandle,
+) -> xai_computer_hub_sdk::SessionHandlerResolver {
     let catalog_toolset = handle.session("main").expect("main session").toolset();
     let mut catalog = build_session_routed_handlers(&catalog_toolset, handle);
     let rpc_handler: Arc<dyn xai_computer_hub_sdk::ToolServerHandler> =
@@ -4441,7 +4547,9 @@ fn bind_resolver_fixture(handle: &WorkspaceHandle) -> xai_computer_hub_sdk::Sess
     catalog.push(rpc_handler);
     handle.session_bind_resolver(Arc::new(catalog), rpc_tool_id)
 }
-fn handler_names(resolved: &xai_computer_hub_sdk::ResolvedSessionHandlers) -> Vec<String> {
+pub(crate) fn handler_names(
+    resolved: &xai_computer_hub_sdk::ResolvedSessionHandlers,
+) -> Vec<String> {
     resolved
         .handlers
         .iter()
@@ -4473,15 +4581,26 @@ async fn bind_mcp_post(
     {
         state.session_ids.lock().push(session_id.to_owned());
     }
-    let id = request["id"].clone();
-    match request["method"].as_str() {
+    let id = request
+        .get("id")
+        .unwrap_or(&serde_json::Value::Null)
+        .clone();
+    match request
+        .get("method")
+        .unwrap_or(&serde_json::Value::Null)
+        .as_str()
+    {
         Some("initialize") => (
             [("mcp-session-id", "local-test-session")],
             axum::Json(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": {
-                    "protocolVersion": request["params"]["protocolVersion"].clone(),
+                    "protocolVersion": request
+                        .get("params")
+                        .and_then(|v| v.get("protocolVersion"))
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
                     "capabilities": {},
                     "serverInfo": {"name": "local-test", "version": "1"}
                 }
@@ -4523,7 +4642,12 @@ async fn bind_mcp_post(
             .into_response()
         }
         Some("tools/call") => {
-            state.tool_calls.lock().push(request["params"].clone());
+            state.tool_calls.lock().push(
+                request
+                    .get("params")
+                    .unwrap_or(&serde_json::Value::Null)
+                    .clone(),
+            );
             axum::Json(serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -4534,6 +4658,12 @@ async fn bind_mcp_post(
             }))
             .into_response()
         }
+        Some("server/discover") => axum::Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32601, "message": "Method not found"}
+        }))
+        .into_response(),
         _ => axum::http::StatusCode::ACCEPTED.into_response(),
     }
 }
@@ -4677,10 +4807,682 @@ async fn bind_advertises_configured_mcp_per_session() {
         })
         .await;
 }
-/// Drive one session's MCP convergence the way the bind-spawned task and the
-/// reload walk do, but against a fake hub — tests have no live hub
-/// connection, so `converge_session_mcp` (which resolves the real one) is
-/// exercised here at the `converge_session` level with the published config.
+/// Stopping a server drops the session's client and its hub registrations while the publish keeps
+/// naming it. A reload's convergence (`IfChanged`) leaves it stopped, so the daemon can stop the
+/// computer-use helper the moment Grok Desktop quits and push the app-endpoint drop right after
+/// without the push starting the helper again; the next bind's convergence (`Always`, like every
+/// bind) starts a fresh client.
+#[tokio::test]
+async fn a_stopped_server_stays_configured_and_returns_at_the_next_bind() {
+    let state = BindMcpTestState::default();
+    let (url, server_task) = spawn_bind_mcp_server(state.clone()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([configured_test_mcp("bound", url)])
+            .with_first_party_servers(["bound".to_owned()]),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let session_id = "conversation";
+    let sid = xai_tool_protocol::SessionId::new(session_id).unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::Always).await;
+    let clients_before = state.session_ids.lock().len();
+    assert_eq!(
+        Some(vec![("bound".to_owned(), vec!["echo".to_owned()])]),
+        live_mcp_servers(&handle, session_id).await
+    );
+    assert!(
+        handle
+            .stop_session_mcp_server(session_id, "bound", Some(&hub))
+            .await,
+        "the server was running here"
+    );
+    assert_eq!(
+        Some(Vec::new()),
+        live_mcp_servers(&handle, session_id).await
+    );
+    assert!(
+        hub.handlers_for_session(&sid).is_empty(),
+        "the stopped server's tools leave the hub with it"
+    );
+    assert_eq!(
+        1,
+        handle
+            .shared
+            .bind_mcp
+            .as_ref()
+            .map_or(0, |published| published.read().servers().len()),
+        "the publish is untouched"
+    );
+    assert!(
+        !handle
+            .stop_session_mcp_server(session_id, "bound", Some(&hub))
+            .await
+    );
+    let reloaded =
+        converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::IfChanged).await;
+    assert_eq!(
+        crate::mcp::SessionMcpDelta::default(),
+        reloaded,
+        "a reload does not start a server stopped until the next bind"
+    );
+    assert_eq!(
+        Some(Vec::new()),
+        live_mcp_servers(&handle, session_id).await
+    );
+    assert_eq!(
+        clients_before,
+        state.session_ids.lock().len(),
+        "the reload opened no client"
+    );
+    resolver(sid.clone(), None)
+        .await
+        .expect("rebind must succeed");
+    let revived = converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(vec!["bound".to_owned()], revived.added);
+    assert_eq!(
+        Some(vec![("bound".to_owned(), vec!["echo".to_owned()])]),
+        live_mcp_servers(&handle, session_id).await
+    );
+    assert!(
+        state.session_ids.lock().len() > clients_before,
+        "the revived server is a new client, not the stopped one"
+    );
+    server_task.abort();
+}
+/// Grok Desktop can quit while a bind's convergence is still starting the helper: the stop then
+/// finds nothing running and only marks the server stopped, without waiting for the convergence
+/// (which may hold the session's `update_lock` for the whole discovery window). The start that
+/// completes afterwards must not commit — the client the convergence opened ends, the way a stop
+/// ends a running one — and the server stays stopped until the session's next bind.
+/// Deterministic: the stop lands while the server is parked in discovery; the record then commits
+/// its client under the FIFO binding lock, a probe captures that client, and the install runs last.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stop_during_a_bind_start_ends_the_client_the_start_opened() {
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tools_list_gate: Some((Arc::clone(&reached), Arc::clone(&release))),
+        ..Default::default()
+    })
+    .await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    let mcp_config = BindMcpConfig::new([configured_test_mcp("helper", url)]);
+    config.bind_mcp = Some(mcp_config.clone());
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let session_id = "conversation";
+    let sid = xai_tool_protocol::SessionId::new(session_id).unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let session = handle.session(session_id).expect("session exists");
+    let hub = Arc::new(FakeHubRegistry::default());
+    let converge = {
+        let session = Arc::clone(&session);
+        let hub = Arc::clone(&hub);
+        let mcp_config = mcp_config.clone();
+        tokio::spawn(async move {
+            let _update_guard = session.update_lock.lock().await;
+            crate::mcp::converge_session(
+                &session,
+                session_id,
+                &mcp_config,
+                &*hub,
+                crate::mcp::McpReclaim::Always,
+                xai_grok_session_events::EventWriter::noop(),
+            )
+            .await
+        })
+    };
+    reached.notified().await;
+    assert!(
+        !handle
+            .stop_session_mcp_server(session_id, "helper", Some(&*hub))
+            .await,
+        "nothing is running yet when the host goes"
+    );
+    let gate = session.mcp_binding.lock().await;
+    release.notify_one();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let probe = {
+        let session = Arc::clone(&session);
+        tokio::spawn(async move {
+            let _binding = session.mcp_binding.lock().await;
+            session
+                .mcp_state
+                .lock()
+                .await
+                .owned_clients
+                .get("helper")
+                .map(Arc::downgrade)
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    drop(gate);
+    let delta = converge
+        .await
+        .unwrap()
+        .expect("the convergence still succeeds");
+    let client = probe
+        .await
+        .unwrap()
+        .expect("the record committed the client before the install saw the stop");
+    assert!(
+        client.upgrade().is_none(),
+        "the client the start opened ends: nothing holds it after the stop"
+    );
+    assert_eq!(
+        crate::mcp::SessionMcpDelta::default(),
+        delta,
+        "a server stopped mid-start was neither added nor failed"
+    );
+    assert_eq!(
+        Some(Vec::new()),
+        live_mcp_servers(&handle, session_id).await,
+        "the stopped server never enters the session's set"
+    );
+    assert!(
+        hub.handlers_for_session(&sid).is_empty(),
+        "nothing of the stopped server is advertised"
+    );
+    assert!(
+        !session
+            .mcp_state
+            .lock()
+            .await
+            .owned_clients
+            .contains_key("helper"),
+        "the session no longer owns the client"
+    );
+    assert_eq!(
+        crate::mcp::SessionMcpDelta::default(),
+        converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::IfChanged).await
+    );
+    resolver(sid.clone(), None)
+        .await
+        .expect("rebind must succeed");
+    release.notify_one();
+    let revived = converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(vec!["helper".to_owned()], revived.added);
+    server_task.abort();
+}
+/// A server whose rmcp service loop ended (its child was killed, crashed, or closed its pipes)
+/// stays in the session's live set, so a convergence used to plan nothing for it and every call
+/// through it failed `Transport closed` until the daemon restarted. The next convergence — every
+/// bind runs one — must stop the dead client and start a fresh one.
+#[tokio::test]
+async fn a_server_whose_transport_closed_is_restarted_at_the_next_convergence() {
+    let state = BindMcpTestState::default();
+    let (url, server_task) = spawn_bind_mcp_server(state.clone()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([configured_test_mcp("bound", url)])
+            .with_first_party_servers(["bound".to_owned()]),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let session_id = "conversation";
+    let sid = xai_tool_protocol::SessionId::new(session_id).unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::Always).await;
+    let clients_before = state.session_ids.lock().len();
+    let echo = |hub: &FakeHubRegistry| {
+        hub.handlers_for_session(&sid)
+            .into_iter()
+            .find(|handler| handler.tool_id().as_str() == "echo")
+            .expect("echo is advertised")
+    };
+    end_mcp_service_loop(&handle, session_id, "bound").await;
+    let dead_call = echo(&hub)
+        .handle_call(
+            ToolCallContext::default(),
+            serde_json::json!({"message": "dead"}),
+        )
+        .await;
+    let error = drain_terminal_err(dead_call).await;
+    assert!(
+        error.to_string().contains("Transport closed"),
+        "a call through the dead client fails closed: {error}"
+    );
+    assert_eq!(
+        Some(vec![("bound".to_owned(), vec!["echo".to_owned()])]),
+        live_mcp_servers(&handle, session_id).await,
+        "nothing removes the dead server from the live set on its own"
+    );
+    resolver(sid.clone(), None)
+        .await
+        .expect("rebind must succeed");
+    let delta = converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(vec!["bound".to_owned()], delta.removed);
+    assert_eq!(vec!["bound".to_owned()], delta.added);
+    assert!(
+        state.session_ids.lock().len() > clients_before,
+        "the restarted server is a new client, not the dead one"
+    );
+    let output = drain_terminal_ok(
+        echo(&hub)
+            .handle_call(
+                ToolCallContext::default(),
+                serde_json::json!({"message": "alive"}),
+            )
+            .await,
+    )
+    .await;
+    assert!(output.value.to_string().contains("MCP_CALL_OK"));
+    let clients_after_restart = state.session_ids.lock().len();
+    let steady = converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::Always).await;
+    assert!(steady.is_empty(), "{steady:?}");
+    assert_eq!(clients_after_restart, state.session_ids.lock().len());
+    server_task.abort();
+}
+/// The daemon's path to a gate: the convergence hands `BindMcpConfig::with_call_gate`'s gate to
+/// the server it names and to no other.
+#[tokio::test]
+async fn convergence_gates_only_the_server_the_bind_config_names() {
+    let gated_state = BindMcpTestState {
+        tool_name: Some("refused".to_owned()),
+        ..BindMcpTestState::default()
+    };
+    let (gated_url, gated_task) = spawn_bind_mcp_server(gated_state.clone()).await;
+    let open_state = BindMcpTestState::default();
+    let (open_url, open_task) = spawn_bind_mcp_server(open_state.clone()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(
+        BindMcpConfig::new([
+            configured_test_mcp("gated", gated_url),
+            configured_test_mcp("open", open_url),
+        ])
+        .with_call_gate("gated", Arc::new(RecordingGate::default())),
+    );
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = xai_tool_protocol::SessionId::new("conversation").unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = FakeHubRegistry::default();
+    converge_with(
+        &handle,
+        "conversation",
+        &hub,
+        crate::mcp::McpReclaim::Always,
+    )
+    .await;
+    let call = |tool: &str| {
+        let handler = hub
+            .handlers_for_session(&sid)
+            .into_iter()
+            .find(|handler| handler.tool_id().as_str() == tool)
+            .expect("the tool is advertised");
+        async move {
+            drain_terminal_ok(
+                handler
+                    .handle_call(ToolCallContext::default(), serde_json::json!({}))
+                    .await,
+            )
+            .await
+        }
+    };
+    let refused = call("refused").await;
+    assert_eq!(
+        serde_json::json!({
+            "content": [{ "type": "text", "text": "refused by the gate" }],
+            "isError": true,
+        }),
+        refused.value
+    );
+    assert!(
+        gated_state.tool_calls.lock().is_empty(),
+        "the gated server never saw the call"
+    );
+    let forwarded = call("echo").await;
+    assert!(forwarded.value.to_string().contains("MCP_CALL_OK"));
+    assert_eq!(1, open_state.tool_calls.lock().len());
+    gated_task.abort();
+    open_task.abort();
+}
+/// End a live server's rmcp service loop and wait until its client reports the transport closed:
+/// the loop quits `Cancelled` here and `Closed` for a SIGKILLed stdio child, but both leave the
+/// client `Ready` over a dead transport, which is all the convergence can observe.
+async fn end_mcp_service_loop(handle: &WorkspaceHandle, session_id: &str, server: &str) {
+    let session = handle.session(session_id).expect("session exists");
+    let client = session
+        .mcp_state
+        .lock()
+        .await
+        .owned_clients
+        .get(server)
+        .cloned()
+        .expect("the session owns the server's client");
+    let service = client
+        .ensure_initialized()
+        .await
+        .expect("the client is ready");
+    service.cancellation_token().cancel();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while client.liveness_check().await != xai_grok_mcp::servers::LivenessCheck::TransportClosed
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the transport closes once the service loop ends");
+}
+async fn drain_terminal_err(
+    mut stream: impl futures::Stream<
+        Item = xai_tool_runtime::ToolStreamItem<xai_tool_runtime::TypedToolOutput>,
+    > + Unpin,
+) -> xai_tool_runtime::ToolError {
+    use futures::StreamExt;
+    use xai_tool_runtime::ToolStreamItem;
+    while let Some(item) = stream.next().await {
+        match item {
+            ToolStreamItem::Terminal(Err(e)) => return e,
+            ToolStreamItem::Progress(_) => {}
+            ToolStreamItem::Terminal(Ok(t)) => {
+                panic!("expected Terminal(Err), got Ok: {t:?}")
+            }
+        }
+    }
+    panic!("stream ended without terminal")
+}
+/// [`crate::mcp::HubToolRegistry`] wrapper that notes, at the first unregister, whether the
+/// stopped server's client was still alive.
+struct ClientAtFirstUnregister {
+    inner: FakeHubRegistry,
+    client: parking_lot::Mutex<Option<std::sync::Weak<xai_grok_mcp::servers::McpClient>>>,
+    alive_at_first_unregister: parking_lot::Mutex<Option<bool>>,
+}
+impl crate::mcp::HubToolRegistry for ClientAtFirstUnregister {
+    async fn register_tool_dynamic(
+        &self,
+        handler: Arc<dyn xai_computer_hub_sdk::ToolServerHandler>,
+        sessions: Vec<xai_tool_protocol::SessionId>,
+        life: u64,
+    ) -> Result<(), xai_computer_hub_sdk::ClientError> {
+        crate::mcp::HubToolRegistry::register_tool_dynamic(&self.inner, handler, sessions, life)
+            .await
+    }
+    async fn unregister_tool_dynamic(
+        &self,
+        tool_id: &xai_tool_protocol::ToolId,
+        session_id: &xai_tool_protocol::SessionId,
+        life: u64,
+    ) -> Result<bool, xai_computer_hub_sdk::ClientError> {
+        let alive = self
+            .client
+            .lock()
+            .as_ref()
+            .is_some_and(|client| client.upgrade().is_some());
+        self.alive_at_first_unregister.lock().get_or_insert(alive);
+        crate::mcp::HubToolRegistry::unregister_tool_dynamic(&self.inner, tool_id, session_id, life)
+            .await
+    }
+}
+/// Reload, `configure_mcp` and the per-session stop all remove servers through `stop_servers`, so
+/// this pins its order once: the client is gone (its child with it) before the hub's first round
+/// trip, which a loaded hub can stretch; the stop is the safety action and must not wait on them.
+#[tokio::test]
+async fn stop_servers_ends_the_client_before_the_first_hub_unregister() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let session_id = "conversation";
+    let sid = xai_tool_protocol::SessionId::new(session_id).unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = ClientAtFirstUnregister {
+        inner: FakeHubRegistry::default(),
+        client: parking_lot::Mutex::new(None),
+        alive_at_first_unregister: parking_lot::Mutex::new(None),
+    };
+    let session = handle.session(session_id).expect("session exists");
+    {
+        let published = handle
+            .shared
+            .bind_mcp
+            .as_ref()
+            .expect("bind_mcp")
+            .read()
+            .clone();
+        let _update_guard = session.update_lock.lock().await;
+        crate::mcp::converge_session(
+            &session,
+            session_id,
+            &published,
+            &hub,
+            crate::mcp::McpReclaim::Always,
+            xai_grok_session_events::EventWriter::noop(),
+        )
+        .await
+        .expect("converge must succeed");
+    }
+    let client = session
+        .mcp_state
+        .lock()
+        .await
+        .owned_clients
+        .get("bound")
+        .map(Arc::downgrade)
+        .expect("the converged server's client is owned by the session");
+    *hub.client.lock() = Some(client.clone());
+    assert!(
+        !hub.inner.handlers_for_session(&sid).is_empty(),
+        "the server's tools are on the hub before the stop"
+    );
+    assert!(
+        handle
+            .stop_session_mcp_server(session_id, "bound", Some(&hub))
+            .await
+    );
+    assert_eq!(
+        Some(false),
+        *hub.alive_at_first_unregister.lock(),
+        "the hub is first told after the client is already gone"
+    );
+    assert!(
+        client.upgrade().is_none(),
+        "nothing keeps the stopped client alive"
+    );
+    assert!(hub.inner.handlers_for_session(&sid).is_empty());
+    server_task.abort();
+}
+/// The stop is the safety action, so it does not wait for a hub: with none connected (as here,
+/// where the handle never dialled one) the client still ends, its child with it, and only the
+/// unregisters are skipped — the registrations went away with the connection.
+#[tokio::test]
+async fn stop_mcp_server_ends_the_client_without_a_hub() {
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([configured_test_mcp("bound", url)]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let session_id = "conversation";
+    let sid = xai_tool_protocol::SessionId::new(session_id).unwrap();
+    resolver(sid.clone(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = FakeHubRegistry::default();
+    converge_with(&handle, session_id, &hub, crate::mcp::McpReclaim::Always).await;
+    let session = handle.session(session_id).expect("session exists");
+    let client = session
+        .mcp_state
+        .lock()
+        .await
+        .owned_clients
+        .get("bound")
+        .map(Arc::downgrade)
+        .expect("the converged server's client is owned by the session");
+    let advertised = hub.handlers_for_session(&sid).len();
+    assert!(advertised > 0, "the server's tools are on the hub");
+    assert!(
+        handle.shared.hub_server_blocking().await.is_none(),
+        "this handle has no hub connection"
+    );
+    assert_eq!(
+        vec![session_id.to_owned()],
+        handle.stop_mcp_server("bound").await,
+        "the stop reports the session it released"
+    );
+    assert!(
+        client.upgrade().is_none(),
+        "the client ends without a hub to tell"
+    );
+    assert_eq!(
+        Some(Vec::new()),
+        live_mcp_servers(&handle, session_id).await
+    );
+    assert_eq!(
+        advertised,
+        hub.handlers_for_session(&sid).len(),
+        "only the unregisters are skipped"
+    );
+    server_task.abort();
+}
+/// [`crate::mcp::HubToolRegistry`] whose unregisters are never acknowledged, like the hub once
+/// Grok Desktop's session is gone: the daemon's config push then waits out its whole budget.
+struct HubThatNeverAcksUnregisters {
+    inner: FakeHubRegistry,
+}
+impl crate::mcp::HubToolRegistry for HubThatNeverAcksUnregisters {
+    async fn register_tool_dynamic(
+        &self,
+        handler: Arc<dyn xai_computer_hub_sdk::ToolServerHandler>,
+        sessions: Vec<xai_tool_protocol::SessionId>,
+        life: u64,
+    ) -> Result<(), xai_computer_hub_sdk::ClientError> {
+        crate::mcp::HubToolRegistry::register_tool_dynamic(&self.inner, handler, sessions, life)
+            .await
+    }
+    async fn unregister_tool_dynamic(
+        &self,
+        _tool_id: &xai_tool_protocol::ToolId,
+        _session_id: &xai_tool_protocol::SessionId,
+        _life: u64,
+    ) -> Result<bool, xai_computer_hub_sdk::ClientError> {
+        std::future::pending().await
+    }
+}
+/// When Grok Desktop quits, the daemon stops the helper and, right behind it, pushes the config
+/// without the app's server; that push's convergence holds the session's `update_lock` and waits
+/// on a hub that never acknowledges the app's unregisters. The stop shares no lock with it across
+/// a hub round trip, so the helper's client is gone within a second while the push is still waiting.
+#[tokio::test]
+async fn the_stop_ends_the_client_while_the_push_waits_on_the_hub() {
+    let (app_url, app_task) = spawn_bind_mcp_server(BindMcpTestState {
+        tool_name: Some("open_window".to_owned()),
+        ..BindMcpTestState::default()
+    })
+    .await;
+    let (url, server_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    config.bind_mcp = Some(BindMcpConfig::new([
+        configured_test_mcp("app", app_url),
+        configured_test_mcp("helper", url.clone()),
+    ]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let session_id = "conversation";
+    resolver(xai_tool_protocol::SessionId::new(session_id).unwrap(), None)
+        .await
+        .expect("bind must succeed");
+    let hub = Arc::new(HubThatNeverAcksUnregisters {
+        inner: FakeHubRegistry::default(),
+    });
+    converge_with(
+        &handle,
+        session_id,
+        &hub.inner,
+        crate::mcp::McpReclaim::Always,
+    )
+    .await;
+    let session = handle.session(session_id).expect("session exists");
+    let helper = session
+        .mcp_state
+        .lock()
+        .await
+        .owned_clients
+        .get("helper")
+        .map(Arc::downgrade)
+        .expect("the helper's client is owned by the session");
+    let stop = tokio::spawn({
+        let handle = handle.clone();
+        let hub = hub.clone();
+        async move {
+            handle
+                .stop_session_mcp_server(session_id, "helper", Some(&*hub))
+                .await
+        }
+    });
+    let without_app = BindMcpConfig::new([configured_test_mcp("helper", url)]);
+    let push = tokio::spawn({
+        let session = session.clone();
+        let hub = hub.clone();
+        async move {
+            let _update_guard = session.update_lock.lock().await;
+            crate::mcp::converge_session(
+                &session,
+                session_id,
+                &without_app,
+                &*hub,
+                crate::mcp::McpReclaim::IfChanged,
+                xai_grok_session_events::EventWriter::noop(),
+            )
+            .await
+        }
+    });
+    let released = tokio::time::Instant::now();
+    while helper.upgrade().is_some() {
+        assert!(
+            released.elapsed() < std::time::Duration::from_secs(1),
+            "the helper's client must end within a second of the stop"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        !push.is_finished(),
+        "the push is still waiting on the hub when the helper is gone"
+    );
+    stop.abort();
+    push.abort();
+    app_task.abort();
+    server_task.abort();
+}
+/// Drive one session's MCP convergence the way the bind-spawned task and the reload walk do, but
+/// against a fake hub — tests have no live hub connection, so `converge_session_mcp` (which
+/// resolves the real one) is exercised here at the `converge_session` level with the published config.
 async fn converge_with(
     handle: &WorkspaceHandle,
     session_id: &str,
@@ -4733,10 +5535,8 @@ async fn live_mcp_servers(
     live.sort();
     Some(live)
 }
-/// The load-bearing precondition for adding an MCP server while the app is
-/// running: a session that bound with nothing configured must still join the
-/// configured set, so a later reload has somewhere to add servers. If this
-/// regressed to `Uninitialized`, reloads would silently skip the session.
+/// The load-bearing precondition for adding an MCP server while the app is running: a session that bound with nothing configured must still join the configured set, so a later reload has somewhere to add servers.
+/// If this regressed to `Uninitialized`, reloads would silently skip the session.
 #[tokio::test]
 async fn bind_with_no_configured_mcp_still_joins_the_configured_set() {
     let local = tokio::task::LocalSet::new();
@@ -4829,8 +5629,8 @@ async fn a_shadowed_mcp_tool_is_not_attributed_to_its_server() {
         })
         .await;
 }
-/// An `rpc_only` bind opts out of MCP entirely, so a later reload must leave
-/// it alone rather than pushing servers into it.
+/// An `rpc_only` bind opts out of MCP entirely: neither the bind nor a later reload may push servers into it. The reload half is the part with no guard of its own — `reload_bind_mcp` walks EVERY live session and never reads the flag.
+/// What excludes an `rpc_only` session is that its binding never went `Active`, so `converge_session` returns before it plans anything.
 #[tokio::test]
 async fn an_rpc_only_bind_never_joins_the_configured_set() {
     let local = tokio::task::LocalSet::new();
@@ -4878,9 +5678,8 @@ async fn reload_is_a_no_op_without_local_mcp_configuration() {
         .await;
 }
 /// A reload that lands while the hub is disconnected must not be silently
-/// dropped: the config is published (new and revived binds start from it)
-/// and the caller gets an error so it can retry the convergence when the
-/// hub is back.
+/// dropped: the config is published (new and revived binds start from it) and
+/// the caller gets an error so it can retry the convergence when the hub is back.
 #[tokio::test]
 async fn a_reload_without_a_hub_stages_the_config_and_reports_it() {
     let local = tokio::task::LocalSet::new();
@@ -5129,10 +5928,9 @@ async fn bind_mcp_cannot_shadow_native_tool() {
         })
         .await;
 }
-/// A teardown that lands while a bridge is still connecting cancels the
-/// drive outright: the pending start future is dropped (killing the client
-/// and its child process) instead of the child living on until the
-/// discovery deadline, and nothing is committed to the ended session.
+/// A teardown that lands while a bridge is still connecting cancels the drive outright: the
+/// pending start future is dropped (killing the client and its child process) instead of the
+/// child living on until the discovery deadline, and nothing is committed to the ended session.
 #[tokio::test]
 async fn a_teardown_mid_connect_drops_the_finished_client() {
     let local = tokio::task::LocalSet::new();
@@ -5216,10 +6014,9 @@ impl crate::mcp::HubToolRegistry for TeardownOnFirstRegister {
             .await
     }
 }
-/// The commit gate on the reload's registrations: a teardown that lands
-/// while re-claimed tools are registering must not leave those ids on the
-/// hub — teardown's unregister pass covers only ids recorded on the servers
-/// it extracted, which cannot include one registered after the extraction.
+/// The commit gate on the reload's registrations: a teardown that lands while re-claimed tools
+/// are registering must not leave those ids on the hub — teardown's unregister pass covers only
+/// ids recorded on the servers it extracted, which cannot include one registered after the extraction.
 #[tokio::test]
 async fn a_teardown_mid_registration_unregisters_the_orphaned_tools() {
     let local = tokio::task::LocalSet::new();
@@ -5318,11 +6115,8 @@ async fn advertised_mcp_tools_are_capped_per_session() {
         })
         .await;
 }
-/// A bind's enrol step must not queue on the session's `update_lock`: a
-/// convergence mid-discovery holds that lock for up to the discovery
-/// window, and a soft rebind or revive bind stuck behind it would blow the
-/// hub's bind ack. Enrolment mutates only the binding and the native-id
-/// set, each under its own short mutex.
+/// A bind's enrol step must not queue on the session's `update_lock`: a convergence mid-discovery holds that lock for up to the discovery window, and a soft rebind or revive bind stuck behind it would blow the hub's bind ack.
+/// Enrolment mutates only the binding and the native-id set, each under its own short mutex.
 #[tokio::test]
 async fn a_soft_rebind_does_not_queue_behind_an_in_flight_convergence() {
     let local = tokio::task::LocalSet::new();
@@ -5351,10 +6145,8 @@ async fn a_soft_rebind_does_not_queue_behind_an_in_flight_convergence() {
         })
         .await;
 }
-/// Teardown runs from hub hooks, so it must not queue on the session's
-/// `update_lock` either: a bind or reload mid-MCP-start holds that lock for
-/// up to the discovery window, and the stall would re-enter the hook path
-/// sideways. `Closed` is what makes the lock unnecessary.
+/// Teardown runs from hub hooks, so it must not queue on the session's `update_lock` either: a bind or reload mid-MCP-start holds that lock for up to the discovery window, and the stall would re-enter the hook path sideways.
+/// `Closed` is what makes the lock unnecessary.
 #[tokio::test]
 async fn teardown_does_not_queue_behind_a_slow_mcp_start() {
     let local = tokio::task::LocalSet::new();
@@ -5376,12 +6168,7 @@ async fn teardown_does_not_queue_behind_a_slow_mcp_start() {
         })
         .await;
 }
-/// The `Closed` lifecycle, end to end. A `SessionEnded` teardown leaves the
-/// session in the map (late notifications still need it), so `Closed` must
-/// be terminal for *reloads* — a late reload never resurrects an ended
-/// session — but not for *binds*: the hub can revive a session id, and that
-/// rebind must re-open the binding and recover the configured set instead of
-/// failing forever against the previous life's terminal state.
+/// The `Closed` lifecycle, end to end. A `SessionEnded` teardown leaves the session in the map (late notifications still need it), so `Closed` must be terminal for *reloads* — a late reload never resurrects an ended session — but not for *binds*: the hub can revive a session id, and that rebind must re-open the binding and recover the configured set instead of failing forever against the previous life's terminal state.
 #[tokio::test]
 async fn an_ended_session_rebind_recovers_the_configured_set() {
     let local = tokio::task::LocalSet::new();
@@ -5448,12 +6235,10 @@ struct FakeHubRegistry {
             Vec<Arc<dyn xai_computer_hub_sdk::ToolServerHandler>>,
         >,
     >,
-    /// Dynamic registrations tracked separately, exactly like the real
-    /// `ToolServer`'s `dynamic_handlers`: a resolver install must preserve
-    /// them (resolver wins tool-id collisions), which is the property
-    /// single-channel publication rests on. Entries carry the life that
-    /// made them, mirroring the SDK's life-tagged ledger.
+    /// Dynamic registrations tracked separately, exactly like the real `ToolServer`'s `dynamic_handlers`: a resolver install must preserve them (resolver wins tool-id collisions), which is the property single-channel publication rests on.
+    /// Entries carry the life that made them, mirroring the SDK's life-tagged ledger.
     dynamic: parking_lot::Mutex<DynamicRegistrations>,
+    registered: tokio::sync::Notify,
 }
 /// Per-session life-tagged dynamic registrations, as the fake hub tracks
 /// them: `session -> [(life, handler)]`.
@@ -5462,11 +6247,7 @@ type DynamicRegistrations = std::collections::HashMap<
     Vec<(u64, Arc<dyn xai_computer_hub_sdk::ToolServerHandler>)>,
 >;
 impl FakeHubRegistry {
-    /// What the fake hub currently advertises for a session — the
-    /// assertion surface reload/converge tests read. Inherent (not on
-    /// [`crate::mcp::HubToolRegistry`]): production never reads back
-    /// through the registry seam, so the trait carries only the
-    /// register/unregister channel.
+    /// What the fake hub currently advertises for a session — the assertion surface reload/converge tests read. Inherent (not on [`crate::mcp::HubToolRegistry`]): production never reads back through the registry seam, so the trait carries only the register/unregister channel.
     fn handlers_for_session(
         &self,
         session_id: &xai_tool_protocol::SessionId,
@@ -5530,6 +6311,9 @@ impl crate::mcp::HubToolRegistry for FakeHubRegistry {
                 .or_default()
                 .push((life, handler.clone()));
         }
+        drop(map);
+        drop(dynamic_map);
+        self.registered.notify_waiters();
         Ok(())
     }
     async fn unregister_tool_dynamic(
@@ -5557,11 +6341,8 @@ impl crate::mcp::HubToolRegistry for FakeHubRegistry {
     }
 }
 impl FakeHubRegistry {
-    /// What the SDK does with a bind response: publish the resolver's
-    /// handlers MERGED with the session's surviving dynamic registrations,
-    /// the resolver winning tool-id collisions (the SDK's
-    /// `merge_resolved_with_dynamic`). A rebind's install must not clobber
-    /// dynamically registered MCP tools.
+    /// What the SDK does with a bind response: publish the resolver's handlers MERGED with the session's surviving dynamic registrations, the resolver winning tool-id collisions (the SDK's `merge_resolved_with_dynamic`).
+    /// A rebind's install must not clobber dynamically registered MCP tools.
     fn install_bind_response(
         &self,
         sid: &xai_tool_protocol::SessionId,
@@ -5587,13 +6368,8 @@ fn fake_hub_tool_ids(hub: &FakeHubRegistry, sid: &xai_tool_protocol::SessionId) 
         .map(|handler| handler.tool_id().as_str().to_owned())
         .collect()
 }
-/// The property single-channel publication rests on, pinned from the
-/// workspace side: a soft rebind re-runs the resolver (natives only) and the
-/// SDK installs that bind response by MERGING it with the session's
-/// surviving dynamic registrations — so the MCP tools a convergence
-/// registered stay advertised across the rebind, exactly once. The SDK half
-/// is the pure `merge_resolved_with_dynamic` (unit-tested in the SDK); the
-/// double mirrors it so this covers the workspace's end of the contract.
+/// The property single-channel publication rests on, pinned from the workspace side: a soft rebind re-runs the resolver (natives only) and the SDK installs that bind response by MERGING it with the session's surviving dynamic registrations — so the MCP tools a convergence registered stay advertised across the rebind, exactly once.
+/// The SDK half is the pure `merge_resolved_with_dynamic` (unit-tested in the SDK); the double mirrors it so this covers the workspace's end of the contract.
 #[tokio::test]
 async fn a_soft_rebind_install_preserves_dynamic_mcp_registrations() {
     let local = tokio::task::LocalSet::new();
@@ -5640,20 +6416,9 @@ async fn a_soft_rebind_install_preserves_dynamic_mcp_registrations() {
         })
         .await;
 }
-/// The stale-bind fence (`mcp_epoch`): a teardown landing after a bind's
-/// resolution began must refuse that bind's MCP enrolment — the hub ended
-/// the session, no further teardown is coming, so enrolling (and the
-/// converge it would spawn) would resurrect servers nothing ever tears
-/// down. The refusal DEGRADES the bind rather than failing it (the bind
-/// invariant: nothing retries a failed bind transparently, so "MCP absent
-/// until the next bind" beats "agent broken now"); the binding stays
-/// `Closed` and the next bind enrols normally. The bind's mount hook runs
-/// between the epoch snapshot and enrolment, so a real teardown inside it
-/// is exactly this race, made deterministic. The distinct coverage kept
-/// here beyond `a_mid_bind_teardown_cannot_fail_a_bind_with_configured_mcp`:
-/// the revived life is fully FUNCTIONAL — the earlier teardown cancelled
-/// only its own life's token, so the revive's converge still starts
-/// servers and claims tools.
+/// The stale-bind fence (`mcp_epoch`): a teardown landing after a bind's resolution began must refuse that bind's MCP enrolment — the hub ended the session, no further teardown is coming, so enrolling (and the converge it would spawn) would resurrect servers nothing ever tears down.
+/// The refusal DEGRADES the bind rather than failing it (the bind invariant: nothing retries a failed bind transparently, so "MCP absent until the next bind" beats "agent broken now"); the binding stays `Closed` and the next bind enrols normally.
+/// The bind's mount hook runs between the epoch snapshot and enrolment, so a real teardown inside it is exactly this race, made deterministic.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_teardown_during_bind_resolution_refuses_stale_enrolment() {
     let local = tokio::task::LocalSet::new();
@@ -5740,11 +6505,9 @@ impl xai_computer_hub_sdk::ToolServerHandler for StaticHandler {
         unreachable!("static test tool is never called")
     }
 }
-/// The last life-blind commit gate: a server completing its start while a
-/// teardown+revive interleaves (deterministically: teardown and the revive
-/// queued on the FIFO binding lock ahead of the drive's commit) must NOT
-/// commit its client into the NEW life's `owned_clients` nor publish its
-/// outcome — the commit gate compares the LIFE, never just not-`Closed`.
+/// The last life-blind commit gate: a server completing its start while a teardown+revive interleaves
+/// (deterministically: teardown and the revive queued on the FIFO binding lock ahead of the drive's commit) must NOT
+/// commit its client into the NEW life's `owned_clients` nor publish its outcome — the commit gate compares the LIFE, never just not-`Closed`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stale_drive_commit_cannot_enter_a_revived_life() {
     let local = tokio::task::LocalSet::new();
@@ -5789,6 +6552,7 @@ async fn a_stale_drive_commit_cannot_enter_a_revived_life() {
                         vec![server],
                         std::time::Duration::from_secs(10),
                         &std::collections::HashSet::new(),
+                        &crate::mcp::McpCallGates::new(),
                         xai_grok_session_events::EventWriter::noop(),
                         tx,
                         scope,
@@ -5831,14 +6595,8 @@ async fn a_stale_drive_commit_cannot_enter_a_revived_life() {
         })
         .await;
 }
-/// The last state-shaped gate, closed: an outcome recorded under life N is
-/// still IN FLIGHT through the convergence's publish channel when a
-/// teardown+revive opens a new life — `install_servers` must refuse it by
-/// LIFE, or the revived session would treat the stale client as already
-/// running and never start a fresh one. Deterministic: the record commits
-/// legitimately under life N (queued first on the FIFO binding lock), the
-/// teardown and revive run next, and the install's lock request lands after
-/// them.
+/// The last state-shaped gate, closed: an outcome recorded under life N is still IN FLIGHT through the convergence's publish channel when a teardown+revive opens a new life — `install_servers` must refuse it by LIFE, or the revived session would treat the stale client as already running and never start a fresh one.
+/// Deterministic: the record commits legitimately under life N (queued first on the FIFO binding lock), the teardown and revive run next, and the install's lock request lands after them.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stale_install_cannot_cross_into_a_revived_life() {
     let local = tokio::task::LocalSet::new();
@@ -5914,11 +6672,8 @@ async fn a_stale_install_cannot_cross_into_a_revived_life() {
         })
         .await;
 }
-/// Only servers designated FIRST-PARTY in the bind config receive the
-/// agent-id header (the bound session id, which also flips the transport to
-/// the no-OAuth local-agent posture). A user-configured third-party server
-/// must see no header — the fixture records the header when present, so
-/// both sides are observable.
+/// Only servers designated FIRST-PARTY in the bind config receive the agent-id header (the bound session id, which also flips the transport to the no-OAuth local-agent posture).
+/// A user-configured third-party server must see no header — the fixture records the header when present, so both sides are observable.
 #[tokio::test]
 async fn a_bind_mcp_server_gets_no_agent_header_unless_first_party() {
     let local = tokio::task::LocalSet::new();
@@ -5964,10 +6719,155 @@ async fn a_bind_mcp_server_gets_no_agent_header_unless_first_party() {
         })
         .await;
 }
-/// A soft rebind of an Active session CONTINUES the life: the epoch must not
-/// bump, or the session's hub registrations (tagged with the life that made
-/// them) desync from the counter and teardown's life-tagged unregisters
-/// miss — handlers then keep routing into dropped bridges.
+/// A user-configured server offering the same bare tool name as the app's endpoint must not remove the app's tool.
+/// The first-party tier wins the collision (the same-tier ambiguity rule would drop the id from both), and because a server's tier is fixed when it starts, a reload that adds the clashing server later cannot steal the id from the running app server.
+#[tokio::test]
+async fn a_first_party_server_keeps_an_id_a_third_party_sibling_also_offers() {
+    let (app_url, app_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let (third_url, third_task) = spawn_bind_mcp_server(BindMcpTestState::default()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    let app = configured_test_mcp("app", app_url);
+    let third = configured_test_mcp("third", third_url);
+    config.bind_mcp =
+        Some(BindMcpConfig::new([app.clone()]).with_first_party_servers(["app".to_owned()]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = xai_tool_protocol::SessionId::new("tiered").unwrap();
+    let hub = FakeHubRegistry::default();
+    resolver(sid.clone(), None).await.expect("bind");
+    converge_with(&handle, "tiered", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, "tiered").await,
+        Some(vec![("app".to_owned(), vec!["echo".to_owned()])])
+    );
+    let session = handle.session("tiered").unwrap();
+    let delta = {
+        let _update_guard = session.update_lock.lock().await;
+        crate::mcp::converge_session(
+            &session,
+            "tiered",
+            &BindMcpConfig::new([app, third]).with_first_party_servers(["app".to_owned()]),
+            &hub,
+            crate::mcp::McpReclaim::IfChanged,
+            xai_grok_session_events::EventWriter::noop(),
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(delta.added, vec!["third".to_owned()]);
+    assert_eq!(
+        live_mcp_servers(&handle, "tiered").await,
+        Some(vec![
+            ("app".to_owned(), vec!["echo".to_owned()]),
+            ("third".to_owned(), Vec::new()),
+        ]),
+        "the first-party server keeps the id; the third-party sibling owns nothing"
+    );
+    let echo = hub
+        .handlers_for_session(&sid)
+        .into_iter()
+        .find(|handler| handler.tool_id().as_str() == "echo")
+        .expect("echo must stay advertised");
+    assert_eq!(
+        echo.description().namespace.as_deref(),
+        Some("app"),
+        "the hub must route echo to the app endpoint, not the user server"
+    );
+    third_task.abort();
+    app_task.abort();
+}
+/// The other arrival order: the third-party server already advertised the id when the first-party server starts (a reload, or the sibling simply finishing discovery first in the same convergence).
+/// The tier moves the id to the app server while it stays in the owned set, and the hub's same-life re-register is an idempotent no-op — so unless the reconciler unregisters the sibling's handler first, the hub keeps routing calls into the user server while the session's bookkeeping says the app owns the id.
+#[tokio::test]
+async fn a_first_party_server_takes_over_an_id_a_running_third_party_sibling_registered() {
+    let third_state = BindMcpTestState::default();
+    let app_state = BindMcpTestState::default();
+    let (third_url, third_task) = spawn_bind_mcp_server(third_state.clone()).await;
+    let (app_url, app_task) = spawn_bind_mcp_server(app_state.clone()).await;
+    let factory = Arc::new(TestSessionContextFactory::new());
+    let mut config =
+        WorkspaceHandle::test_config(factory.temp.path().to_path_buf(), factory.clone());
+    let third = configured_test_mcp("third", third_url);
+    let app = configured_test_mcp("app", app_url);
+    config.bind_mcp = Some(BindMcpConfig::new([third.clone()]));
+    let handle = WorkspaceHandle::new(config).unwrap();
+    handle.create_session("main").unwrap();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = xai_tool_protocol::SessionId::new("takeover").unwrap();
+    let hub = FakeHubRegistry::default();
+    resolver(sid.clone(), None).await.expect("bind");
+    converge_with(&handle, "takeover", &hub, crate::mcp::McpReclaim::Always).await;
+    assert_eq!(
+        live_mcp_servers(&handle, "takeover").await,
+        Some(vec![("third".to_owned(), vec!["echo".to_owned()])])
+    );
+    let session = handle.session("takeover").unwrap();
+    let delta = {
+        let _update_guard = session.update_lock.lock().await;
+        crate::mcp::converge_session(
+            &session,
+            "takeover",
+            &BindMcpConfig::new([third, app]).with_first_party_servers(["app".to_owned()]),
+            &hub,
+            crate::mcp::McpReclaim::IfChanged,
+            xai_grok_session_events::EventWriter::noop(),
+        )
+        .await
+        .unwrap()
+    };
+    assert_eq!(delta.added, vec!["app".to_owned()]);
+    assert_eq!(
+        live_mcp_servers(&handle, "takeover").await,
+        Some(vec![
+            ("app".to_owned(), vec!["echo".to_owned()]),
+            ("third".to_owned(), Vec::new()),
+        ])
+    );
+    let echo_handlers: Vec<_> = hub
+        .handlers_for_session(&sid)
+        .into_iter()
+        .filter(|handler| handler.tool_id().as_str() == "echo")
+        .collect();
+    assert_eq!(
+        echo_handlers.len(),
+        1,
+        "exactly one echo handler on the hub"
+    );
+    let Some(echo_handler) = echo_handlers.first() else {
+        panic!("expected echo handler");
+    };
+    assert_eq!(
+        echo_handler.description().namespace.as_deref(),
+        Some("app"),
+        "the hub must have swapped to the first-party handler"
+    );
+    drain_terminal_ok(
+        echo_handler
+            .handle_call(
+                ToolCallContext::default(),
+                serde_json::json!({"message": "takeover"}),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(
+        app_state.tool_calls.lock().len(),
+        1,
+        "the call must reach the app"
+    );
+    assert!(
+        third_state.tool_calls.lock().is_empty(),
+        "the user server must no longer receive calls for the id it lost"
+    );
+    third_task.abort();
+    app_task.abort();
+}
+/// A soft rebind of an Active session CONTINUES the life: the epoch must not bump, or the
+/// session's hub registrations (tagged with the life that made them) desync from the counter
+/// and teardown's life-tagged unregisters miss — handlers then keep routing into dropped bridges.
 #[tokio::test]
 async fn a_soft_rebind_keeps_registration_tags_matching_the_life() {
     let local = tokio::task::LocalSet::new();
@@ -6012,12 +6912,8 @@ async fn a_soft_rebind_keeps_registration_tags_matching_the_life() {
         })
         .await;
 }
-/// A bind accepted AFTER a hub unbind arrived supersedes the unbind's
-/// deferred teardown: a soft rebind continues the life (same epoch — wave
-/// 13), so the epoch alone cannot distinguish before-unbind from
-/// after-reconnect; the bind generation can. Without it, the deferred
-/// teardown closes MCP under the already-accepted bind, stranding a live
-/// session on `Closed`.
+/// A bind accepted AFTER a hub unbind arrived supersedes the unbind's deferred teardown: a soft rebind continues the life (same epoch — wave 13), so the epoch alone cannot distinguish before-unbind from after-reconnect; the bind generation can.
+/// Without it, the deferred teardown closes MCP under the already-accepted bind, stranding a live session on `Closed`.
 #[tokio::test]
 async fn a_bind_accepted_after_an_unbind_invalidates_its_deferred_teardown() {
     let local = tokio::task::LocalSet::new();
@@ -6052,17 +6948,9 @@ async fn a_bind_accepted_after_an_unbind_invalidates_its_deferred_teardown() {
         })
         .await;
 }
-/// A stale `SessionEnded` hook must not close a life revived (or
-/// continued) by a bind accepted after the end arrived — the third member
-/// of the unbind-fence family (wave 15 fenced `session.unbind`; the hook's
-/// teardown was still unfenced). Unfenced, the end flips the accepted
-/// bind's binding back to `Closed`, and reloads and `configure_mcp` both
-/// refuse `Closed`, so the hub-visible session stays permanently MCP-less
-/// until another bind. The hook anchors the bind generation at arrival;
-/// `teardown_session_mcp_for_event` refuses once a bind moved it.
-/// (Failing-first verified: with the pre-fix unfenced
-/// `teardown_session_mcp` in place of the fenced call, the "must stay
-/// open" assertion below panics.)
+/// A stale `SessionEnded` hook must not close a life revived (or continued) by a bind accepted after the end arrived — the third member of the unbind-fence family (wave 15 fenced `session.unbind`; the hook's teardown was still unfenced).
+/// Unfenced, the end flips the accepted bind's binding back to `Closed`, and reloads and `configure_mcp` both refuse `Closed`, so the hub-visible session stays permanently MCP-less until another bind.
+/// (Failing-first verified: with the pre-fix unfenced `teardown_session_mcp` in place of the fenced call, the "must stay open" assertion below panics.)
 #[tokio::test]
 async fn a_bind_accepted_after_a_session_end_invalidates_its_teardown() {
     let local = tokio::task::LocalSet::new();
@@ -6097,14 +6985,8 @@ async fn a_bind_accepted_after_a_session_end_invalidates_its_teardown() {
         })
         .await;
 }
-/// The event fence's pair must be untearable: the old unbind callback
-/// loaded `mcp_epoch` and `mcp_bind_generation` as two separate atomics
-/// outside `mcp_binding`, so a soft rebind BETWEEN the loads produced the
-/// torn pair (old epoch, post-bind generation) — and a soft rebind keeps
-/// its epoch, so a pairwise (epoch, generation) gate fed that torn pair
-/// matches and closes MCP under the accepted bind. The event path now
-/// anchors ONE load at arrival and re-snapshots the pair under
-/// `mcp_binding`; with the true arrival anchor the teardown refuses.
+/// The event fence's pair must be untearable: the old unbind callback loaded `mcp_epoch` and `mcp_bind_generation` as two separate atomics outside `mcp_binding`, so a soft rebind BETWEEN the loads produced the torn pair (old epoch, post-bind generation) — and a soft rebind keeps its epoch, so a pairwise (epoch, generation) gate fed that torn pair matches and closes MCP under the accepted bind.
+/// The event path now anchors ONE load at arrival and re-snapshots the pair under `mcp_binding`; with the true arrival anchor the teardown refuses.
 #[tokio::test]
 async fn a_torn_unbind_snapshot_cannot_close_an_accepted_binds_mcp() {
     let local = tokio::task::LocalSet::new();
@@ -6152,12 +7034,8 @@ async fn a_torn_unbind_snapshot_cannot_close_an_accepted_binds_mcp() {
         })
         .await;
 }
-/// A losing-but-successful bind (sibling's enrolment won the epoch race,
-/// binding open) still contributes its native ids to the collision-refusal
-/// set: the SDK's install may serve ITS handlers (last resolver install
-/// wins), so filtering against the winner's set alone could let a later
-/// converge advertise an MCP tool that shadows a live native. The sets are
-/// UNIONED, since either bind's handlers may be the installed ones.
+/// A losing-but-successful bind (sibling's enrolment won the epoch race, binding open) still contributes its native ids to the collision-refusal set: the SDK's install may serve ITS handlers (last resolver install wins), so filtering against the winner's set alone could let a later converge advertise an MCP tool that shadows a live native.
+/// The sets are UNIONED, since either bind's handlers may be the installed ones.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_losing_bind_still_contributes_its_native_ids() {
     let local = tokio::task::LocalSet::new();
@@ -6225,17 +7103,8 @@ async fn a_losing_bind_still_contributes_its_native_ids() {
         })
         .await;
 }
-/// The union alone is not enough when the sibling's converge already CLAIMED
-/// against the pre-union set: an MCP tool named after one of the LOSER's
-/// natives is then registered on the hub, and only a reclaim against the
-/// grown set can unregister it before it steals routing from the native.
-/// The losing arm now spawns exactly that `Always` reclaim
-/// (`converge_session_mcp`); unit tests have no hub connection for the spawn
-/// to resolve — the spawn's wiring is the same shape as the enrolled arm's,
-/// which the live matrix covers end-to-end — so this test drives the reclaim
-/// at the fake-registry seam every convergence test uses, pinning the
-/// Bugbot ordering (claim precedes union) and the reclaim's corrective
-/// effect: the collision leaves the hub, the session's server survives.
+/// The union alone is not enough when the sibling's converge already CLAIMED against the pre-union set: an MCP tool named after one of the LOSER's natives is then registered on the hub, and only a reclaim against the grown set can unregister it before it steals routing from the native.
+/// The losing arm now spawns exactly that `Always` reclaim (`converge_session_mcp`); unit tests have no hub connection for the spawn to resolve — the spawn's wiring is the same shape as the enrolled arm's, which the live matrix covers end-to-end — so this test drives the reclaim at the fake-registry seam every convergence test uses, pinning the Bugbot ordering (claim precedes union) and the reclaim's corrective effect: the collision leaves the hub, the session's server survives.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_reclaim_after_a_losing_binds_union_drops_new_collisions() {
     let local = tokio::task::LocalSet::new();
@@ -6335,11 +7204,8 @@ async fn a_reclaim_after_a_losing_binds_union_drops_new_collisions() {
         })
         .await;
 }
-/// The init-progress straggler of the uniform rule: a drive whose scope was
-/// opened under life 1 must not stamp the revived life's shared init
-/// progress with its servers — the init marks compare the life like every
-/// other state write. (Same FIFO choreography: teardown and revive queued
-/// on the binding lock ahead of the stale drive's init block.)
+/// The init-progress straggler of the uniform rule: a drive whose scope was opened under life 1 must not stamp the revived life's shared init progress with its servers — the init marks compare the life like every other state write.
+/// (Same FIFO choreography: teardown and revive queued on the binding lock ahead of the stale drive's init block.)
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stale_drive_cannot_stamp_a_revived_lifes_init_progress() {
     let local = tokio::task::LocalSet::new();
@@ -6388,6 +7254,7 @@ async fn a_stale_drive_cannot_stamp_a_revived_lifes_init_progress() {
                         vec![server],
                         std::time::Duration::from_secs(10),
                         &std::collections::HashSet::new(),
+                        &crate::mcp::McpCallGates::new(),
                         xai_grok_session_events::EventWriter::noop(),
                         tx,
                         stale_scope,
@@ -6408,16 +7275,8 @@ async fn a_stale_drive_cannot_stamp_a_revived_lifes_init_progress() {
         })
         .await;
 }
-/// A workspace with NO machine-owned MCP (`bind_mcp: None` — the CLI
-/// leader, the sandbox server, today's desktop sidecar) must never fail a
-/// bind for an MCP reason: when a teardown lands between the bind's epoch
-/// snapshot and its re-open block, there is nothing to lose by proceeding
-/// — and no layer retries a failed bind transparently (the SDK replies the
-/// error to the hub, the hub maps it to Unavailable, the harness returns
-/// it to the caller), so the old loud refusal was a USER-VISIBLE bind
-/// failure on deployments that have no MCP at all. The binding stays
-/// `Closed` only until the next bind, which re-opens with a fresh
-/// snapshot — also asserted here.
+/// A workspace with NO machine-owned MCP (`bind_mcp: None` — the CLI leader, the sandbox server, today's desktop sidecar) must never fail a bind for an MCP reason: when a teardown lands between the bind's epoch snapshot and its re-open block, there is nothing to lose by proceeding — and no layer retries a failed bind transparently (the SDK replies the error to the hub, the hub maps it to Unavailable, the harness returns it to the caller), so the old loud refusal was a USER-VISIBLE bind failure on deployments that have no MCP at all.
+/// The binding stays `Closed` only until the next bind, which re-opens with a fresh snapshot — also asserted here.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mid_bind_teardown_cannot_fail_a_bind_without_mcp_config() {
     let local = tokio::task::LocalSet::new();
@@ -6476,17 +7335,9 @@ async fn a_mid_bind_teardown_cannot_fail_a_bind_without_mcp_config() {
         })
         .await;
 }
-/// An EMPTY configured set must never fail a bind: the desktop always
-/// passes `bind_mcp: Some(...)` (an empty registry must still be a
-/// configured set so a later `mcp.json` edit has somewhere to land), so a
-/// user with no MCP servers — the common case — sits on the configured
-/// arm. Wave 18's reasoning applies verbatim there: nothing machine-owned
-/// to lose, and nothing retries a failed bind transparently. The loud
-/// raced-teardown refusal keys on the set being NON-empty; an empty set
-/// proceeds with the binding left `Closed`, and the next bind re-opens.
-/// (Accepted trade-off: an `mcp.json` edit landing inside that raced
-/// window attaches at the session's next bind, not immediately — the same
-/// deal the no-config arm made in wave 18.)
+/// An EMPTY configured set must never fail a bind: the desktop always passes `bind_mcp: Some(...)` (an empty registry must still be a configured set so a later `mcp.json` edit has somewhere to land), so a user with no MCP servers — the common case — sits on the configured arm.
+/// The loud raced-teardown refusal keys on the set being NON-empty; an empty set proceeds with the binding left `Closed`, and the next bind re-opens.
+/// (Accepted trade-off: an `mcp.json` edit landing inside that raced window attaches at the session's next bind, not immediately — the same deal the no-config arm made in wave 18.)
 #[tokio::test(flavor = "multi_thread")]
 async fn an_empty_configured_set_never_fails_a_bind() {
     let local = tokio::task::LocalSet::new();
@@ -6540,14 +7391,8 @@ async fn an_empty_configured_set_never_fails_a_bind() {
         })
         .await;
 }
-/// THE bind invariant, strict-arm edition: even with a NON-empty configured
-/// set, a teardown racing the bind must not fail it. Nothing retries a
-/// failed bind transparently (proven in wave 18), so the old loud refusal
-/// traded "MCP absent until the next bind" for "agent broken now" — the
-/// wrong trade in every deployment. The bind proceeds degraded: binding
-/// stays `Closed` for that raced window, observable via
-/// `WORKSPACE_BIND_MCP_DEGRADED_TOTAL{reason="raced_teardown"}`, and the
-/// next bind re-opens and serves the configured set.
+/// THE bind invariant, strict-arm edition: even with a NON-empty configured set, a teardown racing the bind must not fail it.
+/// The bind proceeds degraded: binding stays `Closed` for that raced window, observable via `WORKSPACE_BIND_MCP_DEGRADED_TOTAL{reason="raced_teardown"}`, and the next bind re-opens and serves the configured set.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_mid_bind_teardown_cannot_fail_a_bind_with_configured_mcp() {
     let local = tokio::task::LocalSet::new();
@@ -6602,15 +7447,8 @@ async fn a_mid_bind_teardown_cannot_fail_a_bind_with_configured_mcp() {
         })
         .await;
 }
-/// THE bind invariant, latency edition: a hung MCP server cannot push a
-/// bind past the hub's ack budget even when setup was slow — the converge
-/// grace is a deadline from BIND START, so setup time shrinks the wait.
-/// Here setup (the mount hook) burns ~6s of the 10s window, discovery
-/// hangs forever, and the bind must return in ~6s + min(8s, 10−1−6=3s) ≈
-/// 9s — where the pre-deadline behavior (6s + full 8s grace = 14s) would
-/// blow the ack. The 11s assert cleanly separates the two behaviors while
-/// leaving CI-load margin; the exact ≤-budget property is unit-proven in
-/// `bind_converge_grace_shrinks_when_setup_was_slow`.
+/// THE bind invariant, latency edition: a hung MCP server cannot push a bind past the hub's ack budget even when setup was slow — the converge grace is a deadline from BIND START, so setup time shrinks the wait.
+/// Here setup (the mount hook) burns ~6s of the 10s window, discovery hangs forever, and the bind must return in ~6s + min(8s, 10−1−6=3s) ≈ 9s — where the pre-deadline behavior (6s + full 8s grace = 14s) would blow the ack.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_hung_mcp_server_cannot_push_a_bind_past_the_ack_budget() {
     let local = tokio::task::LocalSet::new();
@@ -6651,11 +7489,9 @@ async fn a_hung_mcp_server_cannot_push_a_bind_past_the_ack_budget() {
         server_task.abort();
     }).await;
 }
-/// The legacy client-driven path honors the SAME per-session advertisement
-/// cap as the bind path's `claim_tools`: a server offering more than
-/// [`crate::mcp::MAX_ADVERTISED_MCP_TOOLS`] tools registers exactly the cap
-/// on the hub (first tools in server order win), instead of unbounded
-/// dynamic registrations.
+/// The legacy client-driven path honors the SAME per-session advertisement cap as the bind path's
+/// `claim_tools`: a server offering more than [`crate::mcp::MAX_ADVERTISED_MCP_TOOLS`] tools registers
+/// exactly the cap on the hub (first tools in server order win), instead of unbounded dynamic registrations.
 #[tokio::test]
 async fn the_configure_path_caps_advertised_tools() {
     let local = tokio::task::LocalSet::new();
@@ -6705,12 +7541,8 @@ async fn the_configure_path_caps_advertised_tools() {
         })
         .await;
 }
-/// The legacy client-driven path (`workspace.configure_mcp`, used when
-/// `bind_mcp` is None: sandbox, standalone, Grok Build) across the full
-/// lifecycle: configure → hub unbind teardown → REBIND (which must re-open
-/// the `Closed` binding even without a machine-owned config) → configure
-/// again succeeds. Without the re-open, the drive fails closed on `Closed`
-/// forever and the session can never attach servers again.
+/// The legacy client-driven path (`workspace.configure_mcp`, used when `bind_mcp` is None: sandbox, standalone, Grok Build) across the full lifecycle: configure → hub unbind teardown → REBIND (which must re-open the `Closed` binding even without a machine-owned config) → configure again succeeds.
+/// Without the re-open, the drive fails closed on `Closed` forever and the session can never attach servers again.
 #[tokio::test]
 async fn a_rebind_reopens_for_the_client_driven_configure_path() {
     let local = tokio::task::LocalSet::new();
@@ -6780,11 +7612,8 @@ async fn a_rebind_reopens_for_the_client_driven_configure_path() {
         })
         .await;
 }
-/// Carrier #6, HIGH shape: hub registrations are life-tagged, so a stale
-/// in-flight teardown's unregister batch (tagged with the life it closed)
-/// can never remove the registration a revived life has since made under
-/// the same id. The revive's register SUPERSEDES the stale ledger entry
-/// (same id, older life) instead of being refused as a duplicate.
+/// Carrier #6, HIGH shape: hub registrations are life-tagged, so a stale in-flight teardown's unregister batch (tagged with the life it closed) can never remove the registration a revived life has since made under the same id.
+/// The revive's register SUPERSEDES the stale ledger entry (same id, older life) instead of being refused as a duplicate.
 #[tokio::test]
 async fn a_stale_teardown_unregister_cannot_remove_a_revived_lifes_tool() {
     let local = tokio::task::LocalSet::new();
@@ -6830,10 +7659,9 @@ async fn a_stale_teardown_unregister_cannot_remove_a_revived_lifes_tool() {
         })
         .await;
 }
-/// Carrier #6, MEDIUM shape: an `Always` reclaim that takes an id away from
-/// the MCP side must not strip a resolver-installed NATIVE handler that has
-/// since taken the id — unregisters remove only matching-life DYNAMIC
-/// registrations, by Arc identity, never by bare id.
+/// Carrier #6, MEDIUM shape: an `Always` reclaim that takes an id away from the MCP side
+/// must not strip a resolver-installed NATIVE handler that has since taken the id —
+/// unregisters remove only matching-life DYNAMIC registrations, by Arc identity, never by bare id.
 #[tokio::test]
 async fn a_reclaim_unregister_cannot_strip_a_native_tool() {
     let local = tokio::task::LocalSet::new();
@@ -6886,13 +7714,8 @@ async fn a_reclaim_unregister_cannot_strip_a_native_tool() {
         })
         .await;
 }
-/// A drop must never orphan a life: `drop_session_with_teardown` unmaps
-/// FIRST and then tears down the unmapped Arc — the reverse order let a
-/// revive bind enrol between the teardown and the unmap, leaving that new
-/// life Active on a session no id lookup could ever reach (so no hub
-/// unbind, reload, or drop could clean it up). The teardown's hub-handle
-/// acquisition is a deterministic park point: holding `hub_handle` while
-/// the drop runs opens the window, and the revive bind lands inside it.
+/// A drop must never orphan a life: `drop_session_with_teardown` unmaps FIRST and then tears down the unmapped Arc — the reverse order let a revive bind enrol between the teardown and the unmap, leaving that new life Active on a session no id lookup could ever reach (so no hub unbind, reload, or drop could clean it up).
+/// The teardown's hub-handle acquisition is a deterministic park point: holding `hub_handle` while the drop runs opens the window, and the revive bind lands inside it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_drop_racing_a_revive_bind_orphans_no_life() {
     let local = tokio::task::LocalSet::new();
@@ -6940,10 +7763,9 @@ async fn a_drop_racing_a_revive_bind_orphans_no_life() {
         })
         .await;
 }
-/// The drive's cancel snapshot must belong to the life its entry check saw
-/// (it is taken inside that same critical section): a teardown of that life
-/// then aborts the drive promptly, instead of the drive continuing to start
-/// servers under a newer life's token that the old teardown never cancelled.
+/// The drive's cancel snapshot must belong to the life its entry check saw (it is taken inside that
+/// same critical section): a teardown of that life then aborts the drive promptly, instead of the
+/// drive continuing to start servers under a newer life's token that the old teardown never cancelled.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_drives_token_belongs_to_the_life_it_checked() {
     let local = tokio::task::LocalSet::new();
@@ -6983,6 +7805,7 @@ async fn a_drives_token_belongs_to_the_life_it_checked() {
                         vec![server],
                         std::time::Duration::from_secs(10),
                         &std::collections::HashSet::new(),
+                        &crate::mcp::McpCallGates::new(),
                         xai_grok_session_events::EventWriter::noop(),
                         tx,
                         scope,
@@ -7017,11 +7840,9 @@ async fn a_drives_token_belongs_to_the_life_it_checked() {
         })
         .await;
 }
-/// The other half of the `mcp_epoch` life fence: a hub `session.unbind`
-/// snapshots the epoch when the frame arrives and runs its teardown on a
-/// spawned task — if a reconnect bind enrols a NEW life before that task
-/// runs, the stale teardown must be refused, or it would end a life the
-/// hub still considers live (and no further teardown would come for it).
+/// The other half of the `mcp_epoch` life fence: a hub `session.unbind` snapshots the epoch when the frame arrives and
+/// runs its teardown on a spawned task — if a reconnect bind enrols a NEW life before that task runs, the stale
+/// teardown must be refused, or it would end a life the hub still considers live (and no further teardown would come for it).
 #[tokio::test]
 async fn a_stale_unbind_teardown_skips_a_newer_life() {
     let local = tokio::task::LocalSet::new();
@@ -7078,12 +7899,7 @@ async fn a_stale_unbind_teardown_skips_a_newer_life() {
         })
         .await;
 }
-/// Every other collision test goes through bind, where nothing is registered
-/// on the hub yet. Only a reload can orphan a registration: when a reload
-/// adds a server whose tool name clashes with a running one, the ambiguity
-/// rule drops the id from both servers — so the id the survivor had
-/// registered must be unregistered, or it stays on the hub owned by nobody
-/// and no later removal ever cleans it up.
+/// Every other collision test goes through bind, where nothing is registered on the hub yet. Only a reload can orphan a registration: when a reload adds a server whose tool name clashes with a running one, the ambiguity rule drops the id from both servers — so the id the survivor had registered must be unregistered, or it stays on the hub owned by nobody and no later removal ever cleans it up.
 #[tokio::test]
 async fn reload_collision_unregisters_the_id_the_surviving_server_lost() {
     let local = tokio::task::LocalSet::new();
@@ -7602,15 +8418,8 @@ async fn restored_server_first_bind_ordering_decides_capability_and_toolset() {
         })
         .await;
 }
-/// Isolation matrix #1 to #3 through the REAL `session.bind` resolver, the closure `connect_hub` installs.
-/// Both a soft rebind and an SDK dead-loop FULL rebind re-run that exact path.
+/// Isolation matrix #1 to #3 through the REAL `session.bind` resolver, the closure `connect_hub` installs. Both a soft rebind and an SDK dead-loop FULL rebind re-run that exact path.
 /// With a live background task, the test drives an identical rebind (`Reused`) and then a changed-explicit-toolset rebind (`Reresolved`).
-/// The changed rebind runs with no in-flight tool calls.
-/// Both keep the session-owned backend (`Arc::ptr_eq`) and the running task; the changed rebind swaps the advertised handler set.
-///
-/// The remaining matrix-#3 sub-asserts live beside the swap tests above.
-/// Persistent-shell cwd preservation is in `reresolved_swap_preserves_persistent_shell_cwd`.
-/// The snapshot-driven rebuild with a live task is in `re_resolve_all_sessions_preserves_session_terminal_backend`.
 #[tokio::test]
 async fn bind_flow_rebinds_keep_backend_and_task_alive_end_to_end() {
     let Some(_worker_env) =
@@ -8091,13 +8900,23 @@ async fn after_turn_decodes_cancellation_fields_into_events_jsonl() {
     let ended = text
         .lines()
         .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap())
-        .find(|e| e["type"] == "turn_ended")
+        .find(|e| e.get("type").unwrap_or(&serde_json::Value::Null) == "turn_ended")
         .expect("turn_ended must be present");
-    assert_eq!(ended["outcome"], "cancelled");
-    assert_eq!(ended["cancellation_category"], "permission_rejected");
     assert_eq!(
-        ended["cancellation_context"],
-        serde_json::json!({ "recovery": false })
+        ended.get("outcome").unwrap_or(&serde_json::Value::Null),
+        "cancelled"
+    );
+    assert_eq!(
+        ended
+            .get("cancellation_category")
+            .unwrap_or(&serde_json::Value::Null),
+        "permission_rejected"
+    );
+    assert_eq!(
+        ended
+            .get("cancellation_context")
+            .unwrap_or(&serde_json::Value::Null),
+        &serde_json::json!({ "recovery": false })
     );
 }
 /// The default watchdog must undercut the requester's 10s hook timeout.
@@ -8341,10 +9160,10 @@ async fn bundled_allowlist_filters_discovery() {
         &dir,
         Some("allowlist-e2e-kept"),
     ));
-    let skills = crate::discovery::discover_skills(cwd.path(), &config).await;
+    let skills = crate::discovery::discover_skills(cwd.path(), &config, true).await;
     let names: Vec<&str> = skills
         .iter()
-        .filter_map(|s| s["name"].as_str())
+        .filter_map(|s| s.get("name").unwrap_or(&serde_json::Value::Null).as_str())
         .filter(|n| n.starts_with("allowlist-e2e-"))
         .collect();
     assert_eq!(
@@ -8397,7 +9216,10 @@ fn make_handle_with_queue_routing(
         project_lsp_trusted: true,
         require_explicit_toolset: false,
         confine_fs_to_workspace_root: false,
+        host_kind: Default::default(),
         bind_mcp: None,
+        tool_approval: crate::permission::ToolApprovalGate::Off,
+        sandbox: None,
     };
     let home = tempfile::tempdir().unwrap();
     let auth: Arc<dyn AuthProvider> = Arc::new(AuthCredential::bearer("test-token"));
@@ -8563,12 +9385,12 @@ fn classify_drain_outcome_covers_all_arms() {
 }
 #[test]
 fn drain_reason_and_outcome_labels_are_stable() {
-    assert_eq!(DrainReason::Sigterm.as_str(), "sigterm");
-    assert_eq!(DrainReason::Evict.as_str(), "evict");
-    assert_eq!(DrainOutcome::Full.as_str(), "full");
-    assert_eq!(DrainOutcome::Partial.as_str(), "partial");
-    assert_eq!(DrainOutcome::ProducersTimeout.as_str(), "producers_timeout");
-    assert_eq!(DrainOutcome::Timeout.as_str(), "timeout");
+    assert_eq!(DrainReason::Sigterm.as_ref(), "sigterm");
+    assert_eq!(DrainReason::Evict.as_ref(), "evict");
+    assert_eq!(DrainOutcome::Full.as_ref(), "full");
+    assert_eq!(DrainOutcome::Partial.as_ref(), "partial");
+    assert_eq!(DrainOutcome::ProducersTimeout.as_ref(), "producers_timeout");
+    assert_eq!(DrainOutcome::Timeout.as_ref(), "timeout");
 }
 #[test]
 fn grace_budget_from_raw_parses_and_falls_back() {
@@ -8760,7 +9582,7 @@ async fn two_phase_drain_waits_for_producer_then_drains_queue() {
     let handle = WorkspaceHandle::new_with_data_collection(
         WorkspaceHandle::test_config(cwd, factory),
         queue_home.path().to_path_buf(),
-        queue.clone(),
+        Some(queue.clone()),
         true,
         false,
         crate::upload::environment::WorkspaceIdentity::default(),
@@ -8830,7 +9652,7 @@ async fn drain_wedged_producer_does_not_starve_queue_flush() {
     let handle = WorkspaceHandle::new_with_data_collection(
         WorkspaceHandle::test_config(cwd, factory),
         queue_home.path().to_path_buf(),
-        queue.clone(),
+        Some(queue.clone()),
         true,
         false,
         crate::upload::environment::WorkspaceIdentity::default(),
@@ -8840,7 +9662,7 @@ async fn drain_wedged_producer_does_not_starve_queue_flush() {
     assert_eq!(outcome, xai_file_utils::queue::EnqueueOutcome::Enqueued);
     let _join = handle.spawn_producer(std::future::pending::<()>());
     let before = DRAIN_COMPLETED_TOTAL
-        .with_label_values(&[DrainOutcome::ProducersTimeout.as_str()])
+        .with_label_values(&[DrainOutcome::ProducersTimeout.as_ref()])
         .get();
     let unfinished = handle
         .two_phase_drain(std::time::Duration::from_millis(600), DrainReason::Sigterm)
@@ -8852,7 +9674,7 @@ async fn drain_wedged_producer_does_not_starve_queue_flush() {
     );
     assert!(
         DRAIN_COMPLETED_TOTAL
-            .with_label_values(&[DrainOutcome::ProducersTimeout.as_str()])
+            .with_label_values(&[DrainOutcome::ProducersTimeout.as_ref()])
             .get()
             > before,
         "the wedged producer dominates the outcome label"
@@ -8917,6 +9739,114 @@ async fn bind_session_root_sets_mapping_and_real_cwd() {
         })
         .await;
 }
+/// Runs `command` through the bound session's `run_terminal_cmd` and returns its stdout.
+async fn bound_shell_stdout(handle: &WorkspaceHandle, session_id: &str, command: &str) -> String {
+    let harness = handle
+        .create_local_harness(session_id)
+        .expect("local harness");
+    let stream = harness
+        .call(
+            xai_tool_protocol::ToolId::new("run_terminal_cmd").expect("valid tool id"),
+            serde_json::json!({ "command": command, "description": "probe the shell env" }),
+            xai_tool_runtime::ToolCallContext::default(),
+        )
+        .await;
+    let typed = drain_terminal_ok(stream).await;
+    typed
+        .chat_completion_output
+        .and_then(|cco| cco.result)
+        .and_then(|r| r.code_execution_result)
+        .map(|cer| cer.stdout)
+        .expect("run_terminal_cmd stdout")
+}
+/// `run_terminal_cmd` refuses to finalize without its background companions.
+fn shell_tools() -> serde_json::Value {
+    serde_json::json!([
+        {"id": "GrokBuild:run_terminal_cmd"},
+        {"id": "GrokBuild:get_task_output"},
+        {"id": "GrokBuild:kill_task"},
+    ])
+}
+const BIND_ENV_PROBE: &str =
+    "echo \"$TERMINAL_JWT_FILE|$TMPDIR|$XDG_CACHE_HOME|$XDG_STATE_HOME|$npm_config_cache|$PORT\"";
+#[tokio::test]
+async fn bind_session_root_scopes_shell_env_to_the_session() {
+    let handle = make_handle();
+    let resolver = bind_resolver_fixture(&handle);
+    let root = tempfile::tempdir().expect("temp dir");
+    let session_root = root.path().join("conv-abc");
+    std::fs::create_dir_all(&session_root).expect("session root");
+    let sid = "hub-sess-env";
+    resolver(
+        xai_tool_protocol::SessionId::new(sid).unwrap(),
+        Some(serde_json::json!({
+            "cwd": "/workspace",
+            "metadata": {
+                "session_root": session_root,
+                "tools": shell_tools(),
+            },
+        })),
+    )
+    .await
+    .expect("bind");
+    let tmp = format!("/tmp/sessions/{sid}");
+    let port = crate::bind_env::advisory_port(sid);
+    assert_eq!(
+        bound_shell_stdout(&handle, sid, BIND_ENV_PROBE)
+            .await
+            .trim(),
+        format!(
+            "/etc/secrets/terminal.conv-abc.jwt|{tmp}|{tmp}/cache|{tmp}/state|{tmp}/npm-cache|{port}"
+        ),
+        "a bound session's shell must see its own token file, tmp tree, and default port"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&tmp)
+            .expect("tmp dir")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "{tmp} must be private to the session");
+    }
+}
+#[tokio::test]
+async fn bind_without_session_root_leaves_shell_env_alone() {
+    let handle = make_handle();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = "legacy-sess-env";
+    resolver(
+        xai_tool_protocol::SessionId::new(sid).unwrap(),
+        Some(serde_json::json!({
+            "metadata": { "tools": shell_tools() },
+        })),
+    )
+    .await
+    .expect("bind");
+    let session = handle.session(sid).expect("session created");
+    assert!(
+        session.session_env().is_empty(),
+        "legacy binds carry no session env: {:?}",
+        session.session_env()
+    );
+    let inherited = |name: &str| std::env::var(name).unwrap_or_default();
+    assert_eq!(
+        bound_shell_stdout(&handle, sid, BIND_ENV_PROBE)
+            .await
+            .trim(),
+        format!(
+            "{}|{}|{}|{}|{}|{}",
+            inherited("TERMINAL_JWT_FILE"),
+            inherited("TMPDIR"),
+            inherited("XDG_CACHE_HOME"),
+            inherited("XDG_STATE_HOME"),
+            inherited("npm_config_cache"),
+            inherited("PORT"),
+        ),
+        "a legacy session's shell inherits the process env unchanged"
+    );
+}
 #[tokio::test]
 async fn rebind_session_root_rewrites_existing_cwd() {
     let local = tokio::task::LocalSet::new();
@@ -8974,6 +9904,74 @@ async fn rebind_session_root_rewrites_existing_cwd() {
             );
         })
         .await;
+}
+#[tokio::test]
+async fn rebind_session_root_refuses_recreate_while_calls_are_in_flight() {
+    let handle = make_handle();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = xai_tool_protocol::SessionId::new("rebind-busy").unwrap();
+    resolver(
+        sid.clone(),
+        Some(serde_json::json!({ "cwd": "/workspace" })),
+    )
+    .await
+    .expect("first bind");
+    handle
+        .activity_tracker()
+        .tool_call_started("busy-c1", "read", Some("rebind-busy"));
+    let refused = resolver(
+        sid,
+        Some(serde_json::json!({
+            "cwd": "/workspace",
+            "metadata": { "session_root": "/workspace/conv-busy" },
+        })),
+    )
+    .await;
+    let err = match refused {
+        Err(e) => e,
+        Ok(_) => panic!("in-flight recreate must fail closed"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("tool calls in flight"),
+        "refusal must name the in-flight gate: {msg}"
+    );
+    let session = handle.session("rebind-busy").expect("live session kept");
+    assert!(session.path_virtualization().is_none());
+    assert_eq!(session.cwd(), std::path::Path::new("/workspace"));
+}
+#[tokio::test]
+async fn rebind_session_root_refuses_recreate_while_turn_is_active() {
+    let handle = make_handle();
+    let resolver = bind_resolver_fixture(&handle);
+    let sid = xai_tool_protocol::SessionId::new("rebind-turn").unwrap();
+    resolver(
+        sid.clone(),
+        Some(serde_json::json!({ "cwd": "/workspace" })),
+    )
+    .await
+    .expect("first bind");
+    handle.activity_tracker().turn_started("rebind-turn", 1);
+    let refused = resolver(
+        sid,
+        Some(serde_json::json!({
+            "cwd": "/workspace",
+            "metadata": { "session_root": "/workspace/conv-turn" },
+        })),
+    )
+    .await;
+    let err = match refused {
+        Err(e) => e,
+        Ok(_) => panic!("turn-active recreate must fail closed"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("turn is active"),
+        "refusal must name the turn gate: {msg}"
+    );
+    let session = handle.session("rebind-turn").expect("live session kept");
+    assert!(session.path_virtualization().is_none());
+    assert_eq!(session.cwd(), std::path::Path::new("/workspace"));
 }
 #[tokio::test]
 async fn bind_session_root_rewrites_artifacts_cwd() {
@@ -9383,4 +10381,33 @@ async fn fork_inherits_path_virtualization() {
             assert_eq!(virt.real_root(), "/workspace/conv-abc");
         })
         .await;
+}
+/// A status probe reads a server's settled outcome without waiting on the session's MCP lock.
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_server_outcome_reports_settled_starts_and_never_waits() {
+    use crate::session::McpServerOutcome;
+    let handle = make_handle();
+    let session = handle.session("main").expect("main session");
+    assert_eq!(session.mcp_server_outcome("computer_use"), None);
+    session
+        .settle_mcp_server_for_test("computer_use", McpServerOutcome::Failed)
+        .await;
+    assert_eq!(
+        session.mcp_server_outcome("computer_use"),
+        Some(McpServerOutcome::Failed)
+    );
+    session
+        .settle_mcp_server_for_test("computer_use", McpServerOutcome::Connected)
+        .await;
+    assert_eq!(
+        session.mcp_server_outcome("computer_use"),
+        Some(McpServerOutcome::Connected)
+    );
+    let held = session.mcp_state.lock().await;
+    assert_eq!(
+        session.mcp_server_outcome("computer_use"),
+        None,
+        "a start holding the lock reads as unsettled rather than blocking the probe"
+    );
+    drop(held);
 }

@@ -345,12 +345,64 @@ pub struct ServerInfo {
     /// from old hubs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_ms: Option<u64>,
+    /// What hosts the server, as the hub resolved it from the minter of the
+    /// server's serve credential — never from the `host_kind` the server
+    /// declared in `metadata`, which a process anywhere can spell as it
+    /// likes. A picker groups and labels on this and falls back to the
+    /// declared value only when it is absent (a hub before this field, or a
+    /// minter the hub does not know). Additive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_kind: Option<HostKind>,
 }
+
+/// What hosts a tool server, resolved by the hub from the *minter* of its
+/// serve credential at upgrade — never from the client-declared `host_kind`
+/// in registration `metadata`. Bind-time policy keys on it, and
+/// `servers.list` carries it as [`ServerInfo::host_kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HostKind {
+    /// The user's own device (the daemon the desktop runs on the hub's mint).
+    Desktop,
+    /// A container the organisation runs, on its own minter's credential.
+    Container,
+    /// A sandbox guest, on the sandbox service's credential.
+    Sandbox,
+}
+
+impl HostKind {
+    pub const ALL: [HostKind; 3] = [HostKind::Desktop, HostKind::Container, HostKind::Sandbox];
+
+    /// The serde wire spelling, so metric labels join against `servers.list`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Desktop => "desktop",
+            Self::Container => "container",
+            Self::Sandbox => "sandbox",
+        }
+    }
+}
+
+impl std::fmt::Display for HostKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Well-known values of the `host_kind` a server *declares* in its
+/// registration `metadata` (display only; the hub's own resolution is
+/// [`ServerInfo::host_kind`]). Readers tolerate unknown strings and fall
+/// back to a plain per-server row.
+pub const HOST_KIND_DESKTOP: &str = "desktop";
+pub const HOST_KIND_DAEMON: &str = "daemon";
+pub const HOST_KIND_SANDBOX: &str = "sandbox";
 
 /// The single catalog of well-known keys a workspace server embeds in its
 /// hub registration `metadata` JSON: machine identity keys announced by
-/// local/RC servers (`hostname`/`display_name`/`cwd`) and sandbox
-/// provenance keys announced by the sandbox start path
+/// local/RC servers (`hostname`/`display_name`/`cwd`), device identity keys
+/// that let pickers group the N servers one machine exposes into one device
+/// (`device_id`/`host_kind`/`platform`), and sandbox provenance keys
+/// announced by the sandbox start path
 /// (`sandbox_id`/`session_id`/`provider_id`/`launch_id`). Producers merge
 /// these into the metadata blob they announce via
 /// [`ServerIdentityMetadata::merge_into`]; the hub stores metadata
@@ -362,6 +414,9 @@ pub struct ServerInfo {
 /// a local/RC workspace server — `hostname`/`display_name` are the
 /// convention-unique keys. Do not use "parses as this convention" or `cwd`
 /// presence as a local-vs-sandbox discriminator.
+///
+/// `device_id` is the grouping and "is this my device" key; `hostname` is
+/// display-only (it renames and goes stale) and must never stand in for it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerIdentityMetadata {
     /// Machine hostname (e.g. `gethostname()` at startup).
@@ -373,6 +428,18 @@ pub struct ServerIdentityMetadata {
     /// Workspace root the server exposes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Stable per-install identifier of the machine hosting this server,
+    /// shared by every server that machine exposes. Opaque to the hub.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<String>,
+    /// What hosts the server: one of the `HOST_KIND_*` constants. Unknown
+    /// values are preserved verbatim for forward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_kind: Option<String>,
+    /// Host operating system (`std::env::consts::OS` spelling: `macos`,
+    /// `linux`, `windows`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
     /// Sandbox that provisioned this server. Absent for local servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox_id: Option<String>,
@@ -413,6 +480,9 @@ impl ServerIdentityMetadata {
             hostname: string_key("hostname"),
             display_name: string_key("display_name"),
             cwd: string_key("cwd"),
+            device_id: string_key("device_id"),
+            host_kind: string_key("host_kind"),
+            platform: string_key("platform"),
             sandbox_id: string_key("sandbox_id"),
             session_id: string_key("session_id"),
             provider_id: string_key("provider_id"),
@@ -574,6 +644,10 @@ pub struct SessionCloseParams {
 /// Reply to a `session_open` request.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionOpenResult {}
+
+/// `session_detach` params (harness → hub); see [`crate::Method::SessionDetach`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionDetachParams {}
 
 /// `session_bind_server` params (harness → hub). Bind a tool server's
 /// tools to the current session.
@@ -788,6 +862,11 @@ pub struct NotificationFilter {
     pub kinds: Option<Vec<String>>,
 }
 
+/// Hub-produced custom `tool.notification` kind for async `bot_send_prompt`.
+/// Auto-subscribed harnesses do not receive this kind. A connection must
+/// list it in [`NotificationFilter::kinds`].
+pub const HUB_KIND_BOT_AGENT_TURN_COMPLETED: &str = "bot_agent_turn_completed";
+
 /// Reply outcome reported by [`SubscribeAck`].
 ///
 /// `Subscribed` and `AlreadySubscribed` discriminate first-time binds
@@ -862,11 +941,12 @@ pub struct UnsubscribeAck {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HookFrame {
     pub session_id: SessionId,
-    /// Omit for session-wide hooks (broadcast); required for call-scoped
-    /// hooks like `Cancel`.
+    /// The tool server that receives the hook.
+    /// `None` sends it to every tool server bound to the session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_id: Option<ToolId>,
-    /// Required for call-scoped hooks (`Cancel`); optional otherwise.
+    /// The running call a `Cancel` ends.
+    /// [`HookEvent::Cancel`] documents a `Cancel` with no `call_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub call_id: Option<ToolCallId>,
     /// Correlation id for a request/response hook. The requester mints it and
@@ -995,8 +1075,9 @@ pub struct ToolsChanged {
 /// Lifecycle status of a tool server connection.
 ///
 /// `starting` → `ready` → `busy` ↔ `ready` → `draining` → `shutting_down`.
-/// `disconnected` is hub-only: set during disconnect cleanup, never sent
-/// by the tool server itself.
+/// `disconnected` is set by the hub during disconnect cleanup, and sent by a
+/// tool server tearing down gracefully (`push_disconnect_status`) — the hub
+/// accepts it only for the sender's own connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolServerLifecycleStatus {
@@ -1312,6 +1393,13 @@ mod tests {
 
     fn sid() -> SessionId {
         SessionId::new("test-session").expect("valid")
+    }
+
+    #[test]
+    fn host_kind_as_str_is_the_wire_spelling() {
+        for kind in HostKind::ALL {
+            assert_eq!(json!(kind.as_str()), serde_json::to_value(kind).unwrap());
+        }
     }
 
     fn tid() -> ToolId {
@@ -1923,6 +2011,46 @@ mod tests {
         assert_eq!(parsed.cwd.as_deref(), Some("/home/me/proj"));
         assert_eq!(parsed.session_id.as_deref(), Some("sandbox-announced"));
         assert_eq!(parsed.sandbox_id, None);
+        assert_eq!(parsed.device_id, None);
+    }
+
+    /// Device identity keys group N servers from one machine and drive
+    /// "this device" detection; an unknown `host_kind` is preserved verbatim
+    /// so readers can fall back to a plain row instead of dropping it.
+    #[test]
+    fn server_identity_metadata_parses_device_identity_keys() {
+        let meta = json!({
+            "hostname": "my-laptop",
+            "cwd": "/home/me/proj",
+            "device_id": "dev-0f3a",
+            "host_kind": "spaceship",
+            "platform": "macos",
+        });
+        let parsed = ServerIdentityMetadata::from_metadata(&meta);
+        assert_eq!(
+            parsed,
+            ServerIdentityMetadata {
+                hostname: Some("my-laptop".to_owned()),
+                cwd: Some("/home/me/proj".to_owned()),
+                device_id: Some("dev-0f3a".to_owned()),
+                host_kind: Some("spaceship".to_owned()),
+                platform: Some("macos".to_owned()),
+                ..Default::default()
+            }
+        );
+        let merged = ServerIdentityMetadata {
+            host_kind: Some(HOST_KIND_DESKTOP.to_owned()),
+            platform: Some("linux".to_owned()),
+            ..Default::default()
+        }
+        .merge_into(Some(
+            json!({"device_id": "dev-0f3a", "host_kind": "daemon"}),
+        ))
+        .expect("object stays object");
+        assert_eq!(
+            merged,
+            json!({"device_id": "dev-0f3a", "host_kind": "daemon", "platform": "linux"})
+        );
     }
 
     #[test]
@@ -2001,6 +2129,9 @@ mod tests {
             "hostname",
             "display_name",
             "cwd",
+            "device_id",
+            "host_kind",
+            "platform",
             "sandbox_id",
             "session_id",
             "provider_id",
@@ -2022,6 +2153,9 @@ mod tests {
                 "hostname" => expected.hostname = Some("value".to_owned()),
                 "display_name" => expected.display_name = Some("value".to_owned()),
                 "cwd" => expected.cwd = Some("value".to_owned()),
+                "device_id" => expected.device_id = Some("value".to_owned()),
+                "host_kind" => expected.host_kind = Some("value".to_owned()),
+                "platform" => expected.platform = Some("value".to_owned()),
                 "sandbox_id" => expected.sandbox_id = Some("value".to_owned()),
                 "session_id" => expected.session_id = Some("value".to_owned()),
                 "provider_id" => expected.provider_id = Some("value".to_owned()),

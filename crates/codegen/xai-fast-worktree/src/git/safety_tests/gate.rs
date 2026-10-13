@@ -154,6 +154,7 @@ fn write_at(worktree: &Path, path: &str, bytes: &[u8]) {
     std::fs::write(at, bytes).unwrap();
 }
 
+#[cfg(unix)]
 #[test]
 fn reclaiming_a_worktree_runs_none_of_its_hooks() {
     use std::os::unix::fs::PermissionsExt;

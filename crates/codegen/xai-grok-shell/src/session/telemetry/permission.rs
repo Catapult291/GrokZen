@@ -45,7 +45,6 @@ where
     }
 }
 
-/// All-or-nothing conversion of finding tokens.
 /// `Some([])` is preserved only when the source vector was truly empty (classifier route ran, empty assessment).
 /// On the FIRST unknown token the ENTIRE field is omitted (`None`) with a fixed diagnostic.
 /// An older shell thus never exports a misleadingly "clean" or partial subset of a newer manager's findings (truthful missingness for eval curation).
@@ -120,7 +119,6 @@ pub(crate) fn permission_mode_label(is_yolo: bool) -> &'static str {
 }
 
 /// Telemetry `source` label for a permission [`Decision`] on the `tool.decision` span.
-/// `is_yolo` collapses auto-approvals to `config`.
 /// `Decision::Allow`/`Ask` carry no provenance, so a config/policy allow is indistinguishable from a user click.
 /// Report neutral `allowed` rather than guessing `user_temporary`.
 pub(crate) fn permission_decision_source(decision: &Decision, is_yolo: bool) -> &'static str {
@@ -159,7 +157,6 @@ pub(crate) struct ResolvedDecisionTelemetry {
     pub source: Option<String>,
 }
 
-/// The manager event's frozen mode, wait time, and yolo state win when present.
 /// The shell's pre-await snapshot is used only when the manager returned no event.
 /// Yolo derives from the frozen event mode, not the post-await handle state.
 /// A mode or always-approve change around an open prompt thus cannot retroactively rewrite the source.
@@ -196,7 +193,6 @@ pub(crate) fn permission_outcome(decision: &Decision) -> PermissionOutcome {
 }
 
 /// The single production event-to-payload projection, used by `tool_calls.rs` and the cohort tests so the tested path is exactly the shipped one.
-/// Callers pass the ONE [`ResolvedDecisionTelemetry`] they already built and fed to the `tool.decision` span.
 /// Mode, wait, and source are never re-derived, so the span and product rails cannot observe different shell state.
 /// Content-free analytics come from [`manager_permission_analytics`].
 pub(crate) fn canonical_permission_tool_name(
@@ -543,6 +539,10 @@ mod permission_analytics_tests {
     #[test]
     fn security_finding_enum_matches_manager_tokens() {
         use std::collections::BTreeSet;
+        assert_eq!(
+            Some(vec![PermissionSecurityFinding::UnresolvedArgument]),
+            convert_findings(&["unresolved_argument".to_owned()]),
+        );
         let manager: BTreeSet<&str> = ClassifierSecurityFinding::ALL
             .iter()
             .map(|f| f.token())
@@ -742,18 +742,18 @@ mod permission_analytics_tests {
         assert_eq!((alignments, disagreements), (1, 1), "50/50");
 
         // Content-free: no command, path, or free text on the projected payload JSON
-        let json = serde_json::to_string(&payloads[0]).unwrap();
+        let [first, second, ..] = payloads.as_slice() else {
+            panic!("expected at least two payloads, got {}", payloads.len());
+        };
+        let json = serde_json::to_string(first).unwrap();
         assert!(!json.contains("$X") && !json.contains("bash -c"));
         assert_eq!(
             events::PermissionDecisionReason::try_from("auto_denial_limit"),
             Ok(PermissionDecisionReason::AutoDenialLimit)
         );
+        assert_eq!(first.prompt_outcome, Some(PermissionPromptOutcome::Reject));
         assert_eq!(
-            payloads[0].prompt_outcome,
-            Some(PermissionPromptOutcome::Reject)
-        );
-        assert_eq!(
-            payloads[1].classifier_verdict,
+            second.classifier_verdict,
             Some(PermissionClassifierVerdict::Block)
         );
     }

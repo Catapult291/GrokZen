@@ -93,6 +93,72 @@ async fn subagent_spawn_context_shares_active_message_parent_prompt_index() {
     );
 }
 #[tokio::test]
+#[serial_test::serial(remote_sig_disarm)]
+async fn memory_reapply_updates_future_spawn_contexts_only() {
+    use crate::config::{MemoryConfig, MemoryMode};
+    let mut agent = build_minimal_agent_for_tests();
+    let initial_memory = MemoryConfig {
+        root_dir_override: Some(std::path::PathBuf::from("/tmp/test-memory-root")),
+        ..Default::default()
+    };
+    agent.set_memory_config(initial_memory);
+    let sid = acp::SessionId::new("parent-memory-refresh");
+    let mut parent = make_test_handle("test-model", false, None);
+    parent.spawn_snapshot.memory_mode = Some(MemoryMode::Legacy);
+    agent.insert_resident(&sid, parent);
+    let existing_spawn = agent.build_subagent_spawn_context(sid.0.as_ref());
+    assert_eq!(
+        existing_spawn
+            .memory_config
+            .as_ref()
+            .map(|config| (config.enabled, config.mode)),
+        Some((false, MemoryMode::Legacy)),
+        "the initial setter must seed spawn snapshots"
+    );
+    agent.cfg.borrow_mut().remote_settings = Some(crate::util::config::RemoteSettings {
+        memory_v2: Some(crate::config::MemoryV2Settings {
+            enabled: Some(true),
+            ..Default::default()
+        }),
+        ..Default::default()
+    });
+    agent.on_remote_settings_changed();
+    let future_spawn = agent.build_subagent_spawn_context(sid.0.as_ref());
+    assert_eq!(
+        future_spawn
+            .memory_config
+            .as_ref()
+            .map(|config| (config.enabled, config.mode)),
+        Some((true, MemoryMode::V2)),
+        "a remote memory-v2 gate must reach contexts built after settings apply"
+    );
+    assert_eq!(
+        future_spawn
+            .memory_config
+            .as_ref()
+            .and_then(|config| config.root_dir_override.as_deref()),
+        Some(std::path::Path::new("/tmp/test-memory-root")),
+        "runtime-only memory paths must survive remote re-resolution"
+    );
+    assert_eq!(
+        existing_spawn
+            .memory_config
+            .as_ref()
+            .map(|config| (config.enabled, config.mode)),
+        Some((false, MemoryMode::Legacy)),
+        "an already-built spawn context must keep its session-pinned memory config"
+    );
+    assert_eq!(
+        agent
+            .resident_handle(&sid)
+            .unwrap()
+            .spawn_snapshot
+            .memory_mode,
+        Some(MemoryMode::Legacy),
+        "the existing session snapshot must remain unchanged"
+    );
+}
+#[tokio::test]
 async fn subagent_spawn_context_shares_parent_goal_loop_gate() {
     use std::sync::atomic::Ordering::Relaxed;
     let agent = build_minimal_agent_for_tests();
@@ -119,6 +185,57 @@ async fn subagent_spawn_context_disables_ask_user_question_from_enabled_parent()
     assert!(
         !ctx.ask_user_question_enabled,
         "subagent must not inherit the enabled parent ask_user_question gate"
+    );
+}
+#[tokio::test]
+async fn subagent_spawn_context_carries_parent_paths_config() {
+    let agent = build_minimal_agent_for_tests();
+    let paths = crate::agent::config::PathsConfig {
+        extra_rule_dirs: vec![
+            "~/team-rules".to_owned(),
+            "/opt/company/grok-rules".to_owned(),
+        ],
+        ..Default::default()
+    };
+    agent.cfg.borrow_mut().paths = paths.clone();
+    let sid = acp::SessionId::new("parent-paths");
+    agent.insert_resident(&sid, make_test_handle("test-model", false, None));
+    let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
+    assert_eq!(
+        paths, ctx.parent_paths_config,
+        "child rules discovery must see the parent's `[paths]` table"
+    );
+}
+#[tokio::test]
+async fn subagent_spawn_context_carries_parent_bash_tool_params() {
+    let agent = build_minimal_agent_for_tests();
+    {
+        let mut cfg = agent.cfg.borrow_mut();
+        cfg.toolset.bash.max_timeout_secs = Some(36_000.0);
+        cfg.toolset.bash.output_byte_limit = Some(65_536);
+        cfg.remote_settings = Some(crate::util::config::RemoteSettings {
+            auto_background_on_timeout: Some(false),
+            ..Default::default()
+        });
+    }
+    let sid = acp::SessionId::new("parent-bash-params");
+    agent.insert_resident(&sid, make_test_handle("test-model", false, None));
+    let ctx = agent.build_subagent_spawn_context(sid.0.as_ref());
+    let expected_bash = serde_json::json!({
+        "max_timeout_secs": 36_000.0,
+        "output_byte_limit": 65_536,
+        "auto_background_on_timeout": false,
+        "allow_background_operator": true,
+    });
+    assert_eq!(
+        ctx.tool_params_json.bash,
+        expected_bash.as_object().cloned(),
+        "child bash params must equal the parent's resolved [toolset.bash] (incl. remote fallbacks)"
+    );
+    let spawn_src = include_str!("../../subagent/handle_request.rs");
+    assert!(
+        spawn_src.contains("std::mem::take(&mut ctx.tool_params_json)"),
+        "run_shell_child must forward ctx.tool_params_json into spawn_session_on_thread"
     );
 }
 #[tokio::test]
@@ -202,6 +319,8 @@ fn model_entry_with_rate_limit(
     crate::agent::config::ModelEntry {
         info,
         bundled_catalog_entry: false,
+        official_catalog_entry: false,
+        mtls_cert_dir: None,
         api_key: None,
         env_key: None,
         auth_provider: None,

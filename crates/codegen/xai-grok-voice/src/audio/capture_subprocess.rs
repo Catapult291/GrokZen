@@ -139,10 +139,9 @@ fn teardown(mut child: Child, reader: JoinHandle<()>) {
     let _ = reader.join();
 }
 
-/// Run the handshake with a deadline.
-/// A reader thread does the blocking read and sends the outcome (plus the stdout, for the PCM stream that follows) over a channel.
-/// On failure the child is killed, reaped, and joined.
-/// `timeout_what` names the operation in the timeout error (capture vs device-info).
+/// A reader thread does the blocking read and sends the outcome (plus the stdout, for the PCM stream that follows) over a
+/// channel. On failure the child is killed, reaped, and joined. `timeout_what` names the operation in the timeout error
+/// (capture vs device-info).
 fn handshake(
     child: Child,
     mut stdout: ChildStdout,
@@ -182,11 +181,9 @@ fn handshake(
     }
 }
 
-/// Spawn helper capture; PCM16 LE chunks are forwarded to `pcm_tx`.
-///
-/// Falls back to in-process cpal capture when the helper cannot run (spawn failure or broken protocol).
-/// Device/permission errors reported by a working helper pass through as-is.
-/// So do handshake timeouts: an in-process retry of the same stuck device would only double the wait.
+/// Spawn helper capture; PCM16 LE chunks are forwarded to `pcm_tx`. Falls back to in-process cpal capture when the helper
+/// cannot run (spawn failure or broken protocol). Device/permission errors reported by a working helper pass through
+/// as-is. So do handshake timeouts: an in-process retry of the same stuck device would only double the wait.
 pub fn spawn_pcm_capture(
     sample_rate: u32,
     pcm_tx: async_mpsc::Sender<Vec<u8>>,
@@ -301,7 +298,7 @@ mod tests {
             assert!(
                 matches!(header(bytes), Err(HandshakeFailure::Broken(_))),
                 "input {:?}... must be Broken",
-                &bytes[..bytes.len().min(12)]
+                bytes.get(..bytes.len().min(12)).unwrap_or(&[])
             );
         }
     }

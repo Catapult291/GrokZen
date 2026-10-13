@@ -21,8 +21,21 @@ pub mod scroll_stress;
 pub mod streaming_render;
 pub mod x10_mouse_leak;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, ValueEnum, Serialize, Deserialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    ValueEnum,
+    Serialize,
+    Deserialize,
+    strum::AsRefStr,
+    strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum Scenario {
     /// Inject rapid `j` keys against a large pre-rendered response.
     ScrollStress,

@@ -10,29 +10,21 @@ use crate::appearance::ScrollMode;
 use crate::appearance::TextSelection;
 use crate::appearance::permission_cursor::DefaultSelectedPermission;
 
-use xai_grok_shell::agent::config::UiConfig;
+use xai_grok_shell::agent::config::{Feature, UiConfig};
 use xai_grok_shell::util::config::DISPLAY_REFRESH_DEFAULT_AUTO_CADENCE_ENABLED;
 use xai_grok_tools::implementations::grok_build::ask_user_question;
 
-// ---------------------------------------------------------------------------
-// Int bounds for `max_thoughts_width`.
-//
-// Stored as `u16` in `UiConfig`, exposed as `i64` for registry uniformity.
-// 40 is the minimum readable width on an 80-col terminal; 500 is the cap before "obviously wrong" territory
-// `pub(crate)` so the dispatcher's clamp and the shell helper's defensive clamp share these bounds
+// Int bounds for `max_thoughts_width`. `pub(crate)` so the dispatcher's clamp and the shell helper's defensive
+// clamp share these bounds.
 pub(crate) const MAX_THOUGHTS_WIDTH_MIN: i64 = 40;
 pub(crate) const MAX_THOUGHTS_WIDTH_MAX: i64 = 500;
 
 /// Registry key for `max_thoughts_width`; it is shared between the registry definition and the live-wrap-preview gate in the int stepper.
 pub(crate) const MAX_THOUGHTS_WIDTH_KEY: &str = "max_thoughts_width";
 
-// ---------------------------------------------------------------------------
-// Theme choice catalogs.
-//
-// Canonical names MUST match `ThemeKind::display_name()`.
-// The catalogs are shared by `theme`, `auto_dark_theme`, and `auto_light_theme`; the auto-* sub-pickers drop "auto" to avoid a circular reference
-// The lists are bounded by `MAX_PICKER_CHOICES`
-// ---------------------------------------------------------------------------
+// Theme choice catalogs. Canonical names MUST match `ThemeKind::display_name()`. The catalogs are shared by
+// `theme`, `auto_dark_theme`, and `auto_light_theme`; the auto-* sub-pickers drop "auto" to avoid a circular
+// reference.
 
 /// Full theme catalog including the "auto" meta-variant; only `theme` uses it.
 const THEME_CHOICES: &[EnumChoice] = &[
@@ -67,24 +59,16 @@ const THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
+    EnumChoice {
+        canonical: "terminal",
+        display: "Terminal",
+        description: "Terminal's own background and text colors.",
+    },
 ];
 
-// ---------------------------------------------------------------------------
-// Permission-mode catalog.
-//
-// Persisted values map onto runtime flags:
-//   "always-approve" ↔ yolo_mode = true  (auto-approve all)
-//   "auto"           ↔ auto_mode = true  (LLM classifier; not full yolo)
-//   "ask"            ↔ both false (interactive prompts)
-//   "default"        ↔ both false (agent's default, currently Ask)
-//
-// Canonical strings match `load_permission_mode`
-// `supports_preview: false` because toggling YOLO drains the permission queue (unsafe for per-keystroke preview)
-//
-// Adding new modes requires: (1) a `PermissionModeKind` variant, (2) an `EnumChoice` here,
-// (3) a `set_yolo_mode_inner` update, (4) a `load_permission_mode` arm, (5) tests
-// `Plan` is excluded; it lives on its own `plan_mode` setting
-// ---------------------------------------------------------------------------
+// Permission-mode catalog. Persisted values map onto runtime flags: "always-approve" ↔ yolo_mode = true
+// (auto-approve all). `supports_preview: false` because toggling YOLO drains the permission queue (unsafe for
+// per-keystroke preview).
 
 // Choice order runs safe to unsafe: Default, Ask, Auto, Always approve
 // "Always approve" at the end creates a speed bump against accidental selection
@@ -102,7 +86,7 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
     },
     EnumChoice {
         canonical: "auto",
-        display: "Auto",
+        display: "Auto-review",
         description: "LLM classifier approves safe tools; dangerous actions may still prompt or deny.",
     },
     EnumChoice {
@@ -112,19 +96,13 @@ const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
     },
 ];
 
-// ---------------------------------------------------------------------------
-// Coding-data-sharing catalog.
-//
-// Persisted in auth metadata (`AuthEntry::coding_data_retention_opt_out`), NOT config.toml
-// Two choices only: the pager has no `Option`/`Unset` representation for this field
-//
+// Coding-data-sharing catalog. Two choices only: the pager has no `Option`/`Unset` representation for this field.
 // `supports_preview: false` because toggling fires an async ACP call that can fail. Commit on Enter only.
-// ---------------------------------------------------------------------------
 
 // The setting's own description carries the full explanation, so the choices are bare labels; an empty description collapses each to a single line.
 // Privacy build: retention is LOCKED to opt-out. A single canonical choice remains so
 // persisted values, pickers, and the shell wire format keep working; opt-in is refused
-// at dispatch time (`set_coding_data_sharing_tracked` Guard 0) and the UI renders the
+// at dispatch time (`set_coding_data_sharing` privacy-lock guard) and the UI renders the
 // row as locked (`CodingDataSharingLock::PrivacyBuild`).
 const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[EnumChoice {
     canonical: "opt-out",
@@ -132,30 +110,12 @@ const CODING_DATA_SHARING_CHOICES: &[EnumChoice] = &[EnumChoice {
     description: "Coding data retention is locked to opt-out in this privacy build. Opt-in is not available.",
 }];
 
-// ---------------------------------------------------------------------------
-// Plan-mode catalog.
-//
-// PAGER-owned and per-session, set over ACP via `session/set_mode`
-// NOT persisted to config.toml; it resets every session start
-//
-// Uses `on`/`off` canonical strings (not the shell's `plan`/`default` wire ids)
-// `Ask` mode is not exposed here; it is only reachable via Shift+Tab
-//
-// `supports_preview: false` because toggling fires an ACP request that gates tool dispatch. Commit on Enter only.
-// ---------------------------------------------------------------------------
+// Plan-mode catalog. `Ask` mode is not exposed here; it is only reachable via Shift+Tab. `supports_preview: false`
+// because toggling fires an ACP request that gates tool dispatch. Commit on Enter only.
 
-// ---------------------------------------------------------------------------
-// Default-selected-permission catalog.
-//
-// Persisted to `[ui].default_selected_permission` in config.toml
-// It controls which row the cursor preselects on the FIRST permission prompt of a session
-// After the user confirms any prompt, the cursor sticks to the last-used option kind
-// `always_allow_all_sessions` (the effective default) lands the cursor on the "Always allow on all sessions" (enable-always-approve) row
-// That targeting goes through `is_enable_always_approve_option`, not index 0
-// The other three map onto `acp::PermissionOptionKind::{AllowOnce, AllowAlways, Reject*}`
-//
-// `supports_preview: false` because permission prompts aren't open in the modal background, so there is nothing to live-preview
-// ---------------------------------------------------------------------------
+// Default-selected-permission catalog. `always_allow_all_sessions` (the effective default) lands the cursor on the
+// "Always allow on all sessions" (enable-always-approve) row. `supports_preview: false` because permission prompts
+// aren't open in the modal background, so there is nothing to live-preview.
 
 // Order matches the live permission prompt rendering (YOLO, always-allow, allow-once, reject) so the picker mirrors the real prompt
 // Canonicals and display labels come from `DefaultSelectedPermission`, the single source of truth
@@ -211,13 +171,9 @@ const FOLLOW_UP_BEHAVIOR_CHOICES: &[EnumChoice] = &[
     },
 ];
 
-// ---------------------------------------------------------------------------
-// Mermaid-rendering catalog.
-//
-// SHELL-owned: persisted to `[ui].render_mermaid`
-// A pager-side process-wide cache mirror (`appearance::cache::*_render_mermaid`) serves the render hot path
-// Canonicals match `RenderMermaid::as_canonical`
-// ---------------------------------------------------------------------------
+// Mermaid-rendering catalog. SHELL-owned: persisted to `[ui].render_mermaid`. A pager-side process-wide cache
+// mirror (`appearance::cache::*_render_mermaid`) serves the render hot path. Canonicals match
+// `RenderMermaid::as_canonical`.
 
 const RENDER_MERMAID_CHOICES: &[EnumChoice] = &[
     EnumChoice {
@@ -350,13 +306,9 @@ const VOICE_CAPTURE_MODE_CHOICES: &[EnumChoice] = &[
     },
 ];
 
-// Voice STT language choices for the settings modal.
-//
-// Concrete codes must match `xai_grok_voice::STT_LANGUAGES`, the official Grok STT catalog
-// The catalog is documented at https://docs.x.ai/developers/model-capabilities/audio/speech-to-text
-// `auto` is client-only; the voice crate resolves it to a concrete code before the STT handshake
-// Order: English (default), System, then the remaining languages A to Z by English name
-// A registry unit test locks this list to the voice crate
+// Voice STT language choices for the settings modal. Concrete codes must match `xai_grok_voice::STT_LANGUAGES`,
+// the official Grok STT catalog. `auto` is client-only; the voice crate resolves it to a concrete code before the
+// STT handshake.
 const VOICE_STT_LANGUAGE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "en",
@@ -518,12 +470,15 @@ const CONCRETE_THEME_CHOICES: &[EnumChoice] = &[
         display: "Oscura Midnight",
         description: "Deep dark with warm accents; needs truecolor.",
     },
+    EnumChoice {
+        canonical: "terminal",
+        display: "Terminal",
+        description: "Terminal's own background and text colors.",
+    },
 ];
 
-/// Child settings shown inside the "Show contextual hints" group sub-sheet.
-/// Keys match the `[ui.contextual_hints]` serde fields.
-/// The namespace keeps them globally unique: bare `plan_mode` collides with the plan-mode enum row.
-/// They are registered as normal Bool settings but hidden from the top-level list (`build_rows` skips any key that is a group child).
+/// Child settings shown inside the "Show contextual hints" group sub-sheet. Keys match the `[ui.contextual_hints]`
+/// serde fields. The namespace keeps them globally unique: bare `plan_mode` collides with the plan-mode enum row.
 const CONTEXTUAL_HINTS_CHILDREN: &[&str] = &[
     "contextual_hints.undo",
     "contextual_hints.plan_mode",
@@ -612,6 +567,21 @@ pub fn default_settings() -> Vec<SettingMeta> {
             },
             restart_required: false,
             // Minimal mode has no interactive scrollback pane for the rail.
+            hidden_in_minimal: true,
+        },
+        SettingMeta {
+            key: "dashboard_preview",
+            category: SettingCategory::Appearance,
+            owner: SettingOwner::Shared,
+            label: "Dashboard preview",
+            description: "Show the selected session's preview and reply panel in the dashboard. \
+                          Turn off to give the session list more space. Open a session to reply \
+                          or answer permissions when the preview is off.",
+            keywords: &["dashboard", "peek", "preview", "prompt", "reply", "panel"],
+            kind: SettingKind::Bool {
+                default: ui_default.dashboard_preview_enabled(),
+            },
+            restart_required: false,
             hidden_in_minimal: true,
         },
         SettingMeta {
@@ -738,7 +708,6 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-        // --- theme and auto themes -------------------------------------------
         SettingMeta {
             key: "theme",
             category: SettingCategory::Appearance,
@@ -830,7 +799,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             label: "Permission mode",
             description: "Default uses the agent's built-in behavior; \
                           Ask prompts for each tool action; \
-                          Auto uses an LLM classifier for risky tools; \
+                          Auto-review uses an LLM classifier for risky tools; \
                           Always approve grants all permissions automatically.",
             keywords: &[
                 "permission",
@@ -840,6 +809,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 "always",
                 "ask",
                 "auto",
+                "review",
                 "classifier",
                 "tool",
                 "danger",
@@ -861,7 +831,7 @@ pub fn default_settings() -> Vec<SettingMeta> {
             label: "Remember tool approvals",
             description: "Show \"Always allow\" options in permission prompts so you can stop \
                           being re-asked about a specific command or tool. Applies in ask and \
-                          auto; Always-approve still skips all prompts. Restart required.",
+                          Auto-review; Always-approve still skips all prompts. Restart required.",
             keywords: &[
                 "permission",
                 "approve",
@@ -910,6 +880,41 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 supports_preview: false,
             },
             restart_required: false,
+            hidden_in_minimal: false,
+        },
+        // SHELL-owned `[features].subagent_model_inheritance`, a registry feature row rather than a `[ui]` key
+        // `restart_required` because each agent latches the mode when it is built; the row's value is the next-start resolution
+        // Each `\n` starts a new line in the expanded detail (a Bool row never reaches the single-line sub-pane header)
+        SettingMeta {
+            key: "subagent_model_inheritance",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shell,
+            label: "Subagent model inheritance",
+            description: "On: Grok cannot set models for subagents\n\
+                          Off: Grok may choose a different model for a subagent. Takes effect \
+                          after restart.\n\
+                          NOTE: This setting only applies when all models are xAI \
+                          \"model_family\". You likely don't need to configure this setting.",
+            keywords: &[
+                "subagent",
+                "subagents",
+                "subagent model",
+                "same model",
+                "model",
+                "parent",
+                "inherit",
+                "inheritance",
+                "picker",
+                "argument",
+                "task",
+                "spawn",
+                "xai",
+                "features",
+            ],
+            kind: SettingKind::Bool {
+                default: Feature::SubagentModelInheritance.default_enabled(),
+            },
+            restart_required: true,
             hidden_in_minimal: false,
         },
         // SHARED. `u16` in UiConfig, widened to `i64` for registry.
@@ -1221,10 +1226,9 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-        // SHELL-owned, persisted to `[ui].default_selected_permission` in config.toml
-        // Read by the pager via `appearance::permission_cursor`
-        // Canonical `always_allow_all_sessions` (the effective default) lands the first prompt's cursor on the enable-always-approve row
-        // Subsequent prompts stick to the last-used kind
+        // SHELL-owned, persisted to `[ui].default_selected_permission` in config.toml. Canonical
+        // `always_allow_all_sessions` (the effective default) lands the first prompt's cursor on the enable-always-approve
+        // row.
         SettingMeta {
             key: "default_selected_permission",
             category: SettingCategory::Agent,
@@ -1253,11 +1257,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-        // SHELL-owned `[toolset.ask_user_question].timeout_enabled`
-        // This row edits the user-config layer of the tiered timeout gate
-        // Requirements, env, managed, and remote settings feed the effective value at agent build
-        // The default is the const shared with the resolver
-        // `restart_required` because the value is resolved when an agent is built, like `remember_tool_approvals`
+        // SHELL-owned `[toolset.ask_user_question].timeout_enabled`. `restart_required` because the value is resolved when
+        // an agent is built, like `remember_tool_approvals`.
         SettingMeta {
             key: "toolset.ask_user_question.timeout_enabled",
             category: SettingCategory::Agent,
@@ -1649,14 +1650,8 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
-        // ── TodoGate (runtime turn-end backstop) ──────────────────────
-        //
-        // Only the CLI flag (`--todo-gate`) is wired
-        // Settings-modal entries for `[reminder.todo_gate]` are deferred
-        // The modal dispatcher requires per-key action arms in `settings_modal.rs`, `app/dispatch.rs`, and `settings/registry.rs`
-        // Those arms don't yet have a place to land
-        // SHELL-owned. `restart_required: false` because the config-reloader rebroadcasts UI changes; mid-session forks pick up new values.
-        // The empty-string default means "no opinion": the shell's resolution applies
+        // Only the CLI flag (`--todo-gate`) is wired. Those arms don't yet have a place to land. `restart_required: false`
+        // because the config-reloader rebroadcasts UI changes.
         SettingMeta {
             key: "fork_secondary_model",
             category: SettingCategory::Models,
