@@ -46,6 +46,23 @@ pub fn normalize_empty_arguments(arguments: &str) -> &str {
 /// discarded whole, and a number cut off at EOF is discarded (`1` could have been `12`).
 /// Returns `None` when nothing salvageable remains or the result still doesn't parse.
 pub fn try_repair_truncated_json(arguments: &str) -> Option<serde_json::Value> {
+    repair_truncated_json_impl(arguments, false)
+}
+
+/// Like [`try_repair_truncated_json`], but keeps an unterminated **string value**
+/// (closes it at EOF) so a residual `{"pattern": "createToolCall` still yields
+/// `pattern`. Used only after the conservative repair parses but fails the tool
+/// schema (missing required field). Keys and numbers follow the conservative rules.
+pub fn try_repair_truncated_json_keep_partial_strings(
+    arguments: &str,
+) -> Option<serde_json::Value> {
+    repair_truncated_json_impl(arguments, true)
+}
+
+fn repair_truncated_json_impl(
+    arguments: &str,
+    keep_partial_strings: bool,
+) -> Option<serde_json::Value> {
     let trimmed = arguments.trim();
     if !trimmed.starts_with('{') {
         return None;
@@ -217,6 +234,19 @@ pub fn try_repair_truncated_json(arguments: &str) -> Option<serde_json::Value> {
         }
     }
 
+    // EOF inside a string value: optionally keep the emitted prefix (salvage path).
+    // A key string at EOF is still dropped — incomplete keys cannot be completed.
+    let mut closed_partial_string = false;
+    if keep_partial_strings && in_string {
+        if let Some(frame) = stack.last_mut()
+            && frame.next_is_value
+        {
+            frame.last_value_end = bytes.len();
+            frame.next_is_value = false;
+            closed_partial_string = true;
+        }
+    }
+
     if stack.is_empty() {
         return None;
     }
@@ -226,6 +256,14 @@ pub fn try_repair_truncated_json(arguments: &str) -> Option<serde_json::Value> {
     // an opening bracket), and every outer frame is mid-value, so the closers are
     // syntactically valid.
     let mut out = trimmed[..stack.last()?.last_value_end].to_string();
+    if closed_partial_string {
+        // The prefix ends mid-string; add the closing quote before container closers.
+        // A trailing lone backslash would escape it — drop that byte instead.
+        if out.ends_with('\\') && !out.ends_with("\\\\") {
+            out.pop();
+        }
+        out.push('"');
+    }
     for frame in stack.iter().rev() {
         out.push(match frame.kind {
             Kind::Object => '}',
@@ -461,5 +499,39 @@ mod tests {
         let repaired =
             try_repair_truncated_json(r#"{"command": "echo \"hi\"", "timeout": "#).expect("repair");
         assert_eq!(repaired["command"], "echo \"hi\"");
+    }
+
+    #[test]
+    fn salvage_keeps_partial_string_value() {
+        let salvaged = try_repair_truncated_json_keep_partial_strings(
+            r#"{"head_limit": 5, "path": "proxy.mjs", "pattern": "createToolCall"#,
+        )
+        .expect("salvage");
+        assert_eq!(salvaged["head_limit"], 5);
+        assert_eq!(salvaged["path"], "proxy.mjs");
+        assert_eq!(salvaged["pattern"], "createToolCall");
+        // Conservative repair still drops the incomplete pattern member.
+        let conservative = try_repair_truncated_json(
+            r#"{"head_limit": 5, "path": "proxy.mjs", "pattern": "createToolCall"#,
+        )
+        .expect("repair");
+        assert!(conservative.get("pattern").is_none());
+    }
+
+    #[test]
+    fn salvage_still_drops_dangling_key_and_number() {
+        let salvaged =
+            try_repair_truncated_json_keep_partial_strings(r#"{"a": 1, "b": "#).expect("salvage");
+        assert_eq!(salvaged["a"], 1);
+        assert!(salvaged.get("b").is_none());
+
+        let salvaged =
+            try_repair_truncated_json_keep_partial_strings(r#"{"limit": 12"#).expect("salvage");
+        assert!(salvaged.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn salvage_none_for_valid_json() {
+        assert!(try_repair_truncated_json_keep_partial_strings(r#"{"a": 1}"#).is_none());
     }
 }
