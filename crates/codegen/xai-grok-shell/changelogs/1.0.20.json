@@ -1,0 +1,42 @@
+[
+  {
+    "category": "features",
+    "description": "**The cross-session section keeps only detached tasks** — the tasks pane used to list ordinary background tasks owned by other sessions as well. Rows are now filtered by the snapshot's `detach` flag: only tasks the user confirmed will outlive their session appear, and unlabelled clutter no longer mixes into the cross-session block.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Cross-session rows can be terminated or cleared** — select a cross-session row and press `x` (or click the row-end ✗): a running task is asked to stop via its owner session; a finished one deletes the durable record on disk and drops the row. A pending-kill marker stays visible in this pane, so the action does not look like a no-op when the completion notification lands in another session.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**The tasks pane refreshes while it is open** — when the pane is visible and a cross-session row has gone stale, the list is re-fetched every five seconds; a background tick still drives the poll when nothing on the panel is running, so reopening is not required to see new state.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**The detach confirmation card no longer pretends it can be allowed forever** — the card used to borrow Bash's option set, which included \"don't ask again\" and always-approve rows that this gate can never honour. It is now reduced to allow once / reject once.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Truncated tool arguments from the model no longer kill the turn** — parallel tool calls concatenated on one wire index are rotated back into independent calls; JSON cut off at EOF drops only the incomplete trailing member and closes the brackets; a half-written string value (for example a partially sent pattern) keeps its prefix and still parses. Responses that omit optional fields such as `arguments` no longer fail the whole request.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**A Responses stream missing the `arguments` field can be backfilled** — on the existing parse-failure retry path, the field is filled with an empty string for the five event types that require it. A bad item degrades from \"entire stream Serialization failed\" to a per-call parse error; a healthy stream still succeeds on the first pass with no extra cost.",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**Deleting a finished task uses a dedicated path** — a new `x.ai/task/delete` removes only completed records; liveness of the worker is not consulted, since the pid in a finished record may already belong to an unrelated process.",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**This is an independent community build** — it carries the privacy hardening and the Windows adaptations, and its version number follows this repository's own series.",
+    "breaking_change": false
+  }
+]
