@@ -17,8 +17,6 @@ pub(crate) const MAX_DOOM_LOOP_SIGNAL_BYTES: usize = 256;
 
 /// Cheap-to-clone accumulator shared between the SSE decode closure and the stream transform of one request attempt.
 /// Created fresh per attempt so signals from a failed attempt can never leak into the next one.
-/// Carries the policy so the stream transform can judge confidence for the mid-stream abort.
-/// The retry loop disarms the abort once the recovery budget is spent so the final attempt completes and can be accepted.
 #[derive(Clone, Debug, Default)]
 pub struct DoomLoopSignalCollector {
     inner: Arc<Mutex<CollectorState>>,
@@ -61,9 +59,7 @@ impl DoomLoopSignalCollector {
     }
 
     /// Inspect a raw SSE frame.
-    /// Returns `true` when the frame is the non-standard `response.doom_loop_check` event (by its SSE `event:` name or its payload `type`).
     /// The caller must swallow such a frame; forwarding it would fail typed deserialization.
-    /// Reported triggers (mid-stream or on the terminal response object) are recorded, deduplicated by raw label.
     /// Never fails.
     pub(crate) fn absorb(&self, event_name: &str, data: &str) -> bool {
         // The name check keeps a check event with an unparseable payload from ever reaching the typed parser
@@ -137,7 +133,10 @@ mod tests {
         assert!(collector.absorb(DOOM_LOOP_CHECK_EVENT_TYPE, SAMPLE_CHECK_EVENT_DATA));
         let signals = collector.take();
         assert_eq!(signals.len(), 1);
-        assert_eq!(signals[0].kind, DoomLoopSignalKind::TailRepetition(4));
+        let Some(signal) = signals.first() else {
+            panic!("expected a signal");
+        };
+        assert_eq!(signal.kind, DoomLoopSignalKind::TailRepetition(4));
     }
 
     /// Servers that omit the SSE `event:` name are still handled by the payload `type` check.
@@ -158,8 +157,14 @@ mod tests {
         ));
         let signals = collector.take();
         assert_eq!(signals.len(), 2);
-        assert_eq!(signals[0].raw, "tail_repetition:4@response");
-        assert_eq!(signals[1].raw, "tail_repetition:2@response");
+        let Some(first) = signals.first() else {
+            panic!("expected first signal");
+        };
+        let Some(second) = signals.get(1) else {
+            panic!("expected second signal");
+        };
+        assert_eq!(first.raw, "tail_repetition:4@response");
+        assert_eq!(second.raw, "tail_repetition:2@response");
     }
 
     #[test]

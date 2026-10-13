@@ -320,10 +320,9 @@ pub(crate) fn render_legacy(root: &Path, max_output_bytes: usize) -> String {
     let collected = collect(root, walker, &cfg);
     let output_lines = render_with_fallback(root, &collected, &cfg);
     // Skip the first line (root dir name) — the caller prepends its own.
-    if output_lines.len() > 1 {
-        output_lines[1..].join("\n")
-    } else {
-        String::new()
+    match output_lines.get(1..) {
+        Some(rest) if !rest.is_empty() => rest.join("\n"),
+        _ => String::new(),
     }
 }
 
@@ -338,15 +337,7 @@ mod tests {
 
     /// Create a reference directory tree for fixture comparison.
     fn create_fixture_tree(root: &std::path::Path) {
-        // src/
-        //   main.rs
-        //   lib.rs
-        //   util/
-        //     helpers.rs
-        // tests/
-        //   test_main.rs
-        // README.md
-        // Cargo.toml
+        // src/ main.rs lib.rs util/ helpers.rs tests/ test_main.rs README.md Cargo.toml
         let src = root.join("src");
         std::fs::create_dir_all(src.join("util")).unwrap();
         std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
@@ -361,14 +352,9 @@ mod tests {
         std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"test\"").unwrap();
     }
 
-    /// The legacy depth-based renderer expands small directories fully,
-    /// showing individual files with indentation per depth level.
-    /// Archived-output fixture test: asserts exact string equality against
-    /// the known output of the earlier depth-threshold algorithm.
-    ///
-    /// Fixture captured from `render_legacy()` on the reference tree defined
-    /// by `create_fixture_tree()`. If this test fails after a change to the
-    /// legacy renderer, the change has drifted from historical behavior.
+    /// The legacy depth-based renderer expands small directories fully, showing individual files with indentation per depth level. Archived-output
+    /// fixture test: asserts exact string equality against the known output of the earlier depth-threshold algorithm. Fixture captured from
+    /// `render_legacy()` on the reference tree defined by `create_fixture_tree()`.
     #[test]
     fn legacy_renders_small_tree_exact_fixture() {
         let tmp = TempDir::new().unwrap();

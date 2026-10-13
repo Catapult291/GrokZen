@@ -1,6 +1,7 @@
 //! Rewind concern for `SessionActor`: rewind points, cross-compaction replay detection, and `handle_rewind`.
 
 use super::*;
+use crate::session::helpers::rewind_preview::rewind_prompt_preview;
 
 impl SessionActor {
     pub(super) async fn close_rewind_window(&self) {
@@ -20,7 +21,6 @@ impl SessionActor {
     }
 
     /// Get available rewind points for this session.
-    ///
     /// Every prompt is a checkpoint: the list always contains `[0, 1, ..., N-1]` where N is the current prompt_index.
     /// File snapshots may or may not exist for each checkpoint (indicated by `has_file_changes`).
     pub(super) async fn get_rewind_points(&self) -> RewindPointsResponse {
@@ -43,22 +43,10 @@ impl SessionActor {
         // Generate a rewind point for every prompt 0..current_prompt_index.
         let rewind_points = (0..current_prompt_index)
             .map(|idx| {
-                let prompt_preview = prompts.get(idx).and_then(|text| {
-                    let clean_text = extract_user_query(text);
-                    let first_line = clean_text
-                        .lines()
-                        .map(|l| l.trim())
-                        .find(|l| !l.is_empty())
-                        .unwrap_or("");
-
-                    if first_line.is_empty() {
-                        None
-                    } else if first_line.chars().count() > 60 {
-                        Some(format!("{}...", crate::util::truncate(first_line, 57)))
-                    } else {
-                        Some(first_line.to_string())
-                    }
-                });
+                let prompt_preview = prompts
+                    .get(idx)
+                    .map(String::as_str)
+                    .and_then(rewind_prompt_preview);
 
                 let file_meta = file_meta_map.get(&idx);
                 let num_file_snapshots = file_meta.map_or(0, |m| m.num_file_snapshots);
@@ -80,12 +68,8 @@ impl SessionActor {
     }
 
     /// Load user prompts from `updates.jsonl` in chronological order.
-    ///
-    /// Each `UserMessageChunk` sequence is merged into a single prompt string.
     /// `RewindMarker` entries truncate the list back to the marker's target so only prompts from the current timeline are returned.
-    ///
     /// Uses [`PromptExtractIterator`] which peeks at the `update.sessionUpdate` discriminant field without fully deserialising every notification.
-    /// This skips large `acp::SessionNotification` allocations for the many update types (tool calls, assistant chunks) prompt extraction ignores.
     pub(super) fn load_user_prompts_from_updates(
         updates_path: &std::path::Path,
     ) -> std::io::Result<Vec<String>> {
@@ -111,10 +95,8 @@ impl SessionActor {
     }
 
     /// Check whether a rewind must replay `updates.jsonl` to reconstruct the conversation: replay whenever a compaction has occurred.
-    ///
     /// Compaction collapses N+1 user messages into ~3, so the conversation in memory no longer has the User count `prompt_index` implies.
     /// `truncate_to_prompt_index` counts User items to find the cut point, so it is wrong for ALL post-compaction targets, not just at the boundary.
-    /// `replay_to_prompt` reads `updates.jsonl` from scratch and handles compaction checkpoints correctly, whatever the target position.
     async fn needs_compaction_replay(&self) -> bool {
         let last = self
             .chat_state_handle
@@ -133,14 +115,9 @@ impl SessionActor {
         }
     }
 
-    /// Handle a rewind request with mode support.
-    ///
     /// "Rewind to N" restores the state from before prompt N ran; prompts 0..N-1 are kept.
-    ///
-    /// Modes:
-    /// - `All`: roll back both conversation and files
-    /// - `ConversationOnly`: roll back conversation, leave files untouched
-    /// - `FilesOnly`: roll back files, leave conversation untouched
+    /// `All`: roll back both conversation and files.
+    /// `ConversationOnly`: roll back conversation, leave files untouched.
     pub(super) async fn handle_rewind(
         &self,
         request: RewindRequest,
@@ -342,10 +319,9 @@ impl SessionActor {
                         // The rebuilt conversation drops the summary unless a checkpoint survived
                         // Carry the recomputed marker to the snapshot restore so the stale value isn't reused
                         replay_compaction_marker = Some(replay_result.last_compaction_prompt_index);
-                        // The replay result may or may not include the session preamble (System and User(user_info)):
-                        // - Checkpoint loaded (target >= compaction_at): compacted_history already has the System and User prefix; use it directly
-                        // - Raw updates (target < compaction_at): replay only accumulates user/agent turns from updates.jsonl
-                        //   Prepend System and the original User(user_info) so the model sees the same preamble it originally saw
+                        // The replay result may or may not include the session preamble (System and User(user_info)).
+                        // Raw updates (target < compaction_at): replay only accumulates user/agent turns from updates.jsonl.
+                        // Prepend System and the original User(user_info) so the model sees the same preamble it originally saw.
                         if matches!(
                             replay_result.conversation.first(),
                             Some(ConversationItem::System(_))
@@ -369,9 +345,7 @@ impl SessionActor {
                             target_index,
                             "Cross-compaction replay failed — rewind aborted"
                         );
-                        // Do NOT fall back to truncation: the post-compaction conversation has wrong user-message counts
-                        // Raw replay without a checkpoint produces an oversized conversation that will exceed the context window
-                        // Return a clear error so the user can rewind to a different (post-compaction) prompt instead
+                        // No fallback to truncation: post-compaction conversations have wrong user-message counts
                         return Ok(RewindResponse {
                             success: false,
                             target_prompt_index: target_index,
@@ -380,12 +354,7 @@ impl SessionActor {
                             clean_files: vec![],
                             conflicts: vec![],
                             prompt_text: None,
-                            error: Some(format!(
-                                "Cannot rewind to prompt #{} — compaction checkpoint data is \
-                                 unavailable ({e}). Try rewinding to a prompt after the \
-                                 compaction point instead.",
-                                target_index,
-                            )),
+                            error: Some(format!("Cannot rewind to prompt #{target_index}: {e}")),
                         });
                     }
                 }
@@ -452,10 +421,9 @@ impl SessionActor {
                 .persistence_tx
                 .send(PersistenceMsg::LastRecap(None));
 
-            // Re-derive the AUTO title-refresh checkpoint from the shortened conversation
-            // A rewind below a checkpoint re-opens refreshing, while one still past the window stays frozen
-            // Persist it so the reopened state survives resume (unlike compaction, a rewind genuinely removes the turns those checkpoints described)
-            // A manually-titled session stays frozen; reopening would only spawn side-calls the manual-title guard rejects anyway
+            // Re-derive the AUTO title-refresh checkpoint from the shortened conversation.
+            // A rewind below a checkpoint re-opens refreshing, while one still past the window stays frozen.
+            // Persist it so the reopened state survives resume (unlike compaction, a rewind genuinely removes the turns those checkpoints described).
             let session_dir = crate::session::persistence::session_dir(&self.session_info);
             if !crate::session::persistence::title_is_manual_in_dir(&session_dir) {
                 let post_rewind_turns = crate::session::helpers::session_recap::main_turn_count(
@@ -500,16 +468,8 @@ impl SessionActor {
     }
 
     /// `ConversationOnly` rewind-tracker bookkeeping: merge the discarded prompts' file effects (`>= target_index`) into the previous rewind point.
-    /// That keeps `/rewind 0` able to undo all file changes.
-    /// A new prompt at `target_index` then gets a fresh rewind point whose before-snapshots reflect current disk state.
-    /// Files and the conversation are left untouched.
-    ///
-    /// Updates the in-memory tracker, then persists via a disk-authoritative merge.
     /// The merge means a lazily-unloaded or partial tracker can't truncate history off disk.
     /// No normalize_to_relative needed: per-turn persistence already normalized the on-disk points (turn.rs, before PersistenceMsg::RewindPoint).
-    ///
-    /// Shared by local `handle_rewind` (ConversationOnly) and the bridge-mode ConversationOnly path.
-    /// The bridge path's conversation rewind lands server-side (SessionCommand::ReconcileRewindTracker).
     pub(super) async fn merge_rewind_tracker_from(&self, target_index: usize) {
         self.file_state_tracker
             .merge_and_remove_from(target_index)
@@ -523,10 +483,6 @@ impl SessionActor {
     /// Out-of-band history repair (`x.ai/session/repair`) for a resident session.
     /// Runs `xai_chat_state::compaction_utils::repair_history` inside the chat-state actor, then flushes persistence.
     /// The flush means `chat_history.jsonl` is rewritten on disk before the caller sees success.
-    ///
-    /// Refused while a turn is in flight (in-flight tool calls legitimately await their results).
-    /// The refusal is enforced inside the chat-state actor's command handler; the check below is just a fast path.
-    /// See `ChatStateCommand::RepairHistory` for why a caller-side check alone would race turn start.
     pub(super) async fn handle_repair_history(
         &self,
         dry_run: bool,

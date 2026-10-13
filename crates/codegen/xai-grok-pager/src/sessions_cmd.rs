@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Subcommand;
+use xai_grok_login::{AuthManager, try_ensure_fresh_auth};
 use xai_grok_shell::agent::config::Config as AgentConfig;
-use xai_grok_shell::auth::{AuthManager, try_ensure_fresh_auth};
 use xai_grok_shell::session::merge::MergedSession;
 use xai_grok_shell::util::grok_home::grok_home;
 
@@ -41,17 +41,19 @@ pub async fn run(
     agent_config: &AgentConfig,
     locale: &LocaleContext,
 ) -> Result<()> {
-    // Best-effort only. Do not force an interactive public login for enterprise
-    // deployments that only configure a deployment_key + custom xai_api_base_url.
-    // If the user has previously run the interactive `grok` TUI (which succeeds
-    // for these setups), any cached credential will be used. Otherwise we still
-    // proceed so the SessionRegistryClient can use the deployment_key when
-    // talking to the custom proxy.
-    let auth = try_ensure_fresh_auth(&agent_config.grok_com_config).await;
+    // Best-effort only: never force an interactive public login here. Enterprise deployments may configure only a
+    // deployment_key and a custom xai_api_base_url. Otherwise we still proceed so the SessionRegistryClient can use
+    // the deployment_key when talking to the custom proxy.
+    let auth = try_ensure_fresh_auth(
+        &agent_config.grok_com_config,
+        agent_config.endpoints.proxy_url(),
+    )
+    .await;
 
-    let auth_manager = std::sync::Arc::new(AuthManager::new(
+    let auth_manager = std::sync::Arc::new(AuthManager::new_with_proxy_base_url(
         &grok_home(),
         agent_config.grok_com_config.clone(),
+        agent_config.endpoints.proxy_url(),
     ));
 
     let client = xai_grok_shell::agent::session_registry_client::SessionRegistryClient::new(
@@ -325,8 +327,14 @@ fn print_sessions_grouped(sessions: &[MergedSession], locale: &LocaleContext) {
                 locale.named_static_text("sessions.list.no_summary", "(no summary)")
             };
             let truncated: String = summary.chars().take(50).collect();
-            let created = &s.created_at[..s.created_at.len().min(10)];
-            let updated = &s.updated_at[..s.updated_at.len().min(10)];
+            let created = s
+                .created_at
+                .get(..s.created_at.len().min(10))
+                .unwrap_or(s.created_at.as_str());
+            let updated = s
+                .updated_at
+                .get(..s.updated_at.len().min(10))
+                .unwrap_or(s.updated_at.as_str());
             let source = match s.source.as_str() {
                 "local" => locale.named_static_text("sessions.source.local", "local"),
                 "remote" => locale.named_static_text("sessions.source.remote", "remote"),

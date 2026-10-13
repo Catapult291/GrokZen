@@ -3,8 +3,9 @@
 //! Inherent [`MvpAgent`] helpers (MCP/clients/gateway, settings/models, session ops, spawn).
 //! Co-located child of `mvp_agent` (`use super::*`).
 use super::*;
-use super::reasoning_effort::EffortTarget;
-use crate::auth::PreferredAuthMethod;
+use crate::agent::config::TraceUploadEndpoints;
+use crate::sampling::EffortTarget;
+use xai_grok_login::PreferredAuthMethod;
 use crate::upload::trace::PromptMetadataParams;
 use xai_grok_tools::implementations::grok_build::task::backend::SubagentBackend;
 use xai_tty_utils::ProcessScope;
@@ -42,25 +43,15 @@ fn should_warn_missing_session(ctx: MissingSessionCtx) -> bool {
         None => ctx.is_session_based_auth,
     }
 }
+/// The stored fields a settings poll may replace. Snapshotted before the fetch so a full reapply landing mid-fetch makes the poll skip.
+type PolledFields = (
+    Option<Vec<xai_grok_announcements::RemoteAnnouncement>>,
+    Vec<xai_grok_config_types::RemoteRequestEncoding>,
+);
+fn polled_fields(settings: &crate::util::config::RemoteSettings) -> PolledFields {
+    (settings.announcements.clone(), settings.accept_request_encodings.clone())
+}
 impl MvpAgent {
-    /// Announce a session's new title over ACP.
-    /// ACP scopes `session/update` to sessions the client established, and a rename can name a history row it never loaded.
-    /// So the liveness check belongs here rather than at each call site.
-    pub(crate) fn notify_session_info_update(
-        &self,
-        session_id: &agent_client_protocol::SessionId,
-        title: &str,
-    ) {
-        if self.is_resident(session_id) {
-            self.gateway
-                .forward_fire_and_forget(
-                    crate::session::summary::session_info_update_manual(
-                        session_id.clone(),
-                        title,
-                    ),
-                );
-        }
-    }
     pub fn reload_skills_all_sessions(&self) -> usize {
         let session_ids = self.resident_ids();
         for sid in &session_ids {
@@ -74,7 +65,11 @@ impl MvpAgent {
         let session_ids = self.resident_ids();
         for session_id in &session_ids {
             if let Some(handle) = self.resident_handle(session_id) {
-                let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
+                let _ = handle
+                    .cmd_tx
+                    .send(SessionCommand::AdvertiseCommands {
+                        trigger: crate::session::AdvertiseTrigger::WorkflowsChanged,
+                    });
             }
         }
         session_ids.len()
@@ -169,7 +164,7 @@ impl MvpAgent {
             );
     }
     /// Return auth for sync config construction.
-    pub(super) fn current_or_buffered_auth(&self) -> Option<crate::auth::GrokAuth> {
+    pub(super) fn current_or_buffered_auth(&self) -> Option<xai_grok_login::GrokAuth> {
         self.auth_manager
             .current()
             .or_else(|| {
@@ -286,7 +281,6 @@ impl MvpAgent {
         });
     }
     /// Rebuild `search_tool` in every live session after a fresh gateway tool catalog committed.
-    ///
     /// Gateway tools live in the agent-level catalog, not per-session `McpServers`.
     /// Callers skip on a failed refetch so the last-good index stays.
     pub(crate) fn refresh_mcp_search_index_in_sessions(&self) {
@@ -296,7 +290,6 @@ impl MvpAgent {
         }
     }
     /// `mcp/list` catalog fetch: optional cache bust, then gateway list, then fan `RefreshMcpSearchIndex` only when a fresh catalog commits.
-    ///
     /// Gateway off (or no eligible auth) goes through [`Self::get_managed_mcp_gateway_tool_catalog`].
     /// That path disables the cache the same way initialize does.
     pub(crate) async fn fetch_gateway_catalog_for_mcp_list(
@@ -315,12 +308,9 @@ impl MvpAgent {
         }
         catalog
     }
-    /// Resolve the launch dir's project-scope trust verdict ONCE and return it with its path.
-    ///
-    /// Memoizes the single [`folder_trust::resolve_launch_dir_trust`] gather (see it for the dedup and TOCTOU contract).
-    /// `ensure_plugin_registry` and `ensure_local_workspace_ops` share one point-in-time verdict instead of each re-scanning.
-    /// The sub-millisecond, startup-only window between them is intentional; the cross-session TOCTOU re-scan is preserved per the contract.
-    fn prime_launch_dir_trust(&self) -> (&std::path::Path, bool) {
+    /// Resolve the launch dir's project-scope trust verdict ONCE and return it with its path. Memoizes the single [`folder_trust::resolve_launch_dir_trust`] gather (see it for the dedup and TOCTOU contract).
+    /// Backs `ensure_local_workspace_ops`. The plugin registry builds deliberately do not reuse it: they read disk config through the trust gate, so they resolve (and record) afresh right before the read — see `registry_build_inputs`.
+    pub(super) fn prime_launch_dir_trust(&self) -> (&std::path::Path, bool) {
         let trust = *self
             .launch_dir_trust
             .get_or_init(|| {
@@ -349,7 +339,11 @@ impl MvpAgent {
                         remote_settings.as_ref(),
                         false,
                     );
-                    folder_trust::filter_untrusted_project_mcp(&cwd, local)
+                    let local = folder_trust::filter_untrusted_project_mcp(&cwd, local);
+                    crate::session::managed_mcp::filter_policy_blocked_agent_mcp(
+                        local,
+                        &cwd,
+                    )
                 })
                 .await
             {
@@ -371,28 +365,125 @@ impl MvpAgent {
     ) -> std::sync::Arc<tokio::sync::Mutex<crate::session::mcp_servers::McpState>> {
         self.agent_mcp_state.clone()
     }
-    /// Build the launch-dir plugin registry snapshot on first use.
-    ///
-    /// Boot-time discovery was deferred past ACP `initialize`, leaving `plugin_registry_handle` empty.
-    /// The cwd-to-git-root and user/marketplace walks stalled grok-desktop's first `initialize`.
-    /// That shared snapshot still backs the launch-dir plugin MCP/LSP merges read in `resolve_mcp_servers` and the session LSP build.
-    /// So populate it lazily, off the `initialize` critical path, on the first session-creating call.
-    /// Runs the discovery walk once; per-session `build_for_cwd` still re-resolves project-scoped plugins for each session's own cwd.
-    pub(super) fn ensure_plugin_registry(&self) {
+    /// Build the launch-dir plugin registry snapshot on first use. Boot-time discovery was deferred past ACP `initialize`, leaving `plugin_registry_handle` empty.
+    /// The cwd-to-git-root and user/marketplace walks stalled grok-desktop's first `initialize`. That shared snapshot still backs the launch-dir plugin MCP/LSP merges read in `resolve_mcp_servers` and the session LSP build.
+    /// So populate it lazily, off the `initialize` critical path, on the first session-creating call. Runs the discovery walk once; per-session `build_for_cwd` still re-resolves project-scoped plugins for each session's own cwd.
+    pub(crate) fn ensure_plugin_registry(&self) {
         if self.plugin_registry_initialized.replace(true) {
             return;
         }
-        let (cwd, trusted) = self.prime_launch_dir_trust();
-        let mut plugins = self.cfg.borrow().plugins.clone();
-        plugins.merge_claude_enabled_plugins(Some(cwd));
-        let disk_config = plugins.to_discovery_config();
+        let remote_settings = self.cfg.borrow().remote_settings.clone();
+        let (trusted, disk_config) = Self::registry_build_inputs(
+            &self.launch_cwd,
+            remote_settings.as_ref(),
+        );
         let count = self
             .plugin_registry_handle
-            .reload(Some(cwd), &disk_config, trusted, false);
+            .reload(Some(&self.launch_cwd), &disk_config, trusted, false);
         tracing::debug!(
             plugin_count = count,
             "lazily populated plugin registry snapshot"
         );
+    }
+    /// Inputs for a registry build scoped to `cwd`: a fresh real-remote trust verdict, then
+    /// `[plugins]` from disk. Self-free so callers can run it on a blocking thread.
+    /// `cfg.plugins` is boot-time state that `config.toml` edits never refresh, so a snapshot built
+    /// from it reports stale `enabled` flags to session-less `x.ai/plugins/list` / `x.ai/skills/list`.
+    /// The disk read gates project paths on this verdict, never on the folder-trust gate's cold-key
+    /// backstop, which resolves remote-less and records a durable verdict that would make an org
+    /// kill-switch unliftable for the process.
+    /// The verdict is never the startup primer's: that memoizes a point-in-time answer, including
+    /// the non-durable no-configs allow, which also leaves the launch dir cold for the gate
+    /// (`plugins_reload_rechecks_launch_dir_trust`).
+    pub(crate) fn registry_build_inputs(
+        cwd: &std::path::Path,
+        remote_settings: Option<&crate::util::config::RemoteSettings>,
+    ) -> (bool, xai_grok_agent::plugins::discovery::DiscoveryConfig) {
+        let trusted = folder_trust::resolve_and_record(cwd, remote_settings, false);
+        let disk_config = xai_grok_workspace::plugins::resolve_effective_plugins_config(xai_grok_workspace::plugins::PluginConfigInputs {
+            effective_config: crate::config::load_effective_config().ok().as_ref(),
+            home: xai_dirs::home_dir().as_deref(),
+            grok_home: xai_grok_config::user_grok_home().as_deref(),
+            cwd,
+            trust: xai_grok_hooks::trust::Trust::from_verdict(trusted),
+            claude_import: crate::claude_import::import_marker(),
+        });
+        (trusted, disk_config)
+    }
+    /// The directory the agent was launched in; the shared registry snapshot is built for it.
+    pub(crate) fn launch_cwd(&self) -> &std::path::Path {
+        &self.launch_cwd
+    }
+    /// An explicit rebuild populated the shared snapshot; the lazy boot build must not run after it
+    /// (it would rebuild with the startup primer's memoized trust, undoing a fresh reload verdict).
+    pub(crate) fn mark_plugin_registry_initialized(&self) {
+        self.plugin_registry_initialized.set(true);
+    }
+    /// [`Self::ensure_plugin_registry`] for async callers: the trust gather, config read and
+    /// discovery walk run on a blocking thread so a pre-session pull never stalls the runtime. The
+    /// result is published back on the runtime, and only if nothing else (a concurrent explicit
+    /// `x.ai/plugins/reload`) initialized the registry meanwhile — the newer build wins.
+    pub(crate) async fn ensure_plugin_registry_async(&self) {
+        if self.plugin_registry_initialized.get() {
+            return;
+        }
+        let launch_cwd = self.launch_cwd.clone();
+        let remote_settings = self.cfg.borrow().remote_settings.clone();
+        let handle = self.plugin_registry_handle.clone();
+        let built = tokio::task::spawn_blocking(move || {
+                let (trusted, disk_config) = Self::registry_build_inputs(
+                    &launch_cwd,
+                    remote_settings.as_ref(),
+                );
+                handle.refresh_and_build_for_cwd(&launch_cwd, &disk_config, &[], trusted)
+            })
+            .await;
+        match built {
+            Ok(_) if self.plugin_registry_initialized.get() => {}
+            Ok(registry) => {
+                tracing::debug!(
+                    plugin_count = registry.as_ref().map_or(0, |r| r.len()),
+                    "lazily populated plugin registry snapshot"
+                );
+                self.plugin_registry_handle.publish(registry);
+                self.plugin_registry_initialized.set(true);
+            }
+            Err(err) => {
+                tracing::warn!(error = %err, "plugin registry build task failed")
+            }
+        }
+    }
+    /// Plugin registry for a pre-session pull (`x.ai/skills/*`, `x.ai/commands/list`) scoped to
+    /// `cwd`: a fresh, non-shared build for that cwd when one is given — the launch dir is unrelated
+    /// to the user's workspace in desktop-to-docker and ssh setups — else the shared launch-dir
+    /// snapshot, built on demand. Trust is resolved before the disk read either way, and the walks
+    /// run on a blocking thread.
+    pub(crate) async fn plugin_registry_for_cwd(
+        &self,
+        cwd: Option<&std::path::Path>,
+    ) -> Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>> {
+        let Some(cwd) = cwd else {
+            self.ensure_plugin_registry_async().await;
+            return self.plugin_registry_handle.snapshot();
+        };
+        let cwd = cwd.to_path_buf();
+        let remote_settings = self.cfg.borrow().remote_settings.clone();
+        let handle = self.plugin_registry_handle.clone();
+        match tokio::task::spawn_blocking(move || {
+                let (trusted, disk_cfg) = Self::registry_build_inputs(
+                    &cwd,
+                    remote_settings.as_ref(),
+                );
+                handle.build_for_cwd(&cwd, &disk_cfg, &[], trusted)
+            })
+            .await
+        {
+            Ok(registry) => registry,
+            Err(err) => {
+                tracing::warn!(error = %err, "plugin registry build task failed");
+                None
+            }
+        }
     }
     /// Admit client servers and merge local / plugin / client sources.
     ///
@@ -402,6 +493,7 @@ impl MvpAgent {
         client_servers: Vec<acp::McpServer>,
         cwd: &std::path::Path,
     ) -> (Vec<acp::McpServer>, Vec<acp::McpServer>) {
+        self.report_setup_phase(super::session_setup::SessionSetupPhase::PluginRegistry);
         self.ensure_plugin_registry();
         let compat = self.cfg.borrow().compat_resolved;
         let admitted = crate::session::managed_mcp::admit_client_mcp_servers(
@@ -409,6 +501,7 @@ impl MvpAgent {
             cwd,
             &compat,
         );
+        self.report_setup_phase(super::session_setup::SessionSetupPhase::McpMerge);
         let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
             admitted.clone(),
             cwd,
@@ -419,11 +512,44 @@ impl MvpAgent {
     }
     /// Set the memory configuration (called from TUI after config resolution).
     pub fn set_memory_config(&mut self, config: crate::config::MemoryConfig) {
-        self.memory_config = if config.enabled { Some(config) } else { None };
+        *self.memory_config.get_mut() = Some(config);
+    }
+    /// Clone the memory configuration pinned by the next session or subagent spawn.
+    pub(super) fn memory_config_snapshot(&self) -> Option<crate::config::MemoryConfig> {
+        self.memory_config.borrow().clone()
+    }
+    fn publish_memory_config(&self, mut config: crate::config::MemoryConfig) {
+        if let Some(current) = self.memory_config.borrow().as_ref() {
+            config.root_dir_override = current.root_dir_override.clone();
+            config.flat_memory_root = current.flat_memory_root;
+        }
+        self.memory_config.replace(Some(config));
+    }
+    /// Apply the current remote settings to memory for sessions spawned after
+    /// this point without changing any running session's pinned snapshot.
+    fn sync_memory_config_from_agent_config(&self) {
+        let memory_config = {
+            let cfg = self.cfg.borrow();
+            cfg.resolve_memory(cfg.memory_enabled_override, cfg.remote_settings.as_ref())
+        };
+        self.publish_memory_config(memory_config);
+    }
+    /// Re-resolve runtime config and publish its memory result to future spawns.
+    pub(super) fn re_resolve_runtime_fields_and_sync_memory(
+        &self,
+        raw_config: &toml::Value,
+    ) {
+        let memory_config = {
+            let mut cfg = self.cfg.borrow_mut();
+            cfg.re_resolve_runtime_fields(raw_config);
+            cfg.memory_config.clone()
+        };
+        if let Some(memory_config) = memory_config {
+            self.publish_memory_config(memory_config);
+        }
     }
     /// Adopt the leader's [`AgentActivity`].
     /// The auto-update checker then sees the agent's live view of running turns/subagents and can flush sessions at shutdown.
-    ///
     /// Must be called right after construction: entries registered on the constructor-created default instance are NOT migrated.
     pub(crate) fn set_activity(
         &mut self,
@@ -432,9 +558,7 @@ impl MvpAgent {
         self.activity = activity;
     }
     /// Send [`SessionCommand::Shutdown`] to every live session actor and wait up to `grace` for them to exit (SessionEnd hooks, memory save, etc.).
-    ///
-    /// Call on non-leader process quit **after** the cancel token fires but **before** dropping the agent / exiting the process.
-    /// Otherwise session actors are killed mid-hook.
+    /// Call on non-leader process quit **after** the cancel token fires but **before** dropping the agent / exiting the process. Otherwise session actors are killed mid-hook.
     /// Mirrors the leader auto-update / relaunch flush path ([`crate::agent::activity::AgentActivity::flush_all_sessions`]).
     pub async fn flush_all_sessions(&self, grace: std::time::Duration) {
         self.activity.flush_all_sessions(grace).await;
@@ -467,7 +591,7 @@ impl MvpAgent {
     fn feedback_credentials(
         &self,
     ) -> Option<(String, Option<String>, Option<String>, Option<String>)> {
-        if !self.has_proxy_credentials() {
+        if !xai_grok_product::FEEDBACK_UPLOADS_ALLOWED || !self.has_proxy_credentials() {
             return None;
         }
         let user_token = self
@@ -482,7 +606,7 @@ impl MvpAgent {
         Some((base_url, user_token, alpha_test_key, deployment_key))
     }
     pub(super) fn ensure_telemetry_client(&self) {
-        crate::auth::credential_provider::sync_external_otel_identity();
+        xai_grok_login::credential_provider::sync_external_otel_identity();
         let cfg = self.cfg.borrow();
         let mode = cfg.resolve_telemetry_mode().value;
         if !mode.is_disabled() {
@@ -490,7 +614,7 @@ impl MvpAgent {
                 .auth_manager
                 .current()
                 .filter(|a| {
-                    a.is_xai_auth() || a.auth_mode == crate::auth::AuthMode::ApiKey
+                    a.is_xai_auth() || a.auth_mode == xai_grok_login::AuthMode::ApiKey
                 }) else {
                 return;
             };
@@ -533,6 +657,9 @@ impl MvpAgent {
     pub(super) fn build_registry_config(
         &self,
     ) -> Option<crate::session::RegistryConfig> {
+        if !xai_grok_product::SESSION_DATA_UPLOADS_ALLOWED {
+            return None;
+        }
         let remote = self
             .cfg
             .borrow()
@@ -581,12 +708,8 @@ impl MvpAgent {
     pub(crate) fn workspaces_client(&self) -> crate::remote::WorkspacesClient {
         crate::remote::WorkspacesClient::new(self.auth_manager.clone())
     }
-    /// Pre-session command availability snapshot.
-    ///
-    /// Used by the `x.ai/commands/list` ext method and the `InitializeResponse._meta` path (`builtin_commands()`).
-    /// Both fire before any session exists.
-    /// The eventual agent's toolset is unknown (it depends on the model the user picks).
-    /// So runtime/tool-dependent gates (`/flush`, `/loop`, `/memory`, …) fail closed.
+    /// Pre-session command availability snapshot. Used by the `x.ai/commands/list` ext method and the `InitializeResponse._meta` path (`builtin_commands()`). Both fire before any session exists.
+    /// The eventual agent's toolset is unknown (it depends on the model the user picks). So runtime/tool-dependent gates (`/flush`, `/loop`, `/memory`, …) fail closed.
     /// The session-scoped `available_commands_update` in `acp_session.rs` fills in the real per-model gating as soon as a session starts.
     pub(crate) fn command_availability(
         &self,
@@ -602,10 +725,21 @@ impl MvpAgent {
     pub(crate) fn is_data_collection_disabled(&self) -> bool {
         self.auth_manager.is_data_collection_disabled()
     }
+    /// Privacy half of the trace-upload gate; see [`TraceUploadEndpoints::is_trace_upload_blocked_for`].
+    /// Like [`Self::is_data_collection_disabled`], a missing credential does not block.
+    fn is_trace_upload_blocked(&self) -> bool {
+        use crate::agent::config::TraceUploadEndpoints;
+        self.auth_manager
+            .current_or_expired()
+            .is_some_and(|auth| {
+                self.cfg.borrow().endpoints.is_trace_upload_blocked_for(&auth)
+            })
+    }
     /// Telemetry enabled and not ZDR. Same gate as session `telemetry_enabled`.
     pub(crate) fn product_analytics_enabled(&self) -> bool {
-        self.cfg.borrow().is_telemetry_enabled()
-            && !self.auth_manager.current_or_expired().is_some_and(|a| a.is_zdr_team())
+        self.cfg
+            .borrow()
+            .product_analytics_enabled(self.auth_manager.current_or_expired().as_ref())
     }
     /// Re-sync the `Send` mirror of `cfg.is_trace_upload_enabled()` that the per-session collection gates read.
     /// `cfg` is `!Send`; the gates run on the tokio pool.
@@ -626,7 +760,7 @@ impl MvpAgent {
         self.session_registry.turn_number(sid)
     }
     /// Return the current GrokAuth credentials, if authenticated and not expired.
-    pub(crate) fn current_auth(&self) -> Option<crate::auth::GrokAuth> {
+    pub(crate) fn current_auth(&self) -> Option<xai_grok_login::GrokAuth> {
         self.auth_manager.current()
     }
     /// Shared plugin registry handle used by extensions for snapshot/reload.
@@ -942,10 +1076,7 @@ impl MvpAgent {
                 });
             });
     }
-    /// Add-only: bind a local workspace mid-session via the ACP extension and session.update.
-    ///
-    /// Refuses if a local existing workspace is already bound (no remove until session end).
-    /// Own mode requires unix (supervisor spawn).
+    /// Add-only: bind a local workspace mid-session via the ACP extension and session.update. Refuses if a local existing workspace is already bound (no remove until session end). Own mode requires unix (supervisor spawn).
     /// Attach is platform-agnostic.
     #[cfg(feature = "local-workspace")]
     pub(crate) async fn add_local_workspace_mid_session(
@@ -1116,6 +1247,11 @@ impl MvpAgent {
         {
             return Err(err.into_acp_error());
         }
+        if let Some(handle) = self.resident_handle(session_id) {
+            handle
+                .emit_local_background_tasks
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         #[cfg(unix)] reap_guard.disarm();
         bind_guard.keep = true;
         Ok(serde_json::json!({
@@ -1193,7 +1329,6 @@ impl MvpAgent {
     }
     #[cfg(feature = "local-workspace")]
     /// After chat+local stamp, wait for handshake success.
-    ///
     /// Only fail-closed for `x.ai/local_workspace` intent (not generic GatewayAttach).
     /// Handshake errors propagate; the session and bridge are reaped on failure / timeout.
     pub(crate) async fn await_existing_workspace_handshake(
@@ -1238,7 +1373,6 @@ impl MvpAgent {
         }
     }
     /// Build the process-lifetime local `WorkspaceOps` on first use.
-    ///
     /// Deferred past ACP wiring so `initialize` can respond before folder-trust scans and `WorkspaceHandle::new_minimal` run.
     /// This is the same boot stall as plugin discovery on grok-desktop Windows.
     fn ensure_local_workspace_ops(
@@ -1284,7 +1418,6 @@ impl MvpAgent {
         Ok(ops)
     }
     /// Resolve the workspace ops, returning `Err` if not yet initialized.
-    ///
     /// Only `None` before the first lazy local build via [`Self::ensure_local_workspace_ops`].
     /// Called at the `ext_method` dispatch boundary and in session spawn; extensions receive the resolved `&WorkspaceOps` directly.
     pub(crate) fn resolve_workspace_ops(
@@ -1306,19 +1439,9 @@ impl MvpAgent {
         }
         Ok(ops)
     }
-    /// Derive the current `AuthType` from auth method and auth manager state.
-    ///
-    /// Conceptually, `AuthType` describes *which authentication mechanism this session uses*, not *whether we currently have a live bearer*.
+    /// Derive the current `AuthType` from auth method and auth manager state. Conceptually, `AuthType` describes *which authentication mechanism this session uses*, not *whether we currently have a live bearer*.
     /// Bearer liveness is tracked by the auth manager; the mechanism is fixed by `auth_method_id`.
-    ///
-    /// Returns `SessionToken` when EITHER:
-    ///   - `auth_manager` currently has a live (non-expired) credential, OR
-    ///   - the active auth method is session-based (`cached_token`, `grok.com`, `oidc`), even if the in-memory token is currently expired or missing.
-    ///
-    /// Returns `ApiKey` only when the auth method is BYOK (`xai.api_key`) or no auth method has been selected yet AND no live credential exists.
-    ///
-    /// The session-based clause is load-bearing.
-    /// Without it, chat_state can get locked into `auth_type = ApiKey` and skip token refresh on later prompts.
+    /// Returns `ApiKey` only when the auth method is BYOK (`xai.api_key`) or no auth method has been selected yet AND no live credential exists. The session-based clause is load-bearing. Without it, chat_state can get locked into `auth_type = ApiKey` and skip token refresh on later prompts.
     pub(crate) fn auth_type(&self) -> xai_chat_state::AuthType {
         if self.auth_manager.current().is_some() || self.is_session_based_auth() {
             xai_chat_state::AuthType::SessionToken
@@ -1351,7 +1474,7 @@ impl MvpAgent {
         let Some(method_id) = self.cached_token_fallthrough_method_id() else {
             let preferred = self.cfg.borrow().grok_com_config.preferred_method;
             let msg = match preferred {
-                Some(crate::auth::PreferredAuthMethod::ApiKey) => {
+                Some(xai_grok_login::PreferredAuthMethod::ApiKey) => {
                     auth_method::PREFERRED_API_KEY_UNAVAILABLE
                 }
                 _ => auth_method::PREFERRED_OIDC_UNAVAILABLE,
@@ -1391,9 +1514,14 @@ impl MvpAgent {
     /// Apply settings side effects and push `x.ai/settings/update` to clients.
     /// Shared tail for every settings-arrival site.
     pub(super) fn on_remote_settings_changed(&self) {
-        crate::agent::config::apply_remote_settings_side_effects(
-            self.cfg.borrow().remote_settings.as_ref(),
-        );
+        self.sync_memory_config_from_agent_config();
+        {
+            let cfg = self.cfg.borrow();
+            crate::agent::config::apply_remote_settings_side_effects(
+                cfg.remote_settings.as_ref(),
+                &cfg.endpoints.proxy_url(),
+            );
+        }
         if let Some(identity) = self
             .auth_manager
             .current_or_expired()
@@ -1428,9 +1556,14 @@ impl MvpAgent {
     /// Idempotent: a no-op once installed.
     fn reapply_official_marketplace(&self) {
         if self.cfg.borrow().resolve_official_marketplace_auto_register().value {
-            crate::extensions::marketplace::ensure_official_marketplace_source(
-                &crate::util::grok_home::grok_home(),
+            let task = tokio_util::task::AbortOnDropHandle::new(
+                tokio::task::spawn_blocking(|| {
+                    crate::extensions::marketplace::ensure_official_marketplace_source(
+                        &crate::util::grok_home::grok_home(),
+                    );
+                }),
             );
+            *self.official_marketplace_register.borrow_mut() = Some(task);
         }
     }
     /// Upgrade storage mode from newly-arrived remote settings.
@@ -1466,59 +1599,56 @@ impl MvpAgent {
                 });
         }
     }
-    /// Run the blocking `/settings` fetch for `auth` off the runtime thread.
+    /// Live `/v1/settings` read. Does not join the startup load and does not
+    /// accept a warm disk cache. `Rejected` is preserved for 401 self-heal.
     async fn fetch_settings(
         &self,
-        auth: &crate::auth::GrokAuth,
+        auth: &xai_grok_login::GrokAuth,
     ) -> crate::remote::SettingsFetch {
-        let (base_url, alpha) = {
+        let query = {
             let cfg = self.cfg.borrow();
-            (cfg.endpoints.proxy_url(), cfg.endpoints.alpha_test_key.clone())
+            crate::agent::remote_config::settings_get::SettingsQuery::from_endpoints(
+                &cfg.endpoints,
+                auth.clone(),
+                cfg.grok_com_config.clone(),
+            )
         };
-        let auth = auth.clone();
-        match tokio::task::spawn_blocking(move || crate::remote::fetch_settings_blocking(
-                &base_url,
-                &auth,
-                alpha.as_deref(),
-            ))
+        xai_grok_cloud_config::settings_get::fetch_settings_live(
+                query,
+                xai_grok_cloud_config::managed_config::policy_repair_pending,
+            )
             .await
-        {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                tracing::warn!(error = %e, "settings fetch task panicked");
-                crate::remote::SettingsFetch::Retry
-            }
-        }
     }
-    /// Fetch remote settings for `auth` and drive the external-OTEL gate from the outcome.
-    /// Re-closes the gate first only on an account switch, then hands the outcome to [`OtelGate::resolve`].
-    /// That returns the settings only on a successful fetch for the still-live identity.
-    /// Both post-auth callers funnel through here.
-    ///
-    /// [`OtelGate::resolve`]: crate::agent::otel_gate::OtelGate::resolve
+    /// Fetch remote settings for `auth` and drive the external-OTEL gate from the outcome. Re-closes the gate first only on an account switch, then hands the outcome to [`OtelGate::resolve`].
+    /// That returns the settings only on a successful fetch for the still-live identity. Both post-auth callers funnel through here. [`OtelGate::resolve`]: crate::agent::otel_gate::OtelGate::resolve
     pub(super) async fn fetch_settings_resolving_gate(
         &self,
-        auth: &crate::auth::GrokAuth,
+        auth: &xai_grok_login::GrokAuth,
     ) -> Option<crate::util::config::RemoteSettings> {
         xai_grok_announcements::load_events::notify_started();
+        xai_grok_locale::dynamic::Domain::Settings.notify_load();
         let identity = auth.user_id.clone();
         let channel = {
             let proxy_url = self.cfg.borrow().endpoints.proxy_url();
             crate::agent::otel_gate::policy_channel_for(&proxy_url)
         };
         self.otel_gate.rearm_on_switch(&identity, channel);
-        let outcome = self.fetch_settings_self_healing_401(auth).await;
+        let outcome = self
+            .settings_refresh
+            .refresh(auth, || self.fetch_settings_self_healing_401(auth))
+            .await;
         let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
-        self.otel_gate.resolve(&identity, outcome, live.as_deref())
+        match outcome {
+            Some(outcome) => self.otel_gate.resolve(&identity, outcome, live.as_deref()),
+            None => None,
+        }
     }
-    /// Fetch settings; on a `401` try one self-healing [`AuthManager::auth`] refresh and re-fetch if it yields a *different* token.
-    /// This recovers a 401 from a token that expired mid-fetch.
-    /// The caller waits at most `STARTUP_AUTH_REFRESH_TIMEOUT`, but the refresh is spawned and runs to completion past the deadline.
-    /// Dropping it mid-exchange could abandon an IdP response carrying the rotated refresh token.
+    /// Fetch settings; on a `401` try one self-healing [`AuthManager::auth`] refresh and re-fetch if it yields a *different* token. This recovers a 401 from a token that expired mid-fetch.
+    /// The caller waits at most `STARTUP_AUTH_REFRESH_TIMEOUT`, but the refresh is spawned and runs to completion past the deadline. Dropping it mid-exchange could abandon an IdP response carrying the rotated refresh token.
     /// On timeout or error the original `Rejected` stands.
     async fn fetch_settings_self_healing_401(
         &self,
-        auth: &crate::auth::GrokAuth,
+        auth: &xai_grok_login::GrokAuth,
     ) -> crate::remote::SettingsFetch {
         let outcome = self.fetch_settings(auth).await;
         if matches!(outcome, crate::remote::SettingsFetch::Rejected) {
@@ -1560,12 +1690,9 @@ impl MvpAgent {
         self.store_remote_settings(settings);
         self.on_remote_settings_changed();
     }
-    /// Re-fetch remote settings, re-init the telemetry client, apply side effects, and push `x.ai/settings/update` to clients.
-    /// Called from both auth handlers (first install and reauth/account switch).
-    ///
-    /// Agent-level fields resolved at startup (`worktree_type`, `restore_code`) are NOT re-resolved here.
-    /// That requires a broader refactor of the init path.
-    pub(super) async fn refresh_remote_settings(&self, auth: &crate::auth::GrokAuth) {
+    /// Re-fetch remote settings, re-init the telemetry client, apply side effects, and push `x.ai/settings/update` to clients. Called from both auth handlers (first install and reauth/account switch).
+    /// Agent-level fields resolved at startup (`worktree_type`, `restore_code`) are NOT re-resolved here. That requires a broader refactor of the init path.
+    pub(super) async fn refresh_remote_settings(&self, auth: &xai_grok_login::GrokAuth) {
         if !crate::util::config::resolve_remote_fetch_enabled() {
             tracing::debug!("post-auth settings refresh skipped: remote_fetch disabled");
             return;
@@ -1633,33 +1760,29 @@ impl MvpAgent {
             subscription_tier,
             crate::http::shared_client(),
         );
-        crate::auth::credential_provider::sync_external_otel_identity();
+        xai_grok_login::credential_provider::sync_external_otel_identity();
         self.on_remote_settings_changed();
         if remote_was_absent {
             self.run_deferred_remote_work();
         }
     }
-    /// Refresh remote settings and re-resolve eagerly-resolved config fields.
-    ///
-    /// Called on `/new` session creation so feature flags reflect the latest remote settings state without requiring a TUI restart.
-    /// Extends [`refresh_remote_settings`] by also re-running [`resolve_runtime_fields`] with the fresh settings.
-    ///
-    /// In-flight sessions are unaffected; they snapshot config at creation.
+    /// Refresh remote settings and re-resolve eagerly-resolved config fields. Called on `/new` session creation so feature flags reflect the latest remote settings state without requiring a TUI restart.
+    /// Extends [`refresh_remote_settings`] by also re-running [`resolve_runtime_fields`] with the fresh settings. In-flight sessions are unaffected; they snapshot config at creation.
     pub(super) async fn refresh_settings_and_reapply(
         &self,
-        auth: &crate::auth::GrokAuth,
+        auth: &xai_grok_login::GrokAuth,
     ) {
         self.refresh_remote_settings(auth).await;
         {
             let mut cfg = self.cfg.borrow_mut();
             crate::util::config::sync_campaign_fields(&mut cfg);
-            let raw_config = crate::config::load_effective_config()
-                .unwrap_or_else(|e| {
-                    tracing::warn!(error = %e, "config reload failed during settings refresh");
-                    toml::Value::Table(toml::map::Map::new())
-                });
-            cfg.re_resolve_runtime_fields(&raw_config);
         }
+        let raw_config = crate::config::load_effective_config()
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "config reload failed during settings refresh");
+                toml::Value::Table(toml::map::Map::new())
+            });
+        self.re_resolve_runtime_fields_and_sync_memory(&raw_config);
         self.sync_collection_config_gate();
         self.emit_settings_update_notification();
         self.emit_announcements(AnnouncementsPushMode::Force);
@@ -1723,11 +1846,9 @@ impl MvpAgent {
                 .set(self.settings_reapply_spawn_count.get() + 1);
         }
     }
-    /// Resolve post-auth remote settings in the background.
-    /// A slow or hung `/settings` then can't gate `authenticate` (and thus the client's first draw).
-    /// The external-OTEL gate stays fail-closed until this resolves; the result reaches clients via `x.ai/settings/update`.
-    /// Its own guard keeps an in-flight reapply from coalescing away the authenticated identity.
-    pub(super) fn spawn_post_auth_settings(&self, auth: crate::auth::GrokAuth) {
+    /// Resolve post-auth remote settings in the background. A slow or hung `/settings` then can't gate `authenticate` (and thus the client's first draw).
+    /// The external-OTEL gate stays fail-closed until this resolves; the result reaches clients via `x.ai/settings/update`. Its own guard keeps an in-flight reapply from coalescing away the authenticated identity.
+    pub(super) fn spawn_post_auth_settings(&self, auth: xai_grok_login::GrokAuth) {
         let agent_ref = LocalRef::new(self);
         let _spawned = self
             .spawn_coalesced_settings_task(
@@ -1744,10 +1865,8 @@ impl MvpAgent {
                 .set(self.post_auth_settings_spawn_count.get() + 1);
         }
     }
-    /// Spawn the periodic remote-settings poll that pushes mid-session announcement changes to connected clients.
-    /// Idempotent.
-    /// Plain loop (no cancellation) like `ensure_session_supervisor`; the LocalSet drop at process exit ends it.
-    /// Skipped under `cfg!(test)` like the managed-config sync (PTY e2e runs the real binary and is unaffected).
+    /// Spawn the periodic remote-settings poll that pushes mid-session announcement changes to connected clients. Idempotent.
+    /// Plain loop (no cancellation) like `ensure_session_supervisor`; the LocalSet drop at process exit ends it. Skipped under `cfg!(test)` like the managed-config sync (PTY e2e runs the real binary and is unaffected).
     pub(super) fn spawn_announcements_refresh(&self) {
         if cfg!(test) || self.announcements_refresh_started.replace(true) {
             return;
@@ -1770,64 +1889,57 @@ impl MvpAgent {
             }
         });
     }
-    /// One poll cycle.
-    /// With no settings baseline, first population is delegated to the fill-if-missing path (which emits on success).
-    /// Otherwise refresh the stored announcements best-effort, then run the emit gate.
+    /// One poll cycle. With no settings baseline, first population is delegated to the fill-if-missing path (which emits on success). Otherwise refresh the stored announcements best-effort, then run the emit gate.
     /// The gate runs even when the fetch was skipped or failed, so a pure expiry crossing still clears client banners on time.
     async fn poll_announcements_refresh_once(&self) {
         if self.cfg.borrow().remote_settings.is_none() {
             self.maybe_fetch_post_auth_settings().await;
             return;
         }
-        self.fetch_and_store_polled_announcements().await;
+        self.fetch_and_store_polled_settings().await;
         self.emit_announcements(AnnouncementsPushMode::IfChanged);
     }
-    /// Fetch half of a poll cycle: fresh settings from the proxy, then the announcements-only apply.
+    /// Fetch half of a poll cycle: fresh settings from the proxy, then the poll-only apply.
     /// Every failure path is a silent skip; the next tick retries.
-    async fn fetch_and_store_polled_announcements(&self) {
+    async fn fetch_and_store_polled_settings(&self) {
         let Ok(auth) = self.auth_manager.auth().await else {
             tracing::debug!("announcements refresh skipped: not authenticated");
             return;
         };
         if crate::util::config::resolve_remote_fetch_enabled() {
             xai_grok_announcements::load_events::notify_started();
+            xai_grok_locale::dynamic::Domain::Settings.notify_load();
         }
-        let pre_fetch = self
-            .cfg
-            .borrow()
-            .remote_settings
-            .as_ref()
-            .and_then(|s| s.announcements.clone());
+        let pre_fetch = self.cfg.borrow().remote_settings.as_ref().map(polled_fields);
         let Some(settings) = self.fetch_remote_settings(auth).await else {
             tracing::debug!("announcements refresh skipped: settings fetch failed");
             return;
         };
-        self.apply_polled_announcements(settings, pre_fetch);
+        self.apply_polled_settings(settings, pre_fetch);
     }
-    /// Store the polled announcements unless another writer (full refresh / paywall unblock) landed mid-fetch.
-    /// In that case this fetch is stale and the next tick reconciles.
-    /// Emission is `emit_announcements`'s job, not this store's.
-    pub(super) fn apply_polled_announcements(
+    pub(super) fn apply_polled_settings(
         &self,
         fresh: crate::util::config::RemoteSettings,
-        pre_fetch: Option<Vec<xai_grok_announcements::RemoteAnnouncement>>,
+        pre_fetch: Option<PolledFields>,
     ) {
         let mut cfg = self.cfg.borrow_mut();
+        let origin = cfg.endpoints.proxy_url();
         let Some(stored) = cfg.remote_settings.as_mut() else {
             return;
         };
-        if stored.announcements != pre_fetch {
-            tracing::debug!("announcements poll apply skipped: settings changed mid-fetch");
+        if pre_fetch.as_ref() != Some(&polled_fields(stored)) {
+            tracing::debug!("settings poll apply skipped: settings changed mid-fetch");
             return;
         }
         stored.announcements = fresh.announcements;
+        stored.accept_request_encodings = fresh.accept_request_encodings;
+        crate::util::config::cache_remote_accept_request_encodings(
+            &origin,
+            &stored.accept_request_encodings,
+        );
     }
-    /// The single announcements push gate: every `remote_settings` writer funnels through here.
-    /// Emits `x.ai/announcements/update` and advances the last-emitted baseline per [`announcements_push_payload`].
-    /// `mode` decides when an unchanged list still pushes.
-    /// The baseline advances only once the gateway accepts the send.
-    /// A failed enqueue leaves it untouched so the next gate call re-diffs and re-pushes.
-    ///
+    /// The single announcements push gate: every `remote_settings` writer funnels through here. Emits `x.ai/announcements/update` and advances the last-emitted baseline per [`announcements_push_payload`].
+    /// `mode` decides when an unchanged list still pushes. The baseline advances only once the gateway accepts the send. A failed enqueue leaves it untouched so the next gate call re-diffs and re-pushes.
     /// Synchronous by design: the decide, send, advance sequence cannot interleave with another gate call on the LocalSet.
     pub(super) fn emit_announcements(&self, mode: AnnouncementsPushMode) {
         let payload_list = {
@@ -1877,13 +1989,11 @@ impl MvpAgent {
         self.announcements_gen.set(next);
         next
     }
-    /// Shared fetch half of every settings refresh.
-    /// Endpoint fields come from a scoped `cfg` borrow; failures normalize to `None`.
-    /// `fetch_settings_blocking` runs off-executor (it already retries transient errors internally).
+    /// Shared fetch half of every settings refresh. Endpoint fields come from a scoped `cfg` borrow; failures normalize to `None`. `fetch_settings_blocking` runs off-executor (it already retries transient errors internally).
     /// Callers own their miss logging; the apply halves deliberately stay separate (full reapply vs announcements-only).
     pub(super) async fn fetch_remote_settings(
         &self,
-        auth: crate::auth::GrokAuth,
+        auth: xai_grok_login::GrokAuth,
     ) -> Option<crate::util::config::RemoteSettings> {
         if !crate::util::config::resolve_remote_fetch_enabled() {
             tracing::debug!("settings fetch skipped: remote_fetch disabled");
@@ -2033,7 +2143,7 @@ impl MvpAgent {
         let cfg = self.cfg.borrow();
         let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
         let client_version = cfg.client_version.clone();
-        let deployment_id = crate::managed_config::resolve_deployment_id(
+        let deployment_id = xai_grok_cloud_config::managed_config::resolve_deployment_id(
             cfg.endpoints.deployment_key.as_deref(),
         );
         drop(cfg);
@@ -2069,7 +2179,6 @@ impl MvpAgent {
         }
     }
     /// Apply a profile's pinned-model override to the session's sampling config.
-    ///
     /// `pinned_model` is resolved once by the caller (shared with harness inheritance).
     /// `None` (no override, or model not in catalog) keeps the session defaults.
     fn apply_agent_model_override(
@@ -2089,18 +2198,9 @@ impl MvpAgent {
         );
         (id.clone(), new_config)
     }
-    /// Whether the current session is a personal grok.com account on a gated tier (free / X Basic).
-    /// The Imagine tools stay advertised to the model but are flagged tier-restricted.
+    /// Whether the current session is a personal grok.com account on a gated tier (free / X Basic). The Imagine tools stay advertised to the model but are flagged tier-restricted.
     /// They then short-circuit at call time with the SuperGrok upsell prose (see `ImageGenConfig`/`VideoGenConfig`'s `tier_restricted`).
-    ///
-    /// Fails **open** (returns `false`) whenever we can't positively confirm a restricted personal tier.
-    /// No auth yet, BYOK / API-key sessions, team accounts, and an unknown/absent tier all pass.
-    /// The server authoritatively zero-limits Imagine for free and X Basic (429).
-    /// So this client gate is a UX optimization (a clean in-chat upsell instead of a doomed request), never the security boundary.
-    /// Under-restricting is safe; over-restricting would wrongly disable a paid feature.
-    ///
-    /// Mirrors the pager's cosmetic slash-command gate ([`crate::tier::is_restricted_tier_name`]).
-    /// The only difference is the absent-tier policy (the pager hides on `None`, we fail open on `None`).
+    /// Fails **open** (returns `false`) whenever we can't positively confirm a restricted personal tier. So this client gate is a UX optimization (a clean in-chat upsell instead of a doomed request), never the security boundary. The only difference is the absent-tier policy (the pager hides on `None`, we fail open on `None`).
     fn is_tier_restricted_capability(&self) -> bool {
         let Some(auth) = self.auth_manager.current() else {
             return false;
@@ -2117,42 +2217,28 @@ impl MvpAgent {
             .or_else(|| jwt_tier_claim(&auth.key));
         tier.as_deref().is_some_and(crate::tier::is_restricted_tier_name)
     }
-    /// Both BYOK and session (OAuth) users go direct to `xai_api_base_url`.
-    /// `sampling_config.api_key` carries the OAuth bearer for session users (the `api_key_provider` refreshes it per request).
-    /// So IC authenticates and meters Imagine usage per-user.
+    /// Direct to `xai_api_base_url` so IC authenticates and meters Imagine per user; the bearer rule lives in
+    /// `media_tool_config`.
     pub(super) fn prepare_image_gen_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig {
         use xai_grok_tools::implementations::grok_build::image_gen::ImageGenConfig;
-        let sampling_config = self.sampling_config.borrow();
-        let Some(ref api_key) = sampling_config.api_key else {
+        if self.sampling_config.borrow().api_key.is_none() {
             return ImageGenConfig::Disabled;
-        };
-        let tier_restricted = self.is_tier_restricted_capability();
-        let cfg = self.cfg.borrow();
-        let base_url = cfg.endpoints.xai_api_base_url.clone();
-        let version = cfg
-            .client_version
-            .clone()
-            .unwrap_or_else(|| xai_grok_version::VERSION.to_string());
-        let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
-        let mut headers = indexmap::IndexMap::new();
-        headers.insert("user-agent".to_string(), format!("xai-grok-build/{version}"));
-        inject_proxy_headers(
-            &mut headers,
-            cfg.client_version.as_deref(),
-            alpha_test_key.as_deref(),
-            &base_url,
-        );
-        ImageGenConfig::Enabled {
-            api_key: api_key.clone(),
-            base_url,
-            extra_headers: headers,
-            image_gen_enabled: cfg.resolve_image_gen().value,
-            image_edit_enabled: cfg.resolve_image_edit().value,
-            model_override: cfg.resolve_image_gen_model_override(),
-            edit_model_override: cfg.resolve_image_edit_model_override(),
-            tier_restricted,
+        }
+        crate::agent::media_tool_config::image_gen_config(
+            &self.cfg.borrow(),
+            &self.media_tool_credentials(),
+        )
+    }
+    /// `tier_restricted` keeps the tools advertised so the model can nudge; the call short-circuits with the SuperGrok
+    /// upsell. Fails open; see `is_tier_restricted_capability`.
+    fn media_tool_credentials(
+        &self,
+    ) -> crate::agent::media_tool_config::MediaToolCredentials {
+        crate::agent::media_tool_config::MediaToolCredentials {
+            static_bearer: self.auth_manager.side_call_bearer().ok(),
+            tier_restricted: self.is_tier_restricted_capability(),
         }
     }
     /// The tool talks directly to the deployer service.
@@ -2162,51 +2248,18 @@ impl MvpAgent {
         use xai_grok_tools::implementations::grok_build::app_builder::AppBuilderDeployerConfig;
         AppBuilderDeployerConfig::Disabled
     }
-    /// Video tools call the xAI API directly.
+    /// See [`Self::prepare_image_gen_config`] for the bearer rule.
     pub(super) fn prepare_video_gen_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig {
         use xai_grok_tools::implementations::grok_build::video_gen::VideoGenConfig;
-        let cfg = self.cfg.borrow();
-        if !cfg.resolve_video_gen().value {
+        if self.sampling_config.borrow().api_key.is_none() {
             return VideoGenConfig::Disabled;
         }
-        let Some(api_key) = self.sampling_config.borrow().api_key.clone() else {
-            return VideoGenConfig::Disabled;
-        };
-        let tier_restricted = self.is_tier_restricted_capability();
-        let zdr_video_output_s3 = cfg
-            .disable_zdr_incompatible_tools
-            .then(|| cfg.zdr_video_output_s3.clone())
-            .flatten()
-            .filter(|s3| s3.is_valid());
-        let zdr_restricted = cfg.disable_zdr_incompatible_tools
-            && zdr_video_output_s3.is_none();
-        if zdr_restricted {
-            tracing::info!("video_gen zdr-restricted by tools.disable_zdr_incompatible_tools");
-        }
-        let base_url = cfg.endpoints.xai_api_base_url.clone();
-        let version = cfg
-            .client_version
-            .clone()
-            .unwrap_or_else(|| xai_grok_version::VERSION.to_string());
-        let alpha_test_key = cfg.endpoints.alpha_test_key.clone();
-        let mut headers = indexmap::IndexMap::new();
-        headers.insert("user-agent".to_string(), format!("xai-grok-build/{version}"));
-        inject_proxy_headers(
-            &mut headers,
-            cfg.client_version.as_deref(),
-            alpha_test_key.as_deref(),
-            &base_url,
-        );
-        VideoGenConfig::Enabled {
-            api_key,
-            base_url,
-            extra_headers: headers,
-            zdr_video_output_s3: zdr_video_output_s3.map(Box::new),
-            tier_restricted,
-            zdr_restricted,
-        }
+        crate::agent::media_tool_config::video_gen_config(
+            &self.cfg.borrow(),
+            &self.media_tool_credentials(),
+        )
     }
     pub(super) fn prepare_web_search_sampling_config(&self) -> Option<SamplingConfig> {
         let model_id = self.cfg.borrow().web_search_model.clone();
@@ -2223,7 +2276,7 @@ impl MvpAgent {
             client_version,
             &self.cfg.borrow().endpoints,
         )?;
-        inject_proxy_headers(
+        crate::agent::proxy_headers::inject_proxy_headers(
             &mut cfg.extra_headers,
             cfg.client_version.as_deref(),
             alpha_test_key.as_deref(),
@@ -2237,22 +2290,20 @@ impl MvpAgent {
         cfg: &AgentConfig,
         auth_manager: Arc<AuthManager>,
         prefetched_models: Option<IndexMap<String, ModelEntry>>,
+        boot: Option<crate::agent::init::BootstrapPrefetch>,
     ) -> Result<Self, crate::agent::init::BootstrapError> {
-        let (cfg, models_manager) = crate::agent::init::bootstrap(
+        let (cfg, models_manager) = crate::agent::init::bootstrap_with_cancel(
             cfg,
             &auth_manager,
             prefetched_models,
+            &tokio_util::sync::CancellationToken::new(),
+            boot,
         )?;
         Ok(Self::with_models(gateway, &cfg, auth_manager, models_manager))
     }
     /// Prepare the web fetch configuration based on feature flags.
-    ///
     /// Enabled gate: `disable_web_search` kill-switch > `GROK_WEB_FETCH` env > remote settings `web_fetch_enabled` > default (false).
-    ///
-    /// Params resolution (TOML > env > remote settings > default):
-    /// - `proxy_endpoint`: `[toolset.web_fetch] proxy_endpoint` > `GROK_WEB_FETCH_PROXY` > remote settings > None
-    /// - `allowed_domains`: `[toolset.web_fetch] allowed_domains` > remote settings > built-in defaults
-    /// - `allow_local`: `[toolset.web_fetch] allow_local` > `GROK_WEB_FETCH_ALLOW_LOCAL` > false
+    /// Params resolution (TOML > env > remote settings > default): `proxy_endpoint`: `[toolset.web_fetch] proxy_endpoint` > `GROK_WEB_FETCH_PROXY` > remote settings > None `allowed_domains`: `[toolset.web_fetch] allowed_domains` > remote settings > built-in defaults `allow_local`: `[toolset.web_fetch] allow_local` > `GROK_WEB_FETCH_ALLOW_LOCAL` > false
     pub(super) fn prepare_web_fetch_config(
         &self,
     ) -> xai_grok_tools::implementations::grok_build::web_fetch::WebFetchConfig {
@@ -2287,7 +2338,7 @@ impl MvpAgent {
         gateway: GatewaySender,
         cfg: &AgentConfig,
         auth_manager: Arc<AuthManager>,
-        models_manager: crate::agent::models::ModelsManager,
+        models_manager: crate::agent::remote_config::ModelsManager,
     ) -> Self {
         models_manager.set_gateway(gateway.clone());
         let sampling_config = models_manager.sampling_config();
@@ -2383,6 +2434,7 @@ impl MvpAgent {
             ),
             tier_allowed: std::cell::Cell::new(true),
             allow_access_resolved_for: std::cell::RefCell::new(None),
+            official_marketplace_register: std::cell::RefCell::new(None),
             storage_mode: std::cell::Cell::new(storage_mode),
             otel_gate: crate::agent::otel_gate::OtelGate::default(),
             default_yolo_mode,
@@ -2390,7 +2442,8 @@ impl MvpAgent {
             trace_upload_live: Arc::new(
                 std::sync::atomic::AtomicBool::new(cfg.is_trace_upload_enabled()),
             ),
-            memory_config: None,
+            feedback_trace_upload_grants: RefCell::new(VecDeque::new()),
+            memory_config: RefCell::new(None),
             config_watcher_path_tx: None,
             relay_sync_enabled,
             buffering_settings: RefCell::new(None),
@@ -2438,6 +2491,7 @@ impl MvpAgent {
             supervisor_started: std::cell::Cell::new(false),
             settings_reapply_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
             post_auth_settings_in_flight: std::rc::Rc::new(std::cell::Cell::new(false)),
+            settings_refresh: crate::agent::remote_config::SettingsRefresh::default(),
             announcements_gen: std::cell::Cell::new(0),
             last_emitted_announcements: RefCell::new(Vec::new()),
             announcements_refresh_started: std::cell::Cell::new(false),
@@ -2466,11 +2520,11 @@ impl MvpAgent {
                 instance.cfg.borrow().grok_com_config.auth_provider_command.clone(),
                 instance.diagnostic_upload_config(),
             );
-        crate::auth::credential_provider::wire_otel_auth_manager(
+        xai_grok_login::credential_provider::wire_otel_auth_manager(
             instance.auth_manager.clone(),
         );
         if let Some(ref dk) = instance.cfg.borrow().endpoints.deployment_key {
-            crate::auth::credential_provider::wire_otel_deployment_key(dk.clone());
+            xai_grok_login::credential_provider::wire_otel_deployment_key(dk.clone());
         }
         instance
     }
@@ -2552,8 +2606,13 @@ impl MvpAgent {
                 );
                 continue;
             }
+            if let Some(handle) = self.resident_handle(&id) {
+                handle.persist_resume_status().await;
+            }
             self.request_session_shutdown(&id);
+            self.retire_root_session(&id);
             if self.take_session(&id).is_some() {
+                self.session_registry.remove_retired_root(&id);
                 self.session_registry.clear_resident(&id);
                 self.set_session_live_state(&id, SessionLiveState::Dormant);
                 unloaded += 1;
@@ -2563,14 +2622,9 @@ impl MvpAgent {
         tracing::info!(kept_resident, unloaded, "client-disconnect detach complete");
         self.sweep_dead_sessions();
     }
-    /// Wait for an old session thread to finish before reloading the same session.
-    ///
-    /// When a client disconnects and a session is *idle*, `handle_evict_sessions` unloads it.
-    /// That sends `Shutdown`, drops the `SessionHandle`, and keeps the `SessionThread`.
-    /// (Sessions with live work stay fully resident and skip this path.)
-    /// If the client reconnects and loads the same session, wait for the old actor to finish flushing to disk before replaying `updates.jsonl`.
-    ///
-    /// Uses async polling (never blocks the `LocalSet` runtime) with a 5s deadline to handle slow shutdowns (e.g., embedding API timeouts).
+    /// Wait for an old session thread to finish before reloading the same session. When a client disconnects and a session is *idle*, `handle_evict_sessions` unloads it.
+    /// That sends `Shutdown`, drops the `SessionHandle`, and keeps the `SessionThread`. (Sessions with live work stay fully resident and skip this path.)
+    /// If the client reconnects and loads the same session, wait for the old actor to finish flushing to disk before replaying `updates.jsonl`. Uses async polling (never blocks the `LocalSet` runtime) with a 5s deadline to handle slow shutdowns (e.g., embedding API timeouts).
     pub(super) async fn drain_old_session_thread(&self, session_id: &acp::SessionId) {
         self.drain_old_session_thread_within(session_id, DRAIN_OLD_THREAD_WAIT).await;
     }
@@ -2619,8 +2673,6 @@ impl MvpAgent {
         }
     }
     /// Mark a `session/load` as in flight for `session_id`.
-    ///
-    /// Returns an RAII guard.
     /// While it is alive, [`Self::wait_for_in_flight_session_load`] blocks racing session-scoped requests for the same session.
     /// Dropping the guard (every exit path of `load_session`, success or error) removes the marker and wakes all waiters via watch-channel closure.
     pub(super) fn begin_session_load(
@@ -2635,15 +2687,9 @@ impl MvpAgent {
             _tx: tx,
         }
     }
-    /// Session lookup that tolerates an in-flight `session/load`.
-    ///
-    /// THE chokepoint for the post-leader-crash error class.
+    /// Session lookup that tolerates an in-flight `session/load`. THE chokepoint for the post-leader-crash error class.
     /// Every user-facing session-scoped handler (`prompt`, `set_session_model`, `interject`, ...) resolves its handle through this.
-    /// A bare `sessions` lookup would make a request racing the reconnect-replayed `session/load` fail with "unknown session id".
-    /// This waits for the session to land instead.
-    ///
-    /// Returns `None` only when the session is genuinely absent: no load in flight (or the load failed / timed out).
-    /// Those are exactly the cases where the legacy error is correct.
+    /// A bare `sessions` lookup would make a request racing the reconnect-replayed `session/load` fail with "unknown session id". This waits for the session to land instead. Returns `None` only when the session is genuinely absent: no load in flight (or the load failed / timed out). Those are exactly the cases where the legacy error is correct.
     pub(crate) async fn session_handle_waiting_for_load(
         &self,
         session_id: &acp::SessionId,
@@ -2655,15 +2701,9 @@ impl MvpAgent {
         self.wait_for_in_flight_session_load(session_id).await;
         self.resident_handle(session_id)
     }
-    /// If a `session/load` for `session_id` is in flight, wait (bounded) for it to finish.
-    /// Returns immediately when no load is in flight.
-    ///
-    /// This closes the load-vs-request race after a leader restart.
-    /// Clients replay `session/load` on reconnect.
-    /// A `session/prompt` arriving right behind it must wait for the session to land in `self.sessions`.
-    /// Otherwise it fails with "unknown session id".
-    /// The wait wakes when the load's [`SessionLoadGuard`] drops (success or failure) and re-checks.
-    /// A failed load still gives the caller the original error.
+    /// If a `session/load` for `session_id` is in flight, wait (bounded) for it to finish. This closes the load-vs-request race after a leader restart. Clients replay `session/load` on reconnect.
+    /// A `session/prompt` arriving right behind it must wait for the session to land in `self.sessions`. Otherwise it fails with "unknown session id".
+    /// The wait wakes when the load's [`SessionLoadGuard`] drops (success or failure) and re-checks. A failed load still gives the caller the original error.
     pub(crate) async fn wait_for_in_flight_session_load(
         &self,
         session_id: &acp::SessionId,
@@ -2699,6 +2739,37 @@ impl MvpAgent {
                 return;
             }
         }
+    }
+    /// A warm attach adopting an actor another attach installed waits for that actor's identity
+    /// stamp; adopting before it lands would publish an identity disk never saw.
+    /// A stamp that fails, or outlives the wait, takes the install back so nothing is published.
+    pub(super) async fn await_adopted_identity_stamp(
+        &self,
+        session_id: &acp::SessionId,
+    ) -> Result<(), acp::Error> {
+        const IDENTITY_STAMP_WAIT: std::time::Duration = std::time::Duration::from_secs(
+            60,
+        );
+        let Some((install_id, mut stamp)) = self
+            .session_registry
+            .pending_identity_stamp(session_id) else {
+            return Ok(());
+        };
+        let landed = stamp.wait_for(|outcome| *outcome != IdentityStamp::Pending);
+        match tokio::time::timeout(IDENTITY_STAMP_WAIT, landed).await {
+            Ok(Ok(outcome)) if *outcome == IdentityStamp::Durable => return Ok(()),
+            Ok(_) => {}
+            Err(_) => {
+                let failed = IdentityStamp::Failed;
+                if let StampResolution::Withdrawn(withdrawn) = self
+                    .session_registry
+                    .resolve_identity_stamp(session_id, install_id, failed)
+                {
+                    self.roll_back_install(session_id, *withdrawn).await;
+                }
+            }
+        }
+        Err(acp::Error::invalid_params().data("session identity stamp failed"))
     }
     /// Wait until no attach is in flight for this id, up to `budget`.
     /// An attach registers its actor and keeps going, so handle presence is not enough.
@@ -2911,11 +2982,8 @@ impl MvpAgent {
         }
     }
     /// Flush a session's persistence buffer with a 5-second timeout.
-    ///
     /// Sends `FlushComplete` to the session actor, which chains through to `FlushAndAck` on the persistence actor.
     /// That is a true sync barrier: it only resolves after all queued writes (chat messages, updates) hit disk.
-    ///
-    /// Returns `Ok(())` on success, `Err(reason)` on timeout or channel failure.
     pub(crate) async fn flush_session(
         &self,
         session_id: &acp::SessionId,
@@ -2940,12 +3008,9 @@ impl MvpAgent {
             Err(_) => Err("timeout"),
         }
     }
-    /// RelaySync is only enabled when:
-    /// 1. Running in TUI interactive mode (cfg.enable_relay_sync)
-    /// 2. Config file/env enables it ([relay] enabled or GROK_RELAY_SYNC_ENABLED)
-    /// 3. User is authenticated
-    ///
-    /// Returns a `RelaySync` instance whose connection state can be observed via `connection_state()`.
+    /// RelaySync is only enabled when: Running in TUI interactive mode (cfg.enable_relay_sync)
+    /// Config file/env enables it ([relay] enabled or GROK_RELAY_SYNC_ENABLED)
+    /// User is authenticated
     pub(super) fn create_relay_sync(
         &self,
         session_id: &str,
@@ -3092,8 +3157,7 @@ impl MvpAgent {
     pub(super) fn trace_upload_config_snapshot(
         &self,
     ) -> Option<crate::session::repo_changes::UploadMethod> {
-        if self.is_data_collection_disabled()
-            || !self.cfg.borrow().is_trace_upload_enabled()
+        if self.is_trace_upload_blocked() || !self.cfg.borrow().is_trace_upload_enabled()
         {
             return None;
         }
@@ -3110,7 +3174,7 @@ impl MvpAgent {
     }
     pub(super) fn diagnostic_upload_config(
         &self,
-    ) -> Option<crate::auth::DiagnosticUploader> {
+    ) -> Option<xai_grok_login::DiagnosticUploader> {
         self.sync_collection_config_gate();
         let cfg = self.cfg.borrow();
         if !cfg.is_trace_upload_enabled() {
@@ -3166,7 +3230,7 @@ impl MvpAgent {
         crate::upload::turn::TraceUploadReason,
     ) {
         use crate::upload::turn::TraceUploadReason;
-        if self.is_data_collection_disabled() {
+        if self.is_trace_upload_blocked() {
             crate::upload::trace::spawn_startup_spill_reconcile(
                 crate::util::grok_home::grok_home(),
                 None,
@@ -3250,8 +3314,6 @@ impl MvpAgent {
                 origin
             })
     }
-    /// Returns the model state for a given session (or the agent default).
-    ///
     /// When `session_id` is `Some`, looks up the session's per-session model.
     /// Falls back to `current_model_id` (startup default) when no session is found or `session_id` is `None`.
     /// The `None` case covers `initialize`, before any session exists.
@@ -3270,24 +3332,49 @@ impl MvpAgent {
             .values()
             .cloned()
             .collect();
-        let override_effort = session_id
-            .and_then(|sid| self.resident_handle(sid).map(|h| h.reasoning_effort))
-            .flatten()
+        self.overlay_session_model_meta(session_id, &model_id, &mut available_models);
+        acp::SessionModelState::new(model_id, available_models)
+    }
+    /// Writes the session's effort and context window selection into the current model's meta.
+    fn overlay_session_model_meta(
+        &self,
+        session_id: Option<&acp::SessionId>,
+        model_id: &acp::ModelId,
+        available_models: &mut [acp::ModelInfo],
+    ) {
+        let handle = session_id.and_then(|sid| self.resident_handle(sid));
+        let effort = handle
+            .as_ref()
+            .and_then(|h| h.reasoning_effort)
             .or_else(|| self.models_manager.current_reasoning_effort());
-        if let Some(override_effort) = override_effort
-            && let Some(info) = available_models
-                .iter_mut()
-                .find(|info| info.model_id == model_id)
-            && supports_reasoning_effort_meta(info.meta.as_ref())
-        {
-            let mut map = info.meta.clone().unwrap_or_default();
+        let context_window_selection = handle
+            .as_ref()
+            .and_then(|h| crate::session::handle::load_context_window_selection(
+                &h.context_window_selection,
+            ));
+        let Some(info) = available_models
+            .iter_mut()
+            .find(|info| info.model_id == *model_id) else {
+            return;
+        };
+        let effort = effort
+            .filter(|_| supports_reasoning_effort_meta(info.meta.as_ref()));
+        if effort.is_none() && context_window_selection.is_none() {
+            return;
+        }
+        let map = info.meta.get_or_insert_default();
+        if let Some(effort) = effort {
             map.insert(
                 REASONING_EFFORT_META_KEY.to_string(),
-                reasoning_effort_meta_value(override_effort),
+                reasoning_effort_meta_value(effort),
             );
-            info.meta = Some(map);
         }
-        acp::SessionModelState::new(model_id, available_models)
+        if let Some(window) = context_window_selection {
+            map.insert(
+                xai_grok_sampling_types::CONTEXT_WINDOW_META_KEY.to_string(),
+                xai_grok_sampling_types::context_window_meta_value(window),
+            );
+        }
     }
     pub(crate) async fn session_model_state(
         &self,
@@ -3397,7 +3484,8 @@ impl MvpAgent {
         }
     }
     /// Insert the per-session `_meta` keys shared by `new_session` and `load_session`.
-    /// The keys are `x.ai/sessionConfig`, `x.ai/sessionDetail`, and `x.ai/schedulerBackgroundLoops`.
+    /// The keys are `x.ai/sessionConfig`, `x.ai/sessionDetail`,
+    /// and `x.ai/memoryMode`.
     /// Keeping both response paths on this one builder stops them drifting.
     pub(super) fn insert_session_config_meta(
         &self,
@@ -3419,21 +3507,17 @@ impl MvpAgent {
             serde_json::json!({ "options": config_options }),
         );
         meta.insert("x.ai/sessionDetail".to_string(), serde_json::json!(detail));
-        if let Some(background_loops) = self
+        if let Some(memory_mode) = self
             .resident_handle(session_id)
-            .map(|handle| handle.spawn_snapshot.scheduler_background_loops)
+            .and_then(|handle| handle.spawn_snapshot.memory_mode)
         {
             meta.insert(
-                SCHEDULER_BACKGROUND_LOOPS_META_KEY.to_string(),
-                serde_json::json!(background_loops),
+                MEMORY_MODE_META_KEY.to_string(),
+                serde_json::json!(memory_mode),
             );
         }
     }
-    /// Seed the global sampling config with login auth when available.
-    ///
-    /// Only sets the `api_key` if missing.
-    /// Does NOT resolve `base_url` from `current_model_id`.
-    /// That is deferred to session creation time.
+    /// Seed the global sampling config with login auth when available. Only sets the `api_key` if missing. Does NOT resolve `base_url` from `current_model_id`. That is deferred to session creation time.
     /// It avoids cross-client contamination in leader mode, where `current_model_id` is shared mutable state.
     pub(super) fn seed_client_config_auth_if_available(&self) {
         let mut sampling_config = self.sampling_config.borrow_mut();
@@ -3504,6 +3588,35 @@ impl MvpAgent {
             .current_or_expired()
             .is_some_and(|auth| auth.team_name.is_some())
     }
+    pub(crate) fn issue_feedback_trace_upload_grant(
+        &self,
+        session_id: acp::SessionId,
+    ) -> String {
+        const MAX_PENDING_GRANTS: usize = 8;
+        let token = uuid::Uuid::new_v4().to_string();
+        let mut grants = self.feedback_trace_upload_grants.borrow_mut();
+        if grants.len() == MAX_PENDING_GRANTS {
+            let _ = grants.pop_front();
+        }
+        grants.push_back((token.clone(), session_id));
+        token
+    }
+    pub(crate) fn consume_feedback_trace_upload_grant(
+        &self,
+        token: &str,
+        session_id: &acp::SessionId,
+    ) -> bool {
+        let mut grants = self.feedback_trace_upload_grants.borrow_mut();
+        let Some(position) = grants
+            .iter()
+            .position(|(grant, granted_session)| {
+                grant == token && granted_session == session_id
+            }) else {
+            return false;
+        };
+        let _ = grants.remove(position);
+        true
+    }
     /// Whether `/feedback` may offer to turn trace upload on.
     /// An individual coding-data opt-out still asks: the card is how opted-out users switch sharing back on.
     /// ZDR has no self-serve way back, so it never asks.
@@ -3530,10 +3643,8 @@ impl MvpAgent {
         cfg.endpoints.deployment_key.is_none()
             && self.auth_manager.current_or_expired().is_some_and(|a| a.is_xai_auth())
     }
-    /// Trace upload being off as *policy* (an MDM/requirements pin or a telemetry-disabled posture) must suppress the card.
-    /// It must not invite the user to override the policy.
-    /// The accepted consent persists at the config tier, which those postures cannot outrank.
-    /// Trace upload being off via the remote `trace_upload_enabled` default is different: that is the card's audience.
+    /// Trace upload being off as *policy* (an MDM/requirements pin or a telemetry-disabled posture) must suppress the card. It must not invite the user to override the policy.
+    /// The accepted consent persists at the config tier, which those postures cannot outrank. Trace upload being off via the remote `trace_upload_enabled` default is different: that is the card's audience.
     /// Individual consent overriding a fleet default is the feature (its own kill switch is `feedback_trace_card_enabled`).
     fn trace_upload_posture_allows_offer(cfg: &crate::agent::config::Config) -> bool {
         cfg.requirements.trace_upload.pinned() != Some(false)
@@ -3544,16 +3655,16 @@ impl MvpAgent {
             || cfg.endpoints.trace_upload_bucket.is_some()
             || cfg.endpoints.trace_upload_endpoint_url.is_some()
     }
-    /// Upload method for a user-consented feedback trace archive.
-    /// Blocks ZDR and custom destinations.
-    /// Deliberately ignores the live `trace_upload` flag and the cached coding-data opt-out.
-    /// The consent just granted may not have reached either cache yet.
-    /// Fails closed on unknown privacy state.
+    /// Upload method for a user-consented feedback trace archive. Blocks ZDR and custom destinations. Deliberately ignores the live `trace_upload` flag and the cached coding-data opt-out.
+    /// The consent just granted may not have reached either cache yet. Fails closed on unknown privacy state.
     /// With no credential (and no deployment key) the ZDR / team predicates can't be evaluated, so nothing may leave the machine.
     pub(crate) async fn one_shot_feedback_gcs_config(
         &self,
         gcs_prefix: String,
     ) -> Option<crate::session::repo_changes::TraceExportConfig> {
+        if !xai_grok_product::SESSION_DATA_UPLOADS_ALLOWED {
+            return None;
+        }
         let cached_auth = self.auth_manager.current_or_expired()?;
         if cached_auth.is_zdr_team() {
             return None;
@@ -3598,13 +3709,8 @@ impl MvpAgent {
             upload_method,
         })
     }
-    /// Allocate the next monotonic telemetry turn number for a session.
-    ///
-    /// Returns the current turn number and advances the counter.
-    /// The counter is intentionally monotonic even across rewinds to avoid overwriting older telemetry docs in cloud storage.
-    ///
-    /// For sessions sharing a parent's trace counter, call this once with the **root session ID** and reuse the result.
-    /// That way the root's counter does not advance more than once per logical turn.
+    /// Allocate the next monotonic telemetry turn number for a session. The counter is intentionally monotonic even across rewinds to avoid overwriting older telemetry docs in cloud storage.
+    /// For sessions sharing a parent's trace counter, call this once with the **root session ID** and reuse the result. That way the root's counter does not advance more than once per logical turn.
     /// The cloud storage layout writes to `{session_id}/turn_{N}/`.
     pub(crate) fn allocate_turn_number(&self, session_id: &acp::SessionId) -> u64 {
         let turn = self.peek_turn_number(session_id);
@@ -3618,6 +3724,9 @@ impl MvpAgent {
     /// Set a session's next trace turn number.
     pub(super) fn set_turn_number(&self, session_id: &acp::SessionId, next: u64) {
         self.session_registry.set_turn_number(session_id, next);
+    }
+    pub(crate) fn release_subagent_turn_number(&self, session_id: &acp::SessionId) {
+        self.session_registry.clear_turn_number(session_id);
     }
     /// Upload each drained harness trace turn as its own `turn_{N}` artifact.
     /// Numbered from the same counter as model turns so subagents interleave correctly in remote clients.
@@ -3671,8 +3780,7 @@ impl MvpAgent {
         }
     }
     /// Number the drained harness turns `base, base+1, …` and build their `(trace context, metadata, capture)` upload payloads.
-    /// Stops at the first turn whose trace context is `None`: uploads are disabled (or the session is gone).
-    /// That state is uniform across the batch since all turns share one `session_id`.
+    /// Stops at the first turn whose trace context is `None`: uploads are disabled (or the session is gone). That state is uniform across the batch since all turns share one `session_id`.
     /// A `None` *after* a `Some` would be a broken invariant, so it is logged rather than dropped silently.
     pub(super) async fn build_harness_trace_uploads(
         &self,
@@ -3705,7 +3813,7 @@ impl MvpAgent {
                 reasoning_effort: ctx
                     .session_handle
                     .reasoning_effort
-                    .map(|e| e.as_str().to_string()),
+                    .map(|e| e.as_ref().to_string()),
                 host_os: std::env::consts::OS.to_string(),
                 host_arch: std::env::consts::ARCH.to_string(),
                 prompt_has_image: Some(false),
@@ -3741,7 +3849,7 @@ impl MvpAgent {
                 );
                 obj.insert(
                     "upload_reason".into(),
-                    serde_json::json!(upload_reason.as_str()),
+                    serde_json::json!(upload_reason.as_ref()),
                 );
                 obj.insert(
                     "data_collection_disabled".into(),
@@ -3761,7 +3869,7 @@ impl MvpAgent {
                 xai_grok_telemetry::session_ctx::log_session_event(crate::agent::session_metrics::TraceUploadSkipped {
                     session_id: session_info.id.0.to_string(),
                     turn_number,
-                    reason: upload_reason.as_str().to_owned(),
+                    reason: upload_reason.as_ref().to_owned(),
                 });
                 return None;
             }
@@ -3823,6 +3931,11 @@ impl MvpAgent {
             gcs_config,
             session_info: session_info.clone(),
             turn_number,
+            attempt_id: None,
+            memory_mode: session_handle
+                .spawn_snapshot
+                .memory_mode
+                .or_else(|| self.memory_config_snapshot().map(|memory| memory.mode)),
             session_handle,
             session_registry_enabled,
             upload_queue,
@@ -3830,20 +3943,9 @@ impl MvpAgent {
             auth_manager: self.auth_manager.clone(),
         })
     }
-    /// Resolve the agent definition for a session.
-    ///
-    /// Priority (highest to lowest):
-    /// 1. Model `agent_type` if it names a strict harness (codex, …).
-    /// 2. `acp_agent_profile` from ACP `_meta.agentProfile` (remote clients).
-    /// 3. `agent_profile_path` from CLI `--agent-profile`.
-    /// 4. `agent_config` from config.toml `[agent]`.
-    /// 5. `GROK_AGENT` env var.
-    /// 6. Built-in default agent.
-    ///
-    /// `GROK_AGENT` and an explicit `[agent] name` bypass step 1.
-    /// Strict-harness classification is structural; see [`xai_grok_agent::config::is_strict_harness_agent_type`].
-    ///
-    /// Harness inheritance for a profile that pins its own model is applied by the caller via [`inherited_harness_template`], not here.
+    /// Resolve the agent definition for a session. Priority (highest to lowest): Model `agent_type` if it names a strict harness (codex, …). `acp_agent_profile` from ACP `_meta.agentProfile` (remote clients).
+    /// `agent_profile_path` from CLI `--agent-profile`. `agent_config` from config.toml `[agent]`. `GROK_AGENT` env var. Built-in default agent. `GROK_AGENT` and an explicit `[agent] name` bypass step 1.
+    /// Strict-harness classification is structural; see [`xai_grok_agent::config::is_strict_harness_agent_type`]. Harness inheritance for a profile that pins its own model is applied by the caller via [`inherited_harness_template`], not here.
     pub fn resolve_agent_definition(
         cwd: &std::path::Path,
         agent_profile_path: Option<&std::path::Path>,
@@ -3981,16 +4083,27 @@ impl MvpAgent {
         meta: Option<&acp::Meta>,
         init: &acp::InitializeRequest,
     ) -> bool {
-        meta.and_then(|m| m.get(xai_grok_status_line::CLIENT_STATUS_LINE_META))
+        Self::resolve_bool_capability(
+            meta,
+            init,
+            xai_grok_status_line::CLIENT_STATUS_LINE_META,
+            xai_grok_status_line::STATUS_LINE_CAPABILITY,
+            false,
+        )
+    }
+    fn resolve_bool_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+        session_key: &str,
+        init_key: &str,
+        default: bool,
+    ) -> bool {
+        meta.and_then(|m| m.get(session_key))
             .or_else(|| {
-                init
-                    .client_capabilities
-                    .meta
-                    .as_ref()
-                    .and_then(|m| m.get(xai_grok_status_line::STATUS_LINE_CAPABILITY))
+                init.client_capabilities.meta.as_ref().and_then(|m| m.get(init_key))
             })
             .and_then(|v| v.as_bool())
-            .unwrap_or(false)
+            .unwrap_or(default)
     }
     /// Switch the row on for the resident actor an attach reuses and ask it to fill it.
     /// The store precedes the request because the emitter re-reads the capability when the wake lands.
@@ -4008,6 +4121,35 @@ impl MvpAgent {
         if wanted {
             handle.request_status_snapshot();
         }
+    }
+    /// Whether the requesting client wants live `user_message_chunk` during a prompt.
+    /// Session `_meta` first: a leader multiplexes many clients behind one `initialize`.
+    pub(super) fn resolve_user_message_echo_capability(
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) -> bool {
+        Self::resolve_bool_capability(
+            meta,
+            init,
+            crate::session::CLIENT_USER_MESSAGE_ECHO_META,
+            crate::session::USER_MESSAGE_ECHO_CAPABILITY,
+            false,
+        )
+    }
+    /// Assign live prompt echo for the reused resident actor. Can turn it off.
+    pub(super) fn attach_user_message_echo(
+        &self,
+        session_id: &acp::SessionId,
+        meta: Option<&acp::Meta>,
+        init: &acp::InitializeRequest,
+    ) {
+        let Some(handle) = self.resident_handle(session_id) else {
+            return;
+        };
+        handle
+            .set_user_message_echo_wanted(
+                Self::resolve_user_message_echo_capability(meta, init),
+            );
     }
     /// Extract per-client terminal/fs capabilities from request `_meta` (injected by the leader).
     /// Falls back to the shared `init` OnceCell.
@@ -4030,14 +4172,14 @@ impl MvpAgent {
         (terminal, fs_read, fs_write)
     }
     /// Spawn and register a session actor given a session id and session parameters.
-    ///
     /// Parameters are bundled in [`SessionSpawnOptions`] (named fields) rather than passed positionally.
     /// There are too many same-typed args (`bool`s, `Option<…>`s) for positional calls to be transposition-safe.
     pub(super) async fn spawn_and_register_session(
         &self,
         init: &acp::InitializeRequest,
         spec: SessionSpawnOptions<'_>,
-    ) -> Result<(), acp::Error> {
+        spawn_trace: Option<xai_grok_telemetry::startup::SpawnTraceContext>,
+    ) -> Result<bool, acp::Error> {
         let SessionSpawnOptions {
             session_info,
             cwd,
@@ -4045,6 +4187,8 @@ impl MvpAgent {
             initial_client_mcp_servers,
             mcp_meta_config_map,
             persistence,
+            root_identity,
+            attach_waiter,
             mut chat_history,
             rewind_points_file_path,
             initial_total_tokens,
@@ -4060,6 +4204,7 @@ impl MvpAgent {
             persisted_workflow_runs,
             persisted_announcement_state,
             session_meta,
+            persisted_agent_profile,
             model_agent_type,
             session_model_id,
             initial_reasoning_effort,
@@ -4068,17 +4213,25 @@ impl MvpAgent {
             prompt_display_cwd,
             is_headless,
             is_chat_kind,
+            prefetch,
         } = spec;
         let _timer = crate::instrumentation_timer!("session.spawn_and_register");
         reject_direct_hub_cloud_meta(session_meta)?;
         let spawn_remote_settings = self.cfg.borrow().remote_settings.clone();
-        folder_trust::resolve_and_record(
-            cwd.as_path(),
-            spawn_remote_settings.as_ref(),
-            false,
-        );
+        let mut prefetch = match prefetch {
+            Some(prefetch) => prefetch,
+            None => {
+                crate::session::session_create_prefetch::SessionCreatePrefetch::launch_from_meta(
+                    cwd.as_path(),
+                    folder_trust::TrustScan::skipped(),
+                    self.plugin_registry_handle.clone(),
+                    session_meta,
+                )
+            }
+        };
+        let project_env_trusted = prefetch
+            .resolve_trust(cwd.as_path(), spawn_remote_settings.as_ref());
         let load_envrc = self.cfg.borrow().session.load_envrc.unwrap_or(true);
-        let project_env_trusted = folder_trust::project_scope_allowed(cwd.as_path());
         let envrc = envrc
             .unwrap_or_else(|| xai_grok_workspace::envrc::spawn_envrc_load(
                 cwd.as_path().to_path_buf(),
@@ -4304,30 +4457,14 @@ impl MvpAgent {
             ?startup_hints,
             "startup hints"
         );
-        let auto_compact_threshold_percent = {
-            let cfg = self.cfg.borrow();
-            let models = self.models_manager.models();
-            let model = config::find_model_by_id(&models, &session_model_id.0);
-            crate::util::config::resolve_auto_compact_threshold_percent(
-                &cfg,
-                &session_model_id.0,
-                model.map(|e| &e.info),
-            )
-        };
-        let system_prompt_label = {
-            let cfg = self.cfg.borrow();
-            let models = self.models_manager.models();
-            let model = config::find_model_by_id(&models, &session_model_id.0);
-            crate::util::config::resolve_system_prompt_label(
-                &cfg,
-                &session_model_id.0,
-                model.map(|e| &e.info),
-            )
-        };
         let compaction_verbatim_input = self
             .cfg
             .borrow()
             .is_feature_enabled(crate::agent::config::Feature::CompactionVerbatimInput);
+        let long_reasoning_reminder = self
+            .cfg
+            .borrow()
+            .resolve_long_reasoning_reminder();
         let compaction_tool_choice = self.cfg.borrow().resolve_compaction_tool_choice();
         let auto_update = self.cfg.borrow().cli.auto_update;
         let client_type = *self.client_type.borrow();
@@ -4350,7 +4487,9 @@ impl MvpAgent {
         );
         let skills = self.cfg.borrow().skills.clone();
         let compat = self.cfg.borrow().compat_resolved;
-        let acp_agent_profile = parse_agent_profile_from_meta(session_meta);
+        let paths_config = self.cfg.borrow().paths.clone();
+        let acp_agent_profile = parse_agent_profile_from_meta(session_meta)
+            .or(persisted_agent_profile);
         let session_default_agent_profile = acp_agent_profile
             .as_ref()
             .map(|d| d.name.clone());
@@ -4424,6 +4563,23 @@ impl MvpAgent {
                 sampling_config,
                 origin_client.clone(),
             );
+        let (auto_compact_threshold_percent, system_prompt_label) = {
+            let cfg = self.cfg.borrow();
+            let models = self.models_manager.models();
+            let model = config::find_model_by_id(&models, &session_model_id.0);
+            (
+                crate::util::config::resolve_auto_compact_threshold_percent(
+                    &cfg,
+                    &session_model_id.0,
+                    model.map(|e| &e.info),
+                ),
+                crate::util::config::resolve_system_prompt_label(
+                    &cfg,
+                    &session_model_id.0,
+                    model.map(|e| &e.info),
+                ),
+            )
+        };
         self.models_manager
             .apply_supported_effort(
                 &mut sampling_config,
@@ -4431,6 +4587,9 @@ impl MvpAgent {
                 &session_info.id,
                 EffortTarget::NewSession,
             );
+        sampling_config.conversation_group_id = Some(
+            crate::sampling::derive_conversation_group_id(session_info.id.0.as_ref()),
+        );
         let max_turns = {
             let cfg = self.cfg.borrow();
             cfg.cli_agent_overrides
@@ -4558,6 +4717,9 @@ impl MvpAgent {
             .cfg
             .borrow()
             .is_feature_enabled(crate::agent::config::Feature::ActiveAgentMessages);
+        let file_acceleration = crate::session::file_acceleration::settings(
+            &self.cfg.borrow(),
+        );
         let goal_enabled = self.cfg.borrow().resolve_goal().value;
         let background_workflows_enabled = self.cfg.borrow().resolve_workflows().value;
         let subagents_enabled = self.cfg.borrow().subagents_enabled;
@@ -4588,17 +4750,9 @@ impl MvpAgent {
         let auth_manager = Some(self.auth_manager.clone());
         let bash_params_json = {
             let cfg = self.cfg.borrow();
-            let remote_auto_bg = cfg
-                .remote_settings
-                .as_ref()
-                .and_then(|r| r.auto_background_on_timeout);
-            let remote_allow_background_operator = cfg
-                .remote_settings
-                .as_ref()
-                .and_then(|r| r.allow_background_operator);
             cfg.toolset
                 .bash
-                .to_bash_params_json(remote_auto_bg, remote_allow_background_operator)
+                .to_bash_params_json_with_remote(cfg.remote_settings.as_ref())
         };
         let ask_user_question_params_json = {
             let cfg = self.cfg.borrow();
@@ -4645,7 +4799,7 @@ impl MvpAgent {
                 );
             }
         }
-        let (mut handle, permission_events_rx, agent_system_prompt, session_thread) = {
+        let (init, session_thread) = {
             let _timer = crate::instrumentation_timer!("session.spawn_actor_call");
             let session_key = self.auth_manager.current_or_expired().map(|a| a.key);
             let credentials = xai_chat_state::Credentials {
@@ -4661,7 +4815,7 @@ impl MvpAgent {
             let attribution_callback: Option<
                 xai_grok_sampler::SharedAttributionCallback,
             > = Some(
-                crate::auth::attribution::ShellAttribution::new(
+                xai_grok_login::attribution::ShellAttribution::new(
                     self.auth_manager.clone(),
                     Some(session_info.id.0.to_string()),
                 ),
@@ -4687,7 +4841,7 @@ impl MvpAgent {
                         return None;
                     }
                     let cwd = std::path::Path::new(&session_info.cwd);
-                    let hooks_trusted = folder_trust::project_scope_allowed(cwd);
+                    let hooks_trusted = project_env_trusted;
                     let git_root = {
                         let _timer = crate::instrumentation_timer!("session.spawn_git_root");
                         xai_grok_workspace::session::git::find_git_root_from_path(cwd)
@@ -4696,9 +4850,10 @@ impl MvpAgent {
                     let (disk_registry, disk_errors) = {
                         let _timer = crate::instrumentation_timer!("session.spawn_hook_discovery");
                         crate::util::hooks::discover_hooks(
+                            &crate::util::hooks::process_hook_inputs(),
                             git_root.as_deref(),
                             &compat,
-                            hooks_trusted,
+                            xai_grok_hooks::trust::Trust::from_verdict(hooks_trusted),
                         )
                     };
                     for e in &disk_errors {
@@ -4720,8 +4875,11 @@ impl MvpAgent {
                 .tx
                 .send(crate::session::persistence::PersistenceMsg::CurrentModel {
                     model_id: session_model_id.clone(),
-                    agent_name: Some(agent_definition.name.clone()),
+                    agent: crate::session::persistence::PersistedAgent::from(
+                        &agent_definition,
+                    ),
                     reasoning_effort: reasoning_effort_to_persist,
+                    context_window: None,
                 });
             let acp_mcp_servers = crate::session::acp_mcp::parse_acp_mcp_servers(
                 session_meta,
@@ -4732,12 +4890,10 @@ impl MvpAgent {
                 .as_ref()
                 .and_then(|m| m.get("x.ai/gitHeadChanged"))
                 .and_then(|v| v.as_bool());
-            let status_line_enabled = std::sync::Arc::new(
-                std::sync::atomic::AtomicBool::new(
-                    Self::resolve_status_line_capability(session_meta, init),
-                ),
+            let client_caps = crate::session::notifications::SessionClientCaps::new(
+                Self::resolve_status_line_capability(session_meta, init),
+                Self::resolve_user_message_echo_capability(session_meta, init),
             );
-            let session_cwd = std::path::Path::new(&session_info.cwd);
             let fs_watch_caps = crate::session::fs_watch::FsWatchCapabilities::resolve(crate::session::fs_watch::CapabilityInputs {
                 client_notify: fs_notify_config.is_some(),
                 hunk_tracking: hunk_plan.enabled(),
@@ -4747,20 +4903,6 @@ impl MvpAgent {
             tool_ctx.live_orphan_heal_lock = self
                 .session_registry
                 .live_orphan_heal_lock(&session_info.id);
-            let plugin_registry_for_session = {
-                let _timer = crate::instrumentation_timer!("session.spawn_and_register.plugin_refresh");
-                let disk_cfg = crate::config::resolve_effective_plugins_config(
-                        session_cwd,
-                    )
-                    .to_discovery_config();
-                self.plugin_registry_handle
-                    .refresh_and_build_for_cwd(
-                        session_cwd,
-                        &disk_cfg,
-                        &parse_session_plugin_dirs(session_meta),
-                        folder_trust::project_scope_allowed(session_cwd),
-                    )
-            };
             let _spawn_on_thread_timer = crate::instrumentation_timer!("session.spawn_on_thread");
             spawn_session_on_thread(
                     session_info.clone(),
@@ -4790,6 +4932,7 @@ impl MvpAgent {
                     system_prompt_label,
                     compaction_mode,
                     compaction_verbatim_input,
+                    long_reasoning_reminder,
                     compaction_tool_choice,
                     two_pass_enabled,
                     buffering_settings,
@@ -4797,26 +4940,28 @@ impl MvpAgent {
                     self.codebase_indexes.clone(),
                     client_code_nav_enabled,
                     fs_watch_caps,
-                    status_line_enabled,
+                    client_caps,
                     feedback_proxy_url,
                     feedback_user_token,
                     feedback_alpha_test_key,
                     deployment_key,
                     client_terminal,
                     client_fs_read && client_fs_write,
+                    file_acceleration,
                     gateway_enabled,
                     agent_definition,
                     session_default_agent_profile,
                     skills,
                     None,
                     compat,
+                    paths_config,
                     incremental_bash_output,
                     persisted_signals,
                     persisted_plan_mode,
                     persisted_goal_mode,
                     persisted_workflow_runs,
                     persisted_announcement_state,
-                    self.memory_config.clone(),
+                    self.memory_config_snapshot(),
                     loc_tracking_enabled,
                     feedback_flags,
                     self.managed_mcp_cache.clone(),
@@ -4835,6 +4980,7 @@ impl MvpAgent {
                     app_builder_deployer_config,
                     write_file_enabled,
                     active_agent_messages_enabled,
+                    None,
                     goal_enabled,
                     background_workflows_enabled,
                     subagents_enabled,
@@ -4854,14 +5000,14 @@ impl MvpAgent {
                     respect_gitignore,
                     path_not_found_hints,
                     tool_params_json,
-                    plugin_registry_for_session,
+                    prefetch,
                     Some(self.plugin_registry_handle.clone()),
                     self.models_manager.clone(),
                     None,
                     None,
                     Some(
                         Arc::new(
-                            crate::auth::manager::SharedAuthKeyProvider(
+                            xai_grok_login::SharedAuthKeyProvider(
                                 self.auth_manager.clone(),
                             ),
                         ),
@@ -4880,14 +5026,28 @@ impl MvpAgent {
                     None,
                     max_turns,
                     None,
+                    {
+                        let cfg = self.cfg.borrow();
+                        cfg.feature(
+                            crate::agent::config::Feature::SubagentModelInheritance,
+                        )
+                    },
                     is_chat_kind,
                     None,
                     None,
+                    spawn_trace,
                 )
                 .await?
         };
-        self.session_registry.set_thread(&session_info.id, session_thread);
         tracing::debug!(session_id = %session_info.id.0, "spawn_session_on_thread complete");
+        let crate::session::SessionInitResult {
+            mut handle,
+            permission_events_rx,
+            system_prompt: agent_system_prompt,
+            toolset,
+        } = init;
+        #[cfg(test)]
+        super::test_hooks::pause_at(super::test_hooks::AttachPause::AfterSpawn).await;
         self.set_session_live_state(&session_info.id, SessionLiveState::IdleResident);
         self.ensure_session_supervisor();
         self.heap_profile_set_session_id(&session_info.id.0);
@@ -4910,7 +5070,11 @@ impl MvpAgent {
                 });
             tracing::debug!(session_id = %session_info.id.0, "enqueued SessionCommand::Initialize");
         }
-        let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
+        let _ = handle
+            .cmd_tx
+            .send(SessionCommand::AdvertiseCommands {
+                trigger: crate::session::AdvertiseTrigger::SessionStart,
+            });
         if let Some(mut loc_rx) = loc_aggregate_rx {
             let signals = handle.signals_handle.clone();
             tokio::spawn(async move {
@@ -4959,10 +5123,93 @@ impl MvpAgent {
             });
         self.notify_session_cwd_for_watch(std::path::Path::new(&session_info.cwd));
         self.activity.register_session(&session_info.id.0, &handle);
-        if let Some(old) = self.insert_resident(&session_info.id, handle)
-            && let Some(scope) = &old.tool_context.process_scope
-        {
-            scope.kill_all();
+        let bind_cwd = handle.tool_context.cwd.clone();
+        let bind_tracker = handle.hunk_tracker_handle.clone();
+        let (displaced, install_id) = match attach_waiter {
+            Some(waiter) => {
+                match self
+                    .session_registry
+                    .put_resident_for_attach(
+                        &session_info.id,
+                        handle,
+                        session_thread,
+                        root_identity,
+                        waiter,
+                    )
+                {
+                    Ok((displaced, install_id)) => (displaced, Some(install_id)),
+                    Err(stale) => {
+                        self.roll_back_install(&session_info.id, *stale).await;
+                        return Ok(false);
+                    }
+                }
+            }
+            None => {
+                self.session_registry.set_thread(&session_info.id, session_thread);
+                (self.install_resident(&session_info.id, handle, root_identity), None)
+            }
+        };
+        self.bind_accepted_install(
+            &workspace_ops,
+            &session_info.id,
+            bind_cwd.as_path(),
+            &bind_tracker,
+            &toolset,
+            install_id,
+        );
+        let mut stamp_guard = install_id
+            .map(|install_id| PendingStampGuard::arm(
+                self,
+                session_info.id.clone(),
+                install_id,
+            ));
+        let displaced_existing = if let Some(old) = displaced {
+            if let Some(scope) = &old.tool_context.process_scope {
+                scope.kill_all();
+            }
+            true
+        } else {
+            false
+        };
+        #[cfg(test)]
+        super::test_hooks::pause_at(super::test_hooks::AttachPause::AfterInstall).await;
+        if let Some(install_id) = install_id {
+            let Some(identity) = self
+                .session_registry
+                .current_attach_identity(&session_info.id, install_id) else {
+                return Ok(false);
+            };
+            let Some(current) = self.resident_handle(&session_info.id) else {
+                return Ok(false);
+            };
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            let sent = current
+                .persistence_tx
+                .send(crate::session::persistence::PersistenceMsg::StampSessionIdentity {
+                    identity: identity.to_session_identity(),
+                    respond_to,
+                })
+                .is_ok();
+            let outcome = if sent && matches!(response.await, Ok(Ok(_))) {
+                IdentityStamp::Durable
+            } else {
+                tracing::warn!(session = %session_info.id, "session identity stamp failed; attach fails closed");
+                IdentityStamp::Failed
+            };
+            let resolution = self
+                .session_registry
+                .resolve_identity_stamp(&session_info.id, install_id, outcome);
+            if let Some(guard) = &mut stamp_guard {
+                guard.disarm();
+            }
+            match resolution {
+                StampResolution::Landed => {}
+                StampResolution::Withdrawn(withdrawn) => {
+                    self.roll_back_install(&session_info.id, *withdrawn).await;
+                    return Ok(false);
+                }
+                StampResolution::Superseded => return Ok(false),
+            }
         }
         if is_headless {
             self.session_registry.mark_headless(&session_info.id);
@@ -4973,7 +5220,7 @@ impl MvpAgent {
             crate::session::prompt_history::truncate_if_needed_async(cwd_for_maintenance)
                 .await;
         });
-        Ok(())
+        Ok(!displaced_existing)
     }
     /// Collects all pending permission events from a session's receiver.
     /// Returns only the events from the current turn (since last collection).
@@ -4982,6 +5229,45 @@ impl MvpAgent {
         session_id: &acp::SessionId,
     ) -> Vec<PermissionEvent> {
         self.session_registry.drain_permission_events(session_id)
+    }
+}
+/// Withdraws an installed actor whose stamp the installer never resolved; a load cancelled mid
+/// round-trip would otherwise leave a `Pending` slot every later adopter waits out.
+struct PendingStampGuard<'a> {
+    agent: &'a MvpAgent,
+    session_id: acp::SessionId,
+    install_id: u64,
+    armed: bool,
+}
+impl<'a> PendingStampGuard<'a> {
+    fn arm(agent: &'a MvpAgent, session_id: acp::SessionId, install_id: u64) -> Self {
+        Self {
+            agent,
+            session_id,
+            install_id,
+            armed: true,
+        }
+    }
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for PendingStampGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let StampResolution::Withdrawn(withdrawn) = self
+            .agent
+            .session_registry
+            .resolve_identity_stamp(
+                &self.session_id,
+                self.install_id,
+                IdentityStamp::Failed,
+            ) else {
+            return;
+        };
+        self.agent.roll_back_install_sync(&self.session_id, *withdrawn);
     }
 }
 /// Rollback guard for mid-session bind reservation.

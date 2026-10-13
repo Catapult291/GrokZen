@@ -2,29 +2,25 @@ use indexmap::IndexMap;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::Span;
+use ratatui::text::{Line, Span};
 use unicode_width::UnicodeWidthStr;
 
-use super::layout::{MIN_DASHBOARD_WIDTH, compute_layout};
+use super::animation::{Animation, NEEDS_INPUT_BLINK_DIVISOR, PaintedAnimations, SPINNER_DIVISOR};
+pub use super::chrome::HeaderUpgradeCta;
+use super::layout::MIN_DASHBOARD_WIDTH;
 use super::row::{
-    DashboardRow, RowBadge, build_rows_with_roster_and_locale, build_rows_with_workspace,
+    DashboardRow, build_rows_with_roster_and_locale, build_rows_with_workspace_and_locale,
 };
 use super::state::{
-    DashboardRowId, DashboardState, Filter, Focusable, Grouping, LocationPickerState, RenameDraft,
-    RowState, SectionKey,
+    DashboardRowId, DashboardState, DashboardStopAction, Filter, Focusable, Grouping,
+    LocationPickerState, RenameDraft, RowState, SectionKey,
 };
+use crate::app::actions::PermissionLabel;
 use crate::app::agent::AgentId;
 use crate::app::agent_view::AgentView;
-use crate::render::line_utils::{truncate_line, truncate_str};
+use crate::render::line_utils::truncate_str;
 use crate::theme::Theme;
-use crate::util::format_time_ago;
-
-/// Show each spinner frame for this many animation ticks.
-/// The frames come from [`crate::glyphs::dot_spinner_frames`] so they degrade to an ASCII pulse on legacy Windows consoles.
-const SPINNER_DIVISOR: u64 = 4;
-/// How many ticks each phase of the `NeedsInput` bullet blink lasts.
-/// At the ~30 Hz dashboard tick this toggles roughly every 0.33 s, about a 1.5 Hz blink.
-const NEEDS_INPUT_BLINK_DIVISOR: u64 = 10;
+use crate::views::dashboard::row_title::RowTitle;
 
 fn dashboard_text<'a>(
     locale: Option<&crate::locale::LocaleContext>,
@@ -67,32 +63,6 @@ fn localized_row_state(
 // need a strong visual presence (needs-input, completed, failed, blocked);
 // hollow marks idle rows.
 
-fn ensure_peek_viewport_lifecycle(
-    state: &mut DashboardState,
-    agents: &mut IndexMap<AgentId, AgentView>,
-) {
-    if state.attached_agent.is_some() {
-        return;
-    }
-    // When a peek row exists, begin or keep the viewport lease; otherwise restore the agent viewport
-    let Some(row) = state.peek.as_ref().map(|p| p.row.clone()) else {
-        state.restore_peek_viewport(agents);
-        return;
-    };
-    if state
-        .peek_viewport
-        .as_ref()
-        .is_some_and(|lease| lease.row == row)
-    {
-        return;
-    }
-    if super::state::scrollback_available_for_row(&row, agents) {
-        state.begin_peek_viewport(row, agents);
-    } else {
-        state.restore_peek_viewport(agents);
-    }
-}
-
 // The thin left bar marking the selected row is `crate::glyphs::selection_bar()`, with a `│` fallback on legacy CP437 consoles
 // It is painted on every content line of a selected row so it spans the row's full visual height
 
@@ -101,25 +71,10 @@ const ROW_HEIGHT: u16 = 3;
 /// Per-group-header visual height in cells: a label row and a one-cell breathing gap.
 const GROUP_HEADER_HEIGHT: u16 = 2;
 
-/// Promo upgrade CTA for the dashboard header, resolved through the shared slot gate by the producer (`app_view`).
-#[derive(Clone, Copy)]
-pub struct HeaderUpgradeCta<'a> {
-    /// The `[label]` button text.
-    pub label: &'a str,
-    /// True when the promo is non-dismissible, so the `Ctrl+O` override applies.
-    pub pinned: bool,
-    /// The promo's trimmed `cta.caption` value; painted only when `pinned` is set.
-    pub caption: Option<&'a str>,
-}
-
-/// Render the dashboard. Like `agent_view::draw`, returns the cursor position to place after the frame is committed.
-///
-/// When a permission request fires on an agent while the dashboard is open, this renderer DOES NOT auto-popup the `PermissionView` modal.
-/// Instead, the row's state flips to `NeedsInput` (blinking yellow bullet and a yellow `Pending:` subtitle).
-/// The user must press Space to peek (which routes the permission question and options into the peek panel) and then a number key to answer.
-/// The dashboard is the top-level view, and random subagent permission requests should not obscure it.
+/// The user must press Space to peek (which routes the permission question and options into the
+/// peek panel) and then a number key to answer.
 #[allow(clippy::too_many_arguments)]
-pub fn render_dashboard(
+pub(crate) fn render_dashboard(
     buf: &mut Buffer,
     area: Rect,
     state: &mut DashboardState,
@@ -131,15 +86,19 @@ pub fn render_dashboard(
     // Leader-mode session roster (FleetView)
     // Empty in non-leader mode, so no roster-only rows are appended
     roster: &[crate::app::roster::RosterEntry],
-    // Dashboard v2 reads membership exclusively from `workspace_snapshot`.
     workspace_dashboard_enabled: bool,
-    workspace_snapshot: Option<&xai_grok_dashboard_store::WorkspaceSnapshot>,
+    // Dashboard v2 membership, layout, and provisional live rows.
+    row_inputs: super::row::WorkspaceRowInputs<'_>,
+    dashboard_session_picker: Option<
+        &mut crate::views::session_picker_surface::SessionPickerSurface,
+    >,
     // Whether the local on-disk session roster is still being fetched (non-leader mode)
     // When true and there's nothing to show yet, the empty body reads "Loading sessions…" instead of the "no agents yet" hint
     // That way a fresh open doesn't flash an empty-looking screen
     dashboard_sessions_loading: bool,
-    // Promo upgrade CTA to paint in the header after the location label (`None` means no CTA); field meanings live on [`HeaderUpgradeCta`]
     upgrade_cta: Option<HeaderUpgradeCta<'_>>,
+    // App-level billing mirror the `/usage` modal renders its allowance from
+    credit_balance: Option<&crate::views::credit_bar::CreditBalance>,
 ) -> Option<(u16, u16)> {
     render_dashboard_with_locale(
         buf,
@@ -150,15 +109,17 @@ pub fn render_dashboard(
         pending_hint,
         roster,
         workspace_dashboard_enabled,
-        workspace_snapshot,
+        row_inputs,
+        dashboard_session_picker,
         dashboard_sessions_loading,
         upgrade_cta,
+        credit_balance,
         None,
     )
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn render_dashboard_with_locale(
+pub(crate) fn render_dashboard_with_locale(
     buf: &mut Buffer,
     area: Rect,
     state: &mut DashboardState,
@@ -167,18 +128,24 @@ pub fn render_dashboard_with_locale(
     pending_hint: Option<crate::views::shortcuts_bar::PendingHint>,
     roster: &[crate::app::roster::RosterEntry],
     workspace_dashboard_enabled: bool,
-    workspace_snapshot: Option<&xai_grok_dashboard_store::WorkspaceSnapshot>,
+    row_inputs: super::row::WorkspaceRowInputs<'_>,
+    dashboard_session_picker: Option<
+        &mut crate::views::session_picker_surface::SessionPickerSurface,
+    >,
     dashboard_sessions_loading: bool,
     upgrade_cta: Option<HeaderUpgradeCta<'_>>,
+    credit_balance: Option<&crate::views::credit_bar::CreditBalance>,
     locale: Option<&crate::locale::LocaleContext>,
 ) -> Option<(u16, u16)> {
     state.set_ui_locale(locale);
     // Cache whether a pinned (non-dismissible) promo CTA is live so the key
     // handler can steal Ctrl+O for it; the dispatch re-resolves the gate.
+    state.workspace_membership_mode = workspace_dashboard_enabled;
+    // Cache whether a pinned (non-dismissible) promo CTA is live so the key handler can steal Ctrl+O for it; the dispatch re-resolves the gate
     state.pinned_upgrade_cta_live = upgrade_cta.is_some_and(|cta| cta.pinned);
+    state.clear_chrome_hit_areas();
     // Re-anchor selection BEFORE we build the rows so that the visible set drives selection clamping
     let theme = Theme::current();
-    // `spinner_tick` is bumped in `AppView::tick()`, not here, so the spinner advances even when no redraw was triggered by other state changes
     state.last_area = area;
 
     // Paint the full area with the theme's base background BEFORE any sub-renderer runs (mirrors `welcome::render` and `PromptWidget::draw`)
@@ -187,10 +154,22 @@ pub fn render_dashboard_with_locale(
     buf.set_style(area, ratatui::style::Style::default().bg(theme.bg_base));
 
     let home = cached_home();
+    let grouping = if workspace_dashboard_enabled {
+        let grouping = row_inputs.grouping();
+        state.observe_workspace_grouping(grouping);
+        grouping
+    } else {
+        state.clear_workspace_grouping();
+        state.grouping
+    };
     let rows = if workspace_dashboard_enabled {
-        workspace_snapshot
-            .map(|snapshot| build_rows_with_workspace(agents, snapshot, home))
-            .unwrap_or_default()
+        build_rows_with_workspace_and_locale(
+            agents,
+            row_inputs,
+            &state.filter,
+            home,
+            Some(state.ui_locale()),
+        )
     } else {
         // The dashboard is not anchored to a specific agent; treat every row equally for
         // highlighting while retaining the locale-aware legacy roster renderer.
@@ -205,8 +184,8 @@ pub fn render_dashboard_with_locale(
             Some(state.ui_locale()),
         )
     };
-    // Chat-conversation roster rows can't be deleted from the dashboard
-    // yet — record them so the `[✗]` and Ctrl+X arm both skip them.
+    state.painted_animations = PaintedAnimations::default();
+    // Chat-conversation roster rows can't be deleted from the dashboard yet; record them so the `[✗]` button and the Ctrl+X arm both skip them
     state.conversation_row_ids = if workspace_dashboard_enabled {
         Default::default()
     } else {
@@ -218,16 +197,11 @@ pub fn render_dashboard_with_locale(
     };
     state.reanchor_selection(&rows);
 
-    // DO NOT GC pinned/reorder at render time
-    // A GC here sees only the post-filter row list, so a user-typed filter that hid a pinned row would drop the pin from the in-memory set
-    // The loss would then be persisted on the next pin or grouping toggle, silently destroying the user's state
-    //
-    // GC runs only at open time (see `dispatch_open_dashboard`), where it has access to the raw `app.agents` snapshot
+    // DO NOT GC pinned/reorder at render time. A GC here sees only the post-filter row list, so a
+    // user-typed filter that hid a pinned row would drop the pin from the in-memory set.
 
-    // When an agent is attached, the popup overlay covers the bottom of the screen with the agent's view (scrollback, status bar, prompt, shortcuts)
-    // Rendering the dashboard's own dispatch input and footer below the popup would stack two input bars
-    // In popup mode we paint ONLY a compact dashboard banner at the top (rows in a bordered panel), and the popup fills the rest
-    // The dashboard's header, dispatch input, footer, and bottom margin are all skipped; the attached agent carries its own equivalents
+    // In popup mode we paint ONLY a compact dashboard banner at the top (rows in a bordered panel),
+    // and the popup fills the rest.
     if state.attached_agent.is_some() {
         state.peek_close_rect = None;
         state.slash_dropdown_items_area = None;
@@ -242,92 +216,11 @@ pub fn render_dashboard_with_locale(
             width: area.width,
             height: banner_h,
         };
-        render_dashboard_banner(buf, banner_area, &theme, &rows, state, locale);
-        // No cursor for the dashboard itself — the popup's agent
-        // owns the cursor.
+        render_dashboard_banner(buf, banner_area, &theme, &rows, grouping, state, locale);
         return None;
     }
 
-    // Peek: list-first allocation (see layout::allocate_peek and docs/internal/33-dashboard-peek-responsive-layout.md)
-    // The provisional layout gives the dispatch width for reply wrapping before we decide whether peek fits
-    let mut layout = compute_layout(area, false);
-    let fixed = super::layout::chrome_overhead(area);
-    let reply_text_w = layout.dispatch.width.saturating_sub(6);
-
-    match state.selected.clone() {
-        Some(sel) => match super::peek::compute_peek_fields_with_locale(&sel, agents, locale) {
-            Some(fields) => {
-                let question = fields.question.is_some();
-                let peek_min = if question {
-                    super::layout::PEEK_MIN_BOX_QUESTION
-                } else {
-                    super::layout::PEEK_MIN_BOX_LIVE_TAIL
-                };
-                let content_rows = if question {
-                    1 + fields.options.len().min(9) as u16
-                } else {
-                    let reply_rows = super::peek::reply_row_count(
-                        &state.peek_reply,
-                        reply_text_w,
-                        super::peek::MAX_REPLY_ROWS,
-                    );
-                    let max_content = super::layout::max_peek_content_rows(area);
-                    // The middle content width is the dispatch box width minus borders and insets
-                    let middle_w = layout.dispatch.width.saturating_sub(4);
-                    let (body_measured, pin_user) =
-                        super::state::scrollback_mut_for_row(&sel, agents)
-                            .map(|sb| {
-                                (
-                                    super::peek_tail::densified_body_line_count(sb, middle_w),
-                                    super::peek_tail::scrollback_has_last_user(sb),
-                                )
-                            })
-                            .unwrap_or((0, false));
-                    super::layout::peek_live_tail_desired_content(
-                        max_content,
-                        reply_rows,
-                        body_measured,
-                        pin_user,
-                    )
-                    .content_rows
-                };
-                let alloc =
-                    super::layout::allocate_peek(area.height, fixed, content_rows, peek_min);
-                if alloc.show_peek {
-                    state.set_peek_reply_target_cwd(peeked_agent_cwd(&sel, agents));
-                    let badge = super::peek::peek_model_and_mode(&sel, agents);
-                    match state.peek.as_mut() {
-                        Some(p) => {
-                            if p.apply_fields(sel, fields) {
-                                state.clear_peek_reply();
-                            }
-                        }
-                        None => state.set_peek(Some(super::peek::PeekPanelState::new(sel, fields))),
-                    }
-                    if let Some(p) = state.peek.as_mut() {
-                        p.model_name = badge.model;
-                        p.auto_approve = badge.yolo;
-                        p.auto = badge.auto;
-                        p.plan_mode = badge.plan;
-                    }
-                    layout = super::layout::compute_layout_with_peek_box(area, alloc.peek_box_h);
-                } else {
-                    state.set_peek_reply_target_cwd(None);
-                    state.set_peek(None);
-                }
-            }
-            None => {
-                state.set_peek_reply_target_cwd(None);
-                state.set_peek(None);
-            }
-        },
-        None => {
-            state.set_peek_reply_target_cwd(None);
-            state.set_peek(None);
-        }
-    }
-
-    ensure_peek_viewport_lifecycle(state, agents);
+    let mut layout = state.layout_with_preview(area, agents);
 
     if state.peek.is_none() && area.height > 8 && !state.dispatch.text().is_empty() {
         let rows = dispatch_text_rows(state, layout.dispatch.width, area.height);
@@ -336,15 +229,22 @@ pub fn render_dashboard_with_locale(
         }
     }
 
-    // Header.
-    render_header_with_locale(
+    super::chrome::render_header(
         buf,
         layout.header,
         &theme,
         &rows,
         state,
+        registry,
         upgrade_cta,
-        locale,
+    );
+    super::chrome::render_actions_row(
+        buf,
+        layout.actions,
+        &theme,
+        state,
+        registry,
+        workspace_dashboard_enabled,
     );
 
     // Body: key off visible rows (local agents and roster), not the local map alone
@@ -361,9 +261,9 @@ pub fn render_dashboard_with_locale(
             );
         }
     } else if area.width < MIN_DASHBOARD_WIDTH {
-        render_narrow_rows(buf, layout.list, &theme, &rows, state);
+        render_narrow_rows_with_grouping(buf, layout.list, &theme, &rows, grouping, state);
     } else {
-        render_rows(buf, layout.list, &theme, &rows, state);
+        render_rows_with_grouping(buf, layout.list, &theme, &rows, grouping, state);
     }
 
     // Compute the contextual placeholder hint and footer mode once here so both sub-renderers stay pure functions of the selected-row state
@@ -371,7 +271,16 @@ pub fn render_dashboard_with_locale(
         .selected
         .as_ref()
         .and_then(|sel| rows.iter().find(|r| r.id == *sel).map(|r| r.state));
-    let peek_active = state.peek.is_some();
+    state.selected_stop_action = workspace_dashboard_enabled
+        .then(|| match state.selected.as_ref() {
+            Some(DashboardRowId::TopLevel(id)) => agents
+                .get(id)
+                .map(|agent| crate::app::dashboard_stop_readiness(agent).action()),
+            Some(DashboardRowId::Workspace { .. }) => Some(DashboardStopAction::Archive),
+            Some(DashboardRowId::Roster { .. }) | None => None,
+        })
+        .flatten();
+    let peek_active = state.peek_owns_input();
 
     // Peek REPLACES the dispatch input when active (a single rounded box at the same screen position, instead of a separate panel floating above it)
     // When peek is closed, the dispatch input renders normally
@@ -380,39 +289,13 @@ pub fn render_dashboard_with_locale(
         // `render_peek_panel` returns the `❯ reply` caret position so the terminal cursor parks in the live reply input
         // It also returns the reply row's rect, recorded for click-to-focus and drag-selection mouse routing
         state.peek_close_rect = None;
-        // Split borrows: the panel is read from `state.peek` while the reply widget (`state.peek_reply`) is drawn mutably
-        // The fields are disjoint and destructured so the borrow checker can see it
-        // Capture voice state before the destructure so the peek reply can show the record badge and interim transcript
-        // The peek box replaces the dispatch box, which would otherwise own the overlay
+        // The peek box replaces the dispatch box, which would otherwise own the overlay.
         let voice_listening = state.voice_listening;
         let voice_interim = state.voice_interim.clone();
         let multiline = state.multiline_mode;
         let peeked_row = state.peek.as_ref().map(|p| p.row.clone());
         let question_pending = state.peek.as_ref().is_some_and(|p| p.question.is_some());
         let (empty_hint, has_scrollback) = match peeked_row.as_ref() {
-            Some(DashboardRowId::Subagent {
-                parent,
-                child_session_id,
-            }) => {
-                let parent_ok = agents
-                    .get(parent)
-                    .is_some_and(|p| p.subagent_sessions.contains_key(child_session_id));
-                let loaded = agents
-                    .get(parent)
-                    .is_some_and(|p| p.subagent_views.contains_key(child_session_id));
-                if parent_ok && !loaded {
-                    (
-                        Some(dashboard_static(
-                            locale,
-                            "dashboard.peek.subagent_not_loaded",
-                            "Subagent not loaded",
-                        )),
-                        false,
-                    )
-                } else {
-                    (None, loaded)
-                }
-            }
             Some(row) => (
                 None,
                 super::state::scrollback_available_for_row(row, agents),
@@ -445,6 +328,8 @@ pub fn render_dashboard_with_locale(
         } else {
             Default::default()
         };
+        // Peek auto-opens for the selected row, so a toast from a row action would otherwise never be painted.
+        paint_dispatch_feedback_badge(buf, layout.dispatch, &theme, state.error_toast.as_deref());
         state.peek_reply_rect = render.reply_rect;
         let cursor = render.caret;
         // The reply is a full PromptWidget, so its `@` file-context picker paints ABOVE the peek box (same chrome as the dispatch box's)
@@ -505,10 +390,43 @@ pub fn render_dashboard_with_locale(
         locale,
     );
 
-    // Cheatsheet modal paints LAST so it overlays everything: the row list, the dispatch widget, the footer hints
-    // The modal lives on `DashboardState` (mirrors `agent_view`'s `active_modal`)
-    // When None, nothing paints and the regular cursor logic below proceeds
-    // When Some, we suppress the dispatch cursor because input is routed to the modal until it closes
+    if let Some(surface) = dashboard_session_picker {
+        if surface.loading {
+            state.painted_animations.mark(Animation::Spinner);
+        }
+        let hit_areas = crate::views::session_picker_surface::render_session_picker(
+            area,
+            buf,
+            &theme,
+            crate::views::session_picker_surface::SessionPickerRenderMode::Modal {
+                window: &mut surface.window,
+                title: crate::views::session_picker_surface::dashboard_picker_title(locale),
+            },
+            &mut crate::views::session_picker_surface::SessionPickerRenderCtx {
+                state: &mut surface.state,
+                sessions: surface.entries.as_deref(),
+                cwd: &state.cwd,
+                loading: surface.loading,
+                pending_hint: None,
+                shortcuts_area: None,
+                content_results: None,
+                content_loading: false,
+                entries_query: surface.entries_query.as_deref(),
+                tick: state.spinner_tick,
+                grouped: true,
+                source_filter: surface.source_filter,
+                pending_delete: false,
+                chat_mode: false,
+                locale,
+            },
+        );
+        surface.state.hit_areas = (hit_areas.search_bar.width > 0).then_some(hit_areas);
+        return None;
+    }
+
+    // Cheatsheet modal paints LAST so it overlays everything: the row list, the dispatch widget, the
+    // footer hints. When Some, we suppress the dispatch cursor because input is routed to the modal
+    // until it closes.
     if let Some(modal) = state.shortcuts_modal.as_mut() {
         crate::views::shortcuts_help::render_modal_with_locale(
             buf,
@@ -523,6 +441,20 @@ pub fn render_dashboard_with_locale(
             &theme,
             /* compact */ false,
             locale,
+        );
+        return None;
+    }
+
+    if let Some(modal) = state.usage_modal.as_mut() {
+        let default_locale = crate::locale::LocaleContext::default();
+        crate::views::usage_modal::render_usage_modal(
+            buf,
+            area,
+            modal,
+            credit_balance,
+            /* compact */ false,
+            &theme,
+            locale.unwrap_or(&default_locale),
         );
         return None;
     }
@@ -556,7 +488,10 @@ fn rename_editor_view<'a>(draft: &'a RenameDraft, width: u16, prefix: &str) -> (
     let prefix_width = UnicodeWidthStr::width(prefix) as u16;
     let editor_width = width.saturating_sub(prefix_width);
     let viewport = draft.viewport(editor_width as usize);
-    let visible = &draft.text()[viewport.visible_byte_range];
+    let visible = draft
+        .text()
+        .get(viewport.visible_byte_range.clone())
+        .unwrap_or("");
     let cursor_offset = prefix_width
         .saturating_add(viewport.cursor_display_column as u16)
         .min(width.saturating_sub(1));
@@ -593,16 +528,15 @@ fn rename_cursor_pos(state: &DashboardState, rows: &[DashboardRow]) -> Option<(u
     let rn = state.rename.as_ref()?;
     let (_, rect) = state.row_rects.iter().find(|(id, _)| *id == rn.row)?;
     let row = rows.iter().find(|r| r.id == rn.row);
-    let (marker_width, indent_width, icon_width) = row
+    let (marker_width, icon_width) = row
         .map(|r| {
             (
                 UnicodeWidthStr::width(crate::glyphs::selection_bar()) as u16,
-                (r.indent as u16) * 2,
                 UnicodeWidthStr::width(state_icon(r.state, state.spinner_tick)) as u16,
             )
         })
-        .unwrap_or((1, 0, 1));
-    let chrome_width = marker_width + 1 + indent_width + icon_width + 1;
+        .unwrap_or((1, 1));
+    let chrome_width = marker_width + 1 + icon_width + 1;
     let content_x = rect.x.saturating_add(chrome_width);
     let content_width = rect.x.saturating_add(rect.width).saturating_sub(content_x);
     let prefix = dashboard_static(
@@ -619,34 +553,16 @@ fn rename_cursor_pos(state: &DashboardState, rows: &[DashboardRow]) -> Option<(u
     Some((cursor_x, title_y))
 }
 
-/// Render the compact dashboard "banner" used when an agent is attached as a popup.
-/// The banner is a bordered panel containing the row list summary.
-/// The popup renders directly below it, carrying the focused agent's full view (scrollback, prompt, shortcuts).
 /// The agent's prompt is then the only input bar on screen.
-///
-/// Visual:
-///
-/// ```text
-/// ╭──── Dashboard · 3 agents · 1 working ─────────────────────╮
-/// │ Working (1)                                                │
-/// │   ⸬ session A      Responding                       4.4s   │
-/// │ Idle (2)                                                   │
-/// │   ○ session B                                       1m12s  │
-/// │   ○ session C                                       2m30s  │
-/// ╰────────────────────────────────────────────────────────────╯
-/// ```
-///
-/// The border and title are drawn via ratatui's `Block` widget so the chrome matches other bordered panels (subagent fullscreen, popup overlays).
-/// Rows are clipped to fit inside the bordered area; the user can see additional rows by closing the popup (Esc) to reach the full dashboard.
 fn render_dashboard_banner(
     buf: &mut Buffer,
     area: Rect,
     theme: &Theme,
     rows: &[DashboardRow],
+    grouping: Grouping,
     state: &mut DashboardState,
     locale: Option<&crate::locale::LocaleContext>,
 ) {
-    use ratatui::text::Line;
     use ratatui::widgets::{Block, Borders, Widget};
 
     state.row_rects.clear();
@@ -660,7 +576,7 @@ fn render_dashboard_banner(
     let mut total = 0usize;
     let mut working = 0usize;
     let mut needs_input = 0usize;
-    for r in rows.iter().filter(|r| r.indent == 0) {
+    for r in rows {
         total += 1;
         if r.state == RowState::Working {
             working += 1;
@@ -721,337 +637,15 @@ fn render_dashboard_banner(
             " No sessions yet. Esc to dispatch one. ",
         );
         let trunc = truncate_str(hint, inner.width as usize);
-        buf.set_string(
-            inner.x,
-            inner.y,
-            trunc,
-            Style::default().fg(theme.gray_dim).bg(theme.bg_base),
-        );
+        buf.set_string(inner.x, inner.y, trunc, theme.dim().bg(theme.bg_base));
         return;
     }
 
     if inner.width < MIN_DASHBOARD_WIDTH {
-        render_narrow_rows(buf, inner, theme, rows, state);
+        render_narrow_rows_with_grouping(buf, inner, theme, rows, grouping, state);
     } else {
-        render_rows(buf, inner, theme, rows, state);
+        render_rows_with_grouping(buf, inner, theme, rows, grouping, state);
     }
-}
-
-/// Render the dashboard header row:
-///
-/// ```text
-///   main worktree ~/wt/wt1 (worktree of ~/proj)   ◆ 2 awaiting · ⋮ 3 working · ◇ 1 idle │ [+ New Agent]
-/// ```
-///
-/// Left: the current location (git branch, worktree badge, cwd), the same line the welcome top bar paints (see `views::welcome::location_line`).
-/// It is rendered the same way as the session status bar, so the dashboard shows where a dispatched session will run.
-/// Truncated with `…` against the chips.
-/// Right: state-count chips with state-coloured diamond/spinner glyphs, so the glyph that marks a working row also marks the "working" chip.
-/// Counts are top-level rows only; subagents inherit their parent's group and would inflate the tallies if counted directly.
-/// Chips with zero count are suppressed.
-///
-/// Reintroduces a `[+ New Agent]` button on the right edge of
-/// the header. The button is the default cursor target whenever
-/// no row is selected — Up-arrow from the first row, Esc deselect,
-/// and dashboard-open-without-prior-agent all land here. While
-/// focused, Enter on an empty prompt creates a session and opens
-/// detail view; click does the same. The focused colour bumps to
-/// the green `accent_success` (mirroring the affirmative "create"
-/// affordance) so the cursor's location is obvious without a
-/// separate marker.
-#[cfg(test)]
-fn render_header(
-    buf: &mut Buffer,
-    area: Rect,
-    theme: &Theme,
-    rows: &[DashboardRow],
-    state: &mut DashboardState,
-    upgrade_cta: Option<HeaderUpgradeCta<'_>>,
-) {
-    render_header_with_locale(buf, area, theme, rows, state, upgrade_cta, None);
-}
-
-fn render_header_with_locale(
-    buf: &mut Buffer,
-    area: Rect,
-    theme: &Theme,
-    rows: &[DashboardRow],
-    state: &mut DashboardState,
-    upgrade_cta: Option<HeaderUpgradeCta<'_>>,
-    locale: Option<&crate::locale::LocaleContext>,
-) {
-    use ratatui::text::{Line, Span};
-
-    use crate::views::agent_status::AgentStatusBar;
-
-    // Clear the click rects at the start of every frame; the paint blocks below repopulate them when the header has room
-    // `set(None)` preserves the `hovered` flag (driven by mouse-move events) so it survives the per-frame rect reset
-    state.new_agent_button_hit.set(None);
-    state.location_hit.set(None);
-    state.upgrade_cta_hit.set(None);
-
-    if area.area() == 0 {
-        return;
-    }
-    buf.set_style(area, Style::default().bg(theme.bg_base));
-
-    // Paint the `[+ New Agent]` button on the far right FIRST, before the status chips
-    // We then shrink the chip rendering area so the chips don't overlap the button
-    // Right-margin is 1 cell so the button doesn't kiss the panel edge
-    // When worktree mode is on and the cwd is a git repo (so it can actually take effect), the next session goes in a fresh git worktree
-    // The label flips to `[+ New Worktree]` to match; otherwise it's the plain new-session button
-    // Width is derived from the chosen label so the positioning and hit rect below stay correct for either string
-    let button_label: &str = if state.dispatch_worktree && state.cwd_has_git_ancestor {
-        dashboard_static(locale, "dashboard.header.new_worktree", "[+ New Worktree]")
-    } else {
-        dashboard_static(locale, "dashboard.header.new_agent", "[+ New Agent]")
-    };
-    let button_w = UnicodeWidthStr::width(button_label) as u16;
-    let right_margin: u16 = 1;
-    let mut chip_area = area;
-    if area.width >= button_w + right_margin {
-        let button_x = area.x + area.width - right_margin - button_w;
-        // Focused: light green `accent_success` (the affirmative "create a new session" colour), so the focus is obvious
-        // Hovered (mouse over, not focused): brighter `text_primary` foreground so the button stands out under the cursor
-        // Only the text colour changes on hover (no background fill)
-        // Otherwise dim gray.
-        let hovered = state.new_agent_button_hit.hovered;
-        let fg = if state.new_agent_button_focused {
-            theme.accent_success
-        } else if hovered {
-            theme.text_primary
-        } else {
-            theme.gray
-        };
-        let style = Style::default()
-            .fg(fg)
-            .bg(theme.bg_base)
-            .add_modifier(Modifier::BOLD);
-        buf.set_string(button_x, area.y, button_label, style);
-        state.new_agent_button_hit.set(Some(Rect {
-            x: button_x,
-            y: area.y,
-            width: button_w,
-            height: 1,
-        }));
-        // Leave one breathing cell between the rightmost chip and the button's `[`
-        let chip_budget = area.width.saturating_sub(button_w + right_margin + 1);
-        chip_area = Rect {
-            x: area.x,
-            y: area.y,
-            width: chip_budget,
-            height: area.height,
-        };
-    }
-
-    // Count top-level rows per state. Subagents inherit their parent's group so we explicitly skip `indent > 0` rows.
-    let mut awaiting = 0usize;
-    let mut working = 0usize;
-    let mut idle = 0usize;
-    let mut done = 0usize;
-    let mut failed = 0usize;
-    for r in rows.iter().filter(|r| r.indent == 0) {
-        match r.state {
-            RowState::NeedsInput => awaiting += 1,
-            RowState::Working => working += 1,
-            RowState::Idle => idle += 1,
-            // Inactive (roster-only) sessions get no header chip; the chips show actionable local state
-            // The section header already carries the inactive count
-            RowState::Inactive => {}
-            RowState::Completed => done += 1,
-            RowState::Failed => failed += 1,
-        }
-    }
-
-    // Build right-aligned chips
-    // Order mirrors `RowState::group_priority` so the most-actionable state (awaiting your input) appears leftmost, where the eye lands first
-    let mut status = AgentStatusBar::new(theme);
-    let chip = |glyph: &str, color: Color, count: usize, label: &str| {
-        Line::from(vec![
-            Span::styled(
-                glyph.to_string(),
-                Style::default().fg(color).bg(theme.bg_base),
-            ),
-            Span::styled(
-                format!(" {count} {label}"),
-                Style::default().fg(theme.gray).bg(theme.bg_base),
-            ),
-        ])
-    };
-    if awaiting > 0 {
-        // Yellow bullet to match the per-row awaiting bullet (no blink in the compact header chip)
-        status.push(
-            "awaiting",
-            chip(
-                crate::glyphs::diamond_filled(),
-                theme.warning,
-                awaiting,
-                dashboard_static(locale, "dashboard.status.awaiting", "awaiting"),
-            ),
-        );
-    }
-    if working > 0 {
-        // Use the spinner glyph at the current tick so the chip's working glyph matches the spinner painted on individual rows
-        let frames = crate::glyphs::dot_spinner_frames();
-        let spin = frames[(state.spinner_tick / SPINNER_DIVISOR) as usize % frames.len()];
-        status.push(
-            "working",
-            chip(
-                spin,
-                theme.accent_running,
-                working,
-                dashboard_static(locale, "dashboard.status.working", "working"),
-            ),
-        );
-    }
-    if idle > 0 {
-        status.push(
-            "idle",
-            chip(
-                crate::glyphs::diamond_hollow(),
-                theme.gray_dim,
-                idle,
-                dashboard_static(locale, "dashboard.status.idle", "idle"),
-            ),
-        );
-    }
-    if done > 0 {
-        status.push(
-            "done",
-            chip(
-                crate::glyphs::diamond_filled(),
-                theme.accent_success,
-                done,
-                dashboard_static(locale, "dashboard.status.done", "done"),
-            ),
-        );
-    }
-    if failed > 0 {
-        status.push(
-            "failed",
-            chip(
-                crate::glyphs::diamond_filled(),
-                theme.accent_error,
-                failed,
-                dashboard_static(locale, "dashboard.status.failed", "failed"),
-            ),
-        );
-    }
-    // Chips render right-aligned within `chip_area` so they sit immediately to the left of the `[+ New Agent]` button
-    // Capture the per-chip rects so the left label's width budget stops short of the leftmost chip instead of painting over it
-    let chip_rects = status.render(buf, chip_area);
-
-    // Paint the current location (git branch and cwd, with worktree label) on the left, mirroring the welcome top bar and the agent status bar
-    // That way the dashboard shows WHERE a dispatched session will run
-    //
-    // Width budget: from `area.x` up to the leftmost chip's ` │ ` separator, the 3 cells `AgentStatusBar::render` paints before its first item
-    // When no chips are rendered, the budget is the full chip area
-    // `truncate_line` appends `…` when the path is cut
-    let full_label_budget = chip_rects
-        .values()
-        .map(|r| r.x)
-        .min()
-        .map(|min_x| min_x.saturating_sub(3).saturating_sub(area.x))
-        .unwrap_or(chip_area.width) as usize;
-    // Reserve the upgrade CTA (a lead space, the `[label]`, and the pinned-only `cta.caption`) so the location label truncates first
-    // The shared painter then clamps to the space left, so it can't overpaint chips
-    // The caption shows only for pinned CTAs
-    // The Ctrl+O CTA chord is handled before the peek-permission key handler, so it opens the CTA (not YOLO) even while a peek prompt is pending
-    let upgrade_caption = upgrade_cta.and_then(|cta| cta.pinned.then_some(cta.caption).flatten());
-    let upgrade_reserve = upgrade_cta.map_or(0usize, |cta| {
-        1 + crate::views::announcements::upgrade_cta_reserve(cta.label, upgrade_caption) as usize
-    });
-    let label_budget = full_label_budget.saturating_sub(upgrade_reserve);
-    let mut location =
-        crate::views::welcome::location_line_at_with_locale(theme, &state.cwd, locale);
-    // 1-cell left inset, matching the old ` Agents` label.
-    location
-        .spans
-        .insert(0, Span::styled(" ", Style::default().bg(theme.bg_base)));
-    let mut location = truncate_line(location, label_budget);
-    // Underline on hover so the label reads as a click target (opens the location picker)
-    // Underline only visible text: whitespace-only spans (the leading inset, the separator between the git and path parts) stay bare
-    // The git span (`{icon} {branch}`) keeps its branch icon and the space after it un-underlined; only the branch name is underlined
-    // Hover is mouse-driven on the prior frame
-    if state.location_hit.hovered {
-        let icon = crate::git_info::branch_icon();
-        location.spans = underline_location_on_hover(std::mem::take(&mut location.spans), icon);
-    }
-    let location_w = location.width() as u16;
-    buf.set_line(area.x, area.y, &location, location_w);
-
-    // Record the painted label as a click target so the mouse handler can open the location picker
-    // Width is clamped to the label budget so the hit area never extends under the chips or the `[+ New Agent]` button
-    let hit_w = location_w.min(label_budget as u16);
-    if hit_w > 0 {
-        state.location_hit.set(Some(Rect {
-            x: area.x,
-            y: area.y,
-            width: hit_w,
-            height: 1,
-        }));
-    }
-
-    // Upgrade CTA painted right after the location label (free-tier upsell), clamped to the space left before the chips
-    // The paint is a lead space then the shared clamping button painter
-    // A pointer click opens it with the `Dashboard` CTA surface; Ctrl+O with `Keyboard`
-    if let Some(HeaderUpgradeCta { label, .. }) = upgrade_cta {
-        let avail = full_label_budget.saturating_sub(location_w as usize);
-        if avail > 1 {
-            let cta_x = area.x + location_w;
-            buf.set_span(
-                cta_x,
-                area.y,
-                &Span::styled(" ", Style::default().bg(theme.bg_base)),
-                1,
-            );
-            let painted = crate::views::announcements::render_cta_button(
-                buf,
-                theme,
-                cta_x + 1,
-                area.y,
-                (avail - 1) as u16,
-                label,
-                upgrade_caption,
-                state.upgrade_cta_hit.hovered,
-            );
-            state.upgrade_cta_hit.set(painted);
-        }
-    }
-}
-
-/// Apply the header location label's hover underline: underline only the visible text.
-/// Whitespace-only spans (the leading inset, the separator between the git and path parts) stay bare.
-/// The git span (`{icon} {branch}`) keeps the branch `icon` plus the space after it un-underlined; only the branch name is underlined.
-/// Total width is preserved (the git span is split, not resized).
-fn underline_location_on_hover(spans: Vec<Span<'static>>, icon: &str) -> Vec<Span<'static>> {
-    let underline = |content: &str, style: Style| -> Style {
-        if content.chars().any(|c| !c.is_whitespace()) {
-            style.add_modifier(Modifier::UNDERLINED)
-        } else {
-            style
-        }
-    };
-    let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 1);
-    for span in spans {
-        let style = span.style;
-        let content = span.content.into_owned();
-        // The git span is `{icon} {branch}`: emit the icon and its trailing space bare, and underline only the branch name
-        if content.starts_with(icon)
-            && let Some(space) = content.find(' ')
-        {
-            let (icon_part, branch) = content.split_at(space + 1);
-            out.push(Span::styled(icon_part.to_owned(), style));
-            if !branch.is_empty() {
-                let s = underline(branch, style);
-                out.push(Span::styled(branch.to_owned(), s));
-            }
-            continue;
-        }
-        let s = underline(&content, style);
-        out.push(Span::styled(content, s));
-    }
-    out
 }
 
 /// Render the location picker modal over the dashboard.
@@ -1229,10 +823,7 @@ fn render_location_picker_with_locale(
         content_area.height = content_area.height.saturating_sub(2);
     }
 
-    // Build entries from the effective list (`visible`, computed above)
-    // Depending on the query these are recents (fuzzy-filtered) or live directory suggestions (prefix-matched)
-    // Worktree badge per row: just `worktree` when the directory name already is the worktree name, else `worktree: <name>`
-    // The badges are built into a parallel Vec so the `&str` badges outlive the entries
+    // Build entries from the effective list (`visible`, computed above).
     let badges: Vec<String> = visible
         .iter()
         .map(|c| match &c.worktree {
@@ -1249,10 +840,8 @@ fn render_location_picker_with_locale(
             None => String::new(),
         })
         .collect();
-    // Truncation priority: the directory name (label) is shown in full whenever it fits; the path (right label) is truncated first
-    // The shared `render_picker_row` does the opposite (right label keeps its full width, label truncates)
-    // So we pre-truncate the path here to leave room for the full label and badge
-    // Constants mirror `render_picker_row`'s layout (fold prefix 2, gap 2, trailing 1); the `-1` conservatively reserves a scrollbar column
+    // Truncation priority: the directory name (label) is shown in full whenever it fits; the path
+    // (right label) is truncated first.
     let details: Vec<String> = {
         const PREFIX: u16 = 2;
         const GAP: u16 = 2;
@@ -1314,14 +903,9 @@ fn render_location_picker_with_locale(
     modal.content_hits = Some(hits);
 }
 
-/// One line in the dashboard's vertical stack: either a state-group header or a content row.
-///
-/// Explicit state group headers (`── Needs input (2) ──`) mark the group boundaries.
-/// The per-row dot and state colour alone don't show at a glance how many sessions are awaiting input, working, idle, or done.
-/// Headers are emitted on every top-level state transition when `grouping == Grouping::State` and the filter isn't already pinned to a single state.
-/// Subagent rows inherit their parent's group and never trigger a header.
-///
-/// Headers do NOT register `row_rects`; they're not selectable, hoverable, or clickable.
+/// One line in the dashboard's vertical stack: either a state-group header or a content row. The
+/// per-row dot and state colour alone don't show at a glance how many sessions are awaiting input,
+/// working, idle, or done.
 enum DashboardLine<'a> {
     /// Cross-cutting "Pinned" section header (with count), emitted above the pinned block when grouping is ON.
     PinnedHeader {
@@ -1344,12 +928,8 @@ enum DashboardLine<'a> {
 }
 
 /// Walk `rows` and intersperse `DashboardLine::Header` entries at every top-level state transition.
-/// Returns a flat sequence that the renderer iterates over directly.
-/// Viewport clamping operates on THIS sequence (not on `rows`) so the header rows count toward the visible window's height budget.
-///
-/// Headers are suppressed when:
-///   - `grouping == Grouping::Directory`: the cwd drives the grouping in that mode, and state headers would cut across the cwd sections.
-///   - `filter == Filter::State(_)`: the filtered view already contains only a single state, so the header is redundant chrome.
+/// `filter == Filter::State(_)`: the filtered view already contains only a single state, so the
+/// header is redundant chrome.
 fn build_dashboard_lines<'a>(
     rows: &'a [DashboardRow],
     grouping: Grouping,
@@ -1361,20 +941,16 @@ fn build_dashboard_lines<'a>(
     let groups_on = matches!(grouping, Grouping::State);
     let emit_state_headers = groups_on && !matches!(filter, Filter::State(_));
 
-    // Pinned top-level agents are sorted to the front (see `sort_rows`), so they form a contiguous prefix of clusters
+    // Pinned top-level agents are sorted to the front (see `sort_rows`), so they form a contiguous prefix
     // Split that prefix off as a dedicated "Pinned" section above the state / directory groups
     // That way a pinned (say) idle agent reads as pinned rather than landing under an "Idle" header
     let mut pinned_end = 0usize;
     let mut pinned_count = 0usize;
     {
         let mut i = 0usize;
-        while i < rows.len() && rows[i].indent == 0 && rows[i].pinned {
+        while i < rows.len() && rows.get(i).is_some_and(|r| r.pinned) {
             pinned_count += 1;
             i += 1;
-            // Glue the pinned parent's subagents into the section.
-            while i < rows.len() && rows[i].indent != 0 {
-                i += 1;
-            }
             pinned_end = i;
         }
     }
@@ -1391,51 +967,39 @@ fn build_dashboard_lines<'a>(
         // A collapsed "Pinned" section keeps its header but hides the pinned rows
         // Collapse only applies when grouping is ON (the header is the toggle; the grouping-OFF divider has none)
         let pinned_collapsed = groups_on && collapsed.contains(&SectionKey::Pinned);
-        if !pinned_collapsed {
-            out.extend(rows[..pinned_end].iter().map(DashboardLine::Row));
+        if !pinned_collapsed && let Some(pinned) = rows.get(..pinned_end) {
+            out.extend(pinned.iter().map(DashboardLine::Row));
         }
         if !groups_on && pinned_end < rows.len() {
             out.push(DashboardLine::Divider);
         }
     }
 
-    let rest = &rows[pinned_end..];
+    let rest = rows.get(pinned_end..).unwrap_or(&[]);
     if !emit_state_headers {
         out.extend(rest.iter().map(DashboardLine::Row));
         return out;
     }
     let mut last_top_state: Option<RowState> = None;
-    // Whether the section currently being emitted is collapsed; when so its rows (and their subagents) are skipped but the header stays
+    // Whether the section currently being emitted is collapsed; when so its rows are skipped but the header stays
     let mut current_collapsed = false;
-    // Idle-overflow cap bookkeeping for the group currently being emitted.
-    // `idle_limit` is `Some(visible_top_level_limit)` only while inside a capped Idle group; `idle_top_seen` counts emitted top-level Idle rows
-    // `idle_capping` latches once the limit is passed so the over-cap rows AND their subagents are skipped
-    // `pending_overflow` holds the `(hidden, expanded)` line to emit at the group's end (after its rows, before the next header)
-    // Capping is suppressed whenever the user is filtering OR in search mode: when you're looking for something, every match shows
-    // Entering search mode clears the filter to `None` (the live query rebuilds it per keystroke)
-    // Without the `search_active` check, an empty search query would leave old idle agents folded
+    // Idle-overflow cap bookkeeping for the group currently being emitted. Without the `search_active`
+    // check, an empty search query would leave old idle agents folded.
     let idle_cap_active = matches!(filter, Filter::None) && !search_active;
     let now = std::time::SystemTime::now();
     let mut idle_limit: Option<usize> = None;
     let mut idle_top_seen = 0usize;
-    let mut idle_capping = false;
     let mut pending_overflow: Option<(usize, bool)> = None;
     for (i, row) in rest.iter().enumerate() {
-        if row.indent == 0 && Some(row.state) != last_top_state {
+        if Some(row.state) != last_top_state {
             // Emit the overflow row of the group we're leaving before the new header, so it lands at the bottom of the Idle group
             if let Some((hidden, expanded)) = pending_overflow.take() {
                 out.push(DashboardLine::IdleOverflow { hidden, expanded });
             }
-            // Count consecutive top-level rows of this state from `i` (looking forward until the next top-level state change or end of list)
-            // Subagents are skipped over rather than breaking the count, since they share their parent's group
-            // The count reflects the true group size even when collapsed or capped
-            // `recent` tracks how many are inside the freshness window (Idle only)
+            // `recent` tracks how many Idle rows are inside the freshness window.
             let mut count = 0usize;
             let mut recent = 0usize;
-            for r in &rest[i..] {
-                if r.indent != 0 {
-                    continue;
-                }
+            for r in rest.iter().skip(i) {
                 if r.state == row.state {
                     count += 1;
                     if idle_row_is_recent(r, now) {
@@ -1454,7 +1018,6 @@ fn build_dashboard_lines<'a>(
             // Reset or set the Idle cap for the new group
             idle_limit = None;
             idle_top_seen = 0;
-            idle_capping = false;
             if row.state == RowState::Idle && idle_cap_active && !current_collapsed {
                 // Keep the freshest agents: at least MAX_VISIBLE_IDLE, extended to cover everything still inside the freshness window
                 // Only fold when it hides at least MIN_IDLE_FOLD rows (a single folded row saves no space)
@@ -1469,13 +1032,10 @@ fn build_dashboard_lines<'a>(
         if current_collapsed {
             continue;
         }
-        // Idle cap: once past the limit, skip over-cap top-level rows and their subagents (idle_capping latches until the next group)
+        // Idle cap: once past the limit, skip the rest of the group until the next header resets the count.
         if let Some(limit) = idle_limit {
-            if row.indent == 0 {
-                idle_top_seen += 1;
-                idle_capping = idle_top_seen > limit;
-            }
-            if idle_capping {
+            idle_top_seen += 1;
+            if idle_top_seen > limit {
                 continue;
             }
         }
@@ -1506,10 +1066,9 @@ fn idle_row_is_recent(row: &DashboardRow, now: std::time::SystemTime) -> bool {
         .unwrap_or(true)
 }
 
-/// Display-order list of keyboard cursor targets: section headers and visible rows.
-/// The list is derived from the same [`build_dashboard_lines`] the renderer paints, so navigation and rendering never disagree on what's on screen.
-/// Collapsed sections contribute only their header (their rows are skipped by the line builder).
-/// `… N more` placeholders are excluded (not selectable).
+/// Display-order list of keyboard cursor targets: section headers and visible rows. The list is
+/// derived from the same [`build_dashboard_lines`] the renderer paints, so navigation and rendering
+/// never disagree on what's on screen.
 pub(crate) fn focusables(
     rows: &[DashboardRow],
     grouping: Grouping,
@@ -1530,19 +1089,16 @@ pub(crate) fn focusables(
     .filter_map(|line| match line {
         DashboardLine::PinnedHeader { .. } => Some(Focusable::Section(SectionKey::Pinned)),
         DashboardLine::Header { state, .. } => Some(Focusable::Section(SectionKey::State(state))),
-        DashboardLine::Row(row) if !row.is_more_placeholder => Some(Focusable::Row(row.id.clone())),
+        DashboardLine::Row(row) => Some(Focusable::Row(row.id.clone())),
         DashboardLine::IdleOverflow { .. } => Some(Focusable::IdleOverflow),
         _ => None,
     })
     .collect()
 }
 
-/// The section header that owns `row_id` under the current grouping and filter.
-/// `None` when no headers are emitted (directory grouping, `s:state` filter) or the row isn't present in `rows` at all.
-/// Walks the same [`build_dashboard_lines`] the renderer paints but with an EMPTY collapsed set.
-/// A row hidden inside a collapsed section therefore still resolves to its owning header.
-/// That lets `reanchor_selection` move a cursor stranded on a collapse-hidden row onto the header that hid it.
-/// Subagent rows resolve to their parent's section (they're emitted under the parent's header).
+/// The section header that owns `row_id` under the current grouping and filter. `None` when no
+/// headers are emitted (directory grouping, `s:state` filter) or the row isn't present in `rows` at
+/// all. A row hidden inside a collapsed section therefore still resolves to its owning header.
 pub(crate) fn section_of_row(
     rows: &[DashboardRow],
     grouping: Grouping,
@@ -1564,11 +1120,23 @@ pub(crate) fn section_of_row(
     None
 }
 
+#[cfg(test)]
 fn render_rows(
     buf: &mut Buffer,
     area: Rect,
     theme: &Theme,
     rows: &[DashboardRow],
+    state: &mut DashboardState,
+) {
+    render_rows_with_grouping(buf, area, theme, rows, state.grouping, state);
+}
+
+fn render_rows_with_grouping(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    rows: &[DashboardRow],
+    grouping: Grouping,
     state: &mut DashboardState,
 ) {
     state.row_rects.clear();
@@ -1584,7 +1152,7 @@ fn render_rows(
     // The clamp helper still treats one unit as one cell; we just pass cell offsets instead of line indices
     let lines = build_dashboard_lines(
         rows,
-        state.grouping,
+        grouping,
         &state.filter,
         &state.collapsed_sections,
         state.idle_show_all,
@@ -1630,12 +1198,8 @@ fn render_rows(
     let viewport_h = area.height as usize;
     let snap_target = selected_cell.map(|(top, h)| top + (h as usize).saturating_sub(1));
     let offset = state.clamp_viewport(snap_target, viewport_h, total_cells);
-    // Bias the offset up if the selection's TOP cell ended up above the visible window
-    // The clamp only guarantees the bottom edge of the selection is in range when snap_target was used
-    //
-    // The bias is skipped while `manual_scroll_active` so the mouse-wheel can travel past the selected row's top cell
-    // It is the same snap-to-selection that the clamp itself skips in that mode
-    // Keyboard nav clears the flag, which restores both the clamp's snap AND this bias
+    // Bias the offset up if the selection's TOP cell ended up above the visible window. The clamp only
+    // guarantees the bottom edge of the selection is in range when snap_target was used.
     let offset = if !state.manual_scroll_active
         && let Some((sel_top, _)) = selected_cell
         && sel_top < offset
@@ -1646,11 +1210,9 @@ fn render_rows(
         offset
     };
 
-    // Snap the offset DOWN to the nearest line boundary
-    // `render_row` paints title and secondary starting at `rect.y`
-    // A partial clip at the top would show the title (cell 0) where the gap (cell 2) belongs: the row "sticks" to the top instead of scrolling away
-    // Trackpad scroll deltas (1 line at a time) make this trivially reproducible
-    // Snapping keeps the topmost visible item starting at its first cell; offsets already on a boundary are left untouched
+    // Snap the offset DOWN to the nearest line boundary `render_row` paints title and secondary
+    // starting at `rect.y`. A partial clip at the top would show the title (cell 0) where the gap
+    // (cell 2) belongs: the row "sticks" to the top instead of scrolling away.
     let offset = snap_offset_to_line_boundary(offset, &heights);
     state.viewport_offset = offset;
 
@@ -1752,17 +1314,15 @@ fn render_rows(
                 for dy in content_top..(content_top + content_h).min(render_h) {
                     mark(&mut line_bg, dy, bg);
                 }
-                if !row.is_more_placeholder {
-                    // Full-height hit rect (content and spacer lines): no hover/click dead zone between items
-                    // The highlight covers the content plus half-cell halos on the neighbouring spacer lines
-                    let hit = Rect {
-                        x: area.x,
-                        y,
-                        width: body_width,
-                        height: render_h,
-                    };
-                    state.row_rects.push((row.id.clone(), hit));
-                }
+                // Full-height hit rect (content and spacer lines): no hover/click dead zone between items
+                // The highlight covers the content plus half-cell halos on the neighbouring spacer lines
+                let hit = Rect {
+                    x: area.x,
+                    y,
+                    width: body_width,
+                    height: render_h,
+                };
+                state.row_rects.push((row.id.clone(), hit));
             }
             DashboardLine::IdleOverflow { hidden, expanded } => {
                 render_idle_overflow(
@@ -1790,11 +1350,8 @@ fn render_rows(
     }
 }
 
-/// Paint the spacer lines between items as half-cell "halos" so a highlighted row reads as vertically centered.
-/// The spacer below a highlighted block shows the highlight in its TOP half, and the spacer above shows it in its BOTTOM half.
-/// Implemented with the upper-half-block glyph (`▀`, CP437 `0xDF`, safe on legacy consoles).
-/// The fg paints the top half with the colour of the content line above; the bg paints the bottom half with the colour of the content line below.
-/// Spacers between two `bg_base` neighbours are left untouched.
+/// Paint the spacer lines between items as half-cell "halos" so a highlighted row reads as
+/// vertically centered.
 fn render_spacer_halos(
     buf: &mut Buffer,
     area: Rect,
@@ -1806,11 +1363,12 @@ fn render_spacer_halos(
         if slot.is_some() {
             continue;
         }
-        let above = if i > 0 {
-            line_bg[i - 1].unwrap_or(base)
-        } else {
-            base
-        };
+        let above = i
+            .checked_sub(1)
+            .and_then(|j| line_bg.get(j))
+            .copied()
+            .flatten()
+            .unwrap_or(base);
         let below = line_bg.get(i + 1).copied().flatten().unwrap_or(base);
         if above == base && below == base {
             continue;
@@ -1820,21 +1378,19 @@ fn render_spacer_halos(
             let fill = " ".repeat(body_width as usize);
             buf.set_string(area.x, y, &fill, Style::default().bg(above));
         } else {
+            // A `Reset` fg on `▀` renders as the terminal's default *text*
+            // color — a sharp bright bar on the terminal theme's canvas —
+            // so skip the halo next to a Reset background.
+            if matches!(above, Color::Reset) || matches!(below, Color::Reset) {
+                continue;
+            }
             let fill = "\u{2580}".repeat(body_width as usize);
             buf.set_string(area.x, y, &fill, Style::default().fg(above).bg(below));
         }
     }
 }
 
-/// Wide-mode group header reads:
-///
-/// ```text
-/// Working 3 ──────────────────────────────────────────────────
-/// ```
-///
-/// Bold flush-left label (within the padded list area), dim count two cells later, faint horizontal rule filling the remainder of the row.
-/// The dim rule visually anchors the boundary the way gh-dash / lazygit / k9s do.
-/// Section titles are left-aligned within the list; row text is indented after the marker and icon columns.
+/// Wide-mode group header reads.
 #[allow(clippy::too_many_arguments)]
 fn render_group_header(
     buf: &mut Buffer,
@@ -1852,20 +1408,18 @@ fn render_group_header(
     if rect.width == 0 {
         return;
     }
-    // Selected (keyboard cursor) uses accent_user; hovered (mouse) uses the brighter text_primary; otherwise the dim gray default
-    let label_fg = if selected {
-        theme.accent_user
+    // Selected (keyboard cursor) uses accent_user; hovered (mouse) uses the brighter text_primary; otherwise muted (dim gray, or the DIM attribute on the terminal theme where gray is Reset)
+    let label_style = if selected {
+        Style::default().fg(theme.accent_user)
     } else if hovered {
-        theme.text_primary
+        Style::default().fg(theme.text_primary)
     } else {
-        theme.gray
-    };
+        theme.muted()
+    }
+    .bg(theme.bg_base)
+    .add_modifier(Modifier::BOLD);
     let count_str = format!(" {count}");
-    let label_style = Style::default()
-        .fg(label_fg)
-        .bg(theme.bg_base)
-        .add_modifier(Modifier::BOLD);
-    let count_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+    let count_style = theme.dim().bg(theme.bg_base);
     let rule_style = Style::default()
         .fg(theme.selection_border)
         .bg(theme.bg_base);
@@ -1938,12 +1492,8 @@ fn render_divider(buf: &mut Buffer, rect: Rect, theme: &Theme) {
     buf.set_string(rect.x, rect.y, &rule, rule_style);
 }
 
-/// The Idle group's "N more" overflow toggle row: a single dim line painted at the bottom of a capped Idle group.
-/// It carries a `+` / `-` expand indicator in the icon column (`+` collapsed, `-` expanded).
-/// The label sits in the agent-name column, aligned with the rows above.
-/// The cursor (keyboard) paints it in `accent_user`; mouse hover brightens it to `text_primary`.
-/// `expanded` flips the label to "show fewer" so the same row re-folds the list.
-/// Shared by the wide and narrow paths (the row is single-line in both).
+/// The Idle group's "N more" overflow toggle row: a single dim line painted at the bottom of a
+/// capped Idle group.
 fn render_idle_overflow(
     buf: &mut Buffer,
     rect: Rect,
@@ -1960,14 +1510,14 @@ fn render_idle_overflow(
     if rect.width == 0 {
         return;
     }
-    let fg = if selected {
-        theme.accent_user
+    let style = if selected {
+        Style::default().fg(theme.accent_user)
     } else if hovered {
-        theme.text_primary
+        Style::default().fg(theme.text_primary)
     } else {
-        theme.gray_dim
-    };
-    let style = Style::default().fg(fg).bg(theme.bg_base);
+        theme.dim()
+    }
+    .bg(theme.bg_base);
     let label = if expanded {
         dashboard_static(locale, "dashboard.overflow.show_fewer", "show fewer").to_string()
     } else {
@@ -1975,7 +1525,7 @@ fn render_idle_overflow(
             .replace("{count}", &hidden.to_string())
     };
     // A `+` / `-` expand indicator in the icon column and the label in the agent-name column, so the row aligns with the Idle rows above
-    // Columns: marker (1) + gap (1) + icon + gap (1); the Idle group is top-level, so indent is 0
+    // Columns: marker (1) + gap (1) + icon + gap (1)
     let indicator = if expanded { "-" } else { "+" };
     let icon_w = unicode_width::UnicodeWidthStr::width(state_icon(RowState::Idle, 0)) as u16;
     let indicator_x = rect.x.saturating_add(2);
@@ -2004,17 +1554,15 @@ fn render_group_header_narrow(
     hovered: bool,
 ) {
     let bg_style = Style::default().bg(theme.bg_base);
-    let label_fg = if selected {
-        theme.accent_user
+    let label_style = if selected {
+        Style::default().fg(theme.accent_user)
     } else if hovered {
-        theme.text_primary
+        Style::default().fg(theme.text_primary)
     } else {
-        theme.gray
-    };
-    let label_style = Style::default()
-        .fg(label_fg)
-        .bg(theme.bg_base)
-        .add_modifier(Modifier::BOLD);
+        theme.muted()
+    }
+    .bg(theme.bg_base)
+    .add_modifier(Modifier::BOLD);
     let fill = " ".repeat(rect.width as usize);
     buf.set_string(rect.x, rect.y, fill, bg_style);
     let glyph = if collapsed {
@@ -2027,12 +1575,8 @@ fn render_group_header_narrow(
     buf.set_string(rect.x, rect.y, trunc, label_style);
 }
 
-/// Render the list scrollbar in the right gutter, stuck to the window's rightmost column, in the exact scrollback style.
-/// That style is a `█` thumb in `scrollbar_fg` over a `scrollbar_bg` track (no `│` line).
-/// Reuses the shared `render_scrollbar_styled` so the thumb sizing and colour match the scrollback pixel-for-pixel.
-///
-/// The list content is inset by `LIST_OUTER_HPAD`; the scrollbar lives in that right margin so it never reserves width from the rows.
-/// The position is clamped to the buffer edge so isolated renders (where `area` spans the whole buffer, e.g. tests) still paint in-bounds.
+/// The list content is inset by `LIST_OUTER_HPAD`; the scrollbar lives in that right margin so it
+/// never reserves width from the rows.
 fn render_scrollbar(
     buf: &mut Buffer,
     area: Rect,
@@ -2067,15 +1611,9 @@ fn render_scrollbar(
     );
 }
 
-/// Snap a cell-granular viewport offset DOWN to the nearest item-start boundary in `heights`.
-/// Each entry in `heights` is the cell-height of one `DashboardLine` (rows 3, headers 2).
-/// The returned offset is the cumulative start of the item that currently overlaps `offset`.
-/// Offsets that already land on a boundary are returned unchanged.
-///
-/// This exists because `render_row` paints its content from `rect.y` (title, then secondary) and has no notion of a partial top clip.
-/// Without snapping, a trackpad scrolling by 1 cell would paint the row's title at the viewport top where the row's gap-cell should be.
-/// Visually the row "sticks" instead of scrolling away.
-/// Snapping forces whole-row alignment so the topmost row always starts at its first cell.
+/// Snap a cell-granular viewport offset DOWN to the nearest item-start boundary in `heights`. This
+/// exists because `render_row` paints its content from `rect.y` (title, then secondary) and has no
+/// notion of a partial top clip. Visually the row "sticks" instead of scrolling away.
 fn snap_offset_to_line_boundary(offset: usize, heights: &[u16]) -> usize {
     let mut cum = 0usize;
     let mut snapped = 0usize;
@@ -2116,27 +1654,13 @@ fn row_bg(theme: &Theme, state: &DashboardState, row: &DashboardRow) -> Color {
     }
 }
 
-/// Render a row as a 2-line block plus a trailing padding line.
-/// `rect.height` is expected to be `>= 2`.
-/// The caller (`render_rows`) sizes the rect to either 2 or 3 lines depending on whether the padding is in budget.
-///
-/// Visual:
-///
-/// ```text
-///   ◆ Add responsiveness to /context · xai my-branch-2 worktree       4 mins
-///     Pending: plan approval plan.md
-/// ```
-///
-/// Line 1 (title): selection marker, icon, label, subtitle, age.
-/// Line 2 (secondary): dim text aligned under the label.
-/// It shows the last tool call, the last assistant message, or a `Pending: …` preview of the front-most permission request.
-///
-/// The content block is vertically centered within the rect (see [`row_content_offset`]).
+/// Dim metadata (subtitle, secondary line) over the row background, via `Theme::dim()`.
+/// That is a `gray_dim` fg on RGB themes, and the polarity-safe DIM attribute on the terminal theme — where `gray_dim` is the same bright black as the hover/selection band and would render the text invisible.
+fn row_dim_style(theme: &Theme, bg: Color) -> Style {
+    theme.dim().bg(bg)
+}
+
 /// A title-only row in a 3-cell rect renders as padding, title, padding.
-///
-/// Selection / hover backgrounds fill the CONTENT lines.
-/// The spacer lines around them are painted afterwards by `render_rows`'s half-block pass (see `render_spacer_halos`).
-/// That pass extends the highlight half a cell above and below so it reads as centered on the text.
 fn render_row(
     buf: &mut Buffer,
     rect: Rect,
@@ -2160,29 +1684,31 @@ fn render_row(
         buf.set_string(rect.x, rect.y + dy, &fill, Style::default().bg(bg));
     }
 
-    // Layout columns: marker (1) | gap (1) | indent (2*n) | icon (1-2)
-    //                | gap (1) | label/secondary start.
+    // Layout columns: marker (1) | gap (1) | icon (1-2) | gap (1) | label/secondary start.
     let marker = if selected {
         crate::glyphs::selection_bar()
     } else {
         " "
     };
     let marker_w = UnicodeWidthStr::width(marker) as u16;
-    let indent_w = (row.indent as u16) * 2;
     let icon = state_icon(row.state, state.spinner_tick);
-    // `NeedsInput` bullets blink between yellow and dim yellow; every other state uses its steady state colour
     let icon_color = if row.state == RowState::NeedsInput {
         needs_input_bullet_color(state.spinner_tick, theme)
     } else {
         state_color(row.state, theme)
     };
+    match row.state.animation() {
+        Some(Animation::Spinner) => state.painted_animations.mark(Animation::Spinner),
+        Some(Animation::Blink) if needs_input_blink_visible(theme) => {
+            state.painted_animations.mark(Animation::Blink);
+        }
+        Some(Animation::Blink) | None => {}
+    }
     let icon_w = UnicodeWidthStr::width(icon) as u16;
-    // Title-row paint cursor
-    // There is no leading 1-col gap before the marker: it IS the leftmost cell, mirroring the wide-mode header which starts flush-left at col 0
-    // The content block is vertically centered within the rect at cell granularity
-    // Title-only rows sit padded above and below, while 2-line rows stay top-aligned (2 lines cannot center in a 3-cell row)
+    // Title-row paint cursor. Title-only rows sit padded above and below, while 2-line rows stay
+    // top-aligned (2 lines cannot center in a 3-cell row).
     let title_y = rect.y + row_content_offset(rect.height, row);
-    let content_start_x = rect.x + marker_w + 1 + indent_w + icon_w + 1;
+    let content_start_x = rect.x + marker_w + 1 + icon_w + 1;
 
     // Rename overlay: keep the row's chrome (marker and state icon) in place and swap ONLY the title text for `rename: {draft}`
     // It is painted at the title's own column so the row stays visually aligned with its neighbours while editing
@@ -2213,7 +1739,7 @@ fn render_row(
         }
         // State icon stays put (same column and colour as the normal row)
         buf.set_string(
-            rect.x + marker_w + 1 + indent_w,
+            rect.x + marker_w + 1,
             title_y,
             icon,
             Style::default().fg(icon_color).bg(bg),
@@ -2267,7 +1793,7 @@ fn render_row(
         }
     }
 
-    let icon_x = rect.x + marker_w + 1 + indent_w;
+    let icon_x = rect.x + marker_w + 1;
     buf.set_string(
         icon_x,
         title_y,
@@ -2276,20 +1802,42 @@ fn render_row(
     );
 
     let armed_delete = state.armed_delete_row_ref();
-    let show_delete = !row.is_more_placeholder
-        && !row.id.is_subagent()
-        && !row.id.is_workspace()
+    let show_delete = (!row.id.is_workspace() || state.workspace_membership_mode)
         && row.state.allows_delete()
         && !state.row_is_conversation(&row.id)
         && (state.hovered_row.as_ref() == Some(&row.id) || armed_delete == Some(&row.id));
     let delete_label = crate::glyphs::ballot_x_button();
     let delete_w = UnicodeWidthStr::width(delete_label) as u16;
-    let age = format_time_ago(row.last_change_at.elapsed().unwrap_or_default());
-    let age_str = format!("{age:>6}");
-    let age_w = UnicodeWidthStr::width(age_str.as_str()) as u16;
-    let right_w = if show_delete { delete_w } else { age_w };
-    let right_x = rect.x + rect.width.saturating_sub(right_w + 1);
-    if right_x > content_start_x {
+    let age = super::format_time_ago_with_locale(
+        row.last_change_at.elapsed().unwrap_or_default(),
+        Some(state.ui_locale()),
+    );
+    let age_w = UnicodeWidthStr::width(age.as_str()) as u16;
+    // Each row pins its own age to the right edge. Chips, when present, sit
+    // immediately left of ` · <age>`. Working rows never swap the age for delete.
+    let meta_w = if show_delete { delete_w } else { age_w };
+    let meta_x = rect.x + rect.width.saturating_sub(meta_w.saturating_add(1));
+    let time_sep = " · ";
+    let time_sep_w = UnicodeWidthStr::width(time_sep) as u16;
+    let join_time = crate::views::dashboard::row_title::has_counted_live_work(&row.badges);
+    let title_gap = if join_time { time_sep_w } else { 2 };
+    let title_w = meta_x
+        .saturating_sub(content_start_x)
+        .saturating_sub(title_gap);
+    let chip_w = RowTitle { row, theme, bg }.render_wide_with_locale(
+        buf,
+        Rect::new(content_start_x, title_y, title_w, 1),
+        Some(state.ui_locale()),
+    );
+    if chip_w > 0 && meta_x >= content_start_x.saturating_add(time_sep_w) {
+        buf.set_string(
+            meta_x.saturating_sub(time_sep_w),
+            title_y,
+            time_sep,
+            Style::default().bg(bg).fg(theme.gray),
+        );
+    }
+    if meta_x > content_start_x {
         if show_delete {
             let fg = if state.hovered_delete.as_ref() == Some(&row.id)
                 || armed_delete == Some(&row.id)
@@ -2299,7 +1847,7 @@ fn render_row(
                 theme.text_secondary
             };
             buf.set_string(
-                right_x,
+                meta_x,
                 title_y,
                 delete_label,
                 Style::default().bg(bg).fg(fg),
@@ -2307,7 +1855,7 @@ fn render_row(
             state.row_delete_rects.push((
                 row.id.clone(),
                 Rect {
-                    x: right_x,
+                    x: meta_x,
                     y: title_y,
                     width: delete_w,
                     height: 1,
@@ -2315,108 +1863,11 @@ fn render_row(
             ));
         } else {
             buf.set_string(
-                right_x,
+                meta_x,
                 title_y,
-                &age_str,
+                &age,
                 Style::default().bg(bg).fg(theme.gray),
             );
-        }
-    }
-
-    // Title text: `{label}` (bright), then ` · {subtitle}` (dim), then optional `[badge]` chips for failed / pinned
-    // The text is trimmed to fit between the icon and the age column
-    let title_avail = right_x.saturating_sub(content_start_x).saturating_sub(2);
-    let mut cx = content_start_x;
-    if title_avail > 0 {
-        let label_style = Style::default().bg(bg).fg(if row.is_more_placeholder {
-            theme.gray_dim
-        } else {
-            theme.text_primary
-        });
-        // Fallback "New session #<id>" gets two-tone styling: the
-        // `New session` head in the primary colour, the ` #id` suffix dim.
-        // Detected on the shared prefix + a `#` to avoid dimming real titles
-        // that merely start with "New session".
-        let new_session_label = super::row::new_session_label(Some(state.ui_locale()));
-        let dim_suffix = (!row.is_more_placeholder)
-            .then(|| row.label.strip_prefix(new_session_label))
-            .flatten()
-            .filter(|rest| rest.starts_with(" #"));
-        if let Some(suffix) = dim_suffix {
-            let head_trunc = truncate_str(new_session_label, title_avail as usize);
-            let head_w = UnicodeWidthStr::width(&head_trunc[..]) as u16;
-            buf.set_string(cx, title_y, &head_trunc, label_style);
-            cx += head_w;
-            let remaining = title_avail.saturating_sub(head_w) as usize;
-            if remaining > 0 {
-                let suffix_trunc = truncate_str(suffix, remaining);
-                let suffix_w = UnicodeWidthStr::width(&suffix_trunc[..]) as u16;
-                buf.set_string(
-                    cx,
-                    title_y,
-                    &suffix_trunc,
-                    Style::default().bg(bg).fg(theme.gray_dim),
-                );
-                cx += suffix_w;
-            }
-        } else {
-            let label_trunc = truncate_str(&row.label, title_avail as usize);
-            let label_w = UnicodeWidthStr::width(&label_trunc[..]) as u16;
-            buf.set_string(cx, title_y, label_trunc, label_style);
-            cx += label_w;
-        }
-
-        // Subtitle: ` · xai my-branch-2 worktree`.
-        if let Some(sub) = row.subtitle.as_deref()
-            && cx + 4 < right_x
-        {
-            let remaining = right_x.saturating_sub(cx).saturating_sub(2) as usize;
-            let sub_str = format!(" \u{00B7} {sub}");
-            let sub_trunc = truncate_str(&sub_str, remaining);
-            let sub_w = UnicodeWidthStr::width(&sub_trunc[..]) as u16;
-            buf.set_string(
-                cx,
-                title_y,
-                sub_trunc,
-                Style::default().bg(bg).fg(theme.gray_dim),
-            );
-            cx += sub_w;
-        }
-
-        // Compact badges: only the visually meaningful ones
-        // Several are dropped because another cue already conveys them
-        // `worktree` is folded into the subtitle
-        // `needs-input` shows via the blinking yellow bullet and the yellow `Pending:` subtitle
-        // `pinned` shows via the dedicated Pinned section at the top of the list
-        for badge in &row.badges {
-            if matches!(
-                badge,
-                RowBadge::Worktree | RowBadge::NeedsInput | RowBadge::Pinned
-            ) {
-                continue;
-            }
-            let label = match badge {
-                RowBadge::NeedsInput | RowBadge::Worktree | RowBadge::Pinned => continue,
-                RowBadge::Failed => {
-                    dashboard_static(Some(state.ui_locale()), "dashboard.badge.failed", "failed")
-                }
-                RowBadge::BgTask => dashboard_static(
-                    Some(state.ui_locale()),
-                    "dashboard.badge.background_task",
-                    "bg",
-                ),
-            };
-            let chip = format!(" [{label}]");
-            let cw = UnicodeWidthStr::width(chip.as_str()) as u16;
-            if cx + cw + 1 < right_x {
-                buf.set_string(
-                    cx,
-                    title_y,
-                    &chip,
-                    Style::default().bg(bg).fg(badge_color(*badge, theme)),
-                );
-                cx += cw;
-            }
         }
     }
 
@@ -2433,10 +1884,10 @@ fn render_row(
             .saturating_sub(content_start_x - rect.x)
             .saturating_sub(1);
         if avail > 0 {
-            let secondary_fg = if selected {
-                theme.text_secondary
+            let secondary_style = if selected {
+                Style::default().bg(bg).fg(theme.text_secondary)
             } else {
-                theme.gray_dim
+                row_dim_style(theme, bg)
             };
             // The awaiting-input subtitle is `Pending: …`
             // Paint the `Pending:` prefix in yellow so the actionable state stands out, and the rest in the normal secondary colour
@@ -2456,31 +1907,56 @@ fn render_row(
                 );
                 if prefix_w < avail {
                     let rest = truncate_str(rest, (avail - prefix_w) as usize);
-                    buf.set_string(
-                        content_start_x + prefix_w,
-                        sec_y,
-                        rest,
-                        Style::default().bg(bg).fg(secondary_fg),
-                    );
+                    buf.set_string(content_start_x + prefix_w, sec_y, rest, secondary_style);
                 }
             } else {
                 let trunc = truncate_str(secondary, avail as usize);
-                buf.set_string(
-                    content_start_x,
-                    sec_y,
-                    trunc,
-                    Style::default().bg(bg).fg(secondary_fg),
-                );
+                buf.set_string(content_start_x, sec_y, trunc, secondary_style);
             }
+        }
+    }
+
+    // Terminal theme (Reset band slots): the selection/hover cue is reverse
+    // video over the content lines. RGB themes keep their baked band.
+    if theme.is_bandless() {
+        let hovered = state.hovered_row.as_ref().is_some_and(|h| *h == row.id);
+        // Skip while renaming (editable line), like the narrow path.
+        if (selected || hovered) && !renaming {
+            let content = Rect {
+                x: rect.x,
+                y: rect.y + row_content_offset(rect.height, row),
+                width: rect.width,
+                height: row_content_height(row).min(rect.height),
+            };
+            // Normalize fgs first: colored glyphs (state symbol, the
+            // Pending badge) would invert into colored background patches;
+            // on the band they take the same default fg as the text.
+            crate::render::color::force_area_fg(buf, content, Color::Reset);
+            buf.set_style(
+                content,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
         }
     }
 }
 
+#[cfg(test)]
 fn render_narrow_rows(
     buf: &mut Buffer,
     area: Rect,
     theme: &Theme,
     rows: &[DashboardRow],
+    state: &mut DashboardState,
+) {
+    render_narrow_rows_with_grouping(buf, area, theme, rows, state.grouping, state);
+}
+
+fn render_narrow_rows_with_grouping(
+    buf: &mut Buffer,
+    area: Rect,
+    theme: &Theme,
+    rows: &[DashboardRow],
+    grouping: Grouping,
     state: &mut DashboardState,
 ) {
     state.row_rects.clear();
@@ -2495,7 +1971,7 @@ fn render_narrow_rows(
     // We still emit group headers and the selection marker so the visual vocabulary stays consistent
     let lines = build_dashboard_lines(
         rows,
-        state.grouping,
+        grouping,
         &state.filter,
         &state.collapsed_sections,
         state.idle_show_all,
@@ -2607,6 +2083,9 @@ fn render_narrow_rows(
             theme.bg_base
         };
 
+        if row.state == RowState::Working {
+            state.painted_animations.mark(Animation::Spinner);
+        }
         if renaming && let Some(rn) = state.rename.as_ref() {
             // Mirror the wide layout: keep the marker and state icon chrome and swap only the label for `rename: {draft}`
             // The editing row then stays column-aligned with its neighbours
@@ -2616,8 +2095,7 @@ fn render_narrow_rows(
                 " "
             };
             let icon = state_icon(row.state, state.spinner_tick);
-            let indent = "  ".repeat(row.indent as usize);
-            let chrome = format!("{marker} {indent}{icon} ");
+            let chrome = format!("{marker} {icon} ");
             let chrome_w = UnicodeWidthStr::width(chrome.as_str()) as u16;
             buf.set_string(
                 area.x,
@@ -2650,14 +2128,10 @@ fn render_narrow_rows(
             let marker_w = UnicodeWidthStr::width(marker) as u16;
             let icon = state_icon(row.state, state.spinner_tick);
             let icon_w = UnicodeWidthStr::width(icon) as u16;
-            let indent = "  ".repeat(row.indent as usize);
-            let indent_w = UnicodeWidthStr::width(indent.as_str()) as u16;
             let gap_after_marker = 1u16;
-            let chrome = marker_w + gap_after_marker + indent_w + icon_w + 1;
+            let chrome = marker_w + gap_after_marker + icon_w + 1;
             let armed_here = state.armed_delete_row_ref() == Some(&row.id);
-            let show_delete = !row.is_more_placeholder
-                && !row.id.is_subagent()
-                && !row.id.is_workspace()
+            let show_delete = (!row.id.is_workspace() || state.workspace_membership_mode)
                 && row.state.allows_delete()
                 && !state.row_is_conversation(&row.id)
                 && (hovered || armed_here);
@@ -2666,13 +2140,17 @@ fn render_narrow_rows(
             let label_budget = body_width
                 .saturating_sub(chrome)
                 .saturating_sub(if show_delete { delete_w + 1 } else { 0 });
-            let label = truncate_str(&row.label, label_budget as usize);
-            let line = format!("{marker} {indent}{icon} {label}");
+            let line = format!("{marker} {icon} ");
             buf.set_string(
                 area.x,
                 y,
                 line,
                 Style::default().fg(theme.text_primary).bg(bg),
+            );
+            RowTitle { row, theme, bg }.render_narrow_with_locale(
+                buf,
+                Rect::new(area.x + chrome, y, label_budget, 1),
+                Some(state.ui_locale()),
             );
             if show_delete && body_width > chrome + delete_w {
                 let dx = area.x + body_width.saturating_sub(delete_w);
@@ -2687,9 +2165,16 @@ fn render_narrow_rows(
                     .push((row.id.clone(), Rect::new(dx, y, delete_w, 1)));
             }
         }
-        if !row.is_more_placeholder {
-            state.row_rects.push((row.id.clone(), line_rect));
+        // Terminal theme (Reset band slots): same uniform reverse-video cue
+        // as the wide rows. Skip while renaming (editable line).
+        if theme.is_bandless() && (selected || hovered) && !renaming {
+            crate::render::color::force_area_fg(buf, line_rect, Color::Reset);
+            buf.set_style(
+                line_rect,
+                Style::default().add_modifier(ratatui::style::Modifier::REVERSED),
+            );
         }
+        state.row_rects.push((row.id.clone(), line_rect));
         y += 1;
     }
 
@@ -2788,28 +2273,9 @@ fn render_empty_state_with_locale(
     );
 }
 
-/// Paint a rounded-box chrome around the dispatch input so it reads as a real input field.
-/// On a 3-row rect the layout is:
-///
-/// ```text
-/// ╭──────────────────────────────────────────────────────────╮
-/// │ ❯ Dispatch a new agent                                   │
-/// ╰──────────────────────────────────────────────────────────╯
-/// ```
-///
-/// On a 1-row rect (very short terminals) we fall back to the bare `❯ {text}` line so the input stays usable.
-///
-/// `reply_label` flips the placeholder between `Dispatch a new agent` (`None`) and `Reply to {label}` (`Some`).
-/// The chrome then reflects what Enter will do: dispatch a new session, or enqueue / send a prompt to the currently-selected agent.
-/// Paint a short right-aligned feedback badge onto the dispatch box's **top border**, in a neutral accent colour.
-/// Examples: `✗ Session no longer exists`, `✓ Theme: Grok Day`.
-/// The message is painted VERBATIM: it already carries its own status glyph.
-/// Errors are built via [`DashboardState::set_error_toast`] (`✗`), while successes and info arrive from the `show_toast` builders (`✓` / `⚠`).
-/// The badge therefore neither prepends a glyph nor forces a colour.
-/// Prepending doubled the glyph (`✗ ✓ …`), and a forced colour painted non-errors (like "Session closed") red.
-/// The glyph, not the colour, conveys severity, mirroring the per-agent toast in [`crate::app::agent_view`].
-/// The badge ends one column before the right corner (`╮`) and is truncated to fit.
-/// No-op when there's no toast or the box is too narrow.
+/// On a 1-row rect (very short terminals) we fall back to the bare `❯ {text}` line so the input
+/// stays usable. Examples: `✗ Session no longer exists`, `✓ Theme: Grok Day`. The badge therefore
+/// neither prepends a glyph nor forces a colour.
 fn paint_dispatch_feedback_badge(
     buf: &mut Buffer,
     area: Rect,
@@ -2842,10 +2308,8 @@ fn paint_dispatch_feedback_badge(
     );
 }
 
-/// Paint the model and mode indicator onto the dispatch box's **bottom border**.
-/// Reuses the shared prompt info-line renderer so its style, spacing, and position match the chat prompt exactly (`╰──model · flag──╯`).
-/// The model name renders in dim secondary text; the mode shows as a `plan` (plan accent) or `always-approve` (default) flag.
-/// No-op when the box is too short or there's nothing to show.
+/// The model name renders in dim secondary text; the mode shows as a `plan` (plan accent) or
+/// `always-approve` (default) flag.
 fn paint_dispatch_config_badge(
     buf: &mut Buffer,
     area: Rect,
@@ -2880,16 +2344,23 @@ fn paint_dispatch_config_badge(
             bold: false,
         }),
         DashboardDispatchMode::Auto => flags.push(PromptFlag {
-            text: dashboard_static(locale, "mode.auto.label", "auto"),
+            text: dashboard_static(
+                locale,
+                "mode.auto.label",
+                PermissionLabel::Auto.display_name(),
+            ),
             color: Some(theme.accent_system),
             bold: false,
         }),
         DashboardDispatchMode::AlwaysApprove => flags.push(PromptFlag {
             text: locale
                 .map(|locale| {
-                    locale.named_static_text("mode.always_approve.label", "always-approve")
+                    locale.named_static_text(
+                        "mode.always_approve.label",
+                        PermissionLabel::AlwaysApprove.display_name(),
+                    )
                 })
-                .unwrap_or("always-approve"),
+                .unwrap_or(PermissionLabel::AlwaysApprove.display_name()),
             color: None,
             bold: false,
         }),
@@ -3062,7 +2533,7 @@ fn render_dispatch_with_locale(
                     editor_x,
                     content.y,
                     placeholder,
-                    Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+                    theme.dim().bg(theme.bg_base),
                 );
             }
             0
@@ -3072,7 +2543,11 @@ fn render_dispatch_with_locale(
                 state.dispatch.cursor(),
             )
             .single_line_viewport(avail as usize);
-            let visible = &state.dispatch.text()[viewport.visible_byte_range];
+            let visible = state
+                .dispatch
+                .text()
+                .get(viewport.visible_byte_range.clone())
+                .unwrap_or("");
             if avail > 0 {
                 buf.set_span(
                     editor_x,
@@ -3090,6 +2565,9 @@ fn render_dispatch_with_locale(
             .saturating_add(cursor_column)
             .min(content.width - 1);
         let cx = content.x + cursor_offset;
+        if input_focused && let Some(cell) = buf.cell_mut((cx, content.y)) {
+            cell.set_style(theme.block_cursor_over(theme.bg_base));
+        }
         return input_focused.then_some((cx, content.y));
     }
 
@@ -3118,18 +2596,16 @@ fn render_dispatch_with_locale(
             prefix,
             Style::default().fg(theme.accent_user).bg(theme.bg_base),
         );
-        // The dispatch input always spawns a NEW session, never a reply, so the placeholder is constant whatever row the overview cursor is on
-        // It only paints while the input is UNFOCUSED (matching `PromptWidget::draw`)
-        // When focused the visible caret is the cue and the text area stays clear
-        // Validation feedback (e.g. "Too short") shows as a badge on the box's top border (`paint_dispatch_feedback_badge`), not here.
-        // The badge stays visible even when the rejected text is still in the box
+        // The dispatch input always spawns a NEW session, never a reply, so the placeholder is constant
+        // whatever row the overview cursor is on. It only paints while the input is UNFOCUSED (matching
+        // `PromptWidget::draw`).
         if !input_focused {
             let msg = dashboard_static(
                 locale,
                 "dashboard.dispatch.placeholder",
                 "Dispatch a new agent",
             );
-            let style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let style = theme.dim().bg(theme.bg_base);
             let trunc = truncate_str(msg, content.width.saturating_sub(prefix_w) as usize);
             buf.set_string(content.x + prefix_w, content.y, trunc, style);
         }
@@ -3249,7 +2725,9 @@ fn render_slash_dropdown(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default()
+        .fg(theme.panel_border_fg())
+        .bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);
@@ -3282,23 +2760,6 @@ fn render_slash_dropdown(
         theme,
     );
     state.slash_dropdown_items_area = Some(items_area);
-}
-
-/// Working directory of the agent owning the peeked `row`, used to root the reply's `@` file picker.
-/// Top-level rows use their own cwd; subagent rows reply to (and resolve `@paths` against) their parent; roster rows have no local agent (`None`).
-/// `None` too when the agent has since vanished.
-fn peeked_agent_cwd(
-    row: &super::DashboardRowId,
-    agents: &IndexMap<AgentId, AgentView>,
-) -> Option<std::path::PathBuf> {
-    let id = match row {
-        super::DashboardRowId::TopLevel(id) => *id,
-        super::DashboardRowId::Subagent { parent, .. } => *parent,
-        super::DashboardRowId::Roster { .. } | super::DashboardRowId::Workspace { .. } => {
-            return None;
-        }
-    };
-    agents.get(&id).map(|a| a.session.cwd.clone())
 }
 
 /// Render the session-less `@` file-context picker dropdown above the dispatch box.
@@ -3372,7 +2833,9 @@ fn render_file_search_dropdown_for(
         Style::default().fg(theme.text_primary).bg(theme.bg_light),
     );
 
-    let border_style = Style::default().fg(theme.bg_highlight).bg(theme.bg_base);
+    let border_style = Style::default()
+        .fg(theme.panel_border_fg())
+        .bg(theme.bg_base);
     let bar: String = "\u{2500}".repeat(panel_width as usize);
     buf.set_string(panel_x, top_y, &bar, border_style);
     buf.set_string(panel_x, top_y + panel_h - 1, &bar, border_style);
@@ -3406,22 +2869,9 @@ fn render_file_search_dropdown_for(
     Some(items_area)
 }
 
-/// Render the dashboard's footer / shortcuts hint row.
-///
-/// Uses the shared `ShortcutsBar` widget so the dashboard's shortcut bar matches the agent view's bottom bar.
-/// The form is `Key:label` with bold keys and dim ` │ ` separators on `bg_base`.
-/// When a stop-confirm is armed, `ShortcutsBar::with_pending` paints the `press again to {label}` hint in place of the regular list.
-/// The agent view uses the same mechanism.
-///
-/// Keys are resolved from the action registry every frame so user rebindings show up immediately.
-/// Footer hints flip based on the selected row's state:
-///
-/// - A `NeedsInput` selection shows `Enter:see details · Ctrl+x:stop · ?:shortcuts`.
-///   There is no inline approve/reject yet; the dashboard is intentionally a navigator, not a permission UI.
-/// - Anything else shows `Enter:open · Ctrl+x:stop|delete · ?:shortcuts`.
-///
-/// The Ctrl+x chip label follows the selected agent's state: `stop` for an agent with a live turn, `delete` otherwise.
-/// NeedsInput counts as a live turn: it is paused but still running, so the first Ctrl+x cancels.
+/// There is no inline approve/reject yet; the dashboard is intentionally a navigator, not a
+/// permission UI. The. CtrlCtrl+x chip label follows the selected agent's state: `stop` for an agent
+/// with a live turn, `delete` otherwise.
 #[allow(clippy::too_many_arguments)]
 fn render_footer(
     buf: &mut Buffer,
@@ -3492,8 +2942,16 @@ fn render_footer_with_locale(
     // An expired arm falls through to the normal hints
     if state.armed_delete_row_ref().is_some() {
         if state.list_focused {
+            let confirm_label =
+                if matches!(state.selected_stop_action, Some(DashboardStopAction::Close)) {
+                    "confirm close"
+                } else if state.workspace_membership_mode {
+                    "confirm archive"
+                } else {
+                    "confirm delete"
+                };
             let hints = vec![
-                HintItem::new(key!('y'), "confirm delete"),
+                HintItem::new(key!('y'), confirm_label),
                 HintItem::new(key!('n'), "cancel"),
             ];
             ShortcutsBar::new(&hints)
@@ -3507,7 +2965,13 @@ fn render_footer_with_locale(
                 .unwrap_or_else(|| key!('x', CONTROL));
             let pending = PendingHint {
                 shortcut: stop_key,
-                label: "delete this session",
+                label: if let Some(action) = state.selected_stop_action {
+                    action.confirmation_label().unwrap_or("stop this session")
+                } else if state.workspace_membership_mode {
+                    "archive this session"
+                } else {
+                    "delete this session"
+                },
             };
             ShortcutsBar::new(&[])
                 .with_locale(locale)
@@ -3545,14 +3009,18 @@ fn render_footer_with_locale(
         return;
     }
 
-    let show_ctrl_x = !state
+    let show_ctrl_x = state
         .selected
         .as_ref()
-        .is_some_and(DashboardRowId::is_workspace)
+        .is_none_or(|row| !row.is_workspace() || state.workspace_membership_mode)
         && selected_state.is_some_and(|s| {
             matches!(s, RowState::Working | RowState::NeedsInput) || s.allows_delete()
         });
-    let stop_label = if matches!(
+    let stop_label = if state.workspace_membership_mode {
+        state
+            .selected_stop_action
+            .map_or("stop", |action| action.label())
+    } else if matches!(
         selected_state,
         Some(RowState::Working | RowState::NeedsInput)
     ) {
@@ -3561,11 +3029,8 @@ fn render_footer_with_locale(
         "delete"
     };
 
-    // Overview list focused (via Tab), navigation hints: arrows / j-k move between agents, Enter opens the focused one, Tab returns to the input
-    // Shown so the two-focus model is discoverable
-    //
-    // Skipped while peek is open: peek owns Enter and may disagree with the dispatch list_focused flag (especially vim unfocused reply)
-    // Fall through to the peek_active branch below
+    // Overview list focused (via Tab), navigation hints: arrows / j-k move between agents, Enter opens
+    // the focused one, Tab returns to the input.
     if state.list_focused && !peek_active {
         let key_for = |id: crate::actions::ActionId, fallback: KeyShortcut| -> KeyShortcut {
             registry.find(id).map(|d| d.default_key).unwrap_or(fallback)
@@ -3575,10 +3040,7 @@ fn render_footer_with_locale(
             crate::actions::ActionId::DashboardShortcutsHelp,
             key!('.', CONTROL),
         );
-        // The ↑/↓ (and vim j/k) nav chip is intentionally omitted
-        // The overview is obviously arrow-navigable, and dropping the chip frees the bottom bar for the action hints (open / stop)
-        // Idle overflow toggle under the cursor: Enter reveals or re-folds the older idle agents, so `open` / `stop` would lie
-        // The nav chip is omitted here too, mirroring the section-header row below
+        // The ↑/↓ (and vim j/k) nav chip is intentionally omitted.
         if state.selected_idle_overflow {
             let toggle = if state.idle_show_all {
                 "show fewer"
@@ -3613,6 +3075,20 @@ fn render_footer_with_locale(
                 .render(inner, buf);
             return;
         }
+        // Enter acts on the focused actions-row item; the arrows aren't advertised, the row reads as a row
+        if let Some(enter_label) = state.focused_action_label() {
+            let mut hints = vec![HintItem::new(key!(Enter), enter_label)];
+            // A draft on `+ New Agent` sends from the list pane too, so offer the same send+open chord the input pane shows
+            if state.focused_new_agent_sends_draft() {
+                hints.push(HintItem::new(key!('s', CONTROL), "send+open"));
+            }
+            hints.push(HintItem::new(key!(Tab), "input"));
+            ShortcutsBar::new(&hints)
+                .with_locale(locale)
+                .compact(4, Some(HintItem::new(help, "shortcuts")))
+                .render(inner, buf);
+            return;
+        }
         let mut hints = vec![
             HintItem::new(key!(Enter), "open"),
             HintItem::new(key!(Tab), "input"),
@@ -3635,10 +3111,10 @@ fn render_footer_with_locale(
     // "Send + open" is `Ctrl+S`; `Shift+Enter` inserts a newline instead
     // It is hardcoded in the dispatch / peek key handlers, not a registry action, so the chip is built directly
     let send_open = key!('s', CONTROL);
-    // Multiline: bare Enter inserts a newline; Shift+Enter (or Alt+Enter when the terminal can't distinguish Shift+Enter) sends
+    // Multiline: bare Enter inserts a newline; Shift+Enter (or Alt+Enter over SSH / when Shift+Enter collapses) sends
     // This matches the agent prompt keybar
     let send_key = if state.multiline_mode {
-        if crate::terminal::terminal_context().shift_enter_unavailable() {
+        if crate::terminal::terminal_context().prefer_alt_enter_newline() {
             key!(Enter, ALT)
         } else {
             key!(Enter, SHIFT)
@@ -3656,17 +3132,12 @@ fn render_footer_with_locale(
 
     // Submit chord is `send_key` (Enter, or Shift/Alt+Enter in multiline). Ctrl+S is send+open.
     // Empty draft: create/open on the submit chord; non-empty: send
-    let button_focused = state.new_agent_button_focused;
     let row_selected = state.selected.is_some();
     let prompt_empty = state.dispatch.text().trim().is_empty();
 
     let hints: Vec<HintItem> = if peek_active {
-        // Peek mode: Enter labels mirror `DashboardState::handle_peek_key`:
-        //   vim + unfocused reply → Enter focuses reply ("input")
-        //   focused + non-empty   → Enter sends
-        //   otherwise             → Enter opens / attaches
-        // Ctrl+S remains send+open whenever there is a non-empty draft.
-        // Esc: with no draft it unselects ("New Agent"); with a draft it goes "back"
+        // Peek mode: Enter labels mirror `DashboardState::handle_peek_key`: vim + unfocused reply → Enter
+        // focuses reply ("input") focused + non-empty → Enter sends otherwise → Enter opens / attaches.
         let esc = key!(Esc);
         // Pending permission / ask-tool: `1-9` selects even while unfocused (the handler focuses the panel)
         // When focused with a selected option, Enter answers
@@ -3769,7 +3240,7 @@ fn render_footer_with_locale(
     } else if let Some(section) = state.selected_section {
         // A section header is selected. No stop chip in either state; there's no session under a section header.
         if prompt_empty {
-            // ↑↓ navigate, Enter toggles collapse/expand, Esc returns to the `[+ New Agent]` button
+            // ↑↓ navigate, Enter toggles collapse/expand, Esc returns to the `+ New Agent` button
             let toggle = if state.is_section_collapsed(section) {
                 "expand"
             } else {
@@ -3781,7 +3252,7 @@ fn render_footer_with_locale(
             ]
         } else {
             // Typed text dispatches a NEW agent (a section header is never a reply target)
-            // Show the same chips as the `[+ New Agent]` button with a draft
+            // Show the same chips as the `+ New Agent` button with a draft
             // send_key sends (stays on the dashboard), Ctrl+S sends and opens detail, Shift+Tab cycles the dispatch mode
             vec![
                 HintItem::new(send_key, "send"),
@@ -3808,10 +3279,11 @@ fn render_footer_with_locale(
                 HintItem::new(key!(BackTab), "mode"),
             ]
         }
-    } else if button_focused {
+    } else if let Some(enter_label) = state.focused_action_label() {
         let mut h: Vec<HintItem> = vec![];
         if prompt_empty {
-            h.push(HintItem::new(send_key, "create"));
+            // Same label as the list-focused footer: an empty Enter acts on the focused item from either pane
+            h.push(HintItem::new(send_key, enter_label));
             h.push(HintItem::new(key!(Tab), "list"));
         } else {
             h.push(HintItem::new(send_key, "send"));
@@ -3848,7 +3320,7 @@ fn state_icon(state: RowState, tick: u64) -> &'static str {
         RowState::Working => {
             let frames = crate::glyphs::dot_spinner_frames();
             let i = (tick / SPINNER_DIVISOR) as usize % frames.len();
-            frames[i]
+            frames.get(i).copied().unwrap_or("")
         }
         // Hollow diamond for idle rows; filled diamond for every state that needs visual presence (needs-input, completed, failed)
         // The foreground colour disambiguates (accent_user for needs-input, accent_success for done, accent_error for failed)
@@ -3869,26 +3341,21 @@ fn state_color(state: RowState, theme: &Theme) -> Color {
     }
 }
 
-/// Bullet colour for a `NeedsInput` row: blinks between full yellow (`warning`) and a dimmed yellow so an agent awaiting input draws the eye.
-/// On non-truecolor terminals the dim blend falls back to the full colour (the blink is invisible but the bullet stays yellow).
 fn needs_input_bullet_color(tick: u64, theme: &Theme) -> Color {
     let bright = (tick / NEEDS_INPUT_BLINK_DIVISOR).is_multiple_of(2);
     if bright {
         theme.warning
     } else {
-        crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5)
-            .unwrap_or(theme.warning)
+        needs_input_dim_color(theme).unwrap_or(theme.warning)
     }
 }
 
-fn badge_color(badge: RowBadge, theme: &Theme) -> Color {
-    match badge {
-        RowBadge::Worktree => theme.accent_user,
-        RowBadge::NeedsInput => theme.warning,
-        RowBadge::BgTask => theme.command,
-        RowBadge::Pinned => theme.accent_running,
-        RowBadge::Failed => theme.accent_error,
-    }
+fn needs_input_dim_color(theme: &Theme) -> Option<Color> {
+    crate::render::color::blend_color(theme.bg_base, theme.warning, 0.5)
+}
+
+fn needs_input_blink_visible(theme: &Theme) -> bool {
+    needs_input_dim_color(theme).is_some_and(|dim| dim != theme.warning)
 }
 
 /// Process-wide cached home directory via [`xai_dirs::home_dir`].
@@ -3904,33 +3371,11 @@ pub(crate) fn cached_home() -> Option<&'static str> {
 
 static HOME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 
-// ---------------------------------------------------------------------------
-// Popup overlay (banner-style)
-// ---------------------------------------------------------------------------
-
-/// Compute the rect for the attached-agent popup overlay.
-///
-/// The popup takes the FULL bottom of the screen (no horizontal inset, no bottom inset).
 /// Only a dynamic top inset is reserved for the dashboard banner.
-///
-/// The previous ~1/6-inset-on-all-sides design left the dashboard's dispatch input and footer visible BELOW the popup.
-/// That produced two stacked input bars.
-/// The banner above the popup carries the live row list in a bordered panel.
-///
-/// (Historical legacy comment kept for context: the old layout description is no longer accurate; see the function body for the current layout.)
-/// terminal yields a ~164×48 popup with a ~36×12 dashboard frame visible around it.
-///
-/// On terminals too small to honour the minimum inset, falls through to a 0-inset takeover.
-/// There is no escape hatch: any non-zero inset would clip the agent's prompt below readability.
 pub fn popup_rect(view: Rect) -> Rect {
-    // Popup takes the FULL bottom area (no horizontal inset, no bottom inset)
-    // Only a small TOP inset is reserved for the dashboard banner that shows the live rows
-    // The previous ~1/6-inset-on-all-sides design left the dashboard's dispatch input and footer visible BELOW the popup
-    // That produced two stacked input bars
-    //
-    // The banner height is dynamic: ~30% of the screen up to a BANNER_MAX_HEIGHT cap
-    // A BANNER_MIN_HEIGHT floor applies on tall terminals so a 1-row banner doesn't crowd the rows out
-    // Very short terminals (height < BANNER_MIN_HEIGHT + 10) drop the banner to 0 so the popup gets every available row
+    // Popup takes the FULL bottom area (no horizontal inset, no bottom inset). Only a small TOP inset
+    // is reserved for the dashboard banner that shows the live rows. A BANNER_MIN_HEIGHT floor applies
+    // on tall terminals so a 1-row banner doesn't crowd the rows out.
     const BANNER_MIN_HEIGHT: u16 = 6;
     const BANNER_MAX_HEIGHT: u16 = 14;
 
@@ -3947,19 +3392,9 @@ pub fn popup_rect(view: Rect) -> Rect {
     }
 }
 
-/// Render the popup overlay frame and the attached agent's view via the canonical [`picker::render_bordered_frame`].
-/// That is the same chrome primitive `agent_view::draw_subagent_fullscreen` uses.
-/// Returns `(cursor_pos, post_flush)` from the agent's draw.
-/// The caller places the cursor on the popup's prompt and merges kitty/sixel image escape sequences into the frame's outgoing notification stream.
-///
-/// `title_label` is passed by the caller rather than computed here from a borrowed `AgentView`.
-/// The closure can then take a mutable borrow of the agents map without conflicting with the title lookup.
-///
-/// Side effects on `state`:
-/// - `popup_close_rect` is registered so a click on the `[✗]` button can dispatch a popup close in `handle_mouse`.
-/// - `popup_outer_rect` is registered so clicks outside the popup can be routed correctly.
-///
-/// Too-small popup areas (`area.height < 5` or `area.width < 10`) get a fallback ("terminal too small: Esc to close") and `(None, None, false)`.
+/// `title_label` is passed by the caller rather than computed here from a borrowed `AgentView`. The
+/// closure can then take a mutable borrow of the agents map without conflicting with the title
+/// lookup.
 pub fn render_popup_overlay(
     buf: &mut Buffer,
     area: Rect,
@@ -4011,20 +3446,15 @@ pub fn render_popup_overlay_with_locale(
 
     let border_color = theme.selection_border;
 
-    // The canonical bordered-frame primitive, used by `AgentView::draw_subagent_fullscreen` in app/agent_view/render.rs
+    // The canonical bordered-frame primitive, used by `AgentView::draw_subagent_fullscreen` in app/agent_view/subagent_takeover.rs
     // Paints the header (top border and title row), the divider (T-junctions), and the content frame with full borders
     // The divider sits ABOVE the returned `content` rect, so `draw_agent` cannot overwrite it
     let Some(frame) =
         crate::views::picker::render_bordered_frame(buf, area, border_color, theme.bg_base)
     else {
-        // Too small for the canonical frame (height < 5 or width < 10)
-        // Paint a Clear, an outline, and a single-line hint so the popup still communicates its presence and how to dismiss it
-        //
-        // `popup_outer_rect` is set above so the modal-popup mouse intercept in `AppView::handle_input` swallows ALL clicks inside this rect
-        // The agent is never drawn on this branch (we return `(None, None)` below without invoking `draw_agent`)
-        // Its hit-area maps therefore stay empty by design
-        // There's nothing for the user to click on inside the fallback box other than the (also-non-functional) border
-        // The user's only exit is Esc / Ctrl+\\ / a wider terminal
+        // Too small for the canonical frame (height < 5 or width < 10). The agent is never drawn on this
+        // branch (we return `(None, None)` below without invoking `draw_agent`). Its hit-area maps
+        // therefore stay empty by design. The user's only exit is. EscEsc / Ctrl+\\ / a wider terminal.
         Clear.render(area, buf);
         buf.set_style(area, Style::default().bg(theme.bg_base));
         let outline = Block::default()
@@ -4044,7 +3474,7 @@ pub fn render_popup_overlay_with_locale(
                 area.x + 1,
                 area.y + area.height / 2,
                 hint,
-                Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+                theme.dim().bg(theme.bg_base),
             );
         }
         state.popup_close_rect = None;
@@ -4092,352 +3522,6 @@ pub fn render_popup_overlay_with_locale(
 
     let (cursor, post_flush) = draw_agent(inner, buf);
     (cursor, post_flush, true)
-}
-
-/// Paint a bordered frame around an attached agent view, matching the subagent-fullscreen pattern.
-/// The frame reserves a title row at the top with `{title}` on the left and `{i}/{n} [‹][›] [Dashboard]` on the right.
-/// Below that come a horizontal divider, then the agent's content area.
-///
-/// Layout:
-///
-/// ```text
-/// ╭─────────────────────────────────────────────────────────╮
-/// │ Add responsiveness to /context    1/3 [‹][›] [Dashboard] │
-/// ├─────────────────────────────────────────────────────────┤
-/// │                                                          │
-/// │   <agent.draw paints into here>                          │
-/// │                                                          │
-/// ╰──────────────────────────────────────────────────────────╯
-/// ```
-///
-/// The agent renders inside the frame's `content` rect.
-/// The agent's own shortcuts bar sits at the bottom of the content, inside the frame.
-/// That bar carries the `Ctrl+\\:dashboard` hint, and `Ctrl+[/]:prev/next agent` when the cycle order has more than one agent.
-///
-/// Returns `None` when the area is too small for the bordered frame; the caller falls back to a chromeless render so the user can use the agent.
-///
-/// `position` carries `(current_1_based, total)` for the visible row list.
-/// When `Some` and `total > 1`, the renderer paints the position indicator and cycle chips.
-/// When `None` (or only one row), the cycle chips are omitted.
-/// `hover` flags drive per-button highlight so the mouse user gets visual feedback.
-#[allow(clippy::too_many_arguments)]
-pub fn render_dashboard_session_overlay(
-    buf: &mut Buffer,
-    area: Rect,
-    theme: &Theme,
-    title_label: &str,
-    position: Option<(usize, usize)>,
-    hover_prev: bool,
-    hover_next: bool,
-    hover_close: bool,
-) -> Option<DashboardOverlayChrome> {
-    if area.area() == 0 || area.height < 5 || area.width < 20 {
-        return None;
-    }
-    let border_color = theme.selection_border;
-    let frame =
-        crate::views::picker::render_bordered_frame(buf, area, border_color, theme.bg_base)?;
-    // `(1, 1)` insets: keep a 1-col gap between the title / chips and the frame's left / right borders
-    let (close_rect, prev_rect, next_rect) = paint_session_title_bar(
-        buf,
-        frame.title_row,
-        theme,
-        title_label,
-        position,
-        hover_prev,
-        hover_next,
-        hover_close,
-        1,
-        1,
-        None,
-    );
-    Some(DashboardOverlayChrome {
-        content: frame.content,
-        close_rect,
-        prev_rect,
-        next_rect,
-    })
-}
-
-/// Like [`render_dashboard_session_overlay`] but paints ONLY a top header bar, with **no surrounding border**.
-/// The bar is the agent's title on the left and the `{i}/{n} [‹][›] [Dashboard]` buttons on the right.
-/// The returned `content` is `area` minus the header band, so the agent body below renders full-width.
-/// Its prompt position and overall padding then match the dashboard list view (instead of being inset by a modal frame).
-///
-/// `pad_left` / `pad_right` / `pad_top` mirror the agent body's outer padding (`eff_hpad_left` / `eff_hpad_right` / `eff_outer_vpad`).
-/// The title text lines up with the body's left content edge, and the chips line up with its right edge.
-/// The bar gets the same top breathing room as everything below it.
-/// The header band is `pad_top` blank rows plus one title row.
-/// The agent body that fills `content` then applies its OWN top padding, separating it from the header.
-#[allow(clippy::too_many_arguments)]
-pub fn render_dashboard_session_header(
-    buf: &mut Buffer,
-    area: Rect,
-    theme: &Theme,
-    title_label: &str,
-    position: Option<(usize, usize)>,
-    hover_prev: bool,
-    hover_next: bool,
-    hover_close: bool,
-    pad_left: u16,
-    pad_right: u16,
-    pad_top: u16,
-) -> Option<DashboardOverlayChrome> {
-    render_dashboard_session_header_with_locale(
-        buf,
-        area,
-        theme,
-        title_label,
-        position,
-        hover_prev,
-        hover_next,
-        hover_close,
-        pad_left,
-        pad_right,
-        pad_top,
-        None,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn render_dashboard_session_header_with_locale(
-    buf: &mut Buffer,
-    area: Rect,
-    theme: &Theme,
-    title_label: &str,
-    position: Option<(usize, usize)>,
-    hover_prev: bool,
-    hover_next: bool,
-    hover_close: bool,
-    pad_left: u16,
-    pad_right: u16,
-    pad_top: u16,
-    locale: Option<&crate::locale::LocaleContext>,
-) -> Option<DashboardOverlayChrome> {
-    // Need room for the header band (`pad_top` + 1 title row) plus at
-    // least one body row, and enough width for the title + chips after
-    // the side padding is removed.
-    let band_height = pad_top.saturating_add(1);
-    if area.area() == 0
-        || area.height <= band_height
-        || area.width <= pad_left.saturating_add(pad_right).saturating_add(12)
-    {
-        return None;
-    }
-    // Fill the whole header band's background (top-padding rows and the title row)
-    // It then reads as one contiguous bar flush with the agent body's `bg_base` fill below
-    let fill = " ".repeat(area.width as usize);
-    for dy in 0..band_height {
-        buf.set_string(
-            area.x,
-            area.y + dy,
-            &fill,
-            Style::default().bg(theme.bg_base),
-        );
-    }
-    // Title row sits below the top padding, inset by the side padding so it aligns with the body
-    // `(0, 0)` insets: the boundaries are already encoded in `title_row`
-    let title_row = Rect {
-        x: area.x + pad_left,
-        y: area.y + pad_top,
-        width: area.width.saturating_sub(pad_left + pad_right),
-        height: 1,
-    };
-    let (close_rect, prev_rect, next_rect) = paint_session_title_bar(
-        buf,
-        title_row,
-        theme,
-        title_label,
-        position,
-        hover_prev,
-        hover_next,
-        hover_close,
-        0,
-        0,
-        locale,
-    );
-    let content = Rect {
-        x: area.x,
-        y: area.y + band_height,
-        width: area.width,
-        height: area.height.saturating_sub(band_height),
-    };
-    Some(DashboardOverlayChrome {
-        content,
-        close_rect,
-        prev_rect,
-        next_rect,
-    })
-}
-
-/// Paint the session title bar onto a single-row `title_row`, on `bg_base` with no button fills.
-/// The bar is the title on the left and the `{i}/{n} [‹][›] [Dashboard]` buttons on the right.
-/// Returns the three button hit rects.
-/// Shared by the bordered overlay and the chromeless header bar.
-///
-/// `left_inset` / `right_inset` reserve that many columns inside `title_row` before the title text (left) and after the chips (right).
-/// The bordered overlay passes `1` on each side for a small gap from its border.
-/// The chromeless header passes `0` because its `title_row` is already positioned at the desired padding boundaries.
-#[allow(clippy::too_many_arguments)]
-fn paint_session_title_bar(
-    buf: &mut Buffer,
-    title_row: Rect,
-    theme: &Theme,
-    title_label: &str,
-    position: Option<(usize, usize)>,
-    hover_prev: bool,
-    hover_next: bool,
-    hover_close: bool,
-    left_inset: u16,
-    right_inset: u16,
-    locale: Option<&crate::locale::LocaleContext>,
-) -> (Option<Rect>, Option<Rect>, Option<Rect>) {
-    // `‹` / `›` / `✗` are all painted as plain bracketed text (no button background fills)
-    // Hover only changes the fg color (`text_primary` vs `gray`) for subtle clickability feedback
-    // This matches the style of every other close button in the pager's overlays (peek, popups, etc.)
-    //
-    // U+2039 / U+203A (single guillemets) read as paired nav
-    // arrows in monospace fonts at small sizes — softer than
-    // the ASCII `<` / `>` and visually closer to the chevrons
-    // used in macOS-native pickers.
-    // Labelled with its destination ("Dashboard") rather than a
-    // generic `[✗]` so it's obvious that clicking it returns to the
-    // dashboard. Plain ASCII, so no legacy-console fallback needed.
-    let close_label = dashboard_static(locale, "dashboard.session.return", "[Dashboard]");
-    let prev_label = format!("[{}]", crate::glyphs::chevron_left());
-    let next_label = format!("[{}]", crate::glyphs::chevron());
-    let close_w = UnicodeWidthStr::width(close_label) as u16;
-    let prev_w = prev_label.width() as u16;
-    let next_w = next_label.width() as u16;
-
-    // Left boundary: nothing paints left of here (title text starts exactly at `left_bound`)
-    let left_bound = title_row.x.saturating_add(left_inset);
-
-    // Right edge: paint right-to-left so the rightmost element anchors the edge regardless of which buttons are enabled
-    let mut rx = title_row
-        .x
-        .saturating_add(title_row.width)
-        .saturating_sub(right_inset);
-
-    // [Dashboard] close: plain bracketed text on `bg_base` (NOT a filled button)
-    // It is styled like every other close button in the pager (peek panel, popup overlay, etc.)
-    // The label spells out its destination so it's clear that clicking it returns to the dashboard
-    // Hover still bumps the fg colour for subtle feedback that it's clickable
-    let close_rect = if rx >= left_bound + close_w {
-        rx = rx.saturating_sub(close_w);
-        let fg = if hover_close {
-            theme.text_primary
-        } else {
-            theme.gray
-        };
-        let style = Style::default()
-            .fg(fg)
-            .bg(theme.bg_base)
-            .add_modifier(Modifier::BOLD);
-        buf.set_string(rx, title_row.y, close_label, style);
-        Some(Rect {
-            x: rx,
-            y: title_row.y,
-            width: close_w,
-            height: 1,
-        })
-    } else {
-        None
-    };
-
-    let cycle_enabled = position.is_some_and(|(_, n)| n > 1);
-    let (prev_rect, next_rect) = if cycle_enabled {
-        let mut prev_r = None;
-        let mut next_r = None;
-
-        // Paint `[›]` as plain text (no bg), like [Dashboard].
-        if rx >= left_bound + 1 + next_w {
-            rx = rx.saturating_sub(1 + next_w);
-            let fg = if hover_next {
-                theme.text_primary
-            } else {
-                theme.gray
-            };
-            let style = Style::default()
-                .fg(fg)
-                .bg(theme.bg_base)
-                .add_modifier(Modifier::BOLD);
-            buf.set_string(rx, title_row.y, &next_label, style);
-            next_r = Some(Rect {
-                x: rx,
-                y: title_row.y,
-                width: next_w,
-                height: 1,
-            });
-        }
-
-        // Paint `[‹]` flush against `[›]` (no separating space): the pair reads as one tight nav widget rather than two unrelated chips
-        // The space before `[‹]` (separating it from the position indicator) is owned by the indicator's paint call below
-        if rx >= left_bound + prev_w {
-            rx = rx.saturating_sub(prev_w);
-            let fg = if hover_prev {
-                theme.text_primary
-            } else {
-                theme.gray
-            };
-            let style = Style::default()
-                .fg(fg)
-                .bg(theme.bg_base)
-                .add_modifier(Modifier::BOLD);
-            buf.set_string(rx, title_row.y, &prev_label, style);
-            prev_r = Some(Rect {
-                x: rx,
-                y: title_row.y,
-                width: prev_w,
-                height: 1,
-            });
-        }
-
-        // Position indicator `{i}/{n}`: painted to the LEFT of the chips, separated by a single space
-        // Dim foreground so it reads as metadata, not as another clickable chip
-        if let Some((cur, total)) = position {
-            let pos_text = format!("{cur}/{total}");
-            let pos_w = UnicodeWidthStr::width(pos_text.as_str()) as u16;
-            if rx >= left_bound + 1 + pos_w {
-                rx = rx.saturating_sub(1 + pos_w);
-                let style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
-                buf.set_string(rx, title_row.y, &pos_text, style);
-            }
-        }
-        (prev_r, next_r)
-    } else {
-        (None, None)
-    };
-
-    // Title on the left: plain bold text, no `❱` prefix, starting exactly at `left_bound`
-    // Leave a 1-col gap before whatever sits to its right (chips / position indicator) via the `- 1`
-    if rx > left_bound {
-        let title_avail = rx.saturating_sub(left_bound).saturating_sub(1) as usize;
-        if title_avail > 0 {
-            let trunc = truncate_str(title_label, title_avail);
-            buf.set_string(
-                left_bound,
-                title_row.y,
-                trunc,
-                Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.bg_base)
-                    .add_modifier(Modifier::BOLD),
-            );
-        }
-    }
-
-    (close_rect, prev_rect, next_rect)
-}
-
-/// Output of [`render_dashboard_session_overlay`]: the agent's drawing rect (the bordered frame's inner content area).
-/// Also carries the three hit rects for the title-bar buttons.
-#[derive(Debug, Clone, Copy)]
-pub struct DashboardOverlayChrome {
-    pub content: Rect,
-    pub close_rect: Option<Rect>,
-    pub prev_rect: Option<Rect>,
-    pub next_rect: Option<Rect>,
 }
 
 #[cfg(test)]

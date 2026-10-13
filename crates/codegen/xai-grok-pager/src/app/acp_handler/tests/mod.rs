@@ -11,12 +11,34 @@ use std::path::PathBuf;
 use std::time::Instant;
 use xai_grok_shell::extensions::notification::RetryState;
 use xai_grok_shell::extensions::notification::SessionUpdate as XaiSessionUpdate;
+use xai_grok_test_support::acp_fixtures;
+pub(super) fn test_agent(app: &AppView, id: AgentId) -> &AgentView {
+    let Some(agent) = app.agents.get(&id) else {
+        panic!("expected agent {id:?}");
+    };
+    agent
+}
+pub(super) fn test_subagent<'a>(parent: &'a AgentView, sid: &str) -> &'a AgentView {
+    let Some(child) = parent.subagent_views.get(sid) else {
+        panic!("expected subagent {sid}");
+    };
+    child.as_ref()
+}
+pub(super) fn json_set(
+    value: &mut serde_json::Value,
+    key: impl Into<String>,
+    v: serde_json::Value,
+) {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(key.into(), v);
+    }
+}
 pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     AgentSession {
         id: AgentId(0),
         acp_tx: tx,
-        session_id: session_id.map(acp::SessionId::new),
+        session_id: session_id.map(acp_fixtures::session_id),
         models: ModelState::default(),
         state: AgentState::Idle,
         tracker: AcpUpdateTracker::new(),
@@ -60,11 +82,8 @@ pub(super) fn permission_req_with_raw_input(
 ) -> acp::RequestPermissionRequest {
     let fields = acp::ToolCallUpdateFields::new().raw_input(raw_input);
     acp::RequestPermissionRequest::new(
-        acp::SessionId::new(std::sync::Arc::from("s1")),
-        acp::ToolCallUpdate::new(
-            acp::ToolCallId::new(std::sync::Arc::from("call-1")),
-            fields,
-        ),
+        acp_fixtures::session_id("s1"),
+        acp_fixtures::tool_call_update("call-1", fields),
         vec![],
     )
 }
@@ -75,40 +94,46 @@ pub(super) fn recap_block(text: &str) -> RenderBlock {
     })
 }
 pub(super) fn make_subagent_info(child_sid: &str) -> SubagentInfo {
+    let now = Instant::now();
     SubagentInfo {
         subagent_id: Arc::from(format!("sa-{child_sid}")),
         child_session_id: Arc::from(child_sid),
         description: Arc::from("test"),
         subagent_type: Arc::from("general-purpose"),
-        persona: None,
-        role: None,
-        model: None,
-        context_source: None,
-        resumed_from: None,
-        capability_mode: None,
-        workflow_run_id: None,
-        context_normalized: false,
-        parent_prompt_id: None,
-        started_at: Instant::now(),
-        last_progress_at: Instant::now(),
-        finished: false,
-        status: None,
-        error: None,
-        duration_ms: None,
-        tool_calls: None,
-        turns: None,
-        turn_count: None,
-        tool_call_count: None,
-        tokens_used: None,
-        context_window_tokens: Some(131072),
-        context_usage_pct: Some(85),
-        tools_used: Vec::new(),
-        error_count: None,
-        activity_label: None,
-        is_background: false,
-        pending_kill: false,
-        kill_requested_at: None,
-        scrollback_entry_id: None,
+        attempt: crate::app::subagent::SubagentAttemptInfo {
+            lifecycle: crate::app::subagent::SubagentLifecycleState::running_legacy_for_test(),
+            persona: None,
+            role: None,
+            model: None,
+            context_source: None,
+            resumed_from: None,
+            capability_mode: None,
+            workflow_run_id: None,
+            context_normalized: false,
+            parent_prompt_id: None,
+            started_at: now,
+            last_progress_at: now,
+            status: None,
+            error: None,
+            duration_ms: None,
+            tool_calls: None,
+            turns: None,
+            turn_count: None,
+            tool_call_count: None,
+            tokens_used: None,
+            context_window_tokens: Some(131072),
+            context_usage_pct: Some(85),
+            tools_used: Vec::new(),
+            error_count: None,
+            activity_label: None,
+            is_background: false,
+            pending_kill: false,
+            kill_requested_at: None,
+            scrollback_entry_id: None,
+            terminal_entry_id: None,
+        },
+        completed_attempt_tokens: 0,
+        sealed_attempt_tokens: Default::default(),
         prompt: None,
         child_cwd: None,
         worktree_path: None,
@@ -181,7 +206,12 @@ pub(super) fn last_session_event(sb: &ScrollbackState) -> Option<SessionEvent> {
 }
 pub(super) fn make_app_with_agent(session_id: &str) -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+    let mut app = AppView::new(
+        tx.clone(),
+        ModelState::default(),
+        Vec::new(),
+        crate::render::draw::EscapeWriter::disconnected(),
+    );
     app.leader_mode = true;
     let id = AgentId(0);
     let agent = make_agent(Some(session_id));
@@ -198,17 +228,12 @@ pub(super) fn interjection_broadcast(
     session_id: &str,
     text: &str,
 ) -> acp::ExtNotification {
-    acp::ExtNotification::new(
+    acp_fixtures::ext_notification(
         "x.ai/session/interjection",
-        std::sync::Arc::from(
-            serde_json::value::to_raw_value(
-                    &serde_json::json!({
-                    "sessionId": session_id,
-                    "text": text,
-                }),
-                )
-                .unwrap(),
-        ),
+        &serde_json::json!({
+                "sessionId": session_id,
+                "text": text,
+            }),
     )
 }
 /// A Running background task registered on the agent's root session.
@@ -264,10 +289,7 @@ pub(super) fn follow_ups_ext(
             "response_id": response_id,
             "suggestions": suggestions,
         });
-    acp::ExtNotification::new(
-        "x.ai/follow_ups",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/follow_ups", &params)
 }
 pub(super) fn follow_ups_ext_with_prompt(
     response_id: &str,
@@ -283,33 +305,20 @@ pub(super) fn follow_ups_ext_with_prompt(
             "promptId": prompt_id,
             "suggestions": suggestions,
         });
-    acp::ExtNotification::new(
-        "x.ai/follow_ups",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/follow_ups", &params)
 }
 pub(super) fn voice_settings_update(enabled: bool) -> acp::ExtNotification {
-    acp::ExtNotification::new(
+    acp_fixtures::ext_notification(
         "x.ai/settings/update",
-        std::sync::Arc::from(
-            serde_json::value::to_raw_value(
-                    &serde_json::json!({ "voice_mode_enabled": enabled }),
-                )
-                .unwrap(),
-        ),
+        &serde_json::json!({ "voice_mode_enabled": enabled }),
     )
 }
 pub(super) fn tier_settings_update(tier: &str) -> acp::ExtNotification {
-    acp::ExtNotification::new(
+    acp_fixtures::ext_notification(
         "x.ai/settings/update",
-        std::sync::Arc::from(
-            serde_json::value::to_raw_value(
-                    &serde_json::json!({
-                    "subscription_tier_display": tier
-                }),
-                )
-                .unwrap(),
-        ),
+        &serde_json::json!({
+                "subscription_tier_display": tier
+            }),
     )
 }
 pub(super) fn group_tool_verbs_settings_update(
@@ -319,10 +328,7 @@ pub(super) fn group_tool_verbs_settings_update(
         Some(v) => serde_json::json!({ "group_tool_verbs": v }),
         None => serde_json::json!({}),
     };
-    acp::ExtNotification::new(
-        "x.ai/settings/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/settings/update", &params)
 }
 pub(super) fn collapsed_edit_blocks_settings_update(
     value: Option<bool>,
@@ -331,9 +337,29 @@ pub(super) fn collapsed_edit_blocks_settings_update(
         Some(v) => serde_json::json!({ "collapsed_edit_blocks": v }),
         None => serde_json::json!({}),
     };
-    acp::ExtNotification::new(
-        "x.ai/settings/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
+    acp_fixtures::ext_notification("x.ai/settings/update", &params)
+}
+pub(super) fn subagent_notification_with_event_id(
+    session_id: &str,
+    update: XaiSessionUpdate,
+    event_id: Option<&str>,
+) -> acp::ExtNotification {
+    let payload = SessionNotification {
+        session_id: acp_fixtures::session_id(session_id),
+        update,
+        meta: event_id.map(|event_id| serde_json::json!({ "eventId": event_id })),
+    };
+    acp_fixtures::ext_notification("x.ai/session_notification", &payload)
+}
+pub(super) fn subagent_notification_with_seq(
+    session_id: &str,
+    update: XaiSessionUpdate,
+    event_seq: u64,
+) -> acp::ExtNotification {
+    subagent_notification_with_event_id(
+        session_id,
+        update,
+        Some(&format!("{session_id}-{event_seq}")),
     )
 }
 pub(super) fn subagent_ext_replay(
@@ -346,10 +372,7 @@ pub(super) fn subagent_ext_replay(
             "update": update,
             "_meta": { "isReplay": true, "eventId": event_id },
         });
-    acp::ExtNotification::new(
-        "x.ai/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/session/update", &params)
 }
 pub(super) fn make_exit_plan_ext(
     plan_content: Option<&str>,
@@ -366,15 +389,14 @@ pub(super) fn make_exit_plan_ext_with_tool_call_id(
     xai_acp_lib::AcpArgs<acp::ExtRequest>,
     tokio::sync::oneshot::Receiver<xai_acp_lib::AcpResult<acp::ExtResponse>>,
 ) {
-    let raw = serde_json::value::to_raw_value(
-            &serde_json::json!({
-            "sessionId": "sess-1",
-            "toolCallId": tool_call_id,
-            "planContent": plan_content,
-        }),
-        )
-        .unwrap();
-    let request = acp::ExtRequest::new("x.ai/exit_plan_mode", raw.into());
+    let request = acp_fixtures::ext_request(
+        "x.ai/exit_plan_mode",
+        &serde_json::json!({
+                "sessionId": "sess-1",
+                "toolCallId": tool_call_id,
+                "planContent": plan_content,
+            }),
+    );
     let (tx, rx) = tokio::sync::oneshot::channel();
     (
         xai_acp_lib::AcpArgs {
@@ -391,9 +413,7 @@ pub(super) fn seed_pending_tool(agent: &mut AgentView, tool_call_id: &str, title
         .handle_update(
             acp::SessionUpdate::ToolCall(
                 acp::ToolCall::new(
-                        acp::ToolCallId::new(
-                            std::sync::Arc::from(tool_call_id.to_owned()),
-                        ),
+                        acp_fixtures::tool_call_id(tool_call_id),
                         title.to_string(),
                     )
                     .kind(acp::ToolKind::Other)
@@ -421,10 +441,7 @@ pub(super) fn queue_changed_ext(session_id: &str, ids: &[&str]) -> acp::ExtNotif
         })
         .collect();
     let params = serde_json::json!({ "sessionId": session_id, "entries": entries });
-    acp::ExtNotification::new(
-        "x.ai/queue/changed",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/queue/changed", &params)
 }
 /// Build a `x.ai/queue/changed` notification carrying `runningPromptId`.
 pub(super) fn queue_changed_running(
@@ -458,21 +475,22 @@ pub(super) fn queue_changed_running_ex(
         .collect();
     let mut params = serde_json::json!({ "sessionId": session_id, "entries": entries });
     if let Some(r) = running {
-        params["runningPromptId"] = serde_json::Value::String(r.to_string());
+        json_set(
+            &mut params,
+            "runningPromptId",
+            serde_json::Value::String(r.to_string()),
+        );
     }
     if let Some(t) = running_text {
-        params["runningText"] = serde_json::Value::String(t.to_string());
+        json_set(&mut params, "runningText", serde_json::Value::String(t.to_string()));
     }
     if let Some(k) = running_kind {
-        params["runningKind"] = serde_json::Value::String(k.to_string());
+        json_set(&mut params, "runningKind", serde_json::Value::String(k.to_string()));
     }
     if let Some(segs) = running_combined_texts {
-        params["runningCombinedTexts"] = serde_json::json!(segs);
+        json_set(&mut params, "runningCombinedTexts", serde_json::json!(segs));
     }
-    acp::ExtNotification::new(
-        "x.ai/queue/changed",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&params).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/queue/changed", &params)
 }
 /// Fixture: p1 runs locally; promoted queued bash b1's adoption is stashed.
 pub(super) fn app_with_running_p1_and_stashed_b1() -> AppView {
@@ -500,16 +518,16 @@ pub(super) fn send_tool_call_update(
 ) {
     let mut meta = serde_json::json!({ "promptId": prompt_id });
     if let Some(eid) = event_id {
-        meta["eventId"] = serde_json::Value::String(eid.to_string());
+        json_set(&mut meta, "eventId", serde_json::Value::String(eid.to_string()));
     }
     let (tx, _rx) = tokio::sync::oneshot::channel();
     handle(
         AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
-            request: acp::SessionNotification::new(
-                    acp::SessionId::new("sess-1"),
+            request: acp_fixtures::session_notification(
+                    "sess-1",
                     acp::SessionUpdate::ToolCall(
                         acp::ToolCall::new(
-                                acp::ToolCallId::new(tool_id.to_owned()),
+                                acp_fixtures::tool_call_id(tool_id),
                                 format!("tool {tool_id}"),
                             )
                             .kind(acp::ToolKind::Execute)
@@ -550,13 +568,6 @@ pub(super) fn tool_call_block_count(agent: &AgentView) -> usize {
         .filter(|e| matches!(&e.block, RenderBlock::ToolCall(_)))
         .count()
 }
-pub(super) fn make_inject_notif(payload: &serde_json::Value) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(payload).unwrap();
-    acp::ExtNotification::new(
-        "x.ai/scheduled_task_inject_prompt",
-        std::sync::Arc::from(raw),
-    )
-}
 pub(super) fn make_fired_notif(
     session_id: &str,
     task_id: &str,
@@ -565,7 +576,7 @@ pub(super) fn make_fired_notif(
     next_fire_at: Option<&str>,
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::ScheduledTaskFired {
             task_id: task_id.into(),
             prompt: prompt.into(),
@@ -575,8 +586,7 @@ pub(super) fn make_fired_notif(
         },
         meta: None,
     };
-    let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/scheduled_task_fired", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/scheduled_task_fired", &notif)
 }
 pub(super) fn make_fired_notif_with_subagent(
     session_id: &str,
@@ -584,7 +594,7 @@ pub(super) fn make_fired_notif_with_subagent(
     subagent_id: &str,
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::ScheduledTaskFired {
             task_id: task_id.into(),
             prompt: "p".into(),
@@ -594,14 +604,18 @@ pub(super) fn make_fired_notif_with_subagent(
         },
         meta: None,
     };
-    let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/scheduled_task_fired", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/scheduled_task_fired", &notif)
 }
 /// Set up an app with two agents; the active view points to agent 1, but agent 0 owns the scheduled task.
 /// Handlers that gate on `active_view` will mutate the wrong agent (or silently no-op).
 pub(super) fn make_app_two_agents() -> AppView {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let mut app = AppView::new(tx.clone(), ModelState::default(), Vec::new());
+    let mut app = AppView::new(
+        tx.clone(),
+        ModelState::default(),
+        Vec::new(),
+        crate::render::draw::EscapeWriter::disconnected(),
+    );
     let id0 = AgentId(0);
     let agent0 = make_agent(Some("sess-owner"));
     app.agents.insert(id0, agent0);
@@ -631,14 +645,9 @@ pub(super) fn announcements_update_notif(
     r#gen: u64,
     announcements: &[xai_grok_announcements::RemoteAnnouncement],
 ) -> acp::ExtNotification {
-    acp::ExtNotification::new(
+    acp_fixtures::ext_notification(
         "x.ai/announcements/update",
-        std::sync::Arc::from(
-            serde_json::value::to_raw_value(
-                    &serde_json::json!({ "gen": r#gen, "announcements": announcements }),
-                )
-                .unwrap(),
-        ),
+        &serde_json::json!({ "gen": r#gen, "announcements": announcements }),
     )
 }
 /// Id of the item the banner slot currently selects (`None` means the banner is closed).
@@ -657,7 +666,7 @@ pub(super) fn make_created_ext_notif(
     next_fire_at: Option<&str>,
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::ScheduledTaskCreated {
             task_id: task_id.into(),
             prompt: prompt.into(),
@@ -666,8 +675,7 @@ pub(super) fn make_created_ext_notif(
         },
         meta: None,
     };
-    let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/scheduled_task_created", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/scheduled_task_created", &notif)
 }
 pub(super) fn make_deleted_ext_notif(
     session_id: &str,
@@ -687,27 +695,24 @@ pub(super) fn make_deleted_ext_notif_with_reason(
     is_replay: bool,
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::ScheduledTaskDeleted {
             task_id: task_id.into(),
             reason,
         },
         meta: is_replay.then(crate::acp::meta::ReplayMetaStamp::replayed),
     };
-    let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/scheduled_task_deleted", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/scheduled_task_deleted", &notif)
 }
 pub(super) fn make_token_notification_message(
     session_id: &str,
     total_tokens: u64,
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    let request = acp::SessionNotification::new(
-            acp::SessionId::new(session_id),
+    let request = acp_fixtures::session_notification(
+            session_id,
             acp::SessionUpdate::AgentMessageChunk(
-                acp::ContentChunk::new(
-                    acp::ContentBlock::Text(acp::TextContent::new("hi")),
-                ),
+                acp::ContentChunk::new(acp_fixtures::text_block("hi")),
             ),
         )
         .meta(serde_json::json!({
@@ -725,10 +730,10 @@ pub(super) fn make_agent_chunk_message(
     text: &str,
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    let request = acp::SessionNotification::new(
-        acp::SessionId::new(session_id),
+    let request = acp_fixtures::session_notification(
+        session_id,
         acp::SessionUpdate::AgentMessageChunk(
-            acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text))),
+            acp::ContentChunk::new(acp_fixtures::text_block(text)),
         ),
     );
     AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
@@ -751,12 +756,10 @@ pub(super) fn make_agent_chunk_meta(
         meta.insert("eventId".to_string(), serde_json::json!(eid));
     }
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    let request = acp::SessionNotification::new(
-            acp::SessionId::new(session_id),
+    let request = acp_fixtures::session_notification(
+            session_id,
             acp::SessionUpdate::AgentMessageChunk(
-                acp::ContentChunk::new(
-                    acp::ContentBlock::Text(acp::TextContent::new(text)),
-                ),
+                acp::ContentChunk::new(acp_fixtures::text_block(text)),
             ),
         )
         .meta(serde_json::Value::Object(meta).as_object().cloned());
@@ -821,8 +824,8 @@ pub(super) fn plan_update_msg(
     }
     let (tx, _rx) = tokio::sync::oneshot::channel();
     AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
-        request: acp::SessionNotification::new(
-                acp::SessionId::new(session_id),
+        request: acp_fixtures::session_notification(
+                session_id,
                 acp::SessionUpdate::Plan(acp::Plan::new(entries)),
             )
             .meta(serde_json::Value::Object(meta).as_object().cloned()),
@@ -830,14 +833,14 @@ pub(super) fn plan_update_msg(
     })
 }
 pub(super) fn todo_contents(app: &AppView, id: AgentId) -> Vec<String> {
-    app.agents[&id].todo.todos().iter().map(|t| t.content.clone()).collect()
+    test_agent(app, id).todo.todos().iter().map(|t| t.content.clone()).collect()
 }
 pub(super) fn xai_model_switch_notif(
     session_id: &str,
     event_id: &str,
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::ModelAutoSwitched {
             previous_model_id: "m-old".into(),
             new_model_id: "m-new".into(),
@@ -845,24 +848,18 @@ pub(super) fn xai_model_switch_notif(
         },
         meta: Some(serde_json::json!({ "eventId": event_id })),
     };
-    acp::ExtNotification::new(
-        "x.ai/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/session/update", &payload)
 }
 pub(super) fn xai_unhandled_notif(
     session_id: &str,
     event_id: &str,
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::MemoryFlushStarted,
         meta: Some(serde_json::json!({ "eventId": event_id })),
     };
-    acp::ExtNotification::new(
-        "x.ai/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/session/update", &payload)
 }
 /// Build an `agent_message_chunk` notification carrying both `totalTokens` and an explicit `eventId`, for context/dedup interaction tests.
 pub(super) fn make_token_notification_with_event(
@@ -871,12 +868,10 @@ pub(super) fn make_token_notification_with_event(
     event_id: &str,
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    let request = acp::SessionNotification::new(
-            acp::SessionId::new(session_id),
+    let request = acp_fixtures::session_notification(
+            session_id,
             acp::SessionUpdate::AgentMessageChunk(
-                acp::ContentChunk::new(
-                    acp::ContentBlock::Text(acp::TextContent::new("hi")),
-                ),
+                acp::ContentChunk::new(acp_fixtures::text_block("hi")),
             ),
         )
         .meta(
@@ -894,14 +889,13 @@ pub(super) fn make_token_notification_with_event(
 }
 /// Build an `x.ai/session/prompt_complete` ext-notification for `session_id`.
 pub(super) fn prompt_complete_ext(session_id: &str) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(
-            &serde_json::json!({
-            "sessionId": session_id,
-            "stopReason": "end_turn",
-        }),
-        )
-        .unwrap();
-    acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification(
+        "x.ai/session/prompt_complete",
+        &serde_json::json!({
+                "sessionId": session_id,
+                "stopReason": "end_turn",
+            }),
+    )
 }
 /// Insert a fresh agent at `id` with an optional pre-assigned session id.
 pub(super) fn insert_agent(app: &mut AppView, id: AgentId, session_id: Option<&str>) {
@@ -918,35 +912,32 @@ pub(super) fn prompt_complete_ext_with_reason(
             "stopReason": stop_reason,
         });
     if let Some(r) = agent_result {
-        payload["agentResult"] = serde_json::json!(r);
+        json_set(&mut payload, "agentResult", serde_json::json!(r));
     }
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/session/prompt_complete", &payload)
 }
 /// Failed `x.ai/session/prompt_complete` carrying the typed `errorKind`.
 /// Built through the typed [`PromptCompletePayload`] so the test wire shape can never drift from what `handle_prompt_complete` parses.
-/// Callers pass an `agent_result` with no canonical truncation text.
 /// A rail test therefore fails if its typed-kind read is deleted; the text fallback cannot mask it.
 pub(super) fn prompt_complete_ext_failed_with_error_kind(
     session_id: &str,
     agent_result: &str,
     error_kind: &str,
 ) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(
-            &PromptCompletePayload {
-                session_id: session_id.to_string(),
-                stop_reason: Some("error".to_string()),
-                prompt_id: None,
-                agent_result: Some(agent_result.to_string()),
-                cancel_trigger: None,
-                cancellation_category: None,
-                cancellation_context: None,
-                error_kind: Some(error_kind.to_string()),
-                meta: None,
-            },
-        )
-        .unwrap();
-    acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification(
+        "x.ai/session/prompt_complete",
+        &PromptCompletePayload {
+            session_id: session_id.to_string(),
+            stop_reason: Some("error".to_string()),
+            prompt_id: None,
+            agent_result: Some(agent_result.to_string()),
+            cancel_trigger: None,
+            cancellation_category: None,
+            cancellation_context: None,
+            error_kind: Some(error_kind.to_string()),
+            meta: None,
+        },
+    )
 }
 /// Build an `x.ai/session/prompt_complete` ext-notification carrying a `promptId` (shells with the lost-response fix).
 /// Built through the typed [`PromptCompletePayload`] so the test wire shape can never drift from what `handle_prompt_complete` parses.
@@ -955,21 +946,20 @@ pub(super) fn prompt_complete_ext_with_prompt_id(
     prompt_id: &str,
     stop_reason: &str,
 ) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(
-            &PromptCompletePayload {
-                session_id: session_id.to_string(),
-                stop_reason: Some(stop_reason.to_string()),
-                prompt_id: Some(prompt_id.to_string()),
-                agent_result: None,
-                cancel_trigger: None,
-                cancellation_category: None,
-                cancellation_context: None,
-                error_kind: None,
-                meta: None,
-            },
-        )
-        .unwrap();
-    acp::ExtNotification::new("x.ai/session/prompt_complete", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification(
+        "x.ai/session/prompt_complete",
+        &PromptCompletePayload {
+            session_id: session_id.to_string(),
+            stop_reason: Some(stop_reason.to_string()),
+            prompt_id: Some(prompt_id.to_string()),
+            agent_result: None,
+            cancel_trigger: None,
+            cancellation_category: None,
+            cancellation_context: None,
+            error_kind: None,
+            meta: None,
+        },
+    )
 }
 /// Build a live `AgentMessageChunk` whose meta carries `promptId` plus a `turnStartMs` `start_ms_ago` milliseconds in the past.
 /// Drives the viewer adoption path with a known authoritative turn start.
@@ -980,12 +970,10 @@ pub(super) fn make_viewer_chunk_with_turn_start(
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
     let turn_start_ms = chrono::Utc::now().timestamp_millis() - start_ms_ago;
-    let request = acp::SessionNotification::new(
-            acp::SessionId::new(session_id),
+    let request = acp_fixtures::session_notification(
+            session_id,
             acp::SessionUpdate::AgentMessageChunk(
-                acp::ContentChunk::new(
-                    acp::ContentBlock::Text(acp::TextContent::new("driver chunk")),
-                ),
+                acp::ContentChunk::new(acp_fixtures::text_block("driver chunk")),
             ),
         )
         .meta(
@@ -1010,12 +998,10 @@ pub(super) fn make_replay_chunk_with_turn_start(
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
     let turn_start_ms = chrono::Utc::now().timestamp_millis() - start_ms_ago;
-    let request = acp::SessionNotification::new(
-            acp::SessionId::new(session_id),
+    let request = acp_fixtures::session_notification(
+            session_id,
             acp::SessionUpdate::AgentMessageChunk(
-                acp::ContentChunk::new(
-                    acp::ContentBlock::Text(acp::TextContent::new("replayed chunk")),
-                ),
+                acp::ContentChunk::new(acp_fixtures::text_block("replayed chunk")),
             ),
         )
         .meta(
@@ -1041,10 +1027,13 @@ pub(super) fn send_replay_suppressed_tool_call(
     let (tx, _rx) = tokio::sync::oneshot::channel();
     handle(
         AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
-            request: acp::SessionNotification::new(
-                    acp::SessionId::new(session_id),
+            request: acp_fixtures::session_notification(
+                    session_id,
                     acp::SessionUpdate::ToolCall(
-                        acp::ToolCall::new(acp::ToolCallId::new("todo-1"), "TodoWrite")
+                        acp::ToolCall::new(
+                                acp_fixtures::tool_call_id("todo-1"),
+                                "TodoWrite",
+                            )
                             .kind(acp::ToolKind::Other)
                             .status(acp::ToolCallStatus::Completed),
                     ),
@@ -1071,11 +1060,11 @@ pub(super) fn send_replay_bash_tool_call(
     let (tx, _rx) = tokio::sync::oneshot::channel();
     handle(
         AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
-            request: acp::SessionNotification::new(
-                    acp::SessionId::new(session_id),
+            request: acp_fixtures::session_notification(
+                    session_id,
                     acp::SessionUpdate::ToolCall(
                         acp::ToolCall::new(
-                                acp::ToolCallId::new("bash-mode-1"),
+                                acp_fixtures::tool_call_id("bash-mode-1"),
                                 "Execute `ls`",
                             )
                             .kind(acp::ToolKind::Execute)
@@ -1109,7 +1098,7 @@ pub(super) fn xai_turn_completed_notif(
     is_replay: bool,
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::TurnCompleted {
             prompt_id: prompt_id.into(),
             stop_reason: stop_reason.into(),
@@ -1120,10 +1109,7 @@ pub(super) fn xai_turn_completed_notif(
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };
-    acp::ExtNotification::new(
-        "x.ai/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/session/update", &payload)
 }
 /// Replay `TurnCompleted` with optional elapsed, agent_result, and extra `_meta`.
 pub(super) fn xai_turn_completed_replay(
@@ -1137,11 +1123,11 @@ pub(super) fn xai_turn_completed_replay(
     let mut meta = serde_json::json!({ "isReplay": true });
     if let Some(obj) = extra_meta.as_object() {
         for (k, v) in obj {
-            meta[k] = v.clone();
+            json_set(&mut meta, k.clone(), v.clone());
         }
     }
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::TurnCompleted {
             prompt_id: prompt_id.into(),
             stop_reason: stop_reason.into(),
@@ -1152,10 +1138,7 @@ pub(super) fn xai_turn_completed_replay(
         },
         meta: Some(meta),
     };
-    acp::ExtNotification::new(
-        "x.ai/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/session/update", &payload)
 }
 /// Failed `TurnCompleted` carrying `agent_result` plus the typed `error_kind` field.
 /// Callers pass an `agent_result` with no canonical truncation text.
@@ -1168,7 +1151,7 @@ pub(super) fn xai_turn_completed_failed_with_error_kind(
     is_replay: bool,
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::TurnCompleted {
             prompt_id: prompt_id.into(),
             stop_reason: "error".into(),
@@ -1179,10 +1162,7 @@ pub(super) fn xai_turn_completed_failed_with_error_kind(
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };
-    acp::ExtNotification::new(
-        "x.ai/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/session/update", &payload)
 }
 /// Live `TurnCompleted` stamped with `_meta.cancelTrigger` (send-now / ctrl_c).
 pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
@@ -1192,7 +1172,7 @@ pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
     cancel_trigger: &str,
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::TurnCompleted {
             prompt_id: prompt_id.into(),
             stop_reason: stop_reason.into(),
@@ -1208,10 +1188,7 @@ pub(super) fn xai_turn_completed_notif_with_cancel_trigger(
             }),
         ),
     };
-    acp::ExtNotification::new(
-        "x.ai/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/session/update", &payload)
 }
 /// A live durable `TurnCompleted`, optionally stamped with the shell completion clock (`agentTimestampMs`) the wake marker's elapsed reads.
 pub(super) fn xai_wake_turn_completed_notif(
@@ -1221,10 +1198,10 @@ pub(super) fn xai_wake_turn_completed_notif(
 ) -> acp::ExtNotification {
     let mut meta = serde_json::json!({ "isReplay": false });
     if let Some(ms) = agent_timestamp_ms {
-        meta["agentTimestampMs"] = ms.into();
+        json_set(&mut meta, "agentTimestampMs", ms.into());
     }
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::TurnCompleted {
             prompt_id: prompt_id.into(),
             stop_reason: "end_turn".into(),
@@ -1235,10 +1212,7 @@ pub(super) fn xai_wake_turn_completed_notif(
         },
         meta: Some(meta),
     };
-    acp::ExtNotification::new(
-        "x.ai/session/update",
-        std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
-    )
+    acp_fixtures::ext_notification("x.ai/session/update", &payload)
 }
 /// Build a `HookExecution` update (one successful run) on the `x.ai/session/update` rail, optionally stamped `isReplay`.
 /// `prompt_id == None` models pre-attribution shells.
@@ -1269,7 +1243,7 @@ pub(super) fn xai_hook_execution_notif_with_runs(
     runs: Vec<xai_grok_shell::extensions::notification::HookRunEntryDto>,
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::HookExecution {
             event_name: event_name.into(),
             tool_name: None,
@@ -1278,43 +1252,7 @@ pub(super) fn xai_hook_execution_notif_with_runs(
         },
         meta: Some(serde_json::json!({ "isReplay": is_replay })),
     };
-    acp::ExtNotification::new(
-        "x.ai/session/update",
-        serde_json::value::to_raw_value(&payload).unwrap().into(),
-    )
-}
-pub(super) fn xai_hook_execution_notif(
-    session_id: &str,
-    event_name: &str,
-    is_replay: bool,
-) -> acp::ExtNotification {
-    xai_hook_execution_notif_for_prompt(session_id, event_name, None, is_replay)
-}
-pub(super) fn count_lifecycle_blocks(
-    sb: &crate::scrollback::state::ScrollbackState,
-) -> usize {
-    use crate::scrollback::blocks::tool::ToolCallBlock;
-    (0..sb.len())
-        .filter(|i| {
-            matches!(
-                    sb.get(*i).map(|e| &e.block),
-                    Some(RenderBlock::ToolCall(ToolCallBlock::Lifecycle(_)))
-                )
-        })
-        .count()
-}
-/// Stop-hook groups on the last turn-terminal session-event marker, if any.
-pub(super) fn last_marker_stop_hook_groups(
-    sb: &crate::scrollback::state::ScrollbackState,
-) -> Option<usize> {
-    (0..sb.len())
-        .rev()
-        .find_map(|i| match sb.get(i).map(|e| &e.block) {
-            Some(RenderBlock::SessionEvent(b)) if b.event.is_turn_terminal() => {
-                Some(b.stop_hooks.len())
-            }
-            _ => None,
-        })
+    acp_fixtures::ext_notification("x.ai/session/update", &payload)
 }
 /// Work-only status lines ("N … still running") pushed as system rows.
 /// Never pushed in production; tests assert emptiness.
@@ -1351,10 +1289,9 @@ pub(super) fn interjection_ext_with_id(
 ) -> acp::ExtNotification {
     let mut payload = serde_json::json!({ "sessionId": session_id, "text": text });
     if let Some(id) = interjection_id {
-        payload["interjectionId"] = serde_json::json!(id);
+        json_set(&mut payload, "interjectionId", serde_json::json!(id));
     }
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/session/interjection", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/session/interjection", &payload)
 }
 /// Text of the most recent user prompt block in scrollback, if any.
 /// Interjections render as standard user prompt blocks.
@@ -1398,8 +1335,8 @@ pub(super) fn make_plan_message(session_id: &str, entries: &[&str]) -> AcpClient
             acp::PlanEntryStatus::Pending,
         ))
         .collect();
-    let request = acp::SessionNotification::new(
-        acp::SessionId::new(session_id),
+    let request = acp_fixtures::session_notification(
+        session_id,
         acp::SessionUpdate::Plan(acp::Plan::new(plan_entries)),
     );
     AcpClientMessage::SessionNotification(xai_acp_lib::AcpArgs {
@@ -1417,8 +1354,8 @@ pub(super) fn make_commands_update_message(
         .iter()
         .map(|name| acp::AvailableCommand::new(*name, String::new()))
         .collect();
-    let request = acp::SessionNotification::new(
-        acp::SessionId::new(session_id),
+    let request = acp_fixtures::session_notification(
+        session_id,
         acp::SessionUpdate::AvailableCommandsUpdate(
             acp::AvailableCommandsUpdate::new(commands),
         ),
@@ -1436,11 +1373,11 @@ pub(super) fn make_bash_stdout_message(
     stdout: &str,
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    let request = acp::SessionNotification::new(
-        acp::SessionId::new(session_id),
+    let request = acp_fixtures::session_notification(
+        session_id,
         acp::SessionUpdate::ToolCallUpdate(
-            acp::ToolCallUpdate::new(
-                acp::ToolCallId::new(tool_call_id),
+            acp_fixtures::tool_call_update(
+                tool_call_id,
                 acp::ToolCallUpdateFields::new()
                     .raw_output(
                         Some(
@@ -1477,12 +1414,11 @@ pub(super) fn make_ext_session_notification_with_method(
 ) -> AcpClientMessage {
     let (tx, _rx) = tokio::sync::oneshot::channel();
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update,
         meta: None,
     };
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    let request = acp::ExtNotification::new(method, raw.into());
+    let request = acp_fixtures::ext_notification(method, &payload);
     AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
         request,
         response_tx: tx,
@@ -1493,7 +1429,20 @@ pub(super) fn test_subagent_spawned(
     parent_sid: &str,
     child_sid: &str,
 ) -> XaiSessionUpdate {
-    test_subagent_spawned_for_workflow(parent_sid, child_sid, None)
+    test_subagent_spawned_for_attempt(parent_sid, child_sid, Some("at1.one"))
+}
+pub(super) fn test_subagent_spawned_for_attempt(
+    parent_sid: &str,
+    child_sid: &str,
+    attempt_id: Option<&str>,
+) -> XaiSessionUpdate {
+    let mut update = test_subagent_spawned_for_workflow(parent_sid, child_sid, None);
+    let XaiSessionUpdate::SubagentSpawned { attempt_id: wire_attempt, .. } = &mut update
+    else {
+        unreachable!();
+    };
+    *wire_attempt = attempt_id.map(str::to_owned);
+    update
 }
 pub(super) fn test_subagent_spawned_for_workflow(
     parent_sid: &str,
@@ -1502,6 +1451,7 @@ pub(super) fn test_subagent_spawned_for_workflow(
 ) -> XaiSessionUpdate {
     XaiSessionUpdate::SubagentSpawned {
         subagent_id: child_sid.into(),
+        attempt_id: Some("at1.one".into()),
         parent_session_id: parent_sid.into(),
         parent_prompt_id: None,
         child_session_id: child_sid.into(),
@@ -1515,11 +1465,19 @@ pub(super) fn test_subagent_spawned_for_workflow(
         role: None,
         model: None,
         resumed_from: None,
+        agent_address: None,
     }
 }
 pub(super) fn test_subagent_finished(child_sid: &str) -> XaiSessionUpdate {
+    test_subagent_finished_for_attempt(child_sid, Some("at1.one"))
+}
+pub(super) fn test_subagent_finished_for_attempt(
+    child_sid: &str,
+    attempt_id: Option<&str>,
+) -> XaiSessionUpdate {
     XaiSessionUpdate::SubagentFinished {
         subagent_id: child_sid.into(),
+        attempt_id: attempt_id.map(str::to_owned),
         child_session_id: child_sid.into(),
         status: "completed".into(),
         error: None,
@@ -1537,6 +1495,7 @@ pub(super) fn test_subagent_progress(
 ) -> XaiSessionUpdate {
     XaiSessionUpdate::SubagentProgress {
         subagent_id: child_sid.into(),
+        attempt_id: Some("at1.one".into()),
         parent_session_id: parent_sid.into(),
         child_session_id: child_sid.into(),
         duration_ms: 100,
@@ -1565,7 +1524,10 @@ pub(super) fn snapshot_after_subagent_spawn(
 ) -> SubagentSpawnSnapshot {
     let agent = app.agents.get(&AgentId(0)).unwrap();
     let info = agent.subagent_sessions.get(child_sid).unwrap();
-    let entry_id = info.scrollback_entry_id.expect("scrollback_entry_id after spawn");
+    let entry_id = info
+        .attempt
+        .scrollback_entry_id
+        .expect("scrollback_entry_id after spawn");
     let entry = agent.scrollback.get_by_id(entry_id).unwrap();
     let RenderBlock::Subagent(sb) = &entry.block else {
         panic!("expected Subagent block after spawn");
@@ -1577,7 +1539,7 @@ pub(super) fn snapshot_after_subagent_spawn(
         scrollback_len: agent.scrollback.len(),
         child_session_id: sb.child_session_id.clone(),
         block_kind: sb.kind.clone(),
-        scrollback_entry_id: info.scrollback_entry_id,
+        scrollback_entry_id: info.attempt.scrollback_entry_id,
     }
 }
 /// Snapshot after SubagentFinished for method-parity tests.
@@ -1595,17 +1557,20 @@ pub(super) fn snapshot_after_subagent_finish(
 ) -> SubagentFinishSnapshot {
     let agent = app.agents.get(&AgentId(0)).unwrap();
     let info = agent.subagent_sessions.get(child_sid).unwrap();
-    let entry_id = info.scrollback_entry_id.expect("scrollback_entry_id after finish");
+    let entry_id = info
+        .attempt
+        .scrollback_entry_id
+        .expect("scrollback_entry_id after finish");
     let entry = agent.scrollback.get_by_id(entry_id).unwrap();
     let RenderBlock::Subagent(sb) = &entry.block else {
         panic!("expected Subagent block after finish");
     };
     SubagentFinishSnapshot {
-        finished: info.finished,
-        status: info.status.as_ref().map(|s| s.to_string()),
-        tool_calls: info.tool_calls,
-        turns: info.turns,
-        duration_ms: info.duration_ms,
+        finished: info.is_finished(),
+        status: info.attempt.status.as_ref().map(|s| s.to_string()),
+        tool_calls: info.attempt.tool_calls,
+        turns: info.attempt.turns,
+        duration_ms: info.attempt.duration_ms,
         block_kind: sb.kind.clone(),
     }
 }
@@ -1734,7 +1699,7 @@ pub(super) fn write_subagent_meta_json(
     let json = format!(r#"{{"prompt":{}}}"#, serde_json::to_string(prompt).unwrap());
     std::fs::write(sessions_dir.join("meta.json"), json).unwrap();
 }
-/// The persisted echo of a task prompt wraps differently from the injected copy, so compare with internal whitespace collapsed.
+/// The echoed task prompt may wrap differently from the `meta.json` text, so compare with internal whitespace collapsed.
 fn subagent_prompt_text_eq(a: &str, b: &str) -> bool {
     a.split_whitespace().eq(b.split_whitespace())
 }
@@ -1819,11 +1784,13 @@ pub(super) fn dispatch_goal_update(
     update: serde_json::Value,
 ) -> bool {
     let raw_payload = serde_json::json!({ "sessionId": "sess-A", "update": update });
-    let raw = serde_json::value::to_raw_value(&raw_payload).unwrap();
     let (tx, _rx) = tokio::sync::oneshot::channel();
     handle(
         AcpClientMessage::ExtNotification(xai_acp_lib::AcpArgs {
-            request: acp::ExtNotification::new("x.ai/session_notification", raw.into()),
+            request: acp_fixtures::ext_notification(
+                "x.ai/session_notification",
+                &raw_payload,
+            ),
             response_tx: tx,
         }),
         app,
@@ -1848,9 +1815,9 @@ pub(super) fn make_permission_message(
     use std::sync::Arc;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let request = acp::RequestPermissionRequest::new(
-        acp::SessionId::new(session_id),
-        acp::ToolCallUpdate::new(
-            acp::ToolCallId::new(Arc::from("call-perm-1")),
+        acp_fixtures::session_id(session_id),
+        acp_fixtures::tool_call_update(
+            "call-perm-1",
             acp::ToolCallUpdateFields::default(),
         ),
         vec![acp::PermissionOption::new(
@@ -1872,14 +1839,13 @@ pub(super) fn interaction_resolved_ext(
     tool_call_id: &str,
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::InteractionResolved {
             tool_call_id: tool_call_id.into(),
         },
         meta: None,
     };
-    let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/session_notification", &notif)
 }
 pub(super) fn make_git_head_changed_notif(
     session_id: &str,
@@ -1893,8 +1859,7 @@ pub(super) fn make_git_head_changed_notif(
         is_worktree,
         main_repo: main_repo.map(str::to_string),
     };
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/git_head_changed", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/git_head_changed", &payload)
 }
 pub(super) fn make_task_backgrounded_notif(
     session_id: &str,
@@ -1914,7 +1879,7 @@ pub(super) fn make_task_backgrounded_notif_with_detach(
     detach: bool,
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::TaskBackgrounded {
             tool_call_id: tool_call_id.into(),
             task_id: task_id.into(),
@@ -1927,8 +1892,7 @@ pub(super) fn make_task_backgrounded_notif_with_detach(
         },
         meta: None,
     };
-    let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/task_backgrounded", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/task_backgrounded", &notif)
 }
 /// Like [`make_task_backgrounded_notif`] but stamped `_meta.isReplay: true` via the typed [`ReplayMetaStamp`](crate::acp::meta::ReplayMetaStamp).
 /// Mirrors the `session/load` replay envelope.
@@ -1939,7 +1903,7 @@ pub(super) fn make_replayed_task_backgrounded_notif(
     command: &str,
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::TaskBackgrounded {
             tool_call_id: tool_call_id.into(),
             task_id: task_id.into(),
@@ -1952,8 +1916,7 @@ pub(super) fn make_replayed_task_backgrounded_notif(
         },
         meta: Some(crate::acp::meta::ReplayMetaStamp::replayed()),
     };
-    let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/session/update", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/session/update", &notif)
 }
 /// Register a pending Execute tool call in the tracker and send an InProgress update to create the scrollback entry.
 /// Returns the agent for further use.
@@ -1962,7 +1925,7 @@ pub(super) fn setup_pending_execute_tool(app: &mut AppView, tc_id: &str) {
     let meta = crate::acp::meta::NotificationMeta::default();
     let tc = agent_client_protocol::SessionUpdate::ToolCall(
         agent_client_protocol::ToolCall::new(
-                agent_client_protocol::ToolCallId::new(std::sync::Arc::from(tc_id)),
+                acp_fixtures::tool_call_id(tc_id),
                 "Execute `sleep 9999`".to_string(),
             )
             .kind(agent_client_protocol::ToolKind::Execute)
@@ -1972,8 +1935,8 @@ pub(super) fn setup_pending_execute_tool(app: &mut AppView, tc_id: &str) {
     );
     agent.session.tracker.handle_update(tc, &meta, &mut agent.scrollback);
     let update = agent_client_protocol::SessionUpdate::ToolCallUpdate(
-        agent_client_protocol::ToolCallUpdate::new(
-            agent_client_protocol::ToolCallId::new(std::sync::Arc::from(tc_id)),
+        acp_fixtures::tool_call_update(
+            tc_id,
             agent_client_protocol::ToolCallUpdateFields::new()
                 .status(Some(agent_client_protocol::ToolCallStatus::InProgress)),
         ),
@@ -2002,8 +1965,8 @@ pub(super) fn send_late_bg_detection(app: &mut AppView, tc_id: &str) {
         was_bare_echo: false,
     };
     let update = agent_client_protocol::SessionUpdate::ToolCallUpdate(
-        agent_client_protocol::ToolCallUpdate::new(
-            agent_client_protocol::ToolCallId::new(std::sync::Arc::from(tc_id)),
+        acp_fixtures::tool_call_update(
+            tc_id,
             agent_client_protocol::ToolCallUpdateFields::new()
                 .status(Some(agent_client_protocol::ToolCallStatus::InProgress))
                 .raw_output(serde_json::to_value(ToolOutput::Bash(bash)).ok())
@@ -2028,7 +1991,7 @@ pub(super) fn make_app_with_parent_and_child(
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.subagent_sessions.insert(child_sid.into(), make_subagent_info(child_sid));
     let child_view = make_agent(Some(child_sid));
-    agent.subagent_views.insert(child_sid.into(), Box::new(child_view));
+    agent.insert_test_child(child_sid.into(), Box::new(child_view));
     app
 }
 pub(super) fn make_task_completed_notif(
@@ -2058,7 +2021,7 @@ pub(super) fn task_completed_notif(
 ) -> acp::ExtNotification {
     use xai_grok_tools::types::TaskSnapshot;
     let notif = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::TaskCompleted {
             task_snapshot: TaskSnapshot {
                 task_id: task_id.into(),
@@ -2088,8 +2051,7 @@ pub(super) fn task_completed_notif(
         },
         meta: None,
     };
-    let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/task_completed", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/task_completed", &notif)
 }
 pub(super) fn make_monitor_event_notif(
     session_id: &str,
@@ -2097,7 +2059,7 @@ pub(super) fn make_monitor_event_notif(
     event_text: &str,
 ) -> acp::ExtNotification {
     let notif = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
+        session_id: acp_fixtures::session_id(session_id),
         update: XaiSessionUpdate::MonitorEvent {
             task_id: task_id.into(),
             description: "test monitor".into(),
@@ -2105,11 +2067,10 @@ pub(super) fn make_monitor_event_notif(
         },
         meta: None,
     };
-    let raw = serde_json::value::to_raw_value(&notif).unwrap();
-    acp::ExtNotification::new("x.ai/monitor_event", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/monitor_event", &notif)
 }
 pub(super) fn make_model_info(id: &str) -> acp::ModelInfo {
-    acp::ModelInfo::new(acp::ModelId::new(std::sync::Arc::from(id)), id.to_string())
+    acp_fixtures::model_info(id, id)
 }
 pub(super) fn make_models_update_notif(
     current_model_id: &str,
@@ -2120,11 +2081,10 @@ pub(super) fn make_models_update_notif(
         .map(|id| make_model_info(id))
         .collect();
     let state = acp::SessionModelState::new(
-        acp::ModelId::new(std::sync::Arc::from(current_model_id)),
+        acp_fixtures::model_id(current_model_id),
         models,
     );
-    let raw = serde_json::value::to_raw_value(&state).unwrap();
-    acp::ExtNotification::new("x.ai/models/update", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/models/update", &state)
 }
 /// `x.ai/models/update` carrying a single reasoning-capable model whose catalog-default effort is `default_effort`.
 /// The broadcast reports that catalog default for every client, never the per-session selection.
@@ -2132,46 +2092,62 @@ pub(super) fn make_reasoning_models_update_notif(
     current_model_id: &str,
     default_effort: &str,
 ) -> acp::ExtNotification {
-    let mut info = make_model_info(current_model_id);
-    info.meta = serde_json::json!({
-            "supportsReasoningEffort": true,
-            "reasoningEffort": default_effort,
-        })
-        .as_object()
-        .cloned();
+    let info = acp_fixtures::model_info_with_meta(
+        current_model_id,
+        current_model_id,
+        serde_json::json!({
+                "supportsReasoningEffort": true,
+                "reasoningEffort": default_effort,
+            }),
+    );
     let state = acp::SessionModelState::new(
-        acp::ModelId::new(std::sync::Arc::from(current_model_id)),
+        acp_fixtures::model_id(current_model_id),
         vec![info],
     );
-    let raw = serde_json::value::to_raw_value(&state).unwrap();
-    acp::ExtNotification::new("x.ai/models/update", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/models/update", &state)
+}
+/// Adds model `id` with `default` as `totalContextTokens` and `windows` as `contextWindows`.
+pub(super) fn seed_windowed_model(
+    agent: &mut AgentView,
+    id: &str,
+    default: u64,
+    windows: &[u64],
+) {
+    let info = acp_fixtures::model_info_with_meta(
+        id,
+        id,
+        serde_json::json!({
+                "totalContextTokens": default,
+                "contextWindows": windows,
+            }),
+    );
+    agent.session.models.available.insert(acp_fixtures::model_id(id), info);
 }
 /// Seed a session's model catalog with the given ids and mark `current_model_id` as the active one (must be in the list).
 /// Used by the `ModelChanged` broadcast tests to set up a starting state that the simulated remote/local switch then transitions away from.
 pub(super) fn seed_models(agent: &mut AgentView, current: &str, available: &[&str]) {
     for id in available {
-        let model_id = acp::ModelId::new(std::sync::Arc::from(*id));
+        let model_id = acp_fixtures::model_id(id);
         agent.session.models.available.insert(model_id.clone(), make_model_info(id));
     }
-    agent.session.models.current = Some(
-        acp::ModelId::new(std::sync::Arc::from(current)),
-    );
+    agent.session.models.current = Some(acp_fixtures::model_id(current));
 }
 pub(super) fn model_changed_ext(
     session_id: &str,
     model_id: &str,
     reasoning_effort: Option<&str>,
+    context_window_selection: Option<u64>,
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::ModelChanged {
-            model_id: model_id.to_string(),
-            reasoning_effort: reasoning_effort.map(String::from),
-        },
+        session_id: acp_fixtures::session_id(session_id),
+        update: XaiSessionUpdate::model_changed(
+            model_id,
+            reasoning_effort.map(String::from),
+            context_window_selection,
+        ),
         meta: None,
     };
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/session_notification", &payload)
 }
 pub(super) fn model_changed_ext_with_event(
     session_id: &str,
@@ -2179,20 +2155,16 @@ pub(super) fn model_changed_ext_with_event(
     event_id: &str,
 ) -> acp::ExtNotification {
     let payload = SessionNotification {
-        session_id: acp::SessionId::new(session_id),
-        update: XaiSessionUpdate::ModelChanged {
-            model_id: model_id.to_string(),
-            reasoning_effort: None,
-        },
+        session_id: acp_fixtures::session_id(session_id),
+        update: XaiSessionUpdate::model_changed(model_id, None, None),
         meta: Some(serde_json::json!({ "eventId": event_id })),
     };
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/session_notification", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/session_notification", &payload)
 }
 pub(super) fn make_tool_call_update(title: &str) -> acp::SessionUpdate {
     acp::SessionUpdate::ToolCallUpdate(
-        acp::ToolCallUpdate::new(
-            acp::ToolCallId::new("tc-1"),
+        acp_fixtures::tool_call_update(
+            "tc-1",
             acp::ToolCallUpdateFields::new()
                 .title(Some(title.to_string()))
                 .status(Some(acp::ToolCallStatus::Completed)),
@@ -2201,7 +2173,7 @@ pub(super) fn make_tool_call_update(title: &str) -> acp::SessionUpdate {
 }
 pub(super) fn make_tool_call(title: &str) -> acp::SessionUpdate {
     acp::SessionUpdate::ToolCall(
-        acp::ToolCall::new(acp::ToolCallId::new("tc-2"), title.to_string())
+        acp::ToolCall::new(acp_fixtures::tool_call_id("tc-2"), title.to_string())
             .kind(acp::ToolKind::Other)
             .status(acp::ToolCallStatus::Pending)
             .content(vec![])
@@ -2218,14 +2190,13 @@ pub(super) fn make_mcp_init_progress_notif(
     total: u32,
     connected: u32,
 ) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(
-            &serde_json::json!({
-            "total": total,
-            "connected": connected,
-        }),
-        )
-        .unwrap();
-    acp::ExtNotification::new("x.ai/mcp/init_progress", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification(
+        "x.ai/mcp/init_progress",
+        &serde_json::json!({
+                "total": total,
+                "connected": connected,
+            }),
+    )
 }
 pub(super) fn make_mcps_modal_with_servers(
     servers: Vec<crate::views::mcps_modal::McpServerInfo>,
@@ -2254,6 +2225,7 @@ pub(super) fn seed_owner_agent_with_open_modal(app: &mut AppView) {
             tools: Vec::new(),
             enabled: true,
             source: "local".into(),
+            blocked_reason: None,
             wire_source: McpWireSource::Local,
             plugin_name: None,
             is_managed_gateway: false,
@@ -2281,15 +2253,13 @@ pub(super) fn make_server_status_notif(
         detail: None,
         tools,
     };
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp/server_status", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/mcp/server_status", &payload)
 }
 /// `mcp/servers_updated` real wire shape: `{ mcpServers: [...] }` with NO `sessionId`.
 /// Regression guard: anything that tries to extract a session id here must fail and fall through to the broadcast path.
 pub(super) fn make_servers_updated_notif() -> acp::ExtNotification {
     let payload = serde_json::json!({ "mcpServers": [] });
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp/servers_updated", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/mcp/servers_updated", &payload)
 }
 /// Real post-handshake / auth-recovery wire shape: `McpToolsChanged { sessionId, serverName, tools }`.
 pub(super) fn make_tools_changed_notif_post_h2(
@@ -2300,15 +2270,13 @@ pub(super) fn make_tools_changed_notif_post_h2(
         server_name: "grok_com_linear".to_string(),
         tools: Vec::new(),
     };
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp/tools_changed", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/mcp/tools_changed", &payload)
 }
 /// Legacy / forward-compat wire shape: older shells emit `{ serverName, tools }` with NO sessionId.
 /// The pager must fall back to active_view for this shape.
 pub(super) fn make_tools_changed_notif_pre_h2() -> acp::ExtNotification {
     let payload = serde_json::json!({ "serverName": "grok_com_linear", "tools": [] });
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp/tools_changed", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/mcp/tools_changed", &payload)
 }
 /// Real `mcp_initialized` wire shape: `{ sessionId, mcpToolCount, elapsedMs }`.
 pub(super) fn make_mcp_initialized_notif(session_id: &str) -> acp::ExtNotification {
@@ -2317,8 +2285,7 @@ pub(super) fn make_mcp_initialized_notif(session_id: &str) -> acp::ExtNotificati
             "mcpToolCount": 12_u64,
             "elapsedMs": 250_u64,
         });
-    let raw = serde_json::value::to_raw_value(&payload).unwrap();
-    acp::ExtNotification::new("x.ai/mcp_initialized", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification("x.ai/mcp_initialized", &payload)
 }
 /// Helper: `init_progress` notification carrying an explicit sessionId.
 pub(super) fn make_mcp_init_progress_notif_for(
@@ -2326,27 +2293,25 @@ pub(super) fn make_mcp_init_progress_notif_for(
     connected: u32,
     session_id: &str,
 ) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(
-            &serde_json::json!({
-            "total": total,
-            "connected": connected,
-            "sessionId": session_id,
-        }),
-        )
-        .unwrap();
-    acp::ExtNotification::new("x.ai/mcp/init_progress", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification(
+        "x.ai/mcp/init_progress",
+        &serde_json::json!({
+                "total": total,
+                "connected": connected,
+                "sessionId": session_id,
+            }),
+    )
 }
 /// Helper: `mcp_initialized` notification for a specific sessionId.
 pub(super) fn make_mcp_initialized_notif_for(session_id: &str) -> acp::ExtNotification {
-    let raw = serde_json::value::to_raw_value(
-            &serde_json::json!({
-            "sessionId": session_id,
-            "mcpToolCount": 0,
-            "elapsedMs": 0,
-        }),
-        )
-        .unwrap();
-    acp::ExtNotification::new("x.ai/mcp_initialized", std::sync::Arc::from(raw))
+    acp_fixtures::ext_notification(
+        "x.ai/mcp_initialized",
+        &serde_json::json!({
+                "sessionId": session_id,
+                "mcpToolCount": 0,
+                "elapsedMs": 0,
+            }),
+    )
 }
 mod permissions;
 mod session_events;
@@ -2358,10 +2323,12 @@ mod queue_and_adoption;
 mod plan_mode;
 mod reconnect;
 mod turn_completion;
+mod hooks;
 mod interjection;
 mod session_routing;
 mod plugins;
 mod subagents;
+mod subagent_attempt_lifecycle;
 mod goals;
 mod interactions;
 mod background_tasks;

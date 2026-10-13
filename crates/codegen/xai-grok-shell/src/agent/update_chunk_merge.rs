@@ -32,43 +32,8 @@ fn default_max_duration_ms() -> u64 {
     10 // 10 ms
 }
 
-/// Low-level buffer for ACP text chunks (agent message/thought chunks).
-///
-/// API:
-/// - `consume_chunk(...) -> Option<SessionNotification>` returns a notification to send now, typically the previously buffered one.
-///   `None` means keep buffering.
-/// - `flush() -> Option<SessionNotification>` returns any pending buffered notification to send.
-///
-/// Example of session notification:
-/// ```json
-/// {
-///   "sessionId":"019e0000-0000-7000-8000-000000000001",
-///   "update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":".g"}},
-///   "_meta":{
-///     "totalTokens":100,
-///     "eventId":"019e0000-0000-7000-8000-000000000001-0001",
-///     "agentTimestampMs":1700000000000,
-///     "updateType":"AgentMessageChunk",
-///     "updateParams":{"textPreview":".g"}
-///   }
-/// }
-/// ```
-/// ```json
-/// {
-///   "sessionId":"019e0000-0000-7000-8000-000000000001",
-///   "update":{
-///       "sessionUpdate":"agent_message_chunk",
-///       "content":{"type":"text","text":".,"}
-///   },
-///   "_meta":{
-///       "totalTokens":100,
-///       "eventId":"019e0000-0000-7000-8000-000000000001-0002",
-///       "agentTimestampMs":1700000000000,
-///       "updateType":"AgentMessageChunk",
-///       "updateParams":{"textPreview":".,"}
-///   }
-/// }
-/// ```
+/// Low-level buffer for ACP text chunks (agent message/thought chunks). API: `consume_chunk(...) -> Option<SessionNotification>` returns a notification to send now, typically the previously buffered one.
+/// `None` means keep buffering. `flush() -> Option<SessionNotification>` returns any pending buffered notification to send.
 pub(crate) struct ReplayBuffer {
     settings: Option<BufferingSettings>,
     pending: Option<SessionNotification>,
@@ -195,10 +160,9 @@ impl ReplayBuffer {
         }
     }
 
-    /// Two-by-two dispatch on protocol kind:
-    /// - Same kind on both sides: delegate to the per-kind merge function.
-    /// - Different kinds: can't merge, force-flush prev and pass incoming through.
-    /// - No prev: buffer the incoming chunk if it's of a bufferable kind, force-send otherwise.
+    /// Two-by-two dispatch on protocol kind: Same kind on both sides: delegate to the per-kind merge function.
+    /// Different kinds: can't merge, force-flush prev and pass incoming through.
+    /// No prev: buffer the incoming chunk if it's of a bufferable kind, force-send otherwise.
     fn merge(
         &mut self,
         prev: Option<SessionNotification>,
@@ -330,15 +294,15 @@ fn append_chunk_id_range(range_arr: &mut Vec<serde_json::Value>, new_chunk_id: u
     }
 
     if let Some(range_values) = last_value.as_array_mut() {
-        if range_values.len() == 2 {
-            if let Some(range_end) = chunk_id_as_u64(&range_values[1])
+        if let [_, end] = range_values.as_mut_slice() {
+            if let Some(range_end) = chunk_id_as_u64(end)
                 && new_chunk_id == range_end + 1
             {
-                range_values[1] = serde_json::json!(new_chunk_id);
+                *end = serde_json::json!(new_chunk_id);
                 return;
             }
-        } else if range_values.len() == 1
-            && let Some(range_end) = chunk_id_as_u64(&range_values[0])
+        } else if let [only] = range_values.as_slice()
+            && let Some(range_end) = chunk_id_as_u64(only)
             && new_chunk_id == range_end + 1
         {
             *last_value = serde_json::json!([range_end, new_chunk_id]);

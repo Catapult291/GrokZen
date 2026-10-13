@@ -8,17 +8,16 @@
 //! Conversion from domain types (`HookSpec`, `LoadedPlugin`) to these DTOs
 //! lives in the shell's extension handlers, not here.
 
+#![deny(clippy::indexing_slicing)]
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
 
-/// Plugin scope.
-///
-/// Maps from `PluginScope` in `xai-grok-agent`. Variant renames:
-/// - source `CliOverride` -> DTO `Cli` (matches Display output "cli")
-/// - source `ConfigPath` -> DTO `Config` (matches Display output "config")
+/// Maps from `PluginScope` in `xai-grok-agent`. Variant renames: source `CliOverride` -> DTO `Cli` (matches Display
+/// output "cli"); source `ConfigPath` -> DTO `Config` (matches Display output "config").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginScope {
@@ -28,10 +27,8 @@ pub enum PluginScope {
     Config,
 }
 
-/// The concrete discovery source a plugin came from.
-///
-/// Maps from `PluginOrigin` in `xai-grok-agent`. Optional on [`PluginInfo`]
-/// so older shells (which don't send it) deserialize to `None`.
+/// The concrete discovery source a plugin came from. Maps from `PluginOrigin` in `xai-grok-agent`. Optional on
+/// [`PluginInfo`] so older shells (which don't send it) deserialize to `None`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginOrigin {
@@ -74,11 +71,8 @@ pub enum PluginOrigin {
     Unknown,
 }
 
-/// Hook event type.
-///
-/// Maps from `HookEventName` in `xai-grok-hooks`. The source type's
-/// `SubagentEnd` variant (backward-compat alias) is collapsed into
-/// `SubagentStop` during conversion.
+/// Maps from `HookEventName` in `xai-grok-hooks`. The source type's `SubagentEnd` variant (backward-compat alias) is
+/// collapsed into `SubagentStop` during conversion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookEvent {
@@ -241,7 +235,7 @@ pub struct HookInfo {
     pub timeout_ms: u64,
     /// Source directory of the hook definition file.
     pub source_dir: String,
-    /// Whether this hook is disabled via ~/.grok/disabled-hooks.
+    /// Whether dispatch skips this hook: `enabled = false`, listed in ~/.grok/disabled-hooks, or kept off by `allow_managed_hooks_only`.
     #[serde(default)]
     pub disabled: bool,
     /// Enforced by root-owned managed policy: disable actions are refused
@@ -249,11 +243,9 @@ pub struct HookInfo {
     /// state up front rather than let a refusal be the first signal.
     #[serde(default)]
     pub pinned: bool,
-    /// Whether `HooksAction::Remove` can succeed for this hook's source:
-    /// true only for user-registered hook directories without a
-    /// managed-policy member (removal targets the whole `source_dir`, and a
-    /// pinned member makes it refused), so surfaces don't offer removal
-    /// elsewhere.
+    /// Whether `HooksAction::Remove` can succeed for this hook's source: true only for user-registered hook directories
+    /// without a managed-policy member (removal targets the whole `source_dir`, and a pinned member makes it refused), so
+    /// surfaces don't offer removal elsewhere.
     #[serde(default)]
     pub removable: bool,
 }
@@ -449,17 +441,14 @@ fn strip_control_chars(s: &str) -> String {
 
 fn truncate_chars(s: &str, max_chars: usize) -> String {
     match s.char_indices().nth(max_chars) {
-        Some((idx, _)) => s[..idx].to_string(),
+        Some((idx, _)) => s.get(..idx).unwrap_or(s).to_string(),
         None => s.to_string(),
     }
 }
 
-/// Full inventory of a plugin's components, sourced from a marketplace
-/// catalog (`plugin-index.json`).
-///
-/// Serde deserialization bypasses [`ComponentItem::new`], so values are not
-/// sanitized by construction: every consumer that renders catalog-derived
-/// data to a terminal must call [`Self::sanitize`] at its ingestion point.
+/// Full inventory of a plugin's components, sourced from a marketplace catalog (`plugin-index.json`). Serde
+/// deserialization bypasses [`ComponentItem::new`], so values are not sanitized by construction: every consumer that
+/// renders catalog-derived data to a terminal must call [`Self::sanitize`] at its ingestion point.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginComponents {
@@ -993,11 +982,11 @@ mod tests {
         };
         components.sanitize();
         assert_eq!(components.skills.len(), MAX_COMPONENTS_PER_CATEGORY);
-        assert_eq!(components.skills[0].name, "s0");
-        assert_eq!(
-            components.skills[0].description.as_ref().unwrap().len(),
-            120
-        );
+        let Some(skill) = components.skills.first() else {
+            panic!("expected a skill: {:?}", components.skills);
+        };
+        assert_eq!(skill.name, "s0");
+        assert_eq!(skill.description.as_ref().unwrap().len(), 120);
     }
 
     fn one_item_per_category() -> PluginComponents {
@@ -1033,7 +1022,10 @@ mod tests {
         );
         components.sanitize();
         for (_, items) in components.categories() {
-            assert!(!items[0].name.contains('\u{1b}'));
+            let Some(item) = items.first() else {
+                panic!("expected one item: {items:?}");
+            };
+            assert!(!item.name.contains('\u{1b}'));
         }
     }
 
@@ -1052,11 +1044,11 @@ mod tests {
         assert!(!json.contains("commands"), "{json}");
         let parsed: PluginComponents = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, components);
-        assert_eq!(parsed.skills[0].name, "brainstorming");
-        assert_eq!(
-            parsed.skills[0].description.as_deref(),
-            Some("Structured ideation")
-        );
+        let Some(skill) = parsed.skills.first() else {
+            panic!("expected a skill: {:?}", parsed.skills);
+        };
+        assert_eq!(skill.name, "brainstorming");
+        assert_eq!(skill.description.as_deref(), Some("Structured ideation"));
     }
 
     #[test]
@@ -1082,7 +1074,10 @@ mod tests {
         let parsed: MarketplacePluginEntry = serde_json::from_str(json).unwrap();
         let components = parsed.components.clone().expect("components present");
         assert_eq!(components.skills.len(), 1);
-        assert_eq!(components.skills[0].name, "code-review");
+        let Some(skill) = components.skills.first() else {
+            panic!("expected a skill: {:?}", components.skills);
+        };
+        assert_eq!(skill.name, "code-review");
         let reserialized = serde_json::to_string(&parsed).unwrap();
         assert!(reserialized.contains("code-review"), "{reserialized}");
     }

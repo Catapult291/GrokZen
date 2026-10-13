@@ -56,10 +56,9 @@ impl From<serde_json::Value> for DynamicOutput {
         Self { value }
     }
 }
-/// Typed saved path for the media tools (`image_gen` / `video_gen` /
-/// `image_edit`), so consumers read it directly instead of scraping the prose.
-/// A struct (not a bare `PathBuf`) is required: `ToolOutput` is internally
-/// tagged and only accepts map payloads.
+/// Typed saved path for the media tools (`image_gen` / `video_gen` / `image_edit`), so consumers
+/// read it directly instead of scraping the prose. A struct (not a bare `PathBuf`) is required:
+/// `ToolOutput` is internally tagged and only accepts map payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaGenOutput {
     /// Absolute path to the saved media file. Empty for [`Self::uploaded`].
@@ -128,11 +127,9 @@ impl MediaGenOutput {
 use crate::implementations::grok_build::todo::{TodoItem, TodoState};
 use crate::implementations::skills::skill::SkillOutput;
 use crate::util::truncate::{DEFAULT_SOFT_WRAP_WIDTH, soft_wrap_lines};
-/// Result of running a tool through the ToolRunner pipeline.
-///
-/// This is the **single return type** from `ToolRunner::run()`. It carries:
-/// 1. Clean `output` — never mutated by layers; for JSON serialization, protocol translation.
-/// 2. `prompt_text` — rendered with system reminders appended; for model prompt.
+/// Result of running a tool through the ToolRunner pipeline. This is the **single return type**
+/// from `ToolRunner::run()`. Clean `output` — never mutated by layers; for JSON serialization,
+/// protocol translation. `prompt_text` — rendered with system reminders appended; for model prompt.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ToolRunResult {
     /// Clean tool output — never mutated by layers.
@@ -186,25 +183,7 @@ pub enum ListDirOutput {
     /// Generic / unclassified error
     Error(String),
 }
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GrepLineMatch {
-    pub line_number: usize,
-    pub content: String,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GrepFileMatch {
-    pub path: String,
-    pub matches: Vec<GrepLineMatch>,
-}
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GrepSearchOutput {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-    pub exit_code: i32,
-    pub match_count: usize,
-    #[serde(default)]
-    pub file_matches: Vec<GrepFileMatch>,
-}
+pub use xai_tool_types::{GrepFileMatch, GrepLineMatch, GrepSearchOutput};
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FileContent {
     /// content here is the model friendly output which will always be present since even
@@ -232,12 +211,9 @@ pub struct FileContent {
     #[schemars(skip)]
     pub extracted_images: Vec<crate::util::base64_images::ExtractedImage>,
 }
-/// Image content returned when reading an image file.
-///
-/// This is a local type so it can derive `schemars::JsonSchema` v0.8,
-/// which the `Tool` trait requires for its `Output` associated type.
-/// Conversion to the protocol-level image type happens at the
-/// protocol boundary in `xai-grok-shell`.
+/// Image content returned when reading an image file. This is a local type so it can derive `schemars::JsonSchema`
+/// v0.8, which the `Tool` trait requires for its `Output` associated type. Conversion to the protocol-level image type
+/// happens at the protocol boundary in `xai-grok-shell`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ImageContent {
     /// Base64-encoded image data
@@ -326,11 +302,9 @@ pub struct SearchReplaceEditDetail {
     pub context_before: String,
     /// The context after the match
     pub context_after: String,
-    /// Leading text on the first line before the matched `old_string` begins.
-    ///
-    /// When the match starts mid-line (e.g., after indentation), this captures
-    /// the prefix so the diff renderer can display proper alignment. Empty when
-    /// the match starts at the beginning of a line or when unknown.
+    /// Leading text on the first line before the matched `old_string` begins. When the match starts mid-line (e.g., after
+    /// indentation), this captures the prefix so the diff renderer can display proper alignment. Empty when the match
+    /// starts at the beginning of a line or when unknown.
     #[serde(default)]
     pub line_prefix: String,
 }
@@ -375,21 +349,17 @@ pub enum ApplyPatchOutput {
     /// No hunks in the patch.
     EmptyPatch(String),
 }
-/// Payload for `SearchReplaceOutput::NoMatchesFound`.
-///
-/// Separate struct so consumers (reminders, outcome trackers) can extract
-/// the file path without needing to know the call-site context.
+/// Payload for `SearchReplaceOutput::NoMatchesFound`. Separate struct so consumers (reminders,
+/// outcome trackers) can extract the file path without needing to know the call-site context.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NoMatchesFoundError {
     /// Human-readable error message shown to the model.
     pub message: String,
     /// Canonical absolute path of the file that was searched.
     pub file_path: std::path::PathBuf,
-    /// Full file text from the same read the edit used when reporting no match.
-    ///
-    /// In-process only: never serialized on the wire (avoids leaking fresher or
-    /// broader file content than the read/edit path already loaded). Used for
-    /// `StrReplace` fuzzy hints without a second `read_file`.
+    /// Full file text from the same read the edit used when reporting no match. In-process only: never serialized on the
+    /// wire (avoids leaking fresher or broader file content than the read/edit path already loaded). Used for `StrReplace`
+    /// fuzzy hints without a second `read_file`.
     #[serde(default, skip_serializing)]
     #[schemars(skip)]
     pub file_snapshot_at_edit: Option<String>,
@@ -431,22 +401,14 @@ pub struct BashOutput {
     pub output_file: String,
     /// Total bytes of output (before truncation).
     pub total_bytes: usize,
-    /// Incremental output delta (new bytes since last notification).
-    /// When present, consumers should append to their accumulated buffer
-    /// instead of replacing with `output`. When `Some(vec![])`, consumers
-    /// should clear their accumulated buffer (reset signal).
-    /// When `None`, the consumer should use `output` as the full buffer.
+    /// Incremental output delta (new bytes since last notification). When present, consumers should append to their
+    /// accumulated buffer instead of replacing with `output`. When `Some(vec![])`, consumers should clear their accumulated
+    /// buffer (reset signal). When `None`, the consumer should use `output` as the full buffer.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub output_delta: Option<Vec<u8>>,
-    /// Set by the grok_build `run_terminal_cmd` implementation when the
-    /// command was detected as a bare `echo "<msg>"` (or close variant:
-    /// echo -n, echo -e, simple printf for literal output, etc.).
-    ///
-    /// Used for:
-    /// - Telemetry / statistics on this pattern for the grok_build backend.
-    /// - Potential doom-loop / stagnation signals (repeated trivial echoes
-    ///   are a common "no progress" signal).
-    /// - Model hints (see BareEchoHintState in the bash tool).
+    /// Set by the grok_build `run_terminal_cmd` implementation when the command was detected as a bare `echo "<msg>"` (or close variant: echo -n,
+    /// echo -e, simple printf for literal output, etc.). Telemetry / statistics on this pattern for the grok_build backend. Potential doom-loop /
+    /// stagnation signals (repeated trivial echoes are a common "no progress" signal). Model hints (see BareEchoHintState in the bash tool).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub was_bare_echo: bool,
 }
@@ -477,12 +439,9 @@ pub struct BackgroundTaskStarted {
     /// Built by the tool's run() using resolved tool/param names.
     #[serde(default)]
     pub retrieval_hint: String,
-    /// Optional pre-formatted prompt body. When set, `to_prompt_format`
-    /// uses this string verbatim instead of the default
-    /// `<task-id>...</task-id>` XML envelope. Used by namespace-specific
-    /// adapters that need to emit a different model-visible shape
-    /// without disturbing the structured fields above (which other
-    /// consumers still parse).
+    /// Optional pre-formatted prompt body. When set, `to_prompt_format` uses this string verbatim instead of the default
+    /// `<task-id>...</task-id>` XML envelope. Used by namespace-specific adapters that need to emit a different
+    /// model-visible shape without disturbing the structured fields above (which other consumers still parse).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pre_formatted: Option<String>,
     /// PID of the spawned shell process, when available. Surfaced by
@@ -491,18 +450,7 @@ pub struct BackgroundTaskStarted {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
 }
-#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct WebSearchOutput {
-    pub query: String,
-    pub content: String,
-    pub citations: Vec<String>,
-    pub allowed_domains: Option<Vec<String>>,
-    /// When set, `to_prompt_format()` returns this text directly instead of
-    /// wrapping `content` with the default header. Used by the compat adapter
-    /// to produce the exact `Title: / Content: / ---` schema.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub pre_formatted: Option<String>,
-}
+pub use xai_tool_types::WebSearchOutput;
 #[derive(Debug, Clone)]
 pub struct WebFetchSourceArtifact {
     /// Session artifact containing the complete converted response.
@@ -596,11 +544,9 @@ impl WebFetchOutput {
 }
 use xai_tool_types::KillTaskOutput;
 use xai_tool_types::TaskOutputOutput;
-/// Output schema for the bash tool.
-///
-/// The bash tool can either complete synchronously (`Bash`) or be started
-/// in the background (`BackgroundTaskStarted`). This enum exists to
-/// provide a precise JSON Schema via the `Tool::Output` associated type.
+/// Output schema for the bash tool. The bash tool can either complete synchronously (`Bash`) or be
+/// started in the background (`BackgroundTaskStarted`). This enum exists to provide a precise JSON
+/// Schema via the `Tool::Output` associated type.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type")]
 pub enum BashToolOutput {
@@ -912,15 +858,6 @@ impl ToolOutput {
             }) => {
                 let ask = &tool_hints.ask_user;
                 let exit = &tool_hints.exit_plan;
-                let task_hint = if tool_hints.task.is_empty() {
-                    String::new()
-                } else {
-                    format!(
-                        "\n     You can use the {} tool with subagent_type=\"explore\" to \
-                         parallelize codebase exploration without filling your context window.",
-                        tool_hints.task
-                    )
-                };
                 let plan_status = match plan_file_seed {
                     PlanFileSeedStatus::Empty => {
                         format!(
@@ -953,7 +890,7 @@ impl ToolOutput {
                      If the user's request contains Chinese, or active instructions ask for Chinese, use concise Simplified Chinese and do not translate it into English. \
                      Preserve code identifiers, tool names, commands, paths, URLs, configuration keys, protocol fields and status values, symbols, product and proper names, and task IDs; keep canonical values such as pending, in_progress, completed, and cancelled verbatim.\n\n\
                      In plan mode, you should:\n\
-                     1. Thoroughly explore the codebase to understand existing patterns{task_hint}\n\
+                     1. Thoroughly explore the codebase to understand existing patterns\n\
                      2. Identify similar features, codebase architecture, and understand trade-offs\n\
                      3. Use {ask} if you need to clarify the approach\n\
                      4. Design a concrete implementation strategy\n\
@@ -1030,11 +967,9 @@ pub struct TodoWriteSuccess {
     #[schemars(skip)]
     pub state: TodoState,
 }
-/// Output from the TodoWrite tool.
-///
-/// Follows the error-as-output-variant pattern (like `ReadFileOutput`,
-/// `SearchReplaceOutput`) so consumers (Python side, ACP layer) can
-/// distinguish tool-logic errors from infrastructure errors.
+/// Output from the TodoWrite tool. Follows the error-as-output-variant pattern (like
+/// `ReadFileOutput`, `SearchReplaceOutput`) so consumers (Python side, ACP layer) can distinguish
+/// tool-logic errors from infrastructure errors.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum TodoWriteOutput {
     /// Successfully updated todo state.
@@ -1062,10 +997,9 @@ pub enum PlanFileSeedFailure {
     /// No `FileSystem` resource or no absolute path was available to seed.
     Unavailable,
 }
-/// Result of probing / seeding the session plan file on `enter_plan_mode`.
-///
-/// Defaults to `Missing(NotCreated)` when the field is absent on older payloads
-/// (fail-closed in `to_prompt_format`).
+/// Result of probing / seeding the session plan file on `enter_plan_mode`. Defaults to
+/// `Missing(NotCreated)` when the field is absent on older payloads (fail-closed in
+/// `to_prompt_format`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PlanFileSeedStatus {
@@ -1081,10 +1015,8 @@ impl Default for PlanFileSeedStatus {
         Self::Missing(PlanFileSeedFailure::NotCreated)
     }
 }
-/// Output from the `EnterPlanMode` tool.
-///
-/// Confirms plan mode entry and reports session plan-file seed status.
-/// The tool may create an empty session plan file (never truncating non-empty
+/// Output from the `EnterPlanMode` tool. Confirms plan mode entry and reports session plan-file
+/// seed status. The tool may create an empty session plan file (never truncating non-empty
 /// content); broader read-only enforcement is handled by orchestration.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum EnterPlanModeOutput {
@@ -1096,10 +1028,9 @@ pub enum EnterPlanModeOutput {
         /// Absolute or display path to the plan file so the model knows
         /// where to write its plan immediately.
         plan_file_path: String,
-        /// Pre-resolved tool name hints for `to_prompt_format()`.
-        /// Resolved at runtime via `TemplateRenderer` so no tool names
-        /// are hardcoded. Falls back to canonical names when the
-        /// renderer is unavailable.
+        /// Pre-resolved tool name hints for `to_prompt_format()`. Resolved at runtime via
+        /// `TemplateRenderer` so no tool names are hardcoded. Falls back to canonical names when
+        /// the renderer is unavailable.
         #[serde(default)]
         tool_hints: EnterPlanModeToolHints,
         /// Probe / seed outcome; defaults to `Missing` when absent.
@@ -1140,16 +1071,9 @@ impl EnterPlanModeToolHints {
         "exit_plan_mode".to_owned()
     }
 }
-/// Output from the `AskUserQuestion` tool.
-///
-/// This is a thin signal — the tool sends the questions to the client via
-/// a notification and returns a confirmation. The actual answers come back
-/// from the client as the tool result (handled by the orchestration layer).
-///
-/// Because the answers are provided by the client asynchronously (the user
-/// interacts with a UI), the tool output here just confirms the questions
-/// were dispatched. The orchestration layer is responsible for blocking
-/// until the user responds and injecting the answers into the conversation.
+/// Output from the `AskUserQuestion` tool. This is a thin signal — the tool sends the questions to the client via a notification and returns a
+/// confirmation. The actual answers come back from the client as the tool result (handled by the orchestration layer). Because the answers are
+/// provided by the client asynchronously (the user interacts with a UI), the tool output here just confirms the questions were dispatched.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum AskUserQuestionOutput {
     /// Questions were successfully dispatched to the client for user input.
@@ -1161,11 +1085,9 @@ pub enum AskUserQuestionOutput {
         /// Number of questions sent.
         question_count: usize,
     },
-    /// The user has responded (or cancelled). The `message` is the
-    /// fully-formatted tool result string produced by the format module.
-    ///
-    /// All four user paths (accepted, chat about this, skip interview,
-    /// cancel) return this variant with `ToolCall` status `Completed`.
+    /// The user has responded (or cancelled). The `message` is the fully-formatted tool result
+    /// string produced by the format module. All four user paths (accepted, chat about this, skip
+    /// interview, cancel) return this variant with `ToolCall` status `Completed`.
     UserAnswered {
         /// Pre-formatted tool result string for the model.
         message: String,
@@ -1179,11 +1101,9 @@ pub enum AskUserQuestionOutput {
         extracted_images: Vec<crate::util::base64_images::ExtractedImage>,
     },
 }
-/// Output from the `ExitPlanMode` tool.
-///
-/// The tool reads the plan file from disk and surfaces its content. The
-/// orchestration layer / client is responsible for presenting the plan to
-/// the user for approval and determining the exit outcome.
+/// Output from the `ExitPlanMode` tool. The tool reads the plan file from disk and surfaces its
+/// content. The orchestration layer / client is responsible for presenting the plan to the user for
+/// approval and determining the exit outcome.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub enum ExitPlanModeOutput {
     /// Plan file had content — surfaced for approval.
@@ -1301,8 +1221,42 @@ impl xai_tool_runtime::ToolOutput for ToolOutput {
     fn chat_completion_output(&self) -> Option<xai_tool_runtime::ToolChatCompletionResponse> {
         match self {
             Self::Bash(bash) => xai_tool_runtime::ToolOutput::chat_completion_output(bash),
+            Self::SearchReplace(edit) => xai_tool_runtime::ToolOutput::chat_completion_output(edit),
             _ => None,
         }
+    }
+}
+impl SearchReplaceEditsApplied {
+    /// Where the client's diff lands in the file. `None` for creations (no
+    /// line to point at) and when `replace_all` touched several matches,
+    /// since the card renders one snippet.
+    fn edit_file_anchor(&self) -> Option<xai_tool_runtime::EditFileAnchor> {
+        if self.old_string.is_empty() {
+            return None;
+        }
+        let [edit] = self.edits.details.as_slice() else {
+            return None;
+        };
+        let start_line = u32::try_from(edit.old_line).ok()?;
+        Some(xai_tool_runtime::EditFileAnchor { start_line })
+    }
+}
+impl xai_tool_runtime::ToolOutput for SearchReplaceEditsApplied {
+    /// Same frame grok-computer's `FileEditTool` sends: an empty, successful
+    /// `code_execution_result` shell is what settles the edit card on every
+    /// client, and the anchor rides along when there is one. The reducer
+    /// projects the anchor ahead of the shell only where clients accept it.
+    fn chat_completion_output(&self) -> Option<xai_tool_runtime::ToolChatCompletionResponse> {
+        Some(xai_tool_runtime::ToolChatCompletionResponse {
+            result: Some(xai_tool_runtime::ToolChatCompletion {
+                sender: "assistant".into(),
+                message_tag: Some("raw_function_result".into()),
+                code_execution_result: Some(xai_tool_runtime::ToolCodeExecutionResult::default()),
+                edit_file_result: self.edit_file_anchor(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
     }
 }
 impl xai_tool_runtime::ToolOutput for BashOutput {
@@ -1345,12 +1299,19 @@ impl xai_tool_runtime::ToolOutput for BashOutput {
         })
     }
 }
-impl xai_tool_runtime::ToolOutput for GrepSearchOutput {}
 impl xai_tool_runtime::ToolOutput for ReadFileOutput {}
 impl xai_tool_runtime::ToolOutput for ListDirOutput {}
-impl xai_tool_runtime::ToolOutput for SearchReplaceOutput {}
+impl xai_tool_runtime::ToolOutput for SearchReplaceOutput {
+    fn chat_completion_output(&self) -> Option<xai_tool_runtime::ToolChatCompletionResponse> {
+        match self {
+            Self::EditsApplied(applied) => {
+                xai_tool_runtime::ToolOutput::chat_completion_output(applied)
+            }
+            _ => None,
+        }
+    }
+}
 impl xai_tool_runtime::ToolOutput for TodoWriteOutput {}
-impl xai_tool_runtime::ToolOutput for WebSearchOutput {}
 impl xai_tool_runtime::ToolOutput for WebFetchOutput {}
 impl xai_tool_runtime::ToolOutput for SkillOutput {}
 impl xai_tool_runtime::ToolOutput for ApplyPatchOutput {}
@@ -1380,6 +1341,13 @@ mod tests {
             (NotFoundOrNotOwned, true),
             (NotActiveOrFinalizing, true),
             (Saturated { max_in_flight: 8 }, true),
+            (
+                QuotaExceeded {
+                    kind: crate::implementations::grok_build::task::types::ActiveAgentMessageQuotaKind::AttemptOutbound,
+                    limit: 32,
+                },
+                true,
+            ),
             (AdmissionUncertain, false),
             (NotAcceptedBeforeDeadline, true),
             (Unsupported, true),
@@ -1495,8 +1463,14 @@ mod tests {
         );
         let back: MCPOutput = serde_json::from_value(v).unwrap();
         assert_eq!(back.extracted_images.len(), 1);
-        assert_eq!(back.extracted_images[0].data, payload);
-        assert_eq!(back.extracted_images[0].mime_type, "image/png");
+        assert_eq!(
+            back.extracted_images.first().map(|i| i.data.as_str()),
+            Some(payload.as_str())
+        );
+        assert_eq!(
+            back.extracted_images.first().map(|i| i.mime_type.as_str()),
+            Some("image/png")
+        );
     }
     #[test]
     fn tool_output_mcp_extracted_images_survive_hub_roundtrip() {
@@ -1517,7 +1491,10 @@ mod tests {
             panic!("expected MCP");
         };
         assert_eq!(mcp.extracted_images.len(), 1);
-        assert_eq!(mcp.extracted_images[0].data, payload);
+        assert_eq!(
+            mcp.extracted_images.first().map(|i| i.data.as_str()),
+            Some(payload.as_str())
+        );
     }
     #[test]
     fn file_content_extracted_images_survive_hub_json_roundtrip() {
@@ -1539,7 +1516,10 @@ mod tests {
         assert!(v.get("extracted_images").is_some());
         let back: FileContent = serde_json::from_value(v).unwrap();
         assert_eq!(back.extracted_images.len(), 1);
-        assert_eq!(back.extracted_images[0].data, payload);
+        assert_eq!(
+            back.extracted_images.first().map(|i| i.data.as_str()),
+            Some(payload.as_str())
+        );
     }
     #[test]
     fn empty_extracted_images_omitted_from_json() {
@@ -1570,8 +1550,14 @@ mod tests {
             panic!("expected FileContent");
         };
         assert_eq!(fc.extracted_images.len(), 1);
-        assert_eq!(fc.extracted_images[0].data, payload);
-        assert_eq!(fc.extracted_images[0].mime_type, "image/png");
+        assert_eq!(
+            fc.extracted_images.first().map(|i| i.data.as_str()),
+            Some(payload.as_str())
+        );
+        assert_eq!(
+            fc.extracted_images.first().map(|i| i.mime_type.as_str()),
+            Some("image/png")
+        );
     }
     fn empty_file_content(offset: Option<usize>, total_lines: usize) -> FileContent {
         FileContent {
@@ -1664,7 +1650,11 @@ mod tests {
             consumed_completion_task_id: Some("task-abc".into()),
         };
         let json = serde_json::to_value(&text).unwrap();
-        assert_eq!(json["consumed_completion_task_id"], "task-abc");
+        assert_eq!(
+            json.get("consumed_completion_task_id")
+                .and_then(|v| v.as_str()),
+            Some("task-abc")
+        );
         let round_trip: TextOutput = serde_json::from_value(json).unwrap();
         assert_eq!(
             round_trip.consumed_completion_task_id.as_deref(),
@@ -1710,15 +1700,30 @@ mod tests {
         for (output, ty, path, filename, session_folder, message) in cases {
             let prompt_json: serde_json::Value =
                 serde_json::from_str(&output.to_prompt_format()).unwrap();
-            assert_eq!(prompt_json["path"], path);
-            assert_eq!(prompt_json["filename"], filename);
-            assert_eq!(prompt_json["session_folder"], session_folder);
-            assert_eq!(prompt_json["message"], message);
+            assert_eq!(prompt_json.get("path").and_then(|v| v.as_str()), Some(path));
+            assert_eq!(
+                prompt_json.get("filename").and_then(|v| v.as_str()),
+                Some(filename)
+            );
+            assert_eq!(
+                prompt_json.get("session_folder").and_then(|v| v.as_str()),
+                Some(session_folder)
+            );
+            assert_eq!(
+                prompt_json.get("message").and_then(|v| v.as_str()),
+                Some(message)
+            );
             let json = to_json(output);
-            assert_eq!(json["type"], ty);
-            assert_eq!(json["path"], path);
-            assert_eq!(json["filename"], filename);
-            assert_eq!(json["session_folder"], session_folder);
+            assert_eq!(json.get("type").and_then(|v| v.as_str()), Some(ty));
+            assert_eq!(json.get("path").and_then(|v| v.as_str()), Some(path));
+            assert_eq!(
+                json.get("filename").and_then(|v| v.as_str()),
+                Some(filename)
+            );
+            assert_eq!(
+                json.get("session_folder").and_then(|v| v.as_str()),
+                Some(session_folder)
+            );
             let (ToolOutput::ImageGen(m)
             | ToolOutput::ImageToVideo(m)
             | ToolOutput::ReferenceToVideo(m)
@@ -1738,7 +1743,7 @@ mod tests {
         let prompt = output.to_prompt_format();
         assert!(prompt.contains(url), "prompt must include the upload URL");
         let json = to_json(output);
-        assert_eq!(json["uploaded_url"], url);
+        assert_eq!(json.get("uploaded_url").and_then(|v| v.as_str()), Some(url));
         assert!(
             json.get("path").is_some(),
             "path field must be present (empty for uploaded)"
@@ -1959,7 +1964,10 @@ mod tests {
             }
             .into(),
         );
-        assert_eq!(json["type"], "ApplyPatch");
+        assert_eq!(
+            json.get("type").and_then(|v| v.as_str()),
+            Some("ApplyPatch")
+        );
         assert!(json.get("Success").is_some(), "missing Success key: {json}");
         for key in ["ParseError", "ApplicationError", "EmptyPatch"] {
             assert!(
@@ -1978,10 +1986,16 @@ mod tests {
             })
             .into(),
         );
-        assert_eq!(json["type"], "KillTask");
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("KillTask"));
         assert!(json.get("Result").is_some(), "missing Result key: {json}");
-        assert_eq!(json["Result"]["task_id"], "task-1");
-        assert_eq!(json["Result"]["outcome"], "killed");
+        assert_eq!(
+            json.pointer("/Result/task_id").and_then(|v| v.as_str()),
+            Some("task-1")
+        );
+        assert_eq!(
+            json.pointer("/Result/outcome").and_then(|v| v.as_str()),
+            Some("killed")
+        );
     }
     #[test]
     fn kill_task_not_found_json() {
@@ -2027,10 +2041,19 @@ mod tests {
             })
             .into(),
         );
-        assert_eq!(json["type"], "TaskOutput");
+        assert_eq!(
+            json.get("type").and_then(|v| v.as_str()),
+            Some("TaskOutput")
+        );
         assert!(json.get("Result").is_some(), "missing Result key: {json}");
-        assert_eq!(json["Result"]["task_id"], "task-1");
-        assert_eq!(json["Result"]["status"], "running");
+        assert_eq!(
+            json.pointer("/Result/task_id").and_then(|v| v.as_str()),
+            Some("task-1")
+        );
+        assert_eq!(
+            json.pointer("/Result/status").and_then(|v| v.as_str()),
+            Some("running")
+        );
     }
     /// The single-task detail view is duration-only: absolute `started` /
     /// `ended` instants stay on the wire struct but must not reach the prompt.
@@ -2151,7 +2174,11 @@ mod tests {
             })
             .into(),
         );
-        assert_eq!(json["Result"]["raw_output_bytes"], 11);
+        assert_eq!(
+            json.pointer("/Result/raw_output_bytes")
+                .and_then(|v| v.as_u64()),
+            Some(11)
+        );
     }
     #[test]
     fn task_output_not_found_json() {
@@ -2193,17 +2220,26 @@ mod tests {
             })
             .into(),
         );
-        assert_eq!(json["type"], "Todo");
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("Todo"));
         assert!(
             json.get("TodosUpdated").is_some(),
             "missing TodosUpdated key: {json}"
         );
         assert_eq!(
-            json["TodosUpdated"]["summary_for_prompt"],
-            "- [pending] 1: Task A\n"
+            json.pointer("/TodosUpdated/summary_for_prompt")
+                .and_then(|v| v.as_str()),
+            Some("- [pending] 1: Task A\n")
         );
-        assert_eq!(json["TodosUpdated"]["todos"][0]["content"], "Task A");
-        assert_eq!(json["TodosUpdated"]["todos"][0]["status"], "pending");
+        assert_eq!(
+            json.pointer("/TodosUpdated/todos/0/content")
+                .and_then(|v| v.as_str()),
+            Some("Task A")
+        );
+        assert_eq!(
+            json.pointer("/TodosUpdated/todos/0/status")
+                .and_then(|v| v.as_str()),
+            Some("pending")
+        );
     }
     #[test]
     fn todo_write_duplicate_id_json() {
@@ -2247,9 +2283,12 @@ mod tests {
             TodoWriteOutput::TodosUpdated(s) => {
                 assert_eq!(s.summary_for_prompt, "summary");
                 assert_eq!(s.todos.len(), 1);
-                assert_eq!(s.todos[0].content, "task");
-                assert_eq!(s.todos[0].status, TodoStatus::InProgress);
-                assert_eq!(s.todos[0].priority, TodoPriority::High);
+                let Some(todo) = s.todos.first() else {
+                    panic!("expected a todo: {:?}", s.todos);
+                };
+                assert_eq!(todo.content, "task");
+                assert_eq!(todo.status, TodoStatus::InProgress);
+                assert_eq!(todo.priority, TodoPriority::High);
             }
             other => panic!("expected TodosUpdated, got {other:?}"),
         }
@@ -2282,8 +2321,8 @@ mod tests {
             "resume_from hint with correct ID"
         );
         assert!(
-            rendered.contains("subagent_type: explore"),
-            "subagent_type visible"
+            !rendered.contains("subagent_type"),
+            "completion text must not advertise subagent_type"
         );
         assert!(
             rendered.contains("<subagent_result>"),
@@ -2357,9 +2396,15 @@ mod tests {
             persona_hint: Some("implementer".into()),
         };
         let json = serde_json::to_value(&output).unwrap();
-        assert_eq!(json["resume_from_hint"], "sub-abc-123");
-        assert_eq!(json["persona_hint"], "implementer");
-        assert_eq!(json["subagent_id"], json["resume_from_hint"]);
+        assert_eq!(
+            json.get("resume_from_hint").and_then(|v| v.as_str()),
+            Some("sub-abc-123")
+        );
+        assert_eq!(
+            json.get("persona_hint").and_then(|v| v.as_str()),
+            Some("implementer")
+        );
+        assert_eq!(json.get("subagent_id"), json.get("resume_from_hint"));
     }
     #[test]
     fn enter_plan_mode_tool_hints_default() {
@@ -2376,9 +2421,15 @@ mod tests {
             task: "task".into(),
         };
         let json = serde_json::to_value(&hints).unwrap();
-        assert_eq!(json["ask_user"], "AskUser");
-        assert_eq!(json["exit_plan"], "FinishPlan");
-        assert_eq!(json["task"], "task");
+        assert_eq!(
+            json.get("ask_user").and_then(|v| v.as_str()),
+            Some("AskUser")
+        );
+        assert_eq!(
+            json.get("exit_plan").and_then(|v| v.as_str()),
+            Some("FinishPlan")
+        );
+        assert_eq!(json.get("task").and_then(|v| v.as_str()), Some("task"));
         let deserialized: EnterPlanModeToolHints = serde_json::from_value(json).unwrap();
         assert_eq!(deserialized.ask_user, "AskUser");
         assert_eq!(deserialized.exit_plan, "FinishPlan");
@@ -2427,8 +2478,8 @@ mod tests {
             plan_file_seed: PlanFileSeedStatus::Empty,
         });
         let prompt = output.to_prompt_format();
-        assert!(prompt.contains("delegate-xyz"));
-        assert!(prompt.contains("subagent_type"));
+        assert!(!prompt.contains("delegate-xyz"));
+        assert!(!prompt.contains("subagent_type"));
     }
     #[test]
     fn enter_plan_mode_prompt_format_with_custom_tool_names() {
@@ -2461,10 +2512,26 @@ mod tests {
             plan_file_seed: PlanFileSeedStatus::Empty,
         };
         let json = serde_json::to_value(&output).unwrap();
-        assert_eq!(json["Entered"]["tool_hints"]["ask_user"], "AskUser");
-        assert_eq!(json["Entered"]["tool_hints"]["exit_plan"], "FinishPlan");
-        assert_eq!(json["Entered"]["tool_hints"]["task"], "delegate");
-        assert_eq!(json["Entered"]["plan_file_seed"], "empty");
+        assert_eq!(
+            json.pointer("/Entered/tool_hints/ask_user")
+                .and_then(|v| v.as_str()),
+            Some("AskUser")
+        );
+        assert_eq!(
+            json.pointer("/Entered/tool_hints/exit_plan")
+                .and_then(|v| v.as_str()),
+            Some("FinishPlan")
+        );
+        assert_eq!(
+            json.pointer("/Entered/tool_hints/task")
+                .and_then(|v| v.as_str()),
+            Some("delegate")
+        );
+        assert_eq!(
+            json.pointer("/Entered/plan_file_seed")
+                .and_then(|v| v.as_str()),
+            Some("empty")
+        );
         let deserialized: EnterPlanModeOutput = serde_json::from_value(json).unwrap();
         match deserialized {
             EnterPlanModeOutput::Entered {
@@ -2607,8 +2674,8 @@ mod tests {
         };
         let json = serde_json::to_value(&output).unwrap();
         assert_eq!(
-            json["Entered"]["plan_file_seed"],
-            json!({ "missing": "not_a_file" })
+            json.pointer("/Entered/plan_file_seed"),
+            Some(&json!({ "missing": "not_a_file" }))
         );
         let back: EnterPlanModeOutput = serde_json::from_value(json).unwrap();
         let EnterPlanModeOutput::Entered { plan_file_seed, .. } = back;
@@ -2632,7 +2699,10 @@ mod tests {
             persona_hint: None,
         };
         let json = serde_json::to_value(&output).unwrap();
-        assert_eq!(json["resume_from_hint"], "sub-xyz");
+        assert_eq!(
+            json.get("resume_from_hint").and_then(|v| v.as_str()),
+            Some("sub-xyz")
+        );
         assert!(
             json.get("persona_hint").is_none(),
             "persona_hint should be absent when None"
@@ -2681,17 +2751,35 @@ mod tests {
         let pdf = make_pdf_page_images(&[1, 3], 20, 8192);
         let output = ToolOutput::ReadFile(ReadFileOutput::PdfPageImages(pdf));
         let json = to_json(output);
-        assert_eq!(json["type"], "ReadFile");
+        assert_eq!(json.get("type").and_then(|v| v.as_str()), Some("ReadFile"));
         assert!(
             json.get("PdfPageImages").is_some(),
             "missing PdfPageImages key: {json}"
         );
-        let inner = &json["PdfPageImages"];
-        assert_eq!(inner["total_pages"], 20);
-        assert_eq!(inner["file_size"], 8192);
-        assert_eq!(inner["pages"].as_array().unwrap().len(), 2);
-        assert_eq!(inner["pages"][0]["page_number"], 1);
-        assert_eq!(inner["pages"][1]["page_number"], 3);
+        let Some(inner) = json.get("PdfPageImages") else {
+            panic!("missing PdfPageImages key: {json}");
+        };
+        assert_eq!(inner.get("total_pages").and_then(|v| v.as_u64()), Some(20));
+        assert_eq!(inner.get("file_size").and_then(|v| v.as_u64()), Some(8192));
+        assert_eq!(
+            inner
+                .get("pages")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(2)
+        );
+        assert_eq!(
+            inner
+                .pointer("/pages/0/page_number")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            inner
+                .pointer("/pages/1/page_number")
+                .and_then(|v| v.as_u64()),
+            Some(3)
+        );
     }
     fn sample_bash(exit_code: i32, output: &[u8], timed_out: bool) -> BashOutput {
         BashOutput {
@@ -2845,6 +2933,100 @@ mod tests {
         assert!(
             xai_tool_runtime::ToolOutput::chat_completion_output(&ToolOutput::Text(
                 TextOutput::from("noop")
+            ))
+            .is_none()
+        );
+    }
+    fn sample_edits_applied(old_lines: &[usize]) -> SearchReplaceEditsApplied {
+        sample_edits_applied_for("b", old_lines)
+    }
+    fn sample_edits_applied_for(
+        old_string: &str,
+        old_lines: &[usize],
+    ) -> SearchReplaceEditsApplied {
+        SearchReplaceEditsApplied {
+            old_string: old_string.into(),
+            new_string: "z".into(),
+            tool_output_for_prompt: "edited".into(),
+            tool_output_for_prompt_concise: None,
+            absolute_path: PathBuf::from("/w/a.rs"),
+            edits: SearchReplaceEditContextInformation {
+                details: old_lines
+                    .iter()
+                    .map(|&old_line| SearchReplaceEditDetail {
+                        old_string: old_string.into(),
+                        old_line,
+                        new_string: "z".into(),
+                        new_line: old_line,
+                        context_before: String::new(),
+                        context_after: String::new(),
+                        line_prefix: String::new(),
+                    })
+                    .collect(),
+            },
+            patch: None,
+            unicode_normalized: false,
+        }
+    }
+    /// Every applied edit settles the card through the empty success shell;
+    /// only a single-match edit of an existing file also carries the anchor.
+    fn assert_applied_edit_frame(
+        resp: xai_tool_runtime::ToolChatCompletionResponse,
+        anchor: Option<xai_tool_runtime::EditFileAnchor>,
+    ) {
+        let result = resp.result.unwrap();
+        assert_eq!(result.message_tag.as_deref(), Some("raw_function_result"));
+        assert_eq!(result.edit_file_result, anchor);
+        let cer = result.code_execution_result.expect("settle shell");
+        assert_eq!(
+            (
+                cer.stdout.as_str(),
+                cer.stderr.as_str(),
+                cer.exit_code,
+                cer.command_timed_out
+            ),
+            ("", "", 0, false)
+        );
+        assert!(result.extra.is_empty());
+    }
+    #[test]
+    fn search_replace_chat_completion_anchors_single_edit() {
+        let anchor = Some(xai_tool_runtime::EditFileAnchor { start_line: 137 });
+        let applied = SearchReplaceOutput::EditsApplied(sample_edits_applied(&[137]));
+        assert_applied_edit_frame(
+            xai_tool_runtime::ToolOutput::chat_completion_output(&applied).unwrap(),
+            anchor,
+        );
+        assert_applied_edit_frame(
+            xai_tool_runtime::ToolOutput::chat_completion_output(&ToolOutput::SearchReplace(
+                applied,
+            ))
+            .unwrap(),
+            anchor,
+        );
+    }
+    #[test]
+    fn search_replace_chat_completion_settles_multi_match_and_creation_without_anchor() {
+        assert_applied_edit_frame(
+            xai_tool_runtime::ToolOutput::chat_completion_output(&ToolOutput::SearchReplace(
+                SearchReplaceOutput::EditsApplied(sample_edits_applied(&[2, 9])),
+            ))
+            .unwrap(),
+            None,
+        );
+        assert_applied_edit_frame(
+            xai_tool_runtime::ToolOutput::chat_completion_output(
+                &SearchReplaceOutput::EditsApplied(sample_edits_applied_for("", &[1])),
+            )
+            .unwrap(),
+            None,
+        );
+    }
+    #[test]
+    fn search_replace_chat_completion_skips_failures() {
+        assert!(
+            xai_tool_runtime::ToolOutput::chat_completion_output(&ToolOutput::SearchReplace(
+                SearchReplaceOutput::MultipleMatchesFound("two".into())
             ))
             .is_none()
         );

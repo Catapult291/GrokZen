@@ -12,9 +12,11 @@
 
 非 SpaceXAI 官方发行版。
 
+![grok-zh 中文 TUI 工具链体检](docs/screenshots/grok-zh-toolchain-check.png)
+
 </div>
 
----
+## 特点
 
 ## 项目简介
 

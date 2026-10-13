@@ -66,6 +66,8 @@ pub struct LoadedPlugin {
     pub has_inline_lsp_only: bool,
     /// Inline hooks JSON from manifest (when hooks are defined inline, not file-based).
     pub inline_hooks: Option<serde_json::Value>,
+    /// Parsed hook specs from the hooks file and inline hooks. Empty unless the plugin is enabled and trusted.
+    pub hook_specs: Vec<xai_grok_hooks::config::HookSpec>,
     /// Inline MCP servers JSON from manifest (when defined inline, not file-based).
     pub inline_mcp_servers: Option<serde_json::Value>,
     /// Inline LSP servers JSON from manifest (when defined inline, not file-based).
@@ -172,7 +174,7 @@ impl PluginRegistry {
                 .any(|e| e == &dp.id.0 || e == &dp.manifest.name);
             let enabled = !is_disabled(&dp, disabled) && explicitly_enabled;
 
-            let loaded = LoadedPlugin {
+            let mut loaded = LoadedPlugin {
                 name: name.clone(),
                 id: dp.id,
                 root: dp.root,
@@ -201,10 +203,14 @@ impl PluginRegistry {
                 lsp_server_count,
                 has_inline_lsp_only,
                 inline_hooks,
+                hook_specs: Vec::new(),
                 inline_mcp_servers,
                 inline_lsp_servers,
                 conflict: dp.conflict,
             };
+            if loaded.enabled && loaded.trusted {
+                loaded.hook_specs = super::hooks_adapter::load_plugin_hook_specs(&loaded);
+            }
 
             // Track MCP server ownership for enabled and trusted plugins
             if loaded.enabled && loaded.trusted {
@@ -267,8 +273,7 @@ impl PluginRegistry {
             .collect()
     }
 
-    /// List enabled plugins (both trusted and untrusted).
-    /// Useful for skill/agent discovery where trust only gates executables.
+    /// List enabled plugins regardless of trust; callers must apply their own trust policy.
     pub fn enabled_plugins(&self) -> Vec<&LoadedPlugin> {
         self.list().into_iter().filter(|p| p.enabled).collect()
     }
@@ -311,14 +316,9 @@ impl SharedPluginRegistryHandle {
         self.inner.read().unwrap().clone()
     }
 
-    /// The read-only `commands/list` pull and the reload fan-out also call this, so it must not refresh or mutate local installs on disk.
+    /// Must not refresh or mutate local installs on disk — `commands/list` and reload fan-out also call this.
     /// Use [`Self::refresh_and_build_for_cwd`] at genuine session spawn.
-    /// CLI `--plugin-dir` paths from process startup are always included.
-    ///
-    /// `session_plugin_dirs` are per-session dirs from `session/new` / `session/load` `_meta.pluginDirs`.
-    /// They get the same CliOverride scope and trust as `--plugin-dir`, but only for the session whose registry this builds.
-    ///
-    /// `project_trusted` is the folder-trust verdict for `cwd`, threaded into discovery to gate Project-scope plugins.
+    /// `session_plugin_dirs` get CliOverride trust but only for this session; `project_trusted` gates Project-scope plugins.
     pub fn build_for_cwd(
         &self,
         cwd: &std::path::Path,
@@ -353,10 +353,15 @@ impl SharedPluginRegistryHandle {
         }
     }
 
+    /// Replace the shared "latest" registry with one built elsewhere (e.g. on a blocking thread via
+    /// [`Self::refresh_and_build_for_cwd`]), so the decision to publish can stay with the caller.
+    pub fn publish(&self, registry: Option<std::sync::Arc<PluginRegistry>>) {
+        *self.inner.write().unwrap() = registry;
+    }
+
     /// Re-copy trusted / user-home local installs, then [`Self::build_for_cwd`].
-    ///
-    /// The refresh at session spawn picks up agents/skills added to a live local source after install (the snapshot is a copy, not a symlink).
-    /// Only genuine session spawn is wired here; the read-only `commands/list` pull and the reload fan-out use the pure builder.
+    /// The snapshot is a copy, not a symlink, so spawn refresh picks up agents/skills added after install.
+    /// Only genuine session spawn is wired here; read-only pulls use the pure builder.
     pub fn refresh_and_build_for_cwd(
         &self,
         cwd: &std::path::Path,
@@ -385,17 +390,8 @@ impl SharedPluginRegistryHandle {
     }
 
     /// Rebuild the shared registry from disk and replace the shared state.
-    ///
-    /// `cwd` should be the session's working directory.
-    /// `disk_config` should be freshly loaded from config.toml.
-    /// CLI `--plugin-dir` paths from startup are automatically merged.
-    ///
-    /// Returns the count of plugins discovered.
-    ///
-    /// `project_trusted` is the folder-trust verdict for `cwd`, threaded into discovery to gate Project-scope plugins.
-    ///
-    /// `force` controls the local-install refresh: only the explicit, user-initiated `/plugins reload` passes `true`, a guaranteed full re-copy.
-    /// Incidental rebuilds (boot, plugin enable/disable/add/remove) pass `false` for the cheap skip-unchanged path.
+    /// `project_trusted` gates Project-scope plugins.
+    /// `force` is a full re-copy only for explicit `/plugins reload`; incidental rebuilds skip unchanged snapshots.
     pub fn reload(
         &self,
         cwd: Option<&std::path::Path>,
@@ -427,9 +423,8 @@ impl SharedPluginRegistryHandle {
 // ── Component counting helpers ────────────────────────────────────────
 
 /// Collect the SKILL.md paths that load from the given skill dirs.
-///
-/// Paths come from `find_skill_md_paths` and are deduped by normalized parent-dir basename, the identity the skill loader dedupes on.
-/// Counts therefore equal what actually loads, both for overlapping dir entries and for same-basename dirs at different paths.
+/// Deduped by normalized parent-dir basename, the identity the skill loader dedupes on.
+/// Counts therefore equal what actually loads.
 pub fn skill_md_paths(skill_dirs: &[PathBuf]) -> Vec<PathBuf> {
     use xai_grok_tools::implementations::skills::discovery::{
         find_skill_md_paths, normalize_skill_name,
@@ -539,8 +534,6 @@ fn count_lsp_servers(dp: &DiscoveredPlugin) -> usize {
 }
 
 /// Count hook specs defined in a plugin's hooks.json and/or inline hooks.
-///
-/// The hooks JSON structure is `{ "hooks": { "EventName": [ { "hooks": [...] } ] } }`.
 /// Each entry in the inner `hooks` array is one hook handler spec.
 fn count_hook_specs(hooks_path: Option<&Path>, inline_hooks: Option<&serde_json::Value>) -> usize {
     fn count_in_value(v: &serde_json::Value) -> usize {
@@ -587,12 +580,16 @@ fn is_disabled(dp: &DiscoveredPlugin, disabled: &[String]) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::discovery::PluginId;
     use super::super::manifest::PluginManifest;
     use super::*;
 
-    fn make_discovered(name: &str, scope: PluginScope, trusted: bool) -> DiscoveredPlugin {
+    pub(crate) fn make_discovered(
+        name: &str,
+        scope: PluginScope,
+        trusted: bool,
+    ) -> DiscoveredPlugin {
         let root = PathBuf::from(format!("/tmp/test-plugins/{name}"));
         DiscoveredPlugin {
             manifest: PluginManifest {
@@ -756,7 +753,10 @@ mod tests {
         assert_eq!(reg.len(), 2);
         let active = reg.active_plugins();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].name, "enabled-plugin");
+        assert_eq!(
+            active.first().map(|p| p.name.as_str()),
+            Some("enabled-plugin")
+        );
 
         let disabled = reg.get("disabled-plugin").unwrap();
         assert!(!disabled.enabled);
@@ -835,9 +835,12 @@ mod tests {
 
         let reg = PluginRegistry::from_discovered(plugins, &[], &[]);
         let list = reg.list();
-        assert_eq!(list[0].name, "alpha"); // CliOverride = 0
-        assert_eq!(list[1].name, "beta"); // Project = 1
-        assert_eq!(list[2].name, "zebra"); // User = 2
+        let [alpha, beta, zebra, ..] = list.as_slice() else {
+            panic!("expected three plugins: {list:?}");
+        };
+        assert_eq!(alpha.name, "alpha"); // CliOverride = 0
+        assert_eq!(beta.name, "beta"); // Project = 1
+        assert_eq!(zebra.name, "zebra"); // User = 2
     }
 
     #[test]
@@ -911,11 +914,14 @@ mod tests {
 
         let active = reg.active_plugins();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].name, "good-plugin");
+        assert_eq!(active.first().map(|p| p.name.as_str()), Some("good-plugin"));
 
         let enabled = reg.enabled_plugins();
         assert_eq!(enabled.len(), 1);
-        assert_eq!(enabled[0].name, "good-plugin");
+        assert_eq!(
+            enabled.first().map(|p| p.name.as_str()),
+            Some("good-plugin")
+        );
 
         let bad = reg.get("bad-plugin").unwrap();
         assert!(!bad.enabled);
@@ -933,7 +939,7 @@ mod tests {
 
         let enabled = reg.enabled_plugins();
         assert_eq!(enabled.len(), 1);
-        assert_eq!(enabled[0].name, "listed");
+        assert_eq!(enabled.first().map(|p| p.name.as_str()), Some("listed"));
 
         assert!(!reg.get("unlisted").unwrap().enabled);
     }
@@ -953,7 +959,10 @@ mod tests {
 
         let enabled = reg.enabled_plugins();
         assert_eq!(enabled.len(), 1);
-        assert_eq!(enabled[0].name, "enabled-trusted");
+        assert_eq!(
+            enabled.first().map(|p| p.name.as_str()),
+            Some("enabled-trusted")
+        );
     }
 
     #[test]
@@ -1001,7 +1010,7 @@ mod tests {
 
         let active = reg.active_plugins();
         assert_eq!(active.len(), 1);
-        assert_eq!(active[0].name, "beta");
+        assert_eq!(active.first().map(|p| p.name.as_str()), Some("beta"));
     }
 
     #[test]

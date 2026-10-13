@@ -14,6 +14,7 @@ const CONTROLS_ENV: &str = "SANDBOX_E2E_CONTROLS";
 const POSTLAUNCH_ENV: &str = "SANDBOX_E2E_POSTLAUNCH";
 /// Set when the spoof parent leaves `/data` on a read-only ancestor mount.
 /// The subprocess then knows exact-mountpoint verification must reject the forgery.
+#[cfg(target_os = "linux")]
 const DATA_STAGED_ENV: &str = "SANDBOX_E2E_DATA_STAGED";
 const MARKER: &str = "deny-paths-e2e-marker-9f3c1a";
 const REQUIRE_ENV: &str = "SANDBOX_E2E_REQUIRE_ENFORCEMENT";
@@ -845,10 +846,9 @@ fn fixture_homes(
         TempDirGuard(workspace),
     )
 }
-/// Drive one deny case end-to-end; shared by the exact-path and glob cases.
-/// A custom profile gets `deny_entries` (exact paths and/or globs) as its `deny` list.
-/// Each `target` is created with the MARKER, each `control` with readable content.
-/// An isolated subprocess then asserts every target is read/write/rename-denied and every control stays readable.
+/// A custom profile gets `deny_entries` (exact paths and/or globs) as its `deny` list. Each `target` is created with the
+/// MARKER, each `control` with readable content. An isolated subprocess then asserts every target is
+/// read/write/rename-denied and every control stays readable.
 fn run_deny_case(
     tag: &str,
     profile: &str,

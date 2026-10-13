@@ -19,13 +19,9 @@ const DIFF_TIMEOUT: Duration = Duration::from_secs(10);
 /// Files larger than this will be skipped to avoid pathological diff behavior.
 const MAX_DIFF_FILE_SIZE: usize = 1024 * 1024; // 1 MB
 
-/// Generate a unified diff patch string from baseline and current content.
-/// This produces a patch that can be parsed by Pierre's `getSingularPatch`.
-///
-/// Returns None if:
-/// - Content is identical
-/// - Either file exceeds MAX_DIFF_FILE_SIZE
-/// - Diff computation times out
+/// Generate a unified diff patch string from baseline and current content. This produces a patch that can be parsed by
+/// Pierre's `getSingularPatch`. Returns None if: Content is identical; Either file exceeds MAX_DIFF_FILE_SIZE; Diff
+/// computation times out.
 pub fn generate_unified_patch(path: &Path, baseline: &str, current: &str) -> Option<String> {
     // If content is identical, no patch needed
     if baseline == current {
@@ -149,13 +145,9 @@ pub fn generate_hunk_patch(baseline: &str, current: &str, hunk: &Hunk) -> String
     output
 }
 
-/// Compute hunks by diffing baseline against current content.
-/// Uses the `similar` crate for line-based diff.
-///
-/// Returns an empty vector if:
-/// - Content is identical (no changes)
-/// - Either file exceeds MAX_DIFF_FILE_SIZE
-/// - Diff computation times out
+/// Compute hunks by diffing baseline against current content. Uses the `similar` crate for line-based diff. Returns an
+/// empty vector if: Content is identical (no changes); Either file exceeds MAX_DIFF_FILE_SIZE; Diff computation times
+/// out.
 pub fn compute_hunks(path: &Path, baseline: &str, current: &str, source: HunkSource) -> Vec<Hunk> {
     // If content is identical, no hunks
     if baseline == current {
@@ -328,17 +320,8 @@ pub fn format_unified_diff(hunk: &Hunk) -> String {
     output
 }
 
-/// Replace lines in content starting at `start_line` (1-indexed),
-/// removing `remove_count` lines and inserting `insert_text`.
-///
-/// # Arguments
-/// * `content` - The full file content to patch
-/// * `start_line` - 1-indexed line number where patch begins
-/// * `remove_count` - Number of lines to remove (can be 0 for pure insert)
-/// * `insert_text` - Text to insert (can be empty for pure delete)
-///
-/// # Returns
-/// The patched content
+/// Replace lines in content starting at `start_line` (1-indexed), removing `remove_count` lines and inserting
+/// `insert_text`.
 pub fn patch_lines(
     content: &str,
     start_line: usize,
@@ -351,7 +334,7 @@ pub fn patch_lines(
     let mut result = Vec::new();
 
     // Lines before the patch point
-    result.extend(lines[..start_idx.min(lines.len())].iter().copied());
+    result.extend(lines.iter().take(start_idx.min(lines.len())).copied());
 
     // Insert new lines (if any)
     if !insert_text.is_empty() {
@@ -362,7 +345,7 @@ pub fn patch_lines(
 
     // Lines after the removed section
     let end_idx = (start_idx + remove_count).min(lines.len());
-    result.extend(lines[end_idx..].iter().copied());
+    result.extend(lines.iter().skip(end_idx).copied());
 
     // Reconstruct with proper trailing newline handling
     let mut output = result.join("\n");
@@ -492,10 +475,13 @@ mod tests {
         let hunks = compute_hunks(Path::new("test.rs"), baseline, current, agent_source());
 
         assert_eq!(hunks.len(), 1);
-        assert_eq!(hunks[0].old_text, Some("line 2\n".to_string()));
-        assert_eq!(hunks[0].new_text, "modified\n");
-        assert_eq!(hunks[0].line_info.old_start, 2);
-        assert_eq!(hunks[0].line_info.new_start, 2);
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
+        assert_eq!(hunk.old_text, Some("line 2\n".to_string()));
+        assert_eq!(hunk.new_text, "modified\n");
+        assert_eq!(hunk.line_info.old_start, 2);
+        assert_eq!(hunk.line_info.new_start, 2);
     }
 
     #[test]
@@ -505,10 +491,13 @@ mod tests {
         let hunks = compute_hunks(Path::new("test.rs"), baseline, current, agent_source());
 
         assert_eq!(hunks.len(), 1);
-        assert_eq!(hunks[0].old_text, None);
-        assert_eq!(hunks[0].new_text, "inserted\n");
-        assert_eq!(hunks[0].line_info.old_count, 0);
-        assert_eq!(hunks[0].line_info.new_count, 1);
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
+        assert_eq!(hunk.old_text, None);
+        assert_eq!(hunk.new_text, "inserted\n");
+        assert_eq!(hunk.line_info.old_count, 0);
+        assert_eq!(hunk.line_info.new_count, 1);
     }
 
     #[test]
@@ -518,10 +507,13 @@ mod tests {
         let hunks = compute_hunks(Path::new("test.rs"), baseline, current, agent_source());
 
         assert_eq!(hunks.len(), 1);
-        assert_eq!(hunks[0].old_text, Some("line 2\n".to_string()));
-        assert_eq!(hunks[0].new_text, "");
-        assert_eq!(hunks[0].line_info.old_count, 1);
-        assert_eq!(hunks[0].line_info.new_count, 0);
+        let Some(hunk) = hunks.first() else {
+            panic!("expected a hunk: {hunks:?}");
+        };
+        assert_eq!(hunk.old_text, Some("line 2\n".to_string()));
+        assert_eq!(hunk.new_text, "");
+        assert_eq!(hunk.line_info.old_count, 1);
+        assert_eq!(hunk.line_info.new_count, 0);
     }
 
     #[test]
@@ -531,8 +523,11 @@ mod tests {
         let hunks = compute_hunks(Path::new("test.rs"), baseline, current, agent_source());
 
         assert_eq!(hunks.len(), 2);
-        assert_eq!(hunks[0].line_info.old_start, 1);
-        assert_eq!(hunks[1].line_info.old_start, 5);
+        let [first, second] = hunks.as_slice() else {
+            panic!("expected two hunks: {hunks:?}");
+        };
+        assert_eq!(first.line_info.old_start, 1);
+        assert_eq!(second.line_info.old_start, 5);
     }
 
     #[test]
@@ -648,14 +643,8 @@ mod tests {
 
     #[test]
     fn test_find_matching_hunk_fallback_best_overlap() {
-        // This test figures out the edge case mentioned: when a new hunk overlaps
-        // *multiple* old hunks (and no content match, so fallback), the current
-        // .find() picks the *first* overlapping one -- order-dependent, can preserve
-        // wrong hunk ID/source.
-        //
-        // We use different overlap sizes so "best" (max overlap) is unambiguous.
-        // With current code, this test FAILS (picks "small" because it's first).
-        // After fix to use max overlap, it should PASS (picks "large").
+        // We use different overlap sizes so "best" (max overlap) is unambiguous. With current code, this test FAILS (picks
+        // "small" because it's first). After fix to use max overlap, it should PASS (picks "large").
 
         // Old hunks with no content match to new_hunk, ordered small-first
         let old_hunk_small = Arc::new(Hunk {
@@ -694,11 +683,8 @@ mod tests {
 
         let old_hunks = vec![old_hunk_small.clone(), old_hunk_large.clone()]; // small first!
 
-        // New hunk overlaps both, but more with large:
-        // new lines 2-5 (end=6)
-        // - small: overlap lines 2 (size=1)
-        // - large: overlap lines 3-5 (size=3)
-        // Content differs -> no content match -> fallback to overlap
+        // New hunk overlaps both, but more with large: new lines 2-5 (end=6). small: overlap lines 2 (size=1); large: overlap
+        // lines 3-5 (size=3). Content differs -> no content match -> fallback to overlap
         let new_hunk = Hunk {
             id: HunkId::new(),
             path: "test.rs".into(),
@@ -857,20 +843,19 @@ mod tests {
             "Should produce 2 hunks after accepting first one"
         );
 
-        // Verify the hunks are at the expected positions
+        let [first, second] = hunks.as_slice() else {
+            panic!("expected two hunks: {hunks:?}");
+        };
         assert_eq!(
-            hunks[0].line_info.old_start, 7,
+            first.line_info.old_start, 7,
             "First hunk should be at line 7"
         );
-        assert_eq!(hunks[0].new_text, "HUNK_B\n", "First hunk should be HUNK_B");
+        assert_eq!(first.new_text, "HUNK_B\n", "First hunk should be HUNK_B");
 
         assert_eq!(
-            hunks[1].line_info.old_start, 11,
+            second.line_info.old_start, 11,
             "Second hunk should be at line 11"
         );
-        assert_eq!(
-            hunks[1].new_text, "HUNK_C\n",
-            "Second hunk should be HUNK_C"
-        );
+        assert_eq!(second.new_text, "HUNK_C\n", "Second hunk should be HUNK_C");
     }
 }

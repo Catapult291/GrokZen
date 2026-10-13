@@ -1,6 +1,6 @@
 //! Image-strip persistence policy (`acp_session_impl/image_strip.rs`).
-//! Covers which `ImagesStripped` events may rewrite stored history and the deferred persist that waits for the stripped retry's `Completed`.
-//! Also covers the user notifications for both the request-local and the durable case.
+//! Covers which `ImagesStripped` events may rewrite stored history, the deferred persist that
+//! waits for the stripped retry to terminal (`Completed` or `Failed`), and the user notifications.
 
 use std::sync::Arc;
 
@@ -52,8 +52,7 @@ fn drain_gateway_debug(
     out
 }
 
-/// The deferred apply runs as a detached local task with nothing to join, and several callers assert absence afterwards.
-/// That needs a window, not a completion signal.
+/// Several callers assert that a notification never arrives; that needs a window, not a completion signal.
 /// Yield to the LocalSet for a wall-clock bound.
 async fn settle() {
     let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
@@ -87,10 +86,10 @@ async fn wait_for_conversation(
 
 fn own_request(actor: &SessionActor, request_id: &RequestId) {
     let (tx, _rx) = tokio::sync::oneshot::channel();
-    actor
-        .turn_stream_drained
-        .lock()
-        .insert(request_id.clone(), Some(tx));
+    actor.turn_stream_drained.lock().insert(
+        request_id.clone(),
+        crate::session::acp_session::StreamOwnership::with_waiter(Some(tx)),
+    );
 }
 
 fn completed_event(request_id: &RequestId) -> SamplingEvent {
@@ -220,15 +219,11 @@ async fn server_rejected_strip_persists_only_after_completed() {
             );
 
             actor.handle_sampling_event(completed_event(&rid)).await;
-            let conv = wait_for_conversation(&actor, |conv| {
-                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
-            })
-            .await;
+            let conv = actor.chat_state_handle.get_conversation().await;
             assert!(
                 !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
-                "Completed must apply the buffered strip: {conv:?}"
+                "Completed must persist the strip before the handler returns: {conv:?}"
             );
-            settle().await; // the note follows the disk ack
             let sent = drain_gateway_debug(&mut gateway_rx);
             assert!(
                 sent.contains("removed from the conversation"),
@@ -266,6 +261,7 @@ async fn timed_out_strip_survives_new_turn_until_late_completed() {
                 .lock()
                 .get_mut(&timed_out)
                 .expect("timed-out request remains owned")
+                .waiter
                 .take();
 
             // The next turn keeps only timeout-owned durable work, then clears ordinary stream ownership before registering its own request
@@ -315,8 +311,23 @@ async fn timed_out_strip_survives_new_turn_until_late_completed() {
         .await;
 }
 
-/// Rewind can commit after `Completed` detaches persistence but before the LocalSet schedules it.
-/// The detached task must acquire rewrite ownership before claiming URLs.
+/// Deliver `Completed` the way the sampler drainer does: on its own local task, so the caller can hold
+/// the strip gate and observe the persist blocked on it without deadlocking the single-threaded runtime.
+fn deliver_completed(
+    actor: &Arc<SessionActor>,
+    request_id: &RequestId,
+) -> tokio::task::JoinHandle<()> {
+    let actor = Arc::clone(actor);
+    let request_id = request_id.clone();
+    tokio::task::spawn_local(async move {
+        actor
+            .handle_sampling_event(completed_event(&request_id))
+            .await;
+    })
+}
+
+/// Rewind can commit after `Completed` arrives but before its persist acquires the strip gate.
+/// The persist must acquire rewrite ownership before claiming URLs.
 /// A waiting successful rewind then clears queued work while preserving the restored image and emitting no stale note.
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_cancels_detached_image_strip_before_it_runs() {
@@ -344,6 +355,7 @@ async fn rewind_cancels_detached_image_strip_before_it_runs() {
                 .lock()
                 .get_mut(&timed_out)
                 .expect("timed-out request remains owned")
+                .waiter
                 .take();
             actor.retain_timed_out_image_strips_for_new_turn();
             actor.turn_stream_drained.lock().clear();
@@ -355,7 +367,7 @@ async fn rewind_cancels_detached_image_strip_before_it_runs() {
                 .expect("snapshot available");
             snapshot.prompt_index = 2;
             snapshot.prompt_texts = vec!["image turn".into(), "later turn".into()];
-            let ConversationItem::User(image_turn) = &mut snapshot.conversation[0] else {
+            let Some(ConversationItem::User(image_turn)) = snapshot.conversation.first_mut() else {
                 panic!("seeded image must be a user turn");
             };
             image_turn.prompt_index = Some(0);
@@ -377,16 +389,15 @@ async fn rewind_cancels_detached_image_strip_before_it_runs() {
             let _ = actor.chat_state_handle.get_conversation().await;
 
             let strip_blocker = actor.image_strip_rewrite_barrier.lock_strip().await;
-            actor
-                .handle_sampling_event(completed_event(&timed_out))
-                .await;
+            let completed = deliver_completed(&actor, &timed_out);
+            tokio::task::yield_now().await;
             assert!(
                 actor
                     .pending_image_strip
                     .lock()
                     .get(&timed_out)
                     .is_some_and(|strip| !strip.applying && !strip.urls.is_empty()),
-                "Completed must not claim URLs before detached persistence owns the gate"
+                "Completed must not claim URLs before its persist owns the gate"
             );
 
             let rewind_actor = Arc::clone(&actor);
@@ -415,7 +426,7 @@ async fn rewind_cancels_detached_image_strip_before_it_runs() {
                 .expect("rewind task completes")
                 .expect("rewind succeeds");
             assert!(rewind.success, "rewind should commit: {rewind:?}");
-            settle().await;
+            completed.await.expect("Completed handler finishes");
 
             let conv = actor.chat_state_handle.get_conversation().await;
             assert!(
@@ -466,9 +477,8 @@ async fn rejected_rewind_preserves_queued_image_strip() {
             });
             tokio::task::yield_now().await;
 
-            actor
-                .handle_sampling_event(completed_event(&request_id))
-                .await;
+            let completed = deliver_completed(&actor, &request_id);
+            tokio::task::yield_now().await;
             assert!(
                 actor
                     .pending_image_strip
@@ -487,11 +497,9 @@ async fn rejected_rewind_preserves_queued_image_strip() {
                 !rewind.success,
                 "invalid rewind must be rejected: {rewind:?}"
             );
+            completed.await.expect("Completed handler finishes");
 
-            let conv = wait_for_conversation(&actor, |conv| {
-                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
-            })
-            .await;
+            let conv = actor.chat_state_handle.get_conversation().await;
             assert!(
                 !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
                 "strip must resume after rejected rewind: {conv:?}"
@@ -568,9 +576,8 @@ async fn failed_compaction_replay_preserves_queued_image_strip() {
                 .await;
 
             let strip_blocker = actor.image_strip_rewrite_barrier.lock_strip().await;
-            actor
-                .handle_sampling_event(completed_event(&request_id))
-                .await;
+            let completed = deliver_completed(&actor, &request_id);
+            tokio::task::yield_now().await;
             let rewind_actor = Arc::clone(&actor);
             let rewind = tokio::task::spawn_local(async move {
                 rewind_actor
@@ -597,11 +604,9 @@ async fn failed_compaction_replay_preserves_queued_image_strip() {
                 .expect("rewind task completes")
                 .expect("rewind returns a response");
             assert!(!rewind.success, "missing checkpoint must reject rewind");
+            completed.await.expect("Completed handler finishes");
 
-            let conv = wait_for_conversation(&actor, |conv| {
-                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
-            })
-            .await;
+            let conv = actor.chat_state_handle.get_conversation().await;
             let _ = std::fs::remove_dir_all(&session_dir);
             assert!(
                 !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
@@ -635,9 +640,8 @@ async fn pending_strip_bound_preserves_detached_and_new_url_entries() {
                 .await;
 
             let strip_blocker = actor.image_strip_rewrite_barrier.lock_strip().await;
-            actor
-                .handle_sampling_event(completed_event(&applying_id))
-                .await;
+            let completed = deliver_completed(&actor, &applying_id);
+            tokio::task::yield_now().await;
             {
                 let mut pending = actor.pending_image_strip.lock();
                 for index in 0..16 {
@@ -677,14 +681,12 @@ async fn pending_strip_bound_preserves_detached_and_new_url_entries() {
                 assert_eq!(16, pending.len());
             }
             drop(strip_blocker);
+            completed.await.expect("Completed handler finishes");
 
-            let conv = wait_for_conversation(&actor, |conv| {
-                !conversation_has_image(conv, PERSIST_GATE_IMAGE_URI)
-            })
-            .await;
+            let conv = actor.chat_state_handle.get_conversation().await;
             assert!(
                 !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
-                "retained detached write must finish after acquiring the gate: {conv:?}"
+                "retained write must finish after acquiring the gate: {conv:?}"
             );
             assert!(!actor.pending_image_strip.lock().contains_key(&applying_id));
         })
@@ -804,13 +806,12 @@ async fn non_applied_strip_outcome_still_notifies_the_user() {
         .await;
 }
 
-/// A strip that did not rescue the turn proves nothing: `Failed` drops the buffer and stored history keeps its images.
 #[tokio::test(flavor = "current_thread")]
-async fn server_rejected_strip_dropped_when_retry_fails() {
+async fn server_rejected_strip_persists_when_retry_fails() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, _) =
+            let (gateway_tx, mut gateway_rx) =
                 tokio::sync::mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
             let actor =
@@ -826,21 +827,29 @@ async fn server_rejected_strip_dropped_when_retry_fails() {
                     StripReason::ServerRejected,
                 ))
                 .await;
-            // The drop must be wired through the event handler itself; deleting the Failed arm's call must fail this test
             actor
                 .handle_sampling_event(SamplingEvent::Failed {
                     request_id: rid.clone(),
                     error: failed_info(),
                 })
                 .await;
-            // A later Completed for the same id must be a no-op.
-            actor.handle_sampling_event(completed_event(&rid)).await;
-            settle().await;
-
             let conv = actor.chat_state_handle.get_conversation().await;
             assert!(
-                conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
-                "a dropped strip must never persist: {conv:?}"
+                !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "Failed after ServerRejected must persist the strip before the handler returns: {conv:?}"
+            );
+            let sent = drain_gateway_debug(&mut gateway_rx);
+            assert!(
+                sent.contains("removed from the conversation"),
+                "persisted Failed strip must tell the user it is permanent, sent: {sent}"
+            );
+
+            actor.handle_sampling_event(completed_event(&rid)).await;
+            settle().await;
+            let conv = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                !conversation_has_image(&conv, PERSIST_GATE_IMAGE_URI),
+                "a later Completed must not restore the stripped image: {conv:?}"
             );
         })
         .await;

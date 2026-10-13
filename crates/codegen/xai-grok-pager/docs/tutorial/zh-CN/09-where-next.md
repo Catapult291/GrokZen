@@ -13,11 +13,11 @@
 ## 良好习惯
 
 - 会话会自动保存。使用 `grok-zh -c` 恢复最新会话，或使用 `/resume`
-  （`F3`）选择一个会话。
+  （`Ctrl+R`）选择一个会话。
 - 会话太长而变慢？`/compact` 释放上下文；`/context` 显示上下文使用情况。
 - 自动化一切：`grok-zh -p "summarize new TODOs" --output-format json`
   以无头模式运行——非常适合脚本和 CI。
-- 社区版默认不后台自动更新；程序启动时只检查版本并显示提示。需要更新时，可在欢迎页按 `Ctrl+U` 或手动运行 `grok-zh update` 从本仓库 Release 获取经过校验的新版本。
+- 社区版默认不后台自动更新；程序启动时只检查版本并显示提示。需要更新时，可在欢迎页按 `Ctrl+U` 或手动运行 `grok-zh update` 从本仓库 Release 获取经过校验的新版本，用 `/release-notes` 查看变化。
 - 感觉哪里不对？在官方服务可用时可用 `/feedback` 提交反馈；中文版问题请提交到
   社区 Fork 的问题跟踪器。
 

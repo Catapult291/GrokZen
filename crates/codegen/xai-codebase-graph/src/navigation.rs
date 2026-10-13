@@ -99,9 +99,7 @@ impl From<std::io::Error> for NavigationError {
 }
 
 /// Navigator provides location-based code navigation.
-///
-/// It wraps a ScopeGraphIndex and provides methods to navigate code
-/// based on file path and position (row, column).
+/// Wraps a ScopeGraphIndex and navigates by file path and position.
 pub struct Navigator {
     index: Arc<ScopeGraphIndex>,
     registry: LanguageRegistry,
@@ -109,18 +107,7 @@ pub struct Navigator {
 
 impl Navigator {
     /// Create a new Navigator backed by a shared index.
-    ///
-    /// Accepts anything that converts into `Arc<ScopeGraphIndex>`, so both
-    /// owned and already-shared indexes work without extra wrapping:
-    ///
-    /// ```rust,ignore
-    /// // From an owned index (e.g. IndexBuilder)
-    /// let navigator = Navigator::new(index);
-    ///
-    /// // From a shared snapshot (zero-cost)
-    /// let snapshot = handle.get_snapshot()?;
-    /// let navigator = Navigator::new(snapshot);
-    /// ```
+    /// Accepts anything that converts into `Arc<ScopeGraphIndex>`, so owned and already-shared indexes work.
     pub fn new(index: impl Into<Arc<ScopeGraphIndex>>) -> Self {
         Self {
             index: index.into(),
@@ -134,22 +121,13 @@ impl Navigator {
     }
 
     /// Get a mutable reference to the underlying index.
-    ///
-    /// Uses copy-on-write: if other `Arc` clones of the index exist, the
-    /// index is cloned before returning the mutable reference.
+    /// Copy-on-write: if other `Arc` clones exist, the index is cloned first.
     pub fn index_mut(&mut self) -> &mut ScopeGraphIndex {
         Arc::make_mut(&mut self.index)
     }
 
     /// Get the symbol at the given file path and position.
-    ///
-    /// # Arguments
-    /// * `file_path` - Path to the file
-    /// * `row` - 1-indexed line number
-    /// * `col` - 1-indexed column number
-    ///
-    /// # Returns
-    /// The symbol name at the given position.
+    /// `row` and `col` are 1-indexed.
     pub fn get_symbol_at_position(
         &self,
         file_path: &Path,
@@ -194,7 +172,7 @@ impl Navigator {
 
         match node {
             Some(n) => {
-                let text = std::str::from_utf8(&content[n.byte_range()])
+                let text = std::str::from_utf8(content.get(n.byte_range()).unwrap_or(&[]))
                     .map_err(|_| NavigationError::ParseError("Invalid UTF-8".to_string()))?;
                 Ok(text.to_string())
             }
@@ -203,14 +181,7 @@ impl Navigator {
     }
 
     /// Go to definition for the symbol at the given position.
-    ///
-    /// # Arguments
-    /// * `file_path` - Path to the file
-    /// * `row` - 1-indexed line number
-    /// * `col` - 1-indexed column number
-    ///
-    /// # Returns
-    /// NavigationResult containing the symbol and its definition locations.
+    /// `row` and `col` are 1-indexed.
     pub fn goto_definition(
         &self,
         file_path: &Path,
@@ -233,17 +204,8 @@ impl Navigator {
     }
 
     /// Go to references for the symbol at the given position.
-    ///
-    /// This first resolves the symbol to its definition, then finds all references.
-    ///
-    /// # Arguments
-    /// * `file_path` - Path to the file
-    /// * `row` - 1-indexed line number  
-    /// * `col` - 1-indexed column number
-    /// * `include_definition` - Whether to include the definition location in results
-    ///
-    /// # Returns
-    /// NavigationResult containing the symbol and its reference locations.
+    /// Resolves the symbol to its definition first, then finds all references.
+    /// `row` and `col` are 1-indexed.
     pub fn goto_references(
         &self,
         file_path: &Path,
@@ -449,7 +411,8 @@ function test(sessionId: string) {{
             "request should be found as a definition"
         );
         assert_eq!(
-            def_result.locations[0].line, 4,
+            def_result.locations.first().map(|l| l.line),
+            Some(4),
             "request should be defined on line 4"
         );
 
@@ -460,7 +423,8 @@ function test(sessionId: string) {{
             "toolCallId should be found as a definition"
         );
         assert_eq!(
-            def_result2.locations[0].line, 4,
+            def_result2.locations.first().map(|l| l.line),
+            Some(4),
             "toolCallId should be defined on line 4"
         );
 
@@ -502,7 +466,8 @@ for (const {{ name, value }} of items) {{
             "name should be found as a definition"
         );
         assert_eq!(
-            def_result.locations[0].line, 3,
+            def_result.locations.first().map(|l| l.line),
+            Some(3),
             "name should be defined on line 3"
         );
 
@@ -513,7 +478,8 @@ for (const {{ name, value }} of items) {{
             "value should be found as a definition"
         );
         assert_eq!(
-            def_result2.locations[0].line, 3,
+            def_result2.locations.first().map(|l| l.line),
+            Some(3),
             "value should be defined on line 3"
         );
     }
@@ -543,7 +509,8 @@ console.log(first, second);"#
             "first should be found as a definition"
         );
         assert_eq!(
-            def_result.locations[0].line, 2,
+            def_result.locations.first().map(|l| l.line),
+            Some(2),
             "first should be defined on line 2"
         );
 
@@ -554,7 +521,8 @@ console.log(first, second);"#
             "second should be found as a definition"
         );
         assert_eq!(
-            def_result2.locations[0].line, 2,
+            def_result2.locations.first().map(|l| l.line),
+            Some(2),
             "second should be defined on line 2"
         );
     }
@@ -584,7 +552,8 @@ console.log(foo, bar);"#
             "foo should be found as a definition"
         );
         assert_eq!(
-            def_result.locations[0].line, 2,
+            def_result.locations.first().map(|l| l.line),
+            Some(2),
             "foo should be defined on line 2"
         );
 
@@ -595,7 +564,8 @@ console.log(foo, bar);"#
             "bar should be found as a definition"
         );
         assert_eq!(
-            def_result2.locations[0].line, 2,
+            def_result2.locations.first().map(|l| l.line),
+            Some(2),
             "bar should be defined on line 2"
         );
     }
@@ -652,7 +622,8 @@ const result = myObject.value;"#
             "first should be found as a definition"
         );
         assert_eq!(
-            def_result.locations[0].line, 1,
+            def_result.locations.first().map(|l| l.line),
+            Some(1),
             "first should be defined on line 1"
         );
 
@@ -663,7 +634,8 @@ const result = myObject.value;"#
             "name should be found as a definition"
         );
         assert_eq!(
-            def_result2.locations[0].line, 1,
+            def_result2.locations.first().map(|l| l.line),
+            Some(1),
             "name should be defined on line 1"
         );
     }
@@ -693,7 +665,8 @@ const result = myObject.value;"#
             "name should be found as a definition"
         );
         assert_eq!(
-            def_result.locations[0].line, 1,
+            def_result.locations.first().map(|l| l.line),
+            Some(1),
             "name should be defined on line 1"
         );
 
@@ -704,7 +677,8 @@ const result = myObject.value;"#
             "age should be found as a definition"
         );
         assert_eq!(
-            def_result2.locations[0].line, 1,
+            def_result2.locations.first().map(|l| l.line),
+            Some(1),
             "age should be defined on line 1"
         );
     }
@@ -766,10 +740,7 @@ function FileTreeTab({{ basePath, onFileSelect }}) {{
             "fileTree should have references"
         );
 
-        // Check references in dependency arrays:
-        // Line 10: [fileTree]
-        // Line 17: [loadDirectory, fileTree]
-        // Line 25: [fileTree, onFileSelect]
+        // Check references in dependency arrays on lines 10, 17, and 25.
         let dep_array_lines: Vec<usize> = ref_result
             .locations
             .iter()

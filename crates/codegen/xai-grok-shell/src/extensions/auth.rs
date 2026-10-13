@@ -22,8 +22,38 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "x.ai/auth/logout" => handle_logout(agent, args).await,
         "x.ai/auth/info" => handle_info(agent),
         "x.ai/auth/check_subscription" => handle_check_subscription(agent).await,
+        "x.ai/auth/hydrate_team_capability" => handle_hydrate_team_capability(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
+}
+
+/// `pub` with both serde directions so the pager builds the request from the type the agent parses.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HydrateTeamCapabilityRequest {
+    pub email: Option<String>,
+    pub team_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HydrateTeamCapabilityResponse {
+    /// Required but nullable: the handler always emits it, so an absent or misspelled key is a broken peer, not an unknown answer.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub can_administer_team: Option<bool>,
+}
+
+/// Backfills `canAdministerTeam` for a cached credential that predates it: startup only enriches a missing user id and the token fast path skips `/user`.
+/// The ACP layer clones the agent's `Rc` into this request's task, so a dropped connection does not cancel the GET; nobody reads the answer, but the shared cache still fills.
+async fn handle_hydrate_team_capability(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    let params: HydrateTeamCapabilityRequest = parse_params(args)?;
+    let can_administer_team = agent
+        .auth_manager
+        .hydrate_can_administer_team(params.email.as_deref(), params.team_id.as_deref())
+        .await;
+    to_raw_response(&HydrateTeamCapabilityResponse {
+        can_administer_team,
+    })
 }
 
 /// Stop an in-flight interactive login (device poll or loopback wait).
@@ -45,10 +75,8 @@ fn handle_cancel(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 }
 
 async fn handle_get_bearer_token(agent: &MvpAgent) -> ExtResult {
-    // Fail closed for session tokens: desktop resume treats non-null as success.
-    // Never return a hard-expired access token
-    // Still return wire-valid session tokens and static user-supplied keys (process model key, env, or disk api_key)
-    // That keeps non-session sessions working when AuthManager has no OIDC entry
+    // Fail closed for session tokens: desktop resume treats non-null as success. Never return a hard-expired access token
+    // Still return wire-valid session tokens and static user-supplied keys (process model key, env, or disk api_key) That keeps non-session sessions working when AuthManager has no OIDC entry
     let token = match agent.auth_manager.get_valid_token().await {
         Ok(token) => Some(token),
         Err(_) => agent
@@ -73,23 +101,17 @@ fn handle_set_api_key(args: &acp::ExtRequest) -> ExtResult {
     let params: serde_json::Value = parse_params(args)?;
     let key = params.get("key").and_then(|v| v.as_str());
     let grok_home = crate::util::grok_home::grok_home();
-    if let Some(k) = key {
-        if k.is_empty() {
-            crate::auth::clear_api_key(&grok_home)
+    match key {
+        Some(k) if !k.is_empty() => {
+            xai_grok_login::store_api_key(&grok_home, k)
                 .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            // SAFETY: ext_method is single-threaded per agent
-            unsafe { std::env::remove_var("XAI_API_KEY") };
-        } else {
-            crate::auth::store_api_key(&grok_home, k)
-                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-            // SAFETY: ext_method is single-threaded per agent
-            unsafe { std::env::set_var("XAI_API_KEY", k) };
+            xai_grok_login::auth_method::set_runtime_xai_api_key(k);
         }
-    } else {
-        crate::auth::clear_api_key(&grok_home)
-            .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-        // SAFETY: ext_method is single-threaded per agent
-        unsafe { std::env::remove_var("XAI_API_KEY") };
+        _ => {
+            xai_grok_login::clear_api_key(&grok_home)
+                .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+            xai_grok_login::auth_method::clear_runtime_xai_api_key();
+        }
     }
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
         .to_ext_response()
@@ -108,10 +130,10 @@ fn handle_submit_code(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     match agent.interactive_auth.submit_code(params.code) {
         Ok(()) => to_raw_response(&serde_json::json!({ "submitted": true })),
-        Err(crate::auth::single_flight::SubmitCodeError::SendFailed(e)) => {
+        Err(xai_grok_login::single_flight::SubmitCodeError::SendFailed(e)) => {
             Err(acp::Error::internal_error().data(format!("failed to submit auth code: {e}")))
         }
-        Err(crate::auth::single_flight::SubmitCodeError::NoPendingAttempt) => {
+        Err(xai_grok_login::single_flight::SubmitCodeError::NoPendingAttempt) => {
             Err(acp::Error::invalid_params().data("no pending auth session"))
         }
     }
@@ -148,10 +170,14 @@ async fn handle_logout(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // Stop any in-flight login so it cannot write credentials back after logout.
     agent.interactive_auth.cancel();
 
-    let result = crate::auth::perform_logout(&agent.auth_manager, params.scope.as_deref())
-        .map_err(|e| acp::Error::internal_error().data(format!("failed to logout: {e}")))?;
+    let result = xai_grok_login::perform_logout(
+        &agent.auth_manager,
+        params.scope.as_deref(),
+        xai_grok_cloud_config::managed_config::clear_orphan,
+    )
+    .map_err(|e| acp::Error::internal_error().data(format!("failed to logout: {e}")))?;
     // `auth.lifecycle` (not `auth`) avoids colliding with the pre-existing per-request `AuthManager::auth()` `#[instrument]` span
-    tracing::info_span!("auth.lifecycle", action = "logout", success = true).in_scope(|| {});
+    xai_grok_telemetry::event_span!("auth.lifecycle", action = "logout", success = true);
 
     agent.models_manager.on_auth_changed().await;
 
@@ -240,6 +266,6 @@ fn handle_info(agent: &MvpAgent) -> ExtResult {
         coding_data_retention_opt_out: auth
             .as_ref()
             .map(|a| a.coding_data_retention_opt_out)
-            .unwrap_or_else(crate::auth::default_coding_data_retention_opt_out),
+            .unwrap_or_else(xai_grok_login::default_coding_data_retention_opt_out),
     })
 }

@@ -7,7 +7,6 @@ use anyhow::{Context, Result};
 use std::path::Path;
 use xai_grok_telemetry::region;
 use xai_grok_telemetry::region::Parent;
-use xai_grok_workspace::session::git::find_git_root_from_path;
 pub use xai_grok_workspace::worktree::*;
 const WORKTREE_LOG: &str = "xai_worktree";
 impl From<ShellWorktreeType> for WorktreeType {
@@ -38,6 +37,7 @@ async fn create_worktree_for_resume(
     worktree_type: ShellWorktreeType,
     git_ref: Option<String>,
     grove_worktree: bool,
+    grove_gate_source: &'static str,
 ) -> Result<CreateWorktreeFromWorktreeResponse> {
     let copy_mode = if git_ref.is_some() {
         WorktreeCopyMode::Clean
@@ -52,23 +52,21 @@ async fn create_worktree_for_resume(
         worktree_type: Some(WorktreeType::from(worktree_type)),
         label: None,
         grove_worktree: Some(grove_worktree),
+        grove_gate_source: Some(grove_gate_source.into()),
         cancellation_token: None,
         resolved_dest_path: None,
+        resolved_source_git_root: None,
     };
     let source = std::path::Path::new(source_cwd);
-    if find_git_root_from_path(source)
-        .ok()
-        .is_some_and(|root| xai_grok_workspace::session::git::detect_vcs_kind(&root).is_jj())
-    {
+    if git_or_grove_is_jj_async(source, grove_worktree).await {
         create_jj_workspace(&wt_req).await
     } else {
         create_worktree_from_worktree_sync(&wt_req).await
     }
 }
 /// Check out a persisted HEAD commit in a worktree, with fetch fallback.
-///
 /// Always stashes any dirty state before invoking `git checkout`, so the caller can show the stash ref to the user.
-/// (Under `copy_mode: dirty` the worktree may carry copies of the source's uncommitted changes.)
+/// (Under `copy_mode: dirty` the worktree may carry copies of the source's uncommitted changes.).
 pub(crate) async fn checkout_persisted_head_in_worktree(
     worktree_path: &str,
     head_commit: Option<&str>,
@@ -130,9 +128,10 @@ pub(crate) async fn resume_session_in_worktree(
     worktree_type_default: ShellWorktreeType,
     restore_code_default: bool,
     registry_client: Option<&crate::agent::session_registry_client::SessionRegistryClient>,
-    auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
+    auth_manager: Option<std::sync::Arc<xai_grok_login::AuthManager>>,
     agent_id: &str,
     grove_worktree: bool,
+    grove_gate_source: &'static str,
 ) -> Result<ResumeSessionInWorktreeResponse> {
     tracing::info!(
         target: WORKTREE_LOG,
@@ -163,6 +162,7 @@ pub(crate) async fn resume_session_in_worktree(
             auth_manager,
             agent_id,
             grove_worktree,
+            grove_gate_source,
         )
         .await;
     }
@@ -192,6 +192,7 @@ pub(crate) async fn resume_session_in_worktree(
         worktree_type,
         req.git_ref.clone(),
         grove_worktree,
+        grove_gate_source,
     )
     .await?;
     let dest = wt_resp.worktree_path.clone();
@@ -282,6 +283,7 @@ async fn restore_remote_session_into_worktree(
         code_restored: codebase_ok,
         restore_summary,
         restore_degree,
+        strategy: wt_resp.strategy,
     })
 }
 /// Local-session resume: create worktree from source, fork session into it.
@@ -293,9 +295,10 @@ async fn resume_local_session_in_worktree(
     worktree_type_default: ShellWorktreeType,
     restore_code_default: bool,
     registry_client: Option<&crate::agent::session_registry_client::SessionRegistryClient>,
-    auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
+    auth_manager: Option<std::sync::Arc<xai_grok_login::AuthManager>>,
     agent_id: &str,
     grove_worktree: bool,
+    grove_gate_source: &'static str,
 ) -> Result<ResumeSessionInWorktreeResponse> {
     use crate::session::fork::{ForkSessionRequest, fork_session};
     use xai_grok_workspace::session::git::effective_worktree_path;
@@ -309,6 +312,7 @@ async fn resume_local_session_in_worktree(
         worktree_type,
         req.git_ref.clone(),
         grove_worktree,
+        grove_gate_source,
     )
     .await?;
     tracing::info!(
@@ -327,9 +331,9 @@ async fn resume_local_session_in_worktree(
         restore_degree: None,
     };
     if req.restore_code.unwrap_or(restore_code_default) {
-        let is_jj = find_git_root_from_path(std::path::Path::new(resolved_source_cwd))
-            .ok()
-            .is_some_and(|root| xai_grok_workspace::session::git::detect_vcs_kind(&root).is_jj());
+        let is_jj =
+            git_or_grove_is_jj_async(std::path::Path::new(resolved_source_cwd), grove_worktree)
+                .await;
         if !is_jj {
             if xai_grok_workspace::session::git::should_warn_registry_disabled(
                 is_jj,
@@ -416,6 +420,7 @@ async fn resume_local_session_in_worktree(
         code_restored,
         restore_summary,
         restore_degree,
+        strategy: wt_resp.strategy,
     })
 }
 /// Run session rehydration: recreate the git worktree at the exact path and restore all session state using the original session ID.
@@ -423,6 +428,8 @@ pub(crate) async fn rehydrate_session_in_worktree(
     req: &RehydrateSessionRequest,
     #[allow(unused_variables)] ops: &xai_grok_workspace::WorkspaceOps,
     registry_client: Option<&crate::agent::session_registry_client::SessionRegistryClient>,
+    grove_worktree: bool,
+    grove_gate_source: &'static str,
 ) -> Result<RehydrateSessionResponse> {
     let worktree_path_str = req.worktree_path.as_deref().unwrap_or(&req.source_cwd);
     let repo_root = Path::new(&req.repo_root);
@@ -464,7 +471,7 @@ pub(crate) async fn rehydrate_session_in_worktree(
         let session_id = req.session_id.clone();
         let btrfs_delegate = btrfs_delegate_from_env();
         let _recreate = region!("worktree.cwd_recreate", Parent::Inherit);
-        tokio::task::spawn_blocking(move || {
+        let created = tokio::task::spawn_blocking(move || {
             use xai_fast_worktree::{
                 CreationMode, IgnoredFilesMode, WorkingTreeMode, WorktreeBuilder,
             };
@@ -474,13 +481,27 @@ pub(crate) async fn rehydrate_session_in_worktree(
                 .creation_mode(CreationMode::Linked)
                 .worktree_kind(xai_fast_worktree::WorktreeKind::Fork)
                 .session_id(session_id);
+            if let Some(opts) = crate::util::config::grove_worktree_opts_if_enabled(grove_worktree)
+            {
+                builder = builder.grove_worktree(opts);
+            }
             if let Some(delegate) = btrfs_delegate {
                 builder = builder.btrfs_delegate(delegate);
             }
             builder.create()
         })
         .await
-        .map_err(|e| anyhow::anyhow!("worktree creation task failed: {e}"))??;
+        .map_err(|e| anyhow::anyhow!("worktree creation task failed: {e}"))?;
+        let report = created?;
+        tracing::info!(
+            session_id = %req.session_id,
+            worktree_path = %report.worktree_path.display(),
+            resolved_strategy = report.resolved_strategy,
+            skipped = %xai_fast_worktree::render_arm_skips(&report.skipped),
+            grove_worktree,
+            grove_gate_source,
+            "rehydrate: created worktree"
+        );
     }
     let client = registry_client.ok_or_else(|| {
         anyhow::anyhow!(
@@ -575,6 +596,7 @@ mod tests {
                 "checked out abc12345, staged: true, unstaged: false, untracked: 3".into(),
             ),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::Full),
+            strategy: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let deser: ResumeSessionInWorktreeResponse = serde_json::from_str(&json).unwrap();
@@ -643,6 +665,7 @@ mod tests {
             code_restored: true,
             restore_summary: Some("checked out abc".into()),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::HeadOnly),
+            strategy: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"restoreDegree\":\"head_only\""));
@@ -683,6 +706,7 @@ mod tests {
             code_restored: false,
             restore_summary: None,
             restore_degree: None,
+            strategy: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("sessionId"));
@@ -734,6 +758,7 @@ mod tests {
             commit: "abc123".to_string(),
             source_git_root: None,
             copied_changes: None,
+            strategy: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(!json.contains("copiedChanges"));
@@ -754,6 +779,7 @@ mod tests {
                 deletions_applied: 1,
                 warnings: vec![],
             }),
+            strategy: None,
         };
         let json = serde_json::to_string(&status).unwrap();
         assert!(json.contains("copiedChanges"));
@@ -919,6 +945,7 @@ mod tests {
             None,
             "test-agent",
             false,
+            "default",
         )
         .await;
         let err = result.expect_err("should fail when session not found and no registry");
@@ -973,6 +1000,7 @@ mod tests {
             ShellWorktreeType::Linked,
             None,
             false,
+            "default",
         )
         .await
         .expect("worktree creation should succeed");
@@ -1014,6 +1042,7 @@ mod tests {
             ShellWorktreeType::Linked,
             Some("main".into()),
             false,
+            "default",
         )
         .await
         .expect("worktree creation with git_ref should succeed");
@@ -1043,6 +1072,7 @@ mod tests {
             ShellWorktreeType::Linked,
             None,
             false,
+            "default",
         )
         .await
         .expect("worktree creation should succeed");

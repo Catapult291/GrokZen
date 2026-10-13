@@ -23,10 +23,6 @@ use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::text::Line;
 
-// ---------------------------------------------------------------------------
-// ListPaneStyle: configurable colors for the framework's post-pass overlays
-// ---------------------------------------------------------------------------
-
 /// Controls colors for selection highlighting, the input bar, and other framework-level overlays.
 /// Match highlights use style inversion (REVERSED modifier) and don't need configurable colors.
 /// Items do not need to know about these; the framework applies them in a pass after each item renders.
@@ -95,27 +91,9 @@ impl Default for ListPaneStyle {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ListItem trait
-// ---------------------------------------------------------------------------
-
-/// Items are owned by the model, not the view. The view borrows them through `&[T]` in [`ListPaneState::prepare_layout`] and [`ListPane::new`].
-///
-/// ## Rendering: two modes
-///
-/// **Content-based (preferred):** implement [`content()`] and optionally [`prefix()`].
-/// The framework handles wrapping, truncation, highlighting, and selection overlays automatically. This is the right choice for most items.
-///
-/// **Custom rendering (escape hatch):** override [`render()`] to paint directly into a buffer.
-/// Use this only when the content/prefix model doesn't fit (e.g. diff hunks with side-by-side layout). You must also override [`desired_height()`].
-///
-/// Items that implement [`content()`] (a non-empty Line) get framework rendering; [`render()`] and [`desired_height()`] then derive automatically.
-/// Items that override [`render()`] bypass the framework.
+/// Items are owned by the model, not the view. The view borrows them through `&[T]` in
+/// [`ListPaneState::prepare_layout`] and [`ListPane::new`].
 pub trait ListItem {
-    // =======================================================================
-    // Content-based API (preferred)
-    // =======================================================================
-
     /// The styled content to display: one logical line of text.
     /// The framework handles wrapping (Wrap mode) and truncation (NoWrap mode) based on this content. Return a reference to a stored `Line`.
     /// Default returns an empty `Line` (signals "use custom `render()`").
@@ -149,9 +127,7 @@ pub trait ListItem {
         None
     }
 
-    // =======================================================================
     // Custom rendering API (escape hatch)
-    // =======================================================================
 
     /// Override this only when the content/prefix model doesn't fit; with the content-based API, leave it as the default no-op.
     /// The framework calls this only when `content()` returns an empty Line.
@@ -173,11 +149,9 @@ pub trait ListItem {
         if text_area == 0 {
             return 1;
         }
-        // Use the actual word-wrap line count via textwrap, not character-count division
-        // The cheap ceil(chars/width) estimate underestimates because word-aware wrapping produces more lines when words can't fit at line boundaries
-        //
-        // textwrap::wrap is cheap (it only computes break positions); word_wrap_line is expensive (it builds styled Lines)
-        // Uses the same FirstFit options as the rendering pipeline
+        // Use the actual word-wrap line count via textwrap, not character-count division. The cheap
+        // ceil(chars/width) estimate underestimates because word-aware wrapping produces more lines when
+        // words can't fit at line boundaries. Uses the same FirstFit options as the rendering pipeline.
         let flat: String = self
             .content()
             .spans
@@ -190,10 +164,6 @@ pub trait ListItem {
         (textwrap::wrap(&flat, opts).len() as u16).max(1)
     }
 
-    // =======================================================================
-    // Identity & behavior
-    // =======================================================================
-
     /// Stable identity that survives insertions, removals, and reordering.
     /// Must be unique within the list. Used so that selection state persists across mutations without index arithmetic.
     fn stable_id(&self) -> u64;
@@ -204,9 +174,6 @@ pub trait ListItem {
     }
 
     /// Source line number for goto-line (`:N`) navigation.
-    /// When items have a meaningful source line number (e.g. file viewer lines), return `Some(n)`.
-    /// Goto-line then targets the correct item even when the visual index differs (e.g. interleaved comment lines).
-    /// Return `None` (default) to use the visual index.
     fn goto_line_number(&self) -> Option<usize> {
         None
     }
@@ -216,14 +183,7 @@ pub trait ListItem {
         false
     }
 
-    // =======================================================================
-    // Search / filter
-    // =======================================================================
-
     /// Plain text for search/filter matching.
-    /// The framework calls `regex.is_match(item.search_text())` during filtering and `regex.find_iter(item.search_text())` for highlight rendering.
-    /// Byte offsets in this string correspond to the text content rendered starting at column [`search_text_col_offset`].
-    /// Default returns `""` (item not searchable/filterable).
     fn search_text(&self) -> &str {
         ""
     }

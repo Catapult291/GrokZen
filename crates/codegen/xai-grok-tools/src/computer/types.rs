@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use crate::computer::content_search::{ContentSearchJob, ContentSearchRequest};
 use crate::notification::types::ToolNotificationHandle;
 
 /// A validated, non-wide WHATWG source encoding for terminal output.
@@ -134,24 +135,46 @@ impl From<std::io::Error> for ComputerError {
 pub trait AsyncFileSystem: Send + Sync {
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, ComputerError>;
 
+    fn supports_bounded_read(&self) -> bool {
+        false
+    }
+
+    /// Read a complete regular file without acquiring more than `max_bytes + 1` bytes.
+    /// Unsupported backends must not fall back to an unbounded read.
+    async fn read_file_bounded(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        let _ = (path, max_bytes);
+        Err(ComputerError::io_with_kind(
+            "bounded file reads are not supported by this backend",
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError>;
 
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError>;
 
-    /// Whether `path` exists as a readable regular file, without reading
-    /// its contents. `Ok(false)` means a definitive not-found; other probe
-    /// failures surface as `Err`.
-    ///
-    /// The default errs with `ErrorKind::Unsupported` — callers must treat
-    /// `Err` as "unknown" and fail closed. Backends opt in by overriding
-    /// with a cheap stat/lookup; a full-content read is never an acceptable
-    /// probe (the target may be arbitrarily large or remote).
+    /// Whether `path` exists as a readable regular file, without reading its contents. The default errs with `ErrorKind::Unsupported` — callers
+    /// must treat `Err` as "unknown" and fail closed. Backends opt in by overriding with a cheap stat/lookup; a full-content read is never an
+    /// acceptable probe (the target may be arbitrarily large or remote).
     async fn file_exists(&self, path: &Path) -> Result<bool, ComputerError> {
         let _ = path;
         Err(ComputerError::io_with_kind(
             "file_exists is not supported by this backend",
             std::io::ErrorKind::Unsupported,
         ))
+    }
+
+    /// Offer to answer a grep content search instead of `rg`. `None` declines and
+    /// must not do any I/O. The grep tool runs the returned job first and runs
+    /// `rg` when the job fails. A served result must be exactly what `rg` reports
+    /// for the same request (see [`crate::computer::content_search`]).
+    fn offer_content_search(&self, request: &ContentSearchRequest) -> Option<ContentSearchJob> {
+        let _ = request;
+        None
     }
 }
 
@@ -186,12 +209,9 @@ pub struct TerminalRunRequest {
     /// `BashOutputChunk.base.tool_call_id`.
     pub tool_call_id: String,
 
-    /// Original user command before isolation wrapping.
-    ///
-    /// When set, the terminal actor stores this on the `ProcessEntry` so
-    /// `get_task()` returns it in `TaskSnapshot.display_command`. This
-    /// ensures model-facing `get_task_output` shows the user's command
-    /// instead of the `unshare`/mount wrapper.
+    /// Original user command before isolation wrapping. When set, the terminal actor stores this on the `ProcessEntry` so
+    /// `get_task()` returns it in `TaskSnapshot.display_command`. This ensures model-facing `get_task_output` shows the
+    /// user's command instead of the `unshare`/mount wrapper.
     pub display_command: Option<String>,
 
     /// Auto-background on timeout instead of killing (default `false`).
@@ -260,13 +280,9 @@ pub struct TerminalRunResult {
     /// Total bytes of output (before truncation).
     /// When truncated, combined_output contains the first and last portions up to output_byte_limit chars.
     pub total_bytes: usize,
-    /// PID of the spawned shell process, when available. Set by the
-    /// local terminal backend at spawn time. Useful for foreground
-    /// commands that auto-background on timeout: the resulting
-    /// `BackgroundTaskStarted` can carry the real PID instead of a
-    /// placeholder. `None` for backends that cannot surface a local
-    /// PID (e.g. ACP/remote terminals) or when the process exited
-    /// before `child.id()` could be queried.
+    /// PID of the spawned shell process, when available. Set by the local terminal backend at spawn time. Useful for foreground commands that
+    /// auto-background on timeout: the resulting `BackgroundTaskStarted` can carry the real PID instead of a placeholder. `None` for backends that
+    /// cannot surface a local PID (e.g. ACP/remote terminals) or when the process exited before `child.id()` could be queried.
     pub pid: Option<u32>,
 }
 
@@ -275,12 +291,14 @@ pub struct TerminalRunResult {
 pub struct BackgroundHandle {
     pub task_id: String,
     pub output_file: PathBuf,
-    /// PID of the spawned shell process, when available. `None` for
-    /// backends that do not surface a local PID (e.g. ACP/remote
-    /// gateways) or when the process exited before the PID could be
+    /// PID of the spawned shell process, when available. `None` for backends that do not surface a
+    /// local PID (e.g. ACP/remote gateways) or when the process exited before the PID could be
     /// captured.
     pub pid: Option<u32>,
 }
+
+/// The `signal` of a task that was lost, not failed. The pager finalizes it without a failed block
+pub const SESSION_RESTART_SIGNAL: &str = "session_restart";
 
 /// Full snapshot of a task's state.
 /// Used by both local and ACP backends.
@@ -291,10 +309,9 @@ pub struct TaskSnapshot {
     pub task_id: String,
     /// The actual command that was executed (may be isolation-wrapped).
     pub command: String,
-    /// The original user command before isolation wrapping.
-    ///
-    /// When set, model/user-facing output should prefer this over `command`
-    /// to avoid exposing internal isolation mechanics (unshare/mount wrapper).
+    /// The original user command before isolation wrapping. When set, model/user-facing output
+    /// should prefer this over `command` to avoid exposing internal isolation mechanics
+    /// (unshare/mount wrapper).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_command: Option<String>,
     pub cwd: String,
@@ -353,6 +370,10 @@ pub struct TaskSnapshot {
 }
 
 impl TaskSnapshot {
+    pub fn is_completed_background(&self) -> bool {
+        self.completed && self.is_backgrounded
+    }
+
     /// Calculate duration in seconds.
     /// If task is still running, returns time since start.
     pub fn duration_secs(&self) -> f64 {
@@ -362,10 +383,9 @@ impl TaskSnapshot {
             .unwrap_or(0.0)
     }
 
-    /// True iff the task has NOT yet completed — covers bash AND
-    /// monitor task kinds (the `kind` field doesn't change this
-    /// predicate; the runtime turn-end TodoGate counts both as
-    /// backing work).
+    /// True iff the task has NOT yet completed — covers bash AND monitor task kinds (the `kind`
+    /// field doesn't change this predicate; the runtime turn-end TodoGate counts both as backing
+    /// work).
     pub fn is_outstanding(&self) -> bool {
         !self.completed
     }
@@ -387,11 +407,9 @@ impl TaskSnapshot {
     }
 }
 
-/// Result of killing a terminal task.
-///
-/// Serialized over the wire in the `x.ai/task/kill` ext response
-/// (`xai-grok-shell::extensions::task::KillTaskResponse`) and deserialized
-/// by clients (xai-grok-pager), so it derives both serde directions.
+/// Result of killing a terminal task. Serialized over the wire in the `x.ai/task/kill` ext response
+/// (`xai-grok-shell::extensions::task::KillTaskResponse`) and deserialized by clients
+/// (xai-grok-pager), so it derives both serde directions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KillOutcome {
@@ -430,11 +448,8 @@ pub struct BackgroundedForeground {
 // TerminalBackend trait
 // ============================================================================
 
-/// The single abstraction over terminal execution backends.
-///
-/// Implemented by:
-/// - `LocalTerminalBackend` (in xai-grok-tools, spawns processes)
-/// - `AcpTerminalBackend` (in xai-grok-shell, calls ACP protocol)
+/// The single abstraction over terminal execution backends. `LocalTerminalBackend` (in
+/// xai-grok-tools, spawns processes) `AcpTerminalBackend` (in xai-grok-shell, calls ACP protocol)
 #[async_trait::async_trait]
 pub trait TerminalBackend: Send + Sync {
     /// Run a command. Blocks until completion or timeout.
@@ -450,16 +465,12 @@ pub trait TerminalBackend: Send + Sync {
     /// Get current snapshot of a background task.
     async fn get_task(&self, task_id: &str) -> Option<TaskSnapshot>;
 
-    /// Kill a background task.
-    ///
-    /// Equivalent to [`Self::kill_task_with_source`] with
+    /// Kill a background task. Equivalent to [`Self::kill_task_with_source`] with
     /// [`KillSource::ModelTool`].
     async fn kill_task(&self, task_id: &str) -> KillOutcome;
 
-    /// Kill a background task, recording who initiated the kill.
-    ///
-    /// The default ignores `source` and delegates to [`Self::kill_task`],
-    /// which existing backends treat as a model-tool kill.
+    /// Kill a background task, recording who initiated the kill. The default ignores `source` and
+    /// delegates to [`Self::kill_task`], which existing backends treat as a model-tool kill.
     async fn kill_task_with_source(&self, task_id: &str, source: KillSource) -> KillOutcome {
         let _ = source;
         self.kill_task(task_id).await
@@ -484,15 +495,9 @@ pub trait TerminalBackend: Send + Sync {
 
     async fn warm_shell(&self, _cwd: &std::path::Path) {}
 
-    /// Reparent notification handles for all tasks owned by `old_owner_session_id`.
-    /// Swaps the dead child session's notification handle with the parent's
-    /// live handle so events from surviving processes route correctly.
-    /// Also re-spawns monitor pipelines on the caller's runtime so monitor
-    /// events continue streaming to the parent.
-    ///
-    /// `backend_weak` is a [`Weak`](std::sync::Weak) to *this* backend (anchored
-    /// by the parent session's `Arc`); it drives re-spawned monitor pipelines
-    /// without keeping the backend alive. See `run_monitor_pipeline`.
+    /// Reparent notification handles for all tasks owned by `old_owner_session_id`. Swaps the dead child session's
+    /// notification handle with the parent's live handle so events from surviving processes route correctly. Also re-spawns
+    /// monitor pipelines on the caller's runtime so monitor events continue streaming to the parent.
     async fn reparent_notifications(
         &self,
         _old_owner_session_id: &str,
@@ -518,12 +523,9 @@ pub trait TerminalBackend: Send + Sync {
         Vec::new()
     }
 
-    /// Wait for a background task to complete, with optional timeout.
-    ///
-    /// # Panics / overflow
-    /// Implementations may add `timeout` to `Instant::now()`. Callers must
-    /// bound `timeout` (e.g. via `capped_wait_timeout`) so the sum stays
-    /// representable; unbounded model `timeout_ms` can overflow.
+    /// Wait for a background task to complete, with optional timeout. Implementations may add
+    /// `timeout` to `Instant::now()`. Callers must bound `timeout` (e.g. via `capped_wait_timeout`)
+    /// so the sum stays representable; unbounded model `timeout_ms` can overflow.
     async fn wait_for_completion(
         &self,
         task_id: &str,
@@ -568,6 +570,19 @@ pub trait TerminalBackend: Send + Sync {
     /// cleanup affordance for terminal rows, never as a way to stop a process.
     async fn delete_task(&self, _task_id: &str) -> bool {
         false
+    }
+
+    /// Metadata-only listing for durable background_tasks snapshots.
+    /// Skips log reads and omits stdout; default clears output after
+    /// [`Self::list_tasks`].
+    async fn list_tasks_metadata(&self) -> Vec<TaskSnapshot> {
+        let mut tasks = self.list_tasks().await;
+        for task in &mut tasks {
+            task.output.clear();
+            task.output_total_bytes = 0;
+            task.truncated = false;
+        }
+        tasks
     }
 
     /// Return the persistent shell's current working directory, if persistent

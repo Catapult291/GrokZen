@@ -122,9 +122,7 @@ pub(crate) mod hydrate {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        // Pull does not go through the rename extension, so strip and cap here before this reaches `display_name`
-        //
-        // `save_session_data` writes the metadata blob, not the session-row title (`upsert` there passes title=None)
+        // Pull does not go through the rename extension, so strip and cap here before this reaches `display_name` `save_session_data` writes the metadata blob, not the session-row title (`upsert` there passes title=None)
         // Prefer an explicit blob title, including blank (meaning cleared), so a stale row cannot resurrect a pin or clobber a metadata-only rename
         let remote_title = match meta.and_then(|m| m.get("title")) {
             Some(v) => v.as_str().and_then(sanitize_and_cap_title),
@@ -137,8 +135,19 @@ pub(crate) mod hydrate {
         };
         let title_is_manual = generated_title.is_some();
 
+        // Only adopt a parseable agent id; anything else is treated as absent so cold spawn mints a fresh one
+        let remote_agent_id = meta.and_then(|m| {
+            m.get("agentId")
+                .or_else(|| m.get("agent_id"))
+                .and_then(|v| v.as_str())
+                .and_then(xai_message_delivery_core::AgentId::parse)
+                .map(|id| id.as_str().to_owned())
+        });
         let mut summary = Summary {
             info: info.clone(),
+            agent_id: remote_agent_id,
+            // A pulled session is a new activation; mint attempt_id on cold spawn.
+            attempt_id: None,
             cwd_generation: 0,
             previous_cwd: None,
             pending_cwd_switch_reminder: None,
@@ -172,10 +181,11 @@ pub(crate) mod hydrate {
             generated_title,
             title_is_manual,
             worktree_label: None,
-            agent_name: None,
+            agent: Default::default(),
             // Hydrated locally: record the profile this process runs under
             sandbox_profile: xai_grok_sandbox::configured_profile_name().map(String::from),
             reasoning_effort: None,
+            context_window: None,
             last_turn_summary: None,
             last_turn_summary_prompt_id: None,
             last_recap: None,
@@ -323,9 +333,19 @@ mod tests {
 
         for line in &lines {
             let v: serde_json::Value = serde_json::from_str(line).unwrap();
-            assert_eq!(v["timestamp"], 0);
-            assert_eq!(v["method"], "session/update");
-            assert!(v["params"].is_object());
+            assert_eq!(
+                v.pointer("/timestamp").unwrap_or(&serde_json::Value::Null),
+                0
+            );
+            assert_eq!(
+                v.pointer("/method").unwrap_or(&serde_json::Value::Null),
+                "session/update"
+            );
+            assert!(
+                v.pointer("/params")
+                    .unwrap_or(&serde_json::Value::Null)
+                    .is_object()
+            );
         }
     }
 
@@ -402,16 +422,15 @@ mod tests {
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
 
-        assert_eq!(items.len(), 2, "should have 1 user + 1 agent item");
+        let [user, agent] = items.as_slice() else {
+            panic!("should have 1 user + 1 agent item: {items:?}");
+        };
+        assert!(matches!(user, crate::sampling::ConversationItem::User(_)));
         assert!(matches!(
-            &items[0],
-            crate::sampling::ConversationItem::User(_)
-        ));
-        assert!(matches!(
-            &items[1],
+            agent,
             crate::sampling::ConversationItem::Assistant(_)
         ));
-        if let crate::sampling::ConversationItem::User(u) = &items[0] {
+        if let crate::sampling::ConversationItem::User(u) = user {
             let text: String = u
                 .content
                 .iter()
@@ -486,17 +505,15 @@ mod tests {
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
 
-        assert_eq!(items.len(), 2);
-        if let crate::sampling::ConversationItem::User(u) = &items[0] {
-            assert_eq!(u.content.len(), 2, "should have text + image parts");
-            assert!(matches!(
-                &u.content[0],
-                crate::sampling::ContentPart::Text { .. }
-            ));
-            assert!(matches!(
-                &u.content[1],
-                crate::sampling::ContentPart::Image { .. }
-            ));
+        let [user, _agent] = items.as_slice() else {
+            panic!("should have 1 user + 1 agent item, got {}", items.len());
+        };
+        if let crate::sampling::ConversationItem::User(u) = user {
+            let [text, image] = u.content.as_slice() else {
+                panic!("should have text + image parts: {:?}", u.content);
+            };
+            assert!(matches!(text, crate::sampling::ContentPart::Text { .. }));
+            assert!(matches!(image, crate::sampling::ContentPart::Image { .. }));
         } else {
             panic!("expected User item");
         }
@@ -550,6 +567,25 @@ mod tests {
         super::hydrate::write_to_dir(tmp.path(), &data).unwrap();
         let json = std::fs::read_to_string(tmp.path().join("summary.json")).unwrap();
         serde_json::from_str(&json).unwrap()
+    }
+
+    #[test]
+    fn hydrate_adopts_only_parseable_remote_agent_id() {
+        let valid = hydrate_summary(None, Some(serde_json::json!({ "agentId": "ag1.c0ffee" })));
+        assert_eq!(valid.agent_id.as_deref(), Some("ag1.c0ffee"));
+        assert!(valid.attempt_id.is_none());
+
+        let snake = hydrate_summary(None, Some(serde_json::json!({ "agent_id": "ag1.c0ffee" })));
+        assert_eq!(snake.agent_id.as_deref(), Some("ag1.c0ffee"));
+
+        let invalid = hydrate_summary(
+            None,
+            Some(serde_json::json!({ "agentId": "legacy-session-id" })),
+        );
+        assert!(invalid.agent_id.is_none());
+
+        let empty = hydrate_summary(None, Some(serde_json::json!({ "agentId": "" })));
+        assert!(empty.agent_id.is_none());
     }
 
     #[test]

@@ -34,6 +34,9 @@ Grok 为每个会话使用单独的目录，并按工作目录分组。它会对
   summary.json            # 元数据：摘要/标题、时间戳、模型 ID、消息计数
   updates.jsonl           # ACP 会话更新流（对话 + 工具调用）
   chat_history.jsonl      # 发送给模型的原始聊天消息
+  system_prompt.txt       # 实际发送给模型的已渲染系统提示
+  prompt_context.json     # 渲染系统提示时使用的输入
+  tool_definitions.json   # 最近模型调用的函数工具，不含 MCP server__tool 条目
   plan.json               # TODO/任务列表状态
   rewind_points.jsonl     # 用于 /rewind 撤销的回退点
   signals.json            # 会话信号（Token 用量、工具/轮次计数器）
@@ -44,6 +47,8 @@ Grok 为每个会话使用单独的目录，并按工作目录分组。它会对
 
 `summary.json` 是索引条目。它记录会话摘要和生成的标题、模型 ID、创建和更新时间
 戳、消息计数，以及分叉或恢复会话的父会话引用。它还会记录最近一轮摘要和会话回顾，供列表界面展示。`updates.jsonl` 是驱动 `/resume` 和会话恢复的权威对话日志。逐轮令牌与费用总计可通过 `grok-zh usage` 查看。
+
+`tool_definitions.json` 不包含 MCP 的 `server__tool` 条目，因为模型通过其中列出的 `search_tool` 和 `use_tool` 访问这些工具。
 
 ### 会话标题
 
@@ -203,10 +208,7 @@ Esc**），Grok 会：
 
 ```
 /compact
-/compact [context]
 ```
-
-可选的 `context` 参数允许你提供关于压缩期间应保留哪些内容的附加说明。
 
 ### 自动压缩
 
@@ -352,6 +354,8 @@ Worktree 会话在内部通过 `x.ai/git/worktree/*` 扩展方法管理。关键
 - **Remove**：会话结束后清理 worktree
 
 使用 `grok-zh -w -r <session-id>` 在新的 worktree 中恢复会话。
+
+`grok-zh worktree create [NAME]` 会创建与 `grok-zh -w [NAME]` 相同的工作树，但不启动会话。它会输出原本将作为会话工作目录的路径；标准输出中只有这条路径，因此可以使用 `cd "$(grok-zh worktree create my-fix)"` 直接进入。默认以 HEAD 为基准创建工作树，并复制尚未提交的更改。传入 `--ref <ref>` 可从指定分支、标签或提交创建干净的检出。如果新工作树中不存在运行命令时所在的目录（例如 `--ref` 指向该目录创建之前的提交，或该目录被忽略），则输出工作树根目录。
 
 ### 检查磁盘用量
 

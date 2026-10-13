@@ -41,10 +41,9 @@ impl ChildCaptureHandle {
 
 impl Drop for ChildCaptureHandle {
     fn drop(&mut self) {
-        // Always kill the child so the mic is released even when `stop()` was never called (e.g. the STT session ended on its own).
-        // Killing closes the child's stdout, so the reader thread's blocking `read` returns 0 and it exits
-        // `Drop` must never block (it may run on an async executor), so the reap happens on a detached thread
-        // Without it, a teardown that comes through `Drop` would leave a zombie until the pager exits
+        // Always kill the child so the mic is released even when `stop()` was never called (e.g. the STT session ended on its
+        // own). Killing closes the child's stdout, so the reader thread's blocking `read` returns 0 and it exits `Drop` must
+        // never block (it may run on an async executor), so the reap happens on a detached thread.
         self.stop.store(true, Ordering::Release);
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
@@ -83,7 +82,7 @@ pub(super) fn forward_pcm(
                 // Never park this thread on the channel: `stop()` joins it
                 // A send that waits on a stalled STT consumer would turn teardown into a hang. Shed load instead.
                 // (`read` itself is unblocked by the kill-on-stop path: killing the child closes stdout, so a waiting `read` returns 0.)
-                match pcm_tx.try_send(buf[..n].to_vec()) {
+                match pcm_tx.try_send(buf.get(..n).unwrap_or(&[]).to_vec()) {
                     Ok(()) => {}
                     Err(async_mpsc::error::TrySendError::Full(_)) => dropped += 1,
                     // Consumer is gone: the session ended; stop capturing.

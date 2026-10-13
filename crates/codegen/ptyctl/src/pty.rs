@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -31,9 +33,8 @@ pub struct PtyHandle {
 }
 
 /// Resize-capable master half of a dismantled [`PtyHandle`].
-///
-/// portable-pty's unix master is not `Sync` (interior `RefCell`), so it sits
-/// behind a mutex that is only held for the synchronous resize ioctl.
+/// portable-pty's unix master is not `Sync` (`RefCell`), so it sits behind a mutex
+/// held only for the synchronous resize ioctl.
 pub struct PtyMaster {
     master: std::sync::Mutex<Box<dyn MasterPty + Send>>,
 }
@@ -103,7 +104,20 @@ impl PtyHandle {
         if let Some(ref cwd) = config.cwd {
             cmd.cwd(cwd);
         }
+        #[cfg(unix)]
+        {
+            cmd.env_clear();
+            for (key, value) in std::env::vars_os() {
+                if key.as_bytes().contains(&0) || value.as_bytes().contains(&0) {
+                    continue;
+                }
+                cmd.env(&key, &value);
+            }
+        }
         for (key, value) in &config.env {
+            if key.contains('\0') || value.contains('\0') {
+                continue;
+            }
             cmd.env(key, value);
         }
         // Set TERM for proper terminal detection.

@@ -13,12 +13,6 @@ path = "src/bin/cli.rs"
 name = "pool-perf-bench"
 path = "src/bin/pool_perf_bench.rs"
 required-features = ["bench"]
-
-[[bin]]
-name = "nfs-create-latency-bench"
-path = "src/bin/nfs_create_latency_bench.rs"
-required-features = ["bench"]
-
 [[bin]]
 name = "worktree-lifecycle-bench"
 path = "src/bin/worktree_lifecycle_bench.rs"
@@ -56,6 +50,7 @@ rapidhash = "4.2.0"
 rusqlite = { version = "0.37", features = ["bundled"], optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+strum = { workspace = true }
 sha2 = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 tempfile = { workspace = true }
@@ -77,6 +72,8 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 nix = { version = "0.30", features = ["fs"] }

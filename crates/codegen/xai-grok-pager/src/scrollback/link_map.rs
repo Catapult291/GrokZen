@@ -8,7 +8,6 @@ use ratatui::layout::Rect;
 use crate::render::osc8::{LinkOverlay, LinkTarget};
 
 /// A clickable link region on screen.
-///
 /// A single logical link may span multiple screen rows when word-wrap splits it.
 /// Each row segment is a separate `Rect` in `rects`.
 #[derive(Debug, Clone)]
@@ -54,11 +53,8 @@ impl VisibleLinkMap {
         self.generation != current_generation
     }
 
-    /// Rebuild the link map from a `LinkOverlay` and citation URLs.
-    ///
-    /// Consecutive `OverlayLink`s with the same `id` **and** target are merged into one `VisibleLink` with multiple `rects`.
-    /// Matching entries are segments of a single link that word-wrapped across rows.
-    /// Same `id` alone is not enough: markdown ids restart per document, so two visible messages can both carry `id=0` for different URLs.
+    /// Rebuild the link map from a `LinkOverlay` and citation URLs. Same `id` alone is not enough: markdown ids restart
+    /// per document, so two visible messages can both carry `id=0` for different URLs.
     pub fn rebuild(
         &mut self,
         generation: u64,
@@ -97,15 +93,9 @@ impl VisibleLinkMap {
             }));
     }
 
-    /// Append overlay links (e.g. `/btw`) without changing generation.
-    ///
-    /// The same-id, same-target merge applies only *within this append*.
-    /// Markdown link ids are per-document, so they will not merge with anything appended earlier this frame.
-    /// Earlier entries are the scrollback prefix from [`Self::rebuild`] or a previous [`Self::append_from_overlay`] call from another overlay source.
-    /// Wrapped segments of the same logical link inside `overlay` still merge correctly.
-    ///
-    /// Callers that re-append the same source every frame must [`Self::truncate`] back to the desired prefix length first.
-    /// Otherwise each frame's links will accumulate.
+    /// Append overlay links without changing generation. The same-id, same-target merge applies only *within this
+    /// append*. Callers that re-append the same source every frame must [`Self::truncate`] back to the desired prefix
+    /// length first. Otherwise each frame's links will accumulate.
     pub fn append_from_overlay(&mut self, overlay: &LinkOverlay) {
         let start_len = self.links.len();
         self.push_overlay_links(overlay, start_len, crate::terminal::terminal_context());
@@ -194,6 +184,12 @@ mod tests {
         overlay
     }
 
+    fn nth_link(map: &VisibleLinkMap, i: usize) -> &VisibleLink {
+        map.links()
+            .get(i)
+            .unwrap_or_else(|| panic!("expected link {i}, got {} links", map.links().len()))
+    }
+
     fn link(url: &str, widths: &[u16]) -> VisibleLink {
         VisibleLink {
             rects: widths
@@ -244,14 +240,18 @@ mod tests {
         let mut map = VisibleLinkMap::default();
         map.rebuild(1, &overlay, vec![]);
 
-        assert_eq!(map.links()[0].target, LinkTarget::File(Arc::clone(&path)));
-        let resolved = resolve_link_target(&map.links()[0].target).expect("resolved file target");
+        assert_eq!(
+            nth_link(&map, 0).target,
+            LinkTarget::File(Arc::clone(&path))
+        );
+        let resolved =
+            resolve_link_target(&nth_link(&map, 0).target).expect("resolved file target");
         assert_eq!(resolved.open_target, Some(LinkTarget::File(path)));
         assert_eq!(
             resolved.osc8_url.unwrap().as_ref(),
             "file:///tmp/non-display-target/file%20name.rs"
         );
-        assert!(!map.links()[0].looks_like_bare_url_text());
+        assert!(!nth_link(&map, 0).looks_like_bare_url_text());
     }
 
     #[test]
@@ -283,7 +283,7 @@ mod tests {
         map.rebuild_for_context(1, &overlay, vec![], &terminal);
 
         assert_eq!(map.links().len(), 1);
-        assert_eq!(map.links()[0].target, web);
+        assert_eq!(nth_link(&map, 0).target, web);
         assert!(map.link_at(5, 3).is_none());
         assert!(map.link_at(5, 4).is_some());
     }
@@ -394,7 +394,7 @@ mod tests {
         map.rebuild(2, &overlay2, vec![]);
         assert_eq!(map.links().len(), 2);
         assert_eq!(
-            &*resolve_link_target(&map.links()[0].target)
+            &*resolve_link_target(&nth_link(&map, 0).target)
                 .unwrap()
                 .osc8_url
                 .unwrap(),
@@ -412,7 +412,7 @@ mod tests {
         map.rebuild(1, &overlay, vec![]);
         assert_eq!(map.links().len(), 1);
         assert_eq!(
-            &*resolve_link_target(&map.links()[0].target)
+            &*resolve_link_target(&nth_link(&map, 0).target)
                 .unwrap()
                 .osc8_url
                 .unwrap(),
@@ -498,9 +498,9 @@ mod tests {
 
         // One logical link with 2 rects
         assert_eq!(map.links().len(), 1);
-        assert_eq!(map.links()[0].rects.len(), 2);
+        assert_eq!(nth_link(&map, 0).rects.len(), 2);
         assert_eq!(
-            &*resolve_link_target(&map.links()[0].target)
+            &*resolve_link_target(&nth_link(&map, 0).target)
                 .unwrap()
                 .osc8_url
                 .unwrap(),
@@ -559,9 +559,9 @@ mod tests {
                 .unwrap(),
             "https://third.com"
         );
-        assert_eq!(map.links()[0].rects.len(), 1);
-        assert_eq!(map.links()[1].rects.len(), 1);
-        assert_eq!(map.links()[2].rects.len(), 1);
+        assert_eq!(nth_link(&map, 0).rects.len(), 1);
+        assert_eq!(nth_link(&map, 1).rects.len(), 1);
+        assert_eq!(nth_link(&map, 2).rects.len(), 1);
     }
 
     #[test]
@@ -616,7 +616,7 @@ mod tests {
         ]);
         map.append_from_overlay(&btw);
         assert_eq!(map.len(), 1);
-        assert_eq!(map.links()[0].rects.len(), 2);
+        assert_eq!(nth_link(&map, 0).rects.len(), 2);
         assert!(map.link_at(12, 3).is_some());
         assert!(map.link_at(5, 4).is_some());
     }

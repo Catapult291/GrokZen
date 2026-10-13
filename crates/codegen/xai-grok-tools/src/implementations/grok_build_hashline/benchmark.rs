@@ -109,10 +109,9 @@ pub struct SchemeMetrics {
     /// Edit-trace: steps that required re-read (anchor stale after edit).
     pub trace_reread_required: usize,
 
-    /// Estimated total read-amplification lines across all validations.
-    /// Candidate A: 1 line per validation.
-    /// Candidate B: chunk_size lines per validation.
-    /// Candidate C: (line_idx - checkpoint_start + 1) lines per validation.
+    /// Estimated total read-amplification lines across all validations. Candidate A: 1 line per
+    /// validation. Candidate B: chunk_size lines per validation. Candidate C: (line_idx -
+    /// checkpoint_start + 1) lines per validation.
     pub read_amp_lines: usize,
 }
 
@@ -400,12 +399,12 @@ fn run_phase1_for_file(
                 context: anchor.context.clone(),
             };
 
-            // Ground truth: determine expected validity based on LineOutcome.
-            // An anchor should be Valid if the line is Unchanged or Reindented
-            // (whitespace-normalized hashing preserves anchors across
-            // indentation changes). Shifted, Modified, and Deleted anchors
-            // should all be detected as invalid (Stale or OutOfRange).
-            let outcome = &mutation_result.outcomes[orig_idx];
+            // Ground truth: determine expected validity based on LineOutcome. An anchor should be Valid if the line is Unchanged
+            // or Reindented (whitespace-normalized hashing preserves anchors across indentation changes). Shifted, Modified, and
+            // Deleted anchors should all be detected as invalid (Stale or OutOfRange).
+            let Some(outcome) = mutation_result.outcomes.get(orig_idx) else {
+                continue;
+            };
             let should_be_valid =
                 matches!(outcome, LineOutcome::Unchanged | LineOutcome::Reindented);
 
@@ -502,12 +501,9 @@ fn standard_traces(line_count: usize) -> Vec<Vec<TraceStep>> {
     ]
 }
 
-/// Run Phase 2 (edit-trace simulation) for one file.
-///
-/// The simulation keeps using the existing anchor set as long as the probed
-/// anchor survives. Anchors are only regenerated (simulating a re-read) when
-/// the probed anchor is stale. This measures how often each scheme forces a
-/// re-read in sequential editing workflows.
+/// Run Phase 2 (edit-trace simulation) for one file. The simulation keeps using the existing anchor set as long as the
+/// probed anchor survives. Anchors are only regenerated (simulating a re-read) when the probed anchor is stale. This
+/// measures how often each scheme forces a re-read in sequential editing workflows.
 fn run_phase2_for_file(
     scheme: &dyn AnchorScheme,
     _file_name: &str,
@@ -535,15 +531,15 @@ fn run_phase2_for_file(
             }
 
             let probe_idx = step.probe_anchor_idx;
-            if probe_idx >= current_anchors.len() {
+            let Some(current) = current_anchors.get(probe_idx) else {
                 continue;
-            }
+            };
 
             // Snapshot the anchor we want to probe.
             let probe_anchor = ParsedAnchor {
-                line: current_anchors[probe_idx].line,
-                local: current_anchors[probe_idx].local.clone(),
-                context: current_anchors[probe_idx].context.clone(),
+                line: current.line,
+                local: current.local.clone(),
+                context: current.context.clone(),
             };
 
             // Apply the mutation.
@@ -663,10 +659,9 @@ struct Config3 {
 
     #[test]
     fn content_only_has_zero_false_stale() {
-        // With proper ground truth (Unchanged = should be Valid, Shifted =
-        // should be Stale), Candidate A should have zero false_stale:
-        // it never reports Stale for a truly unchanged-at-same-position line
-        // because it has no contextual component.
+        // With proper ground truth (Unchanged = should be Valid, Shifted = should be Stale),
+        // Candidate A should have zero false_stale: it never reports Stale for a truly
+        // unchanged-at-same-position line because it has no contextual component.
         let corpus = test_corpus();
         let config = BenchmarkConfig {
             hash_lengths: vec![3],
@@ -676,18 +671,20 @@ struct Config3 {
         };
         let report = run_benchmark(&corpus, &config);
         assert_eq!(report.schemes.len(), 1);
+        let Some(scheme) = report.schemes.first() else {
+            panic!("expected a scheme: {:?}", report.schemes);
+        };
         assert_eq!(
-            report.schemes[0].false_stale, 0,
+            scheme.false_stale, 0,
             "content_only should have zero false_stale with correct ground truth"
         );
     }
 
     #[test]
     fn chunk_has_nonzero_false_stale() {
-        // Candidate B reports Stale for unchanged lines when a nearby line
-        // in the same chunk changed (chunk context invalidation). These are
-        // false_stale: the line is unchanged but the scheme conservatively
-        // rejects it.
+        // Candidate B reports Stale for unchanged lines when a nearby line in the same chunk
+        // changed (chunk context invalidation). These are false_stale: the line is unchanged but
+        // the scheme conservatively rejects it.
         let corpus = test_corpus();
         let config = BenchmarkConfig {
             hash_lengths: vec![3],
@@ -697,7 +694,9 @@ struct Config3 {
         };
         let report = run_benchmark(&corpus, &config);
         assert_eq!(report.schemes.len(), 2); // A + B
-        let b = &report.schemes[1];
+        let Some(b) = report.schemes.get(1) else {
+            panic!("expected two schemes: {:?}", report.schemes);
+        };
         assert!(
             b.false_stale > 0,
             "chunk scheme should have some false_stale from chunk invalidation"
@@ -718,8 +717,9 @@ struct Config3 {
         let report = run_benchmark(&corpus, &config);
         assert_eq!(report.schemes.len(), 2); // A + B
 
-        let a = &report.schemes[0];
-        let b = &report.schemes[1];
+        let [a, b] = report.schemes.as_slice() else {
+            panic!("expected two schemes: {:?}", report.schemes);
+        };
 
         // B should report at least as many stale results as A.
         let a_stale = a.true_stale + a.false_stale;
@@ -743,7 +743,10 @@ struct Config3 {
         // Repetitive file has identical struct fields ("name: String," etc.)
         // so content-only should show collisions.
         assert!(
-            report.schemes[0].collision_count > 0,
+            report
+                .schemes
+                .first()
+                .is_some_and(|s| s.collision_count > 0),
             "repetitive file should produce collisions"
         );
     }
@@ -820,7 +823,12 @@ struct Config3 {
         };
         let report = run_benchmark(&corpus, &config);
         assert_eq!(report.schemes.len(), 1);
-        assert!(report.schemes[0].label.contains("content_only"));
+        assert!(
+            report
+                .schemes
+                .first()
+                .is_some_and(|s| s.label.contains("content_only"))
+        );
     }
 
     #[test]
@@ -833,7 +841,9 @@ struct Config3 {
             search_radius: DEFAULT_SEARCH_RADIUS,
         };
         let report = run_benchmark(&corpus, &config);
-        let a = &report.schemes[0];
+        let Some(a) = report.schemes.first() else {
+            panic!("expected a scheme: {:?}", report.schemes);
+        };
         // Content-only reads 1 line per validation → avg should be 1.0.
         let avg = a.avg_read_amp_lines();
         assert!(
@@ -852,8 +862,9 @@ struct Config3 {
             search_radius: DEFAULT_SEARCH_RADIUS,
         };
         let report = run_benchmark(&corpus, &config);
-        let a = &report.schemes[0];
-        let b = &report.schemes[1];
+        let [a, b] = report.schemes.as_slice() else {
+            panic!("expected two schemes: {:?}", report.schemes);
+        };
         assert!(
             b.avg_read_amp_lines() > a.avg_read_amp_lines(),
             "chunk read amp ({}) should be > content_only ({})",

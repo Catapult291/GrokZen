@@ -15,8 +15,12 @@ use crate::notification::{
     DurableNotificationTargets, ScheduledTaskCreated, ScheduledTaskFired, ScheduledTaskRemoved,
     ScheduledTaskRemovedReason,
 };
-use crate::reminders::format_loop_iteration_prompt;
-use crate::types::resources::{SharedResources, State};
+use crate::reminders::{
+    ScheduledWakeupTools, child_poll, format_loop_iteration_prompt_with_tools, schedule_tool_names,
+};
+use crate::types::resources::{NativeToolClientNames, SharedResources, State};
+use crate::types::template_renderer::TemplateRenderer;
+use crate::types::tool::ToolKind;
 
 use super::interval::interval_to_human;
 use super::types::{
@@ -26,10 +30,12 @@ use super::types::{
 
 const MAX_SCHEDULED_TASKS: usize = 50;
 const DURABILITY_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a fire waits for the coordinator to record the child as pending or
+/// queued before assuming the signal is lost rather than refused.
+const SPAWN_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 enum LoopFireOutcome {
     Spawned(String),
-    Foreground,
     Skipped,
 }
 
@@ -242,16 +248,13 @@ impl SchedulerActor {
         loop {
             let (needs_wiring, wired) = {
                 let res = self.resources.lock().await;
-                let enabled = res
-                    .get::<crate::types::resources::SchedulerBackgroundLoops>()
-                    .is_none_or(|v| v.0);
                 let soon = Utc::now() + chrono::Duration::seconds(2);
-                let needs_wiring = enabled
-                    && res.get::<State<SchedulerState>>().is_some_and(|s| {
-                        s.tasks
-                            .iter()
-                            .any(|t| t.recurring && !t.foreground && t.next_wake_at() <= soon)
-                    });
+                // Every fire is a subagent now, so a due one-shot needs the wiring just as much as
+                // a recurring task; leaving it out let it fire, skip, and sleep another interval on
+                // its stale `last_fired_at`.
+                let needs_wiring = res
+                    .get::<State<SchedulerState>>()
+                    .is_some_and(|s| s.tasks.iter().any(|t| t.next_wake_at() <= soon));
                 let wired = res.get::<SubagentEventSender>().is_some()
                     && res.get::<SessionIdResource>().is_some();
                 (needs_wiring, wired)
@@ -302,14 +305,15 @@ impl SchedulerActor {
             return;
         };
 
-        let task = &state.tasks[idx];
+        let Some(task) = state.tasks.get(idx) else {
+            return;
+        };
         let task_id = task.id.clone();
         let is_expired = task.recurring && task.is_expired(now);
         let should_remove = !task.recurring;
         let prompt = task.prompt.clone();
         let human_schedule = interval_to_human(task.interval_secs);
         let is_durable = task.durable;
-        let foreground = task.foreground;
         let last_subagent_id = task.last_subagent_id.clone();
         let iterations_since_fresh = task.iterations_since_fresh;
         let chain_reset_pending = task.chain_reset_pending;
@@ -416,10 +420,9 @@ impl SchedulerActor {
         if is_expired {
             state.tasks.remove(idx);
             drop(res);
-            // Flush the absence before announcing, so a crash in the debounce window cannot
-            // resurrect and re-expire the task on restart. Best-effort (non-durable semantics):
-            // on failure the removal proceeds with a warn. The re-lock is race-free; only this
-            // actor task mutates scheduler state.
+            // Flush the absence before announcing, so a crash in the debounce window cannot resurrect and re-expire the task on
+            // restart. Best-effort (non-durable semantics): on failure the removal proceeds with a warn. The re-lock is race-free;
+            // only this actor task mutates scheduler state.
             if let Err(error) = self.persist_resources().await {
                 tracing::warn!(
                     task_id = %task_id,
@@ -440,30 +443,20 @@ impl SchedulerActor {
         }
 
         // Advance the cadence before releasing actor state to avoid immediate reselection.
-        let task = &mut state.tasks[idx];
+        let Some(task) = state.tasks.get_mut(idx) else {
+            return;
+        };
         task.last_fired_at = Some(now);
         let next_fire_at = task.recurring.then(|| task.next_fire_at().to_rfc3339());
-        if should_remove {
-            state.tasks.remove(idx);
-        }
-
-        let background_enabled = res
-            .get::<crate::types::resources::SchedulerBackgroundLoops>()
-            .is_none_or(|v| v.0);
-        let spawn_deps = if foreground || should_remove || !background_enabled {
-            None
-        } else {
-            let events = res.get::<SubagentEventSender>().cloned();
-            let session = res.get::<SessionIdResource>().map(|s| s.0.clone());
-            events.zip(session)
-        };
+        let events = res.get::<SubagentEventSender>().cloned();
+        let session = res.get::<SessionIdResource>().map(|s| s.0.clone());
+        let spawn_deps = events.zip(session);
 
         drop(res);
 
         tracing::info!(
             task_id = %task_id,
             schedule = %human_schedule,
-            background = spawn_deps.is_some(),
             "Firing scheduled task"
         );
 
@@ -483,7 +476,13 @@ impl SchedulerActor {
                 )
                 .await
             }
-            None => LoopFireOutcome::Foreground,
+            None => {
+                tracing::error!(
+                    task_id = %task_id,
+                    "No subagent coordinator wired; skipping this fire"
+                );
+                LoopFireOutcome::Skipped
+            }
         };
 
         if matches!(&outcome, LoopFireOutcome::Skipped) {
@@ -503,21 +502,6 @@ impl SchedulerActor {
 
         match outcome {
             LoopFireOutcome::Skipped => unreachable!("skipped outcome returned above"),
-            LoopFireOutcome::Foreground => {
-                let commit = reservation.commit_next(&mut self.clock);
-                log_rollover(transition, Some(&task_id), commit.rollover);
-                let fire_version = commit.version;
-                self.notification_handle
-                    .send_scheduled_task_fired(ScheduledTaskFired {
-                        task_id,
-                        prompt,
-                        human_schedule,
-                        next_fire_at,
-                        subagent_id: None,
-                        generation: fire_version.generation(),
-                        revision: fire_version.revision(),
-                    });
-            }
             LoopFireOutcome::Spawned(id) => {
                 let commit = reservation.commit_next(&mut self.clock);
                 log_rollover(transition, Some(&task_id), commit.rollover);
@@ -536,6 +520,24 @@ impl SchedulerActor {
         }
 
         if let Some(task_id) = removed_task_id {
+            // Removed only now: the spawn looks the task up to record its
+            // iteration anchor, so dropping it before the fire would make every
+            // one-shot skip.
+            {
+                let mut res = self.resources.lock().await;
+                let state = res.get_or_default::<State<SchedulerState>>();
+                state.tasks.retain(|t| t.id != task_id);
+            }
+            // Flush the absence before announcing. The handoff above can await long enough for a
+            // debounce to write `last_fired_at` while the task is still present, which on restart
+            // leaves the one-shot overdue and free to fire a second time.
+            if let Err(error) = self.persist_resources().await {
+                tracing::warn!(
+                    task_id = %task_id,
+                    %error,
+                    "Completed one-shot's absence was not persisted; a restart may fire it again"
+                );
+            }
             let removal = reservation.commit_next(&mut self.clock);
             debug_assert!(removal.rollover.is_none());
             self.notification_handle
@@ -544,6 +546,25 @@ impl SchedulerActor {
                     ScheduledTaskRemovedReason::Completed,
                     removal.version,
                 ));
+        }
+    }
+
+    /// Put back the pre-fire chain snapshot after a spawn that never started,
+    /// including a pending chain reset the aborted spawn had consumed — losing
+    /// it would let a later fire resume the old chain under a new prompt.
+    async fn restore_fire_anchor(
+        &self,
+        task_id: &str,
+        last_subagent_id: Option<String>,
+        iterations_since_fresh: u32,
+        chain_reset_pending: bool,
+    ) {
+        let mut res = self.resources.lock().await;
+        let state = res.get_or_default::<State<SchedulerState>>();
+        if let Some(task) = state.tasks.iter_mut().find(|t| t.id == task_id) {
+            task.last_subagent_id = last_subagent_id;
+            task.iterations_since_fresh = iterations_since_fresh;
+            task.chain_reset_pending = chain_reset_pending;
         }
     }
 
@@ -590,10 +611,9 @@ impl SchedulerActor {
                         }
                     }
                 } else {
-                    // Coordinator channel closed — cannot verify whether the
-                    // previous iteration is still running. Skip rather than
-                    // treating this as "no previous snapshot", which could
-                    // fall through to Foreground inject and double-execute.
+                    // Coordinator channel closed — cannot verify whether the previous iteration is
+                    // still running. Skip rather than treating this as "no previous snapshot",
+                    // which could fall through to Foreground inject and double-execute.
                     tracing::warn!(
                         task_id = %task_id,
                         previous_subagent = %prev_id,
@@ -675,8 +695,27 @@ impl SchedulerActor {
         };
 
         let subagent_id = uuid::Uuid::now_v7().to_string();
-        let framed_prompt =
-            format_loop_iteration_prompt(prompt, task_id, human_schedule, prior_summary.as_deref());
+        let (poll, delete, create) = {
+            let res = self.resources.lock().await;
+            let names = res.get::<NativeToolClientNames>();
+            let poll = res
+                .get::<TemplateRenderer>()
+                .and_then(|renderer| renderer.tool_for_kind(ToolKind::BackgroundTaskAction))
+                .map(str::to_owned);
+            let delete = names.and_then(|n| n.0.get("scheduler_delete").cloned());
+            let create = names.and_then(|n| n.0.get("scheduler_create").cloned());
+            (poll, delete, create)
+        };
+        let framed_prompt = format_loop_iteration_prompt_with_tools(
+            prompt,
+            task_id,
+            human_schedule,
+            prior_summary.as_deref(),
+            ScheduledWakeupTools {
+                child: child_poll(poll.as_deref(), last_subagent_id.as_deref()),
+                schedule: schedule_tool_names(delete.as_deref(), create.as_deref()),
+            },
+        );
         let description = format!(
             "loop: {} ({human_schedule})",
             truncate_chars(prompt.lines().next().unwrap_or(prompt), 60)
@@ -695,6 +734,7 @@ impl SchedulerActor {
         }
 
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let (registered_tx, registered_rx) = tokio::sync::oneshot::channel();
         let request = SubagentRequest {
             id: subagent_id.clone(),
             prompt: framed_prompt,
@@ -718,6 +758,8 @@ impl SchedulerActor {
             // A child of the actor's token, so shutdown cancels a fire the
             // coordinator still has queued at the concurrent limit.
             cancel_token: self.cancel_token.child_token(),
+            spawn_root: Default::default(),
+            tool_call_id: None,
         };
 
         if events
@@ -725,22 +767,55 @@ impl SchedulerActor {
             .send(SubagentEvent::Spawn(SubagentSpawnRequest {
                 request: Box::new(request),
                 result_tx,
-                registered_tx: None,
+                registered_tx: Some(registered_tx),
             }))
             .is_err()
         {
-            let mut res = self.resources.lock().await;
-            let state = res.get_or_default::<State<SchedulerState>>();
-            if let Some(task) = state.tasks.iter_mut().find(|t| t.id == task_id) {
-                // Restore the full pre-fire snapshot, including a pending
-                // chain reset the aborted spawn had consumed — losing it
-                // would let a later fire resume the old chain under a new
-                // prompt.
-                task.last_subagent_id = last_subagent_id;
-                task.iterations_since_fresh = iterations_since_fresh;
-                task.chain_reset_pending = chain_reset_pending;
+            self.restore_fire_anchor(
+                task_id,
+                last_subagent_id,
+                iterations_since_fresh,
+                chain_reset_pending,
+            )
+            .await;
+            tracing::error!(
+                task_id = %task_id,
+                "Subagent coordinator is gone; skipping this fire"
+            );
+            return LoopFireOutcome::Skipped;
+        }
+
+        // Accepting the envelope is not admission: a stopped parent, unknown lineage, or the concurrent limit can still refuse
+        // the child before it starts, and the coordinator drops the registration sender when it does. Only a started-or-queued
+        // child may be reported as fired, or a one-shot would be deleted for a run that never happened.
+        tokio::select! {
+            biased;
+            _ = self.cancel_token.cancelled() => return LoopFireOutcome::Skipped,
+            registered = registered_rx => {
+                if registered.is_err() {
+                    self.restore_fire_anchor(
+                        task_id,
+                        last_subagent_id,
+                        iterations_since_fresh,
+                        chain_reset_pending,
+                    )
+                    .await;
+                    tracing::warn!(
+                        task_id = %task_id,
+                        "Subagent spawn was refused before starting; skipping this fire"
+                    );
+                    return LoopFireOutcome::Skipped;
+                }
             }
-            return LoopFireOutcome::Foreground;
+            // Registration is synchronous inside the coordinator, so a timeout means it is wedged
+            // rather than that the child was refused. Treating that as a fire is the safe half: a
+            // one-shot that ran is never resurrected to run twice.
+            _ = tokio::time::sleep(SPAWN_REGISTRATION_TIMEOUT) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "Timed out waiting for the subagent to register; treating the fire as started"
+                );
+            }
         }
 
         let resources = self.resources.clone();
@@ -785,11 +860,9 @@ impl SchedulerActor {
                 return;
             }
             let now = Utc::now();
-            // Iteration order matters: the pager sorts the tasks pane by
-            // created_at, but every re-announced task gets a synthetic
-            // `Instant::now()` on the pager side, so the relative order is
-            // determined by the order we send notifications here. Keep
-            // state.tasks as a Vec so insertion order survives.
+            // Iteration order matters: the pager sorts the tasks pane by created_at, but every re-announced task gets a synthetic
+            // `Instant::now()` on the pager side, so the relative order is determined by the order we send notifications here.
+            // Keep state.tasks as a Vec so insertion order survives.
             state
                 .tasks
                 .iter()
@@ -849,12 +922,14 @@ impl SchedulerActor {
                     return;
                 };
                 let mut reservation = self.clock.prepare_transition(1);
-                let task = &mut state.tasks[index];
+                let Some(task) = state.tasks.get_mut(index) else {
+                    let _ = reply.send(Err(SchedulerError::TaskNotFound(id)));
+                    return;
+                };
                 if let Some(prompt) = prompt {
-                    // A new prompt is a new job: the next fire starts a fresh
-                    // transcript. The anchor is kept (not cleared) so the
-                    // in-flight guard still sees a running old iteration —
-                    // clearing it here would let the next fire double-spawn.
+                    // A new prompt is a new job: the next fire starts a fresh transcript. The
+                    // anchor is kept (not cleared) so the in-flight guard still sees a running old
+                    // iteration — clearing it here would let the next fire double-spawn.
                     if prompt != task.prompt {
                         task.chain_reset_pending = true;
                         task.iterations_since_fresh = 0;
@@ -928,6 +1003,12 @@ impl SchedulerActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_chars_does_not_split_a_four_byte_scalar_at_the_cut() {
+        assert_eq!("xx\u{1F600}\u{2026}", truncate_chars("xx\u{1F600}yy", 3));
+    }
+
     use crate::implementations::grok_build::scheduler::types::{
         ScheduledTask, SchedulerHandle, scheduler_tool_error,
     };
@@ -956,6 +1037,7 @@ mod tests {
     ) {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
         resources.register_state::<WebCitationCounter>();
         resources.get_or_default::<State<SchedulerState>>().tasks = tasks;
         let shared = Arc::new(Mutex::new(resources));
@@ -1004,7 +1086,24 @@ mod tests {
         task.id = id.into();
         task.created_at = Utc::now() - chrono::Duration::seconds(10);
         task.expires_at = Some(Utc::now() - chrono::Duration::seconds(1));
-        task.foreground = true;
+        task
+    }
+
+    fn json_at<'a>(value: &'a serde_json::Value, keys: &[&str]) -> &'a serde_json::Value {
+        let mut cur = value;
+        for key in keys {
+            let Some(next) = cur.get(*key) else {
+                panic!("missing json key {key} in {value}");
+            };
+            cur = next;
+        }
+        cur
+    }
+
+    fn first_task<T>(tasks: &[T]) -> &T {
+        let Some(task) = tasks.first() else {
+            panic!("expected a task, len {}", tasks.len());
+        };
         task
     }
 
@@ -1040,6 +1139,7 @@ mod tests {
     ) -> (SchedulerActor, mpsc::UnboundedReceiver<ToolNotification>) {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
         resources.get_or_default::<State<SchedulerState>>().tasks = tasks;
         let (notification_handle, notifications) = auto_acknowledged_notifications();
         let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -1058,6 +1158,44 @@ mod tests {
         )
     }
 
+    /// A coordinator that drops every spawn. Fires only run in subagents now, so
+    /// even a test that just watches notifications needs one wired.
+    fn wire_drained_subagents(resources: &mut Resources) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        resources.insert(SubagentEventSender(tx));
+        resources.insert(
+            crate::implementations::grok_build::task::types::SessionIdResource(
+                "parent-session".to_string(),
+            ),
+        );
+        // Spawns are dropped after admission, but both the registration signal and the in-flight
+        // guards must be answered or the fire reads the silence as a reject and the second fire of
+        // a chain waits for a reply that never comes.
+        tokio::spawn(async move {
+            while let Some(mut event) = rx.recv().await {
+                ack_spawn_registration(&mut event);
+                match event {
+                    SubagentEvent::Query(query) => {
+                        let id = query.subagent_id.clone();
+                        let _ = query.respond_to.send(Some(subagent_snapshot(
+                            &id,
+                            SubagentSnapshotStatus::Completed {
+                                output: String::new(),
+                                tool_calls: 0,
+                                turns: 1,
+                                worktree_path: None,
+                            },
+                        )));
+                    }
+                    SubagentEvent::LoopUnitActive(req) => {
+                        let _ = req.respond_to.send(false);
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
     fn make_test_actor() -> (
         SchedulerHandle,
         CancellationToken,
@@ -1065,6 +1203,7 @@ mod tests {
     ) {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
         let shared = Arc::new(Mutex::new(resources));
 
         let (notif_handle, notif_rx) = auto_acknowledged_notifications();
@@ -1111,7 +1250,7 @@ mod tests {
         let snapshot = list_rx.await.unwrap();
         assert_eq!(snapshot.version.revision(), 1);
         assert_eq!(snapshot.tasks.len(), 1);
-        assert_eq!(snapshot.tasks[0].prompt, "check deploy");
+        assert_eq!(first_task(&snapshot.tasks).prompt, "check deploy");
 
         cancel.cancel();
     }
@@ -1366,9 +1505,9 @@ mod tests {
         let mut task = ScheduledTask::new(1, "babysit the pipeline".into(), true, false);
         task.id = "loop-1".into();
         task.created_at = Utc::now() - chrono::Duration::seconds(10);
-        task.foreground = true;
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
         resources.get_or_default::<State<SchedulerState>>().tasks = vec![task];
         persistence.save(&resources);
         persistence.flush().await;
@@ -1377,6 +1516,7 @@ mod tests {
         // "Second process": fresh resources restored from disk re-arm the loop.
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
         assert!(
             crate::persistence::ResourcesPersistence::new(path).load(&mut resources),
             "persisted scheduler state must load on restart"
@@ -1416,6 +1556,7 @@ mod tests {
 
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
         resources.get_or_default::<State<SchedulerState>>().tasks =
             vec![expired_task("stale-loop", false)];
         persistence.save(&resources);
@@ -1441,8 +1582,8 @@ mod tests {
         let persisted: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            persisted["state"]["grok_build.Scheduler"]["tasks"],
-            serde_json::json!([]),
+            json_at(&persisted, &["state", "grok_build.Scheduler", "tasks"]),
+            &serde_json::json!([]),
             "expired task must not survive on disk"
         );
     }
@@ -1492,6 +1633,7 @@ mod tests {
     async fn announces_existing_tasks_on_startup() {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
 
         // Simulate session restore: scheduler state already contains two
         // recurring tasks before the actor spawns. Both intervals are far
@@ -1584,6 +1726,7 @@ mod tests {
     async fn legacy_one_shot_fires_via_normal_loop_and_is_removed() {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
 
         let state = resources.get_or_default::<State<SchedulerState>>();
         let mut task = ScheduledTask::new(1, "legacy one-shot".into(), false, false);
@@ -1816,6 +1959,7 @@ mod tests {
     async fn cancel_sends_removed_for_remaining_tasks_without_draining_state() {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
 
         let state = resources.get_or_default::<State<SchedulerState>>();
         let mut task_a = ScheduledTask::new(300, "task A".into(), true, false);
@@ -1882,6 +2026,7 @@ mod tests {
     ) {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
         let (subagent_tx, subagent_rx) = mpsc::unbounded_channel();
         resources.insert(SubagentEventSender(subagent_tx));
         resources.insert(
@@ -1926,9 +2071,8 @@ mod tests {
         (handle, cancel, notifications, subagents)
     }
 
-    async fn create_due_task(handle: &SchedulerHandle, prompt: &str, foreground: bool) -> String {
+    async fn create_due_task(handle: &SchedulerHandle, prompt: &str) -> String {
         let mut task = ScheduledTask::new(1, prompt.into(), true, false);
-        task.foreground = foreground;
         task.created_at = chrono::Utc::now() - chrono::Duration::seconds(10);
         let task_id = task.id.clone();
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
@@ -1948,6 +2092,23 @@ mod tests {
             .await
             .expect("event timeout")
             .expect("channel closed")
+    }
+
+    /// Stands in for the coordinator's registration signal. A fire that never sees one reads the
+    /// dropped sender as a pre-start reject and skips, so every fake coordinator in these tests has
+    /// to admit the spawn the way the real one does.
+    async fn next_subagent_event(rx: &mut mpsc::UnboundedReceiver<SubagentEvent>) -> SubagentEvent {
+        let mut event = next_event(rx).await;
+        ack_spawn_registration(&mut event);
+        event
+    }
+
+    fn ack_spawn_registration(event: &mut SubagentEvent) {
+        if let SubagentEvent::Spawn(spawn) = event
+            && let Some(tx) = spawn.registered_tx.take()
+        {
+            let _ = tx.send(());
+        }
     }
 
     fn subagent_snapshot(
@@ -1984,7 +2145,7 @@ mod tests {
     async fn next_subagent_spawn(
         rx: &mut mpsc::UnboundedReceiver<SubagentEvent>,
     ) -> Box<SubagentRequest> {
-        let SubagentEvent::Spawn(spawn) = next_event(rx).await else {
+        let SubagentEvent::Spawn(spawn) = next_subagent_event(rx).await else {
             panic!("expected subagent spawn");
         };
         spawn.request
@@ -2003,9 +2164,9 @@ mod tests {
     #[tokio::test]
     async fn background_fire_spawns_loop_subagent() {
         let (handle, cancel, mut notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
-        let task_id = create_due_task(&handle, "check deploy status", false).await;
+        let task_id = create_due_task(&handle, "check deploy status").await;
 
-        let event = next_event(&mut subagent_rx).await;
+        let event = next_subagent_event(&mut subagent_rx).await;
         let SubagentEvent::Spawn(request) = event else {
             panic!("expected Spawn, got a different event");
         };
@@ -2043,7 +2204,8 @@ mod tests {
             .0
             .send(SchedulerCommand::List { reply: list_tx })
             .unwrap();
-        let task = &list_rx.await.unwrap().tasks[0];
+        let listed = list_rx.await.unwrap();
+        let task = first_task(&listed.tasks);
         assert_eq!(task.last_subagent_id.as_deref(), Some(request.id.as_str()));
         assert_eq!(task.iterations_since_fresh, 1);
 
@@ -2054,13 +2216,18 @@ mod tests {
     async fn in_flight_iteration_skips_fire_then_resumes_chain() {
         let (handle, cancel, mut notif_rx, mut subagent_rx, resources) =
             make_test_actor_with_subagents_at(u64::MAX - 2);
-        create_due_task(&handle, "watch ci", false).await;
-        resources
-            .lock()
-            .await
-            .get_or_default::<State<SchedulerState>>()
-            .tasks[0]
-            .last_fired_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        create_due_task(&handle, "watch ci").await;
+        {
+            let mut res = resources.lock().await;
+            let Some(task) = res
+                .get_or_default::<State<SchedulerState>>()
+                .tasks
+                .first_mut()
+            else {
+                panic!("expected a scheduler task");
+            };
+            task.last_fired_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        }
 
         let first = next_subagent_spawn(&mut subagent_rx).await;
         let first_id = first.id.clone();
@@ -2099,7 +2266,7 @@ mod tests {
         assert_eq!(skipped_version.generation(), old_generation);
         assert_eq!(skipped_version.revision(), u64::MAX);
 
-        let SubagentEvent::Query(query2) = next_event(&mut subagent_rx).await else {
+        let SubagentEvent::Query(query2) = next_subagent_event(&mut subagent_rx).await else {
             panic!("expected completed query");
         };
         let completed = SubagentSnapshotStatus::Completed {
@@ -2113,12 +2280,17 @@ mod tests {
             .send(Some(subagent_snapshot(&first_id, completed)))
             .unwrap();
         answer_loop_unit_active(&mut subagent_rx, false).await;
-        resources
-            .lock()
-            .await
-            .get_or_default::<State<SchedulerState>>()
-            .tasks[0]
-            .last_fired_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        {
+            let mut res = resources.lock().await;
+            let Some(task) = res
+                .get_or_default::<State<SchedulerState>>()
+                .tasks
+                .first_mut()
+            else {
+                panic!("expected a scheduler task");
+            };
+            task.last_fired_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        }
         let second = next_subagent_spawn(&mut subagent_rx).await;
         let fired = notification!(next_event(&mut notif_rx).await, ScheduledTaskFired);
         assert_ne!(fired.generation, old_generation);
@@ -2129,10 +2301,62 @@ mod tests {
         cancel.cancel();
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn paused_clock_advances_past_a_second_fire_while_the_first_is_running() {
+        let (handle, cancel, _notif_rx, mut subagent_rx, resources) =
+            make_test_actor_with_subagents_at(0);
+        create_due_task(&handle, "watch ci").await;
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        let first = next_subagent_spawn(&mut subagent_rx).await;
+        let first_id = first.id.clone();
+        {
+            let mut res = resources.lock().await;
+            let Some(task) = res
+                .get_or_default::<State<SchedulerState>>()
+                .tasks
+                .first_mut()
+            else {
+                panic!("expected a scheduler task");
+            };
+            task.last_fired_at = Some(Utc::now() - chrono::Duration::seconds(2));
+        }
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        answer_subagent_query(
+            &mut subagent_rx,
+            &first_id,
+            SubagentSnapshotStatus::Running {
+                turn_count: 1,
+                tool_call_count: 1,
+                tokens_used: 0,
+                context_window_tokens: 0,
+                context_usage_pct: 0,
+                tools_used: vec![],
+                error_count: 0,
+            },
+        )
+        .await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        while let Ok(mut event) = subagent_rx.try_recv() {
+            ack_spawn_registration(&mut event);
+            assert!(
+                !matches!(
+                    event,
+                    SubagentEvent::Spawn(_) | SubagentEvent::LoopUnitActive(_)
+                ),
+                "second fire overlapped the running iteration"
+            );
+        }
+
+        cancel.cancel();
+    }
+
     #[tokio::test]
     async fn prompt_update_resets_chain_interval_update_keeps_it() {
         let (handle, cancel, _notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
-        let task_id = create_due_task(&handle, "watch ci", false).await;
+        let task_id = create_due_task(&handle, "watch ci").await;
         let first = next_subagent_spawn(&mut subagent_rx).await;
 
         let (up_tx, up_rx) = tokio::sync::oneshot::channel();
@@ -2170,9 +2394,9 @@ mod tests {
     #[tokio::test]
     async fn prompt_update_keeps_in_flight_guard_then_spawns_fresh() {
         let (handle, cancel, _notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
-        let task_id = create_due_task(&handle, "watch ci", false).await;
+        let task_id = create_due_task(&handle, "watch ci").await;
 
-        let SubagentEvent::Spawn(first) = next_event(&mut subagent_rx).await else {
+        let SubagentEvent::Spawn(first) = next_subagent_event(&mut subagent_rx).await else {
             panic!("expected first Spawn");
         };
         let first_id = first.id.clone();
@@ -2191,7 +2415,7 @@ mod tests {
         up_rx.await.unwrap().unwrap();
 
         // Next tick still queries the old iteration; Running must skip.
-        let SubagentEvent::Query(q1) = next_event(&mut subagent_rx).await else {
+        let SubagentEvent::Query(q1) = next_subagent_event(&mut subagent_rx).await else {
             panic!("expected Query after prompt update");
         };
         assert_eq!(q1.subagent_id, first_id, "guard queries the kept anchor");
@@ -2217,7 +2441,7 @@ mod tests {
 
         // Old iteration done: the following tick spawns the NEW job fresh —
         // no resume_from, and the framing carries no old-task output.
-        let SubagentEvent::Query(q2) = next_event(&mut subagent_rx).await else {
+        let SubagentEvent::Query(q2) = next_subagent_event(&mut subagent_rx).await else {
             panic!("expected second Query, not a Spawn");
         };
         let _ = q2.respond_to.send(Some(
@@ -2237,7 +2461,7 @@ mod tests {
             },
         ));
         answer_loop_unit_active(&mut subagent_rx, false).await;
-        let SubagentEvent::Spawn(second) = next_event(&mut subagent_rx).await else {
+        let SubagentEvent::Spawn(second) = next_subagent_event(&mut subagent_rx).await else {
             panic!("expected fresh Spawn after old iteration completed");
         };
         assert!(second.resume_from.is_none(), "prompt change spawns fresh");
@@ -2267,7 +2491,7 @@ mod tests {
             .unwrap();
         reply_rx.await.unwrap().unwrap();
 
-        let SubagentEvent::Spawn(request) = next_event(&mut subagent_rx).await else {
+        let SubagentEvent::Spawn(request) = next_subagent_event(&mut subagent_rx).await else {
             panic!("expected Spawn");
         };
         let spawned_id = request.id.clone();
@@ -2290,8 +2514,8 @@ mod tests {
                 .send(SchedulerCommand::List { reply: list_tx })
                 .unwrap();
             let tasks = list_rx.await.unwrap().tasks;
-            if tasks[0].last_subagent_id.is_none() {
-                assert_eq!(tasks[0].iterations_since_fresh, 0);
+            if first_task(&tasks).last_subagent_id.is_none() {
+                assert_eq!(first_task(&tasks).iterations_since_fresh, 0);
                 break;
             }
             assert!(
@@ -2307,9 +2531,9 @@ mod tests {
     #[tokio::test]
     async fn spawn_send_failure_restores_pending_chain_reset() {
         let (handle, cancel, _notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
-        let task_id = create_due_task(&handle, "watch ci", false).await;
+        let task_id = create_due_task(&handle, "watch ci").await;
 
-        let SubagentEvent::Spawn(first) = next_event(&mut subagent_rx).await else {
+        let SubagentEvent::Spawn(first) = next_subagent_event(&mut subagent_rx).await else {
             panic!("expected first Spawn");
         };
         let first_id = first.id.clone();
@@ -2358,18 +2582,78 @@ mod tests {
         cancel.cancel();
     }
 
+    /// No coordinator means nowhere to run a fire and nothing to fall back to, so the tick is dropped rather than reported
+    /// as fired. Admission can refuse a spawn after the coordinator has taken the envelope, and it drops the registration
+    /// sender when it does. A one-shot deleted on that signal would be gone without ever having run.
     #[tokio::test]
-    async fn background_loops_disabled_forces_legacy_path() {
+    async fn refused_spawn_keeps_the_one_shot() {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
-        let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
-        resources.insert(SubagentEventSender(subagent_tx));
+        let (tx, mut subagent_rx) = mpsc::unbounded_channel();
+        resources.insert(SubagentEventSender(tx));
         resources.insert(
             crate::implementations::grok_build::task::types::SessionIdResource(
                 "parent-session".to_string(),
             ),
         );
-        resources.insert(crate::types::resources::SchedulerBackgroundLoops(false));
+
+        let state = resources.get_or_default::<State<SchedulerState>>();
+        let mut task = ScheduledTask::new(1, "one and done".into(), false, false);
+        task.id = "one-shot-refused".to_string();
+        task.created_at = Utc::now() - chrono::Duration::seconds(60);
+        state.tasks.push(task);
+
+        let shared = Arc::new(Mutex::new(resources));
+        let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
+        let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let cancel_token = CancellationToken::new();
+        let mut actor = SchedulerActor {
+            resources: shared.clone(),
+            resources_persistence: Arc::new(crate::persistence::ResourcesPersistence::noop()),
+            notification_handle: notif_handle,
+            cmd_rx,
+            cancel_token,
+            clock: SchedulerClock::new(),
+            pending_removal: None,
+            blocked_expiries: HashSet::new(),
+        };
+
+        // Take the spawn and drop it without acking: a pre-start reject.
+        let refuse = tokio::spawn(async move {
+            let SubagentEvent::Spawn(spawn) = next_event(&mut subagent_rx).await else {
+                panic!("expected a spawn");
+            };
+            drop(spawn);
+            subagent_rx
+        });
+        actor.fire_next_task().await;
+        let _subagent_rx = refuse.await.unwrap();
+
+        let res = shared.lock().await;
+        let tasks = &res.get::<State<SchedulerState>>().unwrap().tasks;
+        assert_eq!(
+            tasks.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            ["one-shot-refused"],
+            "a refused fire must leave the one-shot to try again"
+        );
+        assert!(
+            first_task(tasks).last_subagent_id.is_none(),
+            "the chain anchor must be rolled back with it"
+        );
+        // A skipped fire re-announces the row it kept; what it must never
+        // claim is that the task ran or completed.
+        while let Ok(notif) = notif_rx.try_recv() {
+            assert!(
+                matches!(notif, ToolNotification::ScheduledTaskCreated(_)),
+                "a refused fire reports neither Fired nor Removed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unwired_coordinator_skips_the_fire() {
+        let mut resources = Resources::new();
+        resources.register_state::<SchedulerState>();
         let shared = Arc::new(Mutex::new(resources));
 
         let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();
@@ -2389,73 +2673,39 @@ mod tests {
             .run(),
         );
         let handle = SchedulerHandle(cmd_tx);
-        create_due_task(&handle, "watch ci", false).await;
+        create_due_task(&handle, "watch ci").await;
 
-        let mut fired = None;
         for _ in 0..4 {
-            let notif = tokio::time::timeout(Duration::from_secs(3), notif_rx.recv())
-                .await
-                .expect("notification")
-                .expect("channel open");
-            if let ToolNotification::ScheduledTaskFired(f) = notif {
-                fired = Some(f);
+            let Ok(Some(notif)) =
+                tokio::time::timeout(Duration::from_millis(500), notif_rx.recv()).await
+            else {
                 break;
-            }
+            };
+            assert!(
+                !matches!(notif, ToolNotification::ScheduledTaskFired(_)),
+                "an unrunnable fire must be skipped, not reported as fired"
+            );
         }
-        assert!(
-            fired.expect("fired notification").subagent_id.is_none(),
-            "disabled config must take the legacy inject path"
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), subagent_rx.recv())
-                .await
-                .is_err(),
-            "disabled config must not touch the subagent coordinator"
-        );
 
         cancel_token.cancel();
-    }
-
-    #[tokio::test]
-    async fn foreground_task_fires_legacy_inject_path() {
-        let (handle, cancel, mut notif_rx, mut subagent_rx) = make_test_actor_with_subagents();
-        create_due_task(&handle, "needs main context", true).await;
-
-        let mut fired = None;
-        for _ in 0..4 {
-            let notif = tokio::time::timeout(Duration::from_secs(2), notif_rx.recv())
-                .await
-                .expect("notification")
-                .expect("channel open");
-            if let ToolNotification::ScheduledTaskFired(f) = notif {
-                fired = Some(f);
-                break;
-            }
-        }
-        let fired = fired.expect("fired notification");
-        assert!(fired.subagent_id.is_none());
-
-        assert!(
-            tokio::time::timeout(Duration::from_millis(200), subagent_rx.recv())
-                .await
-                .is_err(),
-            "foreground fire must not touch the subagent coordinator"
-        );
-
-        cancel.cancel();
     }
 
     #[tokio::test]
     async fn descendant_still_running_skips_fire() {
         let (handle, cancel, _notif_rx, mut subagent_rx, resources) =
             make_test_actor_with_subagents_at(0);
-        create_due_task(&handle, "watch ci", false).await;
-        resources
-            .lock()
-            .await
-            .get_or_default::<State<SchedulerState>>()
-            .tasks[0]
-            .last_fired_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        create_due_task(&handle, "watch ci").await;
+        {
+            let mut res = resources.lock().await;
+            let Some(task) = res
+                .get_or_default::<State<SchedulerState>>()
+                .tasks
+                .first_mut()
+            else {
+                panic!("expected a scheduler task");
+            };
+            task.last_fired_at = Some(Utc::now() - chrono::Duration::seconds(1));
+        }
 
         let first = next_subagent_spawn(&mut subagent_rx).await;
         let first_id = first.id.clone();
@@ -2490,8 +2740,12 @@ mod tests {
         let _ = next_acknowledged(&mut notifications).await;
         let error = delete(&handle, "retry").await.unwrap_err();
         assert_eq!(
-            scheduler_tool_error(error).details.unwrap()["code"],
-            "scheduler_persistence"
+            scheduler_tool_error(error)
+                .details
+                .as_ref()
+                .and_then(|d| d.get("code"))
+                .and_then(|v| v.as_str()),
+            Some("scheduler_persistence")
         );
         let (reply, response) = tokio::sync::oneshot::channel();
         handle
@@ -2524,10 +2778,13 @@ mod tests {
             &std::fs::read_to_string(parent.join("resources_state.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(persisted["state"]["grok_build.WebCitation"]["counter"], 7);
         assert_eq!(
-            persisted["state"]["grok_build.Scheduler"]["tasks"],
-            serde_json::json!([])
+            json_at(&persisted, &["state", "grok_build.WebCitation", "counter"]),
+            &serde_json::json!(7)
+        );
+        assert_eq!(
+            json_at(&persisted, &["state", "grok_build.Scheduler", "tasks"]),
+            &serde_json::json!([])
         );
         cancel.cancel();
     }
@@ -2555,8 +2812,10 @@ mod tests {
         assert_eq!(
             scheduler_tool_error(first.await.unwrap().unwrap_err())
                 .details
-                .unwrap()["code"],
-            "scheduler_notification"
+                .as_ref()
+                .and_then(|d| d.get("code"))
+                .and_then(|v| v.as_str()),
+            Some("scheduler_notification")
         );
         let retry = tokio::spawn({
             let handle = handle.clone();
@@ -2744,8 +3003,8 @@ mod tests {
                 save = next_event(&mut saves) => save,
             };
             assert_eq!(
-                snapshot["state"]["grok_build.Scheduler"]["tasks"],
-                serde_json::json!([])
+                json_at(&snapshot, &["state", "grok_build.Scheduler", "tasks"]),
+                &serde_json::json!([])
             );
             assert!(notifications.try_recv().is_err());
             persisted.send(Ok(())).unwrap();
@@ -2798,7 +3057,20 @@ mod tests {
         assert_eq!(actor.clock.snapshot().revision(), 0);
         assert!(notifications.try_recv().is_err());
 
-        actor.fire_next_task().await;
+        // The completed one-shot flushes its own absence before the removal is
+        // announced, so this fire waits on persistence too.
+        {
+            let fire = actor.fire_next_task();
+            tokio::pin!(fire);
+            let (_, persisted) = tokio::select! {
+                _ = fire.as_mut() => panic!("one-shot removal must wait for resource persistence"),
+                save = next_event(&mut saves) => save,
+            };
+            persisted.send(Ok(())).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), fire)
+                .await
+                .unwrap();
+        }
         assert_eq!(
             (
                 notification!(notifications.try_recv().unwrap(), ScheduledTaskFired).task_id,
@@ -2880,11 +3152,13 @@ mod tests {
         let persisted: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(state_path).unwrap()).unwrap();
         assert!(
-            persisted["state"]["grok_build.Scheduler"]["tasks"]
+            json_at(&persisted, &["state", "grok_build.Scheduler", "tasks"])
                 .as_array()
-                .unwrap()
-                .iter()
-                .all(|task| task["id"] != "expired")
+                .is_some_and(|tasks| {
+                    tasks
+                        .iter()
+                        .all(|task| task.get("id").and_then(|v| v.as_str()) != Some("expired"))
+                })
         );
 
         actor.fire_next_task().await;
@@ -2911,6 +3185,7 @@ mod tests {
         let (persistence, mut saves) = crate::persistence::ResourcesPersistence::controlled();
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
         resources.get_or_default::<State<SchedulerState>>().tasks =
             vec![expired_task("expired", true)];
         let shared = Arc::new(Mutex::new(resources));
@@ -2958,6 +3233,7 @@ mod tests {
     async fn cancel_with_no_tasks_sends_no_removed() {
         let mut resources = Resources::new();
         resources.register_state::<SchedulerState>();
+        wire_drained_subagents(&mut resources);
 
         let shared = Arc::new(Mutex::new(resources));
         let (notif_handle, mut notif_rx) = auto_acknowledged_notifications();

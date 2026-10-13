@@ -105,9 +105,9 @@ mod tests {
     use super::*;
     use crate::send::contributors::{
         AnalyticsClass, CommandAction, CommandInvocation, CommandSpec, CompactionClass,
-        InputAuthority, InputPolicy, QueuePolicy, SessionIdleInput, ShutdownPolicy, TurnAbortInput,
-        TurnAbortReason, TurnBoundary, TurnDoneInput, TurnErrorInput, TurnInputContext,
-        TurnInputFragment, TurnStartInput,
+        InputAuthority, InputPolicy, QueuePolicy, SessionIdleInput, ShutdownPolicy, SlashAuthority,
+        TurnAbortInput, TurnAbortReason, TurnBoundary, TurnDoneInput, TurnErrorInput,
+        TurnInputContext, TurnInputFragment, TurnStartInput,
     };
 
     struct Counter(AtomicUsize);
@@ -190,6 +190,7 @@ mod tests {
     async fn typed_turn_start_defaults_to_legacy_and_can_be_overridden() {
         let policy = InputPolicy {
             authority: InputAuthority::ModelAuthoredUntrusted,
+            slash: SlashAuthority::ModelAuthored,
             turn_boundary: TurnBoundary::Conversational,
             analytics: AnalyticsClass::AgentMessage,
             compaction: CompactionClass::ConversationalAgentAnchor,
@@ -247,7 +248,10 @@ mod tests {
                 })
                 .await;
             assert_eq!(1, fragments.len());
-            assert_eq!("nudge", fragments[0].text);
+            let Some(fragment) = fragments.first() else {
+                panic!("expected a turn-input fragment");
+            };
+            assert_eq!("nudge", fragment.text);
         }
 
         assert!(registry.command_handler("nope").is_none());

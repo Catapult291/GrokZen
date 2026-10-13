@@ -42,13 +42,6 @@ fn localized_template(
 /// - No flag (regardless of `fork_worktree_mode`): the worktree question is skipped and the fork proceeds with `worktree = false`.
 ///
 /// If the notification has not arrived yet (the user forks before the shell sends `git_head_changed`), the `worktree = false` fallback is safe.
-/// The worktree can be created manually afterwards.
-///
-/// Two failure surfaces:
-/// - Active view is not an agent: toast and return.
-/// - Active agent has no `session_id` (still being created): toast and return.
-///
-/// Both rejections are deliberate: queueing the fork until `SessionLoaded` would require persisting `ForkArgs` across the `TaskResult`.
 pub(in crate::app::dispatch) fn dispatch_fork(
     app: &mut AppView,
     args: crate::slash::commands::fork::ForkArgs,
@@ -257,12 +250,11 @@ fn open_fork_question(
         stashed,
     )
     .with_local_kind(LocalQuestionKind::Fork { directive, cut });
-    agent.question_view = Some(state);
+    agent.install_local_question(state);
     agent.prompt.set_text("");
     vec![]
 }
 /// Construct the placeholder agent, push discoverability markers, flip the discovery gate, switch to the new agent, and emit the fork effect.
-///
 /// `worktree == true` reuses the [`Effect::CreateWorktreeSession`] pipeline (with `load_session_id` set to the parent session id).
 /// `worktree == false` emits [`Effect::ForkSession`], which calls `x.ai/session/fork` directly.
 pub(in crate::app::dispatch) fn dispatch_fork_resolved(
@@ -377,6 +369,7 @@ pub(in crate::app::dispatch) fn dispatch_fork_resolved(
             model_id: None,
             permission_mode_override: None,
             preferred_session_id: None,
+            minted_session_id: None,
             chat_kind: parent_chat_kind,
             target_prompt_index: cut.target_prompt_index,
         }]
@@ -402,7 +395,8 @@ fn build_fork_placeholder(
 ) -> AgentView {
     let mut scrollback = ScrollbackState::new();
     scrollback.set_appearance(app.appearance.clone());
-    let mut agent = AgentView::new(
+    let mut agent = AgentView::from_app(
+        app,
         AgentSession {
             id: new_id,
             acp_tx: app.acp_tx.clone(),
@@ -454,9 +448,6 @@ fn build_fork_placeholder(
 }
 /// Build the discoverability banner for the child agent: the child's session id, the full parent session id, and optionally a session-switch tip.
 /// The tip appears when `switch_hint` names a command: `/dashboard` normally, `/resume` in minimal mode where the dashboard is refused.
-/// `switch_hint` comes from the caller's [`crate::views::dashboard::session_switch_hint_command`].
-/// The no-worktree case appends the dim continuation `(both agents share cwd)`.
-///
 /// Called in `TaskResult::SessionLoaded` (not at dispatch time) because the child's session id is not known until the backend responds.
 pub(in crate::app::dispatch) fn build_child_fork_marker(
     session_id: &str,
@@ -539,7 +530,7 @@ pub(in crate::app::dispatch) fn dispatch_startup_fork_session(
             });
         return vec![];
     }
-    let (_agent_id, mut effects) = dispatch_new_session_inner_with_id(app, None);
+    let (_agent_id, mut effects) = dispatch_new_session_inner_with_id(app, None, false);
     let agent_id = app
         .agents
         .keys()
@@ -572,6 +563,7 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
     restore_summary: Option<String>,
     restore_degree: Option<xai_grok_workspace::session::git::RestoreDegree>,
     resume_session_id: Option<String>,
+    strategy_summary: Option<String>,
 ) -> Vec<Effect> {
     let session_id_str = session_id.0.to_string();
     let locale = app.locale.clone();
@@ -615,6 +607,9 @@ pub(in crate::app::dispatch) fn handle_worktree_forked(
             &[("{path}", &worktree_path)],
         );
         agent.scrollback.push_block(RenderBlock::system(message));
+        if let Some(summary) = strategy_summary {
+            agent.scrollback.push_block(RenderBlock::system(summary));
+        }
         match (code_restored, restore_summary.as_deref()) {
             (true, Some(s)) => {
                 let message = localized_template(
@@ -715,6 +710,7 @@ pub(in crate::app::dispatch) fn handle_fork_session_failed(
     tracing::error!(agent = ?agent_id, error = %error, "Fork session failed");
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.pending_extensions_fetch = false;
+        agent.session_starting_since = None;
         agent.session.finish_command();
         let elapsed = agent.turn_elapsed();
         agent.mark_turn_finished(TurnEnd::Aborted);

@@ -9,7 +9,8 @@ use nono::CapabilitySet;
 use std::path::{Path, PathBuf};
 
 // Glob deny entries (detection, macOS regex translation, Linux launch-time expansion) live in a submodule; re-exported so call sites use `deny::…`
-#[cfg(all(feature = "enforce", unix))]
+// The per-command Seatbelt backend needs the macOS translation without `nono`, so the module also builds on macOS when `enforce` is off.
+#[cfg(any(all(feature = "enforce", unix), target_os = "macos"))]
 mod glob;
 
 /// Whether a raw config entry is a glob pattern rather than an exact path.
@@ -20,6 +21,10 @@ pub(crate) fn is_glob(entry: &str) -> bool {
 }
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 pub(crate) use glob::{DENY_GLOB_CAPS, expand_deny_globs};
+#[cfg(target_os = "macos")]
+pub(crate) use glob::{
+    anchored_glob_regex, seatbelt_regex_filter, split_glob_root, validate_deny_glob,
+};
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) use glob::{apply_deny_globs_to_capability_set, partition_deny_entries};
 
@@ -72,15 +77,9 @@ fn toggle_private_prefix(path: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Specific Seatbelt write sub-actions denied for a denied path.
-///
-/// `(deny file-write* ...)` alone does NOT win: nono emits platform rules between the read-allows and the write-allows.
-/// The broad workspace `(allow file-write* (subpath <ws>))` is thus emitted AFTER our deny and wins by last-match.
-/// That leaves an in-workspace denied path writable, so `mv x y && cat y` could relocate and read it.
-/// Empirically, denying each concrete write sub-action makes the deny win regardless of emission order.
-/// (Each sub-action is more specific than the `file-write*` grant.)
-/// That fully blocks overwrite AND relocation (rename/unlink).
-/// This is observed per-operation rule-list behavior, not a guaranteed action-specificity rule; the macOS e2e is the contract.
+/// `(deny file-write*...)` alone does NOT win: nono emits platform rules between the read-allows and the write-allows.
+/// The broad workspace `(allow file-write* (subpath <ws>))` is thus emitted AFTER our deny and wins by last-match. This
+/// is observed per-operation rule-list behavior, not a guaranteed action-specificity rule; the macOS e2e is the contract.
 #[cfg(all(feature = "enforce", target_os = "macos"))]
 const SEATBELT_WRITE_DENY_ACTIONS: &[&str] = &[
     "file-write-data",
@@ -214,10 +213,8 @@ pub(crate) fn apply_write_deny_paths_to_capability_set(
     Ok(())
 }
 
-/// Apply kernel-level deny rules for the given paths.
-///
-/// On macOS, adds Seatbelt read-deny and write-deny (incl. specific write sub-actions) rules.
-/// On Linux, this is a no-op; callers must use bwrap bind-over for read-deny.
+/// Apply kernel-level deny rules for the given paths. On macOS, adds Seatbelt read-deny and write-deny (incl. specific
+/// write sub-actions) rules. On Linux, this is a no-op; callers must use bwrap bind-over for read-deny.
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) fn apply_deny_paths_to_capability_set(
     caps: &mut CapabilitySet,
@@ -240,10 +237,9 @@ pub(crate) fn apply_deny_paths_to_capability_set(
             // Emit a deny for each alias form
             for form in macos_deny_aliases(path, &canonical) {
                 let Some(escaped) = escape_seatbelt_path(&form) else {
-                    // Fail CLOSED: a deny path we can't express as a Seatbelt filter would otherwise be silently unprotected
-                    // The sandbox would still report active
-                    // Erroring leaves apply() not applied, so the shell's macOS `!is_applied` guard refuses to start
-                    // That matches Linux, where any failed bind fails closed
+                    // Fail CLOSED: a deny path we can't express as a Seatbelt filter would otherwise be silently unprotected. The sandbox
+                    // would still report active. Erroring leaves apply() not applied, so the shell's macOS `!is_applied` guard refuses to
+                    // start. That matches Linux, where any failed bind fails closed
                     anyhow::bail!("cannot escape deny path {form:?} for Seatbelt");
                 };
                 // `literal` for files, `subpath` for dirs, so deny rules are more specific than parent-directory allows
@@ -301,10 +297,9 @@ pub(crate) fn effective_deny_paths(workspace: &Path, deny: &[PathBuf]) -> Vec<Pa
     paths
 }
 
-/// Resolve already-partitioned EXACT (non-glob) deny entries into bwrap bind strings: resolved against `workspace`, sorted, deduped, stringified.
-/// The caller passes the exact slice from `partition_deny_entries`.
-/// This is a Linux bwrap concern (macOS denies via Seatbelt, not path strings).
-/// It is the exact-path parallel to glob's `expand_deny_globs`, so both deny resolutions live in `deny/`.
+/// Resolve already-partitioned EXACT (non-glob) deny entries into bwrap bind strings: resolved against `workspace`,
+/// sorted, deduped, stringified. This is a Linux bwrap concern (macOS denies via Seatbelt, not path strings). It is the
+/// exact-path parallel to glob's `expand_deny_globs`, so both deny resolutions live in `deny/`.
 #[cfg(all(feature = "enforce", target_os = "linux"))]
 pub(crate) fn exact_deny_path_strings(workspace: &Path, exact: &[PathBuf]) -> Vec<String> {
     effective_deny_paths(workspace, exact)
@@ -314,12 +309,8 @@ pub(crate) fn exact_deny_path_strings(workspace: &Path, exact: &[PathBuf]) -> Ve
 }
 
 /// Whether a deny path should be treated as a directory (Seatbelt `subpath` / bwrap dir-bind) rather than a single file.
-/// True for existing directories, false otherwise.
-/// Shared by the macOS and Linux deny sites so the two cannot silently diverge.
-///
-/// Limitation: a non-existent deny path is treated as a single file (macOS emits `(literal …)`).
-/// If it is later created as a directory its children are not covered on macOS.
-/// Name concrete existing paths to deny a whole directory tree.
+/// True for existing directories, false otherwise. Shared by the macOS and Linux deny sites so the two cannot silently
+/// diverge. If it is later created as a directory its children are not covered on macOS.
 #[cfg(all(feature = "enforce", unix))]
 pub(crate) fn deny_path_is_dir(canonical: &Path) -> bool {
     canonical.is_dir()
@@ -380,8 +371,11 @@ mod tests {
         let ws = PathBuf::from("/tmp/project");
         let deny = vec![PathBuf::from(".env"), PathBuf::from("/etc/shadow")];
         let resolved = resolve_deny_paths(&ws, &deny);
-        assert_eq!(resolved[0], PathBuf::from("/tmp/project/.env"));
-        assert_eq!(resolved[1], PathBuf::from("/etc/shadow"));
+        let [rel, abs] = resolved.as_slice() else {
+            panic!("expected two resolved paths: {resolved:?}");
+        };
+        assert_eq!(rel, &PathBuf::from("/tmp/project/.env"));
+        assert_eq!(abs, &PathBuf::from("/etc/shadow"));
     }
 
     #[test]

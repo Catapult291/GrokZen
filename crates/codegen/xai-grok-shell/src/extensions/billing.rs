@@ -25,7 +25,6 @@ pub struct Cent {
 }
 
 /// A usage period (weekly or monthly) from the newer credits config.
-///
 /// `start`/`end` are RFC 3339 timestamps.
 /// `period_type` is the proto enum name (e.g. `USAGE_PERIOD_TYPE_WEEKLY`); it is kept so callers can distinguish weekly from monthly cycles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,11 +52,8 @@ pub struct BillingPeriodUsage {
     pub total_used: Option<Cent>,
 }
 
-/// Current billing configuration for Grok Build coding credits.
-///
-/// Carries the newer credits-config fields (`credit_usage_percent`, `current_period`).
-/// It also carries the deprecated `GrokBuildBillingConfig` fields (`monthly_limit`, `used`, `billing_period_*`).
-/// Consumers should prefer the new fields and fall back to the deprecated ones.
+/// Current billing configuration for Grok Build coding credits. Carries the newer credits-config fields (`credit_usage_percent`, `current_period`).
+/// It also carries the deprecated `GrokBuildBillingConfig` fields (`monthly_limit`, `used`, `billing_period_*`). Consumers should prefer the new fields and fall back to the deprecated ones.
 /// The same struct then works against both the new `GetGrokCreditsConfig` and the legacy `GetGrokBuildBillingConfig` responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -149,9 +145,7 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 }
 
 /// Structured context for unified-log entries from a successful billing fetch.
-///
-/// Keeps history to a count + the most recent period so `~/.grok/logs/unified.jsonl`
-/// stays useful without dumping unbounded period arrays.
+/// Keeps history to a count + the most recent period so `~/.grok/logs/unified.jsonl` stays useful without dumping unbounded period arrays.
 fn billing_unified_log_ctx(billing: &BillingConfigResponse) -> serde_json::Value {
     let history_len = billing
         .config
@@ -202,7 +196,7 @@ async fn handle_get_billing(agent: &MvpAgent) -> ExtResult {
         .header("Authorization", format!("Bearer {}", &auth.key))
         .header(
             "X-XAI-Token-Auth",
-            crate::auth::GrokComConfig::default().token_header,
+            xai_grok_login::GrokComConfig::default().token_header,
         )
         .header("x-userid", &auth.user_id)
         .header("x-grok-client-version", xai_grok_version::VERSION)
@@ -292,7 +286,7 @@ async fn handle_get_auto_topup_rule(agent: &MvpAgent) -> ExtResult {
         .header("Authorization", format!("Bearer {}", &auth.key))
         .header(
             "X-XAI-Token-Auth",
-            crate::auth::GrokComConfig::default().token_header,
+            xai_grok_login::GrokComConfig::default().token_header,
         )
         .header("x-userid", &auth.user_id)
         .header("x-grok-client-version", xai_grok_version::VERSION)
@@ -377,7 +371,9 @@ mod tests {
             Some("2025-04-01T00:00:00Z")
         );
         assert_eq!(config.history.len(), 1);
-        let period = &config.history[0];
+        let Some(period) = config.history.first() else {
+            panic!("expected one billing period");
+        };
         let cycle = period.billing_cycle.as_ref().unwrap();
         assert_eq!(cycle.year, 2025);
         assert_eq!(cycle.month, 3);
@@ -428,20 +424,43 @@ mod tests {
             subscription_tier: Some("SuperGrok".into()),
         };
         let ctx = billing_unified_log_ctx(&resp);
-        assert_eq!(ctx["onDemandEnabled"], true);
-        assert_eq!(ctx["subscriptionTier"], "SuperGrok");
-        let config = ctx["config"].as_object().expect("config object");
+        assert_eq!(
+            ctx.get("onDemandEnabled").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            ctx.get("subscriptionTier").and_then(|v| v.as_str()),
+            Some("SuperGrok")
+        );
+        let config = ctx
+            .get("config")
+            .and_then(|v| v.as_object())
+            .expect("config object");
         assert!(
             config.get("history").is_none(),
             "full history must be collapsed"
         );
-        assert_eq!(config["historyLen"], 2);
+        assert_eq!(config.get("historyLen").and_then(|v| v.as_u64()), Some(2));
         assert_eq!(
-            config["latestHistory"]["billingCycle"]["month"], 3,
+            config
+                .get("latestHistory")
+                .and_then(|h| h.get("billingCycle"))
+                .and_then(|c| c.get("month"))
+                .and_then(|v| v.as_u64()),
+            Some(3),
             "latest history period retained"
         );
-        assert_eq!(config["creditUsagePercent"], 42.5);
-        assert_eq!(config["prepaidBalance"]["val"], 100);
+        assert_eq!(
+            config.get("creditUsagePercent").and_then(|v| v.as_f64()),
+            Some(42.5)
+        );
+        assert_eq!(
+            config
+                .get("prepaidBalance")
+                .and_then(|b| b.get("val"))
+                .and_then(|v| v.as_u64()),
+            Some(100)
+        );
     }
 
     #[test]
@@ -579,7 +598,10 @@ mod tests {
         assert_eq!(config.is_unified_billing_user, Some(true));
         // The CLI billing code does not read `productUsage` yet
         assert_eq!(config.history.len(), 1);
-        assert_eq!(config.history[0].on_demand_used.as_ref().unwrap().val, 120);
+        let Some(history) = config.history.first() else {
+            panic!("expected one history period");
+        };
+        assert_eq!(history.on_demand_used.as_ref().unwrap().val, 120);
     }
 
     #[test]

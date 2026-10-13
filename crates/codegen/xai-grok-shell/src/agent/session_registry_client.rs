@@ -127,6 +127,25 @@ pub struct DownloadResponse {
     pub turn: i32,
 }
 
+/// A non-success registry response other than 401, kept typed so callers can tell a refusal from an outage.
+#[derive(Debug, thiserror::Error)]
+#[error("{op} failed: {status}")]
+pub(crate) struct RegistryStatusError {
+    op: &'static str,
+    status: reqwest::StatusCode,
+}
+
+impl RegistryStatusError {
+    /// A 4xx the same request will get again; 408 and 429 are throttling, not refusal.
+    pub(crate) fn is_permanent_refusal(&self) -> bool {
+        self.status.is_client_error()
+            && !matches!(
+                self.status,
+                reqwest::StatusCode::REQUEST_TIMEOUT | reqwest::StatusCode::TOO_MANY_REQUESTS
+            )
+    }
+}
+
 // ============================================================================
 // Client
 // ============================================================================
@@ -170,13 +189,14 @@ impl SessionRegistryClient {
     }
 
     /// Attach an `AuthManager` so request signing and 401 recovery go through the shared auth path.
-    pub fn with_auth(mut self, auth_manager: std::sync::Arc<crate::auth::AuthManager>) -> Self {
+    pub fn with_auth(mut self, auth_manager: std::sync::Arc<xai_grok_login::AuthManager>) -> Self {
         let provider: std::sync::Arc<dyn xai_grok_auth::AuthCredentialProvider> =
             std::sync::Arc::new(
-                crate::auth::credential_provider::ShellAuthCredentialProvider::new(
+                xai_grok_login::credential_provider::ShellAuthCredentialProvider::with_deployment_id_resolver(
                     auth_manager.clone(),
                     self.credentials.deployment_key.clone(),
                     self.credentials.alpha_test_key.clone(),
+                    std::sync::Arc::new(xai_grok_cloud_config::managed_config::resolve_deployment_id),
                 ),
             );
         self.credentials = self.credentials.with_auth_manager(auth_manager);
@@ -194,7 +214,7 @@ impl SessionRegistryClient {
         reqwest::Response,
         Option<xai_grok_auth::StampedBearerSuffix>,
     )> {
-        let builder = xai_file_utils::trace_context::inject_trace_context_into_request(builder);
+        let builder = xai_grok_otel::inject_trace_context_into_request(builder);
         let request = builder.build().context(op)?;
         xai_grok_auth::execute_with_stamp(&self.client, request)
             .await
@@ -213,13 +233,16 @@ impl SessionRegistryClient {
         &self,
         response: reqwest::Response,
         stamp: Option<&xai_grok_auth::StampedBearerSuffix>,
-        op: &str,
+        op: &'static str,
     ) -> anyhow::Error {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
             self.record_401_attribution(op, stamp);
             anyhow::anyhow!("{op}: {}", self.credentials.auth_error_hint())
         } else {
-            anyhow::anyhow!("{op} failed: {}", response.status())
+            anyhow::Error::new(RegistryStatusError {
+                op,
+                status: response.status(),
+            })
         }
     }
 
@@ -228,10 +251,10 @@ impl SessionRegistryClient {
     /// `stamp` is what the middleware put on the wire; [`xai_grok_auth::StampedBearerSuffix`] explains why it is never re-resolved.
     fn record_401_attribution(&self, op: &str, stamp: Option<&xai_grok_auth::StampedBearerSuffix>) {
         if let Some(manager) = self.credentials.auth_manager() {
-            crate::auth::attribution::record_consumer_401(
+            xai_grok_login::attribution::record_consumer_401(
                 manager.as_ref(),
                 self.session_id.as_deref(),
-                crate::auth::attribution::ConsumerKind::SessionRegistryClient,
+                xai_grok_login::attribution::ConsumerKind::SessionRegistryClient,
                 op,
                 stamp.map(|s| s.0.as_str()),
             );
@@ -248,6 +271,10 @@ impl SessionRegistryClient {
 
     /// POST /v1/sessions/register (idempotent via ON CONFLICT)
     pub async fn register(&self, req: &RegisterRequest) -> Result<()> {
+        anyhow::ensure!(
+            xai_grok_product::SESSION_DATA_UPLOADS_ALLOWED,
+            "Session registration is disabled by the community build privacy policy"
+        );
         let url = format!("{}/sessions/register", self.base_url);
         let (response, stamp) = self
             .send_authed(self.post(&url).json(req), "session register")
@@ -260,6 +287,10 @@ impl SessionRegistryClient {
 
     /// POST /v1/sessions/{id}/replicas/update
     pub async fn update(&self, session_id: &str, req: &UpdateRequest) -> Result<()> {
+        anyhow::ensure!(
+            xai_grok_product::SESSION_DATA_UPLOADS_ALLOWED,
+            "Session registration is disabled by the community build privacy policy"
+        );
         let url = format!("{}/sessions/{}/replicas/update", self.base_url, session_id);
         let (response, stamp) = self
             .send_authed(self.post(&url).json(req), "session update")
@@ -272,6 +303,10 @@ impl SessionRegistryClient {
 
     /// POST /v1/sessions/{id}/replicas/finalize
     pub async fn finalize(&self, session_id: &str) -> Result<()> {
+        anyhow::ensure!(
+            xai_grok_product::SESSION_DATA_UPLOADS_ALLOWED,
+            "Session registration is disabled by the community build privacy policy"
+        );
         let url = format!(
             "{}/sessions/{}/replicas/finalize",
             self.base_url, session_id
@@ -387,14 +422,8 @@ impl SessionRegistryClient {
 mod tests {
     use super::*;
 
-    // ── UpdateRequest wire shapes ────────────────────────────────────────────
-    //
-    // The registry writer sends two distinct update payloads at different times:
-    //
-    //   1. Immediately after a turn: `last_turn_number` and `repo_head_at_end`
-    //   2. Once restore artifacts are durable: `restorable_turn_number` only
-    //
-    // These tests verify `skip_serializing_if = "Option::is_none"` for each shape
+    // ── UpdateRequest wire shapes ──────────────────────────────────────────── The registry writer sends two distinct update payloads at different times: Immediately after a turn: `last_turn_number` and `repo_head_at_end`
+    // Once restore artifacts are durable: `restorable_turn_number` only These tests verify `skip_serializing_if = "Option::is_none"` for each shape
     // Old servers then silently ignore the new field and clients never overwrite unrelated fields with nulls
 
     #[test]
@@ -407,8 +436,11 @@ mod tests {
             restorable_turn_number: None,
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["lastTurnNumber"], 5);
-        assert_eq!(json["repoHeadAtEnd"], "abc123");
+        assert_eq!(json.get("lastTurnNumber").and_then(|v| v.as_u64()), Some(5));
+        assert_eq!(
+            json.get("repoHeadAtEnd").and_then(|v| v.as_str()),
+            Some("abc123")
+        );
         assert!(json.get("restorableTurnNumber").is_none());
         assert!(json.get("summary").is_none());
         assert!(json.get("firstPrompt").is_none());
@@ -424,7 +456,10 @@ mod tests {
             restorable_turn_number: Some(5),
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["restorableTurnNumber"], 5);
+        assert_eq!(
+            json.get("restorableTurnNumber").and_then(|v| v.as_u64()),
+            Some(5)
+        );
         assert!(json.get("lastTurnNumber").is_none());
         assert!(json.get("repoHeadAtEnd").is_none());
         assert!(json.get("summary").is_none());
@@ -441,7 +476,10 @@ mod tests {
             restorable_turn_number: None,
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["summary"], "My session summary");
+        assert_eq!(
+            json.get("summary").and_then(|v| v.as_str()),
+            Some("My session summary")
+        );
         assert!(json.get("lastTurnNumber").is_none());
         assert!(json.get("restorableTurnNumber").is_none());
         assert!(json.get("repoHeadAtEnd").is_none());
@@ -490,7 +528,10 @@ mod tests {
     fn register_request_serializes_device_id_as_camel_case() {
         let req = minimal_register_request(Some("machine-uuid-123".into()));
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["deviceId"], "machine-uuid-123");
+        assert_eq!(
+            json.get("deviceId").and_then(|v| v.as_str()),
+            Some("machine-uuid-123")
+        );
         assert!(json.get("device_id").is_none());
     }
 
@@ -498,7 +539,7 @@ mod tests {
     fn register_request_serializes_empty_device_id_as_present() {
         let req = minimal_register_request(Some(String::new()));
         let json = serde_json::to_value(&req).unwrap();
-        assert_eq!(json["deviceId"], "");
+        assert_eq!(json.get("deviceId").and_then(|v| v.as_str()), Some(""));
     }
 
     #[test]
@@ -510,7 +551,6 @@ mod tests {
     }
 
     // ── SessionRecord backward compatibility ─────────────────────────────────
-    //
     // Older servers do not include `restorable_turn_number` in their response.
     // The field is `#[serde(default)]` so it must deserialize as `None` when absent, keeping new clients compatible with old servers
 
@@ -562,12 +602,12 @@ mod tests {
     /// Verifies that each request resolves auth again, so a rotated token is picked up.
     #[tokio::test]
     async fn session_registry_client_uses_active_auth_for_each_request() {
-        use crate::auth::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
         use axum::{Router, response::IntoResponse, routing::post};
         use chrono::{Duration, Utc};
         use std::net::SocketAddr;
         use std::sync::Arc;
         use tokio::net::TcpListener;
+        use xai_grok_login::{AuthManager, AuthMode, GrokAuth, GrokComConfig};
 
         let captured = Arc::new(parking_lot::Mutex::new(None::<String>));
         let captured_for_handler = captured.clone();

@@ -23,8 +23,10 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::StatefulWidgetRef;
+use xai_grok_tools::types::SessionMode;
 use xai_ratatui_textarea::{ElementId, ElementKind, TextArea, TextAreaState, TextElement};
 
+use crate::app::actions::PermissionLabel;
 use crate::clipboard::{SystemClipboard, system_clipboard_get};
 use crate::input::key::key;
 use crate::prompt_images::PastedImage;
@@ -48,6 +50,28 @@ const PASTE_CHIP_DISPLAY_BYTES: usize = 10_000;
 
 pub use crate::prompt_images::PROMPT_IMAGES_TRACING_TARGET;
 
+fn text_without_image_chips(
+    text: &str,
+    elements: impl Iterator<Item = (ElementKind, std::ops::Range<usize>)>,
+) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut previous_end = 0usize;
+    for (kind, range) in elements {
+        if kind != KIND_IMAGE {
+            continue;
+        }
+        let Some(gap) = text.get(previous_end..range.start) else {
+            continue;
+        };
+        output.push_str(gap);
+        previous_end = range.end;
+    }
+    if let Some(tail) = text.get(previous_end..) {
+        output.push_str(tail);
+    }
+    output
+}
+
 /// What kind of element interaction occurred when pressing Enter on a chip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElementInteraction {
@@ -67,9 +91,6 @@ pub enum PromptEvent {
 }
 
 /// Result of routing an Enter-family key event through a submittable prompt.
-///
-/// Used by [`PromptWidget::route_enter`] to centralize the three behaviors every "bare Enter submits" context needs.
-/// Those are the Apple Terminal CoreGraphics modifier rescue, backslash continuation, and the file-search guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnterOutcome {
     /// A newline was inserted (Apple Terminal modifier rescue or backslash continuation).
@@ -89,11 +110,6 @@ pub(crate) enum FileSearchKeyResult {
     /// User accepted the selected result (Tab/Enter).
     Accepted,
     /// User accepted the result without a trailing space (Right Arrow).
-    ///
-    /// Used for "drill-down" completion: the path is inserted but the cursor stays immediately after it (no terminating space).
-    /// The user can then continue typing path segments.
-    /// For directory results, a trailing `/` is appended so further segments can be typed immediately.
-    /// For file results, the path is inserted as an atomic element with no trailing space.
     AcceptedNoSpace,
     /// User accepted the result and wants to open the line viewer (`:` or Ctrl-L).
     AcceptAndOpenViewer,
@@ -115,16 +131,9 @@ fn file_search_has_selection(fs: &FileSearchState) -> bool {
     fs.selected() < fs.result_count()
 }
 
-/// Whether the in-app `Cmd+A` "select all in prompt" handler is supported for the given terminal brand.
-///
-/// Gated to **Ghostty only**.
-/// Most other macOS terminals swallow `Cmd+A` at the terminal layer (Apple Terminal, default iTerm2, default Kitty/WezTerm).
-/// The rest have in-terminal "Select All" behaviour we don't want to fight.
-/// Ghostty users can opt in with a one-line `keybind = cmd+a=unbind` in `~/.config/ghostty/config`.
-/// After that, this handler fires and selects all text inside the prompt buffer.
-///
-/// Extracted as a free function so tests can verify the gate per-brand without the global terminal context singleton.
-/// (See `cmd_a_supported_only_for_ghostty` in the tests submodule.)
+/// Whether the in-app `Cmd+A` "select all in prompt" handler is supported for the given terminal
+/// brand. Gated to Ghostty only. The rest have in-terminal "Select All" behaviour we don't want to
+/// fight.
 fn cmd_a_select_all_supported(brand: crate::terminal::TerminalName) -> bool {
     matches!(brand, crate::terminal::TerminalName::Ghostty)
 }
@@ -172,17 +181,16 @@ pub struct PromptStyle {
     /// Only consulted when `chrome` is true.
     /// Defaults to `true` (the full-TUI boxed prompt); minimal mode sets it `false` for a cleaner, border-less input that still keeps the chrome padding.
     pub show_borders: bool,
-    /// Session title inlined in the top border (right-aligned, 2-cell inset), styled like the bottom info line's model name.
+    /// Session title inlined in the top border, aligned and styled like the bottom info line.
     /// None (default) keeps the plain border. Set only by the agent view.
     pub title: Option<String>,
     /// Paint image-chip overlay into `overlay_area` (default true).
     pub image_preview: bool,
 }
 
-/// Background for the prompt widget.
-///
-/// Paste chips bake `theme.paste_bg` (a badge color tuned for the default canvas) into their display `Line` at paste time.
-/// The background therefore says what *kind* of surface the prompt sits on, not just its color.
+/// Background for the prompt widget. Paste chips bake `theme.paste_bg` (a badge color tuned for the
+/// default canvas) into their display `Line` at paste time. The background therefore says what kind
+/// of surface the prompt sits on, not just its color.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum PromptBg {
     /// The standalone prompt's default fill (`theme.bg_base`).
@@ -291,6 +299,39 @@ pub struct PromptFlag<'a> {
     pub bold: bool,
 }
 
+/// Info-line mode flags shared by the chat prompt and the dashboard peek badge: mode label, then permission.
+/// Mode and permission are independent axes, so neither hides the other.
+pub fn mode_flags<'a>(
+    mode_label: Option<&'a str>,
+    permission: PermissionLabel,
+    theme: &Theme,
+) -> Vec<PromptFlag<'a>> {
+    let mut flags = Vec::new();
+    if let Some(text) = mode_label {
+        // Ask must stay distinct from the plan-family accent.
+        let color = if text == SessionMode::Ask.as_id() {
+            theme.accent_success
+        } else {
+            theme.accent_plan
+        };
+
+        flags.push(PromptFlag {
+            text,
+            color: Some(color),
+            bold: false,
+        });
+    }
+    if permission != PermissionLabel::Ask {
+        flags.push(PromptFlag {
+            text: permission.display_name(),
+            // Blue `accent_system` reads as "system/automation", distinct from plan
+            color: (permission == PermissionLabel::Auto).then_some(theme.accent_system),
+            bold: false,
+        });
+    }
+    flags
+}
+
 /// Optional info line rendered below the prompt text.
 ///
 /// The default is blank: a caller that wants the bottom border without any info text passes it, and [`Self::is_blank`] then skips the text pass.
@@ -318,11 +359,6 @@ impl PromptInfo<'_> {
 }
 
 /// Live voice-capture overlay for the prompt.
-///
-/// Interim STT paints as muted italic ghost text (not in the textarea).
-/// Finalized STT is real prompt content and stays editable while the mic is open.
-/// Overlay presence (even with no interim) marks voice active for callers that
-/// skip empty-state placeholders while capturing.
 #[derive(Debug, Clone, Copy)]
 pub struct VoicePromptOverlay<'a> {
     /// Latest interim transcript, if any.
@@ -395,14 +431,20 @@ pub struct StashedPrompt {
 
 impl Drop for StashedPrompt {
     fn drop(&mut self) {
-        crate::prompt_images::drain_and_cleanup(&mut self.images);
-        crate::prompt_images::drain_and_cleanup(&mut self.image_undo_stash);
+        crate::prompt_images::drain_and_cleanup(
+            crate::prompt_images::SessionPathPolicy::Preserve,
+            &mut self.images,
+        );
+        crate::prompt_images::drain_and_cleanup(
+            crate::prompt_images::SessionPathPolicy::Preserve,
+            &mut self.image_undo_stash,
+        );
     }
 }
 
 /// Feedback attachments in transit between the composer, the trace-consent card, and the send dispatch.
 ///
-/// Owns its staged temp files: dropping without [`take`](Self::take) deletes them.
+/// Owns its staged temp files: dropping without transferring them deletes them.
 #[derive(Debug, Default)]
 pub struct FeedbackImages(Vec<PastedImage>);
 
@@ -414,7 +456,10 @@ impl From<Vec<PastedImage>> for FeedbackImages {
 
 impl Drop for FeedbackImages {
     fn drop(&mut self) {
-        crate::prompt_images::drain_and_cleanup(&mut self.0);
+        crate::prompt_images::drain_and_cleanup(
+            crate::prompt_images::SessionPathPolicy::Delete,
+            &mut self.0,
+        );
     }
 }
 
@@ -498,14 +543,48 @@ impl StashedPrompt {
             return self;
         }
         let Some(start) = self.text.rfind(&text) else {
-            crate::prompt_images::drain_and_cleanup(&mut self.images);
-            crate::prompt_images::drain_and_cleanup(&mut self.image_undo_stash);
+            crate::prompt_images::drain_and_cleanup(
+                crate::prompt_images::SessionPathPolicy::Preserve,
+                &mut self.images,
+            );
+            crate::prompt_images::drain_and_cleanup(
+                crate::prompt_images::SessionPathPolicy::Preserve,
+                &mut self.image_undo_stash,
+            );
             self.text = text;
             self.cursor = self.text.len();
             self.chip_elements.clear();
             self.image_counter = 0;
             return self;
         };
+        self.retain_transformed_range(text, start)
+    }
+
+    pub(crate) fn text_without_image_chips(&self) -> String {
+        text_without_image_chips(
+            &self.text,
+            self.chip_elements
+                .iter()
+                .map(|element| (element.kind, element.range.clone())),
+        )
+    }
+
+    /// Clear `staged_temp_path` only for images whose identity is still owned elsewhere.
+    /// Edit-only pastes keep their paths so Drop / `drain_and_cleanup` can delete them.
+    pub(crate) fn disarm_image_cleanup(&mut self, retained: &std::collections::HashSet<u64>) {
+        for image in &mut self.images {
+            if retained.contains(&image.preview.identity()) {
+                image.staged_temp_path = None;
+            }
+        }
+        for image in &mut self.image_undo_stash {
+            if retained.contains(&image.preview.identity()) {
+                image.staged_temp_path = None;
+            }
+        }
+    }
+
+    fn retain_transformed_range(mut self, text: String, start: usize) -> Self {
         let end = start + text.len();
         let mut image_numbers = std::collections::HashSet::new();
         self.chip_elements.retain_mut(|chip| {
@@ -514,7 +593,9 @@ impl StashedPrompt {
             }
             chip.range = chip.range.start - start..chip.range.end - start;
             if chip.kind == KIND_IMAGE
-                && let Some(number) = parse_image_display_number(&text[chip.range.clone()])
+                && let Some(number) = text
+                    .get(chip.range.clone())
+                    .and_then(parse_image_display_number)
             {
                 image_numbers.insert(number);
             }
@@ -524,11 +605,17 @@ impl StashedPrompt {
             if image_numbers.contains(&image.display_number) {
                 true
             } else {
-                crate::prompt_images::cleanup_temp_file(image);
+                crate::prompt_images::cleanup_image(
+                    crate::prompt_images::SessionPathPolicy::Preserve,
+                    image,
+                );
                 false
             }
         });
-        crate::prompt_images::drain_and_cleanup(&mut self.image_undo_stash);
+        crate::prompt_images::drain_and_cleanup(
+            crate::prompt_images::SessionPathPolicy::Preserve,
+            &mut self.image_undo_stash,
+        );
         self.text = text;
         self.cursor = self.text.len();
         self.image_counter = images_high_water(&self.images);
@@ -537,12 +624,6 @@ impl StashedPrompt {
 }
 
 /// Reusable text prompt component.
-///
-/// Handles text editing, multiline (Shift/Alt-Enter), submit (Enter), and Ctrl-C (clear if non-empty).
-/// Delegates mouse events to TextArea, which tracks drag state internally (including drag-beyond-edge).
-///
-/// Does NOT handle: Esc, Tab (focus management), Ctrl-D (quit).
-/// Does NOT render: accent line, selection box (caller's job).
 pub struct PromptWidget {
     pub textarea: TextArea,
     textarea_state: TextAreaState,
@@ -550,6 +631,8 @@ pub struct PromptWidget {
     textarea_area: Rect,
     /// @-completion file search state.
     pub file_search: FileSearchState,
+    /// Whether typing `@` may activate file-reference completion on this surface.
+    file_search_enabled: bool,
     /// Pending request to open the line viewer.
     /// Set by accept_file_search_for_viewer / Ctrl-L / : triggers, consumed by AgentView.
     pub(crate) pending_viewer_request: Option<ViewerRequest>,
@@ -578,7 +661,6 @@ pub struct PromptWidget {
     /// False while a turn is running, in bash/remember input modes, or while editing a queued prompt.
     pub(crate) prompt_suggestion_active: bool,
 
-    // -- Image paste state ---------------------------------------------------
     /// Images attached to the current prompt.
     pub images: Vec<PastedImage>,
     /// Images removed during undo that can be restored on redo.
@@ -594,14 +676,9 @@ pub struct PromptWidget {
     /// Compact mode lowers the paste-chip threshold from 4 lines to 2.
     compact: bool,
 
-    /// Whether the in-app Cmd+A handler is enabled (gated to Ghostty).
-    ///
-    /// Initialised from `terminal_context().brand` at construction.
-    /// Only Ghostty is supported because:
-    /// - It's the only terminal in current use that can forward `Cmd+A`, needing just one documented terminal-side step (`keybind = cmd+a=unbind`).
-    /// - Other terminals either silently swallow the key (Apple Terminal, default iTerm2) or fight it with their own in-terminal "Select All".
-    ///
-    /// Tests can mutate this field directly (it's private to the module and the test submodule has `use super::*`).
+    /// Whether the in-app Cmd+A handler is enabled (gated to Ghostty). Only Ghostty is supported
+    /// because. It's the only terminal in current use that can forward `Cmd+A`, needing just one
+    /// documented terminal-side step (`keybind = cmd+a=unbind`).
     cmd_a_select_all_enabled: bool,
 
     /// Detects user-initiated wipes of a substantial draft (undo tip).
@@ -637,11 +714,12 @@ impl PromptWidget {
             .fg(theme.selection_border)
             .bg(theme.bg_base);
         textarea.scrollbar_padding = 1;
-        Self {
+        let mut this = Self {
             textarea,
             textarea_state: TextAreaState::default(),
             textarea_area: Rect::default(),
             file_search: FileSearchState::new(cwd),
+            file_search_enabled: true,
             pending_viewer_request: None,
             history_search: HistorySearchState::new(),
             slash_controller: crate::slash::SlashController::with_builtins(cwd.to_path_buf()),
@@ -667,7 +745,11 @@ impl PromptWidget {
             undo_tip_fire: false,
             plan_nudge_fire: false,
             completion_accepted: false,
-        }
+        };
+        // Same fail-closed gate as AgentView: /dashboard is hidden in
+        // CommandRegistry::new until dashboard_enabled() reveals it.
+        this.set_dashboard_visible(crate::views::dashboard::dashboard_enabled());
+        this
     }
 
     /// Create a new empty prompt widget (no file search; for tests/fallback).
@@ -730,8 +812,6 @@ impl PromptWidget {
         self.suggestions.clear_ghost();
     }
 
-    // -- Predicted-next-prompt suggestion (tab autocomplete) -----------------
-
     /// The prompt-suggestion ghost to render for the current text, if the per-frame gate is open and no other completion UI owns the row.
     /// Requires the cursor at end-of-text so the ghost visually continues the typed text.
     pub fn prompt_suggestion_ghost(&self) -> Option<&str> {
@@ -780,17 +860,13 @@ impl PromptWidget {
         self.suggestions.try_progressive_match(new_text)
     }
 
-    // -- Completion dropdown ------------------------------------------------
-
     /// Whether the completion dropdown is currently open.
     pub fn completion_dropdown_open(&self) -> bool {
         self.suggestions.dropdown.open
     }
 
-    /// Whether any prompt-anchored dropdown is open: `@`-file search, slash command, shell completion, or history search.
-    /// All four render in the row directly above the prompt input.
-    /// An overlay gated above the prompt (e.g. the ephemeral tip) must therefore treat an open dropdown as covering it.
-    /// Keep this in sync with the dropdown render arms in `AgentView::draw`.
+    /// An overlay gated above the prompt (e.g. the ephemeral tip) must therefore treat an open dropdown
+    /// as covering it.
     pub fn any_dropdown_open(&self) -> bool {
         self.file_search_visible()
             || self.slash_open()
@@ -860,11 +936,8 @@ impl PromptWidget {
         }
     }
 
-    /// Write a `TabAction::Fill` over the typed token (bash's first Tab).
-    /// The pair was validated against this draft by `tab_decision` in the same key/landing event, so it applies directly.
-    /// The cursor lands after the fill.
-    /// Returns whether the fill was written: a range clipping an atomic element is declined.
-    /// The caller must NOT treat a declined fill like typing (no re-fetch: that loop would spin on every Tab).
+    /// Write a `TabAction::Fill` over the typed token (bash's first Tab). The caller must NOT treat a
+    /// declined fill like typing (no re-fetch: that loop would spin on every Tab).
     pub fn apply_completion_fill(&mut self, range: std::ops::Range<usize>, fill: &str) -> bool {
         if self.completion_range_clips_element(&range) {
             return false;
@@ -927,9 +1000,36 @@ impl PromptWidget {
         self.textarea.text()
     }
 
+    /// Nothing recoverable remains: text, live images, chips, or Ctrl+U undo stash.
+    /// Matches [`StashedPrompt::is_effectively_empty`].
+    pub(crate) fn is_effectively_empty(&self) -> bool {
+        self.text().trim().is_empty()
+            && self.images.is_empty()
+            && self.textarea.elements().is_empty()
+            && self.image_undo_stash.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_image_undo_stash_for_test(
+        &mut self,
+        image: crate::prompt_images::PastedImage,
+    ) {
+        self.image_undo_stash.push(image);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn image_undo_stash_len(&self) -> usize {
+        self.image_undo_stash.len()
+    }
+
     /// Get the current cursor position (byte offset into text).
     pub fn cursor(&self) -> usize {
         self.textarea.cursor()
+    }
+
+    /// Active selection as a byte range (normalized, char-boundary safe), or `None` when nothing is selected.
+    pub(crate) fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        self.textarea.selection_range()
     }
 
     /// Clear the undo/redo history (see [`TextArea::clear_history`]).
@@ -946,6 +1046,8 @@ impl PromptWidget {
 
     /// Move the current prompt state into a snapshot for later restoration.
     pub fn stash(&mut self) -> StashedPrompt {
+        // Bind orphan placeholders first so the chip snapshot and the drained images agree.
+        self.rebind_image_placeholders();
         let chip_elements = self
             .textarea
             .elements()
@@ -978,8 +1080,14 @@ impl PromptWidget {
         if text.is_empty() {
             self.set_text("");
         } else {
-            crate::prompt_images::drain_and_cleanup(&mut self.images);
-            crate::prompt_images::drain_and_cleanup(&mut self.image_undo_stash);
+            crate::prompt_images::drain_and_cleanup(
+                crate::prompt_images::SessionPathPolicy::Preserve,
+                &mut self.images,
+            );
+            crate::prompt_images::drain_and_cleanup(
+                crate::prompt_images::SessionPathPolicy::Preserve,
+                &mut self.image_undo_stash,
+            );
             crate::prompt_images::reset_counter(&mut self.image_counter);
             self.set_text(&text);
         }
@@ -987,20 +1095,32 @@ impl PromptWidget {
         self.set_images(images);
         self.image_counter = self.image_counter.max(image_counter);
         self.image_undo_stash = image_undo_stash;
+        self.rechip_orphan_image_placeholders();
         self.set_cursor(cursor);
         self.update_file_search_context();
     }
 
-    /// Set the text content.
-    ///
-    /// When `text` is empty this is a full prompt reset.
-    /// Image-side state, the image counter, slash completion state, and any in-progress preview are all cleared so the next prompt starts fresh.
-    ///
-    /// **Image lifecycle contract.** Non-empty replacements with no `[Image #N]` placeholder also clear the image lists and counter.
-    /// Orphan `PastedImage` records without matching chips can't be reached by the user.
-    /// Callers that restore an in-flight prompt after `set_text` must also restore its chip elements and images.
-    /// Overlay contexts should use [`Self::stash`] and [`Self::restore`].
-    /// The `image_counter` is preserved when chips remain so numbering stays monotonic within a prompt lifetime.
+    /// [`Self::set_text`] for text that is not this draft's: a recalled history line or a rewound
+    /// prompt. Its `[Image #N]` placeholders name images from another send, so the records this
+    /// composer still holds are released first instead of re-binding to a matching number.
+    pub fn set_text_discarding_images(&mut self, text: &str) {
+        crate::prompt_images::drain_and_cleanup(
+            crate::prompt_images::SessionPathPolicy::Preserve,
+            &mut self.images,
+        );
+        crate::prompt_images::drain_and_cleanup(
+            crate::prompt_images::SessionPathPolicy::Preserve,
+            &mut self.image_undo_stash,
+        );
+        crate::prompt_images::reset_counter(&mut self.image_counter);
+        self.set_text(text);
+    }
+
+    /// Set the text content. A non-empty `text` that still names `[Image #N]` placeholders keeps the
+    /// `PastedImage` records, unbound until the next sync, `set_images`, or `stash` re-chips them.
+    /// No re-chip happens here: callers that restore an in-flight prompt follow with
+    /// `restore_chip_elements` and `set_images`, and a re-chip first would bind a stale undo-stash
+    /// record ahead of the restored one.
     pub fn set_text(&mut self, text: &str) {
         self.post_insert_image_preview = None;
         self.hovered_image_element_id = None;
@@ -1014,8 +1134,14 @@ impl PromptWidget {
         self.suggestions.invalidate_draft();
         if text.is_empty() {
             // Split "drain Vec" from "reset counter" so the counter-reset is a single explicit line, not two redundant writes hidden in `clear()`
-            crate::prompt_images::drain_and_cleanup(&mut self.images);
-            crate::prompt_images::drain_and_cleanup(&mut self.image_undo_stash);
+            crate::prompt_images::drain_and_cleanup(
+                crate::prompt_images::SessionPathPolicy::Preserve,
+                &mut self.images,
+            );
+            crate::prompt_images::drain_and_cleanup(
+                crate::prompt_images::SessionPathPolicy::Preserve,
+                &mut self.image_undo_stash,
+            );
             crate::prompt_images::reset_counter(&mut self.image_counter);
             self.slash_state
                 .replace(crate::slash::SlashSnapshot::default());
@@ -1025,17 +1151,29 @@ impl PromptWidget {
             // Non-empty replacement with no chip placeholder match: any retained `PastedImage` records are now orphans (no chip in the buffer references them)
             // Drop them to keep `drain_images()` honest and to release encoded bytes
             // The counter is reset since no chips survive
-            crate::prompt_images::drain_and_cleanup(&mut self.images);
-            crate::prompt_images::drain_and_cleanup(&mut self.image_undo_stash);
+            crate::prompt_images::drain_and_cleanup(
+                crate::prompt_images::SessionPathPolicy::Preserve,
+                &mut self.images,
+            );
+            crate::prompt_images::drain_and_cleanup(
+                crate::prompt_images::SessionPathPolicy::Preserve,
+                &mut self.image_undo_stash,
+            );
             crate::prompt_images::reset_counter(&mut self.image_counter);
         }
         self.update_file_search_context();
     }
 
-    /// [`Self::set_text`] unless the buffer already holds exactly `text`.
-    ///
-    /// Skipping the no-op swap keeps chip elements, images, and undo history intact when a view reloads the same draft (the question view's freeform slots).
-    /// Any real content change takes the normal reset path.
+    /// Disable `@` file references for a composer that does not render or drain file-search UI.
+    pub(crate) fn disable_file_search(&mut self) {
+        self.file_search_enabled = false;
+        self.file_search.clear_context();
+        self.pending_viewer_request = None;
+    }
+
+    /// [`Self::set_text`] unless the buffer already holds exactly `text`. Skipping the no-op swap keeps
+    /// chip elements, images, and undo history intact when a view reloads the same draft (the question
+    /// view's freeform slots). Any real content change takes the normal reset path.
     pub fn set_text_preserving(&mut self, text: &str) {
         if self.text() != text {
             self.set_text(text);
@@ -1055,8 +1193,6 @@ impl PromptWidget {
         self.update_file_search_context();
     }
 
-    // -- Slash command state sync -------------------------------------------
-
     pub fn set_slash_current_title(&mut self, title: Option<String>) {
         self.slash_controller.set_current_title(title);
     }
@@ -1065,12 +1201,8 @@ impl PromptWidget {
         self.slash_controller.current_title()
     }
 
-    /// Refresh the slash snapshot from the current text and cursor.
-    ///
-    /// Called by `AgentView` after every `PromptEvent::Edited`.
-    /// Also called when `current_title` changes while the dropdown is already open, so the `/rename` ghost is not left stale until the next keystroke.
-    /// This is the only way to update the slash snapshot: `AgentView` never touches `slash_controller` or `slash_state` directly.
-    ///
+    /// Refresh the slash snapshot from the current text and cursor. This is the only way to update the
+    /// slash snapshot: `AgentView` never touches `slash_controller` or `slash_state` directly.
     pub fn refresh_slash(&mut self, models: &crate::acp::model_state::ModelState) {
         let was_in_args = {
             let snap = self.slash_state.snapshot();
@@ -1101,11 +1233,8 @@ impl PromptWidget {
         }
     }
 
-    /// Sync ACP-advertised commands and the agent toolset into the slash registry, then refresh the snapshot.
-    ///
-    /// Called by `AgentView` when `available_commands_generation` changes.
-    /// Registry sync happens before snapshot refresh (no stale data in the dropdown).
-    /// `tools = None` means the toolset is not yet known; tool-gated commands stay visible.
+    /// Sync ACP-advertised commands and the agent toolset into the slash registry, then refresh the
+    /// snapshot. `tools = None` means the toolset is not yet known; tool-gated commands stay visible.
     pub fn sync_acp_commands(
         &mut self,
         commands: &[agent_client_protocol::AvailableCommand],
@@ -1162,6 +1291,12 @@ impl PromptWidget {
             .set_voice_visible(visible);
     }
 
+    pub(crate) fn set_dashboard_visible(&mut self, visible: bool) {
+        self.slash_controller
+            .registry_mut()
+            .set_dashboard_visible(visible);
+    }
+
     /// Gate `/auto` on the auto permission-mode feature.
     /// See [`crate::slash::SlashController::set_auto_mode_available`].
     pub(crate) fn set_auto_mode_available(&mut self, available: bool) {
@@ -1203,10 +1338,9 @@ impl PromptWidget {
             .scroll_selection(&self.slash_state, delta);
     }
 
-    /// Accept the currently selected slash completion.
-    ///
-    /// Replaces the appropriate text range (command or args) with the selected row's `insert_text`, then refreshes the snapshot.
-    /// Returns `true` if a completion was accepted, `false` if nothing to accept.
+    /// Accept the currently selected slash completion. Replaces the appropriate text range (command or
+    /// args) with the selected row's `insert_text`, then refreshes the snapshot. Returns `true` if a
+    /// completion was accepted, `false` if nothing to accept.
     pub fn accept_slash_completion(
         &mut self,
         models: &crate::acp::model_state::ModelState,
@@ -1234,12 +1368,13 @@ impl PromptWidget {
                     && self.textarea.text().is_char_boundary(range.start)
                     && self.textarea.text().is_char_boundary(range.end)
                 {
-                    // The row's trailing space is its args separator; absorb an existing plain-text one
-                    // Accepting mid-token in `/mod grok-4` then yields `/model grok-4`, not `/model  grok-4`
-                    // Absorbing (rather than trimming the insert) lands the cursor after the separator, in the args phase
-                    // Never absorb an element's byte: a chip's leading space is chip data
-                    // replace_range expands any overlap to the whole element, so the absorb would swallow the chip
-                    let next_is_plain_space = self.textarea.text()[range.end..].starts_with(' ')
+                    // The row's trailing space is its args separator; absorb an existing plain-text one. Absorbing
+                    // (rather than trimming the insert) lands the cursor after the separator, in the args phase.
+                    let next_is_plain_space = self
+                        .textarea
+                        .text()
+                        .get(range.end..)
+                        .is_some_and(|s| s.starts_with(' '))
                         && !self
                             .textarea
                             .elements()
@@ -1316,12 +1451,9 @@ impl PromptWidget {
         }
     }
 
-    // -- Slash preview -------------------------------------------------------
-
-    /// Trigger live preview for the currently selected slash arg suggestion.
-    ///
-    /// Called after `slash_move_selection` when the dropdown is in the args phase of a command that supports preview.
-    /// On the first call, captures the current state so it can be reverted on cancel.
+    /// Trigger live preview for the currently selected slash arg suggestion. Called after
+    /// `slash_move_selection` when the dropdown is in the args phase of a command that supports
+    /// preview. On the first call, captures the current state so it can be reverted on cancel.
     pub fn slash_preview_current_selection(&mut self) {
         let snap = self.slash_state.snapshot();
         if snap.cursor_in_command || snap.matches.is_empty() {
@@ -1376,8 +1508,6 @@ impl PromptWidget {
         self.slash_preview_original = None;
     }
 
-    // -- File search --------------------------------------------------------
-
     /// Poll the file search daemon for new results. Returns `true` if changed.
     pub fn poll_file_search(&mut self) -> bool {
         self.file_search.poll()
@@ -1399,15 +1529,17 @@ impl PromptWidget {
             .any(|e| e.kind == KIND_FILE_REF && (cursor == e.range.start || cursor == e.range.end))
     }
 
-    /// Parse a file ref element into (path, optional line range).
-    ///
-    /// Element text is `@path` or `@path:10` or `@path:10-12`.
-    /// Returns `(path, None)` or `(path, Some(10..11))` or `(path, Some(10..13))`.
+    /// Parse a file ref element into (path, optional line range). Element text is `@path` or `@path:10`
+    /// or `@path:10-12`. Returns `(path, None)` or `(path, Some(10..11))` or `(path, Some(10..13))`.
     fn parse_file_ref_element(text: &str) -> (String, Option<std::ops::Range<usize>>) {
         let text = text.strip_prefix('@').unwrap_or(text);
         if let Some(colon_pos) = text.rfind(':') {
-            let path = &text[..colon_pos];
-            let range_str = &text[colon_pos + 1..];
+            let Some(path) = text.get(..colon_pos) else {
+                return (text.to_owned(), None);
+            };
+            let Some(range_str) = text.get(colon_pos + 1..) else {
+                return (text.to_owned(), None);
+            };
             if let Some(range) = parse_line_range(range_str) {
                 return (path.to_owned(), Some(range));
             }
@@ -1415,10 +1547,9 @@ impl PromptWidget {
         (text.to_owned(), None)
     }
 
-    /// Find a file ref element when cursor is on or immediately after it.
-    ///
-    /// Used by Ctrl-L: works when the cursor is at element start, end, or the position right after element end (e.g., after the trailing space).
-    /// Returns `(path, optional_line_range)`.
+    /// Find a file ref element when cursor is on or immediately after it. Used by. CtrlCtrl-L: works when
+    /// the cursor is at element start, end, or the position right after element end (e.g., after the
+    /// trailing space). Returns `(path, optional_line_range)`.
     pub fn file_ref_element_at_cursor(&self) -> Option<(String, Option<std::ops::Range<usize>>)> {
         let cursor = self.textarea.cursor();
         for elem in self.textarea.elements() {
@@ -1426,17 +1557,16 @@ impl PromptWidget {
                 continue;
             }
             if cursor >= elem.range.start && cursor <= elem.range.end + 1 {
-                let text = &self.textarea.text()[elem.range.clone()];
+                let text = self.textarea.get_range(elem.range.clone())?;
                 return Some(Self::parse_file_ref_element(text));
             }
         }
         None
     }
 
-    /// Find a file ref element when cursor is at an element boundary.
-    ///
-    /// Used by the ':' trigger: fires when the cursor is at element.range.start (on the `@` char) or element.range.end (right after the element).
-    /// Returns `(path, optional_line_range)`.
+    /// Find a file ref element when cursor is at an element boundary. Used by the ':' trigger: fires
+    /// when the cursor is at element.range.start (on the `@` char) or element.range.end (right after
+    /// the element). Returns `(path, optional_line_range)`.
     fn file_ref_at_element_boundary(&self) -> Option<(String, Option<std::ops::Range<usize>>)> {
         let cursor = self.textarea.cursor();
         for elem in self.textarea.elements() {
@@ -1444,18 +1574,22 @@ impl PromptWidget {
                 continue;
             }
             if cursor == elem.range.end || cursor == elem.range.start {
-                let text = &self.textarea.text()[elem.range.clone()];
+                let text = self.textarea.get_range(elem.range.clone())?;
                 return Some(Self::parse_file_ref_element(text));
             }
         }
         None
     }
 
-    /// Update file search context from current text and cursor position.
-    ///
-    /// Suppresses the context if the cursor is on or immediately after a file reference element.
-    /// The `@` belongs to the atomic block and the dropdown can't edit it.
+    /// Update file search context from current text and cursor position. Suppresses the context if the
+    /// cursor is on or immediately after a file reference element. The `@` belongs to the atomic block
+    /// and the dropdown can't edit it.
     fn update_file_search_context(&mut self) {
+        if !self.file_search_enabled {
+            self.file_search.clear_context();
+            self.pending_viewer_request = None;
+            return;
+        }
         let cursor = self.textarea.cursor();
 
         // Check if cursor is adjacent to a file ref element (on it or right after it).
@@ -1472,10 +1606,9 @@ impl PromptWidget {
         }
     }
 
-    /// How tall this widget wants to be, given the available width of the full prompt area (including chrome if enabled).
-    ///
-    /// Height = vpad_top + textarea rows + vpad_info(1) + info line.
-    /// Clamped to max_height.
+    /// How tall this widget wants to be, given the available width of the full prompt area (including
+    /// chrome if enabled). Height = vpad_top + textarea rows + vpad_info(1) + info line. Clamped to
+    /// max_height.
     pub fn desired_height(
         &self,
         area_width: u16,
@@ -1516,6 +1649,30 @@ impl PromptWidget {
         self.textarea_area
     }
 
+    /// Whether the caret sits on the first visual (wrap-aware) row of the text, per the last draw's
+    /// textarea rect and scroll.
+    pub fn caret_on_top_visual_row(&self) -> bool {
+        let area = self.textarea_area;
+        if area.height == 0 {
+            return false;
+        }
+        // An empty draft has exactly one (top) row; its wrap ranges may be empty.
+        if self.textarea.text().is_empty() {
+            return true;
+        }
+        let caret = self
+            .textarea
+            .cursor_pos_with_state(area, self.textarea_state);
+        let top = self
+            .textarea
+            .screen_position_of(0, area, self.textarea_state);
+        match (caret, top) {
+            (Some((_, caret_row)), Some((_, top_row))) => caret_row == top_row,
+            // Caret or text top scrolled out of view: Up must move/scroll within the text.
+            _ => false,
+        }
+    }
+
     /// Compute the content width inside the chrome (if any).
     fn content_width(&self, area_width: u16, style: &PromptStyle) -> u16 {
         if style.chrome {
@@ -1528,19 +1685,8 @@ impl PromptWidget {
 }
 
 impl PromptWidget {
-    /// Handle a key event for text editing only.
-    ///
-    /// This does NOT handle send/submit; that's routed through the action registry and [`try_send()`].
-    /// The widget handles:
-    /// - File search navigation (when dropdown is visible)
-    /// - File search acceptance (Tab/Enter on dropdown)
-    /// - Newline insertion (Shift-Enter, Alt-Enter)
-    /// - Clear (Ctrl-C with text)
-    /// - All readline-style editing via `textarea.input()` (Ctrl-A/E/W/U/K/Y,
-    ///   undo/redo, word movement, etc.)
-    ///
-    /// Wraps the actual handling to feed the undo-tip clear detector with user-initiated text transitions.
-    /// Programmatic mutations (`set_text` from submit/queue flows) never pass through here, which is what keeps them from firing the tip.
+    /// Handle a key event for text editing only. Programmatic mutations (`set_text` from submit/queue
+    /// flows) never pass through here, which is what keeps them from firing the tip.
     pub fn handle_key(&mut self, key: &KeyEvent) -> PromptEvent {
         self.post_insert_image_preview = None;
         // One-shot signals describe THIS keypress only; values the caller didn't consume must not leak into the next keypress
@@ -1553,10 +1699,8 @@ impl PromptWidget {
         }
         let before = self.textarea.text().chars().count();
         let had_images = !self.images.is_empty();
-        // Read the pre-edit keyword state fresh every key (the matcher is non-allocating), and only when the plan-nudge detector is on
-        // Reading it here, not from a stored latch, keeps the rising edge correct for EVERY text writer
-        // A completion-accept, paste, or programmatic restore that already put a keyword in the buffer leaves before == after == true on the next key
-        // So nothing fires, with no per-writer resync to forget
+        // Read the pre-edit keyword state fresh every key (the matcher is non-allocating), and only when
+        // the plan-nudge detector is on.
         let before_kw = self.contextual_hint_plan_mode
             && crate::tips::plan_nudge::prompt_mentions_planning(self.textarea.text());
         let event = self.handle_key_inner(key);
@@ -1581,10 +1725,9 @@ impl PromptWidget {
         event
     }
 
-    /// Whether this just-handled `Edited` keypress should fire the plan-nudge rising edge.
-    /// That is a TYPED edit (not a paste chord) that crossed the draft into mentioning a planning keyword (`before_kw` is the pre-edit state).
-    /// Paste chords are excluded so inline paste matches bracketed paste (neither fires).
-    /// Slash/bash drafts and an open slash dropdown route to a command, not a planning prompt.
+    /// Whether this just-handled `Edited` keypress should fire the plan-nudge rising edge. That is a
+    /// TYPED edit (not a paste chord) that crossed the draft into mentioning a planning keyword
+    /// (`before_kw` is the pre-edit state).
     fn plan_nudge_fire_for_edit(&self, key: &KeyEvent, before_kw: bool) -> bool {
         if crate::input::key::is_paste_key(key) || crate::input::key::is_inline_paste_key(key) {
             return false;
@@ -1612,7 +1755,6 @@ impl PromptWidget {
         // Reset flight recorder delta (overwritten if key reaches textarea).
         self.last_input_delta = crate::input_log::LastInputDelta::default();
 
-        // ── File search key handling (when dropdown is visible) ─────────
         if self.file_search.is_visible() {
             match self.handle_file_search_key(key) {
                 FileSearchKeyResult::Handled => return PromptEvent::Edited,
@@ -1653,7 +1795,6 @@ impl PromptWidget {
             return PromptEvent::Ignored;
         }
 
-        // ── Ctrl-L / : on element opens the line viewer ─────────────────
         // Ctrl-L when the cursor is on or adjacent to a file ref element, or ':' typed right at an element boundary, opens the viewer
         if key!('l', CONTROL).matches(key)
             && let Some((path, initial_range)) = self.file_ref_element_at_cursor()
@@ -1677,10 +1818,10 @@ impl PromptWidget {
         }
         // Not at an element boundary: fall through to type ':' normally
 
-        // ── Normal key handling ─────────────────────────────────────────
-
-        // Newline: Shift/Alt+Enter, or Apple Terminal bare Enter with a newline modifier held (CoreGraphics rescue inside is_mod_enter)
-        if crate::input::is_mod_enter(key) {
+        // Newline: Shift/Alt+Enter, Apple Terminal CoreGraphics rescue (inside is_mod_enter),
+        // or a delivered SUPER+Enter (Kitty). SUPER is excluded from is_mod_enter (fullscreen
+        // on many terminals) and from bare-Enter send; insert here instead of textarea fallthrough.
+        if crate::input::is_mod_enter(key) || crate::input::is_delivered_super_enter(key) {
             self.insert_replacing_selection("\n");
             return PromptEvent::Edited;
         }
@@ -1713,7 +1854,7 @@ impl PromptWidget {
         // Ctrl-Shift-V: inline paste, inserting clipboard content directly without creating a [Pasted: N lines] element
         if crate::input::key::is_inline_paste_key(key) {
             if let Some(text) = system_clipboard_get() {
-                let text = normalize_cr(&text);
+                let text = normalize_line_breaks(&text);
                 if text.is_empty() {
                     crate::clipboard::log_paste_key_empty_host_clipboard("prompt_widget_inline");
                     return PromptEvent::Ignored;
@@ -1725,25 +1866,9 @@ impl PromptWidget {
             return PromptEvent::Ignored;
         }
 
-        // Cmd+A (macOS, Ghostty only): select all text in the prompt textarea
-        //
-        // **Gated to Ghostty.** Every other macOS terminal binds `Cmd+A` to its own in-terminal "Select All" by default
-        // We don't want to compete with that, or surprise users on terminals where the key doesn't even arrive
-        // Ghostty users can unbind it with a one-line config (`keybind = cmd+a=unbind`)
-        // After that, this handler fires and selects the prompt buffer instead of the entire terminal window
-        // See `docs/user-guide/03-keyboard-shortcuts.md`
-        //
-        // The gate is read from a struct field initialised from `terminal_context().brand` at construction (see `cmd_a_select_all_supported`)
-        // Tests in this module override the field directly to exercise both branches of the gate
-        //
-        // Image / paste chips are textarea elements, and `selection_range()` expands selections to element boundaries automatically
-        // A full-buffer selection therefore naturally covers every chip
-        // Subsequent Backspace / Delete / typing falls through to the textarea's existing selection-aware handlers
-        // (`delete_selection()` and `sync_images_with_textarea()` keep those consistent with `self.images`.)
-        // The `[Image #N: /path]` text in each chip means a follow-on Ctrl+X (cut) preserves the file path through the system clipboard
-        //
-        // Ctrl+A is intentionally NOT remapped
-        // The textarea uses it for the Emacs / readline "move to beginning of line" binding, which terminal users rely on
+        // Cmd+A (macOS, Ghostty only): select all text in the prompt textarea. Gated to Ghostty. Every
+        // other macOS terminal binds `Cmd+A` to its own in-terminal "Select All" by default. We don't want
+        // to compete with that, or surprise users on terminals where the key doesn't even arrive.
         if self.cmd_a_select_all_enabled && key!('a', SUPER).matches(key) {
             let len = self.textarea.text().len();
             if len == 0 {
@@ -1825,52 +1950,36 @@ impl PromptWidget {
         }
     }
 
-    // ── File search key dispatch ────────────────────────────────────────
-
     /// Handle navigation/selection keys when the file search dropdown is visible.
     fn handle_file_search_key(&mut self, key: &KeyEvent) -> FileSearchKeyResult {
         if key!(Up).matches(key)
             || key!('p', CONTROL).matches(key)
             || key!('k', CONTROL).matches(key)
         {
-            // Navigation: up.
             self.file_search.move_selection(-1);
             FileSearchKeyResult::Handled
         } else if key!(Down).matches(key)
             || key!('n', CONTROL).matches(key)
             || key!('j', CONTROL).matches(key)
         {
-            // Navigation: down.
             self.file_search.move_selection(1);
             FileSearchKeyResult::Handled
         } else if key!(PageUp).matches(key) || key!('u', CONTROL).matches(key) {
-            // Page up.
             self.file_search.page_move(-1, 8);
             FileSearchKeyResult::Handled
         } else if key!(PageDown).matches(key) || key!('d', CONTROL).matches(key) {
-            // Page down.
             self.file_search.page_move(1, 8);
             FileSearchKeyResult::Handled
         } else if key!(Tab).matches(key) || key!(Enter).matches(key) {
-            // Accept.
             if file_search_has_selection(&self.file_search) {
                 FileSearchKeyResult::Accepted
             } else {
                 FileSearchKeyResult::PassThrough
             }
         } else if key!(Right).matches(key) {
-            // Right Arrow: accept the highlighted suggestion without a terminating space, so the user can keep typing (e.g. drill into a nested directory).
-            // Falls through to normal cursor movement when the dropdown has no valid selection
-            //
-            // `file_search_has_selection` is `selected < result_count`.
-            // The selection invariant is maintained by `FileSearchState`:
-            // - On context entry / query change: `selected = 0` (see FileSearchState::update_context)
-            // - On daemon poll with new results: `selected` is clamped to `result_count - 1` (see FileSearchState::poll)
-            // So in production the gate is normally true whenever the dropdown is visible
-            // The explicit check keeps Right safe even if the invariant ever drifts
-            //
-            // Modified Right (Shift/Alt/Ctrl) is not matched by `key!(Right)`, which requires NONE modifiers
-            // Selection extension and word-jump thus fall through to the textarea unchanged
+            // Right Arrow: accept the highlighted suggestion without a terminating space, so the user can keep
+            // typing (e.g. drill into a nested directory). The selection invariant is maintained by
+            // `FileSearchState`. The explicit check keeps Right safe even if the invariant ever drifts.
             if file_search_has_selection(&self.file_search) {
                 FileSearchKeyResult::AcceptedNoSpace
             } else {
@@ -1888,36 +1997,20 @@ impl PromptWidget {
                 FileSearchKeyResult::PassThrough
             }
         } else if key!(Esc).matches(key) {
-            // Dismiss.
             FileSearchKeyResult::Dismissed
         } else {
-            // Everything else: pass through to normal handling.
             FileSearchKeyResult::PassThrough
         }
     }
 
     /// Accept the currently selected file search result.
-    ///
-    /// - **Dir mode** (query ends with `/`): plain text replacement, stays in completion mode for drill-down.
-    /// - **File mode**: creates an atomic TextArea element (`KIND_FILE_REF`) wrapped in an undo group with a trailing space.
-    ///   Single undo reverts the entire completion.
     pub(crate) fn accept_file_search_result(&mut self) {
         self.accept_file_search_result_inner();
     }
 
-    /// Accept the currently selected file search result via Right Arrow.
-    ///
-    /// Bound to Right Arrow when the dropdown is visible and a suggestion is highlighted.
-    /// This is the "Google search bar" behavior: insert the suggestion and let the user continue refining.
-    ///
-    /// Behavior:
-    /// - **Selected result is a file**: identical to Tab.
-    ///   Inserts the path as an atomic `KIND_FILE_REF` element with a trailing space and dismisses the dropdown.
-    ///   There is nothing to drill into beneath a file, so Right and Tab are intentionally the same here.
-    /// - **Selected result is a directory**: replaces the @-token's path portion with the full selected path WITHOUT a trailing `/`.
-    ///   The missing `/` keeps (or drops the user out of) non-dir-mode.
-    ///   The dropdown then re-populates with both files AND directories under the new prefix, the typical "show me what's inside" intent.
-    ///   If the user wants to filter back to directories only, they can type `/` themselves. The completion context is kept alive.
+    /// Accept the currently selected file search result via Right Arrow. There is nothing to drill into
+    /// beneath a file, so Right and Tab are intentionally the same here. If the user wants to filter
+    /// back to directories only, they can type `/` themselves. The completion context is kept alive.
     pub(crate) fn accept_file_search_result_no_space(&mut self) {
         // Capture the context and result before any state mutation
         let ctx = self.file_search.context().cloned();
@@ -1937,12 +2030,9 @@ impl PromptWidget {
             return;
         }
 
-        // Directory result: drill down
-        // Replace the path portion of the @-token (preserving the `!` hidden-mode prefix) with the full selected path, WITHOUT a trailing `/`
-        // Dropping the slash drops the user out of dir-mode (which filters to dirs only)
-        // The dropdown then shows files AND dirs matching the new prefix, typically what the user wants when drilling
-        // If they want to filter back to directories they can type `/` themselves
-        // The @-context is kept alive so update_file_search_context() below re-detects the @-token and refreshes the dropdown
+        // Directory result: drill down. Replace the path portion of the @-token (preserving the `!`
+        // hidden-mode prefix) with the full selected path, WITHOUT a trailing `/`. Dropping the slash
+        // drops the user out of dir-mode (which filters to dirs only).
         let path_str = res.path.to_string();
         let path = normalize_display_path(&path_str);
 
@@ -1961,11 +2051,8 @@ impl PromptWidget {
         self.update_file_search_context();
     }
 
-    /// Shared body for `accept_file_search_result` (Tab) and `accept_file_search_result_no_space` (Right).
-    /// Used when the selected result is a file or the user is already in dir mode.
-    ///
-    /// Right Arrow's directory drill-down is handled directly in `accept_file_search_result_no_space` before this helper is called.
-    /// So by the time we get here either the selection is a file or the user is in dir mode (typed `/`) and Tab is committing the dir.
+    /// Shared body for `accept_file_search_result` (Tab) and `accept_file_search_result_no_space`
+    /// (Right).
     fn accept_file_search_result_inner(&mut self) {
         // Capture the context and result before any state mutation
         let ctx = self.file_search.context().cloned();
@@ -2017,10 +2104,9 @@ impl PromptWidget {
         self.update_file_search_context();
     }
 
-    /// Accept the file search result and request the line viewer to open.
-    ///
-    /// Creates the element with the undo group begun but NOT ended; the viewer will end or cancel it.
-    /// Clears the dropdown and sets `pending_viewer_path` for AgentView to pick up.
+    /// Accept the file search result and request the line viewer to open. Creates the element with the
+    /// undo group begun but NOT ended; the viewer will end or cancel it. Clears the dropdown and sets
+    /// `pending_viewer_path` for AgentView to pick up.
     fn accept_file_search_for_viewer(&mut self) {
         let ctx = self.file_search.context().cloned();
         let result = self.file_search.selected_result().cloned();
@@ -2067,26 +2153,27 @@ impl PromptWidget {
         false
     }
 
-    /// Shared Enter-routing for any context where bare Enter submits.
-    ///
-    /// Centralizes three behaviors that every submittable prompt needs:
-    /// 1. File-search guard (Enter accepts the dropdown selection, not submit)
-    /// 2. Apple Terminal CoreGraphics modifier rescue (Shift+Enter arrives as bare Enter on terminals without the Kitty protocol)
-    /// 3. Backslash continuation (`\` plus Enter inserts a newline)
-    ///
-    /// Callers match on the result:
-    /// - `NewlineInserted`: return `InputOutcome::Changed`
-    /// - `Submit`: perform the context-specific submit action
-    /// - `PassThrough`: fall through to `self.handle_key(key)`
+    /// Shared Enter-routing for any context where bare Enter submits. Apple Terminal CoreGraphics
+    /// modifier rescue (Shift+Enter arrives as bare Enter on terminals without the Kitty protocol).
     pub fn route_enter(&mut self, key: &KeyEvent) -> EnterOutcome {
+        self.route_enter_with_newline_modifier(
+            key,
+            crate::input::is_apple_terminal_newline_modifier_held(),
+        )
+    }
+
+    pub(crate) fn route_enter_with_newline_modifier(
+        &mut self,
+        key: &KeyEvent,
+        is_newline_modifier_held: bool,
+    ) -> EnterOutcome {
         // The file-search dropdown is open, so Enter accepts the selection, not submit. Let handle_key() deal with it.
         if self.file_search_visible() {
             return EnterOutcome::PassThrough;
         }
 
-        // Apple Terminal: Shift+Enter arrives as bare Enter because there's no Kitty keyboard protocol
-        // Poll CoreGraphics for the real modifier state; if Shift/Option/Cmd is physically held, insert a newline instead of submitting
-        if key.code == KeyCode::Enter && crate::input::is_apple_terminal_newline_modifier_held() {
+        // Apple Terminal: Shift+Enter arrives as bare Enter because there's no Kitty keyboard protocol.
+        if key.code == KeyCode::Enter && is_newline_modifier_held {
             self.insert_replacing_selection("\n");
             return EnterOutcome::NewlineInserted;
         }
@@ -2108,16 +2195,7 @@ impl PromptWidget {
         EnterOutcome::PassThrough
     }
 
-    /// Attempt to send the prompt text.
-    ///
-    /// Called when the `SendPrompt` action is triggered (via action registry).
-    /// Returns `Some(text)` if the prompt was submitted, `None` if rejected
-    /// (empty text, backslash continuation).
-    ///
-    /// Handles:
-    /// - Empty/whitespace rejection: returns None
-    /// - Backslash continuation: a trailing `\` before the cursor is replaced with a newline
-    /// - On success: returns the text and clears the widget
+    /// Attempt to send the prompt text. Empty/whitespace rejection: returns None.
     pub fn try_send(&mut self) -> Option<String> {
         if self.apply_backslash_continuation() {
             return None;
@@ -2150,11 +2228,15 @@ impl PromptWidget {
     }
 
     /// Handle a mouse event.
-    ///
-    /// Forwards to TextArea, which handles click-to-place, drag-to-select, double/triple click, and element interactions.
-    /// The caller should forward ALL mouse events, not just those in the prompt area.
-    /// TextArea tracks drag state internally and handles drag-beyond-edge.
     pub fn handle_mouse(&mut self, mouse: &crossterm::event::MouseEvent) -> PromptEvent {
+        self.handle_mouse_inner(mouse).0
+    }
+
+    pub fn handle_mouse_scroll(&mut self, mouse: &crossterm::event::MouseEvent) -> bool {
+        self.handle_mouse_inner(mouse).1
+    }
+
+    fn handle_mouse_inner(&mut self, mouse: &crossterm::event::MouseEvent) -> (PromptEvent, bool) {
         use xai_ratatui_textarea::{MouseAction, TextElementEventKind};
 
         self.post_insert_image_preview = None;
@@ -2183,7 +2265,8 @@ impl PromptWidget {
             }
         }
 
-        match action {
+        let did_scroll = matches!(action, MouseAction::Scrolled);
+        let event = match action {
             MouseAction::CursorPlaced
             | MouseAction::SelectionUpdated
             | MouseAction::SelectionFinished
@@ -2193,31 +2276,30 @@ impl PromptWidget {
                 PromptEvent::Edited
             }
             MouseAction::Nothing => PromptEvent::Edited,
-        }
+        };
+        (event, did_scroll)
     }
 
-    /// Handle a paste event.
-    ///
-    /// Short pastes are inserted inline.
-    /// At or above the chip threshold (4 lines, 2 in compact mode), or past [`PASTE_CHIP_DISPLAY_BYTES`] bytes, an atomic `[Pasted: N lines]` element is created.
-    /// Trailing newlines in the inline path are preserved so that split batches (Windows) accumulate correctly.
-    /// Repasting a chip's exact content while the cursor is on or right after it expands that chip instead of inserting a duplicate.
+    /// Trailing newlines in the inline path are preserved so that split batches (Windows) accumulate
+    /// correctly. Repasting a chip's exact content while the cursor is on or right after it expands
+    /// that chip instead of inserting a duplicate.
     pub fn handle_paste(&mut self, text: &str) -> PromptEvent {
         if text.is_empty() {
             return PromptEvent::Ignored;
         }
         self.post_insert_image_preview = None;
 
-        let text = normalize_cr(text);
+        let text = normalize_line_breaks(text);
         let text = &text;
         let replacing_selection = self.textarea.selection_range().is_some();
 
         // Repaste-to-expand: "paste didn't do what I want? paste again."
-        // Requires exact byte equality after the original insertion's canonicalization (normalize_cr above and the textarea's tab expansion)
+        // Requires exact byte equality after the original insertion's canonicalization (normalize_line_breaks above and the textarea's tab expansion)
         // E.g. a trailing-newline difference is a different paste and takes the normal path below.
+        let expanded = self.textarea.expand_tabs(text);
         if !replacing_selection
             && let Some(elem) = self.paste_element_near_cursor()
-            && self.textarea.text()[elem.range.clone()] == *self.textarea.expand_tabs(text)
+            && self.textarea.get_range(elem.range.clone()) == Some(expanded.as_ref())
         {
             let id = elem.id;
             self.expand_element(id);
@@ -2261,8 +2343,6 @@ impl PromptWidget {
         PromptEvent::Edited
     }
 
-    // ── Image chip support ──────────────────────────────────────────
-
     /// Maximum number of image chips allowed in a single prompt (v1).
     pub const IMAGE_CAP: usize = 10;
 
@@ -2287,10 +2367,8 @@ impl PromptWidget {
             .unwrap_or_else(|| format!("Image limit reached (max {})", Self::IMAGE_CAP))
     }
 
-    /// Insert a pasted image as an atomic `[Image #N]` chip.
-    ///
-    /// Returns `Err` with a user-facing message if the image is rejected (cap reached or too small).
-    /// The caller should show a toast.
+    /// Insert a pasted image as an atomic `[Image #N]` chip. Returns `Err` with a user-facing message
+    /// if the image is rejected (cap reached or too small). The caller should show a toast.
     pub fn insert_image(&mut self, image: PastedImage) -> Result<(), String> {
         self.insert_image_with_locale(image, None)
     }
@@ -2422,6 +2500,8 @@ impl PromptWidget {
         use std::collections::HashMap;
         use std::collections::hash_map::Entry;
 
+        self.rechip_orphan_image_placeholders();
+
         let live_image_elements: Vec<(ElementId, std::ops::Range<usize>)> = self
             .textarea
             .elements()
@@ -2458,12 +2538,12 @@ impl PromptWidget {
             }
         }
 
-        // Fallback for elements restored by an undo/redo cycle
-        // The textarea may have re-issued a fresh `ElementId` for the restored chip, so an `element_id` lookup misses
-        // Keying by `display_number` is safe here because the monotonic counter never recycles numbers within a prompt lifetime
-        // A collision-warn keeps any future regression visible
+        // Fallback for elements restored by an undo/redo cycle. Keying by `display_number` is safe here
+        // because the monotonic counter never recycles numbers within a prompt lifetime.
+        // A same-number duplicate is no redo target but still owns files, so it stays in the stash.
         let mut stash_by_number: HashMap<usize, PastedImage> =
             HashMap::with_capacity(self.image_undo_stash.len());
+        let mut stash_duplicates: Vec<PastedImage> = Vec::new();
         for img in self.image_undo_stash.drain(..) {
             let display_number = img.display_number;
             let element_id = img.element_id;
@@ -2477,8 +2557,9 @@ impl PromptWidget {
                         display_number,
                         element_id = ?element_id,
                         "sync_images_with_textarea: duplicate display_number \
-                         in undo stash — dropping later entry",
+                         in undo stash — kept aside, not a redo target",
                     );
+                    stash_duplicates.push(img);
                 }
             }
         }
@@ -2489,7 +2570,10 @@ impl PromptWidget {
             // Primary: match by element_id (collision-free, stable for non-undo/redo edits)
             if let Some(mut img) = stored_by_id.remove(id) {
                 // Refresh display_number from the live buffer text in case the chip was renumbered externally (sanity)
-                let parsed = parse_image_display_number(&self.textarea.text()[range.clone()])
+                let parsed = self
+                    .textarea
+                    .get_range(range.clone())
+                    .and_then(parse_image_display_number)
                     .unwrap_or(img.display_number);
                 img.element_id = *id;
                 img.display_number = parsed;
@@ -2497,8 +2581,11 @@ impl PromptWidget {
                 continue;
             }
             // Fallback (redo path): match by display_number from the stash, then rebind to the freshly-issued `element_id`
-            let display_number =
-                parse_image_display_number(&self.textarea.text()[range.clone()]).unwrap_or(0);
+            let display_number = self
+                .textarea
+                .get_range(range.clone())
+                .and_then(parse_image_display_number)
+                .unwrap_or(0);
             if let Some(mut img) = stash_by_number.remove(&display_number) {
                 img.element_id = *id;
                 img.display_number = display_number;
@@ -2506,15 +2593,12 @@ impl PromptWidget {
             }
         }
 
-        // Images whose elements are gone move to the undo stash so they can be recovered if the user redoes
-        // Explicit resets (set_text, Ctrl-C) clear the stash separately
-        //
-        // Cap the stash at `IMAGE_CAP * 2` so a long edit session can't unboundedly grow it
-        // Evicted entries get their temp files cleaned up (mirrors what `clear()` does on submit)
-        // Oldest-first eviction by `display_number` keeps the most recent deletions recoverable, since redo typically reverses the most recent undo
+        // Images whose elements are gone move to the undo stash so they can be recovered if the user
+        // redoes. Cap the stash at `IMAGE_CAP * 2` so a long edit session can't unboundedly grow it.
         let mut new_stash: Vec<PastedImage> = stored_by_id
             .into_values()
             .chain(stash_by_number.into_values())
+            .chain(stash_duplicates)
             .collect();
         let stash_cap = Self::IMAGE_CAP * 2;
         if new_stash.len() > stash_cap {
@@ -2523,7 +2607,10 @@ impl PromptWidget {
             let evict_count = new_stash.len() - stash_cap;
             for img in new_stash.drain(..evict_count) {
                 // Stash eviction
-                crate::prompt_images::cleanup_temp_file(&img);
+                crate::prompt_images::cleanup_image(
+                    crate::prompt_images::SessionPathPolicy::Preserve,
+                    &img,
+                );
             }
         }
         self.image_undo_stash = new_stash;
@@ -2570,12 +2657,8 @@ impl PromptWidget {
         }
     }
 
-    /// Look up the image record for the element the cursor is currently on.
-    ///
-    /// Uses `element_at_cursor()`, which matches when `cursor_pos` falls within `[range.start, range.end)`.
-    /// For atomic elements the cursor sits at `range.start` when the user navigates onto the chip (LEFT arrow jumps there).
-    /// Positions at or past `range.end` (the trailing separator space and beyond) are intentionally excluded.
-    /// The overlay thus dismisses as soon as the cursor leaves the chip.
+    /// Look up the image record for the element the cursor is currently on. Positions at or past
+    /// `range.end` (the trailing separator space and beyond) are intentionally excluded.
     pub fn image_at_cursor(&self) -> Option<&PastedImage> {
         let elem = self.textarea.element_at_cursor()?;
         if elem.kind != KIND_IMAGE {
@@ -2584,10 +2667,9 @@ impl PromptWidget {
         self.images.iter().find(|img| img.element_id == elem.id)
     }
 
-    /// Image element the cursor is on, or exactly at its right edge.
-    ///
-    /// An on-chip match of any kind wins (the chip under the cursor owns the position).
-    /// So a cursor sitting on a non-image chip yields `None` even when an image chip ends at the cursor.
+    /// Image element the cursor is on, or exactly at its right edge. An on-chip match of any kind wins
+    /// (the chip under the cursor owns the position). So a cursor sitting on a non-image chip yields
+    /// `None` even when an image chip ends at the cursor.
     fn image_element_near_cursor(&self) -> Option<&xai_ratatui_textarea::TextElement> {
         if let Some(elem) = self.textarea.element_at_cursor() {
             return (elem.kind == KIND_IMAGE).then_some(elem);
@@ -2616,12 +2698,55 @@ impl PromptWidget {
         self.images.iter().find(|img| img.element_id == id)
     }
 
-    /// Drain all prompt-side images for submission.
-    ///
-    /// Reconciles against live `TextArea` elements first so deleted chips are never included.
-    /// Returns the drained images; the prompt-side storage is left empty.
+    /// Drain all prompt-side images for submission. Re-binds orphan `[Image #N]` text to the records
+    /// that name it, then reconciles against live `TextArea` elements so deleted chips are never
+    /// included. Returns the drained images; the prompt-side storage is left empty.
     pub fn drain_images(&mut self) -> Vec<PastedImage> {
         self.post_insert_image_preview = None;
+        self.reconciled_images();
+        std::mem::take(&mut self.images)
+    }
+
+    pub(crate) fn has_live_image(&self) -> bool {
+        self.images.iter().any(|image| {
+            self.textarea
+                .elements()
+                .iter()
+                .any(|element| element.kind == KIND_IMAGE && element.id == image.element_id)
+        })
+    }
+
+    pub(crate) fn drop_image_preserving_session_file(&mut self, image_identity: u64) {
+        let Some(position) = self
+            .images
+            .iter()
+            .position(|image| image.preview.identity() == image_identity)
+        else {
+            return;
+        };
+        let Some(element_id) = self.images.get(position).map(|image| image.element_id) else {
+            return;
+        };
+        if let Some(range) = self
+            .textarea
+            .elements()
+            .iter()
+            .find(|element| element.id == element_id)
+            .map(|element| element.range.clone())
+        {
+            self.textarea.replace_range(range, "");
+        }
+        let image = self.images.remove(position);
+        crate::prompt_images::cleanup_image(
+            crate::prompt_images::SessionPathPolicy::Preserve,
+            &image,
+        );
+    }
+
+    /// Re-bind orphan placeholders, then reconcile against live `TextArea` elements before a drain,
+    /// dropping the records whose chip text is gone as well.
+    pub(crate) fn reconciled_images(&mut self) -> &[PastedImage] {
+        self.rebind_image_placeholders();
         let live_ids: std::collections::HashSet<_> = self
             .textarea
             .elements()
@@ -2629,43 +2754,45 @@ impl PromptWidget {
             .filter(|e| e.kind == KIND_IMAGE)
             .map(|e| e.id)
             .collect();
-        crate::prompt_images::reconcile(&mut self.images, &live_ids);
-        std::mem::take(&mut self.images)
+        let len_before = self.images.len();
+        crate::prompt_images::reconcile(
+            crate::prompt_images::SessionPathPolicy::Preserve,
+            &mut self.images,
+            &live_ids,
+        );
+        let removed = len_before - self.images.len();
+        if removed > 0 {
+            tracing::warn!(
+                target: PROMPT_IMAGES_TRACING_TARGET,
+                removed,
+                "prompt_widget: image records without chip text discarded at drain",
+            );
+        }
+        &self.images
     }
 
     /// Buffer text with `[Image #N]` chip placeholders removed.
     /// For text-only consumers (e.g. question/permission feedback) that must not leak image tokens onto the wire.
     pub(crate) fn text_without_image_chips(&self) -> String {
-        let text = self.textarea.text();
-        let mut out = String::with_capacity(text.len());
-        let mut prev_end = 0usize;
-        for elem in self.textarea.elements() {
-            if elem.kind != KIND_IMAGE {
-                continue;
-            }
-            out.push_str(&text[prev_end..elem.range.start]);
-            prev_end = elem.range.end;
-        }
-        out.push_str(&text[prev_end..]);
-        out
+        self.submitted_text_without_image_chips(self.textarea.text())
     }
 
-    /// Replace the prompt-side image list and restore `image_counter`.
-    /// The caller must call `restore_chip_elements` beforehand to re-register the `KIND_IMAGE` textarea elements (with stored byte ranges).
-    /// Hover/click behaviour depends on those elements.
-    ///
-    /// **Pairing**: each `PastedImage` is bound to the live textarea element whose chip text parses to the same `display_number`.
-    /// Identity-based pairing is robust against the two ways the `images` vector and the textarea element list can diverge:
-    ///
-    /// 1. `textarea.elements()` is sorted by buffer position (`TextArea::add_element` sorts on every insert).
-    ///    `self.images` is instead populated by `insert_image::push` in chronological insertion order.
-    ///    Inserting a second image at the start of the buffer (cursor-at-Home) is enough to make a positional zip mis-bind both records.
-    /// 2. Two chips with identical placeholder widths (e.g. `[Image #1]` and `[Image #2]`, both 10 bytes) would collide under a byte-length match.
-    ///
-    /// `display_number` is unique within a prompt lifetime (the monotonic counter never recycles within one prompt).
-    /// The identity lookup is therefore collision-free.
-    ///
-    /// Excess `images` past `IMAGE_CAP` are dropped with a warn: defence-in-depth for sessions that somehow accumulated more than the cap.
+    pub(crate) fn submitted_text_without_image_chips(&self, submitted: &str) -> String {
+        if !submitted.starts_with(self.textarea.text()) {
+            return submitted.to_owned();
+        }
+        text_without_image_chips(
+            submitted,
+            self.textarea
+                .elements()
+                .iter()
+                .map(|element| (element.kind, element.range.clone())),
+        )
+    }
+
+    /// Replace the prompt-side image list and restore `image_counter`. The caller must call
+    /// `restore_chip_elements` beforehand to re-register the `KIND_IMAGE` textarea elements (with
+    /// stored byte ranges). The identity lookup is therefore collision-free.
     pub fn set_images(&mut self, mut images: Vec<PastedImage>) {
         if images.len() > Self::IMAGE_CAP {
             tracing::warn!(
@@ -2677,20 +2804,19 @@ impl PromptWidget {
             images.truncate(Self::IMAGE_CAP);
         }
 
-        // Build a display_number-to-ElementId lookup over the live KIND_IMAGE elements
-        // Linear scan (the cap is 10 in practice)
-        //
-        // Defence in depth: the monotonic-counter contract guarantees `display_number` is unique within a prompt lifetime
-        // Duplicates here imply a contract violation upstream (e.g. a future refactor that recycles numbers).
-        // Emit a `tracing::warn!` with the existing image tracing target so the regression is visible without crashing the TUI
-        // The lookup below still picks the first match so the visible binding is at least deterministic
-        let buf = self.textarea.text();
+        // Emit a `tracing::warn!` with the existing image tracing target so the regression is visible
+        // without crashing the TUI. The lookup below still picks the first match so the visible binding is
+        // at least deterministic.
         let mut by_number: Vec<(usize, ElementId)> = Vec::new();
         for elem in self.textarea.elements() {
             if elem.kind != KIND_IMAGE {
                 continue;
             }
-            if let Some(dn) = parse_image_display_number(&buf[elem.range.clone()]) {
+            if let Some(dn) = self
+                .textarea
+                .get_range(elem.range.clone())
+                .and_then(parse_image_display_number)
+            {
                 if by_number.iter().any(|(seen_dn, _)| *seen_dn == dn) {
                     tracing::warn!(
                         target: PROMPT_IMAGES_TRACING_TARGET,
@@ -2721,51 +2847,87 @@ impl PromptWidget {
         // Align with the monotonic contract in `sync_images_with_textarea`: the counter only ever advances upward within a prompt lifetime
         self.image_counter = self.image_counter.max(images_high_water(&images));
         self.images = images;
+        // A record whose stored chip range went stale still binds to the placeholder text that names it.
+        self.rechip_orphan_image_placeholders();
     }
 
     /// Re-register all chip elements (paste blocks, @-file refs, image chips) after a `set_text` restore.
-    /// Uses the byte ranges stored at capture time; no buffer re-scanning.
+    /// Uses the byte ranges stored at capture time; no buffer re-scanning. A range an element of the
+    /// same kind already covers is skipped, so a re-chipped image never gets a second element.
     pub fn restore_chip_elements(&mut self, elems: &[crate::app::agent::ChipElement]) {
+        let covered: Vec<(ElementKind, std::ops::Range<usize>)> = self
+            .textarea
+            .elements()
+            .iter()
+            .map(|e| (e.kind, e.range.clone()))
+            .collect();
         self.textarea.restore_elements(
             elems
                 .iter()
+                .filter(|e| {
+                    !covered.iter().any(|(kind, range)| {
+                        *kind == e.kind && range.start < e.range.end && e.range.start < range.end
+                    })
+                })
                 .map(|e| (e.range.clone(), e.kind, e.display.clone())),
         );
     }
 
-    /// Adopt previously drained images by binding them to the `[Image #N]` placeholders already present in the buffer, matched by display number.
-    /// The `/feedback` pane uses this to turn an inline command's pasted attachments back into live, removable chips inside the prefill text.
-    /// Images without a matching placeholder are cleaned up.
-    /// Nothing in the buffer references them, so they could never be removed by the user nor drained for send.
-    pub fn adopt_images(&mut self, mut images: Vec<PastedImage>) {
-        if images.is_empty() {
-            return;
+    /// Reconcile modal-owned images with live chips, deleting removed session copies.
+    pub(crate) fn reconcile_feedback_images_on_teardown(&mut self) {
+        let live_ids: std::collections::HashSet<_> = self
+            .textarea
+            .elements()
+            .iter()
+            .filter(|element| element.kind == KIND_IMAGE)
+            .map(|element| element.id)
+            .collect();
+        crate::prompt_images::reconcile(
+            crate::prompt_images::SessionPathPolicy::Delete,
+            &mut self.images,
+            &live_ids,
+        );
+    }
+
+    /// Keep disk-backed sources whose off-thread rehydration has not completed.
+    pub(crate) fn preserve_pending_feedback_image_sources(&mut self) {
+        for image in self.images.iter_mut().chain(&mut self.image_undo_stash) {
+            if image.encoded_bytes.is_none() {
+                image.session_image_path = None;
+            }
         }
-        let text = self.textarea.text().to_owned();
-        let mut chips: Vec<crate::app::agent::ChipElement> = Vec::new();
-        let mut adopted: Vec<PastedImage> = Vec::new();
-        for m in chip_placeholder_regex().find_iter(&text) {
-            // The `:`-suffixed regex arm never parses (no closing bracket in the match)
-            // That is correct: only the canonical `[Image #N]` emitter form carries an exact chip range
-            let Some(number) = parse_image_display_number(m.as_str()) else {
-                continue;
-            };
-            let Some(pos) = images.iter().position(|img| img.display_number == number) else {
-                continue;
-            };
-            chips.push(crate::app::agent::ChipElement {
-                range: m.range(),
-                kind: KIND_IMAGE,
-                display: Some(chip_line(format!("Image #{number}"))),
-            });
-            adopted.push(images.remove(pos));
+    }
+
+    /// Drain and delete every image this composer still owns (live chips and undo stash).
+    /// Teardown for throwaway composers (overlay modals); the main prompt lives for the whole session and never needs this.
+    pub(crate) fn cleanup_images_on_teardown(&mut self) {
+        crate::prompt_images::drain_and_cleanup(
+            crate::prompt_images::SessionPathPolicy::Delete,
+            &mut self.images,
+        );
+        crate::prompt_images::drain_and_cleanup(
+            crate::prompt_images::SessionPathPolicy::Delete,
+            &mut self.image_undo_stash,
+        );
+    }
+
+    /// Seed a fresh composer through the normal image insertion and reconciliation path.
+    pub(crate) fn seed_images(&mut self, images: Vec<PastedImage>) -> usize {
+        let mut rejected = 0;
+        self.set_cursor(self.text().len());
+        for image in images {
+            self.image_counter = self
+                .image_counter
+                .max(image.display_number.saturating_sub(1));
+            if self.insert_image(image.clone()).is_err() {
+                crate::prompt_images::cleanup_image(
+                    crate::prompt_images::SessionPathPolicy::Delete,
+                    &image,
+                );
+                rejected += 1;
+            }
         }
-        crate::prompt_images::drain_and_cleanup(&mut images);
-        if adopted.is_empty() {
-            return;
-        }
-        self.restore_chip_elements(&chips);
-        self.set_images(adopted);
+        rejected
     }
 
     /// Expose the underlying textarea for element access.
@@ -2775,21 +2937,20 @@ impl PromptWidget {
 
     /// Buffer text of `elem` if it is a paste chip (`KIND_PASTE`).
     fn paste_text(&self, elem: &TextElement) -> Option<&str> {
-        (elem.kind == KIND_PASTE).then(|| &self.textarea.text()[elem.range.clone()])
+        (elem.kind == KIND_PASTE)
+            .then_some(elem.range.clone())
+            .and_then(|range| self.textarea.get_range(range))
     }
 
-    /// Check if the cursor is currently on a paste element.
-    /// The match is strict on-chip, mirroring the Enter-to-expand targeting in [`Self::try_element_interaction`].
-    ///
-    /// Returns the element's buffer text if so.
+    /// Check if the cursor is currently on a paste element. The match is strict on-chip, mirroring the
+    /// Enter-to-expand targeting in [`Self::try_element_interaction`]. Returns the element's buffer
+    /// text if so.
     pub fn paste_element_at_cursor(&self) -> Option<&str> {
         self.paste_text(self.textarea.element_at_cursor()?)
     }
 
-    /// Paste element the cursor is on or immediately to the right of (where [`TextArea::insert_element`] leaves it right after a paste).
-    ///
-    /// An on-chip match of any kind wins (the chip under the cursor owns the position).
-    /// So a cursor sitting on a non-paste chip yields `None` even when a paste chip ends at the cursor.
+    /// Paste element the cursor is on or immediately to the right of (where
+    /// [`TextArea::insert_element`] leaves it right after a paste).
     fn paste_element_near_cursor(&self) -> Option<&TextElement> {
         let elem = self.textarea.element_at_cursor().or_else(|| {
             let cursor = self.textarea.cursor();
@@ -2801,11 +2962,8 @@ impl PromptWidget {
         (elem.kind == KIND_PASTE).then_some(elem)
     }
 
-    /// Paste element text for the preview overlay.
-    ///
-    /// Shows the moment a chip is created (cursor right after it) as well as with the cursor on it.
-    /// Display-only: Enter handling keeps the strict on-chip match.
-    /// So Enter right after a chip keeps its normal behavior (submit or newline) instead of expanding the chip.
+    /// Paste element text for the preview overlay. Display-only: Enter handling keeps the strict
+    /// on-chip match.
     fn paste_element_for_preview(&self) -> Option<&str> {
         self.paste_text(self.paste_element_near_cursor()?)
     }
@@ -2820,7 +2978,7 @@ impl PromptWidget {
         theme: &Theme,
         locale: Option<&crate::locale::LocaleContext>,
     ) -> Line<'static> {
-        let dim = Style::default().fg(theme.gray);
+        let dim = theme.muted();
         // The chord deliberately deviates from the tips' text_secondary to a real accent
         // Oscura/rosepine alias text_secondary and gray to the box's own content/border colors, so only an accent pops
         let chord = Style::default()
@@ -2869,10 +3027,9 @@ impl PromptWidget {
         self.update_file_search_context();
     }
 
-    /// Expand the paste chip under the cursor (mouse double-click path).
-    ///
-    /// Strict on-chip match: a cursor merely adjacent to a chip (e.g. right after it) must not expand it.
-    /// Returns `true` if a paste chip was expanded.
+    /// Expand the paste chip under the cursor (mouse double-click path). Strict on-chip match: a cursor
+    /// merely adjacent to a chip (e.g. right after it) must not expand it. Returns `true` if a paste
+    /// chip was expanded.
     pub fn expand_paste_element_at_cursor(&mut self) -> bool {
         let Some(elem) = self.textarea.element_at_cursor() else {
             return false;
@@ -2885,12 +3042,9 @@ impl PromptWidget {
         true
     }
 
-    /// Try to interact with an element at the cursor.
-    ///
-    /// - Enter on a paste/file-ref element inlines (expands) it.
-    /// - Enter on an image chip signals the caller to open the preview (it does NOT inline the placeholder text).
-    ///
-    /// Returns `Some(interaction)` if handled, `None` otherwise.
+    /// Try to interact with an element at the cursor. Enter on a paste/file-ref element inlines
+    /// (expands) it. Enter on an image chip signals the caller to open the preview (it does NOT inline
+    /// the placeholder text). Returns `Some(interaction)` if handled, `None` otherwise.
     pub fn try_element_interaction(&mut self, key: &KeyEvent) -> Option<ElementInteraction> {
         let elem = self.textarea.element_at_cursor()?;
         if !key!(Enter).matches(key) {
@@ -2932,10 +3086,9 @@ fn paint_slash_token_highlight(
 }
 
 impl PromptWidget {
-    /// Render the prompt widget.
-    ///
-    /// When `style.chrome` is true, renders the full block layout: `accent(┃) | hpad | content | hpad` with background fill.
-    /// When false, renders only the content (prefix + textarea + info).
+    /// Render the prompt widget. When `style.chrome` is true, renders the full block layout: `accent(┃)
+    /// | hpad | content | hpad` with background fill. When false, renders only the content (prefix +
+    /// textarea + info).
     pub fn draw(
         &mut self,
         buf: &mut Buffer,
@@ -3015,12 +3168,17 @@ impl PromptWidget {
         ])
         .split(content_area);
 
-        let text_area_rect = chunks[1];
+        let Some(&text_area_rect) = chunks.get(1) else {
+            return PromptRenderResult {
+                cursor_pos: None,
+                post_flush_escapes: None,
+            };
+        };
 
         // Top divider: ╭──────────╮
         if vpad_top > 0 && style.chrome && style.show_borders {
             let div_style = Style::default().fg(border_color).bg(bg);
-            let div_y = chunks[0].y;
+            let div_y = chunks.first().map(|c| c.y).unwrap_or(area.y);
             let left_x = area.x;
             let right_x = area.x + area.width.saturating_sub(1);
             for x in area.x..area.x + area.width {
@@ -3037,14 +3195,15 @@ impl PromptWidget {
                 }
             }
 
-            // Caption inlined in the divider, right-aligned ending 2 cells before ╮.
-            // The pad spaces blank the adjacent `─`; corners plus 2-cell insets stay plain border.
+            // Caption inlined in the divider, ending on the same column as the info line below.
+            // The pad spaces blank the adjacent `─`.
             let caption = style
                 .title
                 .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty());
-            let max_w = area.width.saturating_sub(6);
+            let caption_right = content_area.x + content_area.width;
+            let max_w = caption_right.saturating_sub(area.x + 3);
             if let Some(caption) = caption
                 && max_w >= 6
             {
@@ -3052,7 +3211,7 @@ impl PromptWidget {
                 let trunc = crate::render::line_utils::truncate_str(&label, max_w as usize);
                 let label_w = unicode_width::UnicodeWidthStr::width(trunc.as_str()) as u16;
                 buf.set_string(
-                    area.x + area.width.saturating_sub(3 + label_w),
+                    caption_right.saturating_sub(label_w),
                     div_y,
                     &trunc,
                     Self::chrome_caption_style(bg, &theme, style.focused),
@@ -3124,9 +3283,16 @@ impl PromptWidget {
                 theme.accent_skill
             };
 
-            // Teal coloring: recolor the command name cells (not args) when the command is recognized or has visible autocomplete suggestions
+            let text = self.textarea.text();
+            let leading_invocation = snap.command_range.as_ref().is_some_and(|range| {
+                text.get(..range.start)
+                    .is_some_and(|before| before.trim().is_empty())
+            });
+
+            // Leading `/` teals on dropdown or a recognized name. Mid-text teals only when
+            // the token actually runs (hoist) or is a skill/plugin mention.
             if snap.active
-                && (snap.open || snap.command_recognized)
+                && (snap.command_recognized || (leading_invocation && snap.open))
                 && let Some(cmd_range) = &snap.command_range
             {
                 paint_slash_token_highlight(
@@ -3139,8 +3305,9 @@ impl PromptWidget {
                 );
             }
 
-            // Teal for the partial mid-text token under the cursor while typing.
-            if let Some(ref ghost) = snap.inline_ghost {
+            if let Some(ref ghost) = snap.inline_ghost
+                && ghost.highlight
+            {
                 paint_slash_token_highlight(
                     &self.textarea,
                     self.textarea_state,
@@ -3163,12 +3330,7 @@ impl PromptWidget {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
                 if avail > 0 {
                     let truncated = crate::render::line_utils::truncate_str(placeholder, avail);
-                    buf.set_string(
-                        start_x,
-                        row_y,
-                        &truncated,
-                        Style::default().fg(theme.gray).bg(bg),
-                    );
+                    buf.set_string(start_x, row_y, &truncated, theme.muted().bg(bg));
                 }
             }
 
@@ -3184,12 +3346,7 @@ impl PromptWidget {
                 let avail = (ta_area.x + ta_area.width).saturating_sub(screen_x) as usize;
                 if avail > 0 {
                     let truncated = crate::render::line_utils::truncate_str(&ghost.text, avail);
-                    buf.set_string(
-                        screen_x,
-                        screen_y,
-                        &truncated,
-                        Style::default().fg(theme.gray).bg(bg),
-                    );
+                    buf.set_string(screen_x, screen_y, &truncated, theme.muted().bg(bg));
                 }
             }
 
@@ -3210,35 +3367,99 @@ impl PromptWidget {
 
         // Interim STT: muted italic overlay (not in the textarea)
         // Finalized text remains the real, editable draft
+        // While it shows, the caret is drawn after the ghost words, where the final will leave it
+        let mut interim_caret: Option<(u16, u16)> = None;
         let voice_interim_shown = if let Some(v) = voice
             && let Some(interim) = v.interim.filter(|t| !t.trim().is_empty())
             && ta_area.width > 0
             && ta_area.height > 0
         {
-            let interim_fg = crate::render::color::blend_color(bg, theme.text_secondary, 0.7)
-                .unwrap_or(theme.gray);
-            let interim_style = Style::default()
-                .fg(interim_fg)
-                .bg(bg)
+            // muted() fallback where the blend is inexpressible (terminal
+            // theme): DIM instead of gray (Reset — full default fg).
+            let interim_style =
+                match crate::render::color::blend_color(bg, theme.text_secondary, 0.7) {
+                    Some(fg) => Style::default().fg(fg).bg(bg),
+                    None => theme.muted().bg(bg),
+                }
                 .add_modifier(Modifier::ITALIC);
-            if self.textarea.text().is_empty() {
+            if crate::voice::prompt_blank_for_voice(self.textarea.text()) {
                 let lines =
                     wrap_voice_interim(interim, ta_area.width as usize, ta_area.height as usize);
                 for (i, line) in lines.iter().enumerate() {
                     buf.set_string(ta_area.x, ta_area.y + i as u16, line, interim_style);
                 }
+                if let Some(last) = lines.last() {
+                    let end_x =
+                        ta_area.x + unicode_width::UnicodeWidthStr::width(last.as_str()) as u16;
+                    let last_y = ta_area.y + (lines.len() - 1) as u16;
+                    // Mirror the textarea: a full row wraps the caret to the next row, or pins it to the last cell on the last row
+                    interim_caret = Some(if end_x < ta_area.x + ta_area.width {
+                        (end_x, last_y)
+                    } else if last_y + 1 < ta_area.y + ta_area.height {
+                        (ta_area.x, last_y + 1)
+                    } else {
+                        (end_x - 1, last_y)
+                    });
+                }
             } else {
-                // Ghost suffix after the finalized draft (not at the caret).
-                let end = self.textarea.text().len();
+                // Ghost preview of the interim inserted at the caret, or replacing the active selection.
+                // Uses the same selection-aware insertion point and spacing rule
+                // (crate::voice::space_voice_fragment) as the real insertion so preview and result cannot drift.
+                let text = self.textarea.text();
+                let (base, at, tail_at) = match self.textarea.selection_range() {
+                    Some(sel) => (
+                        std::borrow::Cow::Owned(format!(
+                            "{}{}",
+                            text.get(..sel.start).unwrap_or(""),
+                            text.get(sel.end..).unwrap_or("")
+                        )),
+                        sel.start,
+                        sel.end,
+                    ),
+                    None => {
+                        let cursor = self.textarea.cursor();
+                        (std::borrow::Cow::Borrowed(text), cursor, cursor)
+                    }
+                };
+                let (display, _) = crate::voice::space_voice_fragment(&base, at, interim);
+
                 if let Some((start_x, row_y)) =
                     self.textarea
-                        .screen_position_of(end, ta_area, self.textarea_state)
+                        .screen_position_of(at, ta_area, self.textarea_state)
                 {
-                    let display = format!(" {interim}");
-                    let avail = (ta_area.x + ta_area.width).saturating_sub(start_x) as usize;
+                    let row_right = ta_area.x + ta_area.width;
+                    let avail = row_right.saturating_sub(start_x) as usize;
                     if avail > 0 {
+                        // The textarea already painted the full draft: snapshot the cells after the insertion
+                        // point (selection end, or caret), paint the interim over the span, then re-blit that tail
+                        // shifted right by the ghost's width, so the prompt reads as pushed aside and a selection as replaced; a multi-row selection falls back to the caret row.
+                        let tail_x = self
+                            .textarea
+                            .screen_position_of(tail_at, ta_area, self.textarea_state)
+                            .filter(|(_, ty)| *ty == row_y)
+                            .map_or(start_x, |(tx, _)| tx.max(start_x));
+                        let saved: Vec<ratatui::buffer::Cell> = (tail_x..row_right)
+                            .map(|x| buf.cell((x, row_y)).cloned().unwrap_or_default())
+                            .collect();
                         let truncated = crate::render::line_utils::truncate_str(&display, avail);
+                        let ghost_w =
+                            unicode_width::UnicodeWidthStr::width(truncated.as_str()) as u16;
                         buf.set_string(start_x, row_y, &truncated, interim_style);
+                        // trim_end: the caret sits before the spacing added for the text that follows
+                        let words_w =
+                            unicode_width::UnicodeWidthStr::width(truncated.trim_end()) as u16;
+                        interim_caret =
+                            Some(((start_x + words_w).min(row_right.saturating_sub(1)), row_y));
+                        let mut x = start_x.saturating_add(ghost_w);
+                        for cell in saved {
+                            if x >= row_right {
+                                break;
+                            }
+                            if let Some(dst) = buf.cell_mut((x, row_y)) {
+                                *dst = cell;
+                            }
+                            x = x.saturating_add(1);
+                        }
                     }
                 }
             }
@@ -3263,12 +3484,7 @@ impl PromptWidget {
             // `set_string` clips at the buffer edge, not at the textarea, so a placeholder longer than the box would paint over its border.
             let truncated =
                 crate::render::line_utils::truncate_str(placeholder, ta_area.width as usize);
-            buf.set_string(
-                ta_area.x,
-                ta_area.y,
-                &truncated,
-                Style::default().fg(theme.gray).bg(bg),
-            );
+            buf.set_string(ta_area.x, ta_area.y, &truncated, theme.muted().bg(bg));
         }
 
         // Side borders: │ on left and right of each text row.
@@ -3291,8 +3507,13 @@ impl PromptWidget {
         // Bottom divider: ╰──────────grok-3 · flags──╯
         // Guard on actual allocated height, not requested `info_block`
         // During resize the layout may squeeze the info block to 0 rows, leaving chunks[2].y past the buffer boundary
-        if info_block > 0 && style.chrome && style.show_borders && chunks[2].height > 0 {
-            let div_y = chunks[2].y;
+        if info_block > 0
+            && style.chrome
+            && style.show_borders
+            && let Some(info_chunk) = chunks.get(2)
+            && info_chunk.height > 0
+        {
+            let div_y = info_chunk.y;
             let div_style = Style::default().fg(border_color).bg(bg);
             let left_x = area.x;
             let right_x = area.x + area.width.saturating_sub(1);
@@ -3331,17 +3552,18 @@ impl PromptWidget {
                 width: area.width.saturating_sub(2),
                 height: content_area.height.saturating_sub(vpad_top + info_block),
             };
-            crate::render::color::blend_area(buf, dim_area, Some((bg, 0.66)), None);
+            crate::render::color::recede_area(buf, dim_area, bg, 0.66);
         }
 
-        // Finalized draft stays editable during voice; hide the caret only when the box is empty and interim is standing in for it
-        let hide_caret_for_empty_interim = self.textarea.text().is_empty()
-            && voice.is_some_and(|v| v.interim.is_some_and(|t| !t.trim().is_empty()));
-        let cursor_pos = if style.focused && !hide_caret_for_empty_interim {
-            self.textarea
-                .cursor_pos_with_state(ta_area, self.textarea_state)
-        } else {
+        // Finalized draft stays editable during voice; while interim words show, the caret follows their end
+        let cursor_pos = if !style.focused {
             None
+        } else {
+            // `interim_caret` is only set while the interim shows
+            interim_caret.or_else(|| {
+                self.textarea
+                    .cursor_pos_with_state(ta_area, self.textarea_state)
+            })
         };
 
         // Ghost suffixes (shell completion / predicted prompt)
@@ -3464,15 +3686,18 @@ impl PromptWidget {
     /// Dimmed secondary text over the prompt bg, fading further when unfocused, so both borders read as one chrome.
     fn chrome_caption_style(bg: ratatui::style::Color, theme: &Theme, focused: bool) -> Style {
         let opacity = if focused { 0.6 } else { 0.4 };
-        let fg = crate::render::color::blend_color(bg, theme.text_secondary, opacity)
-            .unwrap_or(theme.gray);
-        Style::default().fg(fg).bg(bg)
+        match crate::render::color::blend_color(bg, theme.text_secondary, opacity) {
+            Some(fg) => Style::default().fg(fg).bg(bg),
+            // Profile palettes can't blend: the caption stays dim instead of
+            // dropping to gray, with the fg pinned over the border cells
+            // (accent-colored in plan mode) by muted_over_chrome.
+            None => theme.muted_over_chrome().bg(bg),
+        }
     }
 
     /// Render the info line: left-aligned `model_name · flag1 · flag2`, right-aligned `multiline`.
-    ///
-    /// `pub(crate)` so the dashboard's dispatch box (which draws its own chrome) can paint an identical model and mode indicator on its bottom border.
-    /// Does not read `self`.
+    /// `pub(crate)` so the dashboard's dispatch box (which draws its own chrome) can paint an identical
+    /// model and mode indicator on its bottom border. Does not read `self`.
     pub(crate) fn render_info_line(
         &self,
         buf: &mut Buffer,
@@ -3500,12 +3725,11 @@ impl PromptWidget {
                 .unwrap_or(theme.gray_dim)
         };
         let sep_style = Style::default().fg(sep_fg).bg(bg);
-        let flag_style = Style::default().fg(theme.gray).bg(bg);
+        let flag_style = theme.muted().bg(bg);
 
-        // Left side: model name and flags
-        // Wrap with leading/trailing spaces so the cells adjacent to the corner borders (╰ / ╯) are blanked out
-        // They would otherwise show the underlying `─` glyphs from the bottom-border fill
-        // That gives 1 cell of visual padding on each side
+        // Left side: model name and flags. Wrap with leading/trailing spaces so the cells adjacent to the
+        // corner borders (╰ / ╯) are blanked out. They would otherwise show the underlying `─` glyphs from
+        // the bottom-border fill. That gives 1 cell of visual padding on each side.
         let pad_style = Style::default().bg(bg);
         let mut left_spans = vec![Span::styled(" ", pad_style)];
         if let Some(warning) = info.usage_warning {
@@ -3516,18 +3740,29 @@ impl PromptWidget {
             };
             let warning_style = Style::default().fg(fg).bg(bg);
             left_spans.push(Span::styled(warning.to_owned(), warning_style));
-            left_spans.push(Span::styled(" · ", sep_style));
         }
-        left_spans.push(Span::styled(info.model_name, model_style));
+        let mut needs_sep = info.usage_warning.is_some();
+        if !info.model_name.is_empty() {
+            if needs_sep {
+                left_spans.push(Span::styled(" · ", sep_style));
+            }
+            left_spans.push(Span::styled(info.model_name, model_style));
+            needs_sep = true;
+        }
         for flag in info.flags {
-            left_spans.push(Span::styled(" · ", sep_style));
+            if needs_sep {
+                left_spans.push(Span::styled(" · ", sep_style));
+            }
+            needs_sep = true;
             let mut style = if let Some(color) = flag.color {
                 if flag.bold {
                     // Bold flags use full color for visibility.
                     Style::default().fg(color).bg(bg)
                 } else {
-                    let dimmed = crate::render::color::blend_color(bg, color, flag_opacity)
-                        .unwrap_or(theme.gray);
+                    // No dimmed variant on profile palettes (Reset bg): keep
+                    // the flag's own color rather than dropping to gray.
+                    let dimmed =
+                        crate::render::color::blend_color(bg, color, flag_opacity).unwrap_or(color);
                     Style::default().fg(dimmed).bg(bg)
                 }
             } else if flag.bold {
@@ -3535,9 +3770,12 @@ impl PromptWidget {
             } else if focused {
                 flag_style
             } else {
-                let dimmed = crate::render::color::blend_color(bg, theme.gray, flag_opacity)
-                    .unwrap_or(theme.gray);
-                Style::default().fg(dimmed).bg(bg)
+                // Unfocused colorless flag: fade further toward bg; muted()
+                // where the blend is inexpressible (terminal theme).
+                match crate::render::color::blend_color(bg, theme.gray, flag_opacity) {
+                    Some(dimmed) => Style::default().fg(dimmed).bg(bg),
+                    None => theme.muted().bg(bg),
+                }
             };
             if flag.bold {
                 style = style.add_modifier(Modifier::BOLD);
@@ -3603,16 +3841,15 @@ fn parse_line_range(s: &str) -> Option<std::ops::Range<usize>> {
     }
 }
 
-// ── Element display helpers ────────────────────────────────────────────
-
-/// Build the styled display `Line` for a file reference element.
-///
-/// Renders as: `@foo/bar.rs` or `@foo/bar.rs:10-12`
-/// Style: `@` and `:` in gray, path in theme.path, numbers in text_primary.
+/// Build the styled display `Line` for a file reference element. Renders as: `@foo/bar.rs` or
+/// `@foo/bar.rs:10-12`. Style: `@` and `:` in gray, path in theme.path, numbers in text_primary.
 pub fn file_ref_display(path: &str) -> Line<'static> {
     let theme = Theme::current();
     let (file_part, line_part) = if let Some(colon_pos) = path.rfind(':') {
-        (&path[..colon_pos], Some(&path[colon_pos + 1..]))
+        (
+            path.get(..colon_pos).unwrap_or(path),
+            path.get(colon_pos + 1..),
+        )
     } else {
         (path, None)
     };
@@ -3620,13 +3857,8 @@ pub fn file_ref_display(path: &str) -> Line<'static> {
 }
 
 /// Extract the display number from an `[Image #N]` or `[Image #N: <path>]` chip placeholder.
-/// Returns `None` when the input doesn't match either form.
-///
-/// Path-suffix support is required because chips with a `source_path` (file-path pastes, Finder Cmd+C) appear as `[Image #3: /path/to/file.png]`.
-/// Without it, the undo/redo recovery path in `sync_images_with_textarea` falls back to `stash_by_number.remove(0)` and never finds the original entry.
-///
-/// Permissive parsing: a literal space after `#` (e.g. `[Image # 1]`) is tolerated via `trim()`.
-/// The canonical emitter never produces that form; the permissiveness is intentional defence in depth.
+/// Returns `None` when the input doesn't match either form. The canonical emitter never produces
+/// that form; the permissiveness is intentional defence in depth.
 fn parse_image_display_number(placeholder: &str) -> Option<usize> {
     let inner = placeholder.strip_prefix("[Image #")?.strip_suffix(']')?;
     // Split at the first `:` (path-suffix form) or use the whole string.
@@ -3634,14 +3866,8 @@ fn parse_image_display_number(placeholder: &str) -> Option<usize> {
     number_str.trim().parse().ok()
 }
 
-/// Regex matching a canonical image chip placeholder anywhere in a buffer string: `[Image #<digits>]` or `[Image #<digits>:`.
-///
-/// Used by `set_text` to detect whether a non-empty replacement preserves any chips.
-/// A literal-substring scan (`text.contains("[Image #")`) has two problems:
-/// - a false positive on the user pasting prose like `"[Image #" as a placeholder convention`,
-/// - a false negative on near-matches like `[Image#1]` (missing space) that the parser would reject anyway.
-///
-/// The regex pins to the canonical emitter format so the heuristic matches what `display_text(...)` actually produces.
+/// Regex matching a canonical image chip placeholder anywhere in a buffer string: `[Image
+/// #<digits>]` or `[Image #<digits>:`.
 fn chip_placeholder_regex() -> &'static regex::Regex {
     use std::sync::LazyLock;
     static RE: LazyLock<regex::Regex> =
@@ -3649,9 +3875,8 @@ fn chip_placeholder_regex() -> &'static regex::Regex {
     &RE
 }
 
-/// Build a copy of the buffer text with all element placeholder content removed, and compute the adjusted cursor position.
-///
-/// This gives the slash system a clean view of just user-typed text.
+/// Build a copy of the buffer text with all element placeholder content removed, and compute the
+/// adjusted cursor position. This gives the slash system a clean view of just user-typed text.
 /// Element placeholders like `[Image #1]` (which contain spaces) then can't break command parsing.
 fn strip_all_elements(
     text: &str,
@@ -3668,24 +3893,26 @@ fn strip_all_elements(
     let mut prev_end: usize = 0;
 
     for elem in elements {
-        // Append text between the previous element and this one.
-        let gap = &text[prev_end..elem.range.start];
+        let Some(gap) = text.get(prev_end..elem.range.start) else {
+            continue;
+        };
         result.push_str(gap);
 
         // Adjust the cursor: if it is after this element, subtract the element's length from the cursor position
-        let elem_len = elem.range.end - elem.range.start;
+        let elem_len = elem.range.end.saturating_sub(elem.range.start);
         if cursor > elem.range.end {
-            adjusted_cursor -= elem_len;
+            adjusted_cursor = adjusted_cursor.saturating_sub(elem_len);
         } else if cursor > elem.range.start {
             // The cursor is inside the element: clamp to element start
-            adjusted_cursor -= cursor - elem.range.start;
+            adjusted_cursor = adjusted_cursor.saturating_sub(cursor - elem.range.start);
         }
 
         prev_end = elem.range.end;
     }
 
-    // Append any text after the last element.
-    result.push_str(&text[prev_end..]);
+    if let Some(tail) = text.get(prev_end..) {
+        result.push_str(tail);
+    }
 
     let len = result.len();
     (result, adjusted_cursor.min(len))
@@ -3766,18 +3993,17 @@ fn chip_line(label: String) -> Line<'static> {
     ])
 }
 
-/// Normalize bare `\r` to `\n`, leaving `\r\n` pairs intact.
-///
-/// Some terminals send bare `\r` for line breaks in bracketed-paste content.
-/// Rust's `str::lines()` only splits on `\n` and `\r\n`, so without this normalization multi-line pastes would be treated as a single line.
-fn normalize_cr(text: &str) -> String {
+/// Normalize bare `\r`, U+2028, and U+2029 to `\n`, leaving `\r\n` intact. Rust's `str::lines()`
+/// splits on none of these, so without this normalization such pastes count as a single line and
+/// the invisible separators break the textarea's width model.
+fn normalize_line_breaks(text: &str) -> String {
     let mut s = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\r' && chars.peek() != Some(&'\n') {
-            s.push('\n');
-        } else {
-            s.push(c);
+        match c {
+            '\r' if chars.peek() != Some(&'\n') => s.push('\n'),
+            '\u{2028}' | '\u{2029}' => s.push('\n'),
+            _ => s.push(c),
         }
     }
     s
@@ -3846,6 +4072,8 @@ fn paste_chip_display_bytes_with_locale(
 fn images_high_water(images: &[PastedImage]) -> usize {
     images.iter().map(|i| i.display_number).max().unwrap_or(0)
 }
+
+mod image_state;
 
 #[cfg(test)]
 mod tests;

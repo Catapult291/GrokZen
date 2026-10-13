@@ -31,19 +31,13 @@ pub enum ListLayoutCache {
         width: u16,
         /// Per-item heights (indexed by *visible* index when filtered).
         heights: Vec<u16>,
-        /// Prefix sums: `prefix_sums[i]` = sum of `heights[0..i]`.
-        ///
-        /// Length is `heights.len() + 1`.  `prefix_sums[0] = 0`.
-        /// `prefix_sums[n] = total_height`.
+        /// Prefix sums: `prefix_sums[i]` = sum of `heights[0..i]`. Length is `heights.len() + 1`.
+        /// `prefix_sums[0] = 0`. `prefix_sums[n] = total_height`.
         prefix_sums: Vec<usize>,
     },
 }
 
 impl ListLayoutCache {
-    // -----------------------------------------------------------------------
-    // Constructors
-    // -----------------------------------------------------------------------
-
     /// Create a fixed-height cache for `count` items (all height 1).
     pub fn fixed(count: usize) -> Self {
         Self::FixedHeight { count }
@@ -65,11 +59,9 @@ impl ListLayoutCache {
         }
     }
 
-    /// Extend an existing `Variable` cache with additional item heights.
-    ///
-    /// Used for **incremental append**: when new items arrive, we compute heights only for the new items and extend the prefix-sum array.
-    ///
-    /// Panics if `self` is `FixedHeight`; caller must ensure the mode matches.
+    /// Extend an existing `Variable` cache with additional item heights. Used for incremental append:
+    /// when new items arrive, we compute heights only for the new items and extend the prefix-sum
+    /// array. Panics if `self` is `FixedHeight`; caller must ensure the mode matches.
     pub fn extend_heights(&mut self, new_heights: impl IntoIterator<Item = u16>) {
         match self {
             Self::Variable {
@@ -88,10 +80,6 @@ impl ListLayoutCache {
             }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Queries
-    // -----------------------------------------------------------------------
 
     /// Total height in visual lines.
     pub fn total_height(&self) -> usize {
@@ -127,12 +115,9 @@ impl ListLayoutCache {
         }
     }
 
-    /// Find the item index whose virtual-y range contains `y`.
-    ///
-    /// For `FixedHeight`, this is just `y` (clamped to `count - 1`).
-    /// For `Variable`, binary search on prefix sums, O(log n).
-    ///
-    /// Returns `None` if the cache is empty.
+    /// Find the item index whose virtual-y range contains `y`. For `FixedHeight`, this is just `y`
+    /// (clamped to `count - 1`). For `Variable`, binary search on prefix sums, O(log n). Returns `None`
+    /// if the cache is empty.
     pub fn item_at_y(&self, y: usize) -> Option<usize> {
         match self {
             Self::FixedHeight { count } => {
@@ -165,10 +150,6 @@ impl ListLayoutCache {
         }
     }
 }
-
-// ===========================================================================
-// Tests
-// ===========================================================================
 
 #[cfg(test)]
 mod tests {

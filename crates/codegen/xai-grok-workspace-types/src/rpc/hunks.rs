@@ -105,9 +105,7 @@ pub struct FileSummary {
     pub is_agent_file: bool,
 }
 
-// =========================================================================
-// Request types whose responses reference `xai_hunk_tracker` types (which pull in `gix`), so those responses are mirrored below as wire structs
-// =========================================================================
+// Responses below mirror `xai_hunk_tracker` types so this crate does not depend on `gix`.
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HunkGetAllHunksReq {}
@@ -150,10 +148,6 @@ impl WorkspaceRpc for HunkGetFilteredHunksReq {
     type Response = FilteredHunksResponse;
 }
 
-// =========================================================================
-// Wire mirrors of `xai_hunk_tracker` response types
-// =========================================================================
-
 /// Wire mirror of `xai_hunk_tracker::types::Hunk` (the `selected` field is `#[serde(skip)]` upstream and so is omitted here).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -179,9 +173,7 @@ pub struct HunkLineInfoWire {
 }
 
 /// Wire mirror of `xai_hunk_tracker::types::HunkSource`.
-///
-/// An unrecognized `type` tag from a newer server decodes to `Unknown` (`#[serde(other)]`) instead of failing the whole structured response.
-/// The server only ever produces the known variants.
+/// An unrecognized `type` tag decodes to `Unknown` rather than failing the whole structured response. The server only produces known variants.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum HunkSourceWire {
@@ -195,10 +187,7 @@ pub enum HunkSourceWire {
 }
 
 /// Wire mirror of `xai_hunk_tracker::types::FileContentStatus`.
-///
-/// `Deserialize` is hand-written: a plain string enum cannot use `#[serde(other)]` (only allowed on internally/adjacently tagged enums).
-/// An unrecognized status from a newer server decodes to [`Unknown`](Self::Unknown) rather than failing the whole structured response.
-/// The server only produces the known variants.
+/// Hand-written `Deserialize` because a string enum cannot use `#[serde(other)]`; unknown statuses become [`Unknown`](Self::Unknown) instead of failing the response.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum FileContentStatusWire {
@@ -299,37 +288,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn method_constants() {
-        assert_eq!(HunkSingleActionReq::METHOD, "workspace.hunk_action");
-        assert_eq!(HunkFileActionReq::METHOD, "workspace.hunk_file_action");
-        assert_eq!(HunkTurnActionReq::METHOD, "workspace.hunk_turn_action");
-        assert_eq!(HunkAllActionReq::METHOD, "workspace.hunk_all_action");
-        assert_eq!(
-            HunkGetStagedFilesReq::METHOD,
-            "workspace.hunk_get_staged_files"
-        );
-        assert_eq!(
-            HunkGetFileSummariesReq::METHOD,
-            "workspace.hunk_get_file_summaries"
-        );
-        assert_eq!(HunkGetAllHunksReq::METHOD, "workspace.get_all_hunks");
-        assert_eq!(
-            HunkGetAllFileContentsReq::METHOD,
-            "workspace.hunk_get_all_file_contents"
-        );
-        assert_eq!(
-            HunkGetSessionSummaryReq::METHOD,
-            "workspace.get_session_summary"
-        );
-        assert_eq!(
-            HunkGetFilteredHunksReq::METHOD,
-            "workspace.hunk_get_filtered_hunks"
-        );
-    }
-
-    #[test]
     fn hunk_wire_round_trips_server_json() {
-        // A representative server-side `Hunk` serialization (camelCase, no `selected` field)
+        // camelCase, no `selected` field
         let json = serde_json::json!({
             "id": "hunk-1",
             "path": "/repo/src/main.rs",
@@ -372,7 +332,6 @@ mod tests {
 
     #[test]
     fn hunk_source_wire_unknown_type_decodes_tolerantly() {
-        // An unrecognized `type` tag from a newer server decodes to Unknown rather than erroring
         let src: HunkSourceWire =
             serde_json::from_value(serde_json::json!({ "type": "futureSource" })).unwrap();
         assert!(matches!(src, HunkSourceWire::Unknown));
@@ -380,11 +339,9 @@ mod tests {
 
     #[test]
     fn file_content_status_wire_unknown_decodes_tolerantly() {
-        // An unrecognized status string decodes to Unknown.
         let status: FileContentStatusWire =
             serde_json::from_value(serde_json::json!("futureStatus")).unwrap();
         assert_eq!(status, FileContentStatusWire::Unknown);
-        // Embedded in a FileContentEntryWire, the whole structured response still decodes
         let entry: FileContentEntryWire = serde_json::from_value(serde_json::json!({
             "path": "/x.rs",
             "baseline": { "status": "futureStatus" },

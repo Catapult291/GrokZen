@@ -13,6 +13,8 @@ pub enum ClassifierSecurityFinding {
     FailClosedPolicy,
     /// Shell structure the parser could not decompose to check.
     UnparseableShell,
+    /// Argument values depend on shell expansion.
+    UnresolvedArgument,
     /// Nested/opaque shell execution (`bash -c "$X"`, `eval …`).
     OpaqueShell,
     /// Execution callback or ambient Git-config exec risk.
@@ -25,7 +27,7 @@ pub enum ClassifierSecurityFinding {
     FileWrite,
     /// Dangerous command segment (`rm`, `chmod`, `git push`, …).
     DangerousCommand,
-    /// Special executable/disclosure surface (`rg --pre`, Git drivers/pagers, kubectl config/auth overrides, process-environment dump).
+    /// Special executable/disclosure surface (`rg` unsafe flags, Git drivers/pagers, kubectl config/auth overrides, process-environment dump).
     SpecialExecSurface,
 }
 
@@ -35,6 +37,7 @@ impl ClassifierSecurityFinding {
     pub const ALL: &'static [Self] = &[
         Self::FailClosedPolicy,
         Self::UnparseableShell,
+        Self::UnresolvedArgument,
         Self::OpaqueShell,
         Self::ExecOrAmbientGit,
         Self::EnvInjection,
@@ -50,6 +53,7 @@ impl ClassifierSecurityFinding {
         match self {
             Self::FailClosedPolicy => "fail_closed_policy",
             Self::UnparseableShell => "unparseable_shell",
+            Self::UnresolvedArgument => "unresolved_argument",
             Self::OpaqueShell => "opaque_shell",
             Self::ExecOrAmbientGit => "exec_or_ambient_git",
             Self::EnvInjection => "env_injection",
@@ -68,6 +72,7 @@ impl ClassifierSecurityFinding {
                 "permission policy could not determine whether a rule applies"
             }
             Self::UnparseableShell => "shell structure could not be fully parsed",
+            Self::UnresolvedArgument => "argument values depend on shell expansion",
             Self::OpaqueShell => "invokes a nested or dynamically supplied shell command",
             Self::ExecOrAmbientGit => {
                 "may run code via an execution callback or ambient Git configuration"
@@ -82,10 +87,9 @@ impl ClassifierSecurityFinding {
         }
     }
 
-    /// Whether this finding constrains a *broad* grant (session `allow_bash_execute` blanket, prefix/glob grant, sandbox auto-allow).
-    /// These are effects a broad grant cannot vouch for, so their presence must reach the classifier rather than auto-allow.
-    /// `DangerousCommand` is excluded here because the blanket grant path already refuses dangerous segments.
-    /// `UnparseableShell` and `FailClosedPolicy` are handled by their own decision arms.
+    /// Whether this finding constrains a broad grant (blanket execute, prefix/glob, sandbox auto-allow).
+    /// A broad grant cannot vouch for these effects, so they must reach the classifier rather than auto-allow.
+    /// `DangerousCommand`, `UnparseableShell`, and `FailClosedPolicy` are handled by their own arms.
     const fn is_grant_floor(self) -> bool {
         matches!(
             self,
@@ -99,11 +103,8 @@ impl ClassifierSecurityFinding {
     }
 }
 
-/// The single canonical, ordered, deduplicated finding set for one request.
-///
-/// The `BTreeSet` encodes the ordering/dedup invariant in the type itself, so no caller can supply duplicates or arbitrary order.
-/// Built once at the detector sites in `evaluate_bash`; the manager clones it and adds `FailClosedPolicy` when a managed-policy gate failed closed.
-/// `Default` is the empty assessment (non-Bash access, or a fully safe command).
+/// Canonical ordered, deduplicated finding set for one request; `BTreeSet` encodes that invariant so callers cannot reorder or duplicate.
+/// Built once in `evaluate_bash`; the manager may add `FailClosedPolicy`. `Default` is empty (non-Bash or fully safe).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BashSecurityAssessment(BTreeSet<ClassifierSecurityFinding>);
 

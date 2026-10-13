@@ -33,7 +33,6 @@ pub(super) enum MinimalAuthHint {
 }
 
 /// Map the app's auth and trust state to what the no-agent live region should show.
-///
 /// Mirrors the welcome screen's gate order: trust is only offered after auth is `Done`, when the user has access and is not ZDR-blocked.
 /// Those gates already block sessions, and the input interceptor only answers trust under the same conditions.
 pub(super) fn minimal_auth_hint(
@@ -404,6 +403,14 @@ mod tests {
     static TEST_LOCALE: std::sync::LazyLock<xai_grok_pager::locale::LocaleContext> =
         std::sync::LazyLock::new(xai_grok_pager::locale::LocaleContext::default);
 
+    static ZH_TEST_LOCALE: std::sync::LazyLock<xai_grok_pager::locale::LocaleContext> =
+        std::sync::LazyLock::new(|| {
+            xai_grok_pager::locale::LocaleContext::new(xai_grok_pager::locale::ResolvedLocale {
+                locale: xai_grok_pager::locale::UiLocale::ZhCn,
+                source: xai_grok_pager::locale::LocaleSource::Cli,
+            })
+        });
+
     #[test]
     fn device_user_code_parses_verification_url() {
         assert_eq!(
@@ -512,13 +519,40 @@ mod tests {
             code: Some("ABCD-EFGH".into()),
         };
         render_auth(&mut buf, area, &theme, &hint, &TEST_LOCALE);
-        let text = buffer_text(&buf, area);
+        let text = crate::buffer_text(&buf);
         assert!(text.contains("Sign in to Grok"), "header: {text:?}");
         assert!(text.contains("accounts.x.ai/device"), "url: {text:?}");
         assert!(text.contains("ABCD-EFGH"), "device code: {text:?}");
         assert!(
             text.contains("Waiting for approval"),
             "waiting line: {text:?}"
+        );
+    }
+
+    #[test]
+    fn zh_localization_render_auth_localizes_reqwest_wrapper_without_rewriting_url() {
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 120, 6);
+        let mut buf = Buffer::empty(area);
+        let hint = MinimalAuthHint::Failed(
+            "error sending request for url (https://auth.x.ai/.well-known/openid-configuration)"
+                .into(),
+        );
+        render_auth(&mut buf, area, &theme, &hint, &ZH_TEST_LOCALE);
+        let text = crate::buffer_text(&buf);
+        let compact = text.replace(' ', "");
+        assert!(compact.contains("登录失败"), "heading: {text:?}");
+        assert!(
+            compact.contains("无法向登录服务发送请求"),
+            "localized wrapper: {text:?}"
+        );
+        assert!(
+            compact.contains("https://auth.x.ai/.well-known/openid-configuration"),
+            "provider URL must stay unchanged: {text:?}"
+        );
+        assert!(
+            !text.contains("error sending request for url"),
+            "raw reqwest wrapper leaked: {text:?}"
         );
     }
 
@@ -531,7 +565,7 @@ mod tests {
             workspace: PathBuf::from("/home/agent/project"),
         };
         render_auth(&mut buf, area, &theme, &hint, &TEST_LOCALE);
-        let text = buffer_text(&buf, area);
+        let text = crate::buffer_text(&buf);
         assert!(
             text.contains("Do you trust the contents of this directory?"),
             "question: {text:?}"
@@ -562,18 +596,5 @@ mod tests {
         assert_eq!(wrapped_char_rows("a中a", 2), 3);
         assert_eq!(wrapped_char_rows("中文", 4), 1);
         assert_eq!(wrapped_char_rows("中文", 2), 2);
-    }
-
-    fn buffer_text(buf: &Buffer, area: Rect) -> String {
-        let mut text = String::new();
-        for y in 0..area.height {
-            for x in 0..area.width {
-                if let Some(c) = buf.cell((x, y)) {
-                    text.push_str(c.symbol());
-                }
-            }
-            text.push('\n');
-        }
-        text
     }
 }

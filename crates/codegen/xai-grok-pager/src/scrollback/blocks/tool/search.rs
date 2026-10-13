@@ -76,6 +76,8 @@ pub struct SearchToolCallBlock {
     pub started_at: Option<std::time::Instant>,
     /// Elapsed time in ms after completion.
     pub elapsed_ms: Option<i64>,
+    /// Whether this ordinary search targets a memory v2 scope.
+    pub is_memory_activity: bool,
 }
 
 impl SearchToolCallBlock {
@@ -91,7 +93,13 @@ impl SearchToolCallBlock {
             meta: SearchInputMeta::default(),
             started_at: None,
             elapsed_ms: None,
+            is_memory_activity: false,
         }
+    }
+
+    pub fn with_memory_activity(mut self) -> Self {
+        self.is_memory_activity = true;
+        self
     }
 
     pub fn with_matches(mut self, match_count: usize, file_matches: Vec<SearchFileMatch>) -> Self {
@@ -224,12 +232,8 @@ impl SearchToolCallBlock {
         self.pattern.is_empty() || self.pattern == "."
     }
 
-    /// Three cases:
-    /// 1. Trivial pattern + glob → `Search glob in path (summary)`
-    ///    glob is string-styled without quotes (it IS the search term).
-    /// 2. Real pattern + glob → `Search "pattern" in glob in path (summary)`
-    ///    glob shown as path scope after first "in".
-    /// 3. No glob → `Search "pattern" in path (summary)`
+    /// Trivial pattern + glob → `Search glob in path (summary)` glob is string-styled without quotes (it IS the search
+    /// term). No glob → `Search "pattern" in path (summary)`.
     fn header_line(
         &self,
         theme: &Theme,
@@ -340,7 +344,6 @@ impl SearchToolCallBlock {
     }
 
     /// Header line with only the search term span selectable (exclude "Search " prefix).
-    ///
     /// Span 0 is always the label; span 1 is the pattern/glob.
     /// Later "in path" and summary spans stay non-selectable so copy yields the search term.
     fn header_block_line(&self, line: Line<'static>) -> BlockLine {
@@ -482,7 +485,18 @@ impl BlockContent for SearchToolCallBlock {
 
                 let has_results = !self.file_matches.is_empty() || !self.file_paths.is_empty();
 
-                if has_results {
+                if let Some(ref error) = self.error {
+                    lines.push(Line::from("").into());
+                    for line in error.lines() {
+                        lines.push(
+                            Line::from(Span::styled(
+                                format!("  {line}"),
+                                theme.fg(theme.accent_error),
+                            ))
+                            .into(),
+                        );
+                    }
+                } else if has_results {
                     lines.push(Line::from("").into());
                 } else if self.match_count == 0 {
                     // No results: show a hint
@@ -537,9 +551,9 @@ impl BlockContent for SearchToolCallBlock {
                     for path in &self.file_paths {
                         let line = if is_count {
                             // Count mode: "path:N", split at the last ':'; the path part in path color, ":N" in normal fg
-                            if let Some(colon_pos) = path.rfind(':') {
-                                let file_part = &path[..colon_pos];
-                                let count_part = &path[colon_pos..]; // includes ':'
+                            if let Some((file_part, count_part)) =
+                                path.rfind(':').and_then(|pos| path.split_at_checked(pos))
+                            {
                                 Line::from(vec![
                                     Span::styled(
                                         format!("{indent}{file_part}"),
@@ -594,9 +608,9 @@ impl BlockContent for SearchToolCallBlock {
         false
     }
 
+    // Always foldable: a no-result block still shows the metadata and the hint, a failed one its reason
     fn is_foldable(&self) -> bool {
-        // Always foldable: expanding a no-result block still shows the metadata and the "(no results)" hint
-        self.error.is_none()
+        true
     }
 
     fn default_display_mode(&self) -> DisplayMode {

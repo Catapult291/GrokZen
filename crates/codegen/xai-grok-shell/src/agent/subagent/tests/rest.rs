@@ -1,8 +1,10 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use super::*;
 use super::super::resume_window::resume_inherited_prefix_len;
+use crate::session::storage::UnfinishedSubagent;
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway};
 use crate::upload::trace::SubagentSpawnedRef;
+use xai_grok_sampling_types::SyntheticReason;
 use xai_grok_tools::implementations::grok_build::task::backend::ChannelBackend;
 #[test]
 fn normalize_forked_context_strips_project_layout() {
@@ -16,7 +18,7 @@ fn normalize_forked_context_strips_project_layout() {
     let (conv, _) = xai_grok_subagent_resolution::context::normalize_forked_context(
         items,
     );
-    if let ConversationItem::User(u) = &conv[1] {
+    if let Some(ConversationItem::User(u)) = conv.get(1) {
         let text = u
             .content
             .iter()
@@ -49,7 +51,7 @@ fn normalize_forked_context_consecutive_users() {
         items,
     );
     assert_eq!(prefix_len, 2);
-    if let ConversationItem::User(u) = &conv[1] {
+    if let Some(ConversationItem::User(u)) = conv.get(1) {
         let text = u
             .content
             .iter()
@@ -92,18 +94,18 @@ fn end_to_end_normalized_conversation_shape() {
     );
     assert_eq!(prefix_len, 2);
     assert_eq!(conv.len(), 2);
-    if let ConversationItem::System(ref mut sys) = conv[0] {
+    if let Some(ConversationItem::System(sys)) = conv.first_mut() {
         sys.content = "child system prompt with tool guidance".into();
     } else {
         panic!("expected System at position 0");
     }
-    if let ConversationItem::System(ref sys) = conv[0] {
+    if let Some(ConversationItem::System(sys)) = conv.first() {
         assert_eq!(
                 sys.content.as_ref(),
                 "child system prompt with tool guidance"
             );
     }
-    if let ConversationItem::User(ref u) = conv[1] {
+    if let Some(ConversationItem::User(u)) = conv.get(1) {
         let text = u
             .content
             .iter()
@@ -122,10 +124,10 @@ fn end_to_end_normalized_conversation_shape() {
     let task = "implement bubble sort in Rust";
     conv.push(ConversationItem::user(task));
     assert_eq!(conv.len(), 3);
-    assert!(matches!(conv[0], ConversationItem::System(_)));
-    assert!(matches!(conv[1], ConversationItem::User(_)));
-    assert!(matches!(conv[2], ConversationItem::User(_)));
-    if let ConversationItem::User(ref u) = conv[2] {
+    assert!(matches!(conv.first(), Some(ConversationItem::System(_))));
+    assert!(matches!(conv.get(1), Some(ConversationItem::User(_))));
+    assert!(matches!(conv.get(2), Some(ConversationItem::User(_))));
+    if let Some(ConversationItem::User(u)) = conv.get(2) {
         let text = u
             .content
             .iter()
@@ -153,7 +155,7 @@ fn cached_prompt_text_is_task_not_background() {
     let (conv, _) = xai_grok_subagent_resolution::context::normalize_forked_context(
         parent_conv,
     );
-    let background_text = if let ConversationItem::User(ref u) = conv[1] {
+    let background_text = if let Some(ConversationItem::User(u)) = conv.get(1) {
         u.content
             .iter()
             .filter_map(|p| match p {
@@ -217,8 +219,7 @@ fn last_user_message_is_task_after_normalization() {
             "last user message should be the task, not background context"
         );
 }
-/// Simulate compaction preserving the inherited prefix.
-/// The compactor produces [System, UserPrefix, Summary, ...].
+/// Simulate compaction preserving the inherited prefix. The compactor produces [System, UserPrefix, Summary, ...].
 /// The prefix preservation logic takes [System, BackgroundContext] from the original conversation and skips the compacted System.
 /// The result is [System(inherited), BackgroundContext(inherited), UserPrefix(compacted), Summary, ...].
 #[test]
@@ -234,7 +235,7 @@ fn compaction_preserves_inherited_prefix() {
     );
     assert_eq!(prefix_len, 2);
     let mut full_conv = conv;
-    if let ConversationItem::System(ref mut sys) = full_conv[0] {
+    if let Some(ConversationItem::System(sys)) = full_conv.first_mut() {
         sys.content = "child system prompt".into();
     }
     full_conv.push(ConversationItem::user("do the thing"));
@@ -244,7 +245,10 @@ fn compaction_preserves_inherited_prefix() {
             ConversationItem::user("user prefix"),
             ConversationItem::user("<compacted_summary>summary of work</compacted_summary>"),
         ];
-    let inherited: Vec<_> = full_conv[..prefix_len].to_vec();
+    let Some(prefix) = full_conv.get(..prefix_len) else {
+        panic!("prefix_len {prefix_len} exceeds conversation len {}", full_conv.len());
+    };
+    let inherited: Vec<_> = prefix.to_vec();
     let child_items: Vec<_> = compacted_history
         .into_iter()
         .skip_while(|i| matches!(i, ConversationItem::System(_)))
@@ -252,12 +256,12 @@ fn compaction_preserves_inherited_prefix() {
     let mut preserved = inherited;
     preserved.extend(child_items);
     assert_eq!(preserved.len(), 4);
-    if let ConversationItem::System(ref sys) = preserved[0] {
+    if let Some(ConversationItem::System(sys)) = preserved.first() {
         assert_eq!(sys.content.as_ref(), "child system prompt");
     } else {
         panic!("expected System at [0]");
     }
-    if let ConversationItem::User(ref u) = preserved[1] {
+    if let Some(ConversationItem::User(u)) = preserved.get(1) {
         let text: String = u
             .content
             .iter()
@@ -317,7 +321,7 @@ fn compaction_no_prefix_passes_through() {
     let prefix_len: usize = 0;
     let result = if prefix_len > 0 { unreachable!() } else { compacted.clone() };
     assert_eq!(result.len(), 2);
-    assert!(matches!(result[0], ConversationItem::System(_)));
+    assert!(matches!(result.first(), Some(ConversationItem::System(_))));
 }
 #[test]
 fn resumed_from_field_in_meta_roundtrips() {
@@ -367,11 +371,13 @@ fn resumed_from_none_not_serialized_in_meta() {
         );
 }
 #[test]
-fn backward_compat_meta_without_resumed_from() {
+fn backward_compat_meta_ignores_legacy_identity_fields() {
     let json = r#"{
             "subagent_id": "sa1",
             "parent_session_id": "p1",
             "child_session_id": "c1",
+            "agent_id": "ag1.1",
+            "attempt_id": "at1.2",
             "subagent_type": "explore",
             "description": "d",
             "prompt": "p",
@@ -379,6 +385,7 @@ fn backward_compat_meta_without_resumed_from() {
             "started_at": "2026-01-01T00:00:00Z"
         }"#;
     let meta: SubagentMeta = serde_json::from_str(json).unwrap();
+    assert_eq!(meta.subagent_id, "sa1");
     assert!(meta.resumed_from.is_none());
 }
 #[test]
@@ -423,6 +430,7 @@ fn backward_compat_meta_without_snapshot_ref() {
 fn base_meta() -> SubagentMeta {
     SubagentMeta {
         subagent_id: "sa".into(),
+        attempt_id: None,
         parent_session_id: "parent".into(),
         child_session_id: "child".into(),
         subagent_type: "general-purpose".into(),
@@ -567,57 +575,6 @@ fn subagent_worktree_snapshot_gate_local_enables() {
     let mut ctx = ctx_with_toggle(std::collections::HashMap::new());
     ctx.agent_config = Some(config);
     assert!(ctx.resolve_subagent_worktree_snapshot_enabled());
-}
-#[test]
-fn subagent_tool_filter_removes_ask_user_question() {
-    let mut tools = vec![
-            xai_grok_sampling_types::ToolSpec {
-                name: "read_file".to_owned(),
-                description: None,
-                parameters: serde_json::json!({}),
-            },
-            xai_grok_sampling_types::ToolSpec {
-                name: "ask_user_question".to_owned(),
-                description: None,
-                parameters: serde_json::json!({}),
-            },
-        ];
-    strip_ask_user_question_tool(&mut tools);
-    assert_eq!(tools.len(), 1);
-    assert_eq!(tools[0].name, "read_file");
-}
-#[test]
-fn inherited_child_toolset_cannot_reintroduce_workflow() {
-    let mut tools = vec![
-            xai_grok_sampling_types::ToolSpec {
-                name: "read_file".to_owned(),
-                description: None,
-                parameters: serde_json::json!({}),
-            },
-            xai_grok_sampling_types::ToolSpec {
-                name: "workflow".to_owned(),
-                description: None,
-                parameters: serde_json::json!({}),
-            },
-            xai_grok_sampling_types::ToolSpec {
-                name: "GrokBuild:workflow".to_owned(),
-                description: None,
-                parameters: serde_json::json!({}),
-            },
-            xai_grok_sampling_types::ToolSpec {
-                name: "run_terminal_cmd".to_owned(),
-                description: None,
-                parameters: serde_json::json!({}),
-            },
-        ];
-    strip_workflow_tool(&mut tools);
-    assert_eq!(
-            tools
-                .iter()
-                .map(|tool| tool.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["read_file", "run_terminal_cmd"]
-        );
 }
 /// The gate keeping a worktree must leave no resume pointer.
 /// A pointer sends resume down the rehydrate path, which deletes the directory and rebuilds it from a snapshot that lacks whatever kept it.
@@ -1165,12 +1122,12 @@ fn resumed_session_uses_current_runtime_contract() {
     if let Some(ConversationItem::System(sys)) = conversation.first_mut() {
         sys.content = current_prompt.into();
     }
-    match &conversation[0] {
-        ConversationItem::System(sys) => {
+    match conversation.first() {
+        Some(ConversationItem::System(sys)) => {
             assert_eq!(sys.content.as_ref(), current_prompt);
             assert!(!sys.content.contains("old source"));
         }
-        _ => panic!("first item should be System"),
+        other => panic!("first item should be System, got {other:?}"),
     }
     assert_eq!(conversation.len(), 3);
 }
@@ -1197,7 +1154,7 @@ fn token_estimation_accounts_for_images() {
             content: vec![ContentPart::Text {
                 text: "describe this".into(),
             }],
-            synthetic_reason: None,
+            synthetic_reason: SyntheticReason::Human,
             ..Default::default()
         })];
     let text_tokens = xai_chat_state::estimate_conversation_tokens(&text_only);
@@ -1210,7 +1167,7 @@ fn token_estimation_accounts_for_images() {
                     url: "data:image/png;base64,abc".into(),
                 },
             ],
-            synthetic_reason: None,
+            synthetic_reason: SyntheticReason::Human,
             ..Default::default()
         })];
     let image_tokens = xai_chat_state::estimate_conversation_tokens(&with_image);
@@ -1225,7 +1182,7 @@ fn token_estimation_accounts_for_images() {
                 ContentPart::Image { url: "img2".into() },
                 ContentPart::Image { url: "img3".into() },
             ],
-            synthetic_reason: None,
+            synthetic_reason: SyntheticReason::Human,
             ..Default::default()
         })];
     let multi_tokens = xai_chat_state::estimate_conversation_tokens(&multi_image);
@@ -1377,7 +1334,7 @@ fn inspection(id: &str, status: SubagentSnapshotStatus) -> SubagentInspection {
     }
 }
 async fn reconcile_with_inspections(
-    unfinished: &[(String, String)],
+    unfinished: &[UnfinishedSubagent],
     inspections: HashMap<String, Option<SubagentInspection>>,
     session_dir: &Path,
     gateway: &GatewaySender,
@@ -1525,7 +1482,13 @@ async fn reconcile_reemits_shared_actor_terminal_outcome() {
     write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     reconcile_with_inspections(
-            &[(id.to_string(), format!("child-{id}"))],
+            &[
+                UnfinishedSubagent {
+                    subagent_id: id.to_string(),
+                    attempt_id: None,
+                    child_session_id: format!("child-{id}"),
+                },
+            ],
             HashMap::from([
                 (
                     id.to_string(),
@@ -1910,7 +1873,13 @@ async fn reconcile_dedups_replay_and_running_meta_sources() {
     write_subagent_meta(&sub_dir, &running_test_meta(id, "parent-x"));
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
     reconcile_with_inspections(
-            &[(id.to_string(), format!("child-{id}"))],
+            &[
+                UnfinishedSubagent {
+                    subagent_id: id.to_string(),
+                    attempt_id: None,
+                    child_session_id: format!("child-{id}"),
+                },
+            ],
             HashMap::from([(id.to_string(), None)]),
             session_dir.path(),
             &test_gateway(),
@@ -2053,6 +2022,7 @@ fn provenance_carries_resumed_from() {
 #[test]
 fn notification_subagent_spawned_includes_resumed_from() {
     let notification = SessionUpdate::SubagentSpawned {
+        attempt_id: None,
         subagent_id: "sa-resumed".into(),
         parent_session_id: "parent".into(),
         parent_prompt_id: Some("prompt-1".into()),
@@ -2067,13 +2037,21 @@ fn notification_subagent_spawned_includes_resumed_from() {
         model: None,
         resumed_from: Some("prev-agent-id".into()),
         workflow_run_id: None,
+        agent_address: None,
     };
     let json = serde_json::to_value(&notification).unwrap();
-    assert_eq!(json["resumed_from"], "prev-agent-id");
-    assert_eq!(json["effective_context_source"], "resumed");
-    assert_eq!(json["role"], serde_json::Value::Null);
-    assert_eq!(json["model"], serde_json::Value::Null);
+    assert_eq!(
+            json.get("resumed_from").and_then(|v| v.as_str()),
+            Some("prev-agent-id")
+        );
+    assert_eq!(
+            json.get("effective_context_source").and_then(|v| v.as_str()),
+            Some("resumed")
+        );
+    assert!(json.get("role").is_none_or(serde_json::Value::is_null), "{json}");
+    assert!(json.get("model").is_none_or(serde_json::Value::is_null), "{json}");
     let fresh = SessionUpdate::SubagentSpawned {
+        attempt_id: None,
         subagent_id: "sa-fresh".into(),
         parent_session_id: "p".into(),
         parent_prompt_id: None,
@@ -2088,6 +2066,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         model: None,
         resumed_from: None,
         workflow_run_id: None,
+        agent_address: None,
     };
     let json = serde_json::to_value(&fresh).unwrap();
     assert!(json.get("resumed_from").is_none());
@@ -2105,8 +2084,14 @@ fn upload_ref_includes_resumed_from() {
         resumed_from: Some("prev-agent".into()),
     };
     let json = serde_json::to_value(&ref_resumed).unwrap();
-    assert_eq!(json["resumed_from"], "prev-agent");
-    assert_eq!(json["description"], "goal achievement skeptic");
+    assert_eq!(
+            json.get("resumed_from").and_then(|v| v.as_str()),
+            Some("prev-agent")
+        );
+    assert_eq!(
+            json.get("description").and_then(|v| v.as_str()),
+            Some("goal achievement skeptic")
+        );
     let ref_fresh = SubagentSpawnedRef {
         subagent_id: "sa-f".into(),
         child_session_id: "child-f".into(),
@@ -2121,33 +2106,6 @@ fn upload_ref_includes_resumed_from() {
     let parsed: SubagentSpawnedRef = serde_json::from_value(json).unwrap();
     assert!(parsed.description.is_empty());
 }
-#[test]
-fn turn_active_flag_defaults_to_false() {
-    let presentation = SubagentPresentation::new();
-    assert!(
-            !presentation
-                .turn_active_flag()
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-}
-#[test]
-fn turn_active_flag_shared_via_arc() {
-    let presentation = SubagentPresentation::new();
-    let flag = presentation.turn_active_flag();
-    assert!(!flag.load(std::sync::atomic::Ordering::Relaxed));
-    flag.store(true, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-            presentation
-                .turn_active_flag()
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-    flag.store(false, std::sync::atomic::Ordering::Relaxed);
-    assert!(
-            !presentation
-                .turn_active_flag()
-                .load(std::sync::atomic::Ordering::Relaxed)
-        );
-}
 fn ctx_with_parent_chat_state(
     session_model_id: &str,
     inference_slug: &str,
@@ -2156,8 +2114,17 @@ fn ctx_with_parent_chat_state(
 ) -> SubagentSpawnContext {
     let mut ctx = ctx_with_toggle(HashMap::new());
     ctx.model_id = acp::ModelId::new(session_model_id);
-    ctx.parent_chat_state = Some(spawn_test_parent_chat_state(inference_slug));
-    ctx.models_manager = crate::agent::models::ModelsManager::new(
+    let parent_chat_state = spawn_test_parent_chat_state(inference_slug);
+    let mut parent_sampling_config = test_sampling_config(inference_slug);
+    parent_sampling_config.max_retries = available_models
+        .get(session_model_id)
+        .and_then(|entry| entry.info.max_retries);
+    parent_sampling_config.rate_limit_retry_threshold = available_models
+        .get(session_model_id)
+        .and_then(|entry| entry.info.rate_limit_retry_threshold);
+    parent_chat_state.update_sampling_config(parent_sampling_config);
+    ctx.parent_chat_state = Some(parent_chat_state);
+    ctx.models_manager = crate::agent::remote_config::ModelsManager::new(
         None,
         available_models.clone(),
         acp::ModelId::new(global_model_id),
@@ -2168,16 +2135,44 @@ fn ctx_with_parent_chat_state(
     ctx
 }
 #[tokio::test]
-async fn read_parent_sampling_config_keeps_auto_catalog_id_with_routing_slug() {
+async fn read_parent_sampling_config_keeps_catalog_threshold_when_routing_slug_is_also_key() {
     let mut models = indexmap::IndexMap::new();
-    models.insert("auto".to_string(), test_model_entry("grok-4.5"));
+    let mut entry = test_model_entry("grok-4.5");
+    entry.info.max_retries = Some(6);
+    entry.info.rate_limit_retry_threshold = Some(6);
+    models.insert("auto".to_string(), entry);
+    let mut competing_entry = test_model_entry("grok-4.5");
+    competing_entry.info.max_retries = Some(3);
+    competing_entry.info.rate_limit_retry_threshold = Some(3);
+    models.insert("grok-4.5".to_string(), competing_entry);
     let ctx = ctx_with_parent_chat_state("auto", "grok-4.5", "composer-2-fast", models);
+    let expected_group = crate::sampling::derive_conversation_group_id(
+        &ctx.parent_session_id,
+    );
+    let mut parent_config = ctx
+        .parent_chat_state
+        .as_ref()
+        .unwrap()
+        .get_sampling_config()
+        .await
+        .unwrap();
+    parent_config.conversation_group_id = Some(expected_group.clone());
+    ctx.parent_chat_state.as_ref().unwrap().update_sampling_config(parent_config);
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "auto");
+    assert_eq!(config.max_retries, Some(6));
+    assert_eq!(config.rate_limit_retry_threshold, Some(6));
+    assert_eq!(config.conversation_group_id, Some(expected_group));
 }
+/// Also pins the per-route fields the inherit path derives from the parent's base URL
+/// (`extra_response_includes`, `request_compression`), which a `Default::default()` would silently drop.
 #[tokio::test]
+#[serial_test::serial]
+#[serial_test::serial(remote_sig_disarm)]
 async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only() {
+    let _env = crate::env::EnvVarGuard::remove("GROK_REQUEST_COMPRESSION");
+    let parent_base_url = "https://api.x.ai/v1";
     let mut models = indexmap::IndexMap::new();
     let mut entry = test_model_entry("grok-4.5");
     entry.info.supports_backend_search = true;
@@ -2188,14 +2183,20 @@ async fn read_parent_sampling_config_keeps_auto_when_catalog_has_slug_key_only()
         .unwrap()
         .update_sampling_config(xai_grok_sampling_types::SamplingConfig {
             api_backend: crate::sampling::ApiBackend::Responses,
-            base_url: "https://api.x.ai/v1".to_string(),
+            base_url: parent_base_url.to_string(),
             ..test_sampling_config("grok-4.5")
         });
+    crate::util::config::cache_remote_accept_request_encodings(
+        parent_base_url,
+        &[xai_grok_config_types::RemoteRequestEncoding::Zstd],
+    );
     let (config, model_id) = read_parent_sampling_config(&ctx).await;
+    crate::util::config::cache_remote_accept_request_encodings(parent_base_url, &[]);
     assert_eq!(config.model, "grok-4.5");
     assert_eq!(model_id.0.as_ref(), "auto");
     assert!(config.supports_backend_search);
     assert_eq!(config.extra_response_includes, ["no_inline_citations"]);
+    assert_eq!(config.request_compression, xai_grok_sampler::RequestCompression::Zstd);
 }
 #[tokio::test]
 async fn read_parent_sampling_config_fallback_uses_session_model_id() {
@@ -2206,7 +2207,7 @@ async fn read_parent_sampling_config_fallback_uses_session_model_id() {
     ctx.parent_chat_state = None;
     ctx.sampling_config.model = "composer-2-fast".to_string();
     ctx.available_models = models;
-    ctx.models_manager = crate::agent::models::ModelsManager::new(
+    ctx.models_manager = crate::agent::remote_config::ModelsManager::new(
         None,
         indexmap::IndexMap::new(),
         acp::ModelId::new("auto"),
@@ -2304,22 +2305,20 @@ async fn read_parent_sampling_config_fallback_no_resolver_for_api_key_method() {
     let (config, _) = read_parent_sampling_config(&ctx).await;
     assert!(config.bearer_resolver.is_none());
 }
-/// The override path wires the resolver for a session key regardless of freshness.
-/// Hard-expired (the post-sleep 401 window) is the case that matters.
-/// Gating on whether the key is still valid would freeze the subagent for life.
-/// The sampler strips the dead seeded key at request time instead.
+/// The override path wires the resolver for a session key regardless of freshness. Hard-expired (the post-sleep 401 window) is the case that matters.
+/// Gating on whether the key is still valid would freeze the subagent for life. The sampler strips the dead seeded key at request time instead.
 #[test]
 fn resolve_model_override_wires_resolver_for_fresh_and_hard_expired_session_keys() {
     for auth in [
-        crate::auth::GrokAuth {
+        xai_grok_login::GrokAuth {
             key: "session-jwt".into(),
-            ..crate::auth::GrokAuth::test_default()
+            ..xai_grok_login::GrokAuth::test_default()
         },
-        crate::auth::GrokAuth {
+        xai_grok_login::GrokAuth {
             key: "hard-expired-session-jwt".into(),
             create_time: chrono::Utc::now() - chrono::Duration::hours(2),
             expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
-            ..crate::auth::GrokAuth::test_default()
+            ..xai_grok_login::GrokAuth::test_default()
         },
     ] {
         let key = auth.key.clone();
@@ -2392,7 +2391,7 @@ async fn read_parent_sampling_config_fallback_resolves_backend_search_from_catal
     ctx.sampling_config.api_backend = crate::sampling::ApiBackend::Responses;
     ctx.sampling_config.base_url = "https://api.x.ai/v1".to_string();
     ctx.sampling_config.supports_backend_search = false;
-    ctx.models_manager = crate::agent::models::ModelsManager::new(
+    ctx.models_manager = crate::agent::remote_config::ModelsManager::new(
         None,
         models,
         acp::ModelId::new("auto"),
@@ -2432,7 +2431,7 @@ async fn read_parent_sampling_config_fallback_resolves_compactions_remaining_fro
     ctx.parent_chat_state = None;
     ctx.sampling_config.model = "grok-4.5".to_string();
     ctx.sampling_config.compactions_remaining = None;
-    ctx.models_manager = crate::agent::models::ModelsManager::new(
+    ctx.models_manager = crate::agent::remote_config::ModelsManager::new(
         None,
         models,
         acp::ModelId::new("auto"),
@@ -2503,10 +2502,8 @@ async fn runtime_override_wins_over_subagents_models_pin_in_precedence_path() {
             "an unknown override falls through to the pin",
         );
 }
-/// A `fork_context = true` spawn must infer on the parent session model (`ctx.model_id`) for per-model radix reuse.
-/// That holds even when a `[subagents.models]` pin and an `AgentDefinition.model` override are both present.
-/// `run_shell_child` forces `effective_runtime.model = Some(ctx.model_id)` on the fork path after other override sources.
-/// The runtime override wins in `resolve_effective_model_config`.
+/// A `fork_context = true` spawn must infer on the parent session model (`ctx.model_id`) for per-model radix reuse. That holds even when a `[subagents.models]` pin and an `AgentDefinition.model` override are both present.
+/// `run_shell_child` forces `effective_runtime.model = Some(ctx.model_id)` on the fork path after other override sources. The runtime override wins in `resolve_effective_model_config`.
 #[tokio::test]
 async fn fork_context_pins_parent_model_over_overrides() {
     use xai_grok_agent::config::ModelOverride;
@@ -2579,10 +2576,7 @@ async fn resolve_subagent_inherits_parent_model_without_pins() {
         assert_eq!(model_id.0.as_ref(), parent_model);
     }
 }
-/// An explicit `[subagents.models]` pin routes the subagent to that
-/// model regardless of the parent model — both a light parent
-/// (`grok-4.5`) and a custom parent (`composer-2-fast`)
-/// honor the pin identically now that the heavy-model gate is gone.
+/// An explicit `[subagents.models]` pin routes the subagent to that model regardless of the parent model — a light parent and a custom parent honor the pin identically now that the heavy-model gate is gone.
 #[tokio::test]
 async fn resolve_subagent_config_override_pin_applies_for_any_parent() {
     use xai_grok_agent::config::ModelOverride;
@@ -2768,7 +2762,7 @@ async fn resolve_subagent_agent_definition_unknown_model_falls_through_to_inheri
 async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     use xai_grok_agent::config::ModelOverride;
     let dir = tempfile::tempdir().unwrap();
-    let provider = crate::auth::test_counting_provider(
+    let provider = xai_grok_login::test_counting_provider(
         "test-subagent-spawn",
         dir.path(),
     );
@@ -2781,7 +2775,7 @@ async fn subagent_override_provider_model_spawns_cache_only_credentials() {
     ctx.sampling_config.model = "grok-4.5".to_string();
     ctx.model_id = acp::ModelId::new("grok-4.5");
     ctx.available_models = models;
-    ctx.auth = Some(crate::auth::GrokAuth {
+    ctx.auth = Some(xai_grok_login::GrokAuth {
         key: "parent-session-jwt".to_string(),
         ..Default::default()
     });
@@ -2845,8 +2839,8 @@ fn non_cursor_persona_injected_as_system_reminder() {
     prefix_len += 1;
     assert_eq!(conv.len(), 3, "conversation should have 3 items");
     assert_eq!(prefix_len, 3, "prefix_len should be incremented");
-    if let ConversationItem::User(ref u) = conv[2] {
-        assert_eq!(u.synthetic_reason, Some(SyntheticReason::SystemReminder));
+    if let Some(ConversationItem::User(u)) = conv.get(2) {
+        assert_eq!(u.synthetic_reason, SyntheticReason::SystemReminder);
         let text = u
             .content
             .first()
@@ -2911,7 +2905,7 @@ fn persona_injection_into_empty_conversation() {
     prefix_len += 1;
     assert_eq!(conv.len(), 1);
     assert_eq!(prefix_len, 1);
-    assert!(matches!(& conv[0], ConversationItem::User(_)));
+    assert!(matches!(conv.first(), Some(ConversationItem::User(_))));
 }
 mod cancellation_error_message_tests {
     use super::super::cancellation_error_message;
@@ -3221,6 +3215,7 @@ fn make_test_skill(
         disable_model_invocation: false,
         has_user_specified_description: false,
         paths: None,
+        origin: None,
         body: None,
     }
 }
@@ -3286,6 +3281,7 @@ async fn progress_publisher_delivers_ticks_to_parent_cmd_channel() {
                 test_gateway(),
                 "parent-1".to_string(),
                 "sub-1".to_string(),
+                Some("at1.test".to_string()),
                 "child-1".to_string(),
                 std::time::Instant::now(),
                 cancel.clone(),

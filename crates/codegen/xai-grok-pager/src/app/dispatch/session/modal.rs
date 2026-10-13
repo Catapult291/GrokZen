@@ -7,8 +7,16 @@ use crate::app::app_view::{ActiveView, AppView};
 use crate::app::dispatch::ctx::{SwitchCause, show_welcome, switch_to_agent};
 use crate::app::dispatch::task_result::unregister_session_effect;
 use crate::scrollback::block::RenderBlock;
+use agent_client_protocol as acp;
 /// Removes the agent and clears `forked_from` pointers to it on surviving agents.
 pub(in crate::app::dispatch) fn remove_agent_and_cleanup(app: &mut AppView, agent_id: AgentId) {
+    let identity_rebind = super::super::dashboard::WorkspaceIdentityRebind::capture(app);
+    if let Some(dashboard) = app.dashboard.as_mut() {
+        dashboard.prepare_agent_unbind(
+            &std::collections::HashSet::from([agent_id]),
+            &mut app.agents,
+        );
+    }
     let removed = app.agents.shift_remove(&agent_id);
     for agent in app.agents.values_mut() {
         if agent.session.forked_from == Some(agent_id) {
@@ -19,17 +27,40 @@ pub(in crate::app::dispatch) fn remove_agent_and_cleanup(app: &mut AppView, agen
         drop(removed);
         crate::memory_release::release_retained_memory("agent-close");
     }
+    identity_rebind.apply(app);
+}
+/// Minimal has no dashboard: `/new` replaces the visible session. A leftover prior
+/// AgentView makes a later `/resume` of it focus-only (no `LoadSession`; GB-4877).
+/// Each dropped view that already has a session id must leave the crash-recovery registry.
+#[must_use]
+pub(in crate::app::dispatch) fn drop_other_agents_in_minimal(
+    app: &mut AppView,
+    keep: AgentId,
+) -> Vec<Effect> {
+    if !app.screen_mode.is_minimal() {
+        return vec![];
+    }
+    let stale: Vec<_> = app
+        .agents
+        .iter()
+        .filter(|(id, _)| **id != keep)
+        .map(|(id, agent)| (*id, agent.session.session_id.clone()))
+        .collect();
+    let mut effects = Vec::new();
+    for (id, session_id) in stale {
+        effects.extend(quiesce_session_effect(session_id.as_ref()));
+        effects.extend(unregister_session_effect(session_id));
+        remove_agent_and_cleanup(app, id);
+    }
+    effects
+}
+/// A closed tab's session is left as it is.
+fn quiesce_session_effect(_session_id: Option<&acp::SessionId>) -> Vec<Effect> {
+    Vec::new()
 }
 /// Close (drop from this pager's in-memory list) the given agent.
-///
-/// Order matters:
-/// 1. Refuse to close the only alive agent (toast "Cannot close the only session -- use /home to exit").
-///    The user has nothing to fall back to inside the agent shell.
-/// 2. If the closed agent is currently active, switch first to a surviving peer using `SwitchCause::Picker`.
-///    The peer is the parent via `forked_from` if alive, else the first surviving entry.
-///    If no peer survives, fall back to Welcome; case 1 already prevents that, so this is a safety net.
-/// 3. Drop the agent from `app.agents`; `shift_remove` preserves insertion order on every other entry.
-///    Clear `forked_from` references on surviving agents so dangling parent pointers cannot resurface.
+/// Refuse to close the only alive agent (toast "Cannot close the only session -- use /home to exit").
+/// Clear `forked_from` references on surviving agents so dangling parent pointers cannot resurface.
 pub(in crate::app::dispatch) fn dispatch_sessions_confirm_close(
     app: &mut AppView,
     closed_id: AgentId,
@@ -58,16 +89,16 @@ pub(in crate::app::dispatch) fn dispatch_sessions_confirm_close(
             show_welcome(app);
         }
     }
-    let effects = unregister_session_effect(
-        app.agents
-            .get(&closed_id)
-            .and_then(|a| a.session.session_id.clone()),
-    );
+    let session_id = app
+        .agents
+        .get(&closed_id)
+        .and_then(|agent| agent.session.session_id.clone());
+    let mut effects = quiesce_session_effect(session_id.as_ref());
+    effects.extend(unregister_session_effect(session_id));
     remove_agent_and_cleanup(app, closed_id);
     effects
 }
 /// Rename the current session via x.ai/session/rename.
-///
 /// Produces Effect::RenameSession which spawns an async ACP ext request.
 /// On completion, TaskResult::RenameSessionComplete shows the result.
 pub(in crate::app::dispatch) fn dispatch_rename_session(

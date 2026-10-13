@@ -3,20 +3,15 @@
 //! See the module-level docs in `mod.rs` for the architectural rationale.
 
 use agent_client_protocol as acp;
-use xai_grok_shell::agent::config::UiConfig;
-use xai_grok_shell::util::config::DISPLAY_REFRESH_DEFAULT_AUTO_CADENCE_ENABLED;
+use xai_grok_shell::agent::config::{
+    ConfigSource, Feature, FeatureConfigLayers, FeatureSources, Resolved, UiConfig,
+};
+use xai_grok_shell::config::EffectiveConfigLayers;
+use xai_grok_shell::util::config::{DISPLAY_REFRESH_DEFAULT_AUTO_CADENCE_ENABLED, RemoteSettings};
 use xai_grok_tools::implementations::grok_build::ask_user_question;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// Stable identity for a setting.
-/// The string id matches the `UiConfig` serde field name (for SHELL/SHARED settings).
-/// It is the canonical key referenced by tests, telemetry, and registry lookups.
-///
-/// We deliberately do NOT use a `SettingId` enum: enum renames would ripple through call sites.
-/// `&'static str` ties the registry's vocabulary directly to the shell schema.
+/// Stable identity for a setting. We deliberately do NOT use a `SettingId` enum: enum renames would ripple through
+/// call sites.
 pub type SettingKey = &'static str;
 
 /// Ownership class for a setting.
@@ -128,11 +123,8 @@ pub fn dynamic_enum_choices(
     }
 }
 
-/// String validator applied at write time.
-///
-/// **SECURITY:** The editor's char filter rejects both Cc and Cf
-/// Unicode categories to prevent Trojan-Source visual spoofing.
-/// New input paths (e.g. paste) must re-apply this filter.
+/// String validator applied at write time. Unicode categories to prevent Trojan-Source visual spoofing. New input
+/// paths must re-apply this filter.
 #[derive(Debug, Clone, Copy)]
 pub enum StringValidator {
     /// Non-empty, no whitespace. Used for model ids.
@@ -178,10 +170,8 @@ pub enum SettingKind {
         source: DynamicEnumSource,
         supports_preview: bool,
     },
-    /// A navigational row that opens a sub-sheet of `children` (other registered settings, by key).
-    /// Carries no scalar value of its own: `current_value_for` and `default_value_for` skip it.
-    /// The modal renders it as a chevron row whose Enter opens the sub-sheet.
-    /// Children are hidden from the top-level list (rendered only inside the sub-sheet).
+    /// A navigational row that opens a sub-sheet of `children` (other registered settings, by key). Children are hidden
+    /// from the top-level list (rendered only inside the sub-sheet).
     Group {
         children: &'static [SettingKey],
     },
@@ -217,6 +207,104 @@ pub enum SettingValue {
     String(String),
     Enum(&'static str),
     Int(i64),
+}
+
+/// The one write of the user key on disk right now, and the newest intent waiting behind it.
+/// Writing one key at a time keeps the disk in toggle order whatever the runtime does with the tasks; a failed write settles the mirror back on `persisted`.
+#[derive(Debug, Clone, Copy)]
+pub struct PendingWrite {
+    /// What the disk held when the write was issued, then what each completed write left there.
+    pub persisted: Option<bool>,
+    /// The newest value toggled while the write was pending; its completion issues it unless it already matches `persisted`.
+    pub queued: Option<Option<bool>>,
+}
+
+/// A registry `[features]` row as the settings modal sees it.
+/// The user `config.toml` key is the only layer the modal writes; the other tiers are seeded once so the effective value can be re-resolved after a local write without re-reading disk.
+#[derive(Debug, Clone, Copy)]
+pub struct FeatureOverrideState {
+    pub feature: Feature,
+    /// The pin and the config tier split around the user key (`config.user` is the saved override, `None` when no key is saved).
+    pub config: FeatureConfigLayers,
+    /// Environment and remote; `resolve` takes the pin and config tiers from `config`.
+    pub other_tiers: FeatureSources,
+    /// `None` while no write of the user key is pending.
+    pub writes: Option<PendingWrite>,
+}
+
+impl FeatureOverrideState {
+    /// Every tier unset: the compiled default applies.
+    pub fn new(feature: Feature) -> Self {
+        FeatureOverrideState {
+            feature,
+            config: FeatureConfigLayers::default(),
+            other_tiers: FeatureSources::default(),
+            writes: None,
+        }
+    }
+
+    /// Seed from the layers and campaign patches the shell's `Config` is merged from, so the config tier here is the one
+    /// the next agent latches. A layer that fails to load leaves the pin and the config tier unset.
+    pub fn from_layers(
+        feature: Feature,
+        layers: Option<&EffectiveConfigLayers>,
+        remote: Option<&RemoteSettings>,
+    ) -> Self {
+        let mut state = FeatureOverrideState {
+            feature,
+            config: FeatureConfigLayers::default(),
+            other_tiers: FeatureSources {
+                remote: feature.remote_value(remote),
+                ..FeatureSources::from_process_env(feature)
+            },
+            writes: None,
+        };
+        if let Some(layers) = layers {
+            state.reseed_config_layers(layers);
+        }
+        state
+    }
+
+    /// Re-read the pin and the config tier from `layers`, as after the campaign set changed.
+    /// The user key's mirror stays only while a write is pending, since the disk is then behind it.
+    pub fn reseed_config_layers(&mut self, layers: &EffectiveConfigLayers) {
+        let pending_user = self.writes.is_some().then_some(self.config.user);
+        self.config = self
+            .feature
+            .config_layers(&layers.layers, &layers.active_campaigns);
+        if let Some(user) = pending_user {
+            self.config.user = user;
+        }
+    }
+
+    /// What the feature resolves to at the next start, given the saved override.
+    pub fn resolve(&self) -> Resolved<bool> {
+        self.feature.resolve(FeatureSources {
+            pin: self.config.pin,
+            config: self.config.merged(),
+            ..self.other_tiers
+        })
+    }
+
+    /// Names the tier that outranks the user key: a pin, the environment, or a config layer above the user file.
+    /// A layer below it never forces the row: a saved key would decide.
+    pub fn forced_by(&self) -> Option<String> {
+        let source = self.resolve().source;
+        match source {
+            ConfigSource::Requirement | ConfigSource::Env => {
+                Some(self.feature.source_label(source))
+            }
+            ConfigSource::Config => Some(self.config.above_user?.layer.label().to_owned()),
+            ConfigSource::Remote
+            | ConfigSource::Default
+            | ConfigSource::Cli
+            | ConfigSource::UserConfig
+            | ConfigSource::ManagedConfig
+            | ConfigSource::SystemManagedConfig
+            | ConfigSource::EnvOverlay
+            | ConfigSource::BuildPolicy => None,
+        }
+    }
 }
 
 /// Why `coding_data_sharing` cannot be changed in the settings modal.
@@ -256,10 +344,9 @@ pub struct PagerLocalSnapshot {
     /// `(display_name, ModelId)` pairs from the active session's catalog.
     /// Cloned into the snapshot so the modal's validator and resolver are self-contained (the modal outlives the borrow on `app.agents`).
     pub available_models: Vec<(String, acp::ModelId)>,
-    /// Whether the user has opted OUT of coding data sharing.
-    /// Lives in auth metadata (no `UiConfig` field).
-    /// The mapping is inverted: `opt_out == false` renders as the canonical "opt-in".
-    /// The snapshot default is `true` (opted out) to match the safer consumer default.
+    /// Whether the user has opted OUT of coding data sharing. Lives in auth metadata (no `UiConfig` field). The mapping
+    /// is inverted: `opt_out == false` renders as the canonical "opt-in". The snapshot default is `true` (opted out) to
+    /// match the safer consumer default.
     pub coding_data_sharing_opt_out: bool,
     /// Why `coding_data_sharing` cannot be changed here (`None` means editable).
     pub coding_data_sharing_lock: Option<CodingDataSharingLock>,
@@ -280,7 +367,7 @@ pub struct PagerLocalSnapshot {
     /// Mirrors `AppView::appearance.scrollback.scroll.respect_manual_folds` at snapshot time.
     pub respect_manual_folds: bool,
     /// Mirrors `AppView::auto_mode_gate` at snapshot time.
-    /// When false the permission-mode picker hides the "Auto" choice (matches the Shift+Tab cycle, which skips Auto when the feature gate is off).
+    /// When false the permission-mode picker hides the "Auto-review" choice (matches the Shift+Tab cycle, which skips it when the feature gate is off).
     pub auto_mode_gate: bool,
     /// `[toolset.ask_user_question].timeout_enabled` mirror (effective TOML merge, like `show_tips`).
     /// `None` means unset in TOML, so the default `true` applies.
@@ -288,10 +375,8 @@ pub struct PagerLocalSnapshot {
     /// Live `voice_config.language` at snapshot time.
     /// Lets the modal show the language actually in effect when `[ui].voice_stt_language` is unset but an explicit `[voice].language` applies.
     pub voice_stt_language: String,
-    /// Mirrors `AgentView::scheduler_background_loops` (the value the shell pinned for THIS session).
-    /// Falls back to `AppView::scheduler_background_loops_seed` before the session response lands.
-    /// `/loop` reads it to describe where a scheduled fire runs.
-    pub scheduler_background_loops: bool,
+    /// Mirrors `AppView::subagent_model_inheritance` at snapshot time.
+    pub subagent_model_inheritance: FeatureOverrideState,
 }
 
 impl Default for PagerLocalSnapshot {
@@ -315,8 +400,9 @@ impl Default for PagerLocalSnapshot {
             auto_mode_gate: false,
             ask_user_question_timeout_enabled: None,
             voice_stt_language: xai_grok_voice::STT_LANGUAGE_DEFAULT.to_string(),
-            // Matches `resolve_scheduler_background_loops`'s default.
-            scheduler_background_loops: true,
+            subagent_model_inheritance: FeatureOverrideState::new(
+                Feature::SubagentModelInheritance,
+            ),
         }
     }
 }
@@ -332,11 +418,9 @@ pub fn canonical_voice_capture_mode(value: Option<&str>) -> &'static str {
     }
 }
 
-/// Canonicalize a raw voice STT language to a settings choice.
-///
-/// Delegates to [`xai_grok_voice::canonicalize_stt_language`] so the pager and the STT client share one catalog.
-/// The catalog is the official Grok STT languages plus the client-only `auto`.
-/// Unknown, blank, and `None` all fall back to `en`.
+/// Canonicalize a raw voice STT language to a settings choice. Delegates to
+/// [`xai_grok_voice::canonicalize_stt_language`] so the pager and the STT client share one catalog. The catalog is
+/// the official Grok STT languages plus the client-only `auto`.
 pub fn canonical_voice_stt_language(value: Option<&str>) -> &'static str {
     xai_grok_voice::canonicalize_stt_language(value)
 }
@@ -389,10 +473,6 @@ impl PagerLocalSnapshot {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// Registry
-// ---------------------------------------------------------------------------
 
 /// Process-wide settings registry.
 /// Built in `main` and stored on `AppView::settings_registry: Arc<SettingsRegistry>`.
@@ -483,9 +563,7 @@ fn build_search_haystack(m: &SettingMeta) -> String {
     s
 }
 
-// ---------------------------------------------------------------------------
 // Snapshot reads: the one place that maps a SettingKey to its live field
-// ---------------------------------------------------------------------------
 
 /// Read the current value of `key` from `UiConfig` (SHELL/SHARED) or the pager snapshot (PAGER-owned).
 /// Returns `None` for unknown keys.
@@ -500,6 +578,7 @@ pub fn current_value_for(
         "compact_mode" => Some(SettingValue::Bool(ui.compact_mode)),
         "show_timestamps" => Some(SettingValue::Bool(ui.show_timestamps.unwrap_or(true))),
         "show_timeline" => Some(SettingValue::Bool(ui.show_timeline_enabled())),
+        "dashboard_preview" => Some(SettingValue::Bool(ui.dashboard_preview_enabled())),
         // The cache is the send-path source of truth (same pattern as group_tool_verbs)
         "page_flip_on_send" => Some(SettingValue::Bool(
             crate::appearance::cache::load_page_flip_on_send(),
@@ -660,6 +739,10 @@ pub fn current_value_for(
                 .ask_user_question_timeout_enabled
                 .unwrap_or(ask_user_question::DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED),
         )),
+        // The value the shell latches at the next start, every tier included; the detail text separates the saved key from it
+        "subagent_model_inheritance" => Some(SettingValue::Bool(
+            pager.subagent_model_inheritance.resolve().value,
+        )),
         // default_selected_permission: maps `[ui].default_selected_permission` onto one of the four registry canonicals
         // `None` or an unrecognised value on disk falls back to `always_allow_all_sessions`, the effective default
         // The cursor lands on the "Always allow on all sessions" row, picked explicitly in `enqueue_permission`
@@ -723,7 +806,7 @@ pub fn current_value_for(
     }
 }
 
-/// Consent chooser: no docs tip, and no `d` reset (hint or key).
+/// Consent chooser: no docs tip, and no `d` reset inside the chooser (hint or key).
 pub fn is_consent_chooser(key: &str) -> bool {
     key == "coding_data_sharing"
 }
@@ -741,10 +824,6 @@ pub fn default_value_for(meta: &SettingMeta) -> SettingValue {
         SettingKind::Group { .. } => SettingValue::Bool(false),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -842,6 +921,9 @@ mod tests {
                         ui.show_timeline_enabled(),
                         "show_timeline default drifts from UiConfig::default()"
                     );
+                }
+                ("dashboard_preview", SettingKind::Bool { default }) => {
+                    assert_eq!(ui.dashboard_preview_enabled(), *default);
                 }
                 ("page_flip_on_send", SettingKind::Bool { default }) => {
                     assert_eq!(
@@ -1005,6 +1087,14 @@ mod tests {
                         xai_grok_shell::util::config::DEFAULT_REMEMBER_TOOL_APPROVALS,
                         "remember_tool_approvals default drifts from the shared \
                          resolver const in xai-grok-shell"
+                    );
+                }
+                // subagent_model_inheritance: no UiConfig mirror (a `[features]` row); anchored on the FEATURES row
+                ("subagent_model_inheritance", SettingKind::Bool { default }) => {
+                    assert_eq!(
+                        *default,
+                        Feature::SubagentModelInheritance.default_enabled(),
+                        "subagent_model_inheritance default drifts from the FEATURES row"
                     );
                 }
                 // ask_user_question timeout: no UiConfig mirror (lives under `[toolset]`); the default is anchored on the resolver-shared const
@@ -1560,6 +1650,60 @@ mod tests {
         );
     }
 
+    /// The row shows the next-start resolution (a saved key over remote, a pin over both) and is fixed only by a layer above the user file.
+    #[test]
+    fn feature_override_state_resolves_saved_over_remote_and_is_fixed_by_layers_above_the_user() {
+        use xai_grok_shell::agent::config::{FeatureConfigLayer, FeatureLayerValue};
+        let feature = Feature::SubagentModelInheritance;
+        let mut state = FeatureOverrideState::new(feature);
+        assert!(!state.resolve().value);
+        assert_eq!(None, state.forced_by());
+
+        state.other_tiers.remote = Some(true);
+        assert!(state.resolve().value);
+        state.config.user = Some(false);
+        assert!(!state.resolve().value);
+        assert_eq!(None, state.forced_by());
+
+        // A managed layer shows through while no user key exists, but a key would decide, so it never fixes the row
+        state.config.below_user = Some(FeatureLayerValue {
+            layer: FeatureConfigLayer::SystemManaged,
+            value: true,
+        });
+        assert_eq!(None, state.forced_by());
+        state.config.user = None;
+        assert!(state.resolve().value);
+        assert_eq!(None, state.forced_by());
+
+        // The overlay beats a user key, so it fixes the row even with one saved
+        state.config.user = Some(true);
+        state.config.above_user = Some(FeatureLayerValue {
+            layer: FeatureConfigLayer::Overlay,
+            value: false,
+        });
+        assert!(!state.resolve().value);
+        assert_eq!(
+            Some(FeatureConfigLayer::Overlay.label().to_owned()),
+            state.forced_by()
+        );
+
+        state.config.pin = Some(true);
+        assert!(state.resolve().value);
+        assert_eq!(
+            Some(feature.source_label(ConfigSource::Requirement)),
+            state.forced_by()
+        );
+
+        let pager = PagerLocalSnapshot {
+            subagent_model_inheritance: state,
+            ..Default::default()
+        };
+        assert_eq!(
+            Some(SettingValue::Bool(true)),
+            current_value_for("subagent_model_inheritance", &UiConfig::default(), &pager)
+        );
+    }
+
     /// Keywords must be lowercase and non-empty.
     #[test]
     fn keywords_lowercase_and_non_empty() {
@@ -1630,7 +1774,7 @@ mod tests {
         let reg = SettingsRegistry::defaults();
         let hits = reg.search("compact density");
         assert_eq!(hits.len(), 1, "expected 1 match for 'compact density'");
-        assert_eq!(hits[0].key, "compact_mode");
+        assert_eq!(hits.first().map(|h| h.key), Some("compact_mode"));
 
         let empty = reg.search("xyzzy-no-match");
         assert!(empty.is_empty(), "expected no match for 'xyzzy-no-match'");

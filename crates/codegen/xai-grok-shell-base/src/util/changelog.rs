@@ -25,13 +25,8 @@ fn changelog_cache_names() -> (&'static str, &'static str) {
     }
 }
 
-/// A single structured changelog entry from the published JSON changelog.
-///
-/// Shape must match the output of `render_external_json` in `changelog.sh`:
-///   `{category, description, breaking_change}`
-/// If you change fields here, update `changelog.sh:render_external_json` too.
-///
-/// All fields use `#[serde(default)]` so a single malformed entry doesn't kill the entire array parse.
+/// A single structured changelog entry from the published JSON changelog. Shape must match the output of `render_external_json` in `changelog.sh`: `{category, description, breaking_change}`
+/// If you change fields here, update `changelog.sh:render_external_json` too. All fields use `#[serde(default)]` so a single malformed entry doesn't kill the entire array parse.
 /// Entries with an empty description are filtered out by `bullets_from_entries`.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ChangelogEntry {
@@ -55,7 +50,6 @@ pub struct Changelog {
 }
 
 /// Manages changelog retrieval from CDN with local disk caching.
-///
 /// Single entry point: `fetch()` returns both markdown and JSON in one `Changelog` struct.
 /// Each format is fetched independently with its own cache file, so a failure in one doesn't block the other.
 pub struct ChangelogManager {
@@ -84,20 +78,9 @@ impl ChangelogManager {
         }
     }
 
-    /// Fetch both markdown and JSON changelogs for the current version.
-    ///
-    /// Each format is fetched independently (CDN, 3 s timeout) and cached
-    /// to disk. On failure, falls back to the cached copy. Either field
-    /// may be `None` if offline with no cache.
-    ///
-    /// When `GROK_CHANGELOG_OFFLINE` is set (PTY / integration tests), skip
-    /// the CDN entirely and read only the disk cache so seeded fixtures win
-    /// deterministically without network races. Paths are re-resolved from
-    /// the product home so harness-injected overrides apply before first use.
-    ///
-    /// JSON is only cached after a successful parse to avoid poisoning the
-    /// disk cache with malformed content (the markdown cache is write-through
-    /// since it's consumed as raw text).
+    /// Fetch both markdown and JSON changelogs for the current version. Each format is fetched independently (CDN, 3 s timeout) and cached to disk, falling back to the cached copy on failure.
+    /// Either field may be `None` if offline with no cache. When `GROK_CHANGELOG_OFFLINE` is set (PTY / integration tests), the CDN is skipped and only the disk cache is read.
+    /// JSON is cached only after a successful parse; the markdown cache is write-through since it's consumed as raw text.
     pub fn fetch(&self) -> Changelog {
         // Community releases must not fall back to the official changelog CDN.
         // A locally seeded community changelog remains available offline.
@@ -105,11 +88,8 @@ impl ChangelogManager {
         Self::from_product_home().fetch_with(offline, CHANGELOG_BASE)
     }
 
-    /// Fetch using this manager's already-resolved cache paths, an explicit offline flag, and an explicit CDN base.
-    ///
-    /// Split out of [`fetch`] so unit tests can drive it against a temp home without touching process-global env.
-    /// Mutating `GROK_HOME` / `GROK_CHANGELOG_OFFLINE` races across the parallel test harness.
-    /// Passing an unreachable `base` forces a deterministic CDN miss instead of depending on whether the sandbox happens to block network.
+    /// Fetch using this manager's already-resolved cache paths, an explicit offline flag, and an explicit CDN base. Split out of [`fetch`] so unit tests can drive it against a temp home without touching process-global env.
+    /// Mutating `GROK_HOME` / `GROK_CHANGELOG_OFFLINE` races across the parallel test harness. Passing an unreachable `base` forces a deterministic CDN miss instead of depending on whether the sandbox happens to block network.
     /// Production callers always go through [`fetch`].
     fn fetch_with(&self, offline: bool, base: &str) -> Changelog {
         if offline {
@@ -211,7 +191,6 @@ fn strip_markdown_inline(s: &str) -> String {
 }
 
 /// Convert changelog entries to plain-text bullet strings.
-///
 /// Strips `**bold**` and backtick formatting from each description and returns at most `max` entries.
 /// Entries with an empty description (from tolerant deserialization) are skipped.
 pub fn bullets_from_entries(entries: &[ChangelogEntry], max: usize) -> Vec<String> {
@@ -277,7 +256,10 @@ mod tests {
         );
         let entries = changelog.entries.expect("seeded json entries");
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].description, "seeded entry");
+        let [entry] = entries.as_slice() else {
+            panic!("expected exactly one entry, got {}", entries.len());
+        };
+        assert_eq!(entry.description, "seeded entry");
     }
 
     #[test]
@@ -318,9 +300,10 @@ mod tests {
         ];
 
         let bullets = bullets_from_entries(&entries, 2);
-        assert_eq!(bullets.len(), 2);
-        assert_eq!(bullets[0], "Added dark mode support");
-        assert_eq!(bullets[1], "Fixed crash on startup");
+        assert_eq!(
+            bullets.as_slice(),
+            ["Added dark mode support", "Fixed crash on startup"]
+        );
     }
 
     #[test]
@@ -351,9 +334,11 @@ mod tests {
         // A missing description field defaults to an empty string, not a parse error
         let json = r#"[{"category":"features"},{"description":"ok"}]"#;
         let entries: Vec<ChangelogEntry> = serde_json::from_str(json).unwrap();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].description, "");
-        assert_eq!(entries[1].category, "");
-        assert_eq!(entries[1].description, "ok");
+        let [first, second] = entries.as_slice() else {
+            panic!("expected two entries: {entries:?}");
+        };
+        assert_eq!(first.description, "");
+        assert_eq!(second.category, "");
+        assert_eq!(second.description, "ok");
     }
 }

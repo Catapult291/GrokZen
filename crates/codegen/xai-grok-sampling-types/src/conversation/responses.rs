@@ -140,7 +140,7 @@ impl From<&ConversationRequest> for rs::CreateResponse {
             prompt_cache_retention: None,
             reasoning: Some(rs::Reasoning {
                 effort: req.reasoning_effort.map(|e| e.to_responses_api()),
-                summary: Some(rs::ReasoningSummary::Concise),
+                summary: crate::ReasoningSummary::default().to_responses_api(),
             }),
             safety_identifier: None,
             service_tier: None,
@@ -285,9 +285,7 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
 }
 
 fn content_parts_to_easy_input_content(parts: &[ContentPart]) -> rs::EasyInputContent {
-    if parts.len() == 1
-        && let ContentPart::Text { text } = &parts[0]
-    {
+    if let [ContentPart::Text { text }] = parts {
         return rs::EasyInputContent::Text(text.as_ref().to_owned());
     }
 
@@ -310,8 +308,6 @@ fn content_parts_to_easy_input_content(parts: &[ContentPart]) -> rs::EasyInputCo
 
 /// The request's client function tools.
 /// A function tool whose name collides with a backend-hosted tool is dropped: sending both is rejected as a duplicate, so the hosted tool wins.
-///
-/// No hosted tool is emitted here.
 /// Both ride the raw-JSON [`extra_tool_entries`] channel instead.
 fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
     let tools: Vec<rs::Tool> = req
@@ -341,10 +337,8 @@ fn build_responses_tools(req: &ConversationRequest) -> Vec<rs::Tool> {
 }
 
 /// Every hosted tool as a raw JSON entry, which the sampler client splices into the serialized `tools` array.
-/// `x_search` rides this channel because it has no `rs::Tool` variant.
 /// `web_search` rides it because async_openai's `rs::WebSearchToolFilters` models only `allowed_domains` and cannot carry `excluded_domains`.
 /// Emitting either as a typed `rs::Tool` as well would send it twice, which the API rejects as a duplicate.
-/// The JSON built here is byte-identical to the native `rs::Tool::WebSearch` for the no-filter and allowlist-only cases.
 pub fn extra_tool_entries(hosted_tools: &[HostedTool]) -> Vec<serde_json::Value> {
     let mut entries = Vec::new();
     for tool in hosted_tools {

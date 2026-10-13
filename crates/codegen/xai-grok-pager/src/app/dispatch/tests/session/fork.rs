@@ -1,7 +1,5 @@
 use super::*;
 
-// ── Worktree session tests ───────────────────────────────────────
-
 #[test]
 fn open_new_worktree_dialog_sets_dialog_state() {
     let mut app = test_app();
@@ -25,8 +23,11 @@ fn worktree_forked_sets_session_id_eagerly_and_emits_load() {
     let id = AgentId(0);
 
     // Before WorktreeForked: session_id is None, loading_replay is false.
-    assert!(app.agents[&id].session.session_id.is_none());
-    assert!(!app.agents[&id].session.loading_replay);
+    let Some(agent) = app.agents.get(&id) else {
+        panic!("expected agent {id:?}");
+    };
+    assert!(agent.session.session_id.is_none());
+    assert!(!agent.session.loading_replay);
 
     let worktree_path = PathBuf::from("/tmp/grok-worktrees/pager-fork");
     let session_cwd = PathBuf::from("/tmp/grok-worktrees/pager-fork/sub");
@@ -40,26 +41,32 @@ fn worktree_forked_sets_session_id_eagerly_and_emits_load() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
 
     // session_id set eagerly.
+    let Some(agent) = app.agents.get(&id) else {
+        panic!("expected agent {id:?}");
+    };
     assert_eq!(
-        app.agents[&id].session.session_id,
+        agent.session.session_id,
         Some(acp::SessionId::new("forked-sess-1"))
     );
     // loading_replay enabled so UI suppresses redraws during replay.
-    assert!(app.agents[&id].session.loading_replay);
+    assert!(agent.session.loading_replay);
     // CWD updated to worktree.
-    assert_eq!(app.agents[&id].session.cwd, session_cwd);
-    assert!(app.agents[&id].session.is_worktree);
+    assert_eq!(agent.session.cwd, session_cwd);
+    assert!(agent.session.is_worktree);
     // Emits LoadSession effect.
     assert_eq!(effects.len(), 1);
-    assert!(matches!(&effects[0], Effect::LoadSession { session_id, .. }
-                if session_id == "forked-sess-1"));
+    assert!(
+        matches!(effects.first(), Some(Effect::LoadSession { session_id, .. })
+                if session_id == "forked-sess-1")
+    );
     // Scrollback has the "Worktree ready" message.
-    assert!(!app.agents[&id].scrollback.is_empty());
+    assert!(!agent.scrollback.is_empty());
 }
 
 #[test]
@@ -118,11 +125,14 @@ fn worktree_forked_clears_sticky_branch_from_main_repo() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
 
-    let agent = &app.agents[&id];
+    let Some(agent) = app.agents.get(&id) else {
+        panic!("expected agent {id:?}");
+    };
     assert!(
         agent.current_branch.is_none(),
         "sticky main-repo branch must not survive the worktree cwd switch"
@@ -160,6 +170,7 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
             ),
             restore_degree: Some(xai_grok_workspace::session::git::RestoreDegree::Full),
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -167,21 +178,66 @@ fn worktree_forked_with_restore_shows_summary_in_scrollback() {
     // Emits LoadSession
     assert_eq!(effects.len(), 1);
     assert!(matches!(
-        &effects[0],
-        Effect::LoadSession { session_id, .. } if session_id == "forked-sess-2"
+        effects.first(),
+        Some(Effect::LoadSession { session_id, .. }) if session_id == "forked-sess-2"
     ));
     // The scrollback contains the restore summary
-    let has_restore_msg = app.agents[&id]
+    let Some(agent) = app.agents.get(&id) else {
+        panic!("expected agent {id:?}");
+    };
+    let has_restore_msg = agent
         .scrollback
-        .entries_in_range(0..app.agents[&id].scrollback.len())
+        .entries_in_range(0..agent.scrollback.len())
         .iter()
         .any(|e| matches!(&e.block, RenderBlock::System(s) if s.text.contains("Code restored")));
     assert!(has_restore_msg, "expected restore summary in scrollback");
     assert_eq!(
-        app.agents[&id].session.restore_degree,
+        agent.session.restore_degree,
         Some(xai_grok_workspace::session::git::RestoreDegree::Full),
         "restore_degree must be stored on the session"
     );
+}
+
+#[test]
+fn worktree_forked_with_strategy_shows_summary_in_scrollback() {
+    let mut app = test_app_git();
+    dispatch(
+        Action::NewWorktreeSession {
+            load_session_id: Some("orig-sess".into()),
+            label: None,
+            git_ref: None,
+        },
+        &mut app,
+    );
+    let id = AgentId(0);
+    dispatch(
+        Action::TaskComplete(TaskResult::WorktreeForked {
+            agent_id: id,
+            session_id: acp::SessionId::new("forked-sess-strategy"),
+            worktree_path: PathBuf::from("/tmp/grok-worktrees/pager-fork"),
+            session_cwd: PathBuf::from("/tmp/grok-worktrees/pager-fork"),
+            code_restored: false,
+            restore_summary: None,
+            restore_degree: None,
+            resume_session_id: Some("orig-sess".into()),
+            strategy_summary: Some("Requested Grove; using `grove-fuse` (local objects).".into()),
+        }),
+        &mut app,
+    );
+    let Some(agent) = app.agents.get(&id) else {
+        panic!("expected agent {id:?}");
+    };
+    let has_strategy = agent
+        .scrollback
+        .entries_in_range(0..agent.scrollback.len())
+        .iter()
+        .any(|e| {
+            matches!(
+                &e.block,
+                RenderBlock::System(s) if s.text.contains("Requested Grove; using `grove-fuse`")
+            )
+        });
+    assert!(has_strategy, "expected strategy summary in scrollback");
 }
 
 /// The server can emit `code_restored: false` with a non-empty summary (e.g. "restore aborted (checkout failed)…").
@@ -213,13 +269,15 @@ fn worktree_forked_with_restore_failure_shows_warning_banner() {
             ),
             restore_degree: None,
             resume_session_id: Some("orig-fail".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
 
-    let entries = app.agents[&id]
-        .scrollback
-        .entries_in_range(0..app.agents[&id].scrollback.len());
+    let Some(agent) = app.agents.get(&id) else {
+        panic!("expected agent {id:?}");
+    };
+    let entries = agent.scrollback.entries_in_range(0..agent.scrollback.len());
     let warn = entries.iter().find_map(|e| match &e.block {
         RenderBlock::System(s) if s.text.contains("Code restore failed") => Some(&s.text),
         _ => None,
@@ -295,11 +353,11 @@ fn fork_initiation_supersedes_open_reload_window() {
             agent_id: id,
             session_id: acp::SessionId::new("sess-fork"),
             models: None,
+            modes: None,
             code_restored: false,
             restore_summary: None,
             restore_degree: None,
             running_prompt_id: None,
-            scheduler_background_loops: None,
         }),
         &mut app,
     );
@@ -327,7 +385,11 @@ fn slash_new_uses_worktree_cwd() {
     }
     // The new agent (id=1) inherits is_worktree from the source agent
     let new_id = AgentId(1);
-    assert!(app.agents[&new_id].session.is_worktree);
+    assert!(
+        app.agents
+            .get(&new_id)
+            .is_some_and(|a| a.session.is_worktree)
+    );
 }
 
 #[test]
@@ -418,10 +480,9 @@ fn dispatch_fork_without_session_id_toasts_and_returns_no_effect() {
     assert!(effects.is_empty());
     assert_eq!(app.agents.len(), 1);
     // Toast lives on the agent (not in scrollback).
-    let toast = app.agents[&AgentId(0)]
-        .toast
-        .as_ref()
-        .expect("toast should be set");
+    let Some(toast) = app.agents.get(&AgentId(0)).and_then(|a| a.toast.as_ref()) else {
+        panic!("toast should be set");
+    };
     assert!(toast.0.contains("still being created"), "got: {}", toast.0);
 }
 
@@ -458,10 +519,9 @@ fn dispatch_fork_worktree_flag_non_git_toasts_and_returns_no_effect() {
     let effects = dispatch(Action::Fork(fork_args(Some(true), None)), &mut app);
     assert!(effects.is_empty(), "must reject synchronously");
     assert_eq!(app.agents.len(), 1, "no placeholder agent created");
-    let toast = app.agents[&AgentId(0)]
-        .toast
-        .as_ref()
-        .expect("toast should be set");
+    let Some(toast) = app.agents.get(&AgentId(0)).and_then(|a| a.toast.as_ref()) else {
+        panic!("toast should be set");
+    };
     assert!(
         toast.0.contains("not in a git repository"),
         "got: {}",
@@ -474,7 +534,11 @@ fn dispatch_fork_no_flag_non_git_skips_modal_and_forks_without_worktree() {
     // When current_branch is None (not in a git repo), the worktree question is meaningless: skip it and fork with worktree=false
     let mut app = test_app_with_agent();
     // Do NOT set current_branch; the default None simulates a non-git cwd
-    assert!(app.agents[&AgentId(0)].current_branch.is_none());
+    assert!(
+        app.agents
+            .get(&AgentId(0))
+            .is_some_and(|a| a.current_branch.is_none())
+    );
     let effects = dispatch(
         Action::Fork(fork_args(None, Some("explore offline"))),
         &mut app,
@@ -507,10 +571,13 @@ fn dispatch_fork_no_flag_always_opens_question_modal() {
     assert!(effects.is_empty(), "no effects until modal answered");
     // No fork agent yet (placeholder construction is deferred).
     assert_eq!(app.agents.len(), 1);
-    let qv = app.agents[&AgentId(0)]
-        .question_view
-        .as_ref()
-        .expect("modal must be open");
+    let Some(qv) = app
+        .agents
+        .get(&AgentId(0))
+        .and_then(|a| a.question_view.as_ref())
+    else {
+        panic!("modal must be open");
+    };
     match qv.local_kind.as_ref().expect("local_kind must be set") {
         crate::views::question_view::LocalQuestionKind::Fork { directive, cut } => {
             assert_eq!(directive.as_deref(), Some("debug timeout"));
@@ -523,16 +590,15 @@ fn dispatch_fork_no_flag_always_opens_question_modal() {
         other => panic!("expected Fork, got {other:?}"),
     }
     // The modal must offer four options: Yes / No / Always / Never.
+    let Some(question) = qv.questions.first() else {
+        panic!("expected a question: {:?}", qv.questions);
+    };
     assert_eq!(
-        qv.questions[0].options.len(),
+        question.options.len(),
         4,
         "modal must offer exactly 4 options (Yes/No/Always/Never)"
     );
-    let labels: Vec<&str> = qv.questions[0]
-        .options
-        .iter()
-        .map(|o| o.label.as_str())
-        .collect();
+    let labels: Vec<&str> = question.options.iter().map(|o| o.label.as_str()).collect();
     assert_eq!(
         labels,
         vec!["Yes", "No", "Always worktree", "Never worktree"]
@@ -565,10 +631,13 @@ fn open_fork_question_refuses_when_existing_question_is_open() {
     let effects = dispatch(Action::Fork(fork_args(None, None)), &mut app);
     assert!(effects.is_empty());
     // Existing question survives; toast was shown via show_toast.
-    let qv = app.agents[&AgentId(0)]
-        .question_view
-        .as_ref()
-        .expect("existing question still present");
+    let Some(qv) = app
+        .agents
+        .get(&AgentId(0))
+        .and_then(|a| a.question_view.as_ref())
+    else {
+        panic!("existing question still present");
+    };
     assert_eq!(qv.tool_call_id, "existing");
     assert!(qv.local_kind.is_none(), "must not overwrite ACP question");
 }
@@ -718,10 +787,13 @@ fn dispatch_fork_pushes_parent_marker_without_directive() {
 fn dispatch_fork_defers_banner_worktree() {
     let mut app = fork_test_app();
     dispatch(Action::Fork(fork_args(Some(true), None)), &mut app);
-    let info = app.agents[&AgentId(1)]
-        .pending_fork_banner
-        .as_ref()
-        .expect("pending_fork_banner must be set");
+    let Some(info) = app
+        .agents
+        .get(&AgentId(1))
+        .and_then(|a| a.pending_fork_banner.as_ref())
+    else {
+        panic!("pending_fork_banner must be set");
+    };
     assert_eq!(info.parent_sid, "test-session");
     assert!(info.worktree, "worktree flag must be true");
 }
@@ -730,10 +802,13 @@ fn dispatch_fork_defers_banner_worktree() {
 fn dispatch_fork_defers_banner_no_worktree() {
     let mut app = fork_test_app();
     dispatch(Action::Fork(fork_args(Some(false), None)), &mut app);
-    let info = app.agents[&AgentId(1)]
-        .pending_fork_banner
-        .as_ref()
-        .expect("pending_fork_banner must be set");
+    let Some(info) = app
+        .agents
+        .get(&AgentId(1))
+        .and_then(|a| a.pending_fork_banner.as_ref())
+    else {
+        panic!("pending_fork_banner must be set");
+    };
     assert_eq!(info.parent_sid, "test-session");
     assert!(!info.worktree, "worktree flag must be false");
 }
@@ -743,10 +818,13 @@ fn dispatch_fork_stores_full_parent_session_id_in_banner() {
     let mut app = fork_test_app();
     app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = Some("abcdef0123456789".into());
     dispatch(Action::Fork(fork_args(Some(true), None)), &mut app);
-    let info = app.agents[&AgentId(1)]
-        .pending_fork_banner
-        .as_ref()
-        .expect("pending_fork_banner must be set");
+    let Some(info) = app
+        .agents
+        .get(&AgentId(1))
+        .and_then(|a| a.pending_fork_banner.as_ref())
+    else {
+        panic!("pending_fork_banner must be set");
+    };
     assert_eq!(
         info.parent_sid, "abcdef0123456789",
         "full parent session id must be stored (no truncation)"
@@ -778,21 +856,23 @@ fn build_child_fork_marker_worktree_format() {
 fn build_child_fork_marker_no_worktree_format() {
     let banner = build_child_fork_marker("child-sid", "parent-sid", false, Some("/dashboard"));
     let lines: Vec<&str> = banner.split('\n').collect();
-    assert_eq!(lines.len(), 2, "expected 2-line banner, got: {banner}");
+    let [first, second] = lines.as_slice() else {
+        panic!("expected 2-line banner, got: {banner}");
+    };
     assert!(
-        lines[0].contains("Session child-sid"),
+        first.contains("Session child-sid"),
         "first line must contain child session id: {banner}"
     );
     assert!(
-        lines[0].contains("forked from parent-sid"),
+        first.contains("forked from parent-sid"),
         "first line must contain full parent session id: {banner}"
     );
     assert!(
-        lines[0].contains("/dashboard"),
+        first.contains("/dashboard"),
         "first line must advertise /dashboard: {banner}"
     );
     assert!(
-        lines[1].contains("both agents share cwd"),
+        second.contains("both agents share cwd"),
         "second line must surface shared-cwd caveat: {banner}"
     );
 }
@@ -958,7 +1038,9 @@ fn dispatch_fork_worktree_mode_always_skips_modal_and_creates_worktree() {
     app.fork_worktree_mode = crate::app::app_view::WorktreeMode::Always;
     let effects = dispatch(Action::Fork(fork_args(None, None)), &mut app);
     assert!(
-        app.agents[&AgentId(0)].question_view.is_none(),
+        app.agents
+            .get(&AgentId(0))
+            .is_some_and(|a| a.question_view.is_none()),
         "modal must not open when fork_worktree_mode is Always"
     );
     assert!(
@@ -975,7 +1057,9 @@ fn dispatch_fork_worktree_mode_never_skips_modal_and_forks_in_cwd() {
     app.fork_worktree_mode = crate::app::app_view::WorktreeMode::Never;
     let effects = dispatch(Action::Fork(fork_args(None, None)), &mut app);
     assert!(
-        app.agents[&AgentId(0)].question_view.is_none(),
+        app.agents
+            .get(&AgentId(0))
+            .is_some_and(|a| a.question_view.is_none()),
         "modal must not open when fork_worktree_mode is Never"
     );
     assert!(
@@ -1039,7 +1123,9 @@ fn dispatch_new_session_answered_no_worktree_does_not_cancel_old_turn() {
             .any(|e| matches!(e, Effect::CancelTurn { .. }))
     );
     assert!(
-        app.agents[&id].session.state.is_turn_running(),
+        app.agents
+            .get(&id)
+            .is_some_and(|a| a.session.state.is_turn_running()),
         "old agent's turn must remain running"
     );
 }
@@ -1063,7 +1149,9 @@ fn dispatch_new_session_answered_worktree_does_not_cancel_old_turn() {
         "expected CreateWorktreeSession, got {effects:?}"
     );
     assert!(
-        app.agents[&id].session.state.is_turn_running(),
+        app.agents
+            .get(&id)
+            .is_some_and(|a| a.session.state.is_turn_running()),
         "old agent's turn must remain running"
     );
 }
@@ -1074,7 +1162,9 @@ fn dispatch_new_session_worktree_mode_always_skips_modal_and_creates_worktree() 
     app.new_session_worktree_mode = crate::app::app_view::WorktreeMode::Always;
     let effects = dispatch(Action::NewSession, &mut app);
     assert!(
-        app.agents[&AgentId(0)].question_view.is_none(),
+        app.agents
+            .get(&AgentId(0))
+            .is_some_and(|a| a.question_view.is_none()),
         "modal must not open when new_session_worktree_mode is Always"
     );
     assert!(
@@ -1091,7 +1181,9 @@ fn dispatch_new_session_worktree_mode_never_skips_modal_and_creates_in_cwd() {
     app.new_session_worktree_mode = crate::app::app_view::WorktreeMode::Never;
     let effects = dispatch(Action::NewSession, &mut app);
     assert!(
-        app.agents[&AgentId(0)].question_view.is_none(),
+        app.agents
+            .get(&AgentId(0))
+            .is_some_and(|a| a.question_view.is_none()),
         "modal must not open when new_session_worktree_mode is Never"
     );
     assert!(
@@ -1167,6 +1259,7 @@ fn worktree_forked_retargets_suppress_to_child() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -1201,6 +1294,7 @@ fn worktree_forked_does_not_retarget_unrelated_suppress() {
             restore_summary: None,
             restore_degree: None,
             resume_session_id: Some("orig-sess".into()),
+            strategy_summary: None,
         }),
         &mut app,
     );
@@ -1212,7 +1306,9 @@ fn fork_session_ready_emits_load_session_with_new_id() {
     let mut app = fork_test_app();
     // Plant a placeholder fork agent (mirroring what dispatch_fork would do)
     insert_placeholder_agent(&mut app, AgentId(1));
-    app.agents.get_mut(&AgentId(1)).unwrap().session.session_id = None;
+    let placeholder = app.agents.get_mut(&AgentId(1)).unwrap();
+    placeholder.session.session_id = None;
+    placeholder.session_starting_since = Some(std::time::Instant::now());
     let effects = dispatch(
         Action::TaskComplete(TaskResult::ForkSessionReady {
             agent_id: AgentId(1),
@@ -1246,16 +1342,24 @@ fn fork_session_ready_emits_load_session_with_new_id() {
     }
     // session_id was eagerly adopted on the placeholder.
     assert_eq!(
-        app.agents[&AgentId(1)]
-            .session
-            .session_id
-            .as_ref()
-            .unwrap()
-            .0
-            .as_ref(),
-        "new-sid-123"
+        app.agents
+            .get(&AgentId(1))
+            .and_then(|a| a.session.session_id.as_ref())
+            .map(|s| s.0.as_ref()),
+        Some("new-sid-123")
     );
-    assert!(app.agents[&AgentId(1)].session.loading_replay);
+    assert!(
+        app.agents
+            .get(&AgentId(1))
+            .is_some_and(|a| a.session.loading_replay)
+    );
+    assert!(test_agent(&app, AgentId(1)).session.loading_replay);
+    assert!(
+        test_agent(&app, AgentId(1))
+            .session_starting_since
+            .is_none(),
+        "binding the forked id ends Starting session…"
+    );
 }
 
 /// Successful no-worktree fork under sticky `--chat` (child not a local Build row under cwd) must stamp `conversation_entry`.
@@ -1333,6 +1437,10 @@ fn fork_session_ready_refuses_local_build_under_chat_mode() {
 fn fork_session_failed_pushes_turn_failed_block() {
     let mut app = fork_test_app();
     insert_placeholder_agent(&mut app, AgentId(1));
+    app.agents
+        .get_mut(&AgentId(1))
+        .unwrap()
+        .session_starting_since = Some(std::time::Instant::now());
     let effects = dispatch(
         Action::TaskComplete(TaskResult::ForkSessionFailed {
             agent_id: AgentId(1),
@@ -1343,6 +1451,12 @@ fn fork_session_failed_pushes_turn_failed_block() {
     assert!(effects.is_empty());
     // The placeholder agent stays in app.agents (no rollback).
     assert!(app.agents.contains_key(&AgentId(1)));
+    assert!(
+        test_agent(&app, AgentId(1))
+            .session_starting_since
+            .is_none(),
+        "a failed fork is not starting any more"
+    );
 }
 
 #[test]
@@ -1374,7 +1488,10 @@ fn translate_local_submit_yes_returns_worktree_true_action() {
         cut: Default::default(),
     });
     // Set selection to option 0 ("Yes" in production).
-    state.selections[0] = crate::views::question_view::QuestionSelection::Single(Some(0));
+    let Some(slot) = state.selections.get_mut(0) else {
+        panic!("expected a selection slot: {:?}", state.selections);
+    };
+    *slot = crate::views::question_view::QuestionSelection::Single(Some(0));
     let kind = state.local_kind.take().unwrap();
     let outcome = crate::app::agent_view::translate_local_submit_for_test(&state, kind, false);
     match outcome {
@@ -1421,7 +1538,10 @@ fn translate_local_submit_no_returns_worktree_false_action() {
         cut: Default::default(),
     });
     // Option 1 is "No", so worktree=false
-    state.selections[0] = crate::views::question_view::QuestionSelection::Single(Some(1));
+    let Some(slot) = state.selections.get_mut(0) else {
+        panic!("expected a selection slot: {:?}", state.selections);
+    };
+    *slot = crate::views::question_view::QuestionSelection::Single(Some(1));
     let kind = state.local_kind.take().unwrap();
     let outcome = crate::app::agent_view::translate_local_submit_for_test(&state, kind, false);
     match outcome {
@@ -1467,7 +1587,10 @@ fn translate_local_submit_always_returns_persist_always_for_fork() {
         directive: None,
         cut: Default::default(),
     });
-    state.selections[0] = crate::views::question_view::QuestionSelection::Single(Some(2));
+    let Some(slot) = state.selections.get_mut(0) else {
+        panic!("expected a selection slot: {:?}", state.selections);
+    };
+    *slot = crate::views::question_view::QuestionSelection::Single(Some(2));
     let kind = state.local_kind.take().unwrap();
     let outcome = crate::app::agent_view::translate_local_submit_for_test(&state, kind, false);
     match outcome {
@@ -1514,7 +1637,10 @@ fn translate_local_submit_never_returns_persist_never_for_fork() {
         directive: None,
         cut: Default::default(),
     });
-    state.selections[0] = crate::views::question_view::QuestionSelection::Single(Some(3));
+    let Some(slot) = state.selections.get_mut(0) else {
+        panic!("expected a selection slot: {:?}", state.selections);
+    };
+    *slot = crate::views::question_view::QuestionSelection::Single(Some(3));
     let kind = state.local_kind.take().unwrap();
     let outcome = crate::app::agent_view::translate_local_submit_for_test(&state, kind, false);
     match outcome {
@@ -1564,7 +1690,10 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
             },
         ),
     );
-    let scrollback_len_before = app.agents[&id].scrollback.len();
+    let Some(agent) = app.agents.get(&id) else {
+        panic!("expected agent {id:?}");
+    };
+    let scrollback_len_before = agent.scrollback.len();
 
     // Drive the real production handler.
     let (args, _rx) = make_ask_user_question_args("acp-driven-question");
@@ -1572,7 +1701,10 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
     assert!(handled, "handler must return true (ACP question accepted)");
 
     // The new ACP question replaced the local fork modal.
-    let qv = app.agents[&id]
+    let Some(agent) = app.agents.get(&id) else {
+        panic!("expected agent {id:?}");
+    };
+    let qv = agent
         .question_view
         .as_ref()
         .expect("new ACP question must be active");
@@ -1582,9 +1714,9 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
         "ACP-driven question must not have local_kind set"
     );
     // The displaced local modal explains why the question disappeared.
-    let last = app.agents[&id]
+    let last = agent
         .scrollback
-        .get(app.agents[&id].scrollback.len() - 1)
+        .last()
         .expect("scrollback should have a new entry");
     match &last.block {
         RenderBlock::System(sys) => {
@@ -1593,7 +1725,7 @@ fn handle_ask_user_question_pushes_system_block_when_displaced_local_fork_modal(
         other => panic!("expected System block, got {other:?}"),
     }
     assert_eq!(
-        app.agents[&id].scrollback.len(),
+        agent.scrollback.len(),
         scrollback_len_before + 1,
         "exactly one system block pushed"
     );

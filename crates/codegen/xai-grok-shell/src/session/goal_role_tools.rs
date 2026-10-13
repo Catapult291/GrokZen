@@ -6,7 +6,6 @@
 use xai_grok_tools::types::tool::ToolKind;
 
 /// Resolved client-facing tool names for a role's prompt placeholders.
-///
 /// Built parent-side from the role's resolved toolset, with one literal fallback per placeholder.
 /// Every resolved name is run through [`sanitized_tool_name`] before it is stored; an unsafe name falls back to the literal default.
 #[derive(Debug, Clone)]
@@ -114,11 +113,8 @@ impl RoleToolNames {
     }
 
     /// Substitute the role-prompt tool placeholders in `template` in a SINGLE left-to-right pass.
-    ///
     /// A substituted value is never re-scanned, so a resolved name can never be re-expanded into another placeholder (order-independence).
-    /// Unknown `{…}` tokens (e.g. the render-time `{KIND_LENS}` / `{SCRATCH}` placeholders resolved elsewhere) are passed through untouched.
     /// Replacing a placeholder a template does not contain is a no-op.
-    /// So all three role templates share one call even though each names only the subset it uses.
     pub(crate) fn apply(&self, template: &str) -> String {
         let resolve = |token: &str| -> Option<&str> {
             Some(match token {
@@ -136,13 +132,22 @@ impl RoleToolNames {
         let mut out = String::with_capacity(template.len() + 64);
         let mut rest = template;
         while let Some(open) = rest.find('{') {
-            out.push_str(&rest[..open]);
-            let after = &rest[open + 1..];
+            let Some(before) = rest.get(..open) else {
+                break;
+            };
+            out.push_str(before);
+            let Some(after) = rest.get(open + 1..) else {
+                break;
+            };
             if let Some(close) = after.find('}')
-                && let Some(value) = resolve(&after[..close])
+                && let Some(token) = after.get(..close)
+                && let Some(value) = resolve(token)
             {
                 out.push_str(value);
-                rest = &after[close + 1..];
+                let Some(next) = after.get(close + 1..) else {
+                    break;
+                };
+                rest = next;
                 continue;
             }
             // Not a known token (or no closing brace): emit the literal `{` and keep scanning after it, leaving foreign placeholders intact

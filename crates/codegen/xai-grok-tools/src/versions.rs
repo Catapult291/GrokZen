@@ -44,11 +44,9 @@ pub struct VersionLifecycle {
     pub replacement: Option<&'static str>,
     /// Optional deprecation message for operational tooling.
     pub deprecation_note: Option<&'static str>,
-    /// The crate release version in which this catalog entry was first added.
-    /// This is catalog-introduction metadata, not behavior-origin metadata.
-    /// For reconstructed legacy behavior, this is the release that added the
-    /// legacy port to the catalog.
-    /// Empty string for `"current"` (moving alias with no fixed origin).
+    /// The crate release version in which this catalog entry was first added. This is catalog-introduction metadata, not
+    /// behavior-origin metadata. For reconstructed legacy behavior, this is the release that added the legacy port to the
+    /// catalog. Empty string for `"current"` (moving alias with no fixed origin).
     pub cataloged_in: &'static str,
     /// Optional opaque references for humans browsing the catalog.
     /// Prefer empty; do not embed external PR/issue number lists here.
@@ -60,9 +58,8 @@ pub struct VersionLifecycle {
 }
 
 /// A named behavior preset (bundle) that maps tool IDs to default contract versions.
-///
-/// Architecturally a "bundle" — a convenience mapping from a label to per-tool
-/// version defaults. Not canonical; must validate against `TOOL_VERSION_REGISTRY`.
+/// Architecturally a "bundle" — a convenience mapping from a label to per-tool version defaults.
+/// Not canonical; must validate against `TOOL_VERSION_REGISTRY`.
 #[derive(Debug)]
 pub struct PresetEntry {
     /// Preset name, e.g. `"current"` or `"legacy-0.4.10"`.
@@ -75,12 +72,9 @@ pub struct PresetEntry {
     pub tool_defaults: &'static [(&'static str, &'static str)],
 }
 
-/// Fully-qualified IDs of version-managed tools.
-///
-/// Only tools listed here can have `behavior_version` overrides.
-/// Uses fully-qualified IDs (`Namespace:tool_id`) to prevent collisions
-/// between namespaces (e.g. `GrokBuild:run_terminal_cmd` vs.
-/// `GrokBuildConcise:run_terminal_cmd`).
+/// Fully-qualified IDs of version-managed tools. Only tools listed here can have `behavior_version`
+/// overrides. Uses fully-qualified IDs (`Namespace:tool_id`) to prevent collisions between
+/// namespaces (e.g. `GrokBuild:run_terminal_cmd` vs. `GrokBuildConcise:run_terminal_cmd`).
 pub const MANAGED_TOOLS: &[&str] = &[
     "GrokBuild:run_terminal_cmd",
     "GrokBuild:read_file",
@@ -91,11 +85,9 @@ pub const MANAGED_TOOLS: &[&str] = &[
     "GrokBuild:get_task_output",
 ];
 
-// Helper constant for concise registry entries.
-//
-// `V_CURRENT` is a moving alias — its metadata fields are empty because
-// `"current"` changes meaning over time. Stable canonical versions use
-// per-tool legacy constants with tool-specific metadata.
+// Helper constant for concise registry entries. `V_CURRENT` is a moving alias — its metadata fields
+// are empty because `"current"` changes meaning over time. Stable canonical versions use per-tool
+// legacy constants with tool-specific metadata.
 const V_CURRENT: VersionLifecycle = VersionLifecycle {
     version: "current",
     lifecycle: BehaviorLifecycle::Active,
@@ -117,6 +109,18 @@ const V_LEGACY_BASH: VersionLifecycle = VersionLifecycle {
     source_refs: &[],
     summary: "Trailing-only & detection, legacy error text for background operator",
 };
+
+// This is the `run_terminal_cmd` behavior from before `block_until_ms` replaced `is_background` and `timeout`
+const V_PRE_BLOCK_UNTIL_MS_BASH: VersionLifecycle = VersionLifecycle {
+    version: "pre-block-until-ms",
+    lifecycle: BehaviorLifecycle::Active,
+    replacement: Some("current"),
+    deprecation_note: None,
+    cataloged_in: "0.1.220-alpha.4",
+    source_refs: &[],
+    summary: "Two-knob contract: `is_background` + `timeout` advertised, `timeout` is a foreground kill deadline (0 = default), auto-background only when the host enables it (15s budget); description text matches",
+};
+
 const V_LEGACY_READ_FILE: VersionLifecycle = VersionLifecycle {
     version: "legacy-0.4.10",
     lifecycle: BehaviorLifecycle::Active,
@@ -163,19 +167,14 @@ const V_LEGACY_TASK_OUTPUT: VersionLifecycle = VersionLifecycle {
     summary: "Simple not-found text without known task ID enumeration",
 };
 
-/// Per-tool version registry — canonical source for which versions each
-/// managed tool supports and their individual lifecycle.
-///
-/// - 7 managed tools total
-/// - 6 legacy-ported (support both `"current"` and `"legacy-0.4.10"`)
-/// - 1 managed but unported (`grep` — only `"current"`)
-///
-/// Each legacy-ported tool has its own `V_LEGACY_*` constant with tool-specific
-/// `summary` and `source_refs`. Do not use a shared legacy constant.
+/// Per-tool version registry — canonical source for which versions each managed tool supports and their individual lifecycle. 7 managed tools
+/// total 6 legacy-ported (support both `"current"` and `"legacy-0.4.10"`) 1 managed but unported (`grep` — only `"current"`) Each legacy-ported
+/// tool has its own `V_LEGACY_*` constant with tool-specific `summary` and `source_refs`. Do not use a shared legacy constant.
+/// `run_terminal_cmd` also supports `"pre-block-until-ms"`, its `current` behavior from before `block_until_ms`.
 pub const TOOL_VERSION_REGISTRY: &[ToolVersionEntry] = &[
     ToolVersionEntry {
         fq_tool_id: "GrokBuild:run_terminal_cmd",
-        versions: &[V_CURRENT, V_LEGACY_BASH],
+        versions: &[V_CURRENT, V_PRE_BLOCK_UNTIL_MS_BASH, V_LEGACY_BASH],
     },
     ToolVersionEntry {
         fq_tool_id: "GrokBuild:read_file",
@@ -203,12 +202,8 @@ pub const TOOL_VERSION_REGISTRY: &[ToolVersionEntry] = &[
     },
 ];
 
-/// Available behavior presets.
-///
-/// ## Reminder behavior policy
-///
-/// Reminders always use current behavior regardless of preset selection.
-/// They are not versioned — this is a deliberate design choice (Option B).
+/// Available behavior presets. Reminders always use current behavior regardless of preset
+/// selection. They are not versioned — this is a deliberate design choice (Option B).
 pub const PRESETS: &[PresetEntry] = &[
     PresetEntry {
         name: "current",
@@ -228,19 +223,17 @@ pub const PRESETS: &[PresetEntry] = &[
             ("GrokBuild:list_dir", "legacy-0.4.10"),
         ],
     },
-    // Release-named presets are best-effort compatibility bundles, not full
-    // historical snapshots. Later-added or unported tools may resolve to
-    // `current` unless explicitly represented. Prefer stable named versions
-    // over `current` here — using `current` means the preset's behavior for
-    // that tool will silently change over time.
+    // Release-named presets are best-effort compatibility bundles, not full historical snapshots. Later-added or unported
+    // tools may resolve to `current` unless explicitly represented. Prefer stable named versions over `current` here —
+    // using `current` means the preset's behavior for that tool will silently change over time.
     PresetEntry {
         name: "release-0.1.157",
         lifecycle: BehaviorLifecycle::Active,
-        // At 0.1.157, all managed tools were at `current`. No per-tool
-        // version other than `legacy-0.4.10` had been carved out yet.
+        // At 0.1.157, all managed tools were at `current`.
+        // `run_terminal_cmd`'s `current` from that release is now `pre-block-until-ms`.
         // `grep` was managed but current-only (no legacy port).
         tool_defaults: &[
-            ("GrokBuild:run_terminal_cmd", "current"),
+            ("GrokBuild:run_terminal_cmd", "pre-block-until-ms"),
             ("GrokBuild:read_file", "current"),
             ("GrokBuild:search_replace", "current"),
             ("GrokBuild:list_dir", "current"),
@@ -251,12 +244,9 @@ pub const PRESETS: &[PresetEntry] = &[
     },
 ];
 
-/// Check whether a contract version string is the legacy-0.4.10 version.
-///
-/// Use this for tools with trivial version deltas (e.g. `kill_task`,
-/// `get_task_output` which only differ in not-found wording). For tools
-/// with substantial version divergence, prefer a typed enum like
-/// `BashVersion` or `ListDirVersion`.
+/// Check whether a contract version string is the legacy-0.4.10 version. Use this for tools with trivial version deltas
+/// (e.g. `kill_task`, `get_task_output` which only differ in not-found wording). For tools with substantial version
+/// divergence, prefer a typed enum like `BashVersion` or `ListDirVersion`.
 pub fn is_legacy_contract(contract_version: Option<&str>) -> bool {
     contract_version == Some("legacy-0.4.10")
 }
@@ -281,10 +271,8 @@ pub fn tool_supported_versions(fq_tool_id: &str) -> Option<&'static [VersionLife
         .map(|e| e.versions)
 }
 
-/// Get the lifecycle for a specific tool+version pair.
-///
-/// Returns `None` if the tool is not in the registry or does not support
-/// the requested version.
+/// Get the lifecycle for a specific tool+version pair. Returns `None` if the tool is not in the
+/// registry or does not support the requested version.
 pub fn tool_version_lifecycle(fq_tool_id: &str, version: &str) -> Option<BehaviorLifecycle> {
     tool_supported_versions(fq_tool_id)?
         .iter()
@@ -324,25 +312,9 @@ pub struct VersionResolution {
     pub warnings: Vec<VersionWarning>,
 }
 
-/// Resolve the concrete contract version for a tool.
-///
-/// ## Resolution order
-///
-/// 1. `per_tool_override` — if `Some`, use it (validated against known versions).
-/// 2. Preset `tool_defaults` entry for this `fq_tool_id`.
-/// 3. `"current"` (fallback for managed tools not yet in preset defaults).
-///
-/// ## Returns
-///
-/// - `Ok(Some(version))` — for version-managed tools.
-/// - `Ok(None)` — for tools NOT in `MANAGED_TOOLS` (unmanaged).
-/// - `Err(msg)` — for:
-///   - Unknown preset name
-///   - Unknown `per_tool_override` value
-///   - `per_tool_override` supplied for a tool not in `MANAGED_TOOLS`
-///
-/// Resolve version — convenience wrapper that discards warnings.
-/// Use `resolve_version_with_warnings()` when you need deprecation warnings.
+/// Resolve the concrete contract version for a tool. `per_tool_override` — if `Some`, use it (validated against known versions). Preset
+/// `tool_defaults` entry for this `fq_tool_id`. `"current"` (fallback for managed tools not yet in preset defaults). `Ok(Some(version))` — for
+/// version-managed tools. `Ok(None)` — for tools NOT in `MANAGED_TOOLS` (unmanaged). Unknown preset name Unknown `per_tool_override` value
 pub fn resolve_version(
     preset_name: &str,
     fq_tool_id: &str,
@@ -433,12 +405,9 @@ pub fn resolve_version_with_warnings(
     })
 }
 
-/// Validate a version against the per-tool registry and apply lifecycle rules.
-///
-/// - `Active` → use it.
-/// - `Deprecated` → warn + continue.
-/// - `RemovalCandidate` → reject with replacement suggestion.
-/// - Not found → reject with supported versions list.
+/// Validate a version against the per-tool registry and apply lifecycle rules. `Active` → use it.
+/// `Deprecated` → warn + continue. `RemovalCandidate` → reject with replacement suggestion. Not
+/// found → reject with supported versions list.
 fn validate_and_resolve(
     fq_tool_id: &str,
     version: &str,
@@ -545,6 +514,28 @@ mod tests {
     }
 
     #[test]
+    fn pre_block_until_ms_pin_wins_under_any_preset_and_is_bash_only() {
+        for preset in PRESETS {
+            let v = resolve_version(
+                preset.name,
+                "GrokBuild:run_terminal_cmd",
+                Some("pre-block-until-ms"),
+            )
+            .expect("pre-block-until-ms pin should resolve for run_terminal_cmd");
+            assert_eq!(
+                v,
+                Some("pre-block-until-ms".to_string()),
+                "pin must win under preset {}",
+                preset.name
+            );
+        }
+
+        let err = resolve_version("current", "GrokBuild:read_file", Some("pre-block-until-ms"))
+            .expect_err("read_file has no pre-block-until-ms version");
+        assert!(err.contains("is not supported for tool"), "got: {err}");
+    }
+
+    #[test]
     fn unmanaged_tool_returns_none() {
         let v = resolve_version("current", "GrokBuild:web_search", None).unwrap();
         assert_eq!(v, None);
@@ -632,13 +623,9 @@ mod tests {
 
     #[test]
     fn deprecated_version_produces_tool_warning() {
-        // Test the deprecated path directly via validate_and_resolve.
-        // We can't mutate the static registry, so we call the internal function
-        // which checks per-tool lifecycle from the registry.
-        // For this test, we need a version that IS in the registry.
-        // Since all current versions are Active, we test the code path by
-        // calling validate_and_resolve on an Active version and verifying
-        // no warning, then documenting the contract.
+        // Test the deprecated path directly via validate_and_resolve. We can't mutate the static registry, so we call the internal function which
+        // checks per-tool lifecycle from the registry. For this test, we need a version that IS in the registry. Since all current versions are
+        // Active, we test the code path by calling validate_and_resolve on an Active version and verifying no warning, then documenting the contract.
         let (version, warnings) =
             validate_and_resolve("GrokBuild:run_terminal_cmd", "current").unwrap();
         assert_eq!(version, Some("current".to_string()));
@@ -858,16 +845,21 @@ mod tests {
     }
 
     #[test]
-    fn release_preset_resolves_all_tools_to_current() {
-        // release-0.1.157 should resolve all managed tools to "current"
-        // because no post-legacy stable version had been carved out yet.
+    fn release_preset_resolves_tools_to_release_era_versions() {
+        // release-0.1.157 shipped before `block_until_ms` replaced `is_background` and `timeout`
         for &fq_id in MANAGED_TOOLS {
             let v = resolve_version("release-0.1.157", fq_id, None).unwrap();
+            let expected = if fq_id == "GrokBuild:run_terminal_cmd" {
+                "pre-block-until-ms"
+            } else {
+                "current"
+            };
             assert_eq!(
                 v,
-                Some("current".to_string()),
-                "release-0.1.157 should resolve {} to current",
-                fq_id
+                Some(expected.to_string()),
+                "release-0.1.157 should resolve {} to {}",
+                fq_id,
+                expected
             );
         }
     }
@@ -895,6 +887,7 @@ mod tests {
     fn legacy_versions_have_populated_tool_specific_metadata() {
         let legacy_constants = [
             ("bash", &V_LEGACY_BASH),
+            ("bash pre-block-until-ms", &V_PRE_BLOCK_UNTIL_MS_BASH),
             ("read_file", &V_LEGACY_READ_FILE),
             ("search_replace", &V_LEGACY_SEARCH_REPLACE),
             ("list_dir", &V_LEGACY_LIST_DIR),
@@ -930,6 +923,10 @@ mod tests {
             V_LEGACY_BASH.summary, V_LEGACY_KILL_TASK.summary,
             "bash and kill_task have different legacy behavior"
         );
+        assert_ne!(
+            V_LEGACY_BASH.summary, V_PRE_BLOCK_UNTIL_MS_BASH.summary,
+            "bash legacy and pre-block-until-ms freeze different behavior"
+        );
         // kill_task and task_output share the same legacy behavior (not-found wording)
         assert_eq!(
             V_LEGACY_KILL_TASK.summary, V_LEGACY_TASK_OUTPUT.summary,
@@ -942,6 +939,7 @@ mod tests {
         // Catalog intentionally keeps source_refs empty.
         for v in [
             &V_LEGACY_BASH,
+            &V_PRE_BLOCK_UNTIL_MS_BASH,
             &V_LEGACY_READ_FILE,
             &V_LEGACY_SEARCH_REPLACE,
             &V_LEGACY_LIST_DIR,

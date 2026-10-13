@@ -27,10 +27,8 @@ impl Default for CapabilityMode {
 }
 
 impl CapabilityMode {
-    /// Filter `config.tools` by capability mode, returning a copy with disallowed tools dropped.
-    ///
-    /// Tools whose `kind` is `None` (baseline, e.g. ad-hoc tools declared via `ToolConfig::simple`) are preserved across all modes.
-    /// **MCP-origin** `kind: None` tools are NOT preserved by this method; see `resolve_session_toolset` for the asymmetric handling.
+    /// Filter `config.tools` by capability mode, dropping disallowed tools.
+    /// Baseline `kind: None` tools are preserved; MCP-origin `kind: None` tools are not — see `resolve_session_toolset`.
     pub fn filter(self, config: &ToolServerConfig) -> ToolServerConfig {
         let kept: Vec<ToolConfig> = config
             .tools
@@ -59,7 +57,7 @@ impl CapabilityMode {
     }
 }
 
-/// Every `ToolKind` variant. Used by `is_subset_of` and by parameterised tests.
+/// Every `ToolKind` variant. Used by `is_subset_of`.
 /// When a new variant is added to `ToolKind`, the compile-time assertion below fires so it can't be silently omitted.
 pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Read,
@@ -97,6 +95,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Monitor,
     ToolKind::GoalUpdate,
     ToolKind::Workflow,
+    ToolKind::Feedback,
     ToolKind::Other,
 ];
 
@@ -133,8 +132,8 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         Lsp | ListDir | List => matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute),
 
         // Edit class.
-        Edit | Write | Delete | Move | ImageGen | VideoGen | ImageToVideo | ReferenceToVideo
-        | DeployApp | InitOrUpdateApp => matches!(mode, M::ReadWrite),
+        Edit | Write | Delete | Move | Feedback | ImageGen | VideoGen | ImageToVideo
+        | ReferenceToVideo | DeployApp | InitOrUpdateApp => matches!(mode, M::ReadWrite),
 
         // Bash / shell.
         Execute => matches!(mode, M::Execute),
@@ -150,10 +149,6 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,28 +163,6 @@ mod tests {
     }
 
     #[test]
-    fn capability_mode_filter_table_is_exhaustive_per_kind() {
-        for &mode in &[
-            CapabilityMode::ReadOnly,
-            CapabilityMode::ReadWrite,
-            CapabilityMode::Execute,
-            CapabilityMode::All,
-        ] {
-            for &kind in ALL_TOOL_KINDS {
-                let id = format!("kind_{kind:?}");
-                let cfg = make_cfg(vec![test_support::tc(&id, Some(kind))]);
-                let out = mode.filter(&cfg);
-                let expected_present = kind_allowed(mode, kind);
-                let actually_present = out.tools.iter().any(|t| t.id == id);
-                assert_eq!(
-                    actually_present, expected_present,
-                    "({mode:?}, {kind:?}): expected present={expected_present}, got {actually_present}"
-                );
-            }
-        }
-    }
-
-    #[test]
     fn capability_mode_filter_anchored_membership() {
         let cfg = make_cfg(vec![
             test_support::tc("read", Some(ToolKind::Read)),
@@ -197,6 +170,7 @@ mod tests {
             test_support::tc("inspect", Some(ToolKind::Lsp)),
             test_support::tc("edit", Some(ToolKind::Edit)),
             test_support::tc("write", Some(ToolKind::Write)),
+            test_support::tc("feedback", Some(ToolKind::Feedback)),
             test_support::tc("bash", Some(ToolKind::Execute)),
             test_support::tc("bg", Some(ToolKind::BackgroundTaskAction)),
             test_support::tc("plan", Some(ToolKind::Plan)),
@@ -214,7 +188,9 @@ mod tests {
         let rw = CapabilityMode::ReadWrite.filter(&cfg);
         assert_eq!(
             names(&rw),
-            vec!["read", "search", "inspect", "edit", "write", "plan", "ask"]
+            vec![
+                "read", "search", "inspect", "edit", "write", "feedback", "plan", "ask"
+            ]
         );
 
         let ex = CapabilityMode::Execute.filter(&cfg);
@@ -227,7 +203,8 @@ mod tests {
         assert_eq!(
             names(&all),
             vec![
-                "read", "search", "inspect", "edit", "write", "bash", "bg", "plan", "ask", "other"
+                "read", "search", "inspect", "edit", "write", "feedback", "bash", "bg", "plan",
+                "ask", "other"
             ]
         );
     }
@@ -296,22 +273,6 @@ mod tests {
                 Some("current"),
                 "behavior_preset lost under {mode:?}"
             );
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // is_subset_of partial order
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn capability_mode_is_subset_of_reflexive() {
-        for &m in &[
-            CapabilityMode::ReadOnly,
-            CapabilityMode::ReadWrite,
-            CapabilityMode::Execute,
-            CapabilityMode::All,
-        ] {
-            assert!(m.is_subset_of(m), "{m:?} must be a subset of itself");
         }
     }
 

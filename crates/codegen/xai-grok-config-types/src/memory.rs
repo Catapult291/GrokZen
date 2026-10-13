@@ -1,8 +1,35 @@
 //! Memory-system configuration value types, extracted from xai-grok-shell so crates the shell depends on can use them.
 //!
-//! These are the raw optional settings and resolved leaf value types for `[memory.*]` and the memory-owned `[compaction.*]` tables.
+//! These are the raw optional settings and resolved leaf value types for the
+//! legacy `[memory.*]`, isolated `[memory_v2]`, and memory-owned
+//! `[compaction.*]` tables.
 
 use serde::{Deserialize, Serialize};
+pub use xai_grok_config::{MemoryV2Rollout, MemoryV2Settings};
+
+/// Persistent-memory implementation selected for a session.
+///
+/// The mode is resolved once with the rest of [`MemoryConfig`] and is not
+/// changed for an already-running session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMode {
+    /// Existing summary, search, and Dream pipeline rooted at `memory/`.
+    #[default]
+    Legacy,
+    /// Isolated topic and observation pipeline rooted at `memory-v2/`.
+    V2,
+}
+
+impl MemoryMode {
+    pub fn is_legacy(self) -> bool {
+        self == Self::Legacy
+    }
+
+    pub fn is_v2(self) -> bool {
+        self == Self::V2
+    }
+}
 
 /// Raw `[memory]` settings. Absence is preserved for per-field fallback.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -17,6 +44,75 @@ pub struct MemorySettings {
     pub watcher: Option<MemoryWatcherSettings>,
     pub gc: Option<MemoryGcSettings>,
     pub dream: Option<MemoryDreamSettings>,
+}
+
+/// Concrete memory-v2 controls pinned when a session is spawned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct MemoryV2Config {
+    pub rollout: MemoryV2Rollout,
+    pub capture_status_enabled: bool,
+    pub capture_enabled: bool,
+    pub automatic_dream_enabled: bool,
+    pub manual_dream_enabled: bool,
+    pub batch_dream_enabled: bool,
+    pub batch_dream_max_run_secs: u64,
+    pub batch_dream_max_calls_per_batch: usize,
+    pub batch_dream_max_batch_note_bytes: usize,
+    pub compact_index_enabled: bool,
+    pub file_writes_enabled: bool,
+    pub archived_retention_days: u64,
+    pub job_retention_days: u64,
+}
+
+impl Default for MemoryV2Config {
+    fn default() -> Self {
+        Self {
+            rollout: MemoryV2Rollout::Active,
+            capture_status_enabled: false,
+            capture_enabled: true,
+            automatic_dream_enabled: true,
+            manual_dream_enabled: true,
+            batch_dream_enabled: false,
+            batch_dream_max_run_secs: 1_800,
+            batch_dream_max_calls_per_batch: 6,
+            batch_dream_max_batch_note_bytes: 96 * 1024,
+            compact_index_enabled: false,
+            file_writes_enabled: true,
+            archived_retention_days: 30,
+            job_retention_days: 14,
+        }
+    }
+}
+
+impl MemoryV2Config {
+    pub fn can_capture(self) -> bool {
+        self.rollout.allows_capture() && self.capture_enabled && self.file_writes_enabled
+    }
+
+    pub fn can_run_maintenance(self) -> bool {
+        self.rollout.allows_capture() && self.file_writes_enabled
+    }
+
+    pub fn can_run_automatic_dream(self) -> bool {
+        matches!(
+            self.rollout,
+            MemoryV2Rollout::Shadow | MemoryV2Rollout::Active
+        ) && self.automatic_dream_enabled
+            && self.file_writes_enabled
+    }
+
+    pub fn can_run_manual_dream(self) -> bool {
+        matches!(
+            self.rollout,
+            MemoryV2Rollout::Shadow | MemoryV2Rollout::Active
+        ) && self.manual_dream_enabled
+            && self.file_writes_enabled
+    }
+
+    pub fn can_expose_memory(self) -> bool {
+        self.rollout.exposes_memory()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -175,10 +271,7 @@ pub struct MemorySearchConfig {
     /// Weight for BM25 text similarity in hybrid scoring.
     pub text_weight: f32,
     /// **Deprecated**: use `temporal_decay` instead.
-    ///
-    /// Per-day decay factor for recency boosting (0.0 to 1.0).
     /// When `temporal_decay.enabled` is true, this field is ignored.
-    /// When `temporal_decay.enabled` is false and this is set, it is converted to an approximate half-life for backward compatibility.
     /// The conversion is `half_life ≈ -1 / log₂(recency_decay)`.
     pub recency_decay: f32,
     /// Temporal decay configuration for time-aware scoring.
@@ -210,15 +303,7 @@ impl Default for MemorySearchConfig {
 }
 
 /// Temporal decay configuration for time-aware search scoring.
-///
-/// Controls how memory chunk scores decay over time.
-/// Chunks from "evergreen" sources (`global`, `workspace`) are exempt from decay since they contain curated long-term knowledge.
 /// Only `session` chunks decay, using an exponential half-life formula:
-///
-/// ```text
-/// decayed_score = base_score × e^(-λ × age_days)
-/// where λ = ln(2) / half_life_days
-/// ```
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct TemporalDecayConfig {
@@ -238,14 +323,8 @@ impl Default for TemporalDecayConfig {
 }
 
 /// MMR (Maximal Marginal Relevance) diversity re-ranking configuration.
-///
 /// When enabled, re-ranks search results to penalize redundancy.
 /// It uses Jaccard similarity on tokenized snippets to measure how alike two results are.
-/// It then greedily selects results that balance relevance with diversity:
-///
-/// ```text
-/// MMR(d) = λ × relevance(d) - (1-λ) × max_similarity(d, selected)
-/// ```
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MmrConfig {
@@ -268,7 +347,6 @@ impl Default for MmrConfig {
 }
 
 /// Deserialize an `f64` clamped to [0.0, 1.0].
-///
 /// Used for fields where values outside the unit interval are meaningless
 /// (e.g. cosine similarity thresholds, trade-off lambdas).
 fn deserialize_clamped_unit<'de, D>(deserializer: D) -> Result<f64, D::Error>
@@ -293,12 +371,7 @@ pub const DEFAULT_RECENCY_DECAY: f32 = 0.95;
 
 impl MemorySearchConfig {
     /// Resolve the effective half-life for temporal decay.
-    ///
-    /// Priority order:
-    /// 1. `temporal_decay.enabled = true`: use `temporal_decay.half_life_days`.
-    /// 2. Otherwise, when `recency_decay` differs from the default (0.95): convert the legacy per-day factor to an approximate half-life.
-    ///    The conversion `half_life ≈ -1.0 / log₂(recency_decay)` preserves behavior for users who only set `recency_decay`.
-    /// 3. Otherwise `None` (decay fully disabled).
+    /// `temporal_decay.enabled = true`: use `temporal_decay.half_life_days`; Otherwise, when `recency_decay` differs from the default (0.95): convert the legacy per-day factor to an approximate half-life. The conversion `half_life ≈ -1.0 / log₂(recency_decay)` preserves behavior for users who only set `recency_decay`; Otherwise `None` (decay fully disabled).
     pub fn effective_half_life_days(&self) -> Option<f64> {
         if self.temporal_decay.enabled {
             if self.temporal_decay.half_life_days <= 0.0 {
@@ -395,13 +468,6 @@ impl Default for MemoryDreamConfig {
 }
 
 /// File watcher configuration for detecting external memory edits (`[memory.watcher]`).
-///
-/// When enabled, watches `~/.grok/memory/` for `.md` file changes (create,
-/// modify, delete) and syncs the index on the next `memory_search` call:
-/// - Created/modified files are reindexed.
-/// - Deleted files have their stale chunks removed from the index.
-///
-/// Events are coalesced in a lock-free `ArcSwap` set.
 /// Sync runs at most once per search call, when dirty files are present and the claim is acquired.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
@@ -423,11 +489,7 @@ impl Default for MemoryWatcherConfig {
 }
 
 /// Garbage collection for orphaned workspace memory directories (`[memory.gc]`).
-///
-/// On session init, directories under `~/.grok/memory/` are scanned:
-/// - `tmp*` dirs: empty ones removed unconditionally, non-empty ones removed after 7 days.
-/// - Other workspaces with no session files: removed after `max_age_days`.
-/// - Non-empty non-tmp workspaces: never touched.
+/// `tmp*` dirs: empty ones removed unconditionally, non-empty ones removed after 7 days; Other workspaces with no session files: removed after `max_age_days`; Non-empty non-tmp workspaces: never touched.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct MemoryGcConfig {
@@ -512,6 +574,11 @@ impl Default for PruningConfig {
 #[serde(default)]
 pub struct MemoryConfig {
     pub enabled: bool,
+    /// Memory was turned off for the whole process (`--no-memory` or `GROK_MEMORY=0`).
+    /// Unlike a TOML opt-out, the `/memory` session toggle cannot override this.
+    #[serde(skip)]
+    pub force_disabled: bool,
+    pub mode: MemoryMode,
     pub index: MemoryIndexConfig,
     pub embedding: MemoryEmbeddingConfig,
     pub search: MemorySearchConfig,
@@ -520,6 +587,7 @@ pub struct MemoryConfig {
     pub watcher: MemoryWatcherConfig,
     pub gc: MemoryGcConfig,
     pub dream: MemoryDreamConfig,
+    pub v2: MemoryV2Config,
     #[serde(skip)]
     pub flush: MemoryFlushConfig,
     #[serde(skip)]
@@ -560,6 +628,10 @@ impl MemoryConfig {
             .get("memory")
             .and_then(|value| value.clone().try_into().ok())
             .unwrap_or_default();
+        let memory_v2 = config
+            .get("memory_v2")
+            .and_then(|value| value.clone().try_into().ok())
+            .unwrap_or_default();
         let compaction = config.get("compaction");
         let flush = compaction
             .and_then(|value| value.get("memory_flush"))
@@ -569,13 +641,21 @@ impl MemoryConfig {
             .and_then(|value| value.get("pruning"))
             .and_then(|value| value.clone().try_into().ok())
             .unwrap_or_default();
-        Self::resolve_settings(memory_enabled_override, &memory, &flush, &pruning, remote)
+        Self::resolve_settings(
+            memory_enabled_override,
+            &memory,
+            &memory_v2,
+            &flush,
+            &pruning,
+            remote,
+        )
     }
 
     /// Resolve typed effective-TOML settings against remote values and code defaults.
     pub fn resolve_settings(
         memory_enabled_override: Option<bool>,
         memory: &MemorySettings,
+        memory_v2: &MemoryV2Settings,
         flush: &MemoryFlushSettings,
         pruning: &PruningSettings,
         remote: Option<&crate::RemoteSettings>,
@@ -591,15 +671,43 @@ impl MemoryConfig {
         let watcher = memory.watcher.as_ref();
         let gc = memory.gc.as_ref();
         let dream = memory.dream.as_ref();
+        let remote_v2 = remote.and_then(|settings| settings.memory_v2.as_ref());
+        let legacy_enabled = crate::BoolFlag::env("GROK_MEMORY")
+            .cli(memory_enabled_override)
+            .config(memory.enabled)
+            .feature_flag(remote.and_then(|settings| settings.memory_enabled))
+            .default(false)
+            .resolve();
+        let v2_enabled = memory_v2
+            .enabled
+            .or_else(|| remote_v2.and_then(|settings| settings.enabled));
+        // A false CLI/env value disables both implementations, as does a local
+        // `[memory] enabled = false` unless the same TOML sets `[memory_v2] enabled = true`.
+        // A remote v2 gate alone never overrides a local opt-out.
+        let force_disabled = !legacy_enabled.value
+            && matches!(
+                legacy_enabled.source,
+                crate::ConfigSource::Cli | crate::ConfigSource::Env
+            );
+        let globally_disabled = force_disabled
+            || (!legacy_enabled.value
+                && legacy_enabled.source == crate::ConfigSource::Config
+                && memory_v2.enabled != Some(true));
+        // A false v2 gate is not a global kill switch: it delegates to the
+        // independent legacy waterfall. Local `[memory_v2]` has precedence
+        // over the dedicated remote v2 settings.
+        let v2_selected = v2_enabled == Some(true);
+        let enabled = !globally_disabled && (v2_selected || legacy_enabled.value);
+        let mode = if v2_selected {
+            MemoryMode::V2
+        } else {
+            MemoryMode::Legacy
+        };
 
         Self {
-            enabled: crate::BoolFlag::env("GROK_MEMORY")
-                .cli(memory_enabled_override)
-                .config(memory.enabled)
-                .feature_flag(remote.and_then(|settings| settings.memory_enabled))
-                .default(false)
-                .resolve()
-                .value,
+            enabled,
+            force_disabled,
+            mode,
             index: MemoryIndexConfig {
                 max_chunk_chars: index
                     .and_then(|settings| settings.max_chunk_chars)
@@ -737,6 +845,84 @@ impl MemoryConfig {
                     },
                 },
             },
+            v2: {
+                let local_rollout = memory_v2.rollout.unwrap_or(defaults.v2.rollout);
+                let restrict_flag = |local: Option<bool>, remote_value: Option<bool>, default| {
+                    local.unwrap_or(default) && remote_value.unwrap_or(true)
+                };
+                let restrict_days = |local: Option<u64>, remote_value: Option<u64>, default| {
+                    let local = local.unwrap_or(default);
+                    remote_value.map_or(local, |remote| local.min(remote))
+                };
+                MemoryV2Config {
+                    rollout: remote_v2
+                        .and_then(|settings| settings.rollout)
+                        .map_or(local_rollout, |remote| local_rollout.restrict(remote)),
+                    capture_status_enabled: memory_v2
+                        .capture_status_enabled
+                        .or_else(|| remote_v2.and_then(|settings| settings.capture_status_enabled))
+                        .unwrap_or(defaults.v2.capture_status_enabled),
+                    capture_enabled: restrict_flag(
+                        memory_v2.capture_enabled,
+                        remote_v2.and_then(|settings| settings.capture_enabled),
+                        defaults.v2.capture_enabled,
+                    ),
+                    automatic_dream_enabled: restrict_flag(
+                        memory_v2.automatic_dream_enabled,
+                        remote_v2.and_then(|settings| settings.automatic_dream_enabled),
+                        defaults.v2.automatic_dream_enabled,
+                    ),
+                    manual_dream_enabled: restrict_flag(
+                        memory_v2.manual_dream_enabled,
+                        remote_v2.and_then(|settings| settings.manual_dream_enabled),
+                        defaults.v2.manual_dream_enabled,
+                    ),
+                    batch_dream_enabled: memory_v2
+                        .batch_dream_enabled
+                        .or_else(|| remote_v2.and_then(|settings| settings.batch_dream_enabled))
+                        .unwrap_or(defaults.v2.batch_dream_enabled),
+                    batch_dream_max_run_secs: memory_v2
+                        .batch_dream_max_run_secs
+                        .or_else(|| {
+                            remote_v2.and_then(|settings| settings.batch_dream_max_run_secs)
+                        })
+                        .unwrap_or(defaults.v2.batch_dream_max_run_secs)
+                        .clamp(60, 3_600),
+                    batch_dream_max_calls_per_batch: memory_v2
+                        .batch_dream_max_calls_per_batch
+                        .or_else(|| {
+                            remote_v2.and_then(|settings| settings.batch_dream_max_calls_per_batch)
+                        })
+                        .unwrap_or(defaults.v2.batch_dream_max_calls_per_batch)
+                        .clamp(2, 16),
+                    batch_dream_max_batch_note_bytes: memory_v2
+                        .batch_dream_max_batch_note_bytes
+                        .or_else(|| {
+                            remote_v2.and_then(|settings| settings.batch_dream_max_batch_note_bytes)
+                        })
+                        .unwrap_or(defaults.v2.batch_dream_max_batch_note_bytes)
+                        .clamp(16 * 1024, 256 * 1024),
+                    compact_index_enabled: memory_v2
+                        .compact_index_enabled
+                        .or_else(|| remote_v2.and_then(|settings| settings.compact_index_enabled))
+                        .unwrap_or(defaults.v2.compact_index_enabled),
+                    file_writes_enabled: restrict_flag(
+                        memory_v2.file_writes_enabled,
+                        remote_v2.and_then(|settings| settings.file_writes_enabled),
+                        defaults.v2.file_writes_enabled,
+                    ),
+                    archived_retention_days: restrict_days(
+                        memory_v2.archived_retention_days,
+                        remote_v2.and_then(|settings| settings.archived_retention_days),
+                        defaults.v2.archived_retention_days,
+                    ),
+                    job_retention_days: restrict_days(
+                        memory_v2.job_retention_days,
+                        remote_v2.and_then(|settings| settings.job_retention_days),
+                        defaults.v2.job_retention_days,
+                    ),
+                }
+            },
             flush: MemoryFlushConfig {
                 enabled: flush
                     .enabled
@@ -827,6 +1013,437 @@ mod tests {
         assert_eq!(f.semantic_dedup_threshold, Some(1.0));
         let f: MemoryFlushConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(f.semantic_dedup_threshold, None);
+    }
+
+    #[test]
+    fn memory_mode_defaults_to_legacy() {
+        assert_eq!(MemoryConfig::default().mode, MemoryMode::Legacy);
+    }
+
+    #[test]
+    fn memory_v2_remote_gate_waterfall_is_exhaustive() {
+        let cases = [
+            (Some(true), Some(false), true, MemoryMode::V2),
+            (Some(true), Some(true), true, MemoryMode::V2),
+            (Some(false), Some(true), true, MemoryMode::Legacy),
+            (Some(false), Some(false), false, MemoryMode::Legacy),
+            (None, Some(true), true, MemoryMode::Legacy),
+            (None, Some(false), false, MemoryMode::Legacy),
+            (None, None, false, MemoryMode::Legacy),
+        ];
+
+        for (memory_v2_enabled, memory_enabled, enabled, mode) in cases {
+            let remote = crate::RemoteSettings {
+                memory_v2: memory_v2_enabled.map(|enabled| MemoryV2Settings {
+                    enabled: Some(enabled),
+                    ..Default::default()
+                }),
+                memory_enabled,
+                ..Default::default()
+            };
+            let resolved = MemoryConfig::resolve_settings(
+                None,
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                Some(&remote),
+            );
+            assert_eq!(
+                (resolved.enabled, resolved.mode),
+                (enabled, mode),
+                "memory_v2_enabled={memory_v2_enabled:?}, memory_enabled={memory_enabled:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn opt_in_flags_local_wins_then_remote_then_off() {
+        let cases = [
+            (None, None, false),
+            (None, Some(false), false),
+            (None, Some(true), true),
+            (Some(false), Some(true), false),
+            (Some(true), Some(false), true),
+            (Some(true), None, true),
+        ];
+        for key in ["batch_dream_enabled", "compact_index_enabled"] {
+            for (local, remote_value, expected) in cases {
+                let local_toml = local.map_or(String::new(), |value| format!("{key} = {value}"));
+                let config: toml::Value =
+                    toml::from_str(&format!("[memory_v2]\nenabled = true\n{local_toml}")).unwrap();
+                let mut remote_v2 = MemoryV2Settings::default();
+                match key {
+                    "batch_dream_enabled" => remote_v2.batch_dream_enabled = remote_value,
+                    _ => remote_v2.compact_index_enabled = remote_value,
+                }
+                let remote = crate::RemoteSettings {
+                    memory_v2: Some(remote_v2),
+                    ..crate::RemoteSettings::default()
+                };
+                let resolved = MemoryConfig::resolve(false, false, &config, Some(&remote));
+                let actual = match key {
+                    "batch_dream_enabled" => resolved.v2.batch_dream_enabled,
+                    _ => resolved.v2.compact_index_enabled,
+                };
+                assert_eq!(
+                    expected, actual,
+                    "{key}: local={local:?}, remote={remote_value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remote_settings_without_batch_dream_keys_parse_and_resolve_to_defaults() {
+        let remote: crate::RemoteSettings = serde_json::from_str(
+            r#"{"memory_v2": {"enabled": true, "rollout": "active",
+                "capture_enabled": true, "automatic_dream_enabled": true}}"#,
+        )
+        .unwrap();
+        let config: toml::Value = toml::from_str("[memory_v2]\nenabled = true").unwrap();
+        let resolved = MemoryConfig::resolve(false, false, &config, Some(&remote));
+        let defaults = MemoryV2Config::default();
+        assert!(!resolved.v2.batch_dream_enabled);
+        assert_eq!(
+            (
+                defaults.batch_dream_max_run_secs,
+                defaults.batch_dream_max_calls_per_batch,
+                defaults.batch_dream_max_batch_note_bytes
+            ),
+            (
+                resolved.v2.batch_dream_max_run_secs,
+                resolved.v2.batch_dream_max_calls_per_batch,
+                resolved.v2.batch_dream_max_batch_note_bytes
+            )
+        );
+        assert!(resolved.v2.can_run_automatic_dream());
+    }
+
+    #[test]
+    fn local_memory_v2_enabled_selects_v2_with_active_defaults() {
+        let config: toml::Value = toml::from_str("[memory_v2]\nenabled = true").unwrap();
+        let resolved = MemoryConfig::resolve(false, false, &config, None);
+
+        assert!(resolved.enabled);
+        assert_eq!(resolved.mode, MemoryMode::V2);
+        assert_eq!(resolved.v2, MemoryV2Config::default());
+        assert_eq!(resolved.v2.rollout, MemoryV2Rollout::Active);
+        assert!(!resolved.v2.capture_status_enabled);
+    }
+
+    #[test]
+    fn local_memory_v2_true_overrides_remote_false() {
+        let config: toml::Value = toml::from_str("[memory_v2]\nenabled = true").unwrap();
+        let remote = crate::RemoteSettings {
+            memory_v2: Some(MemoryV2Settings {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = MemoryConfig::resolve(false, false, &config, Some(&remote));
+
+        assert!(resolved.enabled);
+        assert_eq!(resolved.mode, MemoryMode::V2);
+    }
+
+    #[test]
+    fn memory_v2_cannot_be_selected_from_legacy_memory_section() {
+        let config: toml::Value =
+            toml::from_str("[memory]\nenabled = true\nmode = \"v2\"").unwrap();
+        let resolved = MemoryConfig::resolve(false, false, &config, None);
+
+        assert!(resolved.enabled);
+        assert_eq!(resolved.mode, MemoryMode::Legacy);
+    }
+
+    #[test]
+    fn capture_status_is_debug_only_and_local_config_has_precedence() {
+        let remote = crate::RemoteSettings {
+            memory_v2: Some(MemoryV2Settings {
+                capture_status_enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let remote_enabled = MemoryConfig::resolve_settings(
+            None,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            Some(&remote),
+        );
+        assert!(remote_enabled.v2.capture_status_enabled);
+
+        let local_disabled: MemoryV2Settings =
+            toml::from_str("capture_status_enabled = false").unwrap();
+        let resolved = MemoryConfig::resolve_settings(
+            None,
+            &Default::default(),
+            &local_disabled,
+            &Default::default(),
+            &Default::default(),
+            Some(&remote),
+        );
+        assert!(!resolved.v2.capture_status_enabled);
+    }
+
+    #[test]
+    fn explicit_memory_v2_false_falls_back_to_legacy() {
+        let config: toml::Value =
+            toml::from_str("[memory]\nenabled = true\n[memory_v2]\nenabled = false").unwrap();
+        let resolved = MemoryConfig::resolve(false, false, &config, None);
+
+        assert!(resolved.enabled);
+        assert_eq!(resolved.mode, MemoryMode::Legacy);
+    }
+
+    #[test]
+    fn local_memory_v2_false_overrides_remote_v2_true_then_falls_back() {
+        let config: toml::Value = toml::from_str("[memory_v2]\nenabled = false").unwrap();
+        let remote = crate::RemoteSettings {
+            memory_v2: Some(MemoryV2Settings {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            memory_enabled: Some(true),
+            ..Default::default()
+        };
+        let resolved = MemoryConfig::resolve(false, false, &config, Some(&remote));
+
+        assert!(resolved.enabled);
+        assert_eq!(resolved.mode, MemoryMode::Legacy);
+    }
+
+    #[test]
+    fn local_memory_v2_true_overrides_disabled_legacy_memory() {
+        let config: toml::Value =
+            toml::from_str("[memory]\nenabled = false\n[memory_v2]\nenabled = true").unwrap();
+        let resolved = MemoryConfig::resolve(false, false, &config, None);
+
+        assert!(resolved.enabled);
+        assert_eq!(resolved.mode, MemoryMode::V2);
+    }
+
+    #[test]
+    fn local_memory_false_disables_remote_v2_gate() {
+        let config: toml::Value = toml::from_str("[memory]\nenabled = false").unwrap();
+        let remote = crate::RemoteSettings {
+            memory_v2: Some(MemoryV2Settings {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            memory_enabled: Some(true),
+            ..Default::default()
+        };
+        let resolved = MemoryConfig::resolve(false, false, &config, Some(&remote));
+
+        assert!(!resolved.enabled);
+        assert!(
+            !resolved.force_disabled,
+            "a TOML opt-out is not a process-wide force-disable"
+        );
+        assert_eq!(resolved.mode, MemoryMode::V2);
+    }
+
+    #[test]
+    fn local_memory_false_with_local_v2_true_keeps_v2_despite_remote_v2_false() {
+        let config: toml::Value =
+            toml::from_str("[memory]\nenabled = false\n[memory_v2]\nenabled = true").unwrap();
+        let remote = crate::RemoteSettings {
+            memory_v2: Some(MemoryV2Settings {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            memory_enabled: Some(false),
+            ..Default::default()
+        };
+        let resolved = MemoryConfig::resolve(false, false, &config, Some(&remote));
+
+        assert!(resolved.enabled);
+        assert_eq!(resolved.mode, MemoryMode::V2);
+    }
+
+    #[test]
+    fn remote_legacy_false_does_not_disable_remote_v2_gate() {
+        let remote = crate::RemoteSettings {
+            memory_v2: Some(MemoryV2Settings {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            memory_enabled: Some(false),
+            ..Default::default()
+        };
+        let resolved = MemoryConfig::resolve(
+            false,
+            false,
+            &toml::Value::Table(Default::default()),
+            Some(&remote),
+        );
+
+        assert!(resolved.enabled);
+        assert_eq!(resolved.mode, MemoryMode::V2);
+    }
+
+    #[test]
+    fn no_memory_disables_local_and_remote_v2_gates() {
+        let config: toml::Value = toml::from_str("[memory_v2]\nenabled = true").unwrap();
+        let remote = crate::RemoteSettings {
+            memory_v2: Some(MemoryV2Settings {
+                enabled: Some(true),
+                ..Default::default()
+            }),
+            memory_enabled: Some(true),
+            ..Default::default()
+        };
+        let resolved = MemoryConfig::resolve(false, true, &config, Some(&remote));
+
+        assert!(!resolved.enabled);
+        assert!(resolved.force_disabled);
+    }
+
+    #[test]
+    fn enabled_memory_is_not_force_disabled() {
+        let config: toml::Value = toml::from_str("[memory]\nenabled = true").unwrap();
+        let resolved = MemoryConfig::resolve(false, false, &config, None);
+
+        assert!(resolved.enabled);
+        assert!(!resolved.force_disabled);
+    }
+
+    #[test]
+    fn deprecated_positive_memory_override_keeps_legacy_default() {
+        let resolved =
+            MemoryConfig::resolve(true, false, &toml::Value::Table(Default::default()), None);
+
+        assert!(resolved.enabled);
+        assert_eq!(resolved.mode, MemoryMode::Legacy);
+    }
+
+    #[test]
+    fn v2_rollout_and_kill_switches_resolve_and_fail_closed() {
+        let memory_v2: MemoryV2Settings = toml::from_str(
+            r#"
+            rollout = "record_only"
+            capture_enabled = true
+            file_writes_enabled = false
+            "#,
+        )
+        .unwrap();
+        let resolved = MemoryConfig::resolve_settings(
+            None,
+            &Default::default(),
+            &memory_v2,
+            &Default::default(),
+            &Default::default(),
+            None,
+        );
+        assert_eq!(resolved.v2.rollout, MemoryV2Rollout::RecordOnly);
+        assert!(!resolved.v2.can_capture());
+        assert!(!resolved.v2.can_run_automatic_dream());
+        assert!(!resolved.v2.can_run_manual_dream());
+        assert!(!resolved.v2.can_expose_memory());
+    }
+
+    #[test]
+    fn v2_rollout_stage_matrix_is_exact() {
+        let controls = |rollout| MemoryV2Config {
+            rollout,
+            ..MemoryV2Config::default()
+        };
+        let off = controls(MemoryV2Rollout::Off);
+        assert!(!off.can_capture());
+        assert!(!off.can_run_maintenance());
+        assert!(!off.can_run_automatic_dream());
+        assert!(!off.can_run_manual_dream());
+        assert!(!off.can_expose_memory());
+
+        let record_only = controls(MemoryV2Rollout::RecordOnly);
+        assert!(record_only.can_capture());
+        assert!(record_only.can_run_maintenance());
+        assert!(!record_only.can_run_automatic_dream());
+        assert!(!record_only.can_run_manual_dream());
+        assert!(!record_only.can_expose_memory());
+
+        let shadow = controls(MemoryV2Rollout::Shadow);
+        assert!(shadow.can_capture());
+        assert!(shadow.can_run_maintenance());
+        assert!(shadow.can_run_automatic_dream());
+        assert!(shadow.can_run_manual_dream());
+        assert!(!shadow.can_expose_memory());
+
+        let active = controls(MemoryV2Rollout::Active);
+        assert!(active.can_capture());
+        assert!(active.can_run_maintenance());
+        assert!(active.can_run_automatic_dream());
+        assert!(active.can_run_manual_dream());
+        assert!(active.can_expose_memory());
+    }
+
+    #[test]
+    fn v2_maintenance_is_independent_of_capture_and_dream_switches() {
+        for rollout in [MemoryV2Rollout::RecordOnly, MemoryV2Rollout::Active] {
+            let controls = MemoryV2Config {
+                rollout,
+                capture_enabled: false,
+                automatic_dream_enabled: false,
+                manual_dream_enabled: false,
+                ..MemoryV2Config::default()
+            };
+            assert!(controls.can_run_maintenance());
+        }
+
+        let writes_disabled = MemoryV2Config {
+            file_writes_enabled: false,
+            ..MemoryV2Config::default()
+        };
+        assert!(!writes_disabled.can_run_maintenance());
+    }
+
+    #[test]
+    fn v2_remote_controls_can_only_restrict_local_settings() {
+        let memory_v2: MemoryV2Settings = toml::from_str(
+            r#"
+            rollout = "active"
+            capture_enabled = true
+            automatic_dream_enabled = true
+            manual_dream_enabled = false
+            file_writes_enabled = true
+            archived_retention_days = 30
+            job_retention_days = 14
+            "#,
+        )
+        .unwrap();
+        let remote = crate::RemoteSettings {
+            memory_v2: Some(MemoryV2Settings {
+                rollout: Some(MemoryV2Rollout::RecordOnly),
+                capture_enabled: Some(false),
+                automatic_dream_enabled: Some(false),
+                manual_dream_enabled: Some(true),
+                file_writes_enabled: Some(false),
+                archived_retention_days: Some(7),
+                job_retention_days: Some(60),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let resolved = MemoryConfig::resolve_settings(
+            None,
+            &Default::default(),
+            &memory_v2,
+            &Default::default(),
+            &Default::default(),
+            Some(&remote),
+        );
+        assert_eq!(resolved.v2.rollout, MemoryV2Rollout::RecordOnly);
+        assert!(!resolved.v2.capture_enabled);
+        assert!(!resolved.v2.automatic_dream_enabled);
+        assert!(!resolved.v2.manual_dream_enabled);
+        assert!(!resolved.v2.file_writes_enabled);
+        assert_eq!(resolved.v2.archived_retention_days, 7);
+        assert_eq!(resolved.v2.job_retention_days, 14);
     }
 
     #[test]

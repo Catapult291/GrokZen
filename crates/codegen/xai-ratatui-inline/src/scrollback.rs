@@ -5,11 +5,9 @@ use ratatui::layout::Rect;
 
 use crate::{common::TerminalLike, segment::split_into_line_segments};
 
-// ANSI escape sequence constants.
-// CSI J with the default parameter (0): erase from cursor to end of display.
-// Byte-identical to what the previous termwiz constant
-// (`CSI::Edit(Edit::EraseInDisplay(EraseInDisplay::EraseToEndOfDisplay))`)
-// rendered, and to crossterm's `Clear(ClearType::FromCursorDown)`.
+// CSI J with the default parameter (0): erase from cursor to end of display. Byte-identical to what the previous termwiz
+// constant (`CSI::Edit(Edit::EraseInDisplay(EraseInDisplay::EraseToEndOfDisplay))`) rendered, and to crossterm's
+// `Clear(ClearType::FromCursorDown)`.
 const ANSI_CLEAR_FROM_CURSOR_DOWN: &str = "\x1b[J";
 
 pub fn emit_to_scrollback<T: TerminalLike>(terminal: &mut T, content: &str) -> io::Result<()> {
@@ -139,6 +137,12 @@ mod tests {
 
         // Viewport should have moved down
         assert_eq!(terminal.viewport_updates.len(), 1);
-        assert!(terminal.viewport_updates[0].y > 10);
+        let Some(update) = terminal.viewport_updates.first() else {
+            panic!(
+                "expected a viewport update: {:?}",
+                terminal.viewport_updates
+            );
+        };
+        assert!(update.y > 10);
     }
 }

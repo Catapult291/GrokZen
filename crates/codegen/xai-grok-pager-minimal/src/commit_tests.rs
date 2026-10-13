@@ -82,10 +82,9 @@ fn pending_user_input_holds_the_frontier() {
 
 #[test]
 fn running_agent_message_commits_once_a_later_block_exists() {
-    // The tracker leaves an agent message's `is_running` flag set until turn end
-    // handle_tool_call resets current_agent_msg without finishing the entry when a tool follows
-    // Minimal must still commit that message mid-turn once a later *turn-progress* block proves it's complete
-    // Otherwise the rest of the turn piles up in the live tail and scrolls instead of accumulating into native scrollback
+    // The tracker leaves an agent message's `is_running` flag set until turn end handle_tool_call resets
+    // current_agent_msg without finishing the entry when a tool follows. Otherwise the rest of the turn piles up in
+    // the live tail and scrolls instead of accumulating into native scrollback.
     let mut s = ScrollbackState::new();
     s.push(ScrollbackEntry::running(RenderBlock::agent_message(
         "answer text",
@@ -217,10 +216,9 @@ fn revised_plan_anchors_to_its_own_tool_row_and_neither_plan_re_emits() {
 
 #[test]
 fn bg_task_started_commits_while_running_and_does_not_wedge_frontier() {
-    // A fresh background task is pushed as a running "started" block (`set_last_running(true)`)
-    // Its `is_running` flag is animation-only: the block is a finalized lifecycle event whose content never changes
-    // It must commit immediately even mid-turn
-    // Otherwise it wedges the frontier and the task (plus everything after it) stays hidden in the live tail until the task finishes
+    // Its `is_running` flag is animation-only: the block is a finalized lifecycle event whose content never changes.
+    // It must commit immediately even mid-turn. Otherwise it wedges the frontier and the task (plus everything after
+    // it) stays hidden in the live tail until the task finishes.
     let mut s = ScrollbackState::new();
     s.push(finalized("a"));
     s.push(ScrollbackEntry::running(RenderBlock::bg_task(
@@ -268,11 +266,9 @@ fn no_double_commit_after_mid_list_shift_remove() {
 
 #[test]
 fn mid_list_removal_below_cursor_does_not_strand_uncommitted_entries() {
-    // Regression: a committed placeholder ("Loading session...") is removed AFTER new uncommitted entries were appended past the cursor
-    // That is the `/resume` / reconnect `SessionLoaded` ordering
-    // Removing below the cursor shifts the uncommitted entries down one
-    // Without the cursor decrement in `remove_entry` the first of them slid below the cursor
-    // It was never committed NOR drawn in the live tail (silently missing from minimal mode)
+    // Regression: a committed placeholder ("Loading session.") is removed AFTER new uncommitted entries were appended
+    // past the cursor. Without the cursor decrement in `remove_entry` the first of them slid below the cursor. It was
+    // never committed NOR drawn in the live tail (silently missing from minimal mode).
     let mut s = ScrollbackState::new();
     s.push(finalized("old-1"));
     let placeholder = s.push(finalized("Loading session..."));
@@ -506,10 +502,8 @@ fn clear_resets_the_frontier() {
     assert_eq!(minimal_api::commit_scan_cursor(&s), 0);
 }
 
-/// Height-exactness guard: `commit_active` reserves exactly `desired_height(width)` rows via `insert_before`.
-/// If `render` paints real content beyond that, those rows are silently clipped from native scrollback.
-/// Render each block type into an over-tall buffer and assert no non-space glyph lands past `desired_height`.
-/// Background fill of blank spaces past `h` is fine; only real content matters.
+/// Height-exactness guard: `commit_active` reserves exactly `desired_height(width)` rows via `insert_before`. only
+/// real content matters.
 fn assert_committed_fits(label: &str, block: RenderBlock, width: u16) {
     let mut entry = ScrollbackEntry::new(block);
     entry.set_display_mode(minimal_commit_display_mode(
@@ -571,7 +565,9 @@ fn committed_block_uses_owning_session_cwd_for_tool_paths() {
     let mut text = String::new();
     for y in 0..height {
         for x in 0..width {
-            text.push_str(buf[(x, y)].symbol());
+            if let Some(cell) = buf.cell((x, y)) {
+                text.push_str(cell.symbol());
+            }
         }
     }
     let normalized_text = text.replace('\\', "/");
@@ -743,7 +739,7 @@ fn large_commit_is_capped_with_footer() {
     let cap = 12u16;
     let area = Rect::new(0, 0, width, cap);
     let mut buf = Buffer::empty(area);
-    paint_committed(&mut buf, renderer, width, full_h, theme.dim());
+    paint_committed(&mut buf, &renderer, width, full_h, theme.dim());
 
     // The final row is the overflow footer naming the hidden line count and pointing at /transcript; the buffer is exactly `cap` rows (bounded)
     let last: String = (0..width)
@@ -776,7 +772,7 @@ fn small_commit_is_not_capped() {
     // Buffer is exactly the block's height, so there is no footer (uncapped path)
     let area = Rect::new(0, 0, width, full_h);
     let mut buf = Buffer::empty(area);
-    paint_committed(&mut buf, renderer, width, full_h, theme.dim());
+    paint_committed(&mut buf, &renderer, width, full_h, theme.dim());
 
     let mut all = String::new();
     for y in 0..full_h {
@@ -795,6 +791,13 @@ fn committed_edit_keeps_diff_line_backgrounds() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use similar::ChangeTag;
+    use xai_grok_pager::theme::cache as theme_cache;
+
+    // EditToolCallBlock::rendered_output reads Theme::current(), not the renderer theme.
+    // pin_theme serializes against terminal_native_lock_paints_only_native_colors so this
+    // comparison cannot see Reset insert/delete bands from a concurrent native-lock flip.
+    let _pin = theme_cache::pin_theme();
+    theme_cache::set_terminal_native_lock(false);
 
     let hunk = vec![
         DiffLine {
@@ -825,6 +828,11 @@ fn committed_edit_keeps_diff_line_backgrounds() {
     let block = RenderBlock::edit_with_hunks("src/main.rs", vec![hunk]);
     let mut entry = ScrollbackEntry::new(block);
     let theme = Theme::current();
+    assert!(
+        !theme.diff_uses_line_fg(),
+        "this regression needs a banded theme; terminal-native is covered by \
+         terminal_native_lock_paints_only_native_colors"
+    );
     let appearance = committed_appearance(&AppearanceConfig::default());
     entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
     let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
@@ -833,7 +841,7 @@ fn committed_edit_keeps_diff_line_backgrounds() {
     let h = renderer.desired_height(width);
     let area = Rect::new(0, 0, width, h);
     let mut buf = Buffer::empty(area);
-    renderer.render(area, &mut buf);
+    paint_committed(&mut buf, &renderer, width, h, theme.dim());
 
     // The committed edit uses a flat background (terminal transparency), but must still paint the per-line diff backgrounds
     // Otherwise an added / removed line is indistinguishable from context
@@ -855,12 +863,25 @@ fn committed_edit_keeps_diff_line_backgrounds() {
         saw_delete,
         "committed edit lost the delete (red) diff background"
     );
+
+    let wraps = commit_wrap_flags(&renderer, buf.area.height, h);
+    let rows = crate::full_view::buffer_to_semantic_rows(&buf, &wraps);
+    match theme.diff_insert_bg {
+        Color::Rgb(r, g, b) => {
+            let needle = format!("48;2;{r};{g};{b}");
+            assert!(
+                rows.iter().any(|(ansi, _, _)| ansi.contains(&needle)),
+                "committed ANSI must keep the insert band SGR {needle}: {rows:?}"
+            );
+        }
+        bg => panic!("pin_theme TrueColor groknight insert bg should be RGB, got {bg:?}"),
+    }
 }
 
 /// Asserted through `chrome_width` because that is what both `desired_height` and `render` subtract from the wrap width.
-/// One column is the whole cost of the rail, which is why restoring it is height-safe.
+/// With the reasoning rail moved into the body rows (`rail_under_bullet`), no block reserves the accent column, so every block's chrome starts flush at column 0.
 #[test]
-fn only_thinking_spends_the_accent_column() {
+fn no_block_spends_the_accent_column() {
     let theme = Theme::current();
     let appearance = committed_appearance(&AppearanceConfig::default());
     let chrome = |entry: &ScrollbackEntry| {
@@ -874,13 +895,8 @@ fn only_thinking_spends_the_accent_column() {
         .chrome_width()
     };
 
-    assert_eq!(
-        chrome(&ScrollbackEntry::new(RenderBlock::thinking("reasoning"))),
-        1,
-        "reasoning reserves the 1-col accent gutter"
-    );
-
     for block in [
+        RenderBlock::thinking("reasoning"),
         RenderBlock::agent_message("answer"),
         RenderBlock::user_prompt("ask"),
         RenderBlock::execute("ls"),
@@ -892,17 +908,24 @@ fn only_thinking_spends_the_accent_column() {
         assert_eq!(
             chrome(&entry),
             0,
-            "only reasoning may spend the accent column: {:?}",
+            "no block may spend the accent column: {:?}",
             entry.block
         );
     }
 
-    // A column is reserved only where the block actually paints one
-    // Reserving without painting leaves the content indented over a blank gutter
-    // That is what a collapsed reasoning header did while `hide_accent` keyed off the block type alone
+    // The rail is body chrome now: an open reasoning block leads with its header bullet at column 0
+    // and carries the rail on the rows below it, never a rail beside the header (the pre-`rail_under_bullet` look)
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     let rail = xai_grok_pager::glyphs::accent_bar();
+    let bullet = appearance
+        .scrollback
+        .blocks
+        .tool
+        .bullet
+        .char()
+        .expect("minimal keeps the tool bullet")
+        .to_string();
     minimal_api::set_show_thinking_blocks(true);
     for mode in [
         DisplayMode::Collapsed,
@@ -921,25 +944,35 @@ fn only_thinking_spends_the_accent_column() {
             test_cwd(),
             COMMITTED_TICK,
         );
-        let reserved = renderer.chrome_width();
         let h = renderer.desired_height(60);
         let area = Rect::new(0, 0, 60, h);
         let mut buf = Buffer::empty(area);
         renderer.render(area, &mut buf);
-        let painted = buf.cell((0, 0)).expect("first cell").symbol() == rail;
 
+        // Every mode leads with the header's bullet, flush at column 0.
         assert_eq!(
-            reserved == 1,
-            painted,
-            "{mode:?}: reserved a column={} but painted the rail={painted} — a \
-             reserved-but-unpainted column is a blank indent",
-            reserved == 1,
+            buf.cell((0, 0)).expect("first cell").symbol(),
+            bullet,
+            "{mode:?}: the header bullet must sit at column 0"
         );
+        // Open modes run the rail down every row below the header; collapsed
+        // has no body to delimit and stays a single rail-free header row.
+        if mode == DisplayMode::Collapsed {
+            assert_eq!(h, 1, "collapsed reasoning is its one-line header");
+        } else {
+            for y in 1..h {
+                assert_eq!(
+                    buf.cell((0, y)).expect("body cell").symbol(),
+                    rail,
+                    "{mode:?}: row {y} must carry the rail under the bullet"
+                );
+            }
+        }
     }
 }
 
 #[test]
-fn committed_thinking_paints_a_dim_rail_in_column_zero() {
+fn committed_thinking_paints_a_dim_rail_under_the_bullet() {
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
@@ -980,8 +1013,9 @@ fn committed_thinking_paints_a_dim_rail_in_column_zero() {
     renderer.render(area, &mut buf);
 
     let rail = xai_grok_pager::glyphs::accent_bar();
-    for y in 0..h {
-        let cell = buf.cell((0, y)).expect("accent cell");
+    // Row 0 is the header (`◆ Thought…`) — the rail starts under its bullet.
+    for y in 1..h {
+        let cell = buf.cell((0, y)).expect("rail cell");
         assert_eq!(cell.symbol(), rail, "row {y} lost the rail");
         assert!(
             cell.modifier.contains(Modifier::DIM),
@@ -1146,6 +1180,220 @@ fn collapsed_thinking_commit_is_one_advertised_row() {
     // Too narrow for the hint: the header still wins, still one row.
     let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
     assert_eq!(renderer.desired_height(16), 1);
+}
+
+/// Unbreakable path token: slashed paths wrap at `/` before the last column and cannot prove wrap-join.
+const YAML_UNBREAKABLE: &str = "falcon_missions_nrol97_trajectory_nrol97.mat_unbreakable";
+
+fn yaml_commit_body() -> String {
+    format!(
+        "```yaml\n\
+nrol97:\n\
+  trajectory: {YAML_UNBREAKABLE}\n\
+  mission_number: 1667\n\
+  builds:\n\
+    - cgen_swrelease\n\
+```"
+    )
+}
+
+fn paint_yaml_agent(width: u16, trim: bool) -> (ratatui::buffer::Buffer, u16, Vec<bool>) {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let theme = Theme::current();
+    let appearance = committed_appearance(&AppearanceConfig::default());
+    let mut entry = ScrollbackEntry::new(RenderBlock::agent_message(yaml_commit_body()));
+    entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
+    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let full_h = renderer.desired_height(width);
+    let area = Rect::new(0, 0, width, full_h);
+    let mut buf = Buffer::empty(area);
+    if trim {
+        paint_committed(&mut buf, &renderer, width, full_h, theme.dim());
+    } else {
+        renderer.render(area, &mut buf);
+    }
+    let wraps = renderer.row_soft_wraps(buf.area.height);
+    (buf, full_h, wraps)
+}
+
+fn row_text(buf: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+    (0..width)
+        .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
+        .collect()
+}
+
+#[test]
+fn dense_commit_grid_pads_short_yaml_rows() {
+    let width = 40u16;
+    let (buf, h, _wraps) = paint_yaml_agent(width, false);
+    let mut saw_short_key = false;
+    for y in 0..h {
+        let text = row_text(&buf, y, width);
+        if !text.contains("nrol97:") || text.contains("trajectory") {
+            continue;
+        }
+        saw_short_key = true;
+        let last = buf
+            .cell((width - 1, y))
+            .map(|c| c.symbol().to_string())
+            .unwrap_or_default();
+        assert_eq!(
+            last, " ",
+            "untrimmed short YAML row must space-pad to the last column: {text:?}"
+        );
+    }
+    assert!(
+        saw_short_key,
+        "expected a short nrol97: row in {h} painted rows"
+    );
+}
+
+#[test]
+fn paint_committed_trims_pads_and_semantic_copy_keeps_yaml_intact() {
+    let width = 40u16;
+    let (buf, h, wraps) = paint_yaml_agent(width, true);
+    let mut saw_short_key = false;
+    for y in 0..h {
+        let text = row_text(&buf, y, width);
+        if !text.contains("nrol97:") || text.contains("trajectory") {
+            continue;
+        }
+        saw_short_key = true;
+        let last_vis =
+            crate::full_view::last_visible_column(&buf, y).expect("nrol97: row has glyphs");
+        assert!(
+            last_vis < width.saturating_sub(1),
+            "short YAML key must not serialize painted pads as full width: last_vis={last_vis} {text:?}"
+        );
+    }
+    assert!(saw_short_key, "expected a short nrol97: row after trim");
+
+    assert!(
+        wraps.iter().any(|w| *w),
+        "unbreakable YAML path must produce a wrap joiner"
+    );
+    let copy = crate::full_view::buffer_to_semantic_copy(&buf, &wraps);
+    assert!(
+        copy.contains(YAML_UNBREAKABLE),
+        "soft-wrapped path must join\n{copy}"
+    );
+    assert!(
+        !copy.contains("nrol97:\n\n"),
+        "trailing pads must not become blank lines between keys\n{copy}"
+    );
+    assert!(
+        copy.contains("mission_number: 1667"),
+        "short keys stay intact\n{copy}"
+    );
+}
+
+#[test]
+fn semantic_copy_exact_width_hard_break_code_lines_stay_separate() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let width = 40u16;
+    let line_a = "A".repeat(usize::from(width));
+    let line_b = "B".repeat(usize::from(width));
+    let body = format!("```\n{line_a}\n{line_b}\n```");
+    let theme = Theme::current();
+    let appearance = committed_appearance(&AppearanceConfig::default());
+    let mut entry = ScrollbackEntry::new(RenderBlock::agent_message(body));
+    entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
+    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let full_h = renderer.desired_height(width);
+    let area = Rect::new(0, 0, width, full_h);
+    let mut buf = Buffer::empty(area);
+    paint_committed(&mut buf, &renderer, width, full_h, theme.dim());
+    let wraps = renderer.row_soft_wraps(buf.area.height);
+    let copy = crate::full_view::buffer_to_semantic_copy(&buf, &wraps);
+    assert!(
+        copy.contains(&format!("{line_a}\n{line_b}")),
+        "exact-width hard breaks must stay separate lines\n{copy}"
+    );
+    assert!(
+        !copy.contains(&format!("{line_a}{line_b}")),
+        "native copy must not concatenate exact-width code lines\n{copy}"
+    );
+}
+
+#[test]
+fn capped_footer_does_not_join_wrapped_line() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let width = 20u16;
+    let body = YAML_UNBREAKABLE;
+    let theme = Theme::current();
+    let appearance = committed_appearance(&AppearanceConfig::default());
+    let mut entry = ScrollbackEntry::new(RenderBlock::agent_message(body));
+    entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
+    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let full_h = renderer.desired_height(width);
+    assert!(full_h > 2, "unbreakable token must wrap, got {full_h}");
+
+    let cap = 2u16;
+    let area = Rect::new(0, 0, width, cap);
+    let mut buf = Buffer::empty(area);
+    paint_committed(&mut buf, &renderer, width, full_h, theme.dim());
+
+    let raw = renderer.row_soft_wraps(cap);
+    assert!(
+        raw.first().copied().unwrap_or(false),
+        "precondition: first painted row wraps onto the overwritten continuation: {raw:?}"
+    );
+    let wraps = commit_wrap_flags(&renderer, cap, full_h);
+    assert!(
+        !wraps.iter().any(|w| *w),
+        "cap footer must not inherit a wrap joiner: {wraps:?}"
+    );
+
+    let copy = crate::full_view::buffer_to_semantic_copy(&buf, &wraps);
+    for line in copy.lines() {
+        if line.contains("more lines") {
+            assert!(
+                !line.contains("falcon") && !line.contains("nrol"),
+                "footer must not join the wrapped path\n{copy}"
+            );
+        }
+    }
+    assert!(copy.contains("more lines"), "footer present\n{copy}");
+}
+
+/// A full-width multiline command uses `joiner: Some("\n")`. That is not WRAPLINE.
+#[test]
+fn semantic_copy_multiline_command_keeps_newline_joiners() {
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
+
+    let width = 40u16;
+    let line_a = "A".repeat(usize::from(width.saturating_sub(2)));
+    let line_b = "B".repeat(usize::from(width.saturating_sub(2)));
+    let theme = Theme::current();
+    let appearance = committed_appearance(&AppearanceConfig::default());
+    let mut entry = ScrollbackEntry::new(RenderBlock::execute(format!("{line_a}\n{line_b}")));
+    entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
+    let renderer = minimal_renderer(&entry, &theme, appearance, test_cwd(), COMMITTED_TICK);
+    let full_h = renderer.desired_height(width);
+    let area = Rect::new(0, 0, width, full_h);
+    let mut buf = Buffer::empty(area);
+    paint_committed(&mut buf, &renderer, width, full_h, theme.dim());
+    let wraps = renderer.row_soft_wraps(buf.area.height);
+    assert!(
+        !wraps.iter().any(|w| *w),
+        "command `\\n` joiners must not set WRAPLINE: {wraps:?}"
+    );
+    let copy = crate::full_view::buffer_to_semantic_copy(&buf, &wraps);
+    assert!(
+        copy.contains('A') && copy.contains('B') && copy.contains("A\n"),
+        "native copy must keep the command separator\n{copy}"
+    );
+    assert!(
+        !copy.contains("A    B") && !copy.contains(&format!("{line_a}{line_b}")),
+        "native copy must not concatenate multiline commands\n{copy}"
+    );
 }
 
 /// Reasoning committed collapsed must still fit its reserved `insert_before` height.

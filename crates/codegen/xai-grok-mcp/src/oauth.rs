@@ -12,6 +12,9 @@ use crate::rmcp::transport::auth::{
 
 const MCP_OAUTH_CLIENT_NAME: &str = "Grok";
 
+#[cfg(debug_assertions)]
+const CONSENT_URL_FILE_ENV: &str = "GROK_TEST_MCP_CONSENT_URL_FILE";
+
 const CREDENTIAL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
 const BROWSER_AUTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
@@ -26,10 +29,7 @@ pub(crate) const OAUTH_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Durat
 pub(crate) async fn discover_metadata_bounded(
     manager: &AuthorizationManager,
 ) -> Result<AuthorizationMetadata, AuthError> {
-    // rmcp 3.x `resolve_metadata` never fails discovery: it degrades to legacy
-    // endpoints guessed from the base URL. The probe's auth decision needs the
-    // rmcp 2.x "no OAuth support" signal back, so the fallback maps to
-    // `NoAuthorizationSupport` instead of guessing endpoints.
+    // rmcp 3.x `resolve_metadata` never fails discovery: it degrades to legacy endpoints guessed from the base URL. The probe's auth decision needs the rmcp 2.x "no OAuth support" signal back, so the fallback maps to `NoAuthorizationSupport` instead of guessing endpoints.
     let resolve = async {
         let resolution = manager.resolve_metadata().await?;
         if resolution.source == AuthorizationMetadataSource::LegacyEndpointFallback {
@@ -420,11 +420,34 @@ async fn build_authorization_url(
 
 fn open_consent_browser(server_name: &str, auth_url: &str) {
     tracing::info!(server = server_name, "Opening browser for OAuth consent");
+    if record_consent_url_for_test(auth_url) {
+        return;
+    }
     if let Err(e) = webbrowser::open(auth_url) {
         // eprintln! corrupts the TUI alternate screen (in-process, fd 2).
         // TODO: show the auth URL via ACP notification instead
         tracing::warn!(%e, url = %auth_url, "Failed to open browser for MCP OAuth; user must visit URL manually");
     }
+}
+
+#[cfg(debug_assertions)]
+fn record_consent_url_for_test(auth_url: &str) -> bool {
+    let Ok(path) = std::env::var(CONSENT_URL_FILE_ENV) else {
+        return false;
+    };
+    use std::io::Write;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| writeln!(f, "{auth_url}"))
+        .unwrap_or_else(|e| panic!("{CONSENT_URL_FILE_ENV} write to {path} failed: {e}"));
+    true
+}
+
+#[cfg(not(debug_assertions))]
+fn record_consent_url_for_test(_auth_url: &str) -> bool {
+    false
 }
 
 /// Peeks the file directly: `initialize_from_store` would clobber the freshly registered client with stored values and break the pending exchange.

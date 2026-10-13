@@ -1,13 +1,14 @@
 //! Feedback, remember-note, btw, and recap dispatchers.
 
 use super::ctx::{NO_SESSION_NOTICE, with_active_agent};
-use crate::app::actions::{Effect, FeedbackTraceChoice};
+use agent_client_protocol as acp;
+
+use crate::app::actions::{Effect, FeedbackSendOrigin, FeedbackTraceChoice};
 use crate::app::agent::AgentId;
 use crate::app::agent_view::{AgentView, PromptInputMode};
 use crate::app::app_view::{ActiveView, AppView};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{SessionEvent, ToolCallBlock};
-use crate::views::question_view::{LocalQuestionKind, QuestionViewState};
 
 fn note_static(
     locale: &crate::locale::LocaleContext,
@@ -21,7 +22,9 @@ fn note_text(locale: &crate::locale::LocaleContext, id: &str, english: &str) -> 
     locale.named_text(id, english).into_owned()
 }
 use std::sync::atomic::{AtomicU64, Ordering};
-use xai_grok_tools::implementations::grok_build::ask_user_question::Question;
+use xai_grok_feedback::{
+    FeedbackDraftStore, FeedbackSource, FeedbackTaxonomy, derive_title, structured_feedback,
+};
 
 /// Monotonic counter for correlating async rewrite responses with the modal that requested them.
 /// It prevents stale results from populating a different note's review modal when the user closes and re-opens quickly.
@@ -31,7 +34,9 @@ fn next_rewrite_nonce() -> u64 {
     REWRITE_NONCE.fetch_add(1, Ordering::Relaxed)
 }
 
-pub(crate) use crate::views::question_view::FEEDBACK_QUESTION_LABEL;
+/// One copy of the send-time thank-you, shared by the immediate and modal commit paths.
+pub(crate) const FEEDBACK_THANKS_NOTICE: &str =
+    "Thanks for the feedback! The Grok Build team is on it.";
 
 /// Minimal mode cannot show a toast, so the notice goes to the transcript instead.
 fn feedback_notice(app: &mut AppView, message: &str) {
@@ -46,139 +51,329 @@ fn feedback_notice(app: &mut AppView, message: &str) {
     }
 }
 
-/// Why the bare `/feedback` pane refuses to open, if anything blocks it.
-fn feedback_pane_blocked(
-    agent: &AgentView,
-    locale: &crate::locale::LocaleContext,
-) -> Option<&'static str> {
-    if agent.active_subagent.is_some() {
-        // A fullscreen subagent view hides the prompt, so the pane would have nowhere to draw while still swallowing every key.
-        Some(note_static(
-            locale,
-            "feedback.blocked.subagent",
-            "Close the subagent view before sending feedback",
-        ))
-    } else if agent.question_view.is_some() {
-        Some(note_static(
-            locale,
-            "feedback.blocked.question",
-            "Finish answering the current question first",
-        ))
-    } else if !agent.no_input_overlay_pending()
-        || agent.key_owner() != crate::app::agent_view::KeyOwner::Pane
-    {
-        // Two ways the pane cannot work here. A permission or plan approval holds the composer, even parked in the scrollback, so the
-        // pane would hand it the wrong draft on the way out. A viewer outranks every card for keys, so the box would be untypeable.
-        Some(note_static(
-            locale,
-            "feedback.blocked.overlay",
-            "Close or answer what's open before sending feedback",
-        ))
-    } else if agent.session.session_id.is_none() {
-        Some(note_static(
-            locale,
-            "feedback.no_active_session",
-            NO_SESSION_NOTICE,
-        ))
-    } else {
-        None
+/// Open the feedback modal (every screen mode; minimal hosts it in its live band).
+fn refuse_disabled_feedback(app: &mut AppView) -> bool {
+    if xai_grok_product::FEEDBACK_UPLOADS_ALLOWED {
+        return false;
     }
+    let message = note_text(
+        app.locale.as_ref(),
+        "privacy.feedback_disabled",
+        "Feedback uploads are disabled in this community build. You can report an issue at https://github.com/Catapult291/GrokZen/issues without attaching your session.",
+    );
+    feedback_notice(app, &message);
+    true
 }
 
-/// Open the freeform report pane.
-/// Early exits drop `images`, whose owner cleans up the staged temp files.
-pub(super) fn dispatch_open_feedback_pane(
+/// Open the feedback modal (every screen mode; minimal hosts it in its live band).
+/// Every refusal is visible (voice notice, blocker notice, or no-session notice); the state is never set invisibly.
+/// Early exits drop `open`, whose image owner cleans up the staged temp files.
+pub(super) fn dispatch_open_feedback_modal(
     app: &mut AppView,
-    prefill: Option<String>,
-    mut images: crate::views::prompt_widget::FeedbackImages,
+    open: crate::views::feedback_modal::OpenFeedbackModal,
 ) -> Vec<Effect> {
+    if refuse_disabled_feedback(app) {
+        return vec![];
+    }
     let ActiveView::Agent(id) = app.active_view else {
+        if matches!(app.active_view, ActiveView::AgentDashboard)
+            && let Some(dashboard) = app.dashboard.as_mut()
+        {
+            dashboard.dispatch.set_text("");
+            dashboard.set_error_toast(NO_SESSION_NOTICE);
+        }
         return vec![];
     };
-
+    if matches!(
+        app.voice_recording_target(),
+        Some(crate::app::app_view::VoiceTarget::Agent(target)) if target == id
+    ) {
+        feedback_notice(app, "Stop voice input before opening the feedback form");
+        return vec![];
+    }
     let blocked = {
         let Some(agent) = app.agents.get(&id) else {
             return vec![];
         };
-        feedback_pane_blocked(agent, app.locale.as_ref())
+        agent.feedback_modal_open_blocker().or_else(|| {
+            agent
+                .session
+                .session_id
+                .is_none()
+                .then_some(NO_SESSION_NOTICE)
+        })
     };
     if let Some(message) = blocked {
         feedback_notice(app, message);
         return vec![];
     }
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let prefill_chars = open.text.as_deref().map_or(0, |t| t.chars().count());
+    let prefill_images = open.images.len();
+    crate::unified_log::info(
+        "feedback.modal_open",
+        agent.session.session_id.as_ref().map(|s| s.0.as_ref()),
+        Some(serde_json::json!({
+            "prefill_chars": prefill_chars,
+            "prefill_images": prefill_images,
+            // Fixed taxonomy labels only, never user-authored text.
+            "type": open.r#type.as_ref().map(crate::views::feedback_modal::FeedbackType::label),
+            "task_category": open
+                .task_category
+                .as_ref()
+                .map(crate::views::feedback_modal::FeedbackTaskCategory::label),
+            "failure_mode": open
+                .failure_mode
+                .as_ref()
+                .map(crate::views::feedback_modal::FeedbackFailureMode::label),
+            "has_draft_id": open.draft_id.is_some(),
+        })),
+    );
+    let draft_id = open.draft_id.clone();
+    let modal = crate::views::feedback_modal::FeedbackModalState::new_with_locale(
+        open,
+        agent.scrollback.locale(),
+    );
+    let modal_id = modal.id();
+    let rehydrations = modal.image_rehydration_requests();
+    agent.feedback_modal = Some(modal);
+    let mut effects = rehydrations
+        .into_iter()
+        .map(|(image_identity, path)| Effect::RehydrateFeedbackImage {
+            agent_id: id,
+            modal_id,
+            image_identity,
+            path,
+        })
+        .collect::<Vec<_>>();
+    if draft_id.is_none()
+        && let Some(modal) = agent.feedback_modal.as_mut()
+    {
+        modal.start_open_draft_list();
+        if let Some(request) = modal.take_pending_request()
+            && let Some(session_id) = agent.session.session_id.clone()
+        {
+            effects.push(Effect::FeedbackDraftRequest {
+                agent_id: id,
+                session_id,
+                request,
+            });
+        }
+    }
+    if let Some(draft_id) = draft_id
+        && let Some(modal) = agent.feedback_modal.as_mut()
+    {
+        modal.start_external_draft_load(draft_id);
+        if let Some(request) = modal.take_pending_request() {
+            let Some(session_id) = agent.session.session_id.clone() else {
+                return effects;
+            };
+            effects.push(Effect::FeedbackDraftRequest {
+                agent_id: id,
+                session_id,
+                request,
+            });
+        }
+    }
+    effects
+}
 
-    // An individual coding-data opt-out does not suppress the offer: the card is how opted-out users switch sharing back on
-    // ZDR/team locks have no self-serve path, so they still suppress it
-    // Minimal mode never offers: its `/feedback <text>` path documents sends without a consent card
+/// (when the offer applies and no choice was made yet) or encode the images, close the modal, thank immediately, and emit only the POST. The one-shot upload is never a sibling of the POST:
+/// "Never submit while paste probes are in flight" is owned by the modal's key layer
+/// (`FeedbackModalState::handle_key` defers behind the probe count); every producer of `Action::SubmitFeedbackModal` must route through it or `take_deferred_submit`.
+pub(super) fn dispatch_submit_feedback_modal(
+    app: &mut AppView,
+    modal_id: crate::views::feedback_modal::FeedbackModalId,
+) -> Vec<Effect> {
+    if refuse_disabled_feedback(app) {
+        return vec![];
+    }
+    use crate::views::feedback_modal::{
+        FeedbackTraceChoice as ModalTraceChoice, FeedbackTraceUploadIntent,
+    };
+
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
     let offer_trace = app.feedback_trace_offer()
+        && !app.feedback_trace_choice_latched
+        && !app.coding_data_retention_opt_out
         && app.coding_data_sharing_lock().is_none()
         && app.team_name.is_none()
         && !app.is_zdr
         && !app.screen_mode.is_minimal();
-    let offer_reenables_sharing = app.coding_data_retention_opt_out;
+    // Modal copy never discloses re-enabling coding-data sharing (one archive, this report only).
+    // Unlike the legacy AlwaysUpload card, this path does not call `set_coding_data_sharing`.
+    let trace_reenables_sharing = false;
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
-    let question = Question {
-        question: note_static(
-            app.locale.as_ref(),
-            "feedback.question_label",
-            FEEDBACK_QUESTION_LABEL,
-        )
-        .to_string(),
-        options: vec![],
-        multi_select: Some(false),
-        id: None,
-    };
-    let stashed = agent.prompt.stash();
-    let mut state = QuestionViewState::new(
-        format!("feedback-{}", uuid::Uuid::new_v4()),
-        vec![question],
-        stashed,
-    )
-    .with_local_kind(LocalQuestionKind::Feedback);
-    state.feedback_offer_trace = offer_trace;
-    state.feedback_offer_reenables_sharing = offer_reenables_sharing;
-    let prefill_text = prefill.filter(|s| !s.is_empty());
-    if let Some(text) = prefill_text.as_ref()
-        && let Some(slot) = state.per_question_freeform.get_mut(0)
-    {
-        *slot = text.clone();
-    }
-    let freeform = state.activate_freeform_input();
-    agent.prompt.set_text_preserving(&freeform);
-    // Inline `/feedback` composed alongside pasted images: the prefill kept their `[Image #N]` placeholders as plain text
-    // Rebind the drained records to them so the pane shows live, removable chips
-    let image_count = images.len();
-    agent.prompt.adopt_images(images.take());
-
     let session_id = agent.session.session_id.clone();
-    let report = prefill_text.unwrap_or_default();
-    crate::unified_log::info(
-        "feedback.pane_open",
-        session_id.as_ref().map(|s| s.0.as_ref()),
-        Some(serde_json::json!({
-            "prefill_chars": report.chars().count(),
-            "prefill_images": image_count,
-            "offer_trace": offer_trace,
-            "screen_mode": app.screen_mode.meta_label(),
-        })),
-    );
-    agent.question_view = Some(state);
-    vec![]
+    let has_trace_capacity = agent.has_feedback_trace_capacity();
+    let Some(modal) = agent.feedback_modal.as_mut() else {
+        return vec![];
+    };
+    // A stale submit (deferred behind a paste, or replayed) must never send a different modal's
+    // draft; a duplicate after the send-time close finds no modal at all and already returned.
+    if !modal.matches_id(modal_id) {
+        return vec![];
+    }
+    // Only an Enter-confirmed trace choice may send; a stray submit while the user is still choosing is a no-op.
+    let trace_choice = if modal.in_trace_step() {
+        let Some(choice) = modal.decided_trace_choice() else {
+            return vec![];
+        };
+        Some(choice)
+    } else {
+        None
+    };
+    if trace_choice == Some(ModalTraceChoice::SendThisSession) && !has_trace_capacity {
+        modal.set_error(
+            "Wait for an earlier feedback trace upload to finish, then try again.".to_string(),
+        );
+        return vec![];
+    }
+    let Some(session_id) = session_id else {
+        modal.set_error(NO_SESSION_NOTICE.to_string());
+        return vec![];
+    };
+    if !modal.is_sendable() {
+        modal.set_error(
+            crate::views::feedback_modal::localization::text(
+                agent.scrollback.locale(),
+                crate::views::feedback_modal::FEEDBACK_EMPTY_SUBMIT_ERROR,
+            )
+            .to_string(),
+        );
+        return vec![];
+    }
+    let text = modal.submitted_text().trim().to_string();
+    modal.reconcile_feedback_images();
+    let (encoded_images, dropped) =
+        encode_feedback_image_slice(modal.images(), agent.scrollback.locale());
+    if text.is_empty() && encoded_images.is_empty() {
+        if let Some(notice) = dropped {
+            modal.set_error(notice);
+        } else {
+            modal.set_error(
+                crate::views::feedback_modal::localization::text(
+                    agent.scrollback.locale(),
+                    crate::views::feedback_modal::FEEDBACK_EMPTY_SUBMIT_ERROR,
+                )
+                .to_string(),
+            );
+        }
+        return vec![];
+    }
+    // Refuse a typeless loaded draft before the in-modal trace step, or the choose-a-type error is hidden until after the user confirms a trace choice.
+    // choose-a-type error is hidden until after the user confirms a trace choice.
+    let draft_id = modal.draft_id().cloned();
+    let draft_fields = modal.draft_body();
+    if draft_id.is_some() && draft_fields.is_none() {
+        modal.cancel_draft_submit_pending("Choose a type before sending this draft.".to_owned());
+        return vec![];
+    }
+    // First validated Write submit with an offer available: ask inside the modal instead of sending.
+    if trace_choice.is_none() && offer_trace {
+        modal.begin_trace_step();
+        // Funnel denominator for the in-modal trace step; logged once when Write actually advances.
+        xai_grok_telemetry::session_ctx::log_event(
+            xai_grok_telemetry::events::FeedbackTraceCardShown {
+                reenables_sharing: trace_reenables_sharing,
+            },
+        );
+        return vec![];
+    }
+    let draft = draft_id
+        .clone()
+        .zip(draft_fields)
+        .map(
+            |(draft_id, fields)| crate::app::actions::DraftFeedbackBody {
+                draft_id,
+                title: fields.title,
+                details: text.clone(),
+                area: fields.area,
+                r#type: fields.r#type,
+                task_category: fields.task_category,
+                failure_mode: fields.failure_mode,
+                images: encoded_images.clone(),
+            },
+        );
+    if let Some(choice) = trace_choice {
+        modal.report_confirmed_trace_choice(choice);
+        let _ = modal.take_decided_trace_choice();
+    }
+    let metadata = Some(modal.structured_feedback_metadata());
+    if draft_id.is_none() {
+        drop(modal.take_images());
+    }
+    // `send_this_session` is one archive for this successfully posted report; every other
+    // choice parks nothing, so no path from this modal can persist `[telemetry] trace_upload`.
+    let intent = match trace_choice {
+        Some(ModalTraceChoice::SendThisSession) => Some(FeedbackTraceUploadIntent::SendThisSession),
+        _ => None,
+    };
+    let logged_trace = trace_choice.map(|choice| format!("{choice:?}"));
+    let submission_id = crate::views::feedback_modal::FeedbackSubmissionId::next();
+    if draft_id.is_some() {
+        modal.mark_draft_submit_pending();
+    } else {
+        agent.feedback_modal = None;
+    }
+    if let Some(intent) = intent {
+        agent.park_feedback_trace_consent(
+            submission_id,
+            crate::views::feedback_modal::ParkedFeedbackTraceConsent {
+                intent,
+                session_id: session_id.0.as_ref().to_string(),
+            },
+        );
+    }
+    if let Some(notice) = dropped {
+        agent.scrollback.push_block(RenderBlock::system(notice));
+    }
+    if draft_id.is_none() {
+        agent.scrollback.push_block(RenderBlock::system(
+            note_static(
+                agent.scrollback.locale(),
+                "feedback.thanks",
+                FEEDBACK_THANKS_NOTICE,
+            )
+            .to_string(),
+        ));
+    }
+    let mut effects = vec![feedback_send_effect(
+        id,
+        session_id,
+        text,
+        encoded_images,
+        /*trace*/ None,
+        logged_trace,
+        metadata,
+        /* request_trace_upload_token */ intent.is_some(),
+        draft,
+        FeedbackSendOrigin::Modal {
+            submission_id,
+            modal_id,
+            is_draft: draft_id.is_some(),
+        },
+    )];
+    if trace_choice == Some(ModalTraceChoice::NeverAsk) {
+        // Stop re-offers this session and persist the existing feature latch; never `[telemetry] trace_upload = true`.
+        app.feedback_trace_choice_latched = true;
+        effects.push(Effect::PersistSetting {
+            key: "feedback_trace_card",
+            value: crate::settings::SettingValue::Bool(false),
+            rollback_value: crate::settings::SettingValue::Bool(false),
+        });
+    }
+    effects
 }
 
 /// How long the background trace upload may run before it is reported as failed; longer than the shell's own upload timeout so its error wins.
 pub(crate) const FEEDBACK_TRACE_UPLOAD_TIMEOUT_MS: u64 = 150_000;
-
-/// The `[telemetry] trace_upload = true` write the /feedback card's "Yes" collects.
-pub(super) fn persist_trace_upload_consent() -> Effect {
-    Effect::PersistSetting {
-        key: "trace_upload",
-        value: crate::settings::SettingValue::Bool(true),
-        rollback_value: crate::settings::SettingValue::Bool(false),
-    }
-}
 
 /// Enter remember mode: visual change to prompt bar (remember accent, `#` prefix).
 /// No side effects: the user types a memory note and presses Enter to send.
@@ -190,8 +385,7 @@ pub(super) fn dispatch_enter_remember_mode(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Close the trace-consent funnel opened by `FeedbackTraceCardShown`.
-/// Every outcome of a shown card (answer, Esc, displacement) must log exactly once.
+/// Log the trace-consent outcome carried on an immediate send exactly once.
 pub(crate) fn log_trace_consent_selected(reenables_sharing: bool, choice: FeedbackTraceChoice) {
     use xai_grok_telemetry::events::{FeedbackTraceConsentChoice, FeedbackTraceConsentSelected};
     xai_grok_telemetry::session_ctx::log_event(FeedbackTraceConsentSelected {
@@ -203,27 +397,32 @@ pub(crate) fn log_trace_consent_selected(reenables_sharing: bool, choice: Feedba
         reenables_sharing,
     });
 }
-
 /// The `feedback.send` unified log plus the POST effect for a committed report.
-/// This is the single writer for both, shared with the displaced-card path.
+/// This is the single writer for both, shared with the modal submit path.
 pub(crate) fn feedback_send_effect(
     agent_id: AgentId,
     session_id: agent_client_protocol::SessionId,
     text: String,
     images: Vec<xai_grok_shell::session::FeedbackImage>,
     trace: Option<FeedbackTraceChoice>,
-    displaced: bool,
+    trace_log: Option<String>,
+    metadata: Option<serde_json::Value>,
+    request_trace_upload_token: bool,
+    draft: Option<crate::app::actions::DraftFeedbackBody>,
+    origin: FeedbackSendOrigin,
 ) -> Effect {
     let mut payload = serde_json::json!({
         "chars": text.chars().count(),
         "images": images.len(),
-        "trace": match trace {
+        "trace": trace_log.unwrap_or_else(|| match trace {
             Some(choice) => format!("{choice:?}"),
             None => "NotOffered".to_string(),
-        },
+        }),
     });
-    if displaced {
-        payload["displaced"] = serde_json::Value::Bool(true);
+    if matches!(origin, FeedbackSendOrigin::Modal { .. })
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert("modal".into(), serde_json::Value::Bool(true));
     }
     crate::unified_log::info("feedback.send", Some(session_id.0.as_ref()), Some(payload));
     Effect::SendFeedback {
@@ -231,12 +430,15 @@ pub(crate) fn feedback_send_effect(
         session_id,
         feedback_text: text,
         images,
+        metadata,
+        request_trace_upload_token,
+        draft,
+        origin,
     }
 }
 
 /// Commit a report: encode images (with the dropped-attachment notice), close the consent funnel, and build the send effect.
 /// The "no text and no surviving images means do not send" rule lives only here.
-/// [`dispatch_send_feedback`] and the displaced-consent-card path in `acp_handler` both call this; `displaced` selects that path's user-facing copy.
 pub(crate) fn commit_feedback(
     agent: &mut crate::app::agent_view::AgentView,
     coding_data_retention_opt_out: bool,
@@ -245,47 +447,40 @@ pub(crate) fn commit_feedback(
     text: String,
     images: crate::views::prompt_widget::FeedbackImages,
     trace: Option<FeedbackTraceChoice>,
-    displaced: bool,
 ) -> Option<Effect> {
     // Encode before the emptiness check: encoding can drop attachments, and
     // a report left with no text and no images must not go out blank.
-    let (encoded_images, dropped) = encode_feedback_images(images, agent.scrollback.locale());
+    let (encoded_images, dropped) =
+        encode_feedback_image_slice(images.as_slice(), agent.scrollback.locale());
+    // Encoding is done with the records; dropping the owner deletes the staged temp files
+    drop(images);
     if let Some(notice) = dropped {
         agent.scrollback.push_block(RenderBlock::system(notice));
     }
 
-    // A shown consent card closes its funnel exactly once, sent or not.
+    // A collected consent closes its funnel exactly once, sent or not.
     if let Some(choice) = trace {
         log_trace_consent_selected(coding_data_retention_opt_out, choice);
     }
 
     let trimmed = text.trim().to_string();
     if trimmed.is_empty() && encoded_images.is_empty() {
-        let (key, english) = if displaced {
-            (
-                "feedback.cancelled_interrupted",
-                "/feedback cancelled because another question opened.",
-            )
-        } else {
-            ("feedback.text_required", "Please provide feedback text.")
-        };
-        let message = note_static(agent.scrollback.locale(), key, english).to_string();
+        let message = note_static(
+            agent.scrollback.locale(),
+            "feedback.text_required",
+            "Please provide feedback text.",
+        )
+        .to_string();
         agent.scrollback.push_block(RenderBlock::system(message));
         return None;
     }
 
-    let (key, english) = if displaced {
-        (
-            "feedback.sent_without_trace",
-            "Another question interrupted /feedback. Your report was sent without a trace.",
-        )
-    } else {
-        (
-            "feedback.thanks",
-            "Thanks for the feedback! The Grok Build team is on it.",
-        )
-    };
-    let message = note_static(agent.scrollback.locale(), key, english).to_string();
+    let message = note_static(
+        agent.scrollback.locale(),
+        "feedback.thanks",
+        FEEDBACK_THANKS_NOTICE,
+    )
+    .to_string();
     agent.scrollback.push_block(RenderBlock::system(message));
 
     Some(feedback_send_effect(
@@ -294,8 +489,66 @@ pub(crate) fn commit_feedback(
         trimmed,
         encoded_images,
         trace,
-        displaced,
+        /*trace_log*/ None,
+        // Inline text is composed like a Write-tab report, minus the taxonomy enums.
+        Some(structured_feedback(
+            FeedbackSource::Write,
+            FeedbackTaxonomy::default(),
+        )),
+        /* request_trace_upload_token */ false,
+        /*draft*/ None,
+        FeedbackSendOrigin::Immediate,
     ))
+}
+
+/// A report that did not reach the backend.
+pub(super) struct UnsentFeedbackReport<'a> {
+    pub(super) text: &'a str,
+    /// Attachments are not carried into the draft, so the notice says how many were lost.
+    pub(super) image_count: usize,
+    /// Leading clause of the notice, e.g. "Couldn't send feedback: offline".
+    pub(super) failure: &'a str,
+}
+
+/// The composer was cleared at send time, so the predraft written here is the only copy left;
+/// without a session directory the text is echoed instead. The store write is sync and on the
+/// failure path only: the effect task has no session dir to write from.
+pub(super) fn keep_unsent_feedback_report(agent: &mut AgentView, report: UnsentFeedbackReport<'_>) {
+    let UnsentFeedbackReport {
+        text,
+        image_count,
+        failure,
+    } = report;
+    let attachments = match image_count {
+        0 => String::new(),
+        1 => " (its image was dropped)".to_owned(),
+        count => format!(" (its {count} images were dropped)"),
+    };
+    // An image-only report has nothing the store could keep.
+    if text.trim().is_empty() {
+        agent.scrollback.push_block(RenderBlock::system(format!(
+            "{failure}. Not sent{attachments}."
+        )));
+        return;
+    }
+    let saved = agent.session.ensure_local_session_dir().map(|session_dir| {
+        let session_dir = session_dir.map_err(|error| error.to_string())?;
+        FeedbackDraftStore::new(session_dir)
+            .append_predraft(&derive_title(text), text)
+            .map_err(|error| error.to_string())
+    });
+    let notice = match saved {
+        Some(Ok(_)) => {
+            format!("{failure}. Saved to Drafts{attachments}; open `/feedback` to retry.")
+        }
+        Some(Err(error)) => {
+            format!(
+                "{failure}. Could not save it as a draft ({error}). Not sent{attachments}: {text}"
+            )
+        }
+        None => format!("{failure}. Not sent{attachments}: {text}"),
+    };
+    agent.scrollback.push_block(RenderBlock::system(notice));
 }
 
 /// Thank-you is shown immediately; POST is a background effect.
@@ -307,6 +560,9 @@ pub(super) fn dispatch_send_feedback(
     images: crate::views::prompt_widget::FeedbackImages,
     trace: Option<FeedbackTraceChoice>,
 ) -> Vec<Effect> {
+    if refuse_disabled_feedback(app) {
+        return vec![];
+    }
     let no_session = note_static(
         app.locale.as_ref(),
         "session.no_active_period",
@@ -324,7 +580,15 @@ pub(super) fn dispatch_send_feedback(
     agent.ephemeral_tip.clear_on_submit();
 
     let Some(session_id) = agent.session.session_id.clone() else {
-        agent.scrollback.push_block(RenderBlock::system(no_session));
+        // The slash path already cleared the composer, so the report has nowhere else to live.
+        keep_unsent_feedback_report(
+            agent,
+            UnsentFeedbackReport {
+                text: text.trim(),
+                image_count: images.len(),
+                failure: &no_session,
+            },
+        );
         return vec![];
     };
 
@@ -336,7 +600,6 @@ pub(super) fn dispatch_send_feedback(
         text,
         images,
         trace,
-        false,
     ) else {
         // Nothing went out, so no trace-upload side effects either.
         return vec![];
@@ -355,47 +618,26 @@ pub(super) fn dispatch_send_feedback(
         }
         Some(FeedbackTraceChoice::AlwaysUpload) => {
             app.feedback_trace_choice_latched = true;
-            // The storage proxy rejects uploads while the account is opted out of coding-data sharing
-            // An opted-out account flips sharing first and parks the upload on that write generation
-            let mut park_seq = None;
             if app.coding_data_retention_opt_out {
-                let (sharing, outcome) = super::status::set_coding_data_sharing_tracked(
+                effects.extend(super::status::set_coding_data_sharing(
                     app,
                     true,
                     xai_grok_telemetry::events::CodingDataConsentSource::FeedbackTraceCard,
-                );
-                effects.extend(sharing);
-                match outcome {
-                    super::status::SharingWriteOutcome::Claimed(seq) => park_seq = Some(seq),
-                    // Sharing is already on (the opt-out mirror was stale): nothing to wait on, upload now
-                    super::status::SharingWriteOutcome::AlreadySet => {}
-                    // The guard refused the opt-in this consent depends on: send the report alone
-                    // No upload, no persisted consent, and no latch, since nothing happened
-                    super::status::SharingWriteOutcome::Refused => {
-                        app.feedback_trace_choice_latched = false;
-                        return effects;
-                    }
-                }
+                ));
             }
-            match park_seq {
-                // The consent persist also waits for the confirm
-                // Written now, a failed opt-in would leave `trace_upload = true` on disk while the storage proxy keeps rejecting uploads
-                Some(seq) => {
-                    app.feedback_trace_upload_pending =
-                        Some(crate::app::app_view::PendingFeedbackTraceUpload {
-                            seq,
-                            agent_id: id,
-                            session_id,
-                        });
-                }
-                None => {
-                    effects.push(Effect::UploadFeedbackTrace {
-                        agent_id: id,
-                        session_id,
-                    });
-                    effects.push(persist_trace_upload_consent());
-                }
-            }
+            effects.push(Effect::UploadFeedbackTrace {
+                agent_id: id,
+                session_id,
+                submission_id: None,
+                intent: None,
+                trace_upload_token: None,
+            });
+            // The `[telemetry] trace_upload = true` write an `AlwaysUpload` consent collects.
+            effects.push(Effect::PersistSetting {
+                key: "trace_upload",
+                value: crate::settings::SettingValue::Bool(true),
+                rollback_value: crate::settings::SettingValue::Bool(false),
+            });
         }
     }
     effects
@@ -414,109 +656,34 @@ pub(super) fn dispatch_send_remember_note_from_command(
     send_remember_note(app, text, false)
 }
 
-fn encode_feedback_images(
-    images: crate::views::prompt_widget::FeedbackImages,
+/// Encode a borrowed image snapshot for the POST.
+fn encode_feedback_image_slice(
+    images: &[crate::prompt_images::PastedImage],
     locale: &crate::locale::LocaleContext,
 ) -> (Vec<xai_grok_shell::session::FeedbackImage>, Option<String>) {
     use base64::Engine as _;
-    use xai_grok_shell::session::{
-        MAX_FEEDBACK_IMAGE_BYTES, MAX_FEEDBACK_IMAGE_TOTAL_BYTES, MAX_FEEDBACK_IMAGES,
-        feedback_image_extension,
-    };
 
-    let mut encoded = Vec::new();
-    let mut over_count = 0usize;
-    let mut unsupported = 0usize;
-    let mut too_large = 0usize;
-    let mut unreadable = 0usize;
-    let mut total_bytes = 0usize;
-    for image in images.as_slice() {
-        let Some((bytes, mime_type)) = crate::prompt_images::load_for_send(image) else {
-            unreadable += 1;
-            continue;
-        };
-        if encoded.len() >= MAX_FEEDBACK_IMAGES {
-            over_count += 1;
-            continue;
-        }
-        if feedback_image_extension(&mime_type).is_none() {
-            unsupported += 1;
-            continue;
-        }
-        if bytes.len() > MAX_FEEDBACK_IMAGE_BYTES
-            || total_bytes + bytes.len() > MAX_FEEDBACK_IMAGE_TOTAL_BYTES
-        {
-            too_large += 1;
-            continue;
-        }
-        total_bytes += bytes.len();
-        encoded.push(xai_grok_shell::session::FeedbackImage {
-            data: base64::engine::general_purpose::STANDARD.encode(&bytes),
-            mime_type,
-            file_name: image
-                .source_path
-                .as_deref()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned()),
-        });
-    }
-    // Encoding is done with the records; dropping the owner deletes the staged temp files
-    drop(images);
-
-    let dropped = over_count + unsupported + too_large + unreadable;
-    let notice = (dropped > 0).then(|| {
-        const MIB: usize = 1024 * 1024;
-        let mut reasons = Vec::new();
-        if over_count > 0 {
-            reasons.push(
-                note_text(
-                    locale,
-                    "feedback.images.over_limit",
-                    "{count} over the {limit}-image limit",
-                )
-                .replace("{count}", &over_count.to_string())
-                .replace("{limit}", &MAX_FEEDBACK_IMAGES.to_string()),
-            );
-        }
-        if unsupported > 0 {
-            reasons.push(
-                note_text(
-                    locale,
-                    "feedback.images.unsupported",
-                    "{count} in a format feedback can't carry (PNG, JPEG, or GIF only)",
-                )
-                .replace("{count}", &unsupported.to_string()),
-            );
-        }
-        if too_large > 0 {
-            reasons.push(
-                note_text(
-                    locale,
-                    "feedback.images.too_large",
-                    "{count} over the size limit ({each} MB each, {total} MB combined)",
-                )
-                .replace("{count}", &too_large.to_string())
-                .replace("{each}", &(MAX_FEEDBACK_IMAGE_BYTES / MIB).to_string())
-                .replace(
-                    "{total}",
-                    &(MAX_FEEDBACK_IMAGE_TOTAL_BYTES / MIB).to_string(),
-                ),
-            );
-        }
-        if unreadable > 0 {
-            reasons.push(
-                note_text(locale, "feedback.images.unreadable", "{count} unreadable")
-                    .replace("{count}", &unreadable.to_string()),
-            );
-        }
-        note_text(
-            locale,
-            "feedback.images.dropped",
-            "Dropped {dropped} image attachment(s) from the feedback: {reasons}.",
-        )
-        .replace("{dropped}", &dropped.to_string())
-        .replace("{reasons}", &reasons.join(", "))
-    });
+    let loaded: Vec<Option<(Vec<u8>, String)>> = images
+        .iter()
+        .map(crate::prompt_images::load_for_send)
+        .collect();
+    let (accepted, notice) =
+        super::inline_feedback::select_feedback_images_with_locale(&loaded, locale);
+    let encoded = accepted
+        .into_iter()
+        .filter_map(|index| {
+            let (bytes, mime_type) = loaded.get(index).and_then(Option::as_ref)?;
+            Some(xai_grok_shell::session::FeedbackImage {
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                mime_type: mime_type.clone(),
+                file_name: images
+                    .get(index)
+                    .and_then(|img| img.source_path.as_deref())
+                    .and_then(|p| p.file_name())
+                    .map(|n| n.to_string_lossy().into_owned()),
+            })
+        })
+        .collect();
     (encoded, notice)
 }
 
@@ -626,6 +793,11 @@ pub(super) fn dispatch_save_remember_note_from_modal(app: &mut AppView) -> Vec<E
     } else {
         return vec![];
     };
+    let pinned_mode = agent
+        .session
+        .session_id
+        .as_ref()
+        .map(|_| agent.memory_mode.unwrap_or_default());
 
     agent.active_modal = None;
     let message = note_static(
@@ -640,15 +812,12 @@ pub(super) fn dispatch_save_remember_note_from_modal(app: &mut AppView) -> Vec<E
         agent_id: id,
         text: content,
         cwd,
+        pinned_mode,
     }]
 }
 
 /// Extract session context for the LLM memory rewrite request.
-///
-/// Walks scrollback in reverse, collecting:
-/// - Last 5 user prompts
-/// - File paths from recent tool calls (Read, Edit, ListDir)
-/// - CWD and git branch
+/// File paths from recent tool calls (Read, Edit, ListDir)
 fn extract_session_context(agent: &AgentView) -> String {
     let mut user_prompts: Vec<String> = Vec::new();
     let mut file_paths: Vec<String> = Vec::new();
@@ -670,7 +839,10 @@ fn extract_session_context(agent: &AgentView) -> String {
                             .take_while(|&i| i <= 200)
                             .last()
                             .unwrap_or(0);
-                        format!("{}...", &prompt.text[..end])
+                        match prompt.text.get(..end) {
+                            Some(prefix) => format!("{prefix}..."),
+                            None => prompt.text.clone(),
+                        }
                     } else {
                         prompt.text.clone()
                     };
@@ -735,7 +907,16 @@ fn extract_session_context(agent: &AgentView) -> String {
 /// Send a /btw side question.
 /// Bypasses the prompt queue, so it works even while the agent is mid-turn.
 /// Fires an ACP ext method and shows a loading overlay.
-pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effect> {
+pub(super) fn dispatch_send_btw(
+    app: &mut AppView,
+    question: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+) -> Vec<Effect> {
+    // Drop deletes staged and session files. A side question does not keep them.
+    let images = BtwImages::new(images);
+    // Slash submit strips image chips before the command runs. Put `[Image]`
+    // back so the panel title shows the attachment.
+    let question = question_with_image_chips(&question, images.as_slice());
     let no_session = note_static(
         app.locale.as_ref(),
         "session.no_active",
@@ -745,7 +926,7 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
         return vec![];
     };
     let minimal = app.screen_mode.is_minimal();
-    let (session_id, minimal_request_id) = {
+    let (session_id, minimal_request_id, cwd) = {
         let Some(agent) = app.agents.get_mut(&id) else {
             return vec![];
         };
@@ -759,6 +940,7 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
             }
             return vec![];
         };
+        let cwd = std::path::PathBuf::from(&agent.session.cwd);
 
         // Composer clearing belongs to the submit funnel: `dispatch_send_prompt_inner` clears it when `consume_input` is set
         // Draft-preserving callers (the palette, an edited queue row) keep theirs
@@ -776,15 +958,165 @@ pub(super) fn dispatch_send_btw(app: &mut AppView, question: String) -> Vec<Effe
             agent.btw_focused = false;
             None
         };
-        (session_id, minimal_request_id)
+        (session_id, minimal_request_id, cwd)
     };
 
     vec![Effect::SendBtw {
         agent_id: id,
         session_id,
         question,
+        images: images.into_inner(),
+        cwd,
         minimal_request_id,
     }]
+}
+
+/// Owns `/btw` attachments until they are handed to the send effect.
+/// Drop unlinks staged temps and session copies.
+struct BtwImages(Vec<crate::prompt_images::PastedImage>);
+
+impl BtwImages {
+    fn new(images: Vec<crate::prompt_images::PastedImage>) -> Self {
+        Self(images)
+    }
+
+    fn as_slice(&self) -> &[crate::prompt_images::PastedImage] {
+        &self.0
+    }
+
+    fn into_inner(mut self) -> Vec<crate::prompt_images::PastedImage> {
+        std::mem::take(&mut self.0)
+    }
+}
+
+/// Prefix a single `[Image]` chip. The `/btw` title does not number attachments.
+/// Text-only questions are returned unchanged so newlines survive.
+fn question_with_image_chips(
+    question: &str,
+    images: &[crate::prompt_images::PastedImage],
+) -> String {
+    if images.is_empty() {
+        return question.to_string();
+    }
+    let question = strip_numbered_image_chips(question.trim());
+    if question.contains("[Image]") {
+        return question;
+    }
+    if question.is_empty() {
+        "[Image]".to_string()
+    } else {
+        format!("[Image] {question}")
+    }
+}
+
+/// Remove `[Image #N]` tokens without collapsing newlines.
+fn strip_numbered_image_chips(question: &str) -> String {
+    let mut out = String::new();
+    let mut rest = question;
+    while let Some(start) = rest.find("[Image #") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + "[Image #".len()..];
+        let Some(end) = after.find(']') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        rest = &after[end + 1..];
+        if out.ends_with(' ') && rest.starts_with(' ') {
+            rest = rest.trim_start_matches(' ');
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+impl Drop for BtwImages {
+    fn drop(&mut self) {
+        crate::prompt_images::drain_and_cleanup(
+            crate::prompt_images::SessionPathPolicy::Delete,
+            &mut self.0,
+        );
+    }
+}
+
+/// Side-question payload cap. Matches the per-image send limit so one screenshot
+/// under 50MB is never dropped; extra images past this total are omitted.
+const BTW_IMAGE_AGGREGATE_CAP: usize = 50_000_000;
+
+pub(crate) struct BtwImageEncode {
+    pub blocks: Option<Vec<acp::ContentBlock>>,
+    /// Every attachment that did not encode: the aggregate-cap drops plus the unreadable ones.
+    pub omitted: usize,
+    /// Attachments the aggregate cap dropped before any load was attempted.
+    pub omitted_by_cap: usize,
+    /// Display numbers of attachments whose bytes could not be loaded (a subset of `omitted`).
+    pub skipped_display_numbers: Vec<usize>,
+}
+
+/// Encode composer images into `x.ai/btw` content blocks.
+/// `blocks: None` keeps the text-only wire. `omitted` is how many attachments did not encode.
+/// Caller unlinks the image files after this returns.
+pub(crate) fn encode_btw_images(
+    question: &str,
+    images: &[crate::prompt_images::PastedImage],
+    cwd: &std::path::Path,
+) -> BtwImageEncode {
+    if images.is_empty() {
+        return BtwImageEncode {
+            blocks: None,
+            omitted: 0,
+            omitted_by_cap: 0,
+            skipped_display_numbers: Vec::new(),
+        };
+    }
+    let kept = images_within_aggregate_cap(images);
+    let omitted_by_cap = images.len() - kept.len();
+    if kept.is_empty() {
+        return BtwImageEncode {
+            blocks: None,
+            omitted: images.len(),
+            omitted_by_cap,
+            skipped_display_numbers: Vec::new(),
+        };
+    }
+    let build = crate::prompt_images::build_content_blocks_with_workspace_report_ref(
+        question.to_string(),
+        &kept,
+        Some(cwd),
+    );
+    let produced = build
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, acp::ContentBlock::Image(_)))
+        .count();
+    let omitted = omitted_by_cap + build.skipped_display_numbers.len();
+    BtwImageEncode {
+        blocks: (produced > 0).then_some(build.blocks),
+        omitted,
+        omitted_by_cap,
+        skipped_display_numbers: build.skipped_display_numbers,
+    }
+}
+
+fn images_within_aggregate_cap(
+    images: &[crate::prompt_images::PastedImage],
+) -> Vec<crate::prompt_images::PastedImage> {
+    let mut kept = Vec::new();
+    let mut total = 0usize;
+    for image in images {
+        let size = image.byte_len;
+        if total.saturating_add(size) > BTW_IMAGE_AGGREGATE_CAP {
+            tracing::warn!(
+                bytes = size,
+                total,
+                cap = BTW_IMAGE_AGGREGATE_CAP,
+                "skipping /btw image: aggregate payload cap"
+            );
+            continue;
+        }
+        total += size;
+        kept.push(image.clone());
+    }
+    kept
 }
 
 /// Toast when a manual `/recap` produces no summary.
@@ -822,10 +1154,6 @@ pub(crate) fn scrollback_has_user_messages(
 
 /// Request a session recap.
 /// Bypasses the prompt queue, so it works even while the agent is mid-turn.
-/// Fires the `x.ai/recap` ext method; the recap arrives asynchronously as a `SessionRecap` notification (rendered in scrollback).
-///
-/// `auto` is `false` for an explicit `/recap` and `true` for the automatic return-from-away recap.
-/// The manual path clears the prompt and shows a toast when no session exists yet.
 /// The auto path is best-effort and silently no-ops without an active session.
 pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> {
     let locale = app.locale.clone();
@@ -863,7 +1191,6 @@ pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> 
     if !auto {
         agent.prompt.set_text("");
         // Nothing to summarize yet: show a clear empty-state toast instead of a spinner that ends in "Couldn't generate recap"
-        //
         // Skip the short-circuit while session replay is still loading (prompts may not have arrived yet)
         // Prefer an entry scan over `turn_count()` so mid-batch resume (deferred `rebuild_turns`) still sees history
         if !agent.session.loading_replay && !scrollback_has_user_messages(&agent.scrollback) {
@@ -915,12 +1242,8 @@ pub(super) fn handle_memory_note_saved(
             Ok(()) => {
                 let message = note_text(
                     agent.scrollback.locale(),
-                    "memory_note.saved",
-                    "Memory saved to {path}",
-                )
-                .replace(
-                    "{path}",
-                    &crate::util::display_user_grok_path("memory/MEMORY.md"),
+                    "memory_note.saved_v2",
+                    "Memory note saved",
                 );
                 agent
                     .scrollback
@@ -942,18 +1265,54 @@ pub(super) fn handle_memory_note_saved(
     vec![]
 }
 
+/// Localize only image notices generated by the client. The model request and
+/// unknown diagnostics remain untouched; the notice channel does not carry replies.
+fn localized_btw_image_notice(notice: &str, locale: &crate::locale::LocaleContext) -> String {
+    const ALL: &str = "Attached images were not included (too large or could not be loaded).";
+    const SUFFIX: &str = " attached image(s) were not included (over the 50MB side-question limit or could not be loaded).";
+    if notice == ALL {
+        return locale
+            .named_text("btw.images.omitted_all", ALL)
+            .into_owned();
+    }
+    if let Some(count) = notice.strip_suffix(SUFFIX)
+        && !count.is_empty()
+        && count.bytes().all(|b| b.is_ascii_digit())
+    {
+        return locale.named_text(
+            "btw.images.omitted_some",
+            "{count} attached image(s) were not included (over the 50MB side-question limit or could not be loaded).",
+        ).replace("{count}", count);
+    }
+    notice.to_owned()
+}
+
 pub(super) fn handle_btw_response(
     app: &mut AppView,
     agent_id: AgentId,
     result: Result<String, String>,
     minimal_request_id: Option<uuid::Uuid>,
+    image_notice: Option<String>,
+    skipped_image_numbers: &[usize],
 ) -> Vec<Effect> {
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         use crate::views::btw_overlay::BtwOverlayState;
+        let image_notice = image_notice
+            .as_deref()
+            .map(|notice| localized_btw_image_notice(notice, agent.scrollback.locale()));
         if let Some(request_id) = minimal_request_id {
-            crate::minimal_api::finish_minimal_btw(agent, request_id, result);
+            // A dismissed or stale request ignores the answer. Don't toast either.
+            if crate::minimal_api::finish_minimal_btw(agent, request_id, result) {
+                app.pending_image_notices.extend(image_notice);
+                app.pending_image_notices
+                    .extend(agent.skipped_image_send_notice(skipped_image_numbers));
+            }
             return vec![];
         }
+        // Cap drops and read failures are disjoint sets; the flush shows them as one message.
+        app.pending_image_notices.extend(image_notice);
+        app.pending_image_notices
+            .extend(agent.skipped_image_send_notice(skipped_image_numbers));
         let question = match &agent.btw_state {
             Some(BtwOverlayState::Loading { question }) => question.clone(),
             _ => String::new(),

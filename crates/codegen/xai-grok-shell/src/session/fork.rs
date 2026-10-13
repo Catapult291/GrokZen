@@ -55,7 +55,7 @@ fn generate_fork_session_id(_source_id: &str) -> String {
 pub async fn fork_session(
     request: ForkSessionRequest,
     agent_id: &str,
-    auth_manager: Option<std::sync::Arc<crate::auth::AuthManager>>,
+    auth_manager: Option<std::sync::Arc<xai_grok_login::AuthManager>>,
 ) -> io::Result<ForkSessionResponse> {
     let t0 = std::time::Instant::now();
 
@@ -105,11 +105,17 @@ pub async fn fork_session(
     // Runs on the blocking thread pool so concurrent fork copies can execute truly in parallel
     // On a LocalSet, async copy_session_data serializes because the sync disk I/O blocks the single-threaded runtime
     let options = CopySessionOptions {
+        mint_session_identity: true,
         parent_session_id: Some(request.source_session_id.clone()),
         new_model_id: request.new_model_id.clone(),
         target_prompt_index: request.target_prompt_index,
         session_kind: request.session_kind.clone(),
         source_workspace_dir: request.source_workspace_dir.clone(),
+        prompt_display_cwd: request
+            .source_workspace_dir
+            .clone()
+            .filter(|display| display != &request.new_cwd),
+        skip_cwd_transform: request.session_kind.as_deref() == Some("worktree"),
         // Full forks retain the parent's pre-compaction archive. A partial fork omits it
         // because that archive describes turns removed by the prompt cut.
         copy_compaction_segments: request.target_prompt_index.is_none(),
@@ -127,15 +133,24 @@ pub async fn fork_session(
     // Register the fork with the backend from a spawned task
     // The local fork works without it: all fork state is in session files on disk, and the backend learns of the session when the task completes
     // Spawning keeps the network round-trip (~200-400ms) off the critical path
-    if let Some(am) = auth_manager {
+    if let Some(am) = auth_manager.filter(|_| xai_grok_product::SESSION_DATA_UPLOADS_ALLOWED) {
         let sid = new_session_id.clone();
         let cwd = request.new_cwd.clone();
         let parent = request.source_session_id.clone();
         let model = request.new_model_id.clone();
         let aid = agent_id.to_string();
+        let session_agent_id = result.agent_id.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                sync_forked_session_to_backend(&sid, &cwd, parent, model, &aid, am).await
+            if let Err(e) = sync_forked_session_to_backend(
+                &sid,
+                &cwd,
+                parent,
+                model,
+                &aid,
+                session_agent_id.as_deref(),
+                am,
+            )
+            .await
             {
                 tracing::warn!(
                     session_id = %sid,
@@ -176,8 +191,12 @@ async fn sync_forked_session_to_backend(
     parent_session_id: String,
     model_id: Option<String>,
     agent_id: &str,
-    auth_manager: std::sync::Arc<crate::auth::AuthManager>,
+    session_agent_id: Option<&str>,
+    auth_manager: std::sync::Arc<xai_grok_login::AuthManager>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if !xai_grok_product::SESSION_DATA_UPLOADS_ALLOWED {
+        return Ok(());
+    }
     let client = BackendClient::new().with_auth_manager(auth_manager);
     let metadata = ExportedMetadata {
         title: None, // The title is generated later when the session runs
@@ -187,6 +206,7 @@ async fn sync_forked_session_to_backend(
         updated_at: Some(chrono::Utc::now().to_rfc3339()),
         total_messages: Some(0),
         parent_session_id: Some(parent_session_id),
+        agent_id: session_agent_id.map(str::to_owned),
         session_kind: None,
         subagent_type: None,
         subagent_persona: None,
@@ -393,8 +413,10 @@ mod tests {
                 "newCwd": "/dst",
                 "newSessionId": format!("child-{expected}-{}", wire.unwrap_or("omit")),
             });
-            if let Some(kind) = wire {
-                body["sessionKind"] = serde_json::Value::String(kind.into());
+            if let Some(kind) = wire
+                && let Some(obj) = body.as_object_mut()
+            {
+                obj.insert("sessionKind".into(), serde_json::Value::String(kind.into()));
             }
             let request: ForkSessionRequest = serde_json::from_value(body).unwrap();
             let target = Info {

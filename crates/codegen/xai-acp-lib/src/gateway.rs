@@ -46,9 +46,7 @@ impl<S: AcpSide, C> AcpGatewayReceiver<S, C> {
     }
 
     /// Override the spawner used for dispatching incoming messages.
-    ///
-    /// By default, `spawn_local` is used (suitable for `LocalSet` runtimes).
-    /// Pass a custom spawner to use a different execution strategy.
+    /// Default is `spawn_local` (suitable for `LocalSet` runtimes).
     pub fn with_spawn_fn(
         mut self,
         f: impl Fn(Pin<Box<dyn Future<Output = ()>>>) + 'static,
@@ -358,10 +356,8 @@ impl<S: AcpSide> AcpGatewaySender<S> {
     }
 
     /// Send a request and await the response. Returns a `Send` future.
-    ///
-    /// Equivalent to the `acp::Client` / `acp::Agent` trait methods but the
-    /// returned future is `Send` because this is an inherent async fn — not
-    /// wrapped by `#[async_trait(?Send)]`.
+    /// Equivalent to the trait methods, but `Send` because this is an inherent async fn,
+    /// not wrapped by `#[async_trait(?Send)]`.
     pub async fn send<T>(&self, request: T) -> AcpResult<T::Response>
     where
         T: AcpRequest,
@@ -445,13 +441,9 @@ impl acp::Client for AcpGatewaySender<acp::AgentSide> {
     }
 
     async fn session_notification(&self, args: acp::SessionNotification) -> AcpResult<()> {
-        // Fire-and-forget: session notifications carry no meaningful response (the
-        // ACK is `()`), so we must not block the caller waiting for the client to
-        // acknowledge.  When the agent→relay→client path is degraded (e.g. a Slack
-        // session whose ephemeral WebSocket died mid-turn), the relay write can
-        // stall for minutes (TCP retransmit timeout).  Blocking here freezes the
-        // terminal streaming loop — its timeout check never fires, the session
-        // actor can't process new prompts, and the entire session hangs.
+        // Fire-and-forget: session notifications carry no meaningful response (ACK is `()`).
+        // A degraded agent→relay→client path can stall for minutes; blocking here freezes
+        // the terminal streaming loop and hangs the session.
         self.forward_fire_and_forget(args);
         Ok(())
     }
@@ -462,9 +454,7 @@ impl acp::Client for AcpGatewaySender<acp::AgentSide> {
 
     async fn ext_notification(&self, args: acp::ExtNotification) -> AcpResult<()> {
         // Fire-and-forget for the same reason as `session_notification` above:
-        // the ACK is `()` and blocking risks hanging the caller when the
-        // relay→client path is degraded.  Many call sites already bypass this
-        // trait method and call `forward_fire_and_forget` directly.
+        // the ACK is `()` and blocking risks hanging the caller when the relay path is degraded.
         self.forward_fire_and_forget(args);
         Ok(())
     }
@@ -501,6 +491,13 @@ impl acp::Agent for AcpGatewaySender<acp::ClientSide> {
         &self,
         args: acp::SetSessionModeRequest,
     ) -> AcpResult<acp::SetSessionModeResponse> {
+        self.forward(args).await
+    }
+
+    async fn set_session_model(
+        &self,
+        args: acp::SetSessionModelRequest,
+    ) -> AcpResult<acp::SetSessionModelResponse> {
         self.forward(args).await
     }
 
@@ -583,9 +580,12 @@ mod tests {
 
                 let log = log.borrow();
                 assert_eq!(log.len(), N + 1);
-                assert_eq!(log[N], "RESPONSE");
+                assert_eq!(log.get(N).map(String::as_str), Some("RESPONSE"));
                 for i in 0..N {
-                    assert_eq!(log[i], format!("{i}"));
+                    assert_eq!(
+                        log.get(i).map(String::as_str),
+                        Some(format!("{i}").as_str())
+                    );
                 }
             })
             .await;
@@ -662,11 +662,12 @@ mod tests {
                     .map(|i| log.iter().position(|s| s == &format!("delta-{i}")).unwrap())
                     .collect();
                 for w in delta_positions.windows(2) {
+                    let [a, b] = w else {
+                        continue;
+                    };
                     assert!(
-                        w[0] < w[1],
-                        "delta ordering violated: delta at index {} came after delta at index {}",
-                        w[0],
-                        w[1]
+                        a < b,
+                        "delta ordering violated: delta at index {a} came after delta at index {b}"
                     );
                 }
 

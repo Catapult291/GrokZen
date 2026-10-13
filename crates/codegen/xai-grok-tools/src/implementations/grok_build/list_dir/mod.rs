@@ -46,12 +46,9 @@ pub struct ListDirParams {
     pub max_output_chars: Option<usize>,
 }
 crate::register_resource!("grok_build", "ListDir", ListDirParams);
-/// Exact historical invalid-directory message for `list_dir` in legacy-0.4.10.
-///
-/// Historical fixture captured from an earlier (0.4.10) revision of this tool.
-///
-/// Historical 0.4.10 collapsed nonexistent paths, file paths, and other
-/// invalid-directory failures into the same generic message.
+/// Exact historical invalid-directory message for `list_dir` in legacy-0.4.10. Historical fixture
+/// captured from an earlier (0.4.10) revision of this tool. Historical 0.4.10 collapsed nonexistent
+/// paths, file paths, and other invalid-directory failures into the same generic message.
 fn render_legacy_list_dir_error(path: &Path) -> String {
     format!("Error: {} is not a valid directory", path.display())
 }
@@ -107,10 +104,9 @@ fn root_truncation_notice(renderer: Option<&TemplateRenderer>) -> String {
 /// Hard cap on deep-walk (depth ≥ 2) items; depth-1 seed is not counted. Matches
 /// the Python SWE tool's `MAX_GLOBAL_ITEMS`.
 const MAX_GLOBAL_ITEMS: usize = 100_000;
-/// Cap on depth-1 seed entries so a pathological flat root (millions of direct
-/// children) cannot fully materialize into `DirNode` before the char budget truncates.
-/// Independent in role from `MAX_GLOBAL_ITEMS`, but pinned equal to it (see guard below) so
-/// the cutoff notice's shared count stays correct whichever cap triggers truncation.
+/// Cap on depth-1 seed entries so a pathological flat root (millions of direct children) cannot fully materialize into
+/// `DirNode` before the char budget truncates. Independent in role from `MAX_GLOBAL_ITEMS`, but pinned equal to it (see
+/// guard below) so the cutoff notice's shared count stays correct whichever cap triggers truncation.
 const MAX_SEED_ITEMS: usize = 100_000;
 const _: () = assert!(MAX_SEED_ITEMS == MAX_GLOBAL_ITEMS);
 #[derive(Debug, Default)]
@@ -189,11 +185,11 @@ impl DirNode {
         }
     }
     fn add_item(&mut self, rel_parts: &[&str], is_dir: bool) {
-        if rel_parts.is_empty() {
+        let Some((name, rest)) = rel_parts.split_first() else {
             return;
-        }
-        if rel_parts.len() == 1 {
-            let name = rel_parts[0].to_owned();
+        };
+        if rest.is_empty() {
+            let name = (*name).to_owned();
             if is_dir {
                 let key = format!("{name}/");
                 if !self.children.contains_key(&key) {
@@ -208,17 +204,19 @@ impl DirNode {
             }
             return;
         }
-        let subdir = rel_parts[0];
-        let key = format!("{subdir}/");
+        let key = format!("{name}/");
         if !self.children.contains_key(&key) {
             self.children
                 .insert(key.clone(), DirNode::new(self.depth + 1));
             self.subdirs.push(key.clone());
         }
         let child = self.children.get_mut(&key).expect("just inserted");
-        child.add_item(&rel_parts[1..], is_dir);
+        child.add_item(rest, is_dir);
         if !is_dir {
-            let ext = ext_key_from_path(Path::new(rel_parts.last().unwrap()));
+            let Some(leaf) = rest.last() else {
+                return;
+            };
+            let ext = ext_key_from_path(Path::new(leaf));
             self.subtree.add_ext(&ext);
         }
     }
@@ -546,6 +544,11 @@ impl xai_tool_runtime::Tool for ListDirTool {
         let path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.target_directory);
         let display_base = display_cwd_or_cwd(&cwd, display_cwd.as_deref());
         let display_path = compute_display_path(&display_base, &input.target_directory);
+        if let Err(error) =
+            crate::types::memory_v2::validate_memory_v2_read(&resources, &path).await
+        {
+            return Ok(ListDirOutput::PermissionDenied(error));
+        }
         let meta = tokio::fs::metadata(&path).await;
         let is_dir = meta.as_ref().is_ok_and(|m| m.is_dir());
         if !is_dir {

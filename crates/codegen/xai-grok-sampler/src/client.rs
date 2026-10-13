@@ -18,7 +18,8 @@ use futures_util::StreamExt;
 use futures_util::stream::BoxStream;
 use indexmap::IndexMap;
 use reqwest::header::{
-    ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
+    ACCEPT, AUTHORIZATION, CONTENT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue,
+    USER_AGENT,
 };
 use serde::Serialize;
 use tracing::Instrument;
@@ -34,8 +35,9 @@ use xai_grok_sampling_types::{
     is_check_event, messages, rs,
 };
 
-use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
+use crate::config::{AuthScheme, OriginClientInfo, RequestCompression, SamplerConfig};
 use crate::events::SamplingErrorInfo;
+use crate::request_compression::{compress_body, should_compress};
 use crate::span_timing::{ERROR, STATUS_CODE, SUCCESS, StreamSpanTiming};
 use crate::stream_classify::{chat_chunk_class, message_event_class, responses_event_class};
 use xai_grok_auth::bearer_suffix;
@@ -162,8 +164,6 @@ fn backfill_missing_arguments(value: &mut serde_json::Value) {
 }
 
 /// On `response.completed` / `response.incomplete`, rewrite `usage.total_tokens` to the live context length from `context_details`.
-/// `total_tokens` drives the CLI's `/context` bar, the auto-compact threshold, and `meta.totalTokens` on persisted sessions.
-/// Under server-side loops (`web_search`, `x_search`) the cumulative total inflates; `context_details` holds the final turn's real context.
 /// Billing fields stay on the cumulative wire values, so telemetry is unaffected.
 fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &str) {
     let response = match event {
@@ -210,7 +210,6 @@ fn extract_context_total(value: &serde_json::Value) -> Option<u32> {
 /// Splice the raw-JSON hosted-tool entries for `web_search` and `x_search` into a serialized Responses request body's `tools` array.
 /// `x_search` has no `rs::Tool` variant, and `web_search`'s typed filters cannot carry `excluded_domains`, so both travel as raw JSON.
 /// Neither may also be emitted as a typed `rs::Tool`; the API rejects the duplicate.
-/// Shared by the streaming (`create_response_stream`) and non-streaming (`create_response`) paths so neither can silently drop these tools.
 fn splice_extra_tool_entries(
     request_body: &mut serde_json::Value,
     entries: Vec<serde_json::Value>,
@@ -221,7 +220,9 @@ fn splice_extra_tool_entries(
     if let Some(tools) = request_body.get_mut("tools").and_then(|v| v.as_array_mut()) {
         tools.extend(entries);
     } else {
-        request_body["tools"] = serde_json::Value::Array(entries);
+        if let Some(obj) = request_body.as_object_mut() {
+            obj.insert("tools".to_owned(), serde_json::Value::Array(entries));
+        }
     }
 }
 
@@ -386,7 +387,9 @@ struct ClientDefaults {
     top_p: Option<f32>,
     api_backend: ApiBackend,
     auth_scheme: AuthScheme,
+    request_compression: RequestCompression,
     stream_tool_calls: bool,
+    reasoning_summary: Option<xai_grok_sampling_types::ReasoningSummary>,
     extra_response_includes: Vec<String>,
     doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
 }
@@ -491,10 +494,8 @@ fn agent_version() -> String {
 }
 
 /// Render a User-Agent string for the given origin client.
-///
 /// Mirrors the shell's `user_agent_string_for` but uses sampler-local constants.
 /// The session typically owns the canonical User-Agent rendering for process-wide HTTP clients.
-/// This helper is for per-session sampling clients that want to override it.
 pub fn user_agent_string_for(origin: &OriginClientInfo) -> String {
     let agent_version = agent_version();
     let platform = PlatformInfo::current();
@@ -546,8 +547,7 @@ fn auth_rejected(message: String, sent_bearer: Option<&str>) -> SamplingError {
 // =============================================================================
 
 impl SamplingClient {
-    /// Grabs the process-wide shared `reqwest::Client` (HTTP/2 by default, HTTP/1.1 when `config.force_http1` is set).
-    /// Pre-computes the default request headers.
+    /// Uses an identity-specific client for configured mTLS; otherwise grabs the process-wide shared client.
     /// This does not perform any network I/O.
     pub fn new(config: SamplerConfig) -> Result<Self> {
         let mut headers = HeaderMap::new();
@@ -624,6 +624,15 @@ impl SamplingClient {
             headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
         }
 
+        if let Some(conversation_group_id) = config.conversation_group_id.as_ref()
+            && let Ok(header_value) = HeaderValue::from_str(conversation_group_id.as_ref())
+        {
+            headers.insert(
+                HeaderName::from_static("x-grok-conv-group-id"),
+                header_value,
+            );
+        }
+
         {
             let client_id = config
                 .client_identifier
@@ -651,8 +660,12 @@ impl SamplingClient {
             }
         }
 
-        let http = if config.force_http1 {
+        if config.force_http1 {
             tracing::info!("Using HTTP/1.1 for sampling client (force_http1=true)");
+        }
+        let http = if let Some(cert_dir) = config.mtls_cert_dir.as_deref() {
+            crate::shared_http::mtls_client(cert_dir, config.force_http1)?
+        } else if config.force_http1 {
             crate::shared_http::client_http1().map_err(SamplingError::Http)?
         } else {
             crate::shared_http::client().map_err(SamplingError::Http)?
@@ -665,8 +678,9 @@ impl SamplingClient {
             model = %config.model,
             api_backend = ?config.api_backend,
             auth_scheme = ?config.auth_scheme,
+            request_compression = ?config.request_compression,
             // "unset" (not "none"): `ReasoningEffort::None` is a real wire value; logging the absent Option as "none" looked like we were sending it
-            reasoning_effort = config.reasoning_effort.map_or("unset", |e| e.as_str()),
+            reasoning_effort = config.reasoning_effort.map_or("unset", |e| e.into()),
             has_api_key = config.api_key.is_some(),
             has_bearer_resolver = config.bearer_resolver.is_some(),
             has_authorization_header = headers.get(AUTHORIZATION).is_some(),
@@ -680,7 +694,9 @@ impl SamplingClient {
             top_p: config.top_p,
             api_backend: config.api_backend,
             auth_scheme: config.auth_scheme,
+            request_compression: config.request_compression,
             stream_tool_calls: config.stream_tool_calls,
+            reasoning_summary: config.reasoning_summary,
             extra_response_includes: config.extra_response_includes,
             doom_loop_recovery: config.doom_loop_recovery,
         };
@@ -702,6 +718,14 @@ impl SamplingClient {
 
     pub fn api_backend(&self) -> ApiBackend {
         self.defaults.api_backend.clone()
+    }
+
+    /// Give the bearer resolver its pre-send hook before [`Self::post`] reads it.
+    /// Awaited separately because `post` is sync (its callers hand the builder straight to `send()`).
+    async fn prepare_bearer(&self) {
+        if let Some(resolver) = &self.bearer_resolver {
+            resolver.prepare_for_send().await;
+        }
     }
 
     /// The credential tail is captured at build time — see [`SentRequest`] for
@@ -765,6 +789,16 @@ impl SamplingClient {
         }
     }
 
+    /// Must run before the span gets its first child, which starts it and freezes its parent.
+    fn adopt_traceparent(&self, span: &tracing::Span, traceparent: Option<&str>) {
+        if let Some(injector) = &self.header_injector
+            && let Some(traceparent) = traceparent
+            && !span.is_disabled()
+        {
+            injector.set_span_parent(span, traceparent);
+        }
+    }
+
     /// Tail fragment of the credential in `headers`: `x-api-key` (Messages-API scheme) or `Authorization`.
     /// The fragment length is [`crate::attribution::BEARER_SUFFIX_LEN`].
     fn sent_fragment_from_headers(headers: &HeaderMap, scheme: &AuthScheme) -> Option<String> {
@@ -795,11 +829,8 @@ impl SamplingClient {
     }
 
     /// Invoke the optional 401 attribution callback for one logical 401 response.
-    /// Each of the six UNAUTHORIZED arms in this file calls this helper immediately before returning `SamplingError::Auth(...)`.
     /// The emit happens at the lowest layer that saw the status, so higher layers that react to a 401 must not emit a duplicate event.
-    ///
     /// `sent_suffix` is the fragment [`Self::post`] captured for the rejected request.
-    /// It is already tail-truncated; the full bearer never crosses this boundary.
     fn record_401_attribution(
         &self,
         consumer: crate::attribution::SamplingConsumer,
@@ -938,6 +969,13 @@ impl SamplingClient {
         let x_grok_req_id = &payload.x_grok_req_id.clone().unwrap_or_default();
         let model_id = payload.model.clone().unwrap_or_default();
 
+        let request_region = crate::span_timing::Region::from_span(tracing::info_span!(
+            "sampling.nonstream_request",
+            model = %model_id,
+            status_code = tracing::field::Empty,
+            success = tracing::field::Empty,
+        ));
+
         tracing::debug!(
             base_url = %self.base_url,
             model_id = %model_id,
@@ -955,19 +993,69 @@ impl SamplingClient {
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
         };
+        self.prepare_bearer().await;
         let SentRequest {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("chat/completions"));
-        let http_request = grok_headers.apply(builder).json(&payload);
+        let built_request = self
+            .build_json_request(grok_headers.apply(builder), &payload)
+            .await?;
+        let response = self.send(built_request).await?;
 
-        let response = http_request.send().await.map_err(|e| {
-            // Debug level; the error is returned to the caller
-            tracing::debug!("HTTP request failed: {}", e);
-            e
-        })?;
+        let status = response.status();
+        request_region
+            .span()
+            .record("status_code", status.as_u16() as i64);
+        request_region.span().record("success", status.is_success());
 
         self.handle_response(response, sent_bearer.as_deref()).await
+    }
+
+    /// Serialize `payload` onto `builder` the way `RequestBuilder::json` does
+    /// (a caller-set `Content-Type` wins), zstd-compressing large bodies when
+    /// the shell marked this endpoint as accepting it.
+    async fn build_json_request<T: Serialize + ?Sized>(
+        &self,
+        builder: reqwest::RequestBuilder,
+        payload: &T,
+    ) -> Result<reqwest::Request> {
+        let json = serde_json::to_vec(payload).map_err(|e| {
+            tracing::error!("Failed to serialize request body: {}", e);
+            SamplingError::Serialization(e)
+        })?;
+        let mut request = builder.build().map_err(|e| {
+            tracing::error!("Failed to build HTTP request: {}", e);
+            SamplingError::Http(e)
+        })?;
+        if !request.headers().contains_key(CONTENT_TYPE) {
+            request
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        }
+        let body = if should_compress(self.defaults.request_compression, json.len()) {
+            match compress_body(&json).await {
+                Some(compressed) => {
+                    request
+                        .headers_mut()
+                        .insert(CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+                    compressed
+                }
+                None => json,
+            }
+        } else {
+            json
+        };
+        *request.body_mut() = Some(reqwest::Body::from(body));
+        Ok(request)
+    }
+
+    async fn send(&self, request: reqwest::Request) -> Result<reqwest::Response> {
+        self.http
+            .execute(request)
+            .await
+            .inspect_err(|e| tracing::debug!("HTTP request failed: {}", e))
+            .map_err(Into::into)
     }
 
     async fn execute_stream_request(
@@ -998,6 +1086,7 @@ impl SamplingClient {
             endpoint = %self.endpoint("chat/completions"),
             model_id = request.model.as_deref().unwrap_or(""),
         );
+        self.adopt_traceparent(region.span(), request.traceparent.as_deref());
         if region.span().is_disabled() {
             self.chat_completion_stream_inner(request, region).await
         } else {
@@ -1042,19 +1131,17 @@ impl SamplingClient {
             deployment_id: payload.x_grok_deployment_id.as_deref(),
             user_id: payload.x_grok_user_id.as_deref(),
         };
+        self.prepare_bearer().await;
         let SentRequest {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("chat/completions"));
         let http_request = grok_headers
             .apply(builder)
-            .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&streaming_request);
-
-        let built_request = http_request.build().map_err(|e| {
-            tracing::error!("Failed to build HTTP request: {}", e);
-            SamplingError::Http(e)
-        })?;
+            .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        let built_request = self
+            .build_json_request(http_request, &streaming_request)
+            .await?;
 
         tracing::debug!(
             url = %built_request.url(),
@@ -1227,6 +1314,20 @@ impl SamplingClient {
             request.inner.store = Some(false);
         }
 
+        if let Some(summary) = self.defaults.reasoning_summary {
+            let summary = summary.to_responses_api();
+            match request.inner.reasoning.as_mut() {
+                Some(reasoning) => reasoning.summary = summary,
+                None if summary.is_some() => {
+                    request.inner.reasoning = Some(rs::Reasoning {
+                        effort: None,
+                        summary,
+                    });
+                }
+                None => {}
+            }
+        }
+
         // Include encrypted reasoning content if not specified
         let includes = request.inner.include.get_or_insert_with(Vec::new);
         if !includes.contains(&rs::IncludeEnum::ReasoningEncryptedContent) {
@@ -1246,6 +1347,13 @@ impl SamplingClient {
         let x_grok_conv_id = request.x_grok_conv_id.as_deref().unwrap_or_default();
         let x_grok_req_id = request.x_grok_req_id.as_deref().unwrap_or_default();
         let model_id = request.inner.model.clone().unwrap_or_default();
+
+        let request_region = crate::span_timing::Region::from_span(tracing::info_span!(
+            "sampling.nonstream_request",
+            model = %model_id,
+            status_code = tracing::field::Empty,
+            success = tracing::field::Empty,
+        ));
 
         // The trace field is process-local: upstream session code consumes it (and may upload a payload artifact); the sampler never forwards it
         // Drop it before we send
@@ -1275,18 +1383,21 @@ impl SamplingClient {
         // async-openai's ReasoningTextContent struct omits the `type` discriminator that the Responses API requires on input
         // Patch it in after serializing
         xai_grok_sampling_types::patch_reasoning_text_types(&mut request_body);
+        self.prepare_bearer().await;
         let SentRequest {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("responses"));
-        let http_request = grok_headers.apply(builder).json(&request_body);
-
-        let response = http_request.send().await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            e
-        })?;
+        let built_request = self
+            .build_json_request(grok_headers.apply(builder), &request_body)
+            .await?;
+        let response = self.send(built_request).await?;
 
         let status = response.status();
+        request_region
+            .span()
+            .record("status_code", status.as_u16() as i64);
+        request_region.span().record("success", status.is_success());
         let model_metadata = extract_model_metadata(response.headers());
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
@@ -1353,6 +1464,7 @@ impl SamplingClient {
             endpoint = %self.endpoint("responses"),
             model_id = request.inner.model.as_deref().unwrap_or(""),
         );
+        self.adopt_traceparent(region.span(), request.traceparent.as_deref());
         if region.span().is_disabled() {
             self.create_response_stream_inner(request, region).await
         } else {
@@ -1408,8 +1520,10 @@ impl SamplingClient {
             SamplingError::Serialization(e)
         })?;
         // Inject xAI-specific fields not in async-openai's CreateResponse type.
-        if self.defaults.stream_tool_calls {
-            request_body["stream_tool_calls"] = serde_json::json!(true);
+        if self.defaults.stream_tool_calls
+            && let Some(obj) = request_body.as_object_mut()
+        {
+            obj.insert("stream_tool_calls".to_owned(), serde_json::json!(true));
         }
         splice_extra_tool_entries(&mut request_body, extra_tool_entries);
         append_response_includes(&mut request_body, &self.defaults.extra_response_includes);
@@ -1419,6 +1533,7 @@ impl SamplingClient {
             .defaults
             .doom_loop_recovery
             .map(crate::doom_loop::DoomLoopSignalCollector::new);
+        self.prepare_bearer().await;
         let SentRequest {
             builder,
             sent_bearer,
@@ -1434,12 +1549,7 @@ impl SamplingClient {
                     DEFAULT_EXACT_REPETITION_MIN_TOKENS.to_string(),
                 );
         }
-        let http_request = http_request.json(&request_body);
-
-        let built_request = http_request.build().map_err(|e| {
-            tracing::error!("Failed to build HTTP request: {}", e);
-            SamplingError::Http(e)
-        })?;
+        let built_request = self.build_json_request(http_request, &request_body).await?;
 
         tracing::debug!(
             url = %built_request.url(),
@@ -1606,6 +1716,13 @@ impl SamplingClient {
         let x_grok_req_id = request.x_grok_req_id.as_deref().unwrap_or_default();
         let model_id = request.inner.model.clone();
 
+        let request_region = crate::span_timing::Region::from_span(tracing::info_span!(
+            "sampling.nonstream_request",
+            model = %model_id,
+            status_code = tracing::field::Empty,
+            success = tracing::field::Empty,
+        ));
+
         // Drop process-local trace data.
         request.trace.take();
 
@@ -1623,18 +1740,21 @@ impl SamplingClient {
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
         };
+        self.prepare_bearer().await;
         let SentRequest {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("messages"));
-        let http_request = grok_headers.apply(builder).json(&request.inner);
-
-        let response = http_request.send().await.map_err(|e| {
-            tracing::debug!("HTTP request failed: {}", e);
-            e
-        })?;
+        let built_request = self
+            .build_json_request(grok_headers.apply(builder), &request.inner)
+            .await?;
+        let response = self.send(built_request).await?;
 
         let status = response.status();
+        request_region
+            .span()
+            .record("status_code", status.as_u16() as i64);
+        request_region.span().record("success", status.is_success());
         let model_metadata = extract_model_metadata(response.headers());
         let retry_after_secs = extract_retry_after(response.headers());
         let should_retry = extract_should_retry(response.headers());
@@ -1698,6 +1818,7 @@ impl SamplingClient {
             endpoint = %self.endpoint("messages"),
             model_id = request.inner.model.as_str(),
         );
+        self.adopt_traceparent(region.span(), request.traceparent.as_deref());
         if region.span().is_disabled() {
             self.create_message_stream_inner(request, region).await
         } else {
@@ -1745,19 +1866,17 @@ impl SamplingClient {
             deployment_id: request.x_grok_deployment_id.as_deref(),
             user_id: request.x_grok_user_id.as_deref(),
         };
+        self.prepare_bearer().await;
         let SentRequest {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("messages"));
         let http_request = grok_headers
             .apply(builder)
-            .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&request.inner);
-
-        let built_request = http_request.build().map_err(|e| {
-            tracing::error!("Failed to build HTTP request: {}", e);
-            SamplingError::Http(e)
-        })?;
+            .header(ACCEPT, HeaderValue::from_static("text/event-stream"));
+        let built_request = self
+            .build_json_request(http_request, &request.inner)
+            .await?;
 
         tracing::debug!(
             url = %built_request.url(),
@@ -1944,7 +2063,6 @@ impl SamplingClient {
     }
 
     /// Send a conversation request using the Responses API (streaming).
-    ///
     /// The third tuple element is the per-request doom-loop signal collector (see [`Self::create_response_stream`]).
     /// Callers that don't consume the signals can ignore it.
     #[allow(clippy::type_complexity)]
@@ -1979,6 +2097,7 @@ impl SamplingClient {
         wrapper.x_grok_transient_retry = x_grok_transient_retry;
         wrapper.x_grok_agent_id = x_grok_agent_id;
         wrapper.extra_tool_entries = extra_tools;
+        wrapper.traceparent = request.traceparent;
 
         if let Some(trace) = trace {
             wrapper.trace = Some(trace);
@@ -2050,6 +2169,7 @@ impl SamplingClient {
         wrapper.x_grok_turn_idx = x_grok_turn_idx;
         wrapper.x_grok_transient_retry = x_grok_transient_retry;
         wrapper.x_grok_agent_id = x_grok_agent_id;
+        wrapper.traceparent = request.traceparent;
 
         if let Some(trace) = trace {
             wrapper.trace = Some(trace);
@@ -2091,7 +2211,6 @@ impl SamplingClient {
     }
 
     /// Backend-aware streaming call that collects the full response.
-    ///
     /// Honors the request's [`LengthPolicy`](xai_grok_sampling_types::LengthPolicy) like the actor path.
     /// The default still fails a text-only or empty `Length` stop, so side callers never persist a silently truncated result.
     pub async fn conversation_collect(
@@ -2187,6 +2306,13 @@ fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn nth<T>(xs: &[T], i: usize) -> &T {
+        let Some(x) = xs.get(i) else {
+            panic!("expected item {i}, got {} items", xs.len());
+        };
+        x
+    }
     use axum::{Router, body::Bytes, routing::post};
     use indexmap::IndexMap;
     use tokio::net::TcpListener;
@@ -2199,8 +2325,8 @@ mod tests {
         let mut body = serde_json::json!({ "tools": [{ "type": "function" }] });
         splice_extra_tool_entries(&mut body, vec![serde_json::json!({ "type": "web_search" })]);
         assert_eq!(
-            body["tools"],
-            serde_json::json!([{ "type": "function" }, { "type": "web_search" }])
+            body.get("tools"),
+            Some(&serde_json::json!([{ "type": "function" }, { "type": "web_search" }]))
         );
     }
 
@@ -2208,14 +2334,20 @@ mod tests {
     fn splice_extra_tool_entries_creates_tools_array_when_absent() {
         let mut body = serde_json::json!({});
         splice_extra_tool_entries(&mut body, vec![serde_json::json!({ "type": "web_search" })]);
-        assert_eq!(body["tools"], serde_json::json!([{ "type": "web_search" }]));
+        assert_eq!(
+            body.get("tools"),
+            Some(&serde_json::json!([{ "type": "web_search" }]))
+        );
     }
 
     #[test]
     fn splice_extra_tool_entries_noop_when_empty() {
         let mut body = serde_json::json!({ "tools": [{ "type": "function" }] });
         splice_extra_tool_entries(&mut body, vec![]);
-        assert_eq!(body["tools"], serde_json::json!([{ "type": "function" }]));
+        assert_eq!(
+            body.get("tools"),
+            Some(&serde_json::json!([{ "type": "function" }]))
+        );
     }
 
     #[test]
@@ -2271,33 +2403,8 @@ mod tests {
             api_key: Some("test-key".to_string()),
             base_url: "https://example.test".to_string(),
             model: "test-model".to_string(),
-            max_completion_tokens: None,
-            temperature: None,
-            top_p: None,
-            api_backend: ApiBackend::ChatCompletions,
-            auth_scheme: AuthScheme::Bearer,
-            extra_headers: IndexMap::new(),
-            extra_response_includes: Vec::new(),
-            query_params: IndexMap::new(),
-            env_http_headers: IndexMap::new(),
             context_window: 8192,
-            force_http1: false,
-            max_retries: None,
-            stream_tool_calls: false,
-            idle_timeout_secs: None,
-            reasoning_effort: None,
-            origin_client: None,
-            client_identifier: None,
-            deployment_id: None,
-            user_id: None,
-            client_version: None,
-            attribution_callback: None,
-            bearer_resolver: None,
-            supports_backend_search: false,
-            compactions_remaining: None,
-            compaction_at_tokens: None,
-            doom_loop_recovery: None,
-            header_injector: None,
+            ..Default::default()
         }
     }
 
@@ -2328,6 +2435,7 @@ mod tests {
             x_grok_deployment_id: None,
             x_grok_user_id: None,
             trace: None,
+            traceparent: None,
         };
 
         let wrapper = StreamingChatRequest {
@@ -2353,6 +2461,10 @@ mod tests {
             "x_grok_* are header fields and must never serialize into the body: {:?}",
             obj.keys().collect::<Vec<_>>()
         );
+        assert!(
+            obj.get("traceparent").is_none(),
+            "traceparent rides the span, never the body"
+        );
 
         assert!(
             obj.get("inner").is_none(),
@@ -2369,6 +2481,8 @@ mod tests {
         assert!(obj.get("max_tokens").is_none());
         assert!(obj.get("tools").is_none());
     }
+
+    const EMPTY_RESPONSE_JSON: &str = r#"{"id":"resp","object":"response","created_at":0,"model":"test-model","status":"completed","output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}"#;
 
     async fn capture_response_body(streaming: bool) -> serde_json::Value {
         let (body_tx, body_rx) = oneshot::channel();
@@ -2387,7 +2501,7 @@ mod tests {
                     } else {
                         axum::response::Response::builder()
                             .header("content-type", "application/json")
-                            .body(axum::body::Body::from(r#"{"id":"resp","object":"response","created_at":0,"model":"test-model","status":"completed","output":[],"usage":{"input_tokens":0,"input_tokens_details":{"cached_tokens":0},"output_tokens":0,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":0}}"#))
+                            .body(axum::body::Body::from(EMPTY_RESPONSE_JSON))
                             .unwrap()
                     }
                 }
@@ -2434,23 +2548,206 @@ mod tests {
     async fn response_call_sites_emit_final_includes_and_stream_fields() {
         let unary = capture_response_body(false).await;
         assert_eq!(
-            serde_json::json!(["reasoning.encrypted_content", "no_inline_citations"]),
-            unary["include"],
+            Some(&serde_json::json!([
+                "reasoning.encrypted_content",
+                "no_inline_citations"
+            ])),
+            unary.get("include"),
         );
 
         let stream = capture_response_body(true).await;
         assert_eq!(
-            serde_json::json!(["reasoning.encrypted_content", "no_inline_citations"]),
-            stream["include"],
+            Some(&serde_json::json!([
+                "reasoning.encrypted_content",
+                "no_inline_citations"
+            ])),
+            stream.get("include"),
         );
-        assert_eq!(Some(true), stream["stream"].as_bool());
+        assert_eq!(Some(true), stream.get("stream").and_then(|v| v.as_bool()));
         assert!(
-            stream["tools"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|tool| tool["type"] == "x_search")
+            stream
+                .get("tools")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .any(|tool| tool.get("type") == Some(&serde_json::json!("x_search")))
         );
+    }
+
+    const EMPTY_CHAT_COMPLETION_JSON: &str =
+        r#"{"id":"chat","object":"chat.completion","created":0,"model":"test-model","choices":[]}"#;
+    const EMPTY_MESSAGE_JSON: &str = r#"{"id":"msg","type":"message","role":"assistant","content":[],"model":"test-model","stop_reason":"end_turn","usage":{"input_tokens":0,"output_tokens":0}}"#;
+
+    /// One conversation request through `backend` (unary or SSE) against a mock
+    /// that hands back the request's headers and raw body.
+    async fn capture_request(
+        backend: ApiBackend,
+        streaming: bool,
+        request_compression: RequestCompression,
+        input: &str,
+    ) -> (axum::http::HeaderMap, Bytes) {
+        use xai_grok_sampling_types::{ContentPart, ConversationItem, UserItem};
+
+        let (content_type, reply) = match (streaming, &backend) {
+            (true, _) => ("text/event-stream", "data: [DONE]\n\n"),
+            (false, ApiBackend::Responses) => ("application/json", EMPTY_RESPONSE_JSON),
+            (false, ApiBackend::ChatCompletions) => {
+                ("application/json", EMPTY_CHAT_COMPLETION_JSON)
+            }
+            (false, ApiBackend::Messages) => ("application/json", EMPTY_MESSAGE_JSON),
+        };
+        let (tx, rx) = oneshot::channel();
+        let tx = Arc::new(std::sync::Mutex::new(Some(tx)));
+        let handler = post(move |headers: axum::http::HeaderMap, body: Bytes| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.lock().unwrap().take().unwrap().send((headers, body));
+                axum::response::Response::builder()
+                    .header("content-type", content_type)
+                    .body(axum::body::Body::from(reply))
+                    .unwrap()
+            }
+        });
+        let app = Router::new()
+            .route("/v1/chat/completions", handler.clone())
+            .route("/v1/responses", handler.clone())
+            .route("/v1/messages", handler);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = SamplingClient::new(SamplerConfig {
+            base_url: format!("http://{addr}/v1"),
+            api_backend: backend.clone(),
+            request_compression,
+            ..minimal_config()
+        })
+        .unwrap();
+        let request = ConversationRequest {
+            items: vec![ConversationItem::User(UserItem {
+                content: vec![ContentPart::Text {
+                    text: Arc::from(input),
+                }],
+                ..Default::default()
+            })],
+            ..Default::default()
+        };
+        let sent = match (streaming, &backend) {
+            (false, ApiBackend::ChatCompletions) => client.conversation(request).await.map(drop),
+            (true, ApiBackend::ChatCompletions) => {
+                client.conversation_stream(request).await.map(drop)
+            }
+            (false, ApiBackend::Responses) => {
+                client.conversation_responses(request).await.map(drop)
+            }
+            (true, ApiBackend::Responses) => client
+                .conversation_stream_responses(request)
+                .await
+                .map(drop),
+            (false, ApiBackend::Messages) => client.conversation_messages(request).await.map(drop),
+            (true, ApiBackend::Messages) => {
+                client.conversation_stream_messages(request).await.map(drop)
+            }
+        };
+        sent.unwrap_or_else(|e| panic!("{backend:?} streaming={streaming}: {e}"));
+        let captured = rx.await.unwrap();
+        server.abort();
+        captured
+    }
+
+    fn large_input() -> String {
+        "x".repeat(2 * crate::request_compression::MIN_COMPRESS_BYTES)
+    }
+
+    fn header<'a>(headers: &'a axum::http::HeaderMap, name: HeaderName) -> Option<&'a str> {
+        headers.get(name).and_then(|v| v.to_str().ok())
+    }
+
+    #[tokio::test]
+    async fn every_chat_route_compresses_large_bodies_when_configured() {
+        let input = large_input();
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            for streaming in [false, true] {
+                let route = format!("{backend:?} streaming={streaming}");
+                let (headers, body) =
+                    capture_request(backend.clone(), streaming, RequestCompression::Zstd, &input)
+                        .await;
+                assert_eq!(Some("zstd"), header(&headers, CONTENT_ENCODING), "{route}");
+                assert_eq!(
+                    Some("application/json"),
+                    header(&headers, CONTENT_TYPE),
+                    "{route}: the encoding wraps a JSON body"
+                );
+                // cli-chat-proxy rejects a zstd body it cannot attribute from headers.
+                assert!(
+                    header(&headers, HeaderName::from_static("x-grok-model-override"))
+                        .is_some_and(|model| !model.is_empty()),
+                    "{route}: a compressed body must carry the model override"
+                );
+                assert!(
+                    body.len() < input.len() / 10,
+                    "{route}: zstd body should shrink the padding"
+                );
+                let decoded = String::from_utf8(zstd::decode_all(body.as_ref()).unwrap()).unwrap();
+                serde_json::from_str::<serde_json::Value>(&decoded).expect("decoded body is JSON");
+                assert!(decoded.contains(&input), "{route}: payload lost");
+            }
+        }
+    }
+
+    /// Bodies past the offload threshold compress on the blocking pool; the
+    /// wire result must be indistinguishable from the inline path.
+    #[tokio::test]
+    async fn offloaded_large_body_compresses_like_the_inline_path() {
+        let input = "y".repeat(3 * 1024 * 1024);
+        let (headers, body) = capture_request(
+            ApiBackend::Responses,
+            false,
+            RequestCompression::Zstd,
+            &input,
+        )
+        .await;
+        assert_eq!(Some("zstd"), header(&headers, CONTENT_ENCODING));
+        let decoded = String::from_utf8(zstd::decode_all(body.as_ref()).unwrap()).unwrap();
+        assert!(decoded.contains(&input), "payload lost on the offload path");
+    }
+
+    #[tokio::test]
+    async fn small_body_is_sent_plain_even_when_configured() {
+        let (headers, body) = capture_request(
+            ApiBackend::Responses,
+            false,
+            RequestCompression::Zstd,
+            "small-plain-body",
+        )
+        .await;
+        assert_eq!(None, header(&headers, CONTENT_ENCODING));
+        assert_eq!(Some("application/json"), header(&headers, CONTENT_TYPE));
+        assert!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("small-plain-body")
+        );
+    }
+
+    #[tokio::test]
+    async fn large_body_stays_plain_when_not_configured() {
+        let input = large_input();
+        let (headers, body) = capture_request(
+            ApiBackend::Responses,
+            true,
+            RequestCompression::None,
+            &input,
+        )
+        .await;
+        assert_eq!(None, header(&headers, CONTENT_ENCODING));
+        assert_eq!(Some("application/json"), header(&headers, CONTENT_TYPE));
+        assert!(std::str::from_utf8(&body).unwrap().contains(&input));
     }
 
     #[test]
@@ -2468,12 +2765,12 @@ mod tests {
             ],
         );
         assert_eq!(
-            serde_json::json!([
+            Some(&serde_json::json!([
                 "reasoning.encrypted_content",
                 "web_search_call.action.sources",
                 "no_inline_citations",
-            ]),
-            body["include"],
+            ])),
+            body.get("include"),
         );
 
         let mut unchanged = serde_json::json!({ "include": typed });
@@ -2486,7 +2783,10 @@ mod tests {
             serde_json::json!({ "include": null }),
         ] {
             append_response_includes(&mut body, &["no_inline_citations".to_owned()]);
-            assert_eq!(serde_json::json!(["no_inline_citations"]), body["include"]);
+            assert_eq!(
+                Some(&serde_json::json!(["no_inline_citations"])),
+                body.get("include")
+            );
         }
     }
 
@@ -2685,6 +2985,63 @@ mod tests {
         );
     }
 
+    /// Nothing listens on port 1: each send fails right after the hook runs.
+    #[tokio::test]
+    async fn stream_span_adopts_request_traceparent_on_every_backend() {
+        #[derive(Debug)]
+        struct RecordingInjector(tokio::sync::mpsc::UnboundedSender<String>);
+        impl crate::config::HeaderInjector for RecordingInjector {
+            fn inject(&self, _headers: &mut HeaderMap) {}
+            fn set_span_parent(&self, _span: &tracing::Span, traceparent: &str) {
+                self.0
+                    .send(traceparent.to_owned())
+                    .expect("test receiver alive");
+            }
+        }
+
+        let (seen_tx, mut seen_rx) = tokio::sync::mpsc::unbounded_channel();
+        let injector = Arc::new(RecordingInjector(seen_tx));
+        let traceparent = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+        let client = {
+            let mut config = minimal_config();
+            config.base_url = "http://127.0.0.1:1".to_string();
+            config.header_injector = Some(injector);
+            SamplingClient::new(config).expect("build")
+        };
+        let request = || ConversationRequest {
+            items: vec![xai_grok_sampling_types::ConversationItem::user("hi")],
+            traceparent: Some(traceparent.to_owned()),
+            ..Default::default()
+        };
+
+        // Second registered dispatcher: other tests' threads cannot cache callsite interest as
+        // `never` for this one.
+        let _interest_pin = tracing::Dispatch::new(tracing_subscriber::Registry::default());
+        let disabled =
+            tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
+        let refused = client.conversation_stream(request()).await;
+        assert!(refused.is_err(), "chat completions: port 1 refuses");
+        assert!(
+            seen_rx.try_recv().is_err(),
+            "a disabled span must not reach the hook"
+        );
+        drop(disabled);
+
+        let _subscriber = tracing::subscriber::set_default(tracing_subscriber::Registry::default());
+        let refused = client.conversation_stream(request()).await;
+        assert!(refused.is_err(), "chat completions: port 1 refuses");
+        let refused = client.conversation_stream_responses(request()).await;
+        assert!(refused.is_err(), "responses: port 1 refuses");
+        let refused = client.conversation_stream_messages(request()).await;
+        assert!(refused.is_err(), "messages: port 1 refuses");
+
+        let mut seen = Vec::new();
+        while let Ok(tp) = seen_rx.try_recv() {
+            seen.push(tp);
+        }
+        assert_eq!(vec![traceparent; 3], seen);
+    }
+
     #[test]
     fn user_agent_includes_origin_and_agent_product() {
         let origin = OriginClientInfo {
@@ -2840,7 +3197,7 @@ mod tests {
             Some("ken-oldtail1"),
             "attribution must describe the bearer the rejected request carried"
         );
-        // A record-time re-read would report the rotated token instead:
+        // A record-time re-read would report the rotated token, not the build-time capture.
         assert_eq!(
             client.current_sent_bearer_suffix().as_deref(),
             Some("en-newtail99"),
@@ -2939,12 +3296,12 @@ mod tests {
         let calls = cb.invocations.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(
-            calls[0].0,
+            nth(&calls, 0).0,
             crate::attribution::SamplingConsumer::ChatCompletionsStream
         );
-        assert_eq!(calls[0].1.as_deref(), Some("0-extra-tail"));
+        assert_eq!(nth(&calls, 0).1.as_deref(), Some("0-extra-tail"));
         assert_eq!(
-            calls[0].1.as_deref().map(str::len),
+            nth(&calls, 0).1.as_deref().map(str::len),
             Some(crate::attribution::BEARER_SUFFIX_LEN),
         );
     }
@@ -3254,5 +3611,85 @@ mod tests {
             event,
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
         ));
+    }
+
+    /// A request as the builder emits it: `reasoning.summary` already set to the built-in default.
+    fn built_response_request() -> CreateResponseWrapper {
+        CreateResponseWrapper::new(rs::CreateResponse {
+            reasoning: Some(rs::Reasoning {
+                effort: Some(rs::ReasoningEffort::High),
+                summary: Some(rs::ReasoningSummary::Concise),
+            }),
+            ..Default::default()
+        })
+    }
+
+    fn client_with_summary(
+        summary: Option<xai_grok_sampling_types::ReasoningSummary>,
+    ) -> SamplingClient {
+        SamplingClient::new(SamplerConfig {
+            reasoning_summary: summary,
+            ..minimal_config()
+        })
+        .expect("client should construct")
+    }
+
+    #[test]
+    fn reasoning_summary_unset_keeps_the_built_request() {
+        let client = client_with_summary(None);
+        let mut request = built_response_request();
+        client.apply_response_defaults(&mut request).unwrap();
+        let reasoning = request.inner.reasoning.expect("reasoning block kept");
+        assert_eq!(reasoning.effort, Some(rs::ReasoningEffort::High));
+        assert_eq!(reasoning.summary, Some(rs::ReasoningSummary::Concise));
+    }
+
+    #[test]
+    fn reasoning_summary_none_omits_the_field_but_keeps_effort() {
+        let client = client_with_summary(Some(xai_grok_sampling_types::ReasoningSummary::None));
+        let mut request = built_response_request();
+        client.apply_response_defaults(&mut request).unwrap();
+        let body = serde_json::to_value(&request.inner).unwrap();
+        assert_eq!(
+            body.get("reasoning"),
+            Some(&serde_json::json!({ "effort": "high" }))
+        );
+        let reasoning = request
+            .inner
+            .reasoning
+            .expect("reasoning block kept for effort");
+        assert_eq!(reasoning.effort, Some(rs::ReasoningEffort::High));
+        assert_eq!(reasoning.summary, None);
+    }
+
+    #[test]
+    fn reasoning_summary_override_replaces_the_built_value() {
+        let client = client_with_summary(Some(xai_grok_sampling_types::ReasoningSummary::Detailed));
+        let mut request = built_response_request();
+        client.apply_response_defaults(&mut request).unwrap();
+        assert_eq!(
+            request.inner.reasoning.unwrap().summary,
+            Some(rs::ReasoningSummary::Detailed)
+        );
+    }
+
+    #[test]
+    fn reasoning_summary_adds_a_reasoning_block_only_when_there_is_something_to_send() {
+        let with_summary =
+            client_with_summary(Some(xai_grok_sampling_types::ReasoningSummary::Auto));
+        let mut request = CreateResponseWrapper::new(rs::CreateResponse::default());
+        with_summary.apply_response_defaults(&mut request).unwrap();
+        assert_eq!(
+            request.inner.reasoning,
+            Some(rs::Reasoning {
+                effort: None,
+                summary: Some(rs::ReasoningSummary::Auto),
+            })
+        );
+
+        let without = client_with_summary(Some(xai_grok_sampling_types::ReasoningSummary::None));
+        let mut request = CreateResponseWrapper::new(rs::CreateResponse::default());
+        without.apply_response_defaults(&mut request).unwrap();
+        assert_eq!(request.inner.reasoning, None);
     }
 }

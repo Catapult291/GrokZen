@@ -89,9 +89,10 @@ pub(super) fn outer_block(
     path: &Path,
 ) -> Result<Option<String>, ManagedConfigError> {
     let parsed = parse_block(text, namespace, owned_item_prefix, comments, path)?;
-    Ok(parsed
-        .outer_range
-        .map(|(start, end)| text[start..end].trim_end_matches(['\r', '\n']).to_owned()))
+    Ok(parsed.outer_range.and_then(|(start, end)| {
+        text.get(start..end)
+            .map(|s| s.trim_end_matches(['\r', '\n']).to_owned())
+    }))
 }
 
 pub(super) fn item_state(
@@ -107,7 +108,10 @@ pub(super) fn item_state(
         return Ok(ManagedItemState::Absent);
     };
     let expected = item_section(item, comments, parsed.newline);
-    let actual = original[range.start..range.end].trim_end_matches(['\r', '\n']);
+    let Some(actual) = original.get(range.start..range.end) else {
+        return Ok(ManagedItemState::NeedsUpdate);
+    };
+    let actual = actual.trim_end_matches(['\r', '\n']);
     Ok(if actual == expected {
         ManagedItemState::Exact
     } else {
@@ -130,15 +134,17 @@ pub(super) fn render_update(
         let parsed = parse_block(&updated, namespace, owned_item_prefix, comments, path)?;
         let section = item_section(item, comments, parsed.newline);
         updated = if let Some(range) = parsed.items.get(&item.name) {
-            let keep_eol = updated[range.start..range.end].ends_with('\n');
+            let keep_eol = updated
+                .get(range.start..range.end)
+                .is_some_and(|s| s.ends_with('\n'));
             let replacement = if keep_eol {
-                format!("{section}{}", parsed.newline.as_str())
+                format!("{section}{}", parsed.newline.as_ref())
             } else {
                 section
             };
             replace_range(&updated, range.start, range.end, &replacement)
         } else if let Some(close) = parsed.outer_close {
-            let insertion = format!("{section}{}", parsed.newline.as_str());
+            let insertion = format!("{section}{}", parsed.newline.as_ref());
             replace_range(&updated, close.start, close.start, &insertion)
         } else {
             append_outer(
@@ -158,21 +164,13 @@ pub(super) fn render_update(
     })
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::AsRefStr, strum::IntoStaticStr)]
 enum Newline {
+    #[strum(serialize = "\n")]
     Lf,
+    #[strum(serialize = "\r\n")]
     CrLf,
 }
-
-impl Newline {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Lf => "\n",
-            Self::CrLf => "\r\n",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 struct Line {
     start: usize,
@@ -181,8 +179,8 @@ struct Line {
 }
 
 impl Line {
-    fn content<'a>(&self, text: &'a str) -> &'a str {
-        &text[self.start..self.content_end]
+    fn content<'a>(&self, text: &'a str) -> Option<&'a str> {
+        text.get(self.start..self.content_end)
     }
 }
 
@@ -206,18 +204,30 @@ impl ParsedBlock {
         let Some((start, end)) = self.outer_range else {
             return text.to_owned();
         };
+        let Some(head) = text.get(..start) else {
+            return text.to_owned();
+        };
+        let Some(tail) = text.get(end..) else {
+            return text.to_owned();
+        };
         let mut unmanaged = String::with_capacity(text.len() - (end - start));
-        unmanaged.push_str(&text[..start]);
-        unmanaged.push_str(&text[end..]);
+        unmanaged.push_str(head);
+        unmanaged.push_str(tail);
         unmanaged
     }
 }
 
 fn replace_range(text: &str, start: usize, end: usize, replacement: &str) -> String {
+    let Some(head) = text.get(..start) else {
+        return text.to_owned();
+    };
+    let Some(tail) = text.get(end..) else {
+        return text.to_owned();
+    };
     let mut result = String::with_capacity(text.len() - (end - start) + replacement.len());
-    result.push_str(&text[..start]);
+    result.push_str(head);
     result.push_str(replacement);
-    result.push_str(&text[end..]);
+    result.push_str(tail);
     result
 }
 
@@ -229,7 +239,7 @@ fn append_outer(
     newline: Newline,
     final_newline: bool,
 ) -> String {
-    let eol = newline.as_str();
+    let eol = newline.as_ref();
     let block = format!(
         "{} >>> {} >>>{eol}{section}{eol}{} <<< {} <<<",
         comments.prefix, namespace, comments.prefix, namespace
@@ -245,7 +255,7 @@ fn append_outer(
 }
 
 fn item_section(item: &ManagedItem, comments: &CommentSyntax, newline: Newline) -> String {
-    let eol = newline.as_str();
+    let eol = newline.as_ref();
     let body = item.body.trim_end_matches('\n').replace('\n', eol);
     format!(
         "{} >>> {} >>>{eol}{body}{eol}{} <<< {} <<<",
@@ -270,7 +280,9 @@ fn parse_block(
     let outer_close_text = format!("{} <<< {} <<<", comments.prefix, namespace);
 
     for line in &lines {
-        let content = line.content(text);
+        let Some(content) = line.content(text) else {
+            continue;
+        };
         let Some(candidate) = marker_candidate(content, &comments.prefix) else {
             continue;
         };
@@ -289,12 +301,12 @@ fn parse_block(
 
     let opens = lines
         .iter()
-        .filter(|line| line.content(text) == outer_open_text)
+        .filter(|line| line.content(text) == Some(outer_open_text.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     let closes = lines
         .iter()
-        .filter(|line| line.content(text) == outer_close_text)
+        .filter(|line| line.content(text) == Some(outer_close_text.as_str()))
         .cloned()
         .collect::<Vec<_>>();
     if opens.len() != closes.len() || opens.len() > 1 {
@@ -339,7 +351,9 @@ fn parse_block(
         .iter()
         .filter(|line| line.start > open.start && line.start < close.start)
     {
-        let content = line.content(text);
+        let Some(content) = line.content(text) else {
+            continue;
+        };
         if content.trim().is_empty() && active.is_none() {
             continue;
         }
@@ -429,7 +443,8 @@ fn reject_owned_markers_outside(
         if outer.is_some_and(|(start, end)| line.start >= start && line.start < end) {
             continue;
         }
-        if let Some((_, name)) = parse_marker(line.content(text), &comments.prefix)
+        if let Some(content) = line.content(text)
+            && let Some((_, name)) = parse_marker(content, &comments.prefix)
             && name.starts_with(owned_item_prefix)
         {
             return Err(ManagedConfigError::InvalidMarkers {
@@ -482,7 +497,7 @@ fn detect_newline(text: &str) -> Result<Newline, String> {
             return Err("bare carriage return in config".to_owned());
         }
         if *byte == b'\n' {
-            if index > 0 && bytes[index - 1] == b'\r' {
+            if index.checked_sub(1).and_then(|j| bytes.get(j)).copied() == Some(b'\r') {
                 saw_crlf = true;
             } else {
                 saw_lf = true;
@@ -502,7 +517,9 @@ fn lines(text: &str) -> Vec<Line> {
     let mut start = 0;
     for (index, byte) in bytes.iter().enumerate() {
         if *byte == b'\n' {
-            let content_end = if index > start && bytes[index - 1] == b'\r' {
+            let content_end = if index > start
+                && index.checked_sub(1).and_then(|j| bytes.get(j)).copied() == Some(b'\r')
+            {
                 index - 1
             } else {
                 index

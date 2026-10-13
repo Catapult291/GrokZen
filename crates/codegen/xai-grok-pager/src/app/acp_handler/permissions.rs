@@ -67,7 +67,7 @@ pub(super) fn handle_permission_request(
         app.notification_service.notify(NotificationEvent {
             kind: NotificationEventKind::ApprovalRequired,
             title: "Grok".into(),
-            body: NotificationEventKind::ApprovalRequired.as_str().into(),
+            body: NotificationEventKind::ApprovalRequired.as_ref().into(),
             session_id: Some(perm.request.session_id.0.to_string()),
         });
         app.notification_service.mark_permission_notified();
@@ -81,6 +81,11 @@ fn enqueue_permission(
     perm: xai_acp_lib::AcpArgs<acp::RequestPermissionRequest>,
     agent: &mut AgentView,
 ) -> bool {
+    // Mandatory ingress wins: evict an open feedback modal before the permission stashes the composer.
+    agent.displace_feedback_modal(
+        crate::views::feedback_modal::FeedbackModalDisplacement::Permission,
+    );
+
     let bash_highlights: Option<BashCommandHighlights> = perm
         .request
         .meta
@@ -406,8 +411,11 @@ pub(super) fn mcp_args_lines(req: &acp::RequestPermissionRequest) -> Vec<String>
     if !is_mcp {
         return Vec::new();
     }
+    // A tool that takes no arguments arrives as `{}`; there is nothing to show for it.
     let args = match raw.get("tool_input") {
         Some(serde_json::Value::Null) | None => return Vec::new(),
+        Some(serde_json::Value::Object(map)) if map.is_empty() => return Vec::new(),
+        Some(serde_json::Value::Array(items)) if items.is_empty() => return Vec::new(),
         Some(args) => args,
     };
     let pretty = match serde_json::to_string_pretty(args) {
@@ -417,7 +425,10 @@ pub(super) fn mcp_args_lines(req: &acp::RequestPermissionRequest) -> Vec<String>
     let mut lines: Vec<String> = pretty
         .lines()
         .map(|l| match l.char_indices().nth(MCP_ARGS_MAX_LINE_CHARS) {
-            Some((byte_idx, _)) => format!("{}…", &l[..byte_idx]),
+            Some((byte_idx, _)) => match l.get(..byte_idx) {
+                Some(prefix) => format!("{prefix}…"),
+                None => l.to_owned(),
+            },
             None => l.to_owned(),
         })
         .collect();
@@ -452,28 +463,10 @@ pub(super) fn should_drop_late_auto_recap(
 }
 
 fn cli_is_idle_for_recap(agent: &crate::app::agent_view::AgentView) -> bool {
-    use crate::app::agent::BgTaskStatus;
-
-    if !agent.session.state.is_idle() {
-        return false;
-    }
-    // Auto-wake turns (monitor exit, task or subagent completion) run non-adopted
-    // `session.state` stays idle while they stream, so check them explicitly.
-    if agent.running_wake_turn.is_some() {
+    if !agent.session.state.is_idle() || agent.has_wake_source() {
         return false;
     }
     if agent.session.in_flight_prompt.is_some() || agent.has_held_user_queue() {
-        return false;
-    }
-    if agent.subagent_sessions.values().any(|s| !s.finished) {
-        return false;
-    }
-    if agent
-        .session
-        .bg_tasks
-        .values()
-        .any(|t| t.status == BgTaskStatus::Running && !t.is_monitor)
-    {
         return false;
     }
     if scrollback_waiting_on_user_turn(&agent.scrollback) {

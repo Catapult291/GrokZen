@@ -98,13 +98,8 @@ pub const CAMPAIGN_STRIP_KEYS: &[&str] = &[
 ];
 
 /// Dotted paths the `GROK_CONFIG` / `GROK_CONFIG_PATH` overlay may set.
-/// They are applied at [`crate::env_overlay`]'s finalize step by [`retain_overlay_allowed`].
-/// A length-1 path keeps the whole soft top-level table; a deeper path keeps only that leaf.
 /// No entry is a prefix of another: a top-level key is either a whole-subtree keep or deeper-only, never both.
-/// That makes the choice in `retain_allowed_paths` between keeping a whole subtree and recursing unambiguous.
-/// Its deeper whole-subtree case is defensive.
 /// Fail-closed: anything not listed is dropped, so a newly added table stays out until it is allowlisted here.
-/// The overlay's reach and the security gates that read it overlay-free are documented on [`crate::config_layers::ConfigLayers::env_overlay`].
 pub const OVERLAY_ALLOW_PATHS: &[&[&str]] = &[
     // Global model block (`default_reasoning_effort`, picker filters), not the per-model `[model.<id>]` block; and the soft `[features]` toggles
     &["models"],
@@ -116,8 +111,6 @@ pub const OVERLAY_ALLOW_PATHS: &[&[&str]] = &[
     &["toolset", "web_search", "allowed_domains"],
     &["toolset", "web_search", "excluded_domains"],
     // `[shell_environment_policy]` cannot inject an env value
-    // `set` adds env values (`LD_PRELOAD`, `BASH_ENV`, `PATH`), an indirect way to run code in a tool subprocess, so it is dropped
-    // The remaining fields only select among env names the launcher already controls
     // Relative to a lower layer they may loosen or tighten what a subprocess inherits but never introduce a value
     // A launcher that must add an env var sets it on the process directly
     &["shell_environment_policy", "inherit"],
@@ -134,13 +127,14 @@ pub fn retain_overlay_allowed(overlay: &mut toml::Table) {
 /// Retain only `paths` (nested dotted leaves) in `table`, pruning every other key and any table left empty.
 /// At the top level a whole-subtree entry (a length-1 path) keeps its value only when it is a table.
 /// A scalar or array there would clobber the subtree on deep-merge, so it is dropped.
-/// A deeper leaf keeps whatever value it holds (a bool, an array, an inline table).
 fn retain_allowed_paths(table: &mut toml::Table, paths: &[&[&str]], top_level: bool) {
     table.retain(|key, value| {
         let nested: Vec<&[&str]> = paths
             .iter()
-            .filter(|p| p.first().copied() == Some(key))
-            .map(|p| &p[1..])
+            .filter_map(|p| {
+                let (first, rest) = p.split_first()?;
+                (*first == key).then_some(rest)
+            })
             .collect();
         if nested.is_empty() {
             return false;
@@ -161,9 +155,6 @@ fn retain_allowed_paths(table: &mut toml::Table, paths: &[&[&str]], top_level: b
 }
 
 /// Deep-merge each patch in iteration order (later wins on a leaf), stripping `strip_keys` (top level) and [`PATCH_STRIP_PATHS`] first.
-/// The caller picks the key list; the paths go from every patch, whoever sent it.
-///
-/// A patch is another input to the same merge as the disk layers, so it gets the same normalization ([`crate::loader::normalize_config_layer`]).
 /// Otherwise a patch that flips `[toolset.web_search]` from an allowlist to a blocklist would leave both keys set.
 /// The resolver would then drop the blocklist and let the layer the patch overlays win.
 pub fn apply_patches(
@@ -174,6 +165,24 @@ pub fn apply_patches(
     for mut patch in patches {
         for key in strip_keys {
             patch.remove(*key);
+        }
+        let config_models = config.get("model").and_then(toml::Value::as_table);
+        if let Some(patch_models) = patch.get_mut("model").and_then(toml::Value::as_table_mut) {
+            for (id, patch_model) in patch_models {
+                let has_mtls_identity = config_models
+                    .and_then(|models| models.get(id))
+                    .and_then(toml::Value::as_table)
+                    .is_some_and(|model| model.contains_key("mtls_cert_dir"));
+                if let Some(patch_model) = patch_model.as_table_mut() {
+                    // A patch may tune the model, but it cannot select a local identity
+                    // or change the explicit destination to which that identity is bound.
+                    patch_model.remove("mtls_cert_dir");
+                    if has_mtls_identity {
+                        patch_model.remove("base_url");
+                        patch_model.remove("api_base_url");
+                    }
+                }
+            }
         }
         for path in PATCH_STRIP_PATHS {
             strip_path(&mut patch, path);
@@ -208,6 +217,14 @@ mod tests {
 
     fn table(s: &str) -> toml::Table {
         toml::from_str(s).unwrap()
+    }
+
+    fn at<'a>(cfg: &'a toml::Value, path: &[&str]) -> Option<&'a toml::Value> {
+        let mut cur = cfg;
+        for key in path {
+            cur = cur.get(*key)?;
+        }
+        Some(cur)
     }
 
     /// A patch that replaces a parent table with a scalar (`models = "oops"`) wipes every leaf beneath it on merge.
@@ -299,15 +316,27 @@ mod tests {
             "[ui]\ntheme = \"other\"\n[ui.status_line]\ntype = \"command\"\ncommand = \"curl evil\"\n",
         );
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
-        assert!(cfg["ui"].get("status_line").is_none(), "{cfg:?}");
-        assert_eq!(cfg["ui"]["theme"].as_str(), Some("other"), "siblings apply");
+        assert!(
+            at(&cfg, &["ui"])
+                .and_then(|u| u.get("status_line"))
+                .is_none(),
+            "{cfg:?}"
+        );
+        assert_eq!(
+            at(&cfg, &["ui", "theme"]).and_then(toml::Value::as_str),
+            Some("other"),
+            "siblings apply"
+        );
 
         // An ancestor replaced by a scalar cannot smuggle it through either.
         let mut cfg = toml::Value::Table(table("[ui]\ntheme = \"kanagawa\"\n"));
         let mut patch = toml::Table::new();
         patch.insert("ui".into(), toml::Value::String("oops".into()));
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
-        assert_eq!(cfg["ui"]["theme"].as_str(), Some("kanagawa"));
+        assert_eq!(
+            at(&cfg, &["ui", "theme"]).and_then(toml::Value::as_str),
+            Some("kanagawa")
+        );
     }
 
     #[test]
@@ -316,20 +345,30 @@ mod tests {
         let mut cfg = toml::Value::Table(table("[ui]\n"));
         let patch = table("[ui]\nstatus_line_extra = \"keep\"\n");
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
-        assert_eq!(cfg["ui"]["status_line_extra"].as_str(), Some("keep"));
+        assert_eq!(
+            at(&cfg, &["ui", "status_line_extra"]).and_then(toml::Value::as_str),
+            Some("keep")
+        );
 
         // The stripped path as a scalar rather than a table.
         let mut cfg = toml::Value::Table(table("[ui]\ntheme = \"kanagawa\"\n"));
         let patch = table("[ui]\nstatus_line = \"builtin\"\n");
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
-        assert!(cfg["ui"].get("status_line").is_none(), "{cfg:?}");
+        let ui = at(&cfg, &["ui"]).unwrap_or_else(|| panic!("ui table must remain: {cfg:?}"));
+        assert!(ui.get("status_line").is_none(), "{cfg:?}");
 
         // A patch that never mentions the ancestor is left alone.
         let mut cfg = toml::Value::Table(table("[ui]\ntheme = \"kanagawa\"\n"));
         let patch = table("[models]\ndefault = \"new\"\n");
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
-        assert_eq!(cfg["models"]["default"].as_str(), Some("new"));
-        assert_eq!(cfg["ui"]["theme"].as_str(), Some("kanagawa"));
+        assert_eq!(
+            at(&cfg, &["models", "default"]).and_then(toml::Value::as_str),
+            Some("new")
+        );
+        assert_eq!(
+            at(&cfg, &["ui", "theme"]).and_then(toml::Value::as_str),
+            Some("kanagawa")
+        );
     }
 
     #[test]
@@ -340,13 +379,72 @@ mod tests {
         );
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
         assert!(
-            cfg["ui"]["notifications"].get("hooks").is_none(),
+            at(&cfg, &["ui", "notifications"])
+                .and_then(|n| n.get("hooks"))
+                .is_none(),
             "an array of tables is stripped like any other leaf: {cfg:?}"
         );
         assert_eq!(
-            cfg["ui"]["notifications"]["enabled"].as_bool(),
+            at(&cfg, &["ui", "notifications", "enabled"]).and_then(toml::Value::as_bool),
             Some(false),
             "siblings still apply"
+        );
+    }
+
+    #[test]
+    fn apply_patches_cannot_inject_or_retarget_mtls_identities() {
+        let mut cfg = toml::Value::Table(table(
+            "[model.secure]\n\
+             base_url = \"https://trusted.example\"\n\
+             mtls_cert_dir = \"/trusted/identity\"\n\
+             temperature = 0.1\n",
+        ));
+        let patch = table(
+            "[model.secure]\n\
+             base_url = \"https://retargeted.example\"\n\
+             api_base_url = \"https://retargeted-api.example\"\n\
+             mtls_cert_dir = \"/tmp/replacement\"\n\
+             temperature = 0.7\n\
+             [model.injected]\n\
+             base_url = \"https://injected.example\"\n\
+             api_base_url = \"https://injected-api.example\"\n\
+             mtls_cert_dir = \"/tmp/injected\"\n",
+        );
+        apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
+
+        assert_eq!(
+            at(&cfg, &["model", "secure", "base_url"]).and_then(toml::Value::as_str),
+            Some("https://trusted.example")
+        );
+        assert_eq!(
+            at(&cfg, &["model", "secure", "mtls_cert_dir"]).and_then(toml::Value::as_str),
+            Some("/trusted/identity"),
+        );
+        assert!(
+            at(&cfg, &["model", "secure"])
+                .and_then(|m| m.get("api_base_url"))
+                .is_none(),
+            "patches must not add an alternate destination to a local mTLS identity: {cfg:?}"
+        );
+        assert_eq!(
+            at(&cfg, &["model", "secure", "temperature"]).and_then(toml::Value::as_float),
+            Some(0.7),
+            "unrelated model settings still apply"
+        );
+        assert!(
+            at(&cfg, &["model", "injected"])
+                .and_then(|m| m.get("mtls_cert_dir"))
+                .is_none(),
+            "patches must not select a local mTLS identity: {cfg:?}"
+        );
+        assert_eq!(
+            at(&cfg, &["model", "injected", "base_url"]).and_then(toml::Value::as_str),
+            Some("https://injected.example"),
+        );
+        assert_eq!(
+            at(&cfg, &["model", "injected", "api_base_url"]).and_then(toml::Value::as_str),
+            Some("https://injected-api.example"),
+            "ordinary model destinations remain patchable"
         );
     }
 
@@ -356,8 +454,9 @@ mod tests {
         let first = table("[ui.status_line]\ncommand = \"curl evil\"\n");
         let second = table("[ui.status_line]\ncommand = \"curl worse\"\n");
         apply_patches(&mut cfg, [first, second], PATCH_STRIP_KEYS);
+        let ui = at(&cfg, &["ui"]).unwrap_or_else(|| panic!("ui table must remain: {cfg:?}"));
         assert!(
-            cfg["ui"].get("status_line").is_none(),
+            ui.get("status_line").is_none(),
             "no layer may set an executable command: {cfg:?}"
         );
     }
@@ -367,7 +466,10 @@ mod tests {
         let mut cfg = toml::Value::Table(table("[models]\ndefault = \"old\"\n"));
         let patch = table("[models]\ndefault = \"new\"\n");
         apply_patches(&mut cfg, std::iter::once(patch), PATCH_STRIP_KEYS);
-        assert_eq!(cfg["models"]["default"].as_str(), Some("new"));
+        assert_eq!(
+            at(&cfg, &["models", "default"]).and_then(toml::Value::as_str),
+            Some("new")
+        );
 
         // Top-level strip keys are removed before merge.
         let mut cfg2 = toml::Value::Table(toml::Table::new());
@@ -388,7 +490,7 @@ mod tests {
         assert!(cfg2.get("campaigns").is_none());
         assert!(cfg2.get("auth_provider").is_none());
         assert!(cfg2.get("model_providers").is_none());
-        assert_eq!(cfg2["keep"].as_bool(), Some(true));
+        assert_eq!(cfg2.get("keep").and_then(toml::Value::as_bool), Some(true));
 
         // Top-level strip only: a model may still reference a local provider by name.
         let mut cfg3 = toml::Value::Table(toml::Table::new());
@@ -401,11 +503,11 @@ mod tests {
         assert!(cfg3.get("auth_provider").is_none());
         assert!(cfg3.get("model_providers").is_none());
         assert_eq!(
-            cfg3["model"]["x"]["auth_provider"].as_str(),
+            at(&cfg3, &["model", "x", "auth_provider"]).and_then(toml::Value::as_str),
             Some("local-name")
         );
         assert_eq!(
-            cfg3["model"]["x"]["model_provider"].as_str(),
+            at(&cfg3, &["model", "x", "model_provider"]).and_then(toml::Value::as_str),
             Some("local-provider")
         );
     }

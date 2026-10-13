@@ -21,6 +21,7 @@
 
 pub mod config;
 mod emit;
+pub(crate) mod metrics;
 pub(crate) mod providers;
 mod redact;
 pub mod schema;
@@ -53,12 +54,9 @@ pub struct IdentityAttrs {
 }
 
 impl IdentityAttrs {
-    /// Copy principal ids from the snapshot. `user.id` follows whatever the
-    /// snapshot has (OIDC principal, or an API-key session that populated
-    /// `user_id`). Email is never taken from the snapshot — OAuth/gateway
-    /// only, filled by the shell after `from_snapshot`. Env-only API-key
-    /// (no `GrokAuth` session) has no principal; we do not invent a
-    /// per-install hash.
+    /// `user.id` follows whatever the snapshot has (OIDC principal, or an API-key session that populated `user_id`). Email is
+    /// never taken from the snapshot — OAuth/gateway only, filled by the shell after `from_snapshot`. Env-only API-key (no
+    /// `GrokAuth` session) has no principal; we do not invent a per-install hash.
     pub fn from_snapshot(snapshot: &xai_grok_auth::CredentialSnapshot) -> Self {
         Self {
             user_id: snapshot.user_id.clone(),
@@ -87,7 +85,7 @@ pub struct ExternalTelemetry {
     logger_provider: Option<SdkLoggerProvider>,
     meter_provider: Option<SdkMeterProvider>,
     logger: Option<SdkLogger>,
-    instruments: Option<emit::Instruments>,
+    instruments: Option<metrics::Instruments>,
     /// Emission gate; cleared by the remote force-disable.
     /// The single authority for "emitting right now".
     active: AtomicBool,
@@ -155,6 +153,9 @@ pub fn init(cfg: Option<ExternalOtelConfig>) {
 }
 
 fn build_handle(cfg: ExternalOtelConfig) -> Option<Arc<ExternalTelemetry>> {
+    if !xai_grok_product::TELEMETRY_UPLOADS_ALLOWED {
+        return None;
+    }
     // If the internal firehose resolved its endpoint/headers from `OTEL_EXPORTER_OTLP_*` (the deprecated fallback), refuse to activate
     // This check, in code rather than release discipline, keeps the same events from going out twice
     if cfg.internal_pipeline_consumed_otel_vars {
@@ -189,7 +190,7 @@ fn build_handle(cfg: ExternalOtelConfig) -> Option<Arc<ExternalTelemetry>> {
     let instruments = built
         .meter_provider
         .as_ref()
-        .map(|p| emit::Instruments::new(&p.meter(schema::SCOPE_NAME)));
+        .map(|p| metrics::Instruments::new(&p.meter(schema::SCOPE_NAME)));
 
     let configured_meta = ConfiguredMeta {
         metrics_exporter: exporter_label(cfg.metrics_exporter),
@@ -252,12 +253,8 @@ fn active_handle() -> Option<Arc<ExternalTelemetry>> {
     handle().filter(|ext| ext.active.load(Ordering::Relaxed))
 }
 
-/// Fail-closed OTEL gate.
-/// Defaults open; the leader closes it before init and re-opens it when settings resolve.
-///
-/// Opening is the synchronizing event: `OtelGate::apply_and_open` applies the remote force-disable (`active = false`) and then opens here.
-/// An emitter whose `Acquire` read observes the `Release` open also observes `active = false`, so the emit-path `active` load can stay `Relaxed`.
-/// The window-expiry open has no such pairing and relies on eventual visibility, acceptable because the policy is tighten-only.
+/// Defaults open; the leader closes it before init and re-opens it when settings resolve. The window-expiry open has no
+/// such pairing and relies on eventual visibility, acceptable because the policy is tighten-only.
 static SETTINGS_RESOLVED: AtomicBool = AtomicBool::new(true);
 
 const DEFAULT_SETTINGS_GATE_MAX_WAIT: Duration = Duration::from_secs(30);
@@ -439,7 +436,6 @@ pub(crate) fn flush_on(ext: &ExternalTelemetry) {
     }
 }
 
-/// Flush and shut down both providers with a 2-second watchdog.
 /// Reachable from every `shutdown_otel()` exit path (16 `OtelGuard` sites, the direct call, and the signal handler); subsequent calls are no-ops.
 pub fn shutdown() {
     let Some(ext) = handle() else {
@@ -449,24 +445,22 @@ pub fn shutdown() {
         ext.active.store(false, Ordering::Relaxed);
         let logger_provider = ext.logger_provider.clone();
         let meter_provider = ext.meter_provider.clone();
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
-        // Detached thread and timed wait: a hung provider must not hang exit (`std::thread::scope` is unusable here; it joins unconditionally)
-        std::thread::spawn(move || {
-            if let Some(p) = logger_provider
-                && let Err(e) = p.shutdown()
-            {
-                tracing::debug!(error = %e, "external otel: logger shutdown failed");
-            }
-            if let Some(p) = meter_provider
-                && let Err(e) = p.shutdown()
-            {
-                tracing::debug!(error = %e, "external otel: meter shutdown failed");
-            }
-            let _ = tx.send(());
-        });
-        if rx.recv_timeout(std::time::Duration::from_secs(2)).is_err() {
-            tracing::debug!("external otel: shutdown watchdog expired; abandoning flush thread");
-        }
+        xai_grok_otel::timeout::run_with_timeout(
+            "external otel",
+            xai_grok_otel::timeout::OTEL_SHUTDOWN_TIMEOUT,
+            move || {
+                if let Some(p) = logger_provider
+                    && let Err(e) = p.shutdown()
+                {
+                    tracing::debug!(error = %e, "external otel: logger shutdown failed");
+                }
+                if let Some(p) = meter_provider
+                    && let Err(e) = p.shutdown()
+                {
+                    tracing::debug!(error = %e, "external otel: meter shutdown failed");
+                }
+            },
+        );
         // Runs after provider shutdown, which flushes pending batches
         // Short-lived CLI exits often only export on this path, so the health counters and the mTLS total-failure warn must run after it
         emit_export_health(&ext);
@@ -564,7 +558,7 @@ pub(crate) mod test_support {
             .build();
 
         let logger = logger_provider.logger(schema::SCOPE_NAME);
-        let instruments = emit::Instruments::new(&meter_provider.meter(schema::SCOPE_NAME));
+        let instruments = metrics::Instruments::new(&meter_provider.meter(schema::SCOPE_NAME));
 
         let ext = ExternalTelemetry {
             logger_provider: Some(logger_provider),

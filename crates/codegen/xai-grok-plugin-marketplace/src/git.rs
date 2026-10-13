@@ -2,7 +2,7 @@
 //! Cache root: `~/.grok/marketplace-cache/<url-hash>/`
 
 use std::collections::VecDeque;
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, Command, ExitStatus, Stdio};
@@ -11,11 +11,8 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use fs2::FileExt;
-
 const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
-const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Hard cap for clone/fetch so a bad marketplace URL cannot hang list/refresh.
 const NETWORK_OP_TIMEOUT: Duration = Duration::from_secs(15);
 const STDERR_DIAGNOSTIC_CAP: usize = 64 * 1024;
@@ -64,6 +61,7 @@ pub fn sync_source_cache_with_mode(
     cache_root: &Path,
     mode: SyncMode,
 ) -> Result<SourceCacheLease, String> {
+    let _sync_span = tracing::info_span!("marketplace.source_sync").entered();
     let url = xai_grok_agent::plugins::git_install::validate_git_url(url)?;
     let branch = branch
         .map(xai_grok_agent::plugins::git_install::validate_git_ref)
@@ -73,7 +71,11 @@ pub fn sync_source_cache_with_mode(
     let start = Instant::now();
 
     std::fs::create_dir_all(cache_root).map_err(|e| format!("failed to create cache root: {e}"))?;
-    let lock_file = acquire_cache_lock(&cache_root.join(format!("{hash}.lock")), LOCK_TIMEOUT)?;
+    let lock_file = acquire_file_lock(
+        "cache",
+        &cache_root.join(format!("{hash}.lock")),
+        LOCK_TIMEOUT,
+    )?;
 
     let result = sync_cache_locked(url, branch, &cache_dir, mode);
     match &result {
@@ -115,32 +117,9 @@ fn sync_cache_locked(
     }
 }
 
-fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Result<File, String> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(lock_path)
-        .map_err(|e| format!("failed to open cache lock {}: {e}", lock_path.display()))?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match file.try_lock_exclusive() {
-            Ok(()) => return Ok(file),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if Instant::now() >= deadline {
-                    return Err(format!(
-                        "cache lock timeout after {}s for {}",
-                        timeout.as_secs(),
-                        lock_path.display()
-                    ));
-                }
-                std::thread::sleep(LOCK_POLL_INTERVAL);
-            }
-            Err(e) => return Err(format!("failed to lock cache {}: {e}", lock_path.display())),
-        }
-    }
-}
+/// The one flock helper shared by every plugin lock site (source cache here, the install registry
+/// in the shell and agent); lives in the agent crate at the bottom of the dependency graph.
+pub use xai_grok_agent::plugins::install_registry::acquire_file_lock;
 
 /// Check if the cache was fetched recently enough to skip fetching.
 fn is_cache_fresh(cache_dir: &Path) -> bool {
@@ -526,7 +505,12 @@ fn spawn_stderr_reader(mut stderr: ChildStderr) -> io::Result<StderrReader> {
             let result = loop {
                 match stderr.read(&mut buffer) {
                     Ok(0) => break Ok(diagnostic.finish()),
-                    Ok(read) => diagnostic.push(&buffer[..read]),
+                    Ok(read) => {
+                        let Some(chunk) = buffer.get(..read) else {
+                            break Err(io::Error::other("stderr read exceeded buffer"));
+                        };
+                        diagnostic.push(chunk);
+                    }
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error) => break Err(error),
                 }
@@ -565,7 +549,9 @@ impl CappedStderr {
         self.is_truncated |=
             self.tail.len().saturating_add(tail.len()) > STDERR_DIAGNOSTIC_TAIL_CAP;
         let keep_start = tail.len().saturating_sub(STDERR_DIAGNOSTIC_TAIL_CAP);
-        let tail = &tail[keep_start..];
+        let Some(tail) = tail.get(keep_start..) else {
+            return;
+        };
         let discard = self
             .tail
             .len()
@@ -940,15 +926,15 @@ mod tests {
         let lock_path = cache_root.path().join(format!("{hash}.lock"));
         let lease = SourceCacheLease {
             path: cache_root.path().join(&hash),
-            lock_file: acquire_cache_lock(&lock_path, Duration::from_millis(1)).unwrap(),
+            lock_file: acquire_file_lock("cache", &lock_path, Duration::from_millis(1)).unwrap(),
         };
 
         let start = Instant::now();
-        let err = acquire_cache_lock(&lock_path, Duration::from_millis(50)).unwrap_err();
+        let err = acquire_file_lock("cache", &lock_path, Duration::from_millis(50)).unwrap_err();
         assert!(err.contains("cache lock timeout"));
         assert!(start.elapsed() >= Duration::from_millis(50));
         drop(lease);
-        let _lock = acquire_cache_lock(&lock_path, Duration::from_millis(1)).unwrap();
+        let _lock = acquire_file_lock("cache", &lock_path, Duration::from_millis(1)).unwrap();
     }
 
     #[test]

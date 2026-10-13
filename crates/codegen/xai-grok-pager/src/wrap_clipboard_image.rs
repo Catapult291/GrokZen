@@ -87,7 +87,6 @@ fn write_request_osc() -> std::io::Result<()> {
 }
 
 /// Decode wrap host-image paste content (`Event::Paste` payload).
-///
 /// `None` means not wrap magic (caller treats as normal text).
 /// Malformed wrap frames yield [`WrapImagePaste::NoImage`] so they never land as text.
 pub fn try_decode_wrap_host_image_paste(text: &str) -> Option<WrapImagePaste> {
@@ -282,7 +281,8 @@ mod tests {
     #[test]
     fn request_osc_matches_body() {
         let osc = request_osc_bytes();
-        assert_eq!(&osc[2..osc.len() - 1], REQUEST_BODY);
+        let inner = osc.len().checked_sub(1).and_then(|end| osc.get(2..end));
+        assert_eq!(inner, Some(REQUEST_BODY));
         assert_eq!(osc.first().copied(), Some(0x1b));
         assert_eq!(osc.get(1).copied(), Some(b']'));
         assert_eq!(osc.last().copied(), Some(0x07));

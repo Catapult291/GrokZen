@@ -27,7 +27,6 @@ pub struct CollectedSamplingResult {
 }
 
 /// Cheaply-cloneable handle to the sampler actor.
-///
 /// Internally just an `mpsc::UnboundedSender<SamplerCommand>`.
 /// All methods are non-blocking (fire-and-forget) except for the `*_async` queries which return a future awaiting an `oneshot::Receiver`.
 #[derive(Clone)]
@@ -47,6 +46,19 @@ impl SamplerHandle {
     pub fn noop() -> Self {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         // Receiver is dropped immediately; sends will fail but every send-site uses `let _ = ...` so that is fine
+        Self { cmd_tx }
+    }
+
+    /// Test seam: `notify` fires when the first command is submitted.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn notify_on_submit(notify: std::sync::Arc<tokio::sync::Notify>) -> Self {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            if cmd_rx.recv().await.is_some() {
+                notify.notify_one();
+            }
+            while cmd_rx.recv().await.is_some() {}
+        });
         Self { cmd_tx }
     }
 

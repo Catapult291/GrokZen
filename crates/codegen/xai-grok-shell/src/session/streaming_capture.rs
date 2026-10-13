@@ -54,16 +54,8 @@ pub(crate) struct StreamSegment {
 }
 
 /// Per-turn snapshot of the model's streamed generations, retained out-of-band from `chat_state`.
-/// The in-progress generation lives in the flat fields; finalized prior generations live in `segments`.
-///
 /// At `finalize_for_upload` the flat fields are rebuilt as a joined view of the retained `segments`.
-/// This duplicates each retained generation's reasoning: once under `segments[i]`, once joined in the flat `reasoning_text`.
-/// The duplication is a deliberate back-compat tradeoff bounded by the byte cap.
 /// The currently deployed trace viewer reads only the flat fields, so the joined view makes the full doomloop visible without a frontend deploy.
-/// `segments` carries the structured per-attempt breakdown for newer readers.
-///
-/// Uploaded as `{session_id}/turn_N/streaming_partial.json` by `upload_streaming_partial`.
-/// The upload fires whenever a non-completed turn end produces a non-empty capture.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StreamingTurnCapture {
     /// Request owning the in-progress generation. Never uploaded.
@@ -127,7 +119,6 @@ impl StreamingTurnCapture {
     /// Empty means nothing worth uploading.
     /// A terminal reasoning-only empty response stamps the token magnitude (`reasoning_tokens` / `empty_reason` / ...).
     /// The stamp lands even when no reasoning text was streamed to the shell, so those fields keep the capture non-empty.
-    /// Otherwise the take gate would drop the only record of the doomloop's size.
     pub(crate) fn is_empty(&self) -> bool {
         self.reasoning_text.is_empty()
             && self.response_text.is_empty()
@@ -175,7 +166,6 @@ impl StreamingTurnCapture {
         self.current_request_id.as_deref() == Some(request_id)
     }
 
-    /// Fold the in-progress slot (the flat fields) into `segments` and clear it for the next generation.
     /// A slot that streamed nothing is skipped, unless it carries a doom-loop stamp.
     /// A stamp folds text-free (the same rule as `clear_current_segment`) so it can never linger and mislabel a later generation.
     /// Only uncommitted generations reach this; a generation that emits `Completed` is discarded via `clear_current_segment` instead.
@@ -229,10 +219,15 @@ impl StreamingTurnCapture {
             .iter()
             .rposition(|segment| segment.request_id.as_deref() == Some(request_id))
         {
-            let segment = &mut self.segments[index];
-            if segment.doom_loop.is_some() {
-                segment.reasoning_text.clear();
-                segment.response_text.clear();
+            let keep_stamp = self
+                .segments
+                .get(index)
+                .is_some_and(|segment| segment.doom_loop.is_some());
+            if keep_stamp {
+                if let Some(segment) = self.segments.get_mut(index) {
+                    segment.reasoning_text.clear();
+                    segment.response_text.clear();
+                }
             } else {
                 self.segments.remove(index);
             }
@@ -252,10 +247,8 @@ impl StreamingTurnCapture {
     }
 
     /// Discard the in-progress generation without folding it into `segments`.
-    /// Called on `Completed`: that generation committed to `afterStateHistory`.
     /// Its reasoning must neither be uploaded nor count against the byte cap of later generations.
     /// A doom-stamped committed generation (a budget-spent accept) keeps a TEXT-FREE segment so the stamp survives for traces.
-    /// The text itself lives in the committed history.
     pub(crate) fn clear_current_segment(&mut self) {
         if let Some(stamp) = self.doom_loop.take() {
             self.segments.push(StreamSegment {
@@ -318,7 +311,7 @@ impl StreamingTurnCapture {
             while cut > 0 && !text.is_char_boundary(cut) {
                 cut -= 1;
             }
-            &text[..cut]
+            text.get(..cut).unwrap_or("")
         };
         if channel_is_reasoning {
             self.reasoning_text.push_str(to_append);
@@ -329,25 +322,16 @@ impl StreamingTurnCapture {
         }
     }
 
-    /// In-progress assistant **text** only (reasoning excluded). Retained
-    /// `segments` are discarded same-turn attempts (doomloop resample /
-    /// restart) and must not enter the customer OTEL `assistant_response`.
-    /// Empty after `clear_current_segment`; production emit then uses
-    /// committed chat-state text for finished bubbles, plus this slot for
-    /// uncommitted mid-stream text.
+    /// In-progress assistant text only (reasoning excluded).
+    /// Retained `segments` are discarded same-turn attempts (doomloop resample / restart) and must not enter the customer OTEL `assistant_response`.
+    /// Empty after `clear_current_segment`; production emit then uses committed chat-state text for finished bubbles, plus this slot for uncommitted mid-stream text.
     pub(crate) fn assembled_response_text(&self) -> String {
         self.response_text.clone()
     }
 
-    /// Join committed chat-state assistant text with the live capture slot.
-    ///
-    /// Completed turns trust chat-state: the slot can still hold the last
-    /// bubble after a stream-drain timeout (`clear_request_segment` runs on
-    /// the sampling-event rail and is skipped when the 5s barrier fails
-    /// open). Interrupt / error paths keep the slot so a cancel after a
-    /// prior tool round still exports the in-progress bubble. When both
-    /// sides are non-empty, skip the join if `committed` already ends with
-    /// `captured` so a stale slot cannot duplicate the last bubble.
+    /// Completed turns trust chat-state: the slot can still hold the last bubble after a stream-drain timeout (`clear_request_segment` runs on the sampling-event rail and is skipped when the 5s barrier fails open).
+    /// Interrupt / error paths keep the slot so a cancel after a prior tool round still exports the in-progress bubble.
+    /// When both sides are non-empty, skip the join if `committed` already ends with `captured` so a stale slot cannot duplicate the last bubble.
     pub(crate) fn merge_assistant_response_for_otel(
         committed: String,
         captured: &str,
@@ -367,8 +351,6 @@ impl StreamingTurnCapture {
     /// Consolidate the turn for upload by folding the in-progress slot into `segments`.
     /// `segments` only ever holds uncommitted generations (a committed one is discarded on `Completed`).
     /// Every retained generation (a doomloop retry, a cancel or error mid-stream) is therefore uploaded.
-    /// The upload happens regardless of whether the generation carried reasoning, response text, or a tool call.
-    /// The flat back-compat fields are rebuilt from the segments; when there are none the capture is left empty (no upload).
     pub(crate) fn finalize_for_upload(&mut self) {
         self.push_current_segment();
         // `truncated` reflects only the retained reasoning: committed generations were cleared on `Completed` (never counted)
@@ -429,16 +411,18 @@ mod streaming_turn_capture_tests {
         cap.append(true, "fresh reasoning");
         cap.push_current_segment();
 
-        assert_eq!(cap.segments.len(), 2, "stamp-only slot folded");
-        let stamped = cap.segments[0].doom_loop.as_ref().expect("stamp preserved");
+        let [s0, s1] = cap.segments.as_slice() else {
+            panic!("expected two segments: {:?}", cap.segments);
+        };
+        let stamped = s0.doom_loop.as_ref().expect("stamp preserved");
         assert_eq!(stamped.action, "resampled");
         assert_eq!(stamped.attempt, 1);
-        assert!(cap.segments[0].reasoning_text.is_empty(), "text-free");
+        assert!(s0.reasoning_text.is_empty(), "text-free");
         assert!(
-            cap.segments[1].doom_loop.is_none(),
+            s1.doom_loop.is_none(),
             "the fresh generation is not mislabeled by the lingering stamp"
         );
-        assert_eq!(cap.segments[1].reasoning_text, "fresh reasoning");
+        assert_eq!(s1.reasoning_text, "fresh reasoning");
     }
 
     /// Doom stamps fold into segments, survive JSON round-trip, and a stamped committed slot keeps a text-free segment on clear.
@@ -466,28 +450,27 @@ mod streaming_turn_capture_tests {
         // Committed generation: text discarded, stamp retained text-free.
         cap.clear_current_segment();
 
-        assert_eq!(cap.segments.len(), 2);
+        let [s0, s1] = cap.segments.as_slice() else {
+            panic!("expected two segments: {:?}", cap.segments);
+        };
         assert_eq!(
-            cap.segments[0]
-                .doom_loop
-                .as_ref()
-                .map(|s| s.action.as_str()),
+            s0.doom_loop.as_ref().map(|s| s.action.as_str()),
             Some("resampled")
         );
-        assert_eq!(cap.segments[0].reasoning_text, "loop loop");
+        assert_eq!(s0.reasoning_text, "loop loop");
         assert_eq!(
-            cap.segments[1]
-                .doom_loop
-                .as_ref()
-                .map(|s| s.action.as_str()),
+            s1.doom_loop.as_ref().map(|s| s.action.as_str()),
             Some("accepted_after_budget")
         );
-        assert!(cap.segments[1].reasoning_text.is_empty());
+        assert!(s1.reasoning_text.is_empty());
         assert!(cap.has_doom_loop_segments());
 
         let json = serde_json::to_string(&cap).unwrap();
         let back: StreamingTurnCapture = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.segments[0].doom_loop, cap.segments[0].doom_loop);
+        assert_eq!(
+            back.segments.first().and_then(|s| s.doom_loop.as_ref()),
+            cap.segments.first().and_then(|s| s.doom_loop.as_ref())
+        );
         // Unstamped captures serialize without the field
         let plain = serde_json::to_string(&StreamingTurnCapture::default()).unwrap();
         assert!(!plain.contains("doom_loop"));
@@ -505,10 +488,12 @@ mod streaming_turn_capture_tests {
         cap.append(true, "reasoning attempt two");
         cap.finalize_for_upload();
 
-        assert_eq!(cap.segments.len(), 2, "both same-turn generations kept");
+        let [s0, s1] = cap.segments.as_slice() else {
+            panic!("expected two segments: {:?}", cap.segments);
+        };
         assert_eq!(cap.attempt_count, 2);
-        assert_eq!(cap.segments[0].reasoning_text, "reasoning attempt one");
-        assert_eq!(cap.segments[1].reasoning_text, "reasoning attempt two");
+        assert_eq!(s0.reasoning_text, "reasoning attempt one");
+        assert_eq!(s1.reasoning_text, "reasoning attempt two");
         assert!(cap.reasoning_text.contains("reasoning attempt one"));
         assert!(cap.reasoning_text.contains("reasoning attempt two"));
         assert!(cap.reasoning_text.contains("--- attempt 2 ---"));
@@ -534,10 +519,12 @@ mod streaming_turn_capture_tests {
         cap.phase = CapturePhase::ToolCall;
         cap.finalize_for_upload();
 
-        assert_eq!(cap.segments.len(), 3, "committed cleared, uncommitted kept");
-        assert_eq!(cap.segments[0].reasoning_text, "doomloop reasoning");
-        assert_eq!(cap.segments[1].response_text, "answer cut off");
-        assert_eq!(cap.segments[2].phase, CapturePhase::ToolCall);
+        let [s0, s1, s2] = cap.segments.as_slice() else {
+            panic!("expected three segments: {:?}", cap.segments);
+        };
+        assert_eq!(s0.reasoning_text, "doomloop reasoning");
+        assert_eq!(s1.response_text, "answer cut off");
+        assert_eq!(s2.phase, CapturePhase::ToolCall);
         assert_eq!(cap.attempt_count, 4, "all four generations counted");
         assert!(cap.reasoning_text.contains("doomloop reasoning"));
         assert!(cap.response_text.contains("answer cut off"));
@@ -613,9 +600,11 @@ mod streaming_turn_capture_tests {
         cap.append(true, "doomloop reasoning after a capped commit");
         cap.finalize_for_upload();
 
-        assert_eq!(cap.segments.len(), 1);
+        let [s0] = cap.segments.as_slice() else {
+            panic!("expected one segment: {:?}", cap.segments);
+        };
         assert_eq!(
-            cap.segments[0].reasoning_text,
+            s0.reasoning_text,
             "doomloop reasoning after a capped commit"
         );
         assert!(!cap.truncated);
@@ -698,7 +687,10 @@ mod streaming_turn_capture_tests {
         cap.append(false, "accepted answer");
         cap.clear_current_segment();
         assert!(cap.assembled_response_text().is_empty());
-        assert_eq!(cap.segments[0].response_text, "discarded attempt");
+        assert_eq!(
+            cap.segments.first().map(|s| s.response_text.as_str()),
+            Some("discarded attempt")
+        );
     }
 
     #[test]

@@ -8,9 +8,8 @@ pub use xai_grok_tools::implementations::grok_build::exit_plan_mode::{
 use crate::views::prompt_widget::StashedPrompt;
 
 /// Placeholder body for the plan-approval preview when `exit_plan_mode` parks with no plan content.
-/// No content means a missing/empty `plan.md`, or a whitespace-only body.
-///
-/// Must be non-empty after trim so `LineViewerState::open_markdown_content` accepts it; empty bodies are rejected there.
+/// No content means a missing/empty `plan.md`, or a whitespace-only body. Must be non-empty after
+/// trim so `LineViewerState::open_markdown_content` accepts it; empty bodies are rejected there.
 pub const EMPTY_PLAN_PLACEHOLDER: &str = "\
 # No plan written yet
 
@@ -73,6 +72,20 @@ pub enum PlanReviewSource {
     FileBacked,
 }
 
+/// A revision request is not an outcome: the review reopens and plan mode stays on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanReviewOutcome {
+    Approved,
+    Abandoned,
+}
+
+/// In-turn reviews hold an ext-method channel. After-turn reviews never do.
+/// Answering an in-turn review leaves this as `InTurn(None)`.
+pub enum ReviewOrigin {
+    InTurn(Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>),
+    AfterTurn,
+}
+
 #[derive(Debug, Clone)]
 pub struct PlanComment {
     pub id: u64,
@@ -86,7 +99,7 @@ pub struct PlanApprovalViewState {
     pub plan_content: Option<String>,
     pub source: PlanReviewSource,
     pub stashed_prompt: StashedPrompt,
-    pub response_tx: Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
+    pub origin: ReviewOrigin,
 
     pub focus: PlanApprovalFocus,
     pub comments: Vec<PlanComment>,
@@ -125,7 +138,31 @@ impl PlanApprovalViewState {
             plan_content,
             source,
             stashed_prompt,
-            response_tx: Some(response_tx),
+            origin: ReviewOrigin::InTurn(Some(response_tx)),
+            focus: PlanApprovalFocus::Preview,
+            comments: Vec::new(),
+            next_comment_id: 0,
+            editing_comment_id: None,
+            commenting_range: None,
+            stashed_feedback_prompt: None,
+        }
+    }
+
+    /// CreatePlan already ended; no ext method to answer.
+    pub fn after_turn(
+        tool_call_id: String,
+        plan_content: String,
+        stashed_prompt: StashedPrompt,
+    ) -> Self {
+        let plan_content = (!plan_content.trim().is_empty()).then_some(plan_content);
+        let has_plan = plan_content.is_some();
+        PlanApprovalViewState {
+            tool_call_id,
+            has_plan,
+            plan_content,
+            source: PlanReviewSource::Inline,
+            stashed_prompt,
+            origin: ReviewOrigin::AfterTurn,
             focus: PlanApprovalFocus::Preview,
             comments: Vec::new(),
             next_comment_id: 0,
@@ -188,11 +225,11 @@ pub fn send_exit_plan_response(
 }
 
 fn send_ext_response(
-    tx: &mut Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
+    tx: Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>>,
     outcome: &str,
     feedback: Option<String>,
 ) -> bool {
-    let Some(tx) = tx.take() else {
+    let Some(tx) = tx else {
         return false;
     };
     send_exit_plan_response(tx, outcome, feedback);
@@ -200,16 +237,33 @@ fn send_ext_response(
 }
 
 impl PlanApprovalViewState {
+    pub fn is_after_turn(&self) -> bool {
+        matches!(self.origin, ReviewOrigin::AfterTurn)
+    }
+
+    pub fn is_in_turn(&self) -> bool {
+        matches!(self.origin, ReviewOrigin::InTurn(_))
+    }
+
+    fn take_response_tx(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Sender<AcpResult<acp::ExtResponse>>> {
+        match &mut self.origin {
+            ReviewOrigin::InTurn(tx) => tx.take(),
+            ReviewOrigin::AfterTurn => None,
+        }
+    }
+
     pub fn send_approved(&mut self) -> bool {
-        send_ext_response(&mut self.response_tx, "approved", None)
+        send_ext_response(self.take_response_tx(), "approved", None)
     }
 
     pub fn send_abandoned(&mut self) -> bool {
-        send_ext_response(&mut self.response_tx, "abandoned", None)
+        send_ext_response(self.take_response_tx(), "abandoned", None)
     }
 
     pub fn send_cancelled(&mut self, feedback: Option<String>) -> bool {
-        send_ext_response(&mut self.response_tx, "cancelled", feedback)
+        send_ext_response(self.take_response_tx(), "cancelled", feedback)
     }
 
     pub fn send_stale_cancel(&mut self) -> bool {
@@ -242,12 +296,18 @@ pub(crate) fn inline_plan_snippets(
         return "> [selected lines unavailable]".to_owned();
     }
 
+    let Some(start) = range.start.checked_sub(1) else {
+        return "> [selected lines unavailable]".to_owned();
+    };
     let end = range.end.saturating_sub(1).min(lines.len());
     if end < range.start {
         return "> [selected lines unavailable]".to_owned();
     }
 
-    lines[range.start - 1..end]
+    let Some(snippet) = lines.get(start..end) else {
+        return "> [selected lines unavailable]".to_owned();
+    };
+    snippet
         .iter()
         .map(|line| format!("> {line}"))
         .collect::<Vec<_>>()
@@ -311,7 +371,10 @@ mod tests {
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "approved");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("approved")
+        );
         assert!(parsed.get("feedback").is_none());
     }
 
@@ -323,8 +386,14 @@ mod tests {
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "cancelled");
-        assert_eq!(parsed["feedback"], "fix auth flow");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
+        assert_eq!(
+            parsed.get("feedback").and_then(|v| v.as_str()),
+            Some("fix auth flow")
+        );
     }
 
     #[test]
@@ -335,7 +404,10 @@ mod tests {
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "cancelled");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
         assert!(parsed.get("feedback").is_none());
     }
 
@@ -347,7 +419,10 @@ mod tests {
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "cancelled");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
         assert!(parsed.get("feedback").is_none());
     }
 
@@ -359,7 +434,10 @@ mod tests {
         let raw = resp.expect("should be Ok");
         let parsed: serde_json::Value =
             serde_json::from_str(raw.0.get()).expect("should be valid JSON");
-        assert_eq!(parsed["outcome"], "cancelled");
+        assert_eq!(
+            parsed.get("outcome").and_then(|v| v.as_str()),
+            Some("cancelled")
+        );
         assert!(parsed.get("feedback").is_none());
     }
 
@@ -369,6 +447,26 @@ mod tests {
         assert!(state.send_approved());
         assert!(!state.send_approved());
         assert!(!state.send_cancelled(None));
+    }
+
+    #[test]
+    fn after_turn_review_has_no_ext_method() {
+        let mut state = PlanApprovalViewState::after_turn(
+            "CreatePlan".into(),
+            "# Plan".into(),
+            StashedPrompt {
+                text: String::new(),
+                cursor: 0,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+        );
+        assert!(state.is_after_turn());
+        assert!(state.has_plan);
+        assert!(!state.send_approved());
+        assert!(!state.send_abandoned());
     }
 
     #[test]
@@ -382,7 +480,7 @@ mod tests {
         );
         assert_eq!(state.source, PlanReviewSource::Inline);
         assert_eq!(state.stashed_prompt.text, "stashed text");
-        assert!(state.response_tx.is_some());
+        assert!(state.is_in_turn());
         assert_eq!(state.focus, PlanApprovalFocus::Preview);
         assert!(state.comments.is_empty());
         assert_eq!(state.next_comment_id, 0);

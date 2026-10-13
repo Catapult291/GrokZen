@@ -36,6 +36,11 @@ fn should_skip_entry(name: &str) -> bool {
 }
 
 fn detect_creation_mode(worktree_path: &Path) -> &'static str {
+    // backing markers, so every ProjFS root arrives here) is labelled by the
+    // platform's Grove strategy, not by the shape of its `.git` entry.
+    if crate::nfs::dest_is_projected_mount(worktree_path) {
+        return crate::nfs::default_grove_creation_mode();
+    }
     let git_entry = worktree_path.join(".git");
     if git_entry.is_file() {
         "linked"
@@ -209,7 +214,6 @@ pub fn rebuild_worktree_db(
     rebuild_worktree_db_from_grove_dirs(db, grok_home, &crate::nfs::candidate_data_dirs())
 }
 
-/// Rebuild with an explicit grove data dir (daemon.db / mounts.toml / markers).
 /// `None` skips the NFS union pass (tests).
 pub fn rebuild_worktree_db_with_grove_data(
     db: &crate::db::WorktreeDb,
@@ -231,11 +235,9 @@ fn rebuild_worktree_db_from_grove_dirs(
     let now = now_epoch_secs();
     let roots = managed_worktree_roots(grok_home);
 
-    // Union grove identities before any managed-root walk. The dests we
-    // learn here are skipped in discover_worktrees_skipping so is_dir /
-    // .git / canonicalize never touch a wedged NFS mount. Registering NFS
-    // first also keeps a grove dest from being labeled linked/standalone
-    // (sweep_dead would then Path::exists the live mount).
+    // Union grove identities first so later walks skip those dests and never
+    // touch a wedged NFS mount. Registering NFS first also keeps a grove dest
+    // from being labeled linked/standalone (sweep_dead would exists() it).
     let mut seen = HashSet::new();
     let mut counted_nfs = HashSet::new();
     let recs = db.list(&crate::db::ListFilter {
@@ -305,10 +307,9 @@ fn register_nfs_from_union(
     // permanently skip the live identity. Highest rank first; id tie-break.
     ordered.sort_by(|a, b| b.1.rank.cmp(&a.1.rank).then_with(|| a.0.cmp(&b.0)));
     let mut skip_dests: Vec<PathBuf> = Vec::new();
-    // Hang-avoidance skips (aborted / missing backing) stay in skip_dests so
-    // FS rediscovery does not poke a wedged mount, but they are not claims.
-    // dest_taken must ignore them or a rank-3 aborted journal blocks a live
-    // marker/mounts identity at the same dest.
+    // Hang-avoidance skips stay in skip_dests (don't poke a wedged mount) but
+    // are not claims: dest_taken must ignore them or a rank-3 aborted journal
+    // blocks a live identity at the same dest.
     let mut claimed_dests: Vec<PathBuf> = Vec::new();
     for (id, idn) in ordered {
         if let Some(dest) = idn
@@ -386,11 +387,9 @@ fn register_nfs_from_union(
             .iter()
             .any(|r| crate::nfs::dest_paths_equivalent(&r.path, &dest))
         {
-            // Dest already registered under another id (nfs or linked/copy).
-            // Never overlay this identity's backing/source_pin (stale marker
-            // would make dead-NFS GC drop the live pin) and never flip a
-            // linked/copy row to nfs. Always skip dest so FS rediscovery and
-            // GC cannot exists()/try_nfs_remove a live grove tree.
+            // Dest already registered: never overlay backing/source_pin (stale
+            // marker would make dead-NFS GC drop the live pin) or flip a
+            // linked/copy row to nfs. Always skip so GC cannot touch a live tree.
             claim_nfs_dest(dest, &mut skip_dests, &mut claimed_dests);
             report.already_tracked += 1;
             continue;
@@ -485,11 +484,7 @@ fn grove_mode_for_identity(idn: &crate::nfs::NfsIdentity) -> &'static str {
 }
 
 fn grove_metadata_from_identity(idn: &crate::nfs::NfsIdentity) -> serde_json::Value {
-    let transport = if grove_mode_for_identity(idn) == crate::worktree::STRATEGY_GROVE_FUSE {
-        "fuse"
-    } else {
-        "nfs"
-    };
+    let transport = crate::grove_api::transport_for_strategy(grove_mode_for_identity(idn));
     serde_json::json!({
         "grove": {
             "transport": transport,
@@ -543,9 +538,12 @@ mod tests {
 
         let report = discover_worktrees(grok_home);
         assert_eq!(report.found.len(), 1);
-        assert_eq!(report.found[0].kind, WorktreeKind::Session);
-        assert_eq!(report.found[0].creation_mode, "linked");
-        assert_eq!(report.found[0].path, wt);
+        let Some(found) = report.found.first() else {
+            panic!("expected one worktree: {:?}", report.found);
+        };
+        assert_eq!(found.kind, WorktreeKind::Session);
+        assert_eq!(found.creation_mode, "linked");
+        assert_eq!(found.path, wt);
     }
 
     #[test]
@@ -558,8 +556,11 @@ mod tests {
 
         let report = discover_worktrees(grok_home);
         assert_eq!(report.found.len(), 1);
-        assert_eq!(report.found[0].kind, WorktreeKind::Pool);
-        assert_eq!(report.found[0].creation_mode, "standalone");
+        let Some(found) = report.found.first() else {
+            panic!("expected one worktree: {:?}", report.found);
+        };
+        assert_eq!(found.kind, WorktreeKind::Pool);
+        assert_eq!(found.creation_mode, "standalone");
     }
 
     #[test]
@@ -579,7 +580,10 @@ mod tests {
 
         let report = discover_worktrees(grok_home);
         assert_eq!(report.found.len(), 1);
-        assert_eq!(report.found[0].path, base.join("real-session"));
+        assert_eq!(
+            report.found.first().map(|f| &f.path),
+            Some(&base.join("real-session"))
+        );
         assert!(report.skipped > 0);
     }
 
@@ -930,7 +934,6 @@ mod tests {
         std::fs::create_dir_all(grok_home.join("worktrees")).unwrap();
         let data = tmp.path().join("grove");
         std::fs::create_dir_all(&data).unwrap();
-        // mounts.toml worktree row with pin_ref id but no mountpoint.
         std::fs::write(
             data.join("mounts.toml"),
             "[[mounts]]\nkind = \"worktree\"\npin_ref = \"refs/grok/worktrees/no-dest\"\nbacking = \"/unused/worktree-backing/no-dest\"\n",

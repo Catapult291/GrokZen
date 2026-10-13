@@ -26,10 +26,8 @@ use xai_tool_runtime::{
     ToolCallContext, ToolError, ToolErrorKind, ToolStream, TypedToolOutput, terminal_only,
 };
 use xai_tool_types::ToolDescription;
-/// Deprecation monitor for the self-attested `caller_session_id` param.
-/// `kind="param_mismatch"` means the param disagreed with the server-bound envelope session and the envelope was trusted.
-/// `kind="envelope_absent"` means no envelope session existed and the param was used as a compat fallback.
-/// Enforcement (envelope-only identity) waits for this to be flat zero.
+/// Deprecation monitor for self-attested `caller_session_id`. `param_mismatch` trusted the envelope; `envelope_absent` used the param as fallback.
+/// Envelope-only identity waits for this to be flat zero.
 static WORKSPACE_RPC_CALLER_MISMATCH_TOTAL: std::sync::LazyLock<IntCounterVec> =
     std::sync::LazyLock::new(|| {
         register_int_counter_vec!(
@@ -165,7 +163,8 @@ impl crate::worktree::WorktreeNotificationSender for NoOpNotifier {
 }
 /// Escape hatch: `WORKSPACE_CLIENT_FS_QUERIES=0` (or `false`) disables the client-facing `workspace.client_fs_*` ops with a graceful `HubError`.
 /// The variable is read per call, so flipping it needs no process restart and tests can toggle it under a lock.
-fn client_fs_queries_enabled() -> bool {
+/// Also gates the staged-upload maintenance (orphan sweep and GC ticker) started with the workspace.
+pub(crate) fn client_fs_queries_enabled() -> bool {
     !matches!(
         std::env::var("WORKSPACE_CLIENT_FS_QUERIES").as_deref(),
         Ok("0") | Ok("false")
@@ -652,6 +651,9 @@ impl WorkspaceRpcHandler {
             <GetFilesReq as WorkspaceRpc>::METHOD => {
                 dispatch_op::<GetFilesReq>(params, &self.workspace, bound_session).await
             }
+            <StoreSessionImageReq as WorkspaceRpc>::METHOD => {
+                dispatch_op::<StoreSessionImageReq>(params, &self.workspace, bound_session).await
+            }
             <FsListReq as WorkspaceRpc>::METHOD => {
                 dispatch_op::<FsListReq>(params, &self.workspace, None).await
             }
@@ -679,16 +681,23 @@ impl WorkspaceRpcHandler {
                 ensure_client_fs_queries_enabled()?;
                 dispatch_op::<ClientFsReadFileReq>(params, &self.workspace, bound_session).await
             }
+            <ClientFsWriteFileReq as WorkspaceRpc>::METHOD => {
+                ensure_client_fs_queries_enabled()?;
+                dispatch_op::<ClientFsWriteFileReq>(params, &self.workspace, bound_session).await
+            }
             <DiscoverSkillsReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                let skills =
-                    crate::discovery::discover_skills(&cwd, self.workspace.shared.skills_config())
-                        .await;
+                let skills = crate::discovery::discover_skills(
+                    &cwd,
+                    self.workspace.shared.skills_config(),
+                    true,
+                )
+                .await;
                 Ok(Value::Array(skills))
             }
             <DiscoverAgentsMdReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                let files = crate::discovery::discover_agents_md(&cwd).await;
+                let files = crate::discovery::discover_agents_md(&cwd, true).await;
                 Ok(Value::Array(files))
             }
             <DiscoverPluginsReq as WorkspaceRpc>::METHOD => {
@@ -717,7 +726,16 @@ impl WorkspaceRpcHandler {
             }
             <LoadEnvrcReq as WorkspaceRpc>::METHOD => {
                 let cwd = self.workspace.root_cwd()?;
-                let env = crate::envrc::spawn_envrc_load(cwd, true).join().await;
+                let sandbox = self.workspace.sandbox();
+                if let Some(sandbox) = &sandbox {
+                    sandbox.engage_unless_off().await;
+                }
+                let sandbox = sandbox.map(|sandbox| {
+                    sandbox as std::sync::Arc<dyn xai_grok_tools::sandbox_launch::SandboxLaunch>
+                });
+                let env = crate::envrc::spawn_envrc_load_sandboxed(cwd, true, sandbox)
+                    .join()
+                    .await;
                 serde_json::to_value(env).map_err(|e| WorkspaceError::HubError(e.to_string()))
             }
             <InstallPluginReq as WorkspaceRpc>::METHOD => {
@@ -1237,14 +1255,8 @@ impl ToolServerHandler for WorkspaceRpcHandler {
             .await;
         Some(serde_json::to_value(&reply).unwrap_or(Value::Null))
     }
-    /// Hub-issued `tool_server.evict`.
-    /// Always tears the evicted session down (MCP bridges and activity/writer state, like the `SessionEnded` hook).
-    /// The global two-phase drain then runs **only** when no other session survives.
-    /// A global drain shuts down the *shared* upload queue, which must not happen while another session is live.
-    /// Idempotent across fan-out and safe for an already-gone session id.
-    ///
-    /// Contract: the server-supplied `grace_period_ms` budgets the drain and is therefore honored only when evicting the **last** live session.
-    /// For a multi-session workspace the evicted session is dropped immediately, with no per-session drain.
+    /// Hub `tool_server.evict`: always tear down the evicted session. Global drain runs only when no other session survives, because it closes the shared upload queue.
+    /// `grace_period_ms` is honored only for the last live session; a multi-session evict drops immediately.
     async fn handle_evict(&self, params: ToolServerEvictParams) {
         let sid = params.session_id.as_str();
         let (became_empty, start_drain, removed) = {
@@ -1265,6 +1277,7 @@ impl ToolServerHandler for WorkspaceRpcHandler {
             (empty, start, removed)
         };
         if let Some(session) = &removed {
+            session.staged_uploads().abandon_all();
             self.workspace.teardown_session_mcp_arc(session, None).await;
         }
         self.workspace.on_session_ended(sid);

@@ -46,10 +46,9 @@ impl CaptureHandle {
 
 impl Drop for CaptureHandle {
     fn drop(&mut self) {
-        // Always signal the capture thread to exit so the mic is released even when `stop()` was never called
-        // That covers the STT session ending on its own (server close or error) and the pipeline shutting down mid-utterance
-        // The thread observes the flag within one poll interval and exits, dropping the cpal stream
-        // We deliberately do not join here so `Drop` never blocks (it may run on an async executor)
+        // Always signal the capture thread to exit so the mic is released even when `stop()` was never called. That covers the
+        // STT session ending on its own (server close or error) and the pipeline shutting down mid-utterance. We deliberately do
+        // not join here so `Drop` never blocks (it may run on an async executor)
         self.stop.store(true, Ordering::Release);
         self.bridge.abort();
     }
@@ -61,11 +60,9 @@ pub fn spawn_pcm_capture(
     pcm_tx: async_mpsc::Sender<Vec<u8>>,
 ) -> Result<CaptureHandle, VoiceError> {
     let (sync_tx, sync_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(64);
-    // Bridge the cpal callback's std sync channel to the async STT sender
-    // The `recv()` blocks between audio chunks for the whole session, so it runs on the blocking pool (`spawn_blocking` and `blocking_send`)
-    // Parking a core runtime worker here would shrink executor capacity under pager load
-    // The loop exits on its own when capture stops (sync_tx is dropped) or the STT consumer goes away (`blocking_send` errors)
-    // The `abort()` in `CaptureHandle`'s teardown is only a backstop
+    // The `recv()` blocks between audio chunks for the whole session, so it runs on the blocking pool (`spawn_blocking` and
+    // `blocking_send`). The loop exits on its own when capture stops (sync_tx is dropped) or the STT consumer goes away
+    // (`blocking_send` errors). The `abort()` in `CaptureHandle`'s teardown is only a backstop
     let bridge = tokio::task::spawn_blocking(move || {
         while let Ok(bytes) = sync_rx.recv() {
             if pcm_tx.blocking_send(bytes).is_err() {
@@ -447,8 +444,11 @@ fn resample_mono_i16(samples: &[i16], input_rate: u32, output_rate: u32) -> Vec<
         let src_pos = i as f64 * step;
         let idx = src_pos.floor() as usize;
         let frac = src_pos - idx as f64;
-        let s0 = samples[idx] as f64;
-        let s1 = *samples.get(idx + 1).unwrap_or(&samples[idx]) as f64;
+        let Some(&s0_i) = samples.get(idx) else {
+            break;
+        };
+        let s0 = s0_i as f64;
+        let s1 = samples.get(idx + 1).copied().unwrap_or(s0_i) as f64;
         let sample = s0 + (s1 - s0) * frac;
         let clamped = sample.round().max(i16::MIN as f64).min(i16::MAX as f64);
         output.push(clamped as i16);
@@ -461,15 +461,9 @@ fn resample_mono_i16(samples: &[i16], input_rate: u32, output_rate: u32) -> Vec<
 // `__mic-capture` child mode (see the module docs and `capture_subprocess`).
 // ---------------------------------------------------------------------------
 
-/// Run the `__mic-capture` helper child; `args` is argv after the subcommand.
-/// `--rate <N>` streams PCM16 mono LE at `N` Hz to stdout; `--device-info` prints the default input device instead (one line, no stream opened).
-///
-/// Wire protocol (stdout): one status header line, then raw PCM.
-/// - `READY <device>\n` followed by the PCM byte stream, or
-/// - `INFO <name>\t<detail>\n` for `--device-info`, or
-/// - `ERR <message>\n` and a non-zero exit on any failure.
-///
-/// The child exits when its stdout write fails (parent closed the pipe or died) or when the parent kills it; it never outlives the capture session.
+/// Run the `mic-capture` helper child; `args` is argv after the subcommand. Wire protocol (stdout): one status header
+/// line, then raw PCM. The child exits when its stdout write fails (parent closed the pipe or died) or when the parent
+/// kills it; it never outlives the capture session.
 pub(crate) fn run_capture_child_cli(args: Vec<String>) -> i32 {
     // Route the child's tracing (device open info, cpal warnings) to stderr, which the parent drains into its debug log
     // The output is plain text, since the reader is a pipe, not a terminal
@@ -510,7 +504,10 @@ fn parse_child_args(args: &[String]) -> Result<ChildMode, String> {
     let mut rate: u32 = crate::config::DEFAULT_SAMPLE_RATE;
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        let Some(arg) = args.get(i) else {
+            break;
+        };
+        match arg.as_str() {
             "--device-info" => return Ok(ChildMode::DeviceInfo),
             "--rate" => {
                 i += 1;
@@ -643,6 +640,6 @@ mod tests {
         let stereo = [i16::MAX, i16::MIN];
         let mono = frames_to_mono_i16(&stereo, 2);
         assert_eq!(mono.len(), 1);
-        assert_eq!(mono[0], 0);
+        assert_eq!(mono.first().copied(), Some(0));
     }
 }

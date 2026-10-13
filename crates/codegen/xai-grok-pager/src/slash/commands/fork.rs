@@ -11,10 +11,7 @@ use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand, slash_m
 /// [`parse_fork_args`] returns this, and [`Action::Fork`](crate::app::actions::Action::Fork) carries it to the dispatcher.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ForkArgs {
-    /// `None`        -> open the worktree question modal (the user is
-    ///                  asked every time; the choice is never persisted).
-    /// `Some(true)`  -> force worktree, skipping the modal.
-    /// `Some(false)` -> force no-worktree, skipping the modal.
+    /// `None` -> open the worktree question modal (the user is asked every time. the choice is never persisted).
     pub worktree_override: Option<bool>,
     /// Optional first prompt for the new session. Whitespace-trimmed.
     /// `None` when the user typed `/fork` (with or without flags) and no directive text; the new agent then opens with no first prompt.

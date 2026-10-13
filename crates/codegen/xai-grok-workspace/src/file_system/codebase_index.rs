@@ -88,9 +88,7 @@ impl CodebaseIndexManager {
     }
 
     /// Index whose root is the longest prefix of `path` (multi-repo dispatch).
-    ///
-    /// Upgrades first, then picks the longest *live* covering root.
-    /// If the longest-prefix root's `Weak` is already dead, a shorter but still-live covering root is used instead of returning `None`.
+    /// Upgrades first, then the longest *live* covering root; a dead longest-prefix `Weak` falls through to a shorter live root rather than `None`.
     pub fn get_covering(&self, path: &Path) -> Option<Arc<IndexManagerHandle>> {
         self.indexes
             .iter()
@@ -98,14 +96,6 @@ impl CodebaseIndexManager {
             .filter_map(|(root, weak)| weak.upgrade().map(|handle| (root, handle)))
             .max_by_key(|(root, _)| root.as_os_str().len())
             .map(|(_, handle)| handle)
-    }
-
-    /// Ensure an index exists for every materialized mount.
-    pub fn ensure_all(&mut self, roots: &[PathBuf]) -> Vec<Arc<IndexManagerHandle>> {
-        roots
-            .iter()
-            .map(|root| self.get_or_create(root.clone()).0)
-            .collect()
     }
 
     /// Returns the number of currently-live indexes (test helper).
@@ -132,19 +122,10 @@ mod tests {
         assert!(cache_path.to_string_lossy().ends_with("goto_index.bin"));
     }
 
-    // =========================================================================
-    // Lazy-start mechanic tests
-    //
-    // `CodebaseIndexManager::get()` returns None before the index is created, which maps to `x.ai/code/status` reporting `reason: notStarted`
-    // `get_or_create()` is the lazy-start entry point
-    // `MvpAgent::start_codebase_index_for_code_nav` calls it on the first code-nav request for an eligible session
-    // =========================================================================
+    // Lazy-start: `get()` is `None` until created (`x.ai/code/status` `reason: notStarted`); `get_or_create()` starts on the first eligible code-nav request.
 
-    /// An empty CodebaseIndexManager returns None for any path.
-    ///
-    /// This is the steady-state before ANY code-nav request has been made.
-    /// In `x.ai/code/status`, `resolve_index_handle()` calls `agent.get_codebase_index(cwd)` which calls `mgr.get(cwd)`.
-    /// When this returns None the status reports `reason: notStarted`.
+    /// An empty manager returns `None` for any path — the steady state before any code-nav request.
+    /// `x.ai/code/status` then reports `reason: notStarted`.
     #[test]
     fn test_get_returns_none_before_any_index_created() {
         let mgr = CodebaseIndexManager::new();
@@ -204,10 +185,8 @@ mod tests {
         );
     }
 
-    /// After get_or_create() the same path is found by get().
-    ///
-    /// This is the lazy-start path: `get_or_create` is called by `start_codebase_index_for_code_nav` on the first eligible code-nav request.
-    /// After that, `get_codebase_index` (used by `resolve_index_handle` in `code_status`) returns `Some`.
+    /// After `get_or_create()` the same path is found by `get()`.
+    /// That is the lazy-start path: the first eligible code-nav request creates the index, so later status lookups return `Some`.
     #[test]
     fn test_get_finds_handle_after_get_or_create() {
         let temp = tempfile::tempdir().unwrap();
@@ -232,9 +211,7 @@ mod tests {
     }
 
     /// The index is reaped once the last strong handle drops.
-    ///
-    /// This is the eviction guarantee: the manager holds only a `Weak`, so dropping the sole `Arc` (the last session) makes `get()` miss.
-    /// Nothing accumulates per repo in a long-lived leader process.
+    /// The manager holds only a `Weak`, so the last session's `Arc` drop makes `get()` miss and nothing accumulates per repo.
     #[test]
     fn test_index_evicted_when_last_strong_ref_dropped() {
         let temp = tempfile::tempdir().unwrap();

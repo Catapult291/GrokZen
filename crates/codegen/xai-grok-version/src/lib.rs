@@ -4,6 +4,8 @@
 //! 不上传研究轨迹、不向官方源上报。模型推理仍使用用户自己的凭据访问 Grok
 //! API —— 这是 agent 正常工作所需的唯一网络路径。
 
+#![deny(clippy::indexing_slicing)]
+
 use std::sync::OnceLock;
 
 use semver::Version;

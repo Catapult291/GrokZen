@@ -8,27 +8,9 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent};
 
 use super::event_loop::TimedInputEvent;
 
-/// Reassembles X10 mouse reports whose column byte a UTF-8-converting relay (ConPTY forwarding to a WSL/SSH session) expanded into two bytes.
-///
-/// An X10 report is `ESC [ M CB Cx Cy`, where each field is one raw byte holding `32 + value`.
-/// At columns >= 95 the column byte exceeds `0x7F`, and the relay re-encodes it as a UTF-8 pair (`0xC2`/`0xC3` lead, `0x80..=0xBF` continuation).
-/// Crossterm's parser consumes a fixed 6-byte window, so the pager receives a deterministic, invertible two-event pattern instead of the real report:
-///
-/// 1. a mouse event with column 161/162 (the lead byte minus 33) and row 95..=158 (the continuation byte minus 33).
-///    Kind and modifiers are correct because the button byte parsed fine.
-///    These coordinates are fixed by the encoding and never reflect the true position.
-///    Terminal bounds therefore cannot distinguish a mangled report from a genuine event on a large terminal.
-/// 2. the displaced row byte as a key event: an ASCII `Char` press for rows below 96, or `Backspace` for row byte `0x7F`.
-///    When the row byte was also UTF-8-expanded, it arrives as a Latin-1 `Char` (`U+0080..=U+00FF`).
-///
-/// The filter holds event 1 until its completion arrives, so a pair the reader thread split into two batches still reassembles.
-/// It emits the reconstructed mouse event, so right-margin hover/click keeps working in downgraded sessions and nothing is typed into the composer.
-///
-/// The guard against consuming real typing is how close together the two events arrive.
+/// These coordinates are fixed by the encoding and never reflect the true position.
+/// Terminal bounds therefore cannot distinguish a mangled report from a genuine event on a large terminal.
 /// The pair decodes from contiguous bytes in a single terminal read, so the completion must arrive within [`MAX_COMPLETION_GAP`] of the candidate.
-/// A genuine mouse event can only match the magic shape on a >=163x96 terminal.
-/// Even then, an unrelated keystroke seconds later releases it unchanged instead of eating the key.
-/// A held candidate followed by anything other than its completion is likewise released unchanged.
 pub(super) struct X10ReassemblyFilter {
     /// Candidate mangled report held awaiting its displaced row byte.
     held: Option<HeldReport>,
@@ -143,6 +125,13 @@ mod tests {
 
     use super::*;
 
+    fn nth<T>(xs: &[T], i: usize) -> &T {
+        let Some(x) = xs.get(i) else {
+            panic!("expected index {i}, len {}", xs.len());
+        };
+        x
+    }
+
     fn test_instant() -> Instant {
         static NOW: OnceLock<Instant> = OnceLock::new();
         *NOW.get_or_init(Instant::now)
@@ -187,7 +176,7 @@ mod tests {
         ]);
         assert_eq!(out.len(), 1);
         assert_eq!(
-            out[0].event,
+            nth(&out, 0).event,
             Event::Mouse(MouseEvent {
                 kind: MouseEventKind::Moved,
                 column: 99,
@@ -206,7 +195,7 @@ mod tests {
             press_mods(KeyCode::Char('P'), KeyModifiers::SHIFT),
         ]);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0].event, Event::Mouse(m) if m.column == 163 && m.row == 47));
+        assert!(matches!(nth(&out, 0).event, Event::Mouse(m) if m.column == 163 && m.row == 47));
     }
 
     #[test]
@@ -218,7 +207,7 @@ mod tests {
         ]);
         assert_eq!(out.len(), 1);
         assert!(matches!(
-            out[0].event,
+            nth(&out, 0).event,
             Event::Mouse(m) if m.kind == MouseEventKind::Drag(MouseButton::Left)
                 && m.column == 99
                 && m.row == 47
@@ -235,7 +224,7 @@ mod tests {
             press_mods(KeyCode::Char('P'), KeyModifiers::SHIFT),
         ]);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0].event, Event::Mouse(m) if m.column == 179 && m.row == 47));
+        assert!(matches!(nth(&out, 0).event, Event::Mouse(m) if m.column == 179 && m.row == 47));
     }
 
     #[test]
@@ -244,7 +233,7 @@ mod tests {
         assert!(f.filter(vec![mangled_c2_col100()]).is_empty());
         let out = f.filter(vec![press_mods(KeyCode::Char('P'), KeyModifiers::SHIFT)]);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0].event, Event::Mouse(m) if m.column == 99 && m.row == 47));
+        assert!(matches!(nth(&out, 0).event, Event::Mouse(m) if m.column == 99 && m.row == 47));
     }
 
     #[test]
@@ -255,7 +244,7 @@ mod tests {
             press_mods(KeyCode::Char('\u{A0}'), KeyModifiers::NONE),
         ]);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0].event, Event::Mouse(m) if m.column == 99 && m.row == 127));
+        assert!(matches!(nth(&out, 0).event, Event::Mouse(m) if m.column == 99 && m.row == 127));
     }
 
     #[test]
@@ -266,7 +255,7 @@ mod tests {
             press_mods(KeyCode::Backspace, KeyModifiers::NONE),
         ]);
         assert_eq!(out.len(), 1);
-        assert!(matches!(out[0].event, Event::Mouse(m) if m.column == 99 && m.row == 94));
+        assert!(matches!(nth(&out, 0).event, Event::Mouse(m) if m.column == 99 && m.row == 94));
     }
 
     #[test]
@@ -280,9 +269,9 @@ mod tests {
         };
         let out = f.filter(vec![late_key]);
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].event, mangled_c2_col100().event);
+        assert_eq!(nth(&out, 0).event, mangled_c2_col100().event);
         assert!(matches!(
-            out[1].event,
+            nth(&out, 1).event,
             Event::Key(k) if k.code == KeyCode::Char('q')
         ));
     }
@@ -296,10 +285,10 @@ mod tests {
         ]);
         // Candidate released unchanged; the focus event and the (now unrelated) keystroke pass through
         assert_eq!(out.len(), 3);
-        assert_eq!(out[0].event, mangled_c2_col100().event);
-        assert_eq!(out[1].event, Event::FocusGained);
+        assert_eq!(nth(&out, 0).event, mangled_c2_col100().event);
+        assert_eq!(nth(&out, 1).event, Event::FocusGained);
         assert_eq!(
-            out[2].event,
+            nth(&out, 2).event,
             press_mods(KeyCode::Char('a'), KeyModifiers::NONE).event
         );
     }

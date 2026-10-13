@@ -25,6 +25,9 @@ pub struct BashToolConfig {
     /// `None` uses the server default of 15s.
     /// `Some(0)` disables the short budget, so auto-backgrounding happens only at the model/default timeout.
     pub foreground_block_budget_ms: Option<u64>,
+    /// How long a command may block the foreground, in milliseconds, when the model omits `block_until_ms`.
+    /// `None` uses the server default of 30s.
+    pub default_block_until_ms: Option<u64>,
     /// Whether to allow a background `&` operator in foreground commands (default: `true`).
     /// Resolution: config.toml (this) > remote settings > `true`.
     pub allow_background_operator: Option<bool>,
@@ -32,6 +35,18 @@ pub struct BashToolConfig {
 }
 
 impl BashToolConfig {
+    /// [`Self::to_bash_params_json`] with the fallbacks read from the remote settings snapshot.
+    /// The top-level session and subagent/workflow children both resolve through here so their bash limits cannot drift.
+    pub(crate) fn to_bash_params_json_with_remote(
+        &self,
+        remote: Option<&crate::util::config::RemoteSettings>,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        self.to_bash_params_json(
+            remote.and_then(|r| r.auto_background_on_timeout),
+            remote.and_then(|r| r.allow_background_operator),
+        )
+    }
+
     /// `remote_auto_bg` is the remote settings fallback for `auto_background_on_timeout`.
     /// Resolution: local config.toml > remote fallback > `true`.
     pub(crate) fn to_bash_params_json(
@@ -60,6 +75,9 @@ impl BashToolConfig {
         if let Some(ms) = self.foreground_block_budget_ms {
             map.insert("foreground_block_budget_ms".into(), ms.into());
         }
+        if let Some(ms) = self.default_block_until_ms {
+            map.insert("default_block_until_ms".into(), ms.into());
+        }
         let allow_bg_op = self
             .allow_background_operator
             .or(remote_allow_background_operator)
@@ -69,11 +87,8 @@ impl BashToolConfig {
     }
 }
 
-/// User configurable settings for the ask_user_question tool (`[toolset.ask_user_question]`).
-///
-/// Consumed by `crate::util::config::resolve_ask_user_question_params_from_disk`, which reads the raw config layers directly.
-/// That keeps the documented precedence (requirements > env > user > managed > remote).
-/// This struct exists so the keys are recognized in `config.toml` and round-trip through `AgentConfig`.
+/// User configurable settings for the ask_user_question tool (`[toolset.ask_user_question]`). Consumed by `crate::util::config::resolve_ask_user_question_params_from_disk`, which reads the raw config layers directly.
+/// That keeps the documented precedence (requirements > env > user > managed > remote). This struct exists so the keys are recognized in `config.toml` and round-trip through `AgentConfig`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AskUserQuestionToolConfig {
@@ -103,7 +118,6 @@ pub struct WebFetchToolConfig {
 
 impl WebFetchToolConfig {
     /// Resolve `WebFetchParams` by merging TOML > env > remote settings layers.
-    ///
     /// `remote_proxy` and `remote_domains` are the remote settings fallback values from `RemoteSettings`.
     /// `context_window` comes from the session's SamplingConfig (model-provided).
     pub(crate) fn resolve_params(
@@ -189,26 +203,32 @@ impl ShellToolsetConfig {
         let default_base = SamplerConfig {
             api_key: None,
             base_url: "https://api.x.ai/v1".to_string(),
+            mtls_cert_dir: None,
             model: String::new(),
             max_completion_tokens: None,
             temperature: None,
             top_p: None,
             api_backend: Default::default(),
             auth_scheme: Default::default(),
+            request_compression: Default::default(),
             extra_headers: indexmap::IndexMap::new(),
             extra_response_includes: Vec::new(),
             query_params: indexmap::IndexMap::new(),
             env_http_headers: indexmap::IndexMap::new(),
             context_window: 256_000,
+            max_request_bytes: None,
             client_version: None,
             reasoning_effort: None,
+            reasoning_summary: None,
             force_http1: false,
             max_retries: None,
+            rate_limit_retry_threshold: None,
             stream_tool_calls: false,
             idle_timeout_secs: None,
             client_identifier: None,
             deployment_id: None,
             user_id: None,
+            conversation_group_id: None,
             origin_client: None,
             // Leaving the callback `None` here is fine; this base is only the placeholder for the "no base provided" path
             // Production `SamplerConfig`s in agent/config.rs and acp_session.rs set the real attribution callback
@@ -256,15 +276,6 @@ impl ShellToolsetConfig {
 // ---------------------------------------------------------------------------
 
 /// Configurable in `config.toml` under `[toolset.hashline]`:
-/// ```toml
-/// [toolset]
-/// file_toolset = "hashline"
-///
-/// [toolset.hashline]
-/// scheme = "chunk"       # "chunk" (default) or "content_only"
-/// hash_len = 3           # anchor hash length (1-4, default 3)
-/// chunk_size = 8         # chunk size for chunk scheme (default 8)
-/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HashlineSchemeConfig {
@@ -692,6 +703,29 @@ mod tests {
         assert_eq!(
             fg_budget(&local.to_bash_params_json(None, None)),
             Some(30_000),
+        );
+    }
+
+    // -- default_block_until_ms: only emitted when set (server defaults to 30s) --
+
+    fn default_block_until(map: &serde_json::Map<String, serde_json::Value>) -> Option<u64> {
+        map.get("default_block_until_ms").and_then(|v| v.as_u64())
+    }
+
+    #[test]
+    fn default_block_until_ms_emitted_only_when_set() {
+        assert!(
+            default_block_until(&BashToolConfig::default().to_bash_params_json(None, None))
+                .is_none()
+        );
+
+        let local = BashToolConfig {
+            default_block_until_ms: Some(15_000),
+            ..BashToolConfig::default()
+        };
+        assert_eq!(
+            default_block_until(&local.to_bash_params_json(None, None)),
+            Some(15_000)
         );
     }
 }

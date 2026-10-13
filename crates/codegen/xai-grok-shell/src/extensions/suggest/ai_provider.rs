@@ -8,7 +8,6 @@ const AI_TIMEOUT: Duration = Duration::from_secs(2);
 const AI_PRIORITY: i32 = -10;
 
 /// Request AI-powered shell command suggestions via the session actor.
-///
 /// Sends `SessionCommand::AISuggest` and awaits the response with a 2-second timeout.
 /// Returns at most one `RankedSuggestion` with `source: AI` and `priority: -10` (below history and path results).
 pub(crate) async fn suggest(
@@ -79,17 +78,23 @@ mod tests {
     fn build_suggestion_with_prefix_continuation() {
         let result = build_suggestion("git", "git commit --amend");
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].insert_text, "git commit --amend");
-        assert_eq!(result[0].source, SuggestionSource::AI);
-        assert_eq!(result[0].priority, -10);
-        assert!(result[0].is_ghost_candidate);
+        let Some(r) = result.first() else {
+            panic!("expected one suggestion: {result:?}");
+        };
+        assert_eq!(r.insert_text, "git commit --amend");
+        assert_eq!(r.source, SuggestionSource::AI);
+        assert_eq!(r.priority, -10);
+        assert!(r.is_ghost_candidate);
     }
 
     #[test]
     fn build_suggestion_prepends_prefix_when_missing() {
         let result = build_suggestion("git", " commit --amend");
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].insert_text, "git commit --amend");
+        assert_eq!(
+            result.first().map(|r| r.insert_text.as_str()),
+            Some("git commit --amend")
+        );
     }
 
     #[test]
@@ -112,19 +117,28 @@ mod tests {
         // The model returned "commit" without a leading space, so nothing inserts a separator
         // The model must include the space itself when one is needed
         let result = build_suggestion("git", "commit");
-        assert_eq!(result[0].insert_text, "gitcommit");
+        assert_eq!(
+            result.first().map(|r| r.insert_text.as_str()),
+            Some("gitcommit")
+        );
     }
 
     #[test]
     fn build_suggestion_raw_starts_with_prefix_preserves_internal_whitespace() {
         let result = build_suggestion("git", "git  commit  \n");
-        assert_eq!(result[0].insert_text, "git  commit");
+        assert_eq!(
+            result.first().map(|r| r.insert_text.as_str()),
+            Some("git  commit")
+        );
     }
 
     #[test]
     fn build_suggestion_trims_surrounding_whitespace() {
         let result = build_suggestion("git", "  git commit  \n");
-        assert_eq!(result[0].insert_text, "git commit");
+        assert_eq!(
+            result.first().map(|r| r.insert_text.as_str()),
+            Some("git commit")
+        );
     }
 
     #[tokio::test]
@@ -154,7 +168,10 @@ mod tests {
 
         let result = suggest(&tx, "git", "/tmp", None).await;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].insert_text, "git commit --amend");
+        assert_eq!(
+            result.first().map(|r| r.insert_text.as_str()),
+            Some("git commit --amend")
+        );
     }
 
     #[tokio::test]
@@ -208,6 +225,9 @@ mod tests {
 
         let result = suggest(&tx, "docker", "/home/user", Some("custom-model".into())).await;
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].insert_text, "docker compose up");
+        assert_eq!(
+            result.first().map(|r| r.insert_text.as_str()),
+            Some("docker compose up")
+        );
     }
 }

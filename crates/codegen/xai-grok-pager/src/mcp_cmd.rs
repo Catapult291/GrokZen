@@ -181,6 +181,9 @@ fn run_list(json: bool, locale: &LocaleContext) -> Result<()> {
     let cwd = current_dir_or_exit();
     let servers = xai_grok_shell::util::config::load_mcp_server_configs_with_project(&cwd);
     let disabled = xai_grok_shell::util::config::disabled_mcp_server_names(&cwd);
+    // `mcp_doctor::policy_subjects` judges this same TOML walk (plus the doctor-only `.mcp.json`
+    // and plugin legs), so every server listed here has a verdict; the rule itself is the merge's.
+    let blocked = xai_grok_shell::mcp_doctor::policy_blocked_servers(&cwd);
 
     if json {
         let payload: serde_json::Value = servers
@@ -194,6 +197,12 @@ fn run_list(json: bool, locale: &LocaleContext) -> Result<()> {
                         "enabled".into(),
                         serde_json::Value::Bool(!disabled.contains(name)),
                     );
+                    if let Some(reason) = blocked.get(name) {
+                        obj.insert(
+                            "blocked_reason".into(),
+                            serde_json::Value::String(reason.to_string()),
+                        );
+                    }
                 }
                 entry
             })
@@ -219,21 +228,25 @@ fn run_list(json: bool, locale: &LocaleContext) -> Result<()> {
                 }
                 McpServerTransportConfig::StreamableHttp { url, .. } => url.clone(),
             };
-            let status = if disabled.contains(name) {
-                locale
-                    .named_text("mcp.list.disabled_suffix", " (disabled)")
-                    .into_owned()
-            } else {
+            let mut notes = Vec::new();
+            if blocked.contains_key(name) {
+                notes.push(locale.named_static_text(
+                    "mcp.list.blocked_policy",
+                    "blocked by organization policy",
+                ));
+            }
+            if disabled.contains(name) {
+                notes.push(locale.named_static_text("panel.disabled", "disabled"));
+            }
+            if *scope == "project" {
+                notes.push(locale.named_static_text("mcp.list.project", "project"));
+            }
+            let suffix = if notes.is_empty() {
                 String::new()
-            };
-            let scope_note = if *scope == "project" {
-                locale
-                    .named_text("mcp.list.project_suffix", " (project)")
-                    .into_owned()
             } else {
-                String::new()
+                format!(" ({})", notes.join(", "))
             };
-            println!("  {name}: {transport}{status}{scope_note}");
+            println!("  {name}: {transport}{suffix}");
         }
     }
     Ok(())
@@ -299,6 +312,20 @@ async fn run_add(args: AddArgs, locale: &LocaleContext) -> Result<()> {
         tool_timeouts: None,
         expose_image_base64: None,
     };
+
+    // Policy check BEFORE persist (the same gate as the TUI Add): a denied
+    // server must not be written under a success message.
+    let cwd = current_dir_or_exit();
+    let write_scope = match args.scope {
+        McpScope::User => xai_grok_shell::mcp_doctor::McpWriteScope::User,
+        McpScope::Project => xai_grok_shell::mcp_doctor::McpWriteScope::Project,
+    };
+    if let Some(refusal) =
+        xai_grok_shell::mcp_doctor::policy_add_refusal(&cwd, name, &config, write_scope)
+    {
+        eprintln!("{refusal}");
+        std::process::exit(1);
+    }
 
     let path = scope_target(args.scope);
     xai_grok_shell::util::config::save_mcp_server_config_at(&path, name, &config).await?;
@@ -534,6 +561,7 @@ fn resolve_add_with_locale(args: &AddArgs, locale: &LocaleContext) -> Result<Res
                     url: url.to_string(),
                     transport_type: (transport == McpTransport::Sse).then(|| "sse".to_string()),
                     bearer_token_env_var: None,
+                    bearer_token_file: None,
                     headers: (!headers.is_empty()).then_some(headers),
                     oauth_client_id: None,
                     oauth_client_secret_env_var: None,
@@ -721,6 +749,15 @@ fn is_gateway_cli_toggle_name(name: &str) -> bool {
     name.starts_with("managed_gateway:") || name.contains(':')
 }
 
+/// Whether the user config's `disabled_mcp_servers` list, the one write a disable always makes,
+/// already holds `name`. A user-tier `enabled = false` is not enough: a project layer can shadow it.
+fn user_disabled_list_has(user_config: &toml::Value, name: &str) -> bool {
+    user_config
+        .get("disabled_mcp_servers")
+        .and_then(|v| v.as_array())
+        .is_some_and(|arr| arr.iter().any(|v| v.as_str() == Some(name)))
+}
+
 fn available_mcp_server_names(cwd: &Path) -> Vec<String> {
     let mut names: Vec<String> = xai_grok_shell::util::config::cli_known_mcp_server_names(cwd)
         .into_iter()
@@ -787,13 +824,32 @@ async fn run_set_enabled(name: &str, enabled: bool, locale: &LocaleContext) -> R
         std::process::exit(1);
     }
 
-    let was_disabled = xai_grok_shell::util::config::disabled_mcp_server_names(&cwd).contains(name);
+    // Policy check BEFORE the config write, or a blocked server is written under a success
+    // message and resurrects when the pin lifts; disabling only tightens, so it stays allowed.
+    if enabled && let Some(refusal) = xai_grok_shell::mcp_doctor::policy_enable_refusal(&cwd, name)
+    {
+        eprintln!("{refusal}");
+        std::process::exit(1);
+    }
+
+    // No-op check after the policy gate (blocked refuses, not "already enabled") and before the
+    // save, which rewrites `enabled` keys; disable writes only the user list, so judge that list.
+    let already = if enabled {
+        !xai_grok_shell::util::config::disabled_mcp_server_names(&cwd).contains(name)
+    } else {
+        xai_grok_shell::config::load_from_disk()
+            .is_ok_and(|user_config| user_disabled_list_has(&user_config, name))
+    };
+    if already {
+        let state = if enabled { "enabled" } else { "disabled" };
+        println!("MCP server '{name}' is already {state}.");
+        return Ok(());
+    }
 
     let modified =
         xai_grok_shell::util::config::save_mcp_server_enabled_in(name, enabled, &cwd).await?;
 
     let now_disabled = xai_grok_shell::util::config::disabled_mcp_server_names(&cwd).contains(name);
-    let now_enabled = !now_disabled;
 
     if enabled && now_disabled {
         eprintln!(
@@ -807,7 +863,7 @@ async fn run_set_enabled(name: &str, enabled: bool, locale: &LocaleContext) -> R
         );
         std::process::exit(1);
     }
-    if !enabled && now_enabled {
+    if !enabled && !now_disabled {
         eprintln!(
             "{}",
             localized_mcp_template(
@@ -820,30 +876,14 @@ async fn run_set_enabled(name: &str, enabled: bool, locale: &LocaleContext) -> R
         std::process::exit(1);
     }
 
-    if was_disabled == now_disabled {
-        let (id, english) = if now_enabled {
-            (
-                "mcp.state.already_enabled",
-                "MCP server '{name}' is already enabled.",
-            )
-        } else {
-            (
-                "mcp.state.already_disabled",
-                "MCP server '{name}' is already disabled.",
-            )
-        };
-        println!(
-            "{}",
-            localized_mcp_template(locale, id, english, &[("{name}", name)])
-        );
-    } else if now_enabled {
+    if enabled {
         println!(
             "{}",
             localized_mcp_template(
                 locale,
                 "mcp.state.enabled",
                 "Enabled MCP server '{name}'.",
-                &[("{name}", name)],
+                &[("{name}", name)]
             )
         );
     } else {
@@ -1058,7 +1098,7 @@ async fn run_doctor(json: bool, name: Option<String>, locale: &LocaleContext) ->
             serde_json::to_string_pretty(&report).unwrap_or_default()
         );
     } else {
-        xai_grok_shell::mcp_doctor::print_report(&report);
+        xai_grok_shell::mcp_doctor::print_report_with_locale(&report, locale);
     }
 
     if report.failing_count > 0 {
@@ -1135,7 +1175,7 @@ mod tests {
                 command, args, env, ..
             } => {
                 assert_eq!(command, "npx");
-                assert_eq!(args[0], "-y");
+                assert_eq!(args.first().map(String::as_str), Some("-y"));
                 let env = env.expect("env should be set");
                 assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
                 // Values may themselves contain '='.
@@ -1266,11 +1306,10 @@ mod tests {
                 other => panic!("expected http transport, got {other:?}"),
             }
             assert_eq!(resolved.warnings.len(), 1);
-            assert!(
-                resolved.warnings[0].contains("No --transport given"),
-                "got: {}",
-                resolved.warnings[0]
-            );
+            let Some(warning) = resolved.warnings.first() else {
+                panic!("expected a warning: {:?}", resolved.warnings);
+            };
+            assert!(warning.contains("No --transport given"), "got: {warning}");
         }
     }
 
@@ -1310,10 +1349,12 @@ mod tests {
             McpServerTransportConfig::Stdio { .. }
         ));
         assert_eq!(resolved.warnings.len(), 1);
+        let Some(warning) = resolved.warnings.first() else {
+            panic!("expected a warning: {:?}", resolved.warnings);
+        };
         assert!(
-            resolved.warnings[0].contains("--transport http local http://localhost:3000"),
-            "got: {}",
-            resolved.warnings[0]
+            warning.contains("--transport http local http://localhost:3000"),
+            "got: {warning}"
         );
 
         // Extra args or --env mean a command; URLs stay stdio with a warning.
@@ -1332,7 +1373,12 @@ mod tests {
             McpServerTransportConfig::Stdio { .. }
         ));
         assert_eq!(resolved.warnings.len(), 1);
-        assert!(resolved.warnings[0].contains("--transport http"));
+        assert!(
+            resolved
+                .warnings
+                .first()
+                .is_some_and(|w| w.contains("--transport http"))
+        );
 
         let add = parse_add(&[
             "grok",
@@ -1594,10 +1640,8 @@ mod tests {
 
     #[test]
     fn grok_com_known_only_with_toml_definition() {
-        // Unique name: `grok_home()` is process-wide OnceLock, so GROK_HOME
-        // EnvGuard is a no-op if another test already resolved it. A leftover
-        // `grok_com_*` in the real ~/.grok disabled list would fail an orphan
-        // assertion on a well-known name.
+        // Unique name: `grok_home()` is process-wide OnceLock, so GROK_HOME. `grok_com_*` in the real ~/.grok disabled
+        // list would fail an orphan assertion on a well-known name.
         let name = format!("grok_com_orphan_{}", uuid::Uuid::new_v4().as_simple());
 
         let orphan = tempfile::tempdir().unwrap();
@@ -1627,6 +1671,24 @@ url = "https://mcp.example.test/sse"
             mcp_server_is_known(&name, defined.path()),
             "TOML-defined {name} must be known"
         );
+    }
+
+    /// A no-op disable is judged by the list the disable writes; a user-tier `enabled = false`
+    /// can be shadowed by a project definition, so it must not short-circuit the write.
+    #[test]
+    fn noop_disable_is_judged_by_the_user_disabled_list_only() {
+        let listed: toml::Value = toml::from_str(
+            "disabled_mcp_servers = [\"svc\"]\n[mcp_servers.svc]\nurl = \"https://svc.example.test/sse\"\n",
+        )
+        .unwrap();
+        assert!(user_disabled_list_has(&listed, "svc"));
+        assert!(!user_disabled_list_has(&listed, "other"));
+
+        let field_off: toml::Value = toml::from_str(
+            "[mcp_servers.svc]\nurl = \"https://svc.example.test/sse\"\nenabled = false\n",
+        )
+        .unwrap();
+        assert!(!user_disabled_list_has(&field_off, "svc"));
     }
 
     #[test]

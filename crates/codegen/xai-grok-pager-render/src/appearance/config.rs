@@ -7,10 +7,6 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{DocumentMut, Item, RawString};
 use xai_grok_shared::ui_config::UiConfig;
 
-// ============================================================================
-// Runtime Config (used by render code)
-// ============================================================================
-
 /// Background style for block content area.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum BlockBackground {
@@ -110,10 +106,7 @@ pub struct ScrollbackDisplayConfig {
     /// Blend factor for dimmed accents on collapsed groupable blocks (0.0-1.0).
     /// 0.0 is invisible (fully background), 1.0 is the full accent color. Default: 0.5.
     pub dim_accent: f32,
-    /// When `true` (Mode B / "split"): selection box wraps only the contiguous collapsed sub-group around the selected entry.
-    /// Expanded blocks within a group get their own individual selection box.
-    /// When `false` (Mode A / "always"): selection box wraps the entire group regardless of expanded blocks.
-    /// Default: `true` (Mode B).
+    /// `true`: selection wraps only the collapsed sub-group; expanded blocks get their own box. `false`: the whole group.
     pub group_selection_split: bool,
     /// When true, the active-block highlight within a group extends over the selection box border columns (│).
     /// When false (default), the highlight is inset by 1 column on each side so the borders remain uncolored.
@@ -388,8 +381,7 @@ pub struct EditBlockConfig {
     /// Show the +N/-M line summary in the collapsed header.
     /// `None` (default) follows the shell-owned `collapsed_edit_blocks` flag; an explicit pager.toml value pins the shape regardless of the flag.
     pub line_summary: Option<bool>,
-    /// When true, Edit blocks start in Expanded mode showing the diff; when false, they start Collapsed (one-line summary).
-    /// `None` (default) follows the shell-owned `collapsed_edit_blocks` flag; an explicit pager.toml value pins the shape regardless of the flag.
+    /// Whether Edit blocks start expanded. Fold shape is [`Self::effective_expanded`].
     pub expanded_by_default: Option<bool>,
     /// Separator between diff hunks.
     /// Options: "…" (ellipsis, default), "───" (line), "⋯" (midline), "" (none).
@@ -418,13 +410,13 @@ impl Default for EditBlockConfig {
 }
 
 impl EditBlockConfig {
-    /// The one policy point pairing pager.toml with the shell flag: an explicit value wins; unset defers to `collapsed_edit_blocks`.
-    /// Flag on collapses Edits to the one-liner; flag off keeps the legacy expanded diff.
+    /// A true flag collapses even when `expanded_by_default` is `Some(true)`.
+    /// Flag off returns `expanded_by_default.unwrap_or(true)`, so an explicit false still collapses.
     pub fn effective_expanded(&self, collapsed_edit_blocks: bool) -> bool {
-        self.expanded_by_default.unwrap_or(!collapsed_edit_blocks)
+        !collapsed_edit_blocks && self.expanded_by_default.unwrap_or(true)
     }
 
-    /// Effective collapsed-header `+N/-M` diffstat toggle. Same pairing as [`Self::effective_expanded`]: explicit value wins.
+    /// Effective collapsed-header `+N/-M` diffstat toggle. An explicit `line_summary` wins; unset follows the flag.
     /// Unset shows the diffstat exactly when the flag collapses Edits (the one-liner view is what the summary exists for).
     pub fn effective_line_summary(&self, collapsed_edit_blocks: bool) -> bool {
         self.line_summary.unwrap_or(collapsed_edit_blocks)
@@ -485,6 +477,10 @@ pub struct ThinkingConfig {
     /// Append a dim "(ctrl+e to expand)" hint to the *collapsed* header when it fits on the same row (never adds a row).
     /// **Not a TOML key**: minimal mode sets it, the only mode where a folded block cannot be unfolded in place.
     pub collapsed_expand_hint: bool,
+    /// Draw the reasoning rail inside the body lines (a `┃ ` prefix directly below the header's bullet) instead of painting the reserved accent column.
+    /// The rail then sits under the diamond rather than beside it.
+    /// **Not a TOML key**: minimal mode sets it so every block's bullet stays flush at column 0.
+    pub rail_under_bullet: bool,
 }
 
 impl Default for ThinkingConfig {
@@ -499,6 +495,7 @@ impl Default for ThinkingConfig {
             header_bright: false,
             body_dim_italic: false,
             collapsed_expand_hint: false,
+            rail_under_bullet: false,
         }
     }
 }
@@ -515,9 +512,7 @@ pub struct ToolConfig {
     pub dim_details: bool,
     /// Bullet/icon character rendered before tool call headers.
     pub bullet: ToolBullet,
-    // bullet_accent and bullet_color are gone: BlockContent::bullet() now decides bullet color
-    // Each block type picks its own based on state (accent color, error, default)
-    // Dimming for collapsed groupable blocks is handled by EntryRenderer
+    // Bullet color is decided by BlockContent::bullet(), not config. Collapsed dimming is EntryRenderer.
     // TODO(dim_muted): add a dim factor for collapsed text styling (not just bullet/accent).
 }
 
@@ -531,10 +526,7 @@ impl Default for ToolConfig {
     }
 }
 
-/// Bullet/icon style for tool call headers.
-///
-/// Rendered before the tool title, e.g. `⊙ Read src/main.rs`.
-/// Respects `muted_collapsed`: when the tool is collapsed and muting is enabled, the bullet color blends with the muted palette.
+/// Header icon. When collapsed and `muted_collapsed` is on, the color blends with the muted palette.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolBullet {
     /// No bullet (default).
@@ -625,25 +617,8 @@ impl Default for ExecuteConfig {
     }
 }
 
-// ============================================================================
-// Raw Config (for TOML serde)
-// ============================================================================
-//
-// ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║ MAINTAINER NOTE: When adding/changing fields or sections:                 ║
-// ║                                                                           ║
-// ║ 1. Add doc comments (///) to ALL fields in Raw* structs - they become    ║
-// ║    TOML comments via the `DocumentedFields` derive macro.                 ║
-// ║                                                                           ║
-// ║ 2. If adding a new section (e.g., RawNewBlockConfig):                     ║
-// ║    - Add it to RawBlocksConfig (or appropriate parent)                    ║
-// ║    - Add corresponding runtime config (NewBlockConfig)                    ║
-// ║    - Add From<RawNewBlockConfig> for NewBlockConfig conversion            ║
-// ║    - Add annotate_table call in to_toml_with_comments() below!            ║
-// ║                                                                           ║
-// ║ 3. The to_toml_with_comments() method generates the default config file   ║
-// ║    with comments. Update it when adding new sections.                     ║
-// ╚═══════════════════════════════════════════════════════════════════════════╝
+// Raw TOML structs: field docs become generated comments via DocumentedFields.
+// A new section also needs a runtime twin, a From conversion, and an annotate_table call in to_toml_with_comments().
 
 /// Root appearance configuration (TOML format).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, Documented, DocumentedFields)]
@@ -666,18 +641,11 @@ pub struct RawAppearanceConfig {
     pub show_plan_chip: bool,
 }
 
-/// Terminal behavior configuration (TOML format).
-///
-/// Controls fullscreen (alternate screen) policy and related terminal
-/// interaction settings.
+/// Fullscreen (alternate screen) policy and related terminal settings.
 #[derive(Debug, Clone, Serialize, Deserialize, Documented, DocumentedFields)]
 #[serde(default)]
 pub struct RawTerminalConfig {
-    /// Alt-screen (fullscreen) policy.
-    /// "auto" — fullscreen in plain terminals and normal tmux, inline in
-    ///          tmux control mode and Zellij. (default)
-    /// "always" — always enter fullscreen, even in control mode / Zellij.
-    /// "never" — never enter fullscreen; run inline in main scrollback.
+    /// "auto" (default): fullscreen except tmux control mode and Zellij. "always" / "never" force the choice.
     pub alt_screen: RawAltScreenMode,
     /// Experimental scrollback-native rendering mode. Finalized blocks are
     /// printed into the terminal's native scrollback. Default false.
@@ -686,11 +654,7 @@ pub struct RawTerminalConfig {
     pub minimal_live_rows: Option<u16>,
     /// Maximum rows for a single committed block in minimal mode. Default 2000.
     pub minimal_max_commit_rows: Option<u16>,
-    /// Commit reasoning ("Thought for Xs") to native scrollback COLLAPSED to
-    /// its one-line header instead of in full. Default false — minimal
-    /// deliberately keeps the whole reasoning body in the transcript (K9); this
-    /// is the opt-out for a terser scrollback. The body stays reachable with
-    /// `Ctrl+E` / `/expand` and `/transcript`.
+    /// Opt out of minimal's full reasoning body (K9). Collapsed header only; body stays reachable via expand/transcript.
     pub minimal_collapse_thinking: bool,
 }
 
@@ -727,10 +691,7 @@ impl From<RawAltScreenMode> for crate::terminal::AltScreenMode {
         }
     }
 }
-/// Prompt input view configuration (TOML format).
-///
-/// This configures the prompt editor widget at the bottom of the screen,
-/// NOT the user prompt block rendered inside the scrollback.
+/// Prompt editor widget, not the user prompt block in scrollback.
 #[derive(Debug, Clone, Serialize, Deserialize, Documented, DocumentedFields)]
 #[serde(default)]
 pub struct RawPromptViewConfig {
@@ -1011,10 +972,7 @@ pub struct RawEditBlockConfig {
     pub bg: RawBlockBackground,
     /// Whether to show background behind accent.
     pub accent_bg: bool,
-    /// Accent color for vertical line.
-    /// Use "none" to disable, or a color value.
-    /// Formats: [r, g, b], "#rrggbb", "#rgb", or named color.
-    /// Named: BLUE, CYAN, GREEN, YELLOW, ORANGE, RED, MAGENTA, COMMENT, etc.
+    /// Vertical-line accent. "none" disables. Accepts RGB, hex, or a named color.
     pub accent: OptionalColor,
     /// Whether diff line background extends to include gutter (line numbers).
     pub gutter_bg: bool,
@@ -1025,10 +983,8 @@ pub struct RawEditBlockConfig {
     /// Commented out (unset), it follows the `[ui] collapsed_edit_blocks`
     /// flag in config.toml; uncomment to pin either way.
     pub line_summary: Option<bool>,
-    /// Start Edit blocks expanded (showing the diff) instead of as a
-    /// collapsed one-line summary. Commented out (unset), it follows the
-    /// `[ui] collapsed_edit_blocks` flag in config.toml (flag on =
-    /// collapsed); uncomment to pin either way.
+    /// Unset follows `[ui] collapsed_edit_blocks`. A true flag collapses even when this is true.
+    /// An explicit false still collapses when the flag is off.
     pub expanded_by_default: Option<bool>,
     /// Separator between diff hunks. Options: "…" (default), "───", "⋯", "" (none).
     pub hunk_separator: Option<String>,
@@ -1055,10 +1011,7 @@ impl Default for RawEditBlockConfig {
     }
 }
 
-/// Configuration for user prompt block rendering (TOML format).
-///
-/// This configures how user prompts appear inside the scrollback,
-/// NOT the prompt editor widget (see [prompt] section).
+/// User prompt block in scrollback, not the prompt editor widget.
 #[derive(Debug, Clone, Serialize, Deserialize, Documented, DocumentedFields)]
 #[serde(default)]
 pub struct RawPromptConfig {
@@ -1246,10 +1199,6 @@ impl From<RawBlockBackground> for BlockBackground {
         }
     }
 }
-
-// ============================================================================
-// Raw → Runtime Conversion
-// ============================================================================
 
 impl From<RawAppearanceConfig> for AppearanceConfig {
     fn from(raw: RawAppearanceConfig) -> Self {
@@ -1486,13 +1435,10 @@ impl From<RawThinkingConfig> for ThinkingConfig {
             header_bright: raw.header_bright,
             body_dim_italic: false,
             collapsed_expand_hint: false,
+            rail_under_bullet: false,
         }
     }
 }
-
-// ============================================================================
-// Color Parsing
-// ============================================================================
 
 /// An optional color that can be "none" or a color value.
 /// This allows TOML to represent None values explicitly.
@@ -1577,15 +1523,48 @@ fn parse_hex_color(hex: &str) -> Result<Color, String> {
     let hex = hex.trim_start_matches('#');
     let (r, g, b) = match hex.len() {
         3 => {
-            let r = u8::from_str_radix(&hex[0..1], 16).map_err(|e| e.to_string())? * 17;
-            let g = u8::from_str_radix(&hex[1..2], 16).map_err(|e| e.to_string())? * 17;
-            let b = u8::from_str_radix(&hex[2..3], 16).map_err(|e| e.to_string())? * 17;
+            let r = u8::from_str_radix(
+                hex.get(..1)
+                    .ok_or_else(|| format!("invalid hex color: #{hex}"))?,
+                16,
+            )
+            .map_err(|e| e.to_string())?
+                * 17;
+            let g = u8::from_str_radix(
+                hex.get(1..2)
+                    .ok_or_else(|| format!("invalid hex color: #{hex}"))?,
+                16,
+            )
+            .map_err(|e| e.to_string())?
+                * 17;
+            let b = u8::from_str_radix(
+                hex.get(2..3)
+                    .ok_or_else(|| format!("invalid hex color: #{hex}"))?,
+                16,
+            )
+            .map_err(|e| e.to_string())?
+                * 17;
             (r, g, b)
         }
         6 => {
-            let r = u8::from_str_radix(&hex[0..2], 16).map_err(|e| e.to_string())?;
-            let g = u8::from_str_radix(&hex[2..4], 16).map_err(|e| e.to_string())?;
-            let b = u8::from_str_radix(&hex[4..6], 16).map_err(|e| e.to_string())?;
+            let r = u8::from_str_radix(
+                hex.get(..2)
+                    .ok_or_else(|| format!("invalid hex color: #{hex}"))?,
+                16,
+            )
+            .map_err(|e| e.to_string())?;
+            let g = u8::from_str_radix(
+                hex.get(2..4)
+                    .ok_or_else(|| format!("invalid hex color: #{hex}"))?,
+                16,
+            )
+            .map_err(|e| e.to_string())?;
+            let b = u8::from_str_radix(
+                hex.get(4..6)
+                    .ok_or_else(|| format!("invalid hex color: #{hex}"))?,
+                16,
+            )
+            .map_err(|e| e.to_string())?;
             (r, g, b)
         }
         _ => return Err(format!("invalid hex color: #{hex}")),
@@ -1649,10 +1628,6 @@ fn lookup_named_color(name: &str) -> Result<Color, String> {
     };
     Ok(color)
 }
-
-// ============================================================================
-// TOML Generation with Comments
-// ============================================================================
 
 impl RawAppearanceConfig {
     pub fn to_toml_with_comments() -> String {
@@ -1814,41 +1789,27 @@ pub fn persist_respect_manual_folds(enabled: bool) -> std::io::Result<()> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let path = crate::util::pager_toml_path();
-    let content = match std::fs::read_to_string(&path) {
+    persist_respect_manual_folds_to(&crate::util::pager_toml_path(), enabled)
+}
+
+/// Path-taking body of [`persist_respect_manual_folds`]; the caller holds `PAGER_TOML_SAVE_LOCK`.
+fn persist_respect_manual_folds_to(path: &std::path::Path, enabled: bool) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+
+    // Bind read + publish to one follow destination (path + inode).
+    let dest = xai_grok_config::fs_atomic::bind_follow_destination(path)?;
+    let content = match std::fs::read_to_string(dest.as_path()) {
         Ok(c) => c,
         Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e),
     };
+    let dest = xai_grok_config::fs_atomic::require_same_bound_destination(path, &dest)?;
     let updated = upsert_respect_manual_folds(&content, enabled)
         .map_err(|e| Error::new(ErrorKind::InvalidData, e))?;
-    if let Some(dir) = path.parent() {
+    if let Some(dir) = dest.as_path().parent() {
         std::fs::create_dir_all(dir)?;
     }
-
-    #[cfg(unix)]
-    let prior_mode: Option<u32> = std::fs::metadata(&path).ok().map(|m| {
-        use std::os::unix::fs::PermissionsExt;
-        m.permissions().mode()
-    });
-
-    let suffix = {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        format!("toml.tmp.{}.{}", std::process::id(), nanos)
-    };
-    let tmp = path.with_extension(suffix);
-    std::fs::write(&tmp, updated)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if let Some(mode) = prior_mode {
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
-        }
-    }
-    std::fs::rename(&tmp, &path)
+    xai_grok_config::fs_atomic::write_atomically_bound(&dest, &updated, None)
 }
 
 fn upsert_respect_manual_folds(content: &str, enabled: bool) -> Result<String, String> {
@@ -1896,13 +1857,38 @@ fn annotate_table<T: DocumentedFields>(table: &mut toml_edit::Table) {
     }
 }
 
-// ============================================================================
-// Tests
-// ============================================================================
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `/settings` toggle on a dotfile-managed `~/.grok/pager.toml` must reach the dotfile, not replace the link.
+    #[cfg(unix)]
+    #[test]
+    #[serial_test::serial]
+    fn persist_respect_manual_folds_writes_through_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let _home = xai_grok_env::EnvVarGuard::set("GROK_HOME", dir.path().to_str().unwrap());
+        let target = dir.path().join("dotfiles").join("pager.toml");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "[scrollback.scroll]\nanchor_on_fold = false\n").unwrap();
+        let link = dir.path().join("pager.toml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        persist_respect_manual_folds_to(&link, true).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "pager.toml must stay a symlink"
+        );
+        let raw: RawAppearanceConfig =
+            toml::from_str(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        let cfg: AppearanceConfig = raw.into();
+        assert!(cfg.scrollback.scroll.respect_manual_folds);
+        assert!(!cfg.scrollback.scroll.anchor_on_fold, "siblings preserved");
+    }
 
     #[test]
     fn test_parse_hex_color() {
@@ -2199,17 +2185,17 @@ gutter_bg = true
         }
     }
 
-    /// Unset pager.toml shape keys follow the shell-owned `collapsed_edit_blocks` flag; explicit values pin the shape in both directions.
-    /// Flag on gives the collapsed one-liner with diffstat; flag off gives the legacy expanded diff without it.
+    /// A true `collapsed_edit_blocks` flag collapses edits even when `expanded_by_default` is `Some(true)`.
+    /// Flag off: `None` and `Some(true)` expand, `Some(false)` collapses. `line_summary` still pins on its own.
     #[test]
-    fn effective_edit_shape_follows_flag_unless_pinned() {
+    fn flag_on_forces_collapse_line_summary_still_pins() {
         let unset = EditBlockConfig::default();
-        assert!(unset.effective_expanded(false), "flag off: expanded");
+        assert!(unset.effective_expanded(false), "flag off + None: expanded");
         assert!(
             !unset.effective_line_summary(false),
             "flag off: no diffstat"
         );
-        assert!(!unset.effective_expanded(true), "flag on: collapsed");
+        assert!(!unset.effective_expanded(true), "flag on + None: collapsed");
         assert!(unset.effective_line_summary(true), "flag on: diffstat");
 
         let pinned = EditBlockConfig {
@@ -2218,8 +2204,12 @@ gutter_bg = true
             ..EditBlockConfig::default()
         };
         assert!(
-            pinned.effective_expanded(true),
-            "explicit expanded beats the flag"
+            !pinned.effective_expanded(true),
+            "flag on collapses even when expanded_by_default is Some(true)"
+        );
+        assert!(
+            pinned.effective_expanded(false),
+            "flag off + Some(true): expanded"
         );
         assert!(
             pinned.effective_line_summary(false),
@@ -2231,8 +2221,12 @@ gutter_bg = true
             ..EditBlockConfig::default()
         };
         assert!(
+            !pinned.effective_expanded(true),
+            "flag on + Some(false): collapsed"
+        );
+        assert!(
             !pinned.effective_expanded(false),
-            "explicit collapse beats the flag"
+            "flag off + Some(false): collapsed"
         );
         assert!(
             !pinned.effective_line_summary(true),
@@ -2272,8 +2266,6 @@ gutter_bg = true
             "inserted key must be active:\n{updated}"
         );
     }
-
-    // ── Terminal config (alt_screen) parsing ─────────────────────
 
     #[test]
     fn terminal_alt_screen_auto_default() {
@@ -2358,9 +2350,11 @@ gutter_bg = true
         let cfg = AppearanceConfig::default();
         assert!(!cfg.scrollback.blocks.thinking.body_dim_italic);
         assert!(!cfg.scrollback.blocks.thinking.collapsed_expand_hint);
+        assert!(!cfg.scrollback.blocks.thinking.rail_under_bullet);
 
         let template = RawAppearanceConfig::to_toml_with_comments();
         assert!(!template.contains("body_dim_italic"));
         assert!(!template.contains("collapsed_expand_hint"));
+        assert!(!template.contains("rail_under_bullet"));
     }
 }

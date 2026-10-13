@@ -25,7 +25,10 @@ impl PipeReader {
             loop {
                 match stream.read(&mut chunk).await {
                     Ok(0) | Err(_) => break,
-                    Ok(n) => Self::lock_buffer(&task_buffer).extend_from_slice(&chunk[..n]),
+                    Ok(n) => {
+                        let Some(read) = chunk.get(..n) else { break };
+                        Self::lock_buffer(&task_buffer).extend_from_slice(read);
+                    }
                 }
             }
         });
@@ -43,8 +46,7 @@ impl PipeReader {
         std::mem::take(&mut Self::lock_buffer(&self.buffer))
     }
 
-    /// Wait for EOF (pipe closed by all writers) at most [`KILL_REAP_TIMEOUT`], then return everything read so far.
-    /// Callers only join after the child was reaped or killed, so EOF is normally immediate.
+    /// Wait for EOF (pipe closed by all writers) at most [`KILL_REAP_TIMEOUT`], then return everything read so far. Callers only join after the child was reaped or killed, so EOF is normally immediate.
     /// The bound is a backstop for writers that outlive the command and keep the pipe open, like a background descendant (`printf hi; sleep 30 &`).
     /// A process wedged in uninterruptible kernel I/O (D-state) also holds the pipe open, and not even SIGKILL moves it.
     async fn join_bounded(mut self) -> Vec<u8> {
@@ -73,7 +75,10 @@ fn truncate_buffer(buf: &mut Vec<u8>, limit: usize) -> bool {
             .map(|(i, _)| i)
             .unwrap_or(s.len());
 
-        *buf = s[start_idx..].as_bytes().to_vec();
+        let Some(tail) = s.get(start_idx..) else {
+            return false;
+        };
+        *buf = tail.as_bytes().to_vec();
 
         true
     } else {
@@ -120,10 +125,8 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
             .spawn()
             .map_err(|e| TerminalError::Other(format!("Failed to start shell: {e}")))?;
 
-        // Own the whole tree, not just the direct shell
-        // On timeout the group is killed so grandchildren can't keep running (and can't hold the output pipes open past the kill)
-        // This is the same pattern as `gateway_bridge::local_workspace_supervisor`
-        // The group kill is extra on top of the direct kill, so a failure to create or attach the group only logs and the shell keeps running
+        // Own the whole tree, not just the direct shell On timeout the group is killed so grandchildren can't keep running (and can't hold the output pipes open past the kill)
+        // This is the same pattern as `gateway_bridge::local_workspace_supervisor` The group kill is extra on top of the direct kill, so a failure to create or attach the group only logs and the shell keeps running
         let process_group = match xai_tty_utils::ProcessGroup::new() {
             Ok(mut group) => {
                 if let Err(e) = group.attach(&child) {
@@ -159,13 +162,9 @@ impl AsyncTerminalRunner for LocalTerminalRunner {
                 .code(),
             Err(_) => {
                 timed_out = true;
-                // Kill the direct child AND the whole group (grandchildren)
-                // Then return the synthetic timeout result without waiting for the corpse: `timed_out: true` already tells the caller everything
-                // A D-state child would never become reapable anyway
-                // Both kills are unconditional: `kill()` on a group whose attach failed is a silent no-op
-                // The direct `start_kill` is the guaranteed floor (same as `util/subprocess.rs`)
-                // The kills close the pipes, so the bounded joins below return immediately in the normal case
-                // The abandoned child goes to tokio's orphan reaper
+                // Kill the direct child AND the whole group (grandchildren) Then return the synthetic timeout result without waiting for the corpse: `timed_out: true` already tells the caller everything
+                // A D-state child would never become reapable anyway Both kills are unconditional: `kill()` on a group whose attach failed is a silent no-op The direct `start_kill` is the guaranteed floor (same as `util/subprocess.rs`)
+                // The kills close the pipes, so the bounded joins below return immediately in the normal case The abandoned child goes to tokio's orphan reaper
                 if let Err(e) = child.start_kill() {
                     tracing::warn!("Failed to kill timed-out process: {e}");
                 }
@@ -263,10 +262,8 @@ mod tests {
         assert_eq!(result.exit_code, Some(0));
     }
 
-    /// Timing out a command whose grandchild inherited the output pipes must return promptly.
-    /// It must also actually kill the grandchild via the group kill, not merely stop waiting for it.
-    /// Without the group kill the joins wait for the grandchild's EOF: the full sleep here, forever for a D-state writer.
-    /// That unbounded wait was the production incident this guards against.
+    /// Timing out a command whose grandchild inherited the output pipes must return promptly. It must also actually kill the grandchild via the group kill, not merely stop waiting for it.
+    /// Without the group kill the joins wait for the grandchild's EOF: the full sleep here, forever for a D-state writer. That unbounded wait was the production incident this guards against.
     #[tokio::test]
     #[cfg(unix)]
     async fn test_timeout_kills_grandchildren_and_returns_promptly() {

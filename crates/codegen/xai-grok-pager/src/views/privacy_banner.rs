@@ -360,12 +360,12 @@ pub(crate) fn render_with_locale(
         height: 1,
     };
     let opt_out_style = if hovered(opt_out_rect) {
-        Style::default().fg(theme.text_primary).bg(theme.bg_hover)
+        theme.hover_overlay().fg(theme.text_primary)
     } else {
         Style::default().fg(theme.gray_bright)
     };
     let opt_in_style = if hovered(opt_in_rect) {
-        Style::default().fg(theme.link_fg).bg(theme.bg_hover)
+        theme.hover_overlay().fg(theme.link_fg)
     } else {
         Style::default().fg(theme.text_primary)
     };
@@ -424,7 +424,9 @@ mod tests {
 
     /// The buffer text under `rect` on its row.
     fn text_at(rows: &[String], rect: Rect) -> String {
-        let row = &rows[rect.y as usize];
+        let Some(row) = rows.get(rect.y as usize) else {
+            return String::new();
+        };
         row.chars()
             .skip(rect.x as usize)
             .take(rect.width as usize)
@@ -437,12 +439,15 @@ mod tests {
         for width in [200, 117, 110, 100, 80, 72, 60, 45, 40, 36, 30, 24, 18] {
             let rows = rows(width);
             assert_eq!(rows.len(), height(width) as usize);
+            let Some((title, body, legal)) = rows.split_first().and_then(|(title, rest)| {
+                rest.split_last().map(|(legal, body)| (title, body, legal))
+            }) else {
+                panic!("width {width}: expected title, body, and legal rows, got {rows:?}");
+            };
             assert!(
-                rows[0].starts_with(PRIVACY_BANNER_TITLE),
-                "width {width}: title must never be clipped, got {:?}",
-                rows[0]
+                title.starts_with(PRIVACY_BANNER_TITLE),
+                "width {width}: title must never be clipped, got {title:?}"
             );
-            let legal = rows.last().expect("legal row");
             assert!(
                 PRIVACY_BANNER_LEGAL_VARIANTS
                     .iter()
@@ -450,7 +455,7 @@ mod tests {
                 "width {width}: legal line must survive whole, got {legal:?}"
             );
             assert!(
-                rows[1..rows.len() - 1].iter().all(|r| !r.is_empty()),
+                body.iter().all(|r| !r.is_empty()),
                 "width {width}: body rows must not be blank: {rows:?}"
             );
         }
@@ -460,7 +465,8 @@ mod tests {
     #[test]
     fn body_copy_is_complete_at_common_widths() {
         for width in [200, 117, 100, 80, 60] {
-            let body = rows(width)[1..].join(" ");
+            let rows = rows(width);
+            let body = rows.get(1..).unwrap_or(&[]).join(" ");
             let flattened: String = body.split_whitespace().collect::<Vec<_>>().join(" ");
             assert!(
                 flattened.contains(PRIVACY_BANNER_DESC),

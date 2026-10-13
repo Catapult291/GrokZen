@@ -12,14 +12,8 @@ use xai_grok_sampling_types::ConversationItem;
 
 use crate::commands::{StrictAppendAck, StrictAppendError};
 
-/// Abstraction over chat-specific persistence operations.
-///
-/// The actor owns this exclusively via `Box<dyn ChatPersistence>`, so all
-/// methods take `&mut self` — no interior mutability needed.
-///
-/// The real implementation wraps an `mpsc::UnboundedSender<PersistenceMsg>`
-/// (which only needs `&self` to send, but `&mut self` is still correct
-/// because the actor is the sole owner).
+/// Abstraction over chat-specific persistence. The actor owns this exclusively via `Box<dyn ChatPersistence>`.
+/// Methods take `&mut self` — no interior mutability. The real impl wraps a sender the actor solely owns.
 pub trait ChatPersistence: Send + 'static {
     /// Persist a single conversation item (append to chat_history.jsonl).
     fn persist_message(&mut self, item: &ConversationItem);
@@ -33,10 +27,9 @@ pub trait ChatPersistence: Send + 'static {
     /// Replace the entire chat history (compaction / rewind).
     fn replace_history(&mut self, items: &[ConversationItem]);
 
-    /// Destructive image-strip rewrite: back up the on-disk history, then
-    /// replace it, acking the DISK outcome. A failed backup gates off the
-    /// rewrite so recoverability never silently evaporates; backends without
-    /// a recoverable store may no-op the backup but must ack the write.
+    /// Destructive image-strip rewrite: back up on-disk history, then replace it, acking the disk outcome.
+    /// A failed backup gates off the rewrite so recoverability never silently evaporates.
+    /// Backends without a recoverable store may no-op the backup but must ack the write.
     fn replace_history_for_strip_and_ack(
         &mut self,
         items: &[ConversationItem],
@@ -288,7 +281,10 @@ mod tests {
         mock.persist_message(&item);
         let records = rx.drain();
         assert_eq!(records.len(), 1);
-        assert!(matches!(&records[0], PersistenceRecord::Message(_)));
+        assert!(matches!(
+            records.first(),
+            Some(PersistenceRecord::Message(_))
+        ));
     }
 
     #[test]
@@ -306,8 +302,8 @@ mod tests {
         mock.replace_history(&[ConversationItem::system("a"), ConversationItem::system("b")]);
         let records = rx.drain();
         assert_eq!(records.len(), 1);
-        match &records[0] {
-            PersistenceRecord::ReplaceHistory(items) => assert_eq!(items.len(), 2),
+        match records.first() {
+            Some(PersistenceRecord::ReplaceHistory(items)) => assert_eq!(items.len(), 2),
             other => panic!("expected ReplaceHistory, got {other:?}"),
         }
     }

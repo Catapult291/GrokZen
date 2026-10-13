@@ -18,13 +18,16 @@ use crate::file_system::ContentSearchRequest;
 use crate::handle::WorkspaceHandle;
 use crate::worktree::{ApplyWorktreeRequest, CreateWorktreeRequest, RemoveWorktreeRequest};
 use async_trait::async_trait;
+use base64::Engine;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use xai_computer_hub_sdk::ToolHarness;
 use xai_grok_tools::types::output::ToolRunResult;
+use xai_grok_tools::types::resources::SessionFolder;
 use xai_grok_workspace_client::{WorkspaceClient, is_transport_fatal};
 pub use xai_grok_workspace_types::rpc::agents_md::DiscoverAgentsMdReq;
 pub use xai_grok_workspace_types::rpc::code_nav::{
@@ -34,8 +37,9 @@ pub use xai_grok_workspace_types::rpc::code_nav::{
 pub use xai_grok_workspace_types::rpc::export_github::ExportGithubReq;
 pub use xai_grok_workspace_types::rpc::fs::{
     ClientFsListNode, ClientFsListReq, ClientFsListRes, ClientFsReadFileReq, ClientFsReadFileRes,
-    ClientFsStatReq, ClientFsStatRes, GetFileEntry, GetFileResult, GetFilesReq, GetFilesRes,
-    PutFileEntry, PutFileResult, PutFilesReq, PutFilesRes,
+    ClientFsStatReq, ClientFsStatRes, ClientFsWriteFileReq, ClientFsWriteFileRes, GetFileEntry,
+    GetFileResult, GetFilesReq, GetFilesRes, PutFileEntry, PutFileResult, PutFilesReq, PutFilesRes,
+    StoreSessionImageReq, StoreSessionImageRes,
 };
 pub use xai_grok_workspace_types::rpc::git::{
     BinaryFileInfoData, CheckoutCommitResponse, CommitWithPatchData, DetectVcsKindReq,
@@ -93,14 +97,6 @@ pub trait WorkspaceOp: WorkspaceRpc + DeserializeOwned + Send + Sync {
         ws: &WorkspaceHandle,
         session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response>;
-}
-/// Prepare a worktree fork from an existing worktree (validation + path resolution).
-/// Returns a serialized result with `spawn_task` flag and the response.
-fn hub_transfer_client() -> WorkspaceResult<reqwest::Client> {
-    xai_grok_extra_ca::build_reqwest_client(|builder| {
-        builder.timeout(std::time::Duration::from_secs(600))
-    })
-    .map_err(|e| WorkspaceError::HubError(format!("failed to create HTTP client: {e}")))
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrepareWorktreeFromWorktreeReq {
@@ -259,13 +255,11 @@ fn session_tracker(
     Ok(session.hunk_tracker().clone())
 }
 /// Ancestor hop budget when locating `.grok/repos.json`.
-/// Grove rewrite is one hop (`/workspace/app` to `/workspace`); desktop workspaces can sit deeper, so this is a backstop only.
+/// A single-repo sandbox rewrite is one hop (`/workspace/app` to `/workspace`); desktop workspaces can sit deeper, so this is a backstop only.
 /// Primary bounds are the sandbox root (`/workspace`) and the user-global grok home.
 const REPOS_MANIFEST_MAX_ANCESTOR_HOPS: usize = 16;
-/// Directories to probe for [`REPOS_MANIFEST_RELATIVE_PATH`], starting at `root_cwd` (the agent cwd after the grove rewrite) and walking up.
-///
-/// Does not escape the sandbox workspace or load `~/.grok/repos.json` /
-/// `$GROK_HOME/repos.json` (user-global, not a provisioned workspace).
+/// Directories to probe for [`REPOS_MANIFEST_RELATIVE_PATH`], starting at `root_cwd` (the agent cwd after a single-repo rewrite) and walking up.
+/// Does not escape the sandbox workspace or load `~/.grok/repos.json` / `$GROK_HOME/repos.json` (user-global, not a provisioned workspace).
 fn repos_manifest_search_dirs(start: &std::path::Path) -> Vec<std::path::PathBuf> {
     let rel = xai_grok_workspace_types::rpc::repos::REPOS_MANIFEST_RELATIVE_PATH;
     let home = xai_dirs::home_dir();
@@ -1048,6 +1042,85 @@ impl WorkspaceOp for HookRegistryReq {
     }
 }
 #[async_trait]
+impl WorkspaceOp for StoreSessionImageReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        let session_id = session_id.ok_or_else(|| {
+            WorkspaceError::HubError("store_session_image requires a bound session".to_owned())
+        })?;
+        let session = ws
+            .session(session_id)
+            .ok_or_else(|| WorkspaceError::SessionNotFound(session_id.to_owned()))?;
+        if !matches!(self.extension.as_str(), "jpg" | "png" | "webp" | "gif") {
+            return Err(WorkspaceError::HubError(
+                "store_session_image extension must be jpg, png, webp, or gif".to_owned(),
+            ));
+        }
+        let folder = session
+            .toolset()
+            .resources
+            .lock()
+            .await
+            .require::<SessionFolder>()
+            .map_err(|e| WorkspaceError::HubError(format!("store_session_image: {e}")))?
+            .0
+            .clone();
+        if self.content_base64.len()
+            > xai_grok_workspace_types::rpc::fs::MAX_SESSION_IMAGE_BASE64_BYTES
+        {
+            return Err(WorkspaceError::HubError(format!(
+                "session image exceeds {} byte limit",
+                xai_grok_workspace_types::rpc::fs::MAX_SESSION_IMAGE_BYTES
+            )));
+        }
+        let content_base64 = self.content_base64.clone();
+        let extension = self.extension.clone();
+        tokio::task::spawn_blocking(move || {
+            let content = base64::engine::general_purpose::STANDARD
+                .decode(content_base64)
+                .map_err(|e| {
+                    WorkspaceError::HubError(format!("invalid session image base64: {e}"))
+                })?;
+            if content.len() > xai_grok_workspace_types::rpc::fs::MAX_SESSION_IMAGE_BYTES {
+                return Err(WorkspaceError::HubError(format!(
+                    "session image exceeds {} byte limit",
+                    xai_grok_workspace_types::rpc::fs::MAX_SESSION_IMAGE_BYTES
+                )));
+            }
+            let folder = dunce::canonicalize(&folder).map_err(|e| {
+                WorkspaceError::HubError(format!(
+                    "resolve session image folder {}: {e}",
+                    folder.display()
+                ))
+            })?;
+            let path = folder.join(format!("{}.{extension}", uuid::Uuid::new_v4()));
+            let file_path = path
+                .to_str()
+                .ok_or_else(|| {
+                    WorkspaceError::HubError("session image path is not UTF-8".to_owned())
+                })?
+                .to_owned();
+            let mut temp = tempfile::NamedTempFile::new_in(&folder).map_err(|e| {
+                WorkspaceError::HubError(format!("create session image temporary file: {e}"))
+            })?;
+            temp.write_all(&content)
+                .map_err(|e| WorkspaceError::HubError(format!("write session image: {e}")))?;
+            temp.as_file()
+                .sync_all()
+                .map_err(|e| WorkspaceError::HubError(format!("sync session image: {e}")))?;
+            temp.persist_noclobber(&path).map_err(|e| {
+                WorkspaceError::HubError(format!("persist session image {}: {e}", path.display()))
+            })?;
+            Ok(StoreSessionImageRes { file_path })
+        })
+        .await
+        .map_err(|e| WorkspaceError::JoinError(e.to_string()))?
+    }
+}
+#[async_trait]
 impl WorkspaceOp for PutFilesReq {
     async fn execute(
         &self,
@@ -1095,6 +1168,16 @@ impl WorkspaceOp for ClientFsReadFileReq {
         session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
         crate::file_system::client_fs::read_file(ws, session_id, self).await
+    }
+}
+#[async_trait]
+impl WorkspaceOp for ClientFsWriteFileReq {
+    async fn execute(
+        &self,
+        ws: &WorkspaceHandle,
+        session_id: Option<&str>,
+    ) -> WorkspaceResult<Self::Response> {
+        crate::file_system::client_fs::write_file(ws, session_id, self).await
     }
 }
 /// Resolve the index root for a code-nav op: the explicit per-session `root` (the cwd the client sends per window), else the workspace root.
@@ -1346,8 +1429,9 @@ impl WorkspaceOp for WorktreeGcReq {
         _session_id: Option<&str>,
     ) -> WorkspaceResult<Self::Response> {
         let (dry_run, max_age_secs, force) = (self.dry_run, self.max_age_secs, self.force);
+        let span = tracing::Span::current();
         let report = tokio::task::spawn_blocking(move || {
-            crate::worktree::gc_worktrees_mgmt(dry_run, max_age_secs, force)
+            span.in_scope(|| crate::worktree::gc_worktrees_mgmt(dry_run, max_age_secs, force))
         })
         .await
         .map_err(|e| WorkspaceError::HubError(e.to_string()))?
@@ -1418,15 +1502,7 @@ impl WorkspaceOp for WorktreeDbStatsReq {
         serde_json::to_value(stats).map_err(|e| WorkspaceError::HubError(e.to_string()))
     }
 }
-/// Dual-mode workspace operations handle.
-///
-/// - **`Local`** wraps a [`WorkspaceHandle`].
-///   Extensions dispatch through the handle.
-///   Tool calls dispatch through the workspace session's [`FinalizedToolset`](xai_grok_tools::registry::types::FinalizedToolset).
-///   Call [`bind_local_session`](Self::bind_local_session) after building the agent to install the toolset on the workspace session.
-///
-/// - **`Proxy`** wraps a [`WorkspaceClient`] connected to a remote hub.
-///   Everything routes through hub WebSocket to a remote workspace server.
+/// Dual-mode workspace operations handle. - **`Local`** wraps a [`WorkspaceHandle`]. Extensions dispatch through the handle.
 #[derive(Clone)]
 pub enum WorkspaceOps {
     /// Local in-process mode: extensions dispatch through the handle, tool calls through the workspace session's toolset.
@@ -1470,18 +1546,12 @@ impl WorkspaceOps {
             Self::Proxy { .. } => None,
         }
     }
-    /// Create the workspace session and bind the agent's toolset for local mode.
-    ///
-    /// Creates the session (if absent) reusing the agent's per-session `hunk_tracker` rooted at `cwd`.
-    /// Workspace-routed hunk queries then resolve the same tracker the agent feeds rather than a duplicate rooted at the launch directory.
-    /// Then replaces the session's toolset.
-    /// `cwd` and `hunk_tracker` are only used on first create; a re-bind (e.g. after an agent rebuild) just replaces the toolset.
-    ///
-    /// The installed toolset keeps the shell's own terminal backend.
-    /// The backend created with the session stays idle and is what `drop_session`/evict cancel.
-    /// That backend is deliberately never adopted from the external toolset, or teardown would SIGKILL a backend the shell shares.
-    ///
-    /// No-op in proxy mode (the workspace server owns sessions).
+    /// Create the workspace session and bind the agent's toolset for local mode, reusing the agent's hunk tracker so queries do not see a duplicate.
+    /// `cwd` and `hunk_tracker` are only used on first create; a re-bind only replaces the toolset. The session's own terminal backend is never adopted, or teardown would SIGKILL one the shell shares.
+    /// Last writer wins, so a caller binds only once it owns the id: the shell binds from the installer after
+    /// the registry accepts the install, not from the spawning actor, so overlapping installs do not race here;
+    /// the actor re-binds only as the owner, on its own rebuild.
+    /// Returns whether a binding was taken: `false` in proxy mode, where there is nothing to bind.
     pub fn bind_local_session(
         &self,
         session_id: &str,
@@ -1489,26 +1559,31 @@ impl WorkspaceOps {
         hunk_tracker: xai_hunk_tracker::HunkTrackerHandle,
         toolset: Arc<xai_grok_tools::registry::types::FinalizedToolset>,
         viewer_ctx: Option<xai_tool_runtime::WorkspaceViewerContext>,
-    ) -> WorkspaceResult<()> {
+    ) -> WorkspaceResult<bool> {
         let Self::Local { handle } = self else {
-            return Ok(());
+            return Ok(false);
         };
-        if handle.session(session_id).is_none() {
-            handle.create_session_with_tracker_and_viewer_ctx(
+        for _ in 0..2 {
+            if handle.replace_session_toolset_if_mapped(session_id, Arc::clone(&toolset)) {
+                return Ok(true);
+            }
+            match handle.create_session_with_tracker_and_viewer_ctx(
                 session_id,
-                cwd,
-                hunk_tracker,
+                cwd.clone(),
+                hunk_tracker.clone(),
                 None,
                 crate::capability::CapabilityMode::All,
-                viewer_ctx,
+                viewer_ctx.clone(),
                 false,
-            )?;
+            ) {
+                Ok(_) | Err(WorkspaceError::SessionAlreadyExists(_)) => {}
+                Err(e) => return Err(e),
+            }
         }
-        let session = handle
-            .session(session_id)
-            .ok_or_else(|| WorkspaceError::SessionNotFound(session_id.to_owned()))?;
-        session.replace(session.effective_tool_config(), toolset);
-        Ok(())
+        if handle.replace_session_toolset_if_mapped(session_id, toolset) {
+            return Ok(true);
+        }
+        Err(WorkspaceError::SessionNotFound(session_id.to_owned()))
     }
     /// Release the workspace session. No-op in proxy mode.
     pub fn end_local_session(&self, session_id: &str) {
@@ -1519,6 +1594,18 @@ impl WorkspaceOps {
         if let Err(e) = handle.drop_session(session_id, session_id) {
             tracing::debug!(%session_id, error = %e, "end_local_session: drop_session failed (expected if never bound)");
         }
+    }
+    /// [`Self::end_local_session`] only while `bound` is still the session's toolset; returns whether
+    /// it released. `false` in proxy mode.
+    pub fn end_local_session_if_bound(
+        &self,
+        session_id: &str,
+        bound: &Arc<xai_grok_tools::registry::types::FinalizedToolset>,
+    ) -> bool {
+        let Self::Local { handle } = self else {
+            return false;
+        };
+        handle.drop_session_if_bound(session_id, bound)
     }
     pub async fn on_before_turn(
         &self,
@@ -1573,11 +1660,7 @@ impl WorkspaceOps {
             .into_result()
             .map_err(crate::rpc_envelope::rpc_error_to_workspace)
     }
-    /// Dispatch a typed operation in either local or proxy mode.
-    ///
-    /// - **Local mode**: calls `op.execute(handle, session_id)` directly.
-    /// - **Proxy mode**: serializes the op and routes through the server RPC.
-    ///   The server handler owns session context, so `session_id` is only needed for local `execute()`.
+    /// Dispatch a typed operation in either local or proxy mode. The server handler owns session context, so `session_id` is only needed for local `execute()`.
     pub async fn dispatch<Op: WorkspaceOp>(
         &self,
         op: &Op,
@@ -1666,17 +1749,27 @@ impl WorkspaceOps {
     pub async fn get_files(&self, req: GetFilesReq) -> WorkspaceResult<GetFilesRes> {
         self.dispatch(&req, None).await
     }
-    /// Dispatch a tool call through the workspace.
-    ///
-    /// - **Local**: dispatches through the workspace session's [`FinalizedToolset`](xai_grok_tools::registry::types::FinalizedToolset) (in-process).
-    ///   Requires `session_id` to look up the session.
-    /// - **Proxy**: routes through the server `ToolHarness` (remote).
+    /// Dispatch a tool call through the workspace. - **Local**: dispatches through the workspace session's [`FinalizedToolset`](xai_grok_tools::registry::types::FinalizedToolset) (in-process).
+    /// Requires `session_id` to look up the session.
     pub async fn call_tool(
         &self,
         name: &str,
         args: Value,
         call_id: &str,
         session_id: Option<&str>,
+    ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
+        let mut ctx = xai_tool_runtime::ToolCallContext::default();
+        ctx.call_id = xai_tool_protocol::ToolCallId::new(call_id.to_owned()).unwrap_or(ctx.call_id);
+        self.call_tool_with_context(name, args, session_id, ctx)
+            .await
+    }
+    /// Local dispatch keeps the caller's context. The proxy hop cannot carry a slot, so it is not serialized.
+    pub async fn call_tool_with_context(
+        &self,
+        name: &str,
+        args: Value,
+        session_id: Option<&str>,
+        ctx: xai_tool_runtime::ToolCallContext,
     ) -> Result<ToolRunResult, xai_tool_runtime::ToolError> {
         match self {
             Self::Local { handle } => {
@@ -1695,7 +1788,7 @@ impl WorkspaceOps {
                         ),
                     )
                 })?;
-                session.toolset().call(name, args, call_id, None).await
+                session.toolset().call_with_context(name, args, ctx).await
             }
             Self::Proxy { client } => {
                 if !client.is_connected() {
@@ -1710,10 +1803,8 @@ impl WorkspaceOps {
                         format!("invalid tool name: {e}"),
                     )
                 })?;
-                let mut ctx = xai_tool_runtime::ToolCallContext::default();
-                ctx.call_id =
-                    xai_tool_protocol::ToolCallId::new(call_id.to_owned()).unwrap_or(ctx.call_id);
-                let mut stream = client.harness().call(tool_id, args, ctx).await;
+                let proxy_ctx = xai_tool_runtime::ToolCallContext::new(ctx.call_id.clone());
+                let mut stream = client.harness().call(tool_id, args, proxy_ctx).await;
                 let typed = crate::hub_channel::consume_stream_terminal(&mut stream)
                     .await
                     .inspect_err(|e| {
@@ -1733,10 +1824,7 @@ impl WorkspaceOps {
 }
 #[cfg(any(test, feature = "test-support"))]
 impl WorkspaceOps {
-    /// Test variant backed by a temp dir.
-    ///
-    /// Supports extension dispatch (`dispatch()`).
-    /// Tool calls via `call_tool()` require a workspace session; call `bind_local_session()` with a test toolset first.
+    /// Test variant backed by a temp dir. Supports extension dispatch (`dispatch()`). Tool calls via `call_tool()` require a workspace session; call `bind_local_session()` with a test toolset first.
     pub fn for_test() -> Self {
         Self::Local {
             handle: WorkspaceHandle::for_test(),
@@ -1752,32 +1840,6 @@ impl WorkspaceOps {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Pins these workspace methods' `workspace.*` wire names.
-    /// The request types live in `xai-grok-workspace-types`, re-exported here for existing call sites.
-    /// The gateway's typed dispatch in `workspace_typed/` consumes them without depending on this crate.
-    /// Pinning the `::METHOD` strings stops a rename silently changing the wire contract.
-    #[test]
-    fn pinned_workspace_method_wire_names() {
-        assert_eq!(ReposListReq::METHOD, "workspace.repos_list");
-        assert_eq!(HookRegistryReq::METHOD, "workspace.hook_registry");
-        assert_eq!(HunkGetAllHunksReq::METHOD, "workspace.get_all_hunks");
-        assert_eq!(
-            HunkGetSessionSummaryReq::METHOD,
-            "workspace.get_session_summary"
-        );
-        assert_eq!(
-            HunkGetAllFileContentsReq::METHOD,
-            "workspace.hunk_get_all_file_contents"
-        );
-        assert_eq!(
-            HunkGetFilteredHunksReq::METHOD,
-            "workspace.hunk_get_filtered_hunks"
-        );
-        assert_eq!(
-            CreateWorktreeFromWorktreeSyncReq::METHOD,
-            "workspace.worktree_create_from_worktree_sync"
-        );
-    }
     /// The reported bug: every window's git queries ran against the workspace launch directory.
     /// `git_op_cwd` must return the per-session repo the client sends, and only fall back to the workspace root when none is given.
     #[tokio::test]
@@ -1815,6 +1877,7 @@ mod tests {
             mount_path: "/workspace/app".into(),
             base_branch: "main".into(),
             session_branch: "conv/1".into(),
+            repo_backend: None,
         }]);
         std::fs::create_dir_all(tmp.path().join(".grok")).unwrap();
         std::fs::write(
@@ -1833,6 +1896,7 @@ mod tests {
                 mount_path: "/workspace/app".into(),
                 base_branch: "main".into(),
                 session_branch: "conv/1".into(),
+                repo_backend: None,
             },
             ProvisionedRepo {
                 name: "lib".into(),
@@ -1840,6 +1904,7 @@ mod tests {
                 mount_path: "/workspace/lib".into(),
                 base_branch: "develop".into(),
                 session_branch: "feat/x".into(),
+                repo_backend: None,
             },
         ]);
         std::fs::write(
@@ -1864,6 +1929,7 @@ mod tests {
             mount_path: "/workspace/app".into(),
             base_branch: "".into(),
             session_branch: "conv/1".into(),
+            repo_backend: None,
         }]);
         std::fs::create_dir_all(sandbox_ws.join(".grok")).unwrap();
         std::fs::write(
@@ -1949,6 +2015,7 @@ mod tests {
             mount_path: "/unrelated".into(),
             base_branch: "main".into(),
             session_branch: "x".into(),
+            repo_backend: None,
         }]);
         std::fs::create_dir_all(home.path().join(".grok")).unwrap();
         std::fs::write(
@@ -1971,9 +2038,7 @@ mod tests {
         );
     }
     /// Regression: a long-lived (leader) workspace must reclaim the per-session `FinalizedToolset` when a session ends.
-    /// The toolset transitively pins the MCP tools, `McpState`, and the `events.jsonl` `EventWriter`.
-    /// `bind_local_session` installs the toolset on a leader-level workspace session.
-    /// Without `end_local_session` that session (and everything it holds) leaks for the life of the process.
+    /// The toolset transitively pins the MCP tools, `McpState`, and the `events.jsonl` `EventWriter`. `bind_local_session` installs the toolset on a leader-level workspace session.
     #[tokio::test]
     async fn end_local_session_drops_bound_toolset() {
         let local = tokio::task::LocalSet::new();
@@ -2012,6 +2077,89 @@ mod tests {
                 );
             })
             .await;
+    }
+    /// A rolled-back spawn releases the binding it took, never one a later spawn re-bound under the same id.
+    #[tokio::test]
+    async fn end_local_session_if_bound_releases_only_the_named_toolset() {
+        let ops = WorkspaceOps::for_test();
+        let WorkspaceOps::Local { handle } = &ops else {
+            unreachable!("for_test builds a local handle");
+        };
+        let sid = "sess-owner-checked";
+        let bind = |toolset: &Arc<xai_grok_tools::registry::types::FinalizedToolset>| {
+            ops.bind_local_session(
+                sid,
+                handle.root_cwd().unwrap(),
+                xai_hunk_tracker::HunkTrackerHandle::noop(),
+                Arc::clone(toolset),
+                None,
+            )
+            .expect("bind should succeed");
+        };
+        let first = Arc::new(xai_grok_tools::registry::types::FinalizedToolset::empty_for_test());
+        let second = Arc::new(xai_grok_tools::registry::types::FinalizedToolset::empty_for_test());
+        bind(&first);
+        bind(&second);
+        assert!(
+            !ops.end_local_session_if_bound(sid, &first),
+            "a superseded toolset must not release the successor's binding"
+        );
+        let bound = handle.session(sid).expect("successor binding survives");
+        assert!(Arc::ptr_eq(&bound.toolset(), &second));
+        drop(bound);
+        assert!(
+            ops.end_local_session_if_bound(sid, &second),
+            "the bound toolset releases its own binding"
+        );
+        assert!(handle.session(sid).is_none());
+        assert!(
+            !ops.end_local_session_if_bound(sid, &second),
+            "an unbound id has nothing to release"
+        );
+    }
+    /// The bind side of the protocol: a rollback that unmaps the id after a bind saw it mapped must
+    /// leave the bind creating the session, not failing with `SessionNotFound`.
+    #[tokio::test]
+    async fn bind_local_session_creates_when_a_rollback_unmapped_the_id() {
+        let ops = WorkspaceOps::for_test();
+        let WorkspaceOps::Local { handle } = &ops else {
+            unreachable!("for_test builds a local handle");
+        };
+        let sid = "sess-bind-after-unmap";
+        let first = Arc::new(xai_grok_tools::registry::types::FinalizedToolset::empty_for_test());
+        let second = Arc::new(xai_grok_tools::registry::types::FinalizedToolset::empty_for_test());
+        assert!(
+            !handle.replace_session_toolset_if_mapped(sid, Arc::clone(&first)),
+            "an unmapped id has nothing to swap"
+        );
+        ops.bind_local_session(
+            sid,
+            handle.root_cwd().unwrap(),
+            xai_hunk_tracker::HunkTrackerHandle::noop(),
+            Arc::clone(&first),
+            None,
+        )
+        .expect("first bind creates the session");
+        assert!(handle.replace_session_toolset_if_mapped(sid, Arc::clone(&second)));
+        let bound = handle.session(sid).expect("swap keeps the session mapped");
+        assert!(Arc::ptr_eq(&bound.toolset(), &second));
+        drop(bound);
+        assert!(ops.end_local_session_if_bound(sid, &second));
+        assert!(
+            !handle.replace_session_toolset_if_mapped(sid, Arc::clone(&second)),
+            "the swap half must report the unmapped id instead of failing"
+        );
+        ops.bind_local_session(
+            sid,
+            handle.root_cwd().unwrap(),
+            xai_hunk_tracker::HunkTrackerHandle::noop(),
+            Arc::clone(&second),
+            None,
+        )
+        .expect("a bind after the unmap creates the session again");
+        let bound = handle.session(sid).expect("successor's binding exists");
+        assert!(Arc::ptr_eq(&bound.toolset(), &second));
+        assert_eq!(1, handle.session_count());
     }
     #[test]
     fn hunk_action_response_round_trip() {
@@ -2158,11 +2306,7 @@ mod tests {
             serde_json::to_value(&registry).unwrap()
         );
     }
-    /// Compile-time drift guard: the lean `HookEventNameWire` can't depend on upstream `HookEventName`.
-    /// `hook_registry_to_wire`/`wire_to_hook_registry` only couple them at runtime.
-    /// This exhaustive `match` (no wildcard) fails to compile if upstream adds a variant.
-    /// That forces the wire mirror to be updated before the serde round-trip could silently start erroring.
-    /// The assertion also pins that each variant's serialized key is byte-identical on both sides.
+    /// Compile-time drift guard: the lean `HookEventNameWire` can't depend on upstream `HookEventName`. `hook_registry_to_wire`/`wire_to_hook_registry` only couple them at runtime.
     #[test]
     fn hook_event_name_wire_covers_all_upstream_variants() {
         use xai_grok_hooks::event::HookEventName as E;
@@ -2214,9 +2358,6 @@ mod tests {
     /// Compile-time drift guard for `HookSpecWire`, the struct analog of `hook_event_name_wire_covers_all_upstream_variants`.
     /// The lean types crate can't depend on `xai-grok-hooks`, and `hook_registry_to_wire` only couples the two via a serde round-trip.
     /// A new serialized field on upstream `HookSpec` would otherwise be dropped on the wire silently.
-    /// The exhaustive destructuring below (no `..`) fails to compile when upstream adds or renames a field.
-    /// Rebuilding `HookSpecWire` from those bindings catches wire-side drift; the assertion pins that both serde shapes stay byte-identical.
-    /// The compiled `matcher` is `#[serde(skip)]` and is the only field intentionally absent from the wire.
     #[test]
     fn hook_spec_wire_covers_all_upstream_fields() {
         use xai_grok_hooks::config::HookSpec;
@@ -2241,7 +2382,7 @@ mod tests {
             HookSpecWire {
                 name,
                 event,
-                handler_type: handler_type.as_str().to_string(),
+                handler_type: handler_type.as_ref().to_string(),
                 configured_matcher,
                 enabled,
                 command,
@@ -2251,7 +2392,7 @@ mod tests {
                 timeout_ms,
                 source_dir,
                 extra_env,
-                layer: layer.as_str().to_string(),
+                layer: layer.as_ref().to_string(),
             }
         }
         let spec = HookSpec {
@@ -2276,7 +2417,7 @@ mod tests {
             "HookSpecWire serde shape drifted from upstream HookSpec"
         );
     }
-    /// The worktree-fork request projects onto / rebuilds from its wire mirror; the two `#[serde(skip)]` runtime fields are never serialized.
+    /// The worktree-fork request projects onto / rebuilds from its wire mirror; `#[serde(skip)]` runtime fields are never serialized.
     #[test]
     fn create_worktree_from_worktree_request_wire_round_trip() {
         let req = crate::worktree::CreateWorktreeFromWorktreeRequest {
@@ -2287,8 +2428,10 @@ mod tests {
             worktree_type: Some(crate::worktree::WorktreeType::Linked),
             label: None,
             grove_worktree: None,
+            grove_gate_source: None,
             cancellation_token: None,
             resolved_dest_path: None,
+            resolved_source_git_root: None,
         };
         assert_eq!(
             serde_json::to_value(&req).unwrap(),
@@ -2298,6 +2441,7 @@ mod tests {
         assert_eq!(back.source_worktree_path, "/src");
         assert!(back.cancellation_token.is_none());
         assert!(back.resolved_dest_path.is_none());
+        assert!(back.resolved_source_git_root.is_none());
     }
     use crate::handle::tests::make_handle;
     #[tokio::test]
@@ -2494,13 +2638,12 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         let recovered: PutFilesReq = serde_json::from_value(json).unwrap();
         assert_eq!(recovered.files.len(), 1);
-        assert_eq!(recovered.files[0].path, "a.txt");
-        assert!(!recovered.files[0].create_dirs);
-        assert!(recovered.files[0].append);
-    }
-    #[test]
-    fn put_files_req_method() {
-        assert_eq!(<PutFilesReq as WorkspaceRpc>::METHOD, "workspace.put_files");
+        let Some(file) = recovered.files.first() else {
+            panic!("expected one file: {:?}", recovered.files);
+        };
+        assert_eq!(file.path, "a.txt");
+        assert!(!file.create_dirs);
+        assert!(file.append);
     }
     #[test]
     fn put_file_result_skip_none() {
@@ -2512,7 +2655,7 @@ mod tests {
         };
         let json = serde_json::to_value(&result).unwrap();
         assert!(!json.as_object().unwrap().contains_key("error"));
-        assert_eq!(json["hash"], "abc123");
+        assert_eq!(json.get("hash").and_then(|v| v.as_str()), Some("abc123"));
     }
     #[test]
     fn get_file_entry_defaults() {
@@ -2535,16 +2678,12 @@ mod tests {
         };
         let json = serde_json::to_value(&req).unwrap();
         let recovered: GetFilesReq = serde_json::from_value(json).unwrap();
-        assert_eq!(
-            recovered.files[0].if_none_match.as_deref(),
-            Some("sha256-abc")
-        );
-        assert_eq!(recovered.files[0].offset, Some(100));
-        assert_eq!(recovered.files[0].length, Some(200));
-    }
-    #[test]
-    fn get_files_req_method() {
-        assert_eq!(<GetFilesReq as WorkspaceRpc>::METHOD, "workspace.get_files");
+        let Some(file) = recovered.files.first() else {
+            panic!("expected one file: {:?}", recovered.files);
+        };
+        assert_eq!(file.if_none_match.as_deref(), Some("sha256-abc"));
+        assert_eq!(file.offset, Some(100));
+        assert_eq!(file.length, Some(200));
     }
     #[test]
     fn get_file_result_defaults_and_skip() {
@@ -2577,11 +2716,11 @@ mod tests {
         };
         let json = serde_json::to_value(&put_res).unwrap();
         let recovered: PutFilesRes = serde_json::from_value(json).unwrap();
-        assert!(!recovered.results[0].ok);
-        assert_eq!(
-            recovered.results[0].error.as_deref(),
-            Some("permission denied")
-        );
+        let Some(put) = recovered.results.first() else {
+            panic!("expected one put result: {:?}", recovered.results);
+        };
+        assert!(!put.ok);
+        assert_eq!(put.error.as_deref(), Some("permission denied"));
         let get_res = GetFilesRes {
             results: vec![GetFileResult {
                 path: "y.rs".into(),
@@ -2595,8 +2734,11 @@ mod tests {
         };
         let json = serde_json::to_value(&get_res).unwrap();
         let recovered: GetFilesRes = serde_json::from_value(json).unwrap();
-        assert_eq!(recovered.results[0].size, Some(8));
-        assert_eq!(recovered.results[0].content.as_deref(), Some("contents"));
+        let Some(got) = recovered.results.first() else {
+            panic!("expected one get result: {:?}", recovered.results);
+        };
+        assert_eq!(got.size, Some(8));
+        assert_eq!(got.content.as_deref(), Some("contents"));
     }
     /// Code-nav must resolve its index at the per-session root the client sends, not the shared workspace root.
     /// Otherwise a second window would query the first window's index.

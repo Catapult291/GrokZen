@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use crate::permission::{
     bash_command_splitting::{BashCommandHighlights, primary_command_from_script},
-    manager::web_fetch_deny_key_from_url,
+    grants::web_fetch_deny_key_from_url,
     types::{AccessKind, ClientType, HOOK_ASK_META_KEY, HookAsk, REQUIRES_CONFIRMATION_META_KEY},
 };
 use agent_client_protocol::{self as acp, Client as _};
@@ -15,25 +15,13 @@ use xai_grok_tools::implementations::grok_build::web_fetch::domain_from_url;
 
 const REJECT_ONCE_LABEL: &str = "No, and tell Grok what to do differently";
 
-/// Stable option id for the edit prompt's "Yes, allow all edits during this session" choice.
-/// Distinct from the generic `"always-allow"` id so [`map_selected_outcome`] can map it to [`PromptOutcome::AllowEditsForSession`].
-/// Session edit allows live in memory only and are never persisted.
-/// Exposed so the pager can recognise it and not record it as a sticky cursor target (see `permission_cursor`).
+/// Stable option id for "allow all edits this session", distinct from `"always-allow"` so it maps to [`PromptOutcome::AllowEditsForSession`].
+/// Session-only and never persisted; exposed so the pager does not record it as a sticky cursor target.
 pub const ALLOW_EDITS_SESSION_OPTION_ID: &str = "allow-edits-session";
 
-/// Stable option id for the "enable always-approve mode" option prepended to every permission prompt for TUI / Pager / Desktop clients.
-///
-/// Shell-side, [`map_selected_outcome`] returns [`PromptOutcome::AllowOnce`]: the request is allowed exactly once and the shell persists nothing.
-/// Client-side, the pager also fires its existing `set_yolo_mode(true)` flow, which:
-///     1. Flips local YOLO state on the active agent
-///     2. Drains any queued permission requests with `AllowOnce` responses
-///     3. Persists `[ui] permission_mode = "always-approve"` to
-///        `~/.grok/config.toml` via the `Effect::PersistPermissionMode` effect
-///     4. Sends the existing `x.ai/yolo_mode_changed` ACP notification so the agent's permission manager flips its `yolo_mode` flag
-///
-/// This split keeps the wire protocol plain ACP: no new methods, no extensions, no new `PermissionOptionKind` variant.
-/// A client that does not recognise the id treats it as an ordinary `AllowAlways` option; the shell still maps the response to `AllowOnce`.
-/// Worst case, the user grants the current call but the toggle does not flip; `/always-approve`, Ctrl+O, or the settings modal still works.
+/// Stable id for the "enable always-approve mode" option prepended for TUI / Pager / Desktop clients.
+/// Shell maps it to [`PromptOutcome::AllowOnce`] and persists nothing; the pager separately fires `set_yolo_mode(true)`.
+/// Keeps the wire plain ACP. An unrecognized client still gets `AllowOnce`; worst case the current call is granted but the toggle does not flip.
 pub const ENABLE_ALWAYS_APPROVE_OPTION_ID: &str = "enable-always-approve";
 
 /// Defined once so the label is identical across every permission prompt (edit, bash, MCP, web_fetch, fallback).
@@ -595,7 +583,9 @@ impl AcpPrompter {
     ) -> IndexMap<acp::PermissionOptionId, acp::PermissionOption> {
         match access {
             AccessKind::Edit(_) => self.edit_options.clone(),
-            AccessKind::AgentMessage { .. } => self.agent_message_options.clone(),
+            AccessKind::AgentMessage { .. } | AccessKind::Tool(_) => {
+                self.agent_message_options.clone()
+            }
             AccessKind::Bash(bash_command) => {
                 // For GrokTUI clients, use the fancy interactive options with term selection
                 // For generic clients (web, etc.), use simpler options that work without special UI handling
@@ -605,15 +595,11 @@ impl AcpPrompter {
                             acp::PermissionOptionId,
                             acp::PermissionOption,
                         > = IndexMap::new();
-                        // Ordering: the always-allow row leads for discoverability
-                        // The persistent deny trails so it never sits between safe options
-                        //
-                        // The allow row is offered only when accepting it can actually stop this script from prompting again
-                        // A row that saves a grant which never matches is the "always allow keeps asking" bug
-                        // The deny row stays: deny prefixes bind unconditionally
+                        // Always-allow leads; persistent deny trails so it never sits between safe options
+                        // Offer allow only when accepting it can stop this script from prompting again; deny stays because deny prefixes bind unconditionally
                         let primary_command = primary_command_from_script(bash_command);
                         if let Some(primary_command) = &primary_command
-                            && crate::permission::manager::always_allow_row_is_effective(
+                            && crate::permission::grants::always_allow_row_is_effective(
                                 bash_command,
                             )
                         {
@@ -802,6 +788,8 @@ impl AcpPrompter {
                     access,
                     tool_call_update.tool_call_id.0.as_ref(),
                     hook_ask,
+                    // The manager records "always" answers in its own store.
+                    xai_tool_runtime::ToolApprovalPolicy::GrantsAllowed,
                 )
                 .await
             }
@@ -915,6 +903,7 @@ pub fn tool_name_for_access(access: &AccessKind) -> String {
         AccessKind::AgentMessage { .. } => {
             xai_grok_tools::implementations::grok_build::SEND_SUBAGENT_MESSAGE_TOOL_NAME.to_owned()
         }
+        AccessKind::Tool(name) => name.clone(),
     }
 }
 
@@ -1946,9 +1935,7 @@ mod tests {
         assert_eq!(mcp_titleize_segment(""), "");
     }
 
-    // ------------------------------------------------------------------
     // "Enable always-approve mode" option (prepended for TUI/Pager/Desktop)
-    // ------------------------------------------------------------------
 
     fn enable_always_approve_id() -> acp::PermissionOptionId {
         acp::PermissionOptionId::new(ENABLE_ALWAYS_APPROVE_OPTION_ID)
@@ -2233,21 +2220,37 @@ mod tests {
             2,
             "expected PermissionRequested + PermissionResolved"
         );
-        assert_eq!(lines[0]["type"], "permission_requested");
-        assert_eq!(lines[0]["tool_name"], "run_terminal_command");
-        assert_eq!(lines[1]["type"], "permission_resolved");
-        assert_eq!(lines[1]["tool_name"], "run_terminal_command");
-        assert_eq!(lines[1]["decision"], "deny");
+        let [requested, resolved] = lines.as_slice() else {
+            panic!("expected two event lines: {lines:?}");
+        };
+        assert_eq!(
+            requested.get("type").and_then(|v| v.as_str()),
+            Some("permission_requested")
+        );
+        assert_eq!(
+            requested.get("tool_name").and_then(|v| v.as_str()),
+            Some("run_terminal_command")
+        );
+        assert_eq!(
+            resolved.get("type").and_then(|v| v.as_str()),
+            Some("permission_resolved")
+        );
+        assert_eq!(
+            resolved.get("tool_name").and_then(|v| v.as_str()),
+            Some("run_terminal_command")
+        );
+        assert_eq!(
+            resolved.get("decision").and_then(|v| v.as_str()),
+            Some("deny")
+        );
         assert!(
-            lines[1]["wait_ms"].as_u64().is_some(),
+            resolved.get("wait_ms").and_then(|v| v.as_u64()).is_some(),
             "PermissionResolved must carry wait_ms"
         );
     }
 
-    /// The default constructor leaves the event writer as `noop()`.
-    /// The live shell path relies on this to avoid double-emitting alongside its own `EventTracker`.
-    /// With a `noop` writer there is no backing file to observe, so the test only checks that `request()` still returns the correct `PromptOutcome`.
-    /// The positive emission path is covered by `request_emits_permission_requested_and_resolved`.
+    /// Default constructor leaves the event writer as `noop()` so the live shell does not double-emit beside its own `EventTracker`.
+    /// This test only checks `request()`'s `PromptOutcome`; emission is covered by `request_emits_permission_requested_and_resolved`.
     #[tokio::test]
     async fn request_with_default_noop_writer_returns_outcome() {
         let (tx, rx) = mpsc::unbounded_channel();

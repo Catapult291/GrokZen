@@ -4,6 +4,8 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+use xai_ratatui_inline::WidthShrink;
+
 use crate::host::HostOs;
 
 pub mod da2;
@@ -13,13 +15,17 @@ pub mod image;
 pub mod keyboard;
 pub mod kitty_keyboard;
 pub mod overlay;
+pub mod pop_fence;
 pub(crate) mod probe;
 pub mod term_version;
 pub mod tmux;
 pub mod tmux_probe;
 pub mod xtversion;
 
-pub use tmux::{passthrough_available, should_wrap_osc11, tmux_passthrough, tmux_passthrough_str};
+pub use tmux::{
+    passthrough_available, should_emit_synchronized_output, should_wrap_osc11, tmux_passthrough,
+    tmux_passthrough_str,
+};
 
 pub use embedded_editor::{EmbeddedEditor, embedded_editor_from_env};
 pub use hyperlinks::{
@@ -34,6 +40,7 @@ pub use kitty_keyboard::{
     kitty_event_types_withheld, kitty_flags_pushed, kitty_releases_reported,
     negotiated_kitty_flags, pushed_kitty_flags, set_pushed_kitty_flags, take_kitty_flags_pushed,
 };
+pub use pop_fence::{PopFence, PopFenceOutcome};
 pub use term_version::{TermVersion, TermVersionSource};
 
 #[cfg(test)]
@@ -148,9 +155,30 @@ impl TerminalName {
         )
     }
 
-    /// Only Otty is known to wrap macOS IME commits in bracketed paste.
-    pub fn delivers_ime_as_bracketed_paste(self) -> bool {
-        matches!(self, Self::Otty)
+    /// Only brands known to re-wrap on-screen rows when the window narrows return [`WidthShrink::Rewraps`].
+    /// Warp skips the re-wrap for panes it classifies as CLI agents.
+    pub fn width_shrink(self) -> WidthShrink {
+        match self {
+            Self::AppleTerminal
+            | Self::Ghostty
+            | Self::Iterm2
+            | Self::VsCode
+            | Self::Cursor
+            | Self::Windsurf
+            | Self::Zed
+            | Self::WezTerm
+            | Self::Kitty
+            | Self::Alacritty
+            | Self::Rio
+            | Self::Foot
+            | Self::GrokDesktop
+            | Self::Vte
+            | Self::Terminator
+            | Self::WindowsTerminal => WidthShrink::Rewraps,
+            Self::WarpTerminal | Self::JetBrains | Self::Otty | Self::Unknown => {
+                WidthShrink::Truncates
+            }
+        }
     }
 }
 
@@ -174,11 +202,7 @@ pub enum MultiplexerKind {
     /// cmux (Ghostty-backed macOS terminal multiplexer).
     #[strum(to_string = "cmux")]
     Cmux,
-    /// herdr, a libghostty-backed agent multiplexer ([ogulcancelik/herdr](https://github.com/ogulcancelik/herdr)).
-    ///
-    /// Its embedded emulator answers CSI queries itself, so it counts as CSI-intercepting.
-    /// The accepted cost: a herdr pane typically has no other version signal (brand `Unknown`, no `TERM_PROGRAM_VERSION`).
-    /// The XTVERSION reply describes herdr's engine rather than the host.
+    /// Embedded emulator answers CSI itself, so it counts as CSI-intercepting. XTVERSION then describes herdr's engine, not the host.
     #[strum(to_string = "herdr")]
     Herdr,
     /// No recognized multiplexer detected (does not rule out unknown ones).
@@ -291,6 +315,21 @@ impl TerminalContext {
         self.embedded_editor.is_some() || self.multiplexer != MultiplexerKind::Undetected
     }
 
+    /// How the innermost layer drawing our pane treats on-screen rows when the width shrinks.
+    /// Fails closed to [`WidthShrink::Truncates`]. A wrong `Rewraps` clears committed rows.
+    pub fn width_shrink(&self) -> WidthShrink {
+        if self.embedded_editor.is_some() {
+            return WidthShrink::Truncates;
+        }
+        match self.multiplexer {
+            MultiplexerKind::Tmux | MultiplexerKind::Zellij | MultiplexerKind::Cmux => {
+                WidthShrink::Rewraps
+            }
+            MultiplexerKind::Screen | MultiplexerKind::Herdr => WidthShrink::Truncates,
+            MultiplexerKind::Undetected => self.env_brand.width_shrink(),
+        }
+    }
+
     /// In Byobu-on-tmux, this is `~/.byobu/.tmux.conf`; otherwise `~/.tmux.conf`.
     pub fn tmux_config_path(&self) -> String {
         if self.byobu == Some(ByobuBackend::Tmux) {
@@ -314,7 +353,6 @@ impl TerminalContext {
     ///
     /// Terminal-emulator reasons take precedence over multiplexer reasons so the user is pointed at the deeper cause.
     pub fn kitty_skip_reason(&self) -> Option<&'static str> {
-        let is_tmux_3_3_later = self.is_tmux_version_or_later(3, 3);
         if matches!(
             self.brand,
             TerminalName::VsCode
@@ -336,6 +374,25 @@ impl TerminalContext {
         if self.brand == TerminalName::JetBrains {
             return Some("jetbrains");
         }
+        if let Some(reason) = self.kitty_multiplexer_skip_reason() {
+            return Some(reason);
+        }
+        // No positive evidence of KKP support, so skip: xterm.js mis-encodes shifted keys (https://github.com/xtermjs/xterm.js/issues/5823)
+        // Probing an unresponsive terminal blocks startup.
+        if self.brand.is_capability_unclassified()
+            && self.multiplexer == MultiplexerKind::Undetected
+        {
+            return Some("unknown_no_multiplexer");
+        }
+        None
+    }
+
+    /// Multiplexer layers that drop Kitty keyboard / extended Enter, independent of brand.
+    ///
+    /// [`Self::kitty_skip_reason`] may hide these behind a brand/VTE reason; footer and
+    /// newline-preference decisions must still see them.
+    fn kitty_multiplexer_skip_reason(&self) -> Option<&'static str> {
+        let is_tmux_3_3_later = self.is_tmux_version_or_later(3, 3);
         if self.multiplexer == MultiplexerKind::Screen {
             return Some("screen");
         }
@@ -348,13 +405,6 @@ impl TerminalContext {
         {
             return Some("tmux_extended_keys_off");
         }
-        // No positive evidence of KKP support, so skip: xterm.js mis-encodes shifted keys (https://github.com/xtermjs/xterm.js/issues/5823)
-        // Probing an unresponsive terminal blocks startup.
-        if self.brand.is_capability_unclassified()
-            && self.multiplexer == MultiplexerKind::Undetected
-        {
-            return Some("unknown_no_multiplexer");
-        }
         None
     }
 
@@ -366,32 +416,13 @@ impl TerminalContext {
         None
     }
 
-    /// Whether this terminal leaks mouse-tracking reports into the input as raw text instead of consuming them, corrupting the prompt.
-    ///
-    /// JediTerm (JetBrains IDEs) on Windows is the known offender: crossterm's Windows input source only decodes native console mouse records.
-    /// The VT `\e[M…` byte stream JediTerm emits surfaces as key presses.
-    /// macOS/Linux crossterm parses them, so the leak is Windows-only.
-    /// The pager defaults these sessions to minimal mode (no mouse capture).
+    /// JediTerm on Windows emits VT mouse bytes crossterm does not decode, so they land as key presses and corrupt the prompt. Windows-only; those sessions default to minimal mode.
     pub fn mouse_reporting_leaks_as_raw_text(&self) -> bool {
         mouse_reporting_leaks(self.brand, HostOs::current())
     }
 
-    /// Whether the running terminal cannot distinguish `Shift+Enter` from bare `Enter` at the byte level.
-    ///
-    /// Distinguishing `Shift+Enter` requires the Kitty keyboard protocol (KKP) to be negotiated.
-    /// This returns `true` for the environments where the pager cannot rely on KKP for a usable `Shift+Enter`:
-    ///
-    /// 1. **Legacy VTE** (GNOME Terminal, Ptyxis, kgx, Tilix, etc.) whose `VTE_VERSION` is below `8200`.
-    ///    VTE 0.82.0 is the first release with KKP ([MR !14](https://gitlab.gnome.org/GNOME/vte/-/merge_requests/14)).
-    ///    Also true when the brand is detected as VTE but `VTE_VERSION` is missing or unparseable; we conservatively assume old.
-    /// 2. **VS Code's integrated terminal (xterm.js) and VS Code-family / xterm.js IDE forks**.
-    ///    xterm.js only partially implements KKP (it mis-encodes shifted printable keys), so the pager deliberately never negotiates KKP for them.
-    ///    See [`Self::kitty_skip_reason`] `== "vscode"` and [xterm.js#5823](https://github.com/xtermjs/xterm.js/issues/5823).
-    ///    Without KKP, xterm.js sends a bare `CR` for `Shift+Enter`, byte-for-byte identical to `Enter`.
-    /// 3. **Unidentified terminals with no multiplexer**, where the pager also skips KKP (no positive evidence of support).
-    ///    This is typically VS Code's xterm.js reached over SSH, where `TERM_PROGRAM` isn't forwarded and the brand falls back to `Unknown`.
-    ///
-    /// In every case `Alt+Enter` (delivered as `ESC`+`CR`) is the reliable newline chord and is what the UI advertises.
+    /// True where KKP cannot be relied on: legacy/unknown VTE, xterm.js forks (KKP mis-encodes shifted printables), and unclassified brands with no mux (often VS Code over SSH).
+    /// Those send bare CR for Shift+Enter. The UI advertises Alt+Enter.
     pub fn shift_enter_unavailable(&self) -> bool {
         let is_vte = self.is_vte_based(); // WHY: central helper + version gating
         if is_vte {
@@ -417,11 +448,7 @@ impl TerminalContext {
             return true;
         }
 
-        // Unidentified / unclassified brand with no multiplexer: KKP is skipped (see `kitty_skip_reason`)
-        // This is the common VS Code-over-SSH case (brand falls back to Unknown)
-        // On native Windows the effective `brand` is refined to WindowsTerminal, so consult `env_brand`
-        // A bare ConHost still detects as Unknown from the env
-        // It must advertise Alt+Enter even though we optimistically treat it as WT for capabilities
+        // Consult env_brand: Windows refines Unknown to WindowsTerminal, but bare ConHost must still advertise Alt+Enter.
         if self.env_brand.is_capability_unclassified()
             && self.multiplexer == MultiplexerKind::Undetected
         {
@@ -431,12 +458,16 @@ impl TerminalContext {
         false
     }
 
-    /// True when `Ctrl+.` cannot be delivered reliably as the primary shortcuts key.
-    ///
-    /// Without KKP (or an equivalent extended-key path), `Ctrl+.` is not a classic C0 control and collapses to `.` or an ambiguous byte.
-    /// So we follow [`Self::kitty_skip_reason`] rather than a hard-coded brand list.
-    /// That keeps iTerm2+tmux with `extended-keys off` (and other multiplexer skips) aligned with VS Code / VTE / Apple Terminal.
-    /// The pager folds in host-OS signals (Windows, WSL) via `ctrl_dot_unreliable()`.
+    /// Broader than [`Self::shift_enter_unavailable`]: SSH and multiplexers that drop
+    /// extended Enter (old tmux, `extended-keys off`, GNU screen) collapse Shift+Enter
+    /// even when the brand-first [`Self::kitty_skip_reason`] reports a terminal reason.
+    pub fn prefer_alt_enter_newline(&self) -> bool {
+        self.shift_enter_unavailable()
+            || self.is_ssh
+            || self.kitty_multiplexer_skip_reason().is_some()
+    }
+
+    /// Without KKP, Ctrl+. is not a C0 control and collapses to `.`. Follows [`Self::kitty_skip_reason`] so mux skips stay aligned.
     pub fn ctrl_dot_unreliable(&self) -> bool {
         self.kitty_skip_reason().is_some()
     }
@@ -570,10 +601,7 @@ impl TerminalContext {
 
 static TERMINAL_CONTEXT: OnceLock<TerminalContext> = OnceLock::new();
 
-/// Returns the cached terminal context for the current process.
-///
-/// This is the preferred entry point for new code that needs multiplexer or Byobu information.
-/// The context is computed once at first access from process environment variables.
+/// Computed once from the process environment. Preferred entry for multiplexer or Byobu info.
 pub fn terminal_context() -> &'static TerminalContext {
     TERMINAL_CONTEXT.get_or_init(detect_terminal_context)
 }
@@ -597,10 +625,7 @@ fn standalone_terminal_context_from_env(
 /// Build a [`TerminalContext`] from the current process environment.
 fn detect_terminal_context() -> TerminalContext {
     let env = collect_process_env();
-    // NOTE: brand is usually Unknown in tmux (it overwrites TERM_PROGRAM and per-pane vars don't survive) and over SSH (not forwarded)
-    // Brands with SSH-surviving markers are the exception (the VS Code family, and iTerm2 via LC_TERMINAL)
-    // tmux -g global env is stale (reflects the server's first client, not the current one)
-    // Revisit when `grok ssh` can forward env vars
+    // Brand is usually Unknown in tmux and over SSH. tmux -g global env is the server's first client, not the current one.
     let mut ctx = build_terminal_context_from_env(&env);
     ctx.brand = refine_unknown_brand_for_host(ctx.brand, HostOs::current());
     if ctx.is_tmux_backed() {
@@ -630,16 +655,9 @@ fn is_official_vscode_remote_askpass(path: &str) -> bool {
     })
 }
 
-/// Detect the terminal brand from an injected environment map.
-///
-/// A new env marker here, in [`detect_byobu_from_env`], or in [`detect_multiplexer_from_env`] must also go into `HOST_TERMINAL_ENV_VARS`.
-/// That list lives in `xai-grok-pager-pty-harness/src/pty.rs`.
-/// The PTY harness strips every marker read here so the host terminal can't leak into tests.
+/// A new marker must also go into the PTY harness strip list so the host terminal cannot leak into tests.
 pub fn detect_terminal_brand_from_env(env: &HashMap<String, String>) -> TerminalName {
-    // Some VS Code forks set TERM_PROGRAM=vscode, so check IDE-specific env vars first to disambiguate them from upstream VS Code
-    //
-    // These markers also survive where TERM_PROGRAM does not: plain SSH (not forwarded) and tmux (overwritten by the multiplexer)
-    // Without them, brand falls back to Unknown and clipboard/keyboard gates that key off VS Code family miss the session
+    // Fork-specific markers first: they set TERM_PROGRAM=vscode, and they survive SSH/tmux where TERM_PROGRAM does not.
     if env_get(env, "CURSOR_TRACE_ID").is_some() {
         return TerminalName::Cursor;
     }
@@ -662,13 +680,7 @@ pub fn detect_terminal_brand_from_env(env: &HashMap<String, String>) -> Terminal
         return name;
     }
 
-    // JetBrains IDE terminal (JediTerm). All JetBrains IDEs (IntelliJ, PhpStorm, WebStorm, etc.) set TERMINAL_EMULATOR=JetBrains-JediTerm.
-    // Both the Classic and Reworked 2025 engine set the same value, and no env var distinguishes them
-    // There is no TERM_FEATURES equivalent, and XTVERSION queries leak as garbage (DA1 returns bare VT102 `?6c`)
-    // We're effectively blind to capabilities, so we use conservative defaults only
-    //
-    // This check must run before the TERM_SESSION_ID one: JetBrains sets that too (cross-platform, including Windows)
-    // Otherwise the session would false-positive as Apple Terminal
+    // Both JediTerm engines share this marker; no capability query is safe (XTVERSION leaks). Must run before TERM_SESSION_ID or it false-positives as Apple Terminal.
     if let Some(te) = env_get(env, "TERMINAL_EMULATOR") {
         let te_lower = te.to_ascii_lowercase();
         if te_lower.contains("jetbrains") || te_lower.contains("jediterm") {
@@ -748,12 +760,7 @@ pub fn detect_terminal_brand_from_env(env: &HashMap<String, String>) -> Terminal
     TerminalName::Unknown
 }
 
-/// Resolve an `Unknown` brand to `WindowsTerminal` on native Windows.
-///
-/// Windows Terminal is the Windows 11 default, but its DefTerm handoff starts the first shell without WT_SESSION/TERM_PROGRAM.
-/// Env detection therefore misses it (microsoft/terminal#13006).
-/// The raw detection stays in [`TerminalContext::env_brand`] for consumers that must not trust this guess.
-/// WSL is unaffected (its Linux binary reports `HostOs::Linux`).
+/// WT's DefTerm handoff omits WT_SESSION/TERM_PROGRAM. Raw detection stays in `env_brand`. WSL is unaffected.
 fn refine_unknown_brand_for_host(brand: TerminalName, host: HostOs) -> TerminalName {
     if brand == TerminalName::Unknown && host == HostOs::Windows {
         TerminalName::WindowsTerminal
@@ -768,11 +775,7 @@ fn mouse_reporting_leaks(brand: TerminalName, host: HostOs) -> bool {
     brand == TerminalName::JetBrains && host == HostOs::Windows
 }
 
-/// Detect the Byobu wrapper state from an injected environment map.
-///
-/// Returns `Some(ByobuBackend)` when Byobu markers are present and the backend can be determined.
-/// Byobu sets `BYOBU_BACKEND` to `"tmux"` or `"screen"`.
-/// When `BYOBU_BACKEND` is absent but other Byobu markers exist (`BYOBU_CONFIG_DIR`, `BYOBU_DISTRO`), the backend is inferred from `TMUX` and `STY`.
+/// `BYOBU_BACKEND` when set; otherwise infer tmux vs screen from other Byobu markers plus `TMUX`/`STY`.
 pub fn detect_byobu_from_env(env: &HashMap<String, String>) -> Option<ByobuBackend> {
     let has_byobu_backend = env_get(env, "BYOBU_BACKEND").is_some();
     let has_byobu_config = env_get(env, "BYOBU_CONFIG_DIR").is_some();
@@ -809,17 +812,7 @@ fn infer_byobu_backend_from_mux_markers(env: &HashMap<String, String>) -> Option
     }
 }
 
-/// Detect the multiplexer kind from an injected environment map.
-///
-/// Precedence rules for ambiguous marker combinations:
-/// 1. Explicit `BYOBU_BACKEND` beats generic `TMUX`/`STY` clues.
-/// 2. `TMUX` beats `ZELLIJ` (tmux can nest inside Zellij but not vice-versa).
-/// 3. `STY` (GNU screen) is only chosen when neither `TMUX` nor `ZELLIJ` is set.
-/// 4. herdr and cmux markers classify only when no tmux/zellij/screen (or explicit Byobu backend) won; a real mux nested inside either still wins.
-///    Between the two, `HERDR_ENV` beats the `CMUX_*` markers: when both appear, herdr is running in a cmux panel.
-///    The `CMUX_*` values there are inherited rather than fresh.
-///
-/// Even with multiple markers present (e.g. an inherited `ZELLIJ` var inside a tmux pane), classification is deterministic.
+/// Explicit Byobu backend, then TMUX, then ZELLIJ, then STY. herdr/cmux only if no real mux won; `HERDR_ENV` beats inherited `CMUX_*`.
 pub fn detect_multiplexer_from_env(env: &HashMap<String, String>) -> MultiplexerKind {
     let byobu = detect_byobu_from_env(env);
 
@@ -832,10 +825,7 @@ pub fn detect_multiplexer_from_env(env: &HashMap<String, String>) -> Multiplexer
         }
     }
 
-    // Standard multiplexer markers: tmux beats Zellij beats screen
-    // Nested real multiplexers inside herdr/cmux must win over the host mux.
-    // A herdr daemon first started from tmux freezes that TMUX into every pane
-    // Such a pane is classified tmux here, so OSC 52 gets a tmux DCS wrap herdr renders as text
+    // Nested real muxes win. A herdr daemon started from tmux freezes TMUX into every pane; classifying that as herdr wraps OSC 52 in DCS that herdr prints as text.
     if env_get(env, "TMUX").is_some() {
         return MultiplexerKind::Tmux;
     }
@@ -943,10 +933,7 @@ fn terminal_name_from_term_program(value: &str) -> Option<TerminalName> {
     }
 }
 
-/// User-configured alt-screen (fullscreen) mode.
-///
-/// Parsed from `[terminal] alt_screen` in `~/.grok/pager.toml` and
-/// overridden by the `--no-alt-screen` CLI flag.
+/// `[terminal] alt_screen`, overridden by `--no-alt-screen`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum AltScreenMode {
     /// Automatic: fullscreen in plain terminals and normal tmux, inline in tmux control mode and Zellij.
@@ -998,18 +985,11 @@ fn parse_tmux_major_minor(version: &str) -> Option<(u32, u32)> {
     let minor_end = minor_str
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(minor_str.len());
-    let minor: u32 = minor_str[..minor_end].parse().ok()?;
+    let minor: u32 = minor_str.get(..minor_end)?.parse().ok()?;
     Some((major, minor))
 }
 
-/// Resolve the effective alt-screen (fullscreen) state from CLI override, config, and environment.
-///
-/// Precedence:
-/// 1. The `--no-alt-screen` CLI flag forces inline.
-/// 2. `config_mode` from `[terminal] alt_screen` applies Always/Never/Auto.
-/// 3. Auto rules: Zellij and tmux control mode run inline; otherwise fullscreen.
-///
-/// Returns `true` when the pager should enter the alternate screen.
+/// CLI `--no-alt-screen`, then config Always/Never/Auto. Auto is inline in Zellij and tmux control mode, else fullscreen.
 pub fn determine_alt_screen_policy(
     cli_no_alt_screen: bool,
     config_mode: AltScreenMode,

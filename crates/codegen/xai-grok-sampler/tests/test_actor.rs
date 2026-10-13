@@ -13,7 +13,6 @@ use axum::http::StatusCode;
 use axum::response::sse::{Event, Sse};
 use axum::routing::post;
 use futures_util::stream::{self, StreamExt};
-use indexmap::IndexMap;
 use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -24,7 +23,7 @@ use xai_grok_sampler::{
 };
 use xai_grok_sampling_types::{
     ConversationItem, ConversationRequest, DoomLoopRecoveryPolicy, INVALID_IMAGE_ERROR_CODE,
-    UserItem,
+    SyntheticReason, UserItem,
 };
 use xai_grok_test_support::{SseEvent, sse};
 
@@ -73,33 +72,11 @@ fn test_config(base_url: String, model: &str) -> SamplerConfig {
         base_url,
         model: model.into(),
         max_completion_tokens: Some(1024),
-        temperature: None,
-        top_p: None,
-        api_backend: ApiBackend::ChatCompletions,
-        auth_scheme: Default::default(),
-        extra_headers: IndexMap::new(),
-        extra_response_includes: Vec::new(),
-        query_params: IndexMap::new(),
-        env_http_headers: IndexMap::new(),
         context_window: 128_000,
-        force_http1: false,
         // Keep retries minimal so tests don't take forever.
         max_retries: Some(2),
-        stream_tool_calls: false,
         idle_timeout_secs: Some(30),
-        reasoning_effort: None,
-        origin_client: None,
-        client_identifier: None,
-        deployment_id: None,
-        user_id: None,
-        client_version: None,
-        attribution_callback: None,
-        bearer_resolver: None,
-        supports_backend_search: false,
-        compactions_remaining: None,
-        compaction_at_tokens: None,
-        doom_loop_recovery: None,
-        header_injector: None,
+        ..Default::default()
     }
 }
 
@@ -109,7 +86,7 @@ fn user_request(text: &str) -> ConversationRequest {
             content: vec![xai_grok_sampling_types::ContentPart::Text {
                 text: std::sync::Arc::<str>::from(text),
             }],
-            synthetic_reason: None,
+            synthetic_reason: SyntheticReason::Human,
             ..Default::default()
         })],
         ..Default::default()
@@ -306,9 +283,52 @@ async fn cancel_in_flight_request_terminates_task() {
     if let SamplingEvent::Failed { error, .. } = failed {
         assert!(error.message.contains("cancelled"));
     }
+    assert_eq!(handle.active_count().await, 0);
+    server.shutdown();
+}
 
-    // Wait briefly for the task to clean up.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_submit_and_collect_fails_the_request_without_calling_cancel() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let stream = stream::iter(vec![Ok::<_, std::convert::Infallible>(text_chunk_event(
+                "starting", false,
+            ))])
+            .chain(stream::pending());
+            Sse::new(stream)
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let cfg = test_config(server.base_url(), "test-model");
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+    let rid = RequestId::from("req-drop");
+    let collect = {
+        let handle = handle.clone();
+        let rid = rid.clone();
+        tokio::spawn(async move {
+            let _ = handle.submit_and_collect(rid, user_request("hi")).await;
+        })
+    };
+    let _ = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, SamplingEvent::FirstToken { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("first token");
+    collect.abort();
+    let failed = await_event_matching(
+        &mut event_rx,
+        |e| matches!(e, SamplingEvent::Failed { .. }),
+        Duration::from_secs(5),
+    )
+    .await
+    .expect("Failed event after the collect future is dropped");
+    if let SamplingEvent::Failed { error, .. } = failed {
+        assert!(error.message.contains("cancelled"));
+    }
     assert_eq!(handle.active_count().await, 0);
     server.shutdown();
 }
@@ -501,6 +521,84 @@ async fn invalid_image_code_strips_and_retries() {
         "expected Completed after strip-retry"
     );
 
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "one rejection, one strip-retry");
+    assert!(bodies[0].contains(IMAGE_URI), "first attempt sends image");
+    assert!(
+        !bodies[1].contains(IMAGE_URI),
+        "strip-retry must not resend the image"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_invalid_image_strips_as_server_rejected() {
+    const IMAGE_URI: &str = "data:image/png;base64,cG9pc29uZWQ=";
+    let bodies = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let bodies_handler = Arc::clone(&bodies);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |body: String| {
+            let bodies = Arc::clone(&bodies_handler);
+            async move {
+                let n = {
+                    let mut b = bodies.lock().unwrap();
+                    b.push(body);
+                    b.len()
+                };
+                if n == 1 {
+                    Err::<Sse<_>, (StatusCode, String)>((
+                        StatusCode::BAD_REQUEST,
+                        json!({
+                            "code": INVALID_IMAGE_ERROR_CODE,
+                            "error": "Invalid PNG image.",
+                        })
+                        .to_string(),
+                    ))
+                } else {
+                    let events = sse_events_to_axum(sse::responses_api_reasoning_and_text_events(
+                        "ok",
+                        "recovered",
+                        "test-model",
+                    ));
+                    Ok(Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    )))
+                }
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        responses_config(server.base_url(), None),
+        RetryPolicy::default(),
+        event_tx,
+    );
+
+    let mut request = user_request("what is in this image?");
+    if let Some(ConversationItem::User(u)) = request.items.first_mut() {
+        u.add_image(IMAGE_URI);
+    }
+    handle.submit(RequestId::from("req-responses-invalid-image"), request);
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(15)).await;
+    server.shutdown();
+
+    assert!(
+        events.iter().any(|e| match e {
+            SamplingEvent::ImagesStripped {
+                stripped_urls,
+                reason: StripReason::ServerRejected,
+                ..
+            } => stripped_urls.len() == 1 && stripped_urls[0].as_ref() == IMAGE_URI,
+            _ => false,
+        }),
+        "Responses invalid_image must strip as ServerRejected, got {events:?}"
+    );
+    assert!(
+        matches!(events.last(), Some(SamplingEvent::Completed { .. })),
+        "expected Completed after strip-retry"
+    );
     let bodies = bodies.lock().unwrap();
     assert_eq!(bodies.len(), 2, "one rejection, one strip-retry");
     assert!(bodies[0].contains(IMAGE_URI), "first attempt sends image");
@@ -874,11 +972,11 @@ async fn connect_failure_does_not_emit_images_stripped() {
 }
 
 // ---------------------------------------------------------------------------
-// Rate limit exhausts threshold
+// Rate-limit thresholds
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn rate_limit_exhausts_at_threshold_and_yields_failed() {
+async fn rate_limit_exhausts_at_default_threshold_and_yields_failed() {
     let counter = Arc::new(AtomicU32::new(0));
     let counter_handler = Arc::clone(&counter);
     let app = Router::new().route(
@@ -906,6 +1004,53 @@ async fn rate_limit_exhausts_at_threshold_and_yields_failed() {
     let cfg = test_config(server.base_url(), "test-model");
     let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
 
+    let rid = RequestId::from("req-429-default");
+    handle.submit(rid, user_request("hi"));
+
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(60)).await;
+    server.shutdown();
+
+    match events.last().unwrap() {
+        SamplingEvent::Failed { error, .. } => {
+            assert_eq!(error.kind, SamplingErrorKind::RateLimited);
+            assert_eq!(error.status_code, Some(429));
+        }
+        other => panic!("expected Failed(RateLimited), got {other:?}"),
+    }
+
+    // The request task awaits and classifies each wire attempt before starting the next, so scheduling cannot add another request.
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "the default threshold permits one retry after the initial request"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn configured_rate_limit_threshold_controls_total_wire_attempts() {
+    let counter = Arc::new(AtomicU32::new(0));
+    let counter_handler = Arc::clone(&counter);
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(move || {
+            let counter = Arc::clone(&counter_handler);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [("retry-after", "0")],
+                    json!({ "error": { "message": "slow down" } }).to_string(),
+                )
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut cfg = test_config(server.base_url(), "test-model");
+    cfg.max_retries = Some(6);
+    cfg.rate_limit_retry_threshold = Some(4);
+    let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+
     let rid = RequestId::from("req-429");
     handle.submit(rid.clone(), user_request("hi"));
 
@@ -921,9 +1066,10 @@ async fn rate_limit_exhausts_at_threshold_and_yields_failed() {
     }
 
     let hits = counter.load(Ordering::SeqCst);
-    // RATE_LIMIT_RETRY_THRESHOLD is 2, so the actor stops after two attempts: the first attempt and one retry that also 429s
-    // Allow a small slack in case scheduling fires a third attempt before the threshold check
-    assert!((1..=3).contains(&hits), "expected 1-3 hits, got {hits}");
+    assert_eq!(
+        hits, 4,
+        "the configured threshold is a total-attempt ceiling and must override the policy default of 2"
+    );
 }
 
 // ---------------------------------------------------------------------------

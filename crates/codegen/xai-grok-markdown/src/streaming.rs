@@ -49,21 +49,8 @@ pub(crate) struct FrozenState {
 }
 
 /// Count trailing blank lines in text.
-///
 /// A trailing blank line is a line containing only whitespace followed by end-of-text, or consecutive newlines at the end.
-///
-/// For markdown block separators:
-/// - "\n\n" at the end = 1 blank line (one full blank line between blocks)
-/// - "\n\n\n" at the end = 2 blank lines
-/// - "text\n" at the end = 0 (just a line ending, no blank line)
-///
-/// Examples:
-/// - "" → 0
-/// - "hello" → 0
-/// - "hello\n" → 0 (just a line ending)
-/// - "hello\n\n" → 1
-/// - "hello\n\n\n" → 2
-/// - "hello\n  \n" → 1 (whitespace-only line counts as blank)
+/// "\n\n" at the end = 1 blank line (one full blank line between blocks); "\n\n\n" at the end = 2 blank lines; "text\n" at the end = 0 (just a line ending, no blank line).
 #[cfg(test)]
 fn count_trailing_blank_lines(text: &str) -> usize {
     if text.is_empty() {
@@ -78,18 +65,20 @@ fn count_trailing_blank_lines(text: &str) -> usize {
     while pos > 0 {
         pos -= 1;
 
-        match bytes[pos] {
-            b'\n' => {
+        match bytes.get(pos).copied() {
+            Some(b'\n') => {
                 // Found a newline: check if the line before it is blank
                 // Scan backwards to find start of this line
                 let line_end = pos;
                 let mut line_start = pos;
-                while line_start > 0 && bytes[line_start - 1] != b'\n' {
+                while line_start > 0 && bytes.get(line_start - 1) != Some(&b'\n') {
                     line_start -= 1;
                 }
 
                 // Check if the line is blank (only whitespace)
-                let line_content = &bytes[line_start..line_end];
+                let Some(line_content) = bytes.get(line_start..line_end) else {
+                    break;
+                };
                 let is_blank = line_content.iter().all(|&b| b == b' ' || b == b'\t');
 
                 if is_blank {
@@ -100,11 +89,11 @@ fn count_trailing_blank_lines(text: &str) -> usize {
                     break;
                 }
             }
-            b' ' | b'\t' => {
+            Some(b' ' | b'\t') => {
                 // Trailing whitespace, continue scanning
             }
-            _ => {
-                // Non-whitespace character, stop
+            Some(_) | None => {
+                // Non-whitespace character, or past the buffer: stop
                 break;
             }
         }
@@ -143,15 +132,11 @@ pub struct StreamingMarkdownRenderer {
     collapse_soft_breaks: bool,
 
     /// Incremental highlighter for the trailing still-open fenced code block.
-    ///
-    /// Persists syntect's resumable per-line state across `rerender_tail` calls so a large open code block is highlighted in O(N) total, not O(N²).
-    /// Created lazily on the first render with syntect.
     /// Cleared (so it rebuilds) on any state reset that would change output: theme/style, pretty mode, table width, soft-break mode, or `clear()`.
     open_code: Option<OpenCodeHighlighter>,
 
     /// Streaming LaTeX delimiter normalizer.
     /// Rewrites `\(…\)` / `\[…\]` / `\begin{equation}` into the canonical `$` / `$$` forms before text is appended to `source`.
-    /// The math handlers then convert them uniformly, including inside table cells.
     /// Held-back ambiguous bytes (a partial delimiter at a chunk boundary) are flushed by `finish()`.
     normalizer: LatexDelimiterNormalizer,
 }
@@ -172,7 +157,6 @@ impl Clone for StreamingMarkdownRenderer {
     fn clone(&self) -> Self {
         // Create a fresh renderer and push all source text
         // This recreates the frozen state correctly.
-        //
         // We must propagate `max_table_width` BEFORE pushing/rendering so the clone produces identical output to the original
         let mut new = Self::new(self.style, self.pretty);
         new.set_max_table_width(self.max_table_width);
@@ -216,7 +200,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Set the maximum width for rendered tables.
-    ///
     /// When set, column widths are shrunk proportionally so the table fits within the given number of display columns.
     /// If the width changes, frozen state is reset to ensure consistent rendering.
     pub fn set_max_table_width(&mut self, width: Option<usize>) {
@@ -230,9 +213,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Set whether CommonMark soft breaks collapse to a space.
-    ///
-    /// Defaults to `true`.
-    /// Set `false` for source-faithful rendering (plan preview) where each source line keeps its own visual line and `line_source_map` entry.
     /// Resets frozen state when the mode changes.
     pub fn set_collapse_soft_breaks(&mut self, collapse: bool) {
         if self.collapse_soft_breaks != collapse {
@@ -244,9 +224,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Push a new chunk of markdown text (no rendering).
-    ///
-    /// The chunk is run through the streaming LaTeX delimiter normalizer and the normalized result is appended to the internal buffer.
-    /// A bounded ambiguous suffix (a partial delimiter at the chunk boundary) may be held back until the next `push`; `finish()` flushes it.
     /// Call `render()` to process accumulated content, or use `push_and_render()` for convenience.
     pub fn push(&mut self, chunk: &str) {
         let normalized = self.normalizer.push(chunk);
@@ -261,21 +238,13 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Render accumulated content.
-    ///
-    /// Processes the unfrozen tail and updates the output.
-    /// Call `view()` to get the rendered lines.
-    ///
     /// Pass `None` for syntect to disable syntax highlighting for code blocks.
-    ///
-    /// Theme stability: a still-open fenced code block is highlighted incrementally, caching the colors of the `syntect` theme seen so far.
     /// The `syntect` theme must stay stable between renders; switch themes via [`set_style`](Self::set_style), which clears that cache.
-    /// (Passing a different theme without a reset would leave already-committed lines in the old colors.)
     pub fn render(&mut self, syntect: Option<&Syntect>) {
         self.rerender_tail(syntect);
     }
 
     /// Push a chunk and render immediately (convenience method).
-    ///
     /// Equivalent to `push(chunk)` followed by `render(syntect)`.
     /// Use this for real-time streaming where you want to display after each chunk.
     pub fn push_and_render(&mut self, chunk: &str, syntect: Option<&Syntect>) {
@@ -312,7 +281,9 @@ impl StreamingMarkdownRenderer {
         {
             tail_start += 1;
         }
-        let tail = &self.source[tail_start..];
+        let Some(tail) = self.source.get(tail_start..) else {
+            return;
+        };
         // Lazily create the incremental open-code cache once syntect is present.
         // It rebuilds itself on fence/offset change, so a stale cache from a previous tail (e.g. after a checkpoint advanced) is self-correcting.
         let open_code = match syntect {
@@ -367,17 +338,10 @@ impl StreamingMarkdownRenderer {
                 cb
             }));
 
-        // Detect plain URLs (e.g. the `(url)` suffix in pretty-mode markdown links, bare URLs in prose).
-        // We run this here, not only in `finish()`, for two reasons:
-        //   (a) Non-streaming callers (e.g. `AgentMessageBlock::new(text)` during session replay) never call `finish()`.
-        //       Without url_scan here their URLs would never become HyperlinkTargets
-        //   (b) State resets (`set_max_table_width`, `set_pretty`, `set_style`) rebuild the output from scratch via a subsequent `render()`
-        //       URL hyperlinks added by an earlier `finish()` would otherwise be silently dropped here
-        //
-        // We scan only the newly-rendered tail (`frozen_lines..end`); URLs already on frozen lines were kept by the `retain` filter above
-        // The offset-aware scan emits document-absolute line indices
-        // `detect_plain_urls_with_offset` dedups against existing hyperlinks per line, so it is idempotent
-        let tail_lines = &self.output.lines[frozen_lines..];
+        // Detect plain URLs` suffix in pretty-mode markdown links, bare URLs in prose).
+        // (a) Non-streaming callers` during session replay) never call `finish()`.
+        // Without url_scan here their URLs would never become HyperlinkTargets
+        let tail_lines = self.output.lines.get(frozen_lines..).unwrap_or(&[]);
         let (extra_links, post_scan_next_id) = crate::url_scan::detect_plain_urls_with_offset(
             tail_lines,
             frozen_lines,
@@ -405,7 +369,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Get a view of the current rendered output.
-    ///
     /// This is cheap: it returns a reference to cached output.
     /// The output was computed during `render()` or `push_and_render()`.
     pub fn view(&self) -> MarkdownRenderView<'_> {
@@ -428,7 +391,6 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Reset the renderer, clearing all accumulated content.
-    ///
     /// Also resets `max_table_width` to `None` for symmetry with the freshly-constructed state.
     /// Otherwise a later `set_max_table_width(Some(prev_width))` is silently a no-op (no state reset) because the equality check sees no change.
     pub fn clear(&mut self) {
@@ -466,15 +428,7 @@ impl StreamingMarkdownRenderer {
     }
 
     /// Finalize streaming with a full re-render.
-    ///
-    /// This does a complete non-streaming render of the accumulated source, replacing the incrementally-built output.
-    /// Use this when streaming is complete; it catches edge cases where streaming might have produced slightly different output.
-    ///
-    /// After the parser pass, this runs `url_scan::detect_plain_urls` and sorts the hyperlink list by `(line_index, column_range.start)`.
     /// `render()` also runs the URL detector and sort, so `finish()` adds nothing those calls didn't already produce.
-    /// Its distinguishing value is the unconditional full re-render, independent of frozen-state truncation.
-    ///
-    /// Returns a view of the finalized output.
     pub fn finish(&mut self, syntect: Option<&Syntect>) -> MarkdownRenderView<'_> {
         // Flush any bytes the normalizer held back at the last chunk boundary (e.g. a trailing partial delimiter).
         // The full re-render must see the complete, normalized source
@@ -724,7 +678,10 @@ mod tests {
         assert!(
             !pre.ends_with('`'),
             "without finish(), trailing closer must still be held back; source ends {:?}",
-            &pre[pre.len().saturating_sub(20)..]
+            pre.len()
+                .checked_sub(20)
+                .and_then(|i| pre.get(i..))
+                .unwrap_or(&pre)
         );
         assert!(
             pre.contains('`') && pre.contains("report.html"),
@@ -845,7 +802,7 @@ Final paragraph with no trailing newline."#;
             full_output.lines.as_slice(),
             "[{}] char-by-char streaming mismatch for: {:?}",
             mode,
-            &text[..text.len().min(50)]
+            text.get(..text.len().min(50)).unwrap_or(text)
         );
     }
 
@@ -867,14 +824,26 @@ Final paragraph with no trailing newline."#;
         let mut chunk_idx = 0;
 
         while pos < text.len() {
-            let desired_end = pos + chunk_sizes[chunk_idx % chunk_sizes.len()];
+            if chunk_sizes.is_empty() {
+                break;
+            }
+            let Some(&size) = chunk_sizes.get(chunk_idx % chunk_sizes.len()) else {
+                break;
+            };
+            let desired_end = pos + size;
             // Find next valid char boundary at or after desired_end
-            let end = text[pos..]
+            let Some(rest) = text.get(pos..) else {
+                break;
+            };
+            let end = rest
                 .char_indices()
                 .map(|(i, _)| pos + i)
                 .find(|&i| i >= desired_end)
                 .unwrap_or(text.len());
-            renderer.push_and_render(&text[pos..end], None);
+            let Some(chunk) = text.get(pos..end) else {
+                break;
+            };
+            renderer.push_and_render(chunk, None);
             pos = end;
             chunk_idx += 1;
         }
@@ -885,7 +854,7 @@ Final paragraph with no trailing newline."#;
             full_output.lines.as_slice(),
             "[{}] chunk streaming mismatch for: {:?}",
             mode,
-            &text[..text.len().min(50)]
+            text.get(..text.len().min(50)).unwrap_or(text)
         );
     }
 
@@ -1001,7 +970,7 @@ Final paragraph with no trailing newline."#;
             full_output.line_source_map,
             streaming_output.line_source_map,
             "Line source map mismatch for {:?}",
-            &text[..text.len().min(50)]
+            text.get(..text.len().min(50)).unwrap_or(text)
         );
     }
 
@@ -1057,12 +1026,15 @@ Final paragraph with no trailing newline."#;
         renderer.push_and_render("a **bold** c\nplain line", None);
         let output = renderer.view();
         assert_eq!(output.lines.len(), 2, "lines: {:?}", output.lines);
-        let has_bold = output.lines[0].spans.iter().any(|s| {
+        let Some(first_line) = output.lines.first() else {
+            panic!("expected a line: {:?}", output.lines);
+        };
+        let has_bold = first_line.spans.iter().any(|s| {
             s.style
                 .add_modifier
                 .contains(ratatui::style::Modifier::BOLD)
         });
-        assert!(has_bold, "bold must survive: {:?}", output.lines[0].spans);
+        assert!(has_bold, "bold must survive: {:?}", first_line.spans);
     }
 
     #[test]
@@ -1077,7 +1049,9 @@ Final paragraph with no trailing newline."#;
         assert!(!output.lines.is_empty(), "Should produce lines for heading");
 
         // Check that the first line has styling (heading should be bold and colored)
-        let first_line = &output.lines[0];
+        let Some(first_line) = output.lines.first() else {
+            panic!("expected heading line: {:?}", output.lines);
+        };
         assert!(!first_line.spans.is_empty(), "First line should have spans");
 
         // The heading text should have some style applied (bold, color, etc.)
@@ -1109,7 +1083,9 @@ Final paragraph with no trailing newline."#;
         assert!(!output.lines.is_empty(), "Should produce lines");
 
         // After complete heading, should have styled output
-        let first_line = &output.lines[0];
+        let Some(first_line) = output.lines.first() else {
+            panic!("expected styled line: {:?}", output.lines);
+        };
         let has_style = first_line.spans.iter().any(|span| {
             span.style.fg.is_some()
                 || span
@@ -1351,7 +1327,11 @@ Final paragraph with no trailing newline."#;
             .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
         let frozen_bytes = renderer.frozen_bytes();
-        let frozen_source = renderer.source()[..frozen_bytes].to_string();
+        let frozen_source = renderer
+            .source()
+            .get(..frozen_bytes)
+            .unwrap_or("")
+            .to_string();
         let trailing_blanks = count_trailing_blank_lines(&frozen_source);
 
         let full_lines: Vec<String> = full_output
@@ -1551,8 +1531,11 @@ Final paragraph with no trailing newline."#;
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
 
-        assert_eq!(lines[0], "│ Single line quote");
-        assert_eq!(lines[2], "││ Nested quote");
+        assert_eq!(
+            lines.first().map(String::as_str),
+            Some("│ Single line quote")
+        );
+        assert_eq!(lines.get(2).map(String::as_str), Some("││ Nested quote"));
     }
 
     #[test]
@@ -1743,8 +1726,12 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
                 continue;
             }
 
-            let chunk1 = &text[..split_at];
-            let chunk2 = &text[split_at..];
+            let Some(chunk1) = text.get(..split_at) else {
+                continue;
+            };
+            let Some(chunk2) = text.get(split_at..) else {
+                continue;
+            };
 
             let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
             renderer.push_and_render(chunk1, None);
@@ -1773,8 +1760,12 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
                     streaming_lines.len(),
                     full_lines.len(),
                     diff_line,
-                    &chunk1[chunk1.len().saturating_sub(30)..],
-                    &chunk2[..chunk2.len().min(30)],
+                    chunk1
+                        .len()
+                        .checked_sub(30)
+                        .and_then(|i| chunk1.get(i..))
+                        .unwrap_or(chunk1),
+                    chunk2.get(..chunk2.len().min(30)).unwrap_or(chunk2),
                 ));
             }
         }
@@ -1811,8 +1802,12 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
                 continue;
             }
 
-            let first_half = &text[..split1];
-            let second_half = &text[split1..];
+            let Some(first_half) = text.get(..split1) else {
+                continue;
+            };
+            let Some(second_half) = text.get(split1..) else {
+                continue;
+            };
 
             // Split first half (if possible)
             let first_splits: Vec<usize> = if first_half.len() > 1 {
@@ -1836,10 +1831,10 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
                     let sub2 = find_char_boundary(second_half, sub2);
 
                     let chunks: Vec<&str> = vec![
-                        &first_half[..sub1],
-                        &first_half[sub1..],
-                        &second_half[..sub2],
-                        &second_half[sub2..],
+                        first_half.get(..sub1).unwrap_or(""),
+                        first_half.get(sub1..).unwrap_or(""),
+                        second_half.get(..sub2).unwrap_or(""),
+                        second_half.get(sub2..).unwrap_or(""),
                     ]
                     .into_iter()
                     .filter(|c| !c.is_empty())
@@ -1930,8 +1925,12 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
                 continue;
             }
 
-            let chunk1 = &text[..split_at];
-            let chunk2 = &text[split_at..];
+            let Some(chunk1) = text.get(..split_at) else {
+                continue;
+            };
+            let Some(chunk2) = text.get(split_at..) else {
+                continue;
+            };
 
             let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
             renderer.push_and_render(chunk1, None);
@@ -2053,12 +2052,7 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
     }
 
     /// URL detection runs in BOTH `render()` and `finish()`.
-    /// This test pins:
-    ///   1. The URL surfaces as a HyperlinkTarget during streaming (every `push_and_render` call), not only after `finish()`.
-    ///   2. `finish()` does not duplicate the URL HyperlinkTarget that `render()` already added.
-    ///      The dedup in `detect_plain_urls` makes the second pass idempotent.
-    ///   3. The full `HyperlinkTarget` (URL + line_index + column_range) is identical before and after `finish()`.
-    ///      Ids may be reassigned by `finish()` (it restarts the parser counter at 0), but every other field must match.
+    /// The URL surfaces as a HyperlinkTarget during streaming (every `push_and_render` call), not only after `finish()`; `finish()` does not duplicate the URL HyperlinkTarget that `render()` already added. The dedup in `detect_plain_urls` makes the second pass idempotent; The full `HyperlinkTarget` (URL + line_index + column_range) is identical before and after `finish()`. Ids may be reassigned by `finish()` (it restarts the parser counter at 0), but every other field must match.
     #[test]
     fn streaming_byte_by_byte_url_appears_during_render_and_survives_finish() {
         let text = "See https://example.com for details.\n";
@@ -2133,7 +2127,9 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
             view.hyperlinks,
         );
         // The two ranges must be disjoint: the parser one covers "link", the url_scan one covers the URL in the `(url)` suffix
-        let (a, b) = (&matches[0], &matches[1]);
+        let [a, b] = matches.as_slice() else {
+            panic!("expected two URL matches: {matches:?}");
+        };
         assert!(
             a.column_range.end <= b.column_range.start
                 || b.column_range.end <= a.column_range.start,
@@ -2187,11 +2183,6 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
 
     /// Across multiple streaming chunks every emitted hyperlink id must be unique.
     /// Catches a regression where url_scan reuses an id already assigned to a parser hyperlink (or vice versa).
-    /// A reused id silently merges OSC 8 hyperlinks for the terminal.
-    ///
-    /// The first assertion is the regression target: it runs on the streaming-path output (post-`rerender_tail`, pre-`finish()`).
-    /// A regression in the `post_scan_next_id` vs `tail_next_link_id` bookkeeping at the bottom of `rerender_tail` would surface here.
-    /// We keep a second post-`finish()` assertion because `finish()`'s full re-render is the recovery path users always see eventually.
     /// Both must produce unique ids.
     #[test]
     fn render_assigns_monotonic_ids_across_chunks() {
@@ -2233,11 +2224,7 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
 
     /// Pin: byte-by-byte streaming through a checkpoint advance with a URL straddling the freeze boundary must produce a single full-URL hyperlink.
     /// A stuck partial-URL hyperlink from when only the prefix was visible must not remain.
-    ///
-    /// The PRE-finish assertion is the regression target: the concern is a partial-URL hyperlink left in the streaming-path `view().hyperlinks`.
     /// `finish()` does a full re-render and would recover from any stuck state, masking the regression.
-    /// The streaming-path snapshot is therefore taken first and the assertion runs on it directly.
-    /// The post-finish assertion is retained as a secondary check.
     #[test]
     fn streaming_byte_by_byte_through_checkpoint_with_url_at_boundary() {
         let text = "# Header\n\nSee https://example.com/path here.\n\n";
@@ -2285,7 +2272,6 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
 
     /// After `finish`, a document with one markdown link `[a](url)` and one plain URL `https://b.example` has monotonic IDs.
     /// The markdown-link target gets `id = 0`; the plain-URL target gets a higher id (continuing from `frozen.next_link_id`).
-    ///
     /// In pretty mode, `[a](url)` renders as `a (url)`, so url_scan assigns id=1 to the pretty-mode suffix and the plain URL gets id=2.
     #[test]
     fn url_scan_ids_continue_from_frozen_counter() {
@@ -2338,7 +2324,9 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
                     actual_end += 1;
                 }
             }
-            chunks.push(&text[start..actual_end]);
+            if let Some(chunk) = text.get(start..actual_end) {
+                chunks.push(chunk);
+            }
             start = actual_end;
         }
 
@@ -2411,12 +2399,18 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
         let mut pos = 0;
         while pos < text.len() {
             let desired = pos + chunk;
-            let end = text[pos..]
+            let Some(rest) = text.get(pos..) else {
+                break;
+            };
+            let end = rest
                 .char_indices()
                 .map(|(i, _)| pos + i)
                 .find(|&i| i >= desired)
                 .unwrap_or(text.len());
-            renderer.push_and_render(&text[pos..end], Some(syntect));
+            let Some(piece) = text.get(pos..end) else {
+                break;
+            };
+            renderer.push_and_render(piece, Some(syntect));
             pos = end;
         }
         let streaming_output = renderer.view();
@@ -2461,12 +2455,18 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
         let mut pos = 0;
         while pos < text.len() {
             let desired = pos + chunk;
-            let end = text[pos..]
+            let Some(rest) = text.get(pos..) else {
+                break;
+            };
+            let end = rest
                 .char_indices()
                 .map(|(i, _)| pos + i)
                 .find(|&i| i >= desired)
                 .unwrap_or(text.len());
-            renderer.push_and_render(&text[pos..end], Some(syntect));
+            let Some(piece) = text.get(pos..end) else {
+                break;
+            };
+            renderer.push_and_render(piece, Some(syntect));
             pos = end;
         }
         assert_eq!(
@@ -2568,7 +2568,10 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
             .map(|(i, _)| i)
             .find(|&i| i >= mid)
             .unwrap_or(text.len());
-        renderer.push_and_render(&text[..mid], Some(syntect));
+        let Some(first_half) = text.get(..mid) else {
+            return;
+        };
+        renderer.push_and_render(first_half, Some(syntect));
         assert!(
             renderer.open_code.is_some(),
             "cache should exist after rendering an open block with syntect",
@@ -2582,7 +2585,10 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
         );
 
         // Finish streaming under the new style and compare to a full render under that same style
-        renderer.push_and_render(&text[mid..], Some(syntect));
+        let Some(second_half) = text.get(mid..) else {
+            return;
+        };
+        renderer.push_and_render(second_half, Some(syntect));
         let (full_output, _) = render_markdown_ratatui_full(&text, style2, true, Some(syntect));
         assert_eq!(
             renderer.view().lines,
@@ -2652,8 +2658,14 @@ The frozen lines are **never re-rendered**, making streaming O(N) instead of O(N
             }
 
             let mut renderer = StreamingMarkdownRenderer::new(test_style::STYLE, true);
-            renderer.push_and_render(&text[..split_at], None);
-            renderer.push_and_render(&text[split_at..], None);
+            let Some(chunk1) = text.get(..split_at) else {
+                continue;
+            };
+            let Some(chunk2) = text.get(split_at..) else {
+                continue;
+            };
+            renderer.push_and_render(chunk1, None);
+            renderer.push_and_render(chunk2, None);
             let streaming_output = renderer.view();
 
             let streaming_lines: Vec<String> = streaming_output

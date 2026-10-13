@@ -56,7 +56,6 @@ fn agent_with_foreign_row(status: BgTaskStatus) -> AgentView {
 /// One real frame, so the list layout runs and the pane holds a selection.
 fn draw(agent: &mut AgentView, registry: &ActionRegistry) {
     let area = Rect::new(0, 0, 80, 30);
-    let bundle = crate::app::bundle::BundleState::default();
     let mut buf = Buffer::empty(area);
     let mut scratch = ScratchBuffer::new();
     agent.last_terminal_size = (80, 30);
@@ -68,8 +67,6 @@ fn draw(agent: &mut AgentView, registry: &ActionRegistry) {
         None,
         false,
         BannerSlotParams::none(),
-        &bundle,
-        false,
         false,
         &mut Vec::new(),
         AppRenderParams::default(),

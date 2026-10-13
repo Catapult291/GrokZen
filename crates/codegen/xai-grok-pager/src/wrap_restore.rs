@@ -80,13 +80,9 @@ fn mode_bit(mode: u32) -> Option<u32> {
     })
 }
 
-/// Tracks latched terminal state, shared (via `Arc`) between the wrap output filter, the exit-path drop guard, and the terminate-signal thread.
-///
-/// All state is atomic: the read loop updates it while other threads snapshot it.
-/// The two-phase `restore_claimed`/`restore_done` gate keeps the multiple exit paths from emitting restores twice.
-/// It still lets a losing path wait for the winner to finish.
-/// `SeqCst` throughout: every access is on a cold path (a few RMWs per tracked mode change, none per output byte).
-/// So the uniform strongest ordering is chosen over reasoning about minimal per-site orderings.
+/// Tracks latched terminal state, shared (via `Arc`) between the wrap output filter, the exit-path drop guard, and
+/// the terminate-signal thread. So the uniform strongest ordering is chosen over reasoning about minimal per-site
+/// orderings.
 #[derive(Debug, Default)]
 pub(crate) struct ModeTracker {
     /// Bitmask of latched modes (the `MOUSE_*`/`PASTE_*`/... bits above).
@@ -119,8 +115,12 @@ impl ModeTracker {
         if seq.len() < 3 {
             return;
         }
-        let final_byte = seq[seq.len() - 1];
-        let body = &seq[2..seq.len() - 1];
+        let Some((&final_byte, rest)) = seq.split_last() else {
+            return;
+        };
+        let Some(body) = rest.get(2..) else {
+            return;
+        };
         match final_byte {
             // DECSET/DECRST only; ANSI SM/RM (no `?`) is untracked.
             b'h' | b'l' => {
@@ -144,7 +144,11 @@ impl ModeTracker {
                 Some(b'<') => {
                     // Zero also means the default (1): under the common CSI zero-means-default convention a terminal may pop one entry for `<0u`
                     // Over-counting depth here risks the destructive extra pop at exit
-                    let n = parse_decimal(&body[1..]).filter(|&n| n > 0).unwrap_or(1);
+                    let n = body
+                        .get(1..)
+                        .and_then(parse_decimal)
+                        .filter(|&n| n > 0)
+                        .unwrap_or(1);
                     let _ = self.kitty_depth.fetch_update(
                         Ordering::SeqCst,
                         Ordering::SeqCst,
@@ -178,10 +182,9 @@ impl ModeTracker {
         }
     }
 
-    /// Claim the one-shot restore shared by every exit path (drop guard, signal thread).
-    /// The first caller gets `true` and must call [`finish_restore`](Self::finish_restore) when done.
-    /// Later callers get `false` and must not emit (the terminal would be reset twice, and the kitty pop is a destructive stack operation).
-    /// They should instead wait for completion before letting the process exit.
+    /// The first caller gets `true` and must call `finish_restore` when done. Later callers get `false` and must not
+    /// emit (the terminal would be reset twice, and the kitty pop is a destructive stack operation). They should
+    /// instead wait for completion before letting the process exit.
     pub(crate) fn begin_restore(&self) -> bool {
         !self.restore_claimed.swap(true, Ordering::SeqCst)
     }
@@ -197,13 +200,9 @@ impl ModeTracker {
     }
 }
 
-/// Disable sequences for exactly the latched state in `snapshot`.
-///
-/// Nothing latched yields an empty vec: clean exits must stay byte-transparent.
-/// The emission order matches `xai_crash_handler::terminal::RESTORE_SEQ` for every element the two share (pinned by a unit test below).
-/// Synchronized-update end goes first: multiplexers must stop buffering before the other resets arrive.
-/// Cursor show and the mouse/paste/focus disables follow.
-/// Kitty pops come before the alt-screen exits (the kitty stack is per-screen), and the alt-screen exits go last.
+/// Disable sequences for exactly the latched state in `snapshot`. Nothing latched yields an empty vec: clean exits
+/// must stay byte-transparent. Synchronized-update end goes first: multiplexers must stop buffering before the
+/// other resets arrive.
 pub(crate) fn restore_bytes(snapshot: ModeSnapshot) -> Vec<u8> {
     let mut out = Vec::new();
     if snapshot.modes & SYNC_2026 != 0 {
@@ -417,10 +416,9 @@ mod tests {
         assert!(tracker.restore_done());
     }
 
-    /// Guards the module doc's claim that the tracked set mirrors `RESTORE_SEQ` across crates.
-    /// `RESTORE_SEQ` is the canonical "every mode the pager enables" teardown table, so every disable it contains must be covered by this tracker.
-    /// The shared elements must also be emitted in the same relative order.
-    /// If a mode is added to `RESTORE_SEQ` without extending the tracker, this fails.
+    /// `RESTORE_SEQ` is the canonical "every mode the pager enables" teardown table, so every disable it contains must
+    /// be covered by this tracker. The shared elements must also be emitted in the same relative order. If a mode is
+    /// added to `RESTORE_SEQ` without extending the tracker, this fails.
     #[test]
     fn covers_and_orders_every_crash_handler_restore_seq_element() {
         let elements: Vec<Vec<u8>> = xai_crash_handler::terminal::RESTORE_SEQ
@@ -446,7 +444,10 @@ mod tests {
                 // Show-cursor clears the inverted hidden-cursor latch
                 b"\x1b[?25h" => b"\x1b[?25l".to_vec(),
                 seq if seq.starts_with(b"\x1b[?") && seq.ends_with(b"l") => {
-                    let mut enable = seq[..seq.len() - 1].to_vec();
+                    let mut enable = match seq.split_last() {
+                        Some((_, prefix)) => prefix.to_vec(),
+                        None => seq.to_vec(),
+                    };
                     enable.push(b'h');
                     enable
                 }
@@ -466,11 +467,13 @@ mod tests {
             .map(|element| position_of(&out, element))
             .collect();
         for (window, pair) in elements.windows(2).zip(positions.windows(2)) {
+            let [prev, next] = window else { continue };
+            let [left, right] = pair else { continue };
             assert!(
-                pair[0] < pair[1],
+                left < right,
                 "{:?} must precede {:?} to match RESTORE_SEQ, got {:?}",
-                String::from_utf8_lossy(&window[0]),
-                String::from_utf8_lossy(&window[1]),
+                String::from_utf8_lossy(prev),
+                String::from_utf8_lossy(next),
                 String::from_utf8_lossy(&out)
             );
         }

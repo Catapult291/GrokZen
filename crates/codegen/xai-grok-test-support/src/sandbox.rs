@@ -11,10 +11,9 @@ use tempfile::TempDir;
 const TEST_API_KEY: &str = "test-key-for-ci";
 const REDACTED: &str = "<redacted>";
 
-/// One test's isolated filesystem tree and canonical child environment.
-///
-/// Construction never mutates the process environment.
-/// Child commands start from `env_clear()` and receive only platform essentials, sandbox paths, grok network kill switches, and explicit overrides.
+/// One test's isolated filesystem tree and canonical child environment. Construction never mutates the process
+/// environment. Child commands start from `env_clear()` and receive only platform essentials, sandbox paths, grok network
+/// kill switches, and explicit overrides.
 pub struct TestSandbox {
     root: TempDir,
     home: PathBuf,
@@ -141,11 +140,9 @@ impl TestSandbox {
         cmd
     }
 
-    /// Values that must be removed from captured child-output diagnostics.
-    ///
-    /// This intentionally returns values only, never keys.
-    /// Process diagnostics never print the child's environment.
-    /// A failing child can still echo endpoint URLs, credentials, and sandbox-owned private paths.
+    /// Values that must be removed from captured child-output diagnostics. This intentionally returns values only, never
+    /// keys. Process diagnostics never print the child's environment. A failing child can still echo endpoint URLs,
+    /// credentials, and sandbox-owned private paths.
     pub(crate) fn diagnostic_redactions(&self) -> Vec<String> {
         self.env
             .iter()
@@ -242,12 +239,15 @@ impl TestSandboxBuilder {
 }
 
 impl TestSandbox {
-    fn init_git_workspace(&self) {
+    /// Leaves an existing `README.md` in place.
+    pub fn init_git_workspace(&self) {
         run_git(self, &["init"]);
         run_git(self, &["config", "user.email", "test@test.invalid"]);
         run_git(self, &["config", "user.name", "Grok Test"]);
-        std::fs::write(self.workspace.join("README.md"), "test file\n")
-            .expect("write sandbox git fixture");
+        let readme = self.workspace.join("README.md");
+        if !readme.exists() {
+            std::fs::write(&readme, "test file\n").expect("write sandbox git fixture");
+        }
         run_git(self, &["add", "-A"]);
         run_git(self, &["commit", "-m", "init", "--no-gpg-sign"]);
     }
@@ -310,11 +310,12 @@ fn baseline_env_from_parent(
 ) -> BTreeMap<OsString, OsString> {
     let mut env = BTreeMap::new();
     for key in platform_allowlist() {
-        if let Some(value) = inherited_platform_value(parent_env, key) {
+        if let Some(value) = parent_var(parent_env, key) {
             env.insert((*key).into(), value.to_owned());
         }
     }
     apply_hermetic_git_env(&mut env, parent_cwd, parent_env);
+    apply_hermetic_rg_env(&mut env, parent_cwd, parent_env);
     #[cfg(unix)]
     env.entry("SHELL".into())
         .or_insert_with(|| OsString::from("/bin/sh"));
@@ -331,6 +332,11 @@ fn baseline_env_from_parent(
     }
     for (key, value) in [
         ("GROK_TELEMETRY_ENABLED", "false"),
+        // A test that re-enables the mode must still have no production sink: the pager bakes in the analytics token and events URL.
+        ("GROK_TELEMETRY_MIXPANEL_ENABLED", "false"),
+        ("GROK_TELEMETRY_MIXPANEL_TOKEN", ""),
+        ("GROK_TELEMETRY_EVENTS_URL", ""),
+        ("GROK_TELEMETRY_EVENTS_API_KEY", ""),
         ("GROK_TELEMETRY_TRACE_UPLOAD", "false"),
         ("GROK_FEEDBACK_ENABLED", "false"),
         ("GROK_TRACE_UPLOAD", "false"),
@@ -340,6 +346,10 @@ fn baseline_env_from_parent(
         ("DISABLE_FEEDBACK_COMMAND", "1"),
         ("GROK_DISABLE_AUTOUPDATER", "1"),
         ("GROK_PROMPT_SUGGESTIONS", "false"),
+        // Every sandbox has an empty `GROK_HOME`, so without this the agent id is
+        // recomputed per test; on Windows that is a ~30s `powershell Get-WmiObject`
+        // run inside `initialize`, which blew the harness deadlines (GB-5593).
+        ("GROK_AGENT_ID", "grok-e2e-sandbox"),
         // Pin so a developer-exported override cannot flake empty-home launch tests.
         ("GROK_DEFAULT_PERMISSION_MODE", "ask"),
         // The post-turn summary would send unscripted requests to the mock server and break exact wire-traffic assertions
@@ -359,6 +369,12 @@ fn baseline_env_from_parent(
         "GIT_CONFIG_GLOBAL".into(),
         grok_home.join("gitconfig").into_os_string(),
     );
+    // Leader-lock acquire slots stay inside the sandbox instead of the developer's `/tmp/grok-file-lock-<uid>`.
+    // Literal on purpose: `xai_grok_file_lock::SLOT_DIR_ENV` lives in a crate this one does not depend on.
+    env.insert(
+        "GROK_FILE_LOCK_SLOT_DIR".into(),
+        temp.join("lock-slots").into_os_string(),
+    );
     env
 }
 
@@ -367,7 +383,7 @@ fn apply_hermetic_git_env(
     parent_cwd: &Path,
     parent_env: &BTreeMap<OsString, OsString>,
 ) {
-    let Some(git_bin) = inherited_platform_value(parent_env, "GIT_BIN_PATH") else {
+    let Some(git_bin) = parent_var(parent_env, "GIT_BIN_PATH") else {
         return;
     };
     let git_bin = PathBuf::from(git_bin);
@@ -381,7 +397,7 @@ fn apply_hermetic_git_env(
     };
 
     let mut paths = vec![parent.to_owned()];
-    if let Some(path) = inherited_platform_value(parent_env, "PATH") {
+    if let Some(path) = parent_var(parent_env, "PATH") {
         paths.extend(std::env::split_paths(path));
     }
     let path = std::env::join_paths(paths).unwrap_or_else(|_| parent.as_os_str().to_owned());
@@ -390,25 +406,48 @@ fn apply_hermetic_git_env(
     env.insert("PATH".into(), path);
 }
 
-/// Read one inherited platform variable by its canonical name.
-///
-/// Windows environment names are case-insensitive and an inherited block does not promise
-/// canonical spelling: a Git Bash parent exports `SYSTEMROOT`/`COMSPEC`/`Path`. A case-sensitive
-/// lookup would drop those allowlisted essentials, and a child without `SystemRoot` cannot use
-/// Winsock at all — its provider DLLs are resolved from REG_EXPAND_SZ catalog entries, so every
-/// `connect` fails with `WSAEPROVIDERFAILEDINIT` (os error 10106).
-fn inherited_platform_value<'a>(
+/// Forward the hermetic ripgrep binary to the spawned agent so its grep tool resolves `rg` via
+/// `RG_BIN_PATH`. Bazel sets the path runfiles-relative, so it is absolutized against the parent cwd
+/// like the git binary; absent the variable (cargo/xb, where `rg` is bundled or on PATH) this is a no-op.
+fn apply_hermetic_rg_env(
+    env: &mut BTreeMap<OsString, OsString>,
+    parent_cwd: &Path,
+    parent_env: &BTreeMap<OsString, OsString>,
+) {
+    let Some(rg_bin) = parent_env.get(OsStr::new("RG_BIN_PATH")) else {
+        return;
+    };
+    let rg_bin = PathBuf::from(rg_bin);
+    let rg_bin = if rg_bin.is_absolute() {
+        rg_bin
+    } else {
+        parent_cwd.join(rg_bin)
+    };
+    env.insert("RG_BIN_PATH".into(), rg_bin.into_os_string());
+}
+
+/// Read `key` from the parent environment. Windows variable names are case-insensitive and MSYS
+/// bash (GitHub Actions `shell: bash`) upper-cases inherited ones, so `SystemRoot` arrives as
+/// `SYSTEMROOT`; an exact lookup drops it and the child's Winsock fails (WSAEPROVIDERFAILEDINIT).
+fn parent_var<'a>(parent_env: &'a BTreeMap<OsString, OsString>, key: &str) -> Option<&'a OsString> {
+    if let Some(value) = parent_env.get(OsStr::new(key)) {
+        return Some(value);
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    find_var_ignore_ascii_case(parent_env, key)
+}
+
+/// The value of the first variable named `key` up to ASCII case; a non-UTF-8 name never matches.
+fn find_var_ignore_ascii_case<'a>(
     parent_env: &'a BTreeMap<OsString, OsString>,
     key: &str,
 ) -> Option<&'a OsString> {
-    if cfg!(windows)
-        && let Some((_, value)) = parent_env
-            .iter()
-            .find(|(candidate, _)| candidate.to_string_lossy().eq_ignore_ascii_case(key))
-    {
-        return Some(value);
-    }
-    parent_env.get(OsStr::new(key))
+    parent_env
+        .iter()
+        .find(|(name, _)| name.to_str().is_some_and(|n| n.eq_ignore_ascii_case(key)))
+        .map(|(_, value)| value)
 }
 
 fn platform_allowlist() -> &'static [&'static str] {
@@ -634,6 +673,31 @@ mod tests {
     }
 
     #[test]
+    fn relative_rg_bin_path_resolves_against_parent_cwd() {
+        let parent = tempfile::tempdir().expect("create parent cwd fixture");
+        let parent_cwd = parent.path();
+        let relative_rg = Path::new("external/ripgrep_hermetic/rg");
+        let env = resolved_baseline_env(
+            parent_cwd,
+            BTreeMap::from([(OsString::from("RG_BIN_PATH"), relative_rg.into())]),
+        );
+        let rg_bin = parent_cwd.join(relative_rg);
+        assert_eq!(
+            env.get(OsStr::new("RG_BIN_PATH")).map(OsString::as_os_str),
+            Some(rg_bin.as_os_str())
+        );
+    }
+
+    #[test]
+    fn absent_rg_bin_path_leaves_no_rg_var() {
+        let env = resolved_baseline_env(
+            Path::new("/bazel/execroot/workspace"),
+            BTreeMap::from([(OsString::from("PATH"), OsString::from("/ordinary/bin"))]),
+        );
+        assert!(!env.contains_key(OsStr::new("RG_BIN_PATH")));
+    }
+
+    #[test]
     fn git_command_uses_sandbox_state_without_process_global_mutation() {
         let root = TempDir::new().expect("create git command fixture");
         let git = root.path().join("git-dist/bin/git");
@@ -722,6 +786,10 @@ mod tests {
             Some(sandbox.temp_dir().into())
         );
         assert_eq!(
+            env_value(&sandbox, "GROK_FILE_LOCK_SLOT_DIR"),
+            Some(sandbox.temp_dir().join("lock-slots").into())
+        );
+        assert_eq!(
             env_value(&sandbox, "XAI_API_KEY").as_deref(),
             Some(OsStr::new(TEST_API_KEY))
         );
@@ -733,6 +801,23 @@ mod tests {
             env_value(&sandbox, "GROK_TELEMETRY_TRACE_UPLOAD").as_deref(),
             Some(OsStr::new("false"))
         );
+        assert_eq!(
+            env_value(&sandbox, "GROK_AGENT_ID").as_deref(),
+            Some(OsStr::new("grok-e2e-sandbox")),
+            "GROK_AGENT_ID must be pinned so a fresh GROK_HOME never computes a machine id (WMI on Windows)"
+        );
+        for (sink, value) in [
+            ("GROK_TELEMETRY_MIXPANEL_ENABLED", "false"),
+            ("GROK_TELEMETRY_MIXPANEL_TOKEN", ""),
+            ("GROK_TELEMETRY_EVENTS_URL", ""),
+            ("GROK_TELEMETRY_EVENTS_API_KEY", ""),
+        ] {
+            assert_eq!(
+                env_value(&sandbox, sink).as_deref(),
+                Some(OsStr::new(value)),
+                "{sink} must be pinned off so GROK_TELEMETRY_ENABLED=true cannot reach a production sink"
+            );
+        }
         assert_eq!(
             env_value(&sandbox, "NO_PROXY").as_deref(),
             Some(OsStr::new("127.0.0.1,localhost,::1"))
@@ -878,6 +963,57 @@ mod tests {
                 "inherited {key} must reach the child under its canonical name"
             );
         }
+    }
+
+    #[test]
+    fn find_var_ignore_ascii_case_matches_any_casing_of_a_utf8_name() {
+        let parent_env = BTreeMap::from([
+            (OsString::from("SYSTEMROOT"), OsString::from(r"C:\Windows")),
+            (OsString::from("ComSpec"), OsString::from("exact")),
+            (OsString::from("COMSPEC"), OsString::from("upper")),
+        ]);
+        assert_eq!(
+            Some(&OsString::from(r"C:\Windows")),
+            find_var_ignore_ascii_case(&parent_env, "SystemRoot")
+        );
+        // BTreeMap order puts `COMSPEC` first; the caller's exact lookup is what prefers `ComSpec`.
+        assert_eq!(
+            Some(&OsString::from("upper")),
+            find_var_ignore_ascii_case(&parent_env, "ComSpec")
+        );
+        assert_eq!(None, find_var_ignore_ascii_case(&parent_env, "WINDIR"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_allowlist_matches_recased_parent_names() {
+        let parent = tempfile::tempdir().expect("create parent cwd fixture");
+        let parent_env = BTreeMap::from([
+            (OsString::from("SYSTEMROOT"), OsString::from(r"C:\Windows")),
+            (
+                OsString::from("COMSPEC"),
+                OsString::from(r"C:\Windows\system32\cmd.exe"),
+            ),
+            (
+                OsString::from("Path"),
+                OsString::from(r"C:\Windows\system32"),
+            ),
+        ]);
+        let env = resolved_baseline_env(parent.path(), parent_env);
+        assert_eq!(
+            Some(&OsString::from(r"C:\Windows")),
+            env.get(OsStr::new("SystemRoot"))
+        );
+        assert_eq!(
+            Some(&OsString::from(r"C:\Windows\system32\cmd.exe")),
+            env.get(OsStr::new("ComSpec"))
+        );
+        assert_eq!(
+            Some(&OsString::from(r"C:\Windows\system32")),
+            env.get(OsStr::new("PATH"))
+        );
+        // Inserted under the allowlist's spelling only, never under the parent's recased name.
+        assert_eq!(None, env.get(OsStr::new("SYSTEMROOT")));
     }
 
     #[test]

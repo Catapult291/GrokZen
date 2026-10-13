@@ -11,7 +11,7 @@ use ratatui::text::Span;
 use super::menu::render_menu;
 use super::{
     VersionBadgeMode, WelcomeLayout, WelcomeLayoutInput, WelcomeRenderResult, inset_horizontal,
-    prompt, render_logo, render_version_badge,
+    prompt, render_logo_tier, render_version_badge,
 };
 use crate::app::consent::{BodyCell, BodyRow, ConsentLegibility, ConsentNotice, row_cols, wrap};
 use crate::render::SafeBuf;
@@ -50,7 +50,7 @@ pub fn render_consent(
     let (layout, legibility) = fit_body(content_area, compact, &rows);
     let message = inset_horizontal(layout.error, h_margin);
 
-    render_logo(layout.logo, buf, theme, content_area.height);
+    render_logo_tier(layout.logo, buf, theme, layout.logo_tier);
 
     let link_rects = if legibility.can_accept() {
         let title = if notice.title == "Updates to our terms" {
@@ -206,13 +206,13 @@ fn trim_end(row: &[BodyCell]) -> &[BodyCell] {
         .iter()
         .rposition(|cell| cell.text != " ")
         .map_or(0, |i| i + 1);
-    &row[..end]
+    row.get(..end).unwrap_or(&[])
 }
 
 /// Consecutive cells sharing a link, so each run paints as one span and one hit rect.
 fn runs(row: &[BodyCell]) -> impl Iterator<Item = (Option<usize>, &[BodyCell])> {
     row.chunk_by(|a, b| a.link == b.link)
-        .map(|run| (run[0].link, run))
+        .map(|run| (run.first().and_then(|cell| cell.link), run))
 }
 
 /// Centred within the message block rather than the full width, and ellipsized, so an oversized title cannot run edge to edge.

@@ -690,7 +690,10 @@ async fn checkpoint_record_with_non_checkpoint_path_is_not_copied() {
     // The target updates must keep the transformed record (session id rewritten to the fork), not the source file's raw bytes
     let loaded = adapter.load_session(&target_info).await.unwrap();
     assert_eq!(loaded.updates.len(), 1);
-    match &loaded.updates[0] {
+    let Some(update) = loaded.updates.first() else {
+        panic!("expected an update: {:?}", loaded.updates);
+    };
+    match update {
         SessionUpdate::Xai(notification) => {
             assert_eq!(notification.session_id.0.as_ref(), "ckpt-dst");
         }
@@ -857,7 +860,10 @@ async fn copy_session_data_basic() {
     assert!(loaded.summary.forked_at.is_some());
     assert_eq!(loaded.chat_history.len(), 3);
     assert_eq!(loaded.updates.len(), 1);
-    match &loaded.updates[0] {
+    let Some(update) = loaded.updates.first() else {
+        panic!("expected an update: {:?}", loaded.updates);
+    };
+    match update {
         SessionUpdate::Acp(notification) => {
             assert_eq!(
                 notification.session_id.0.as_ref(),
@@ -867,6 +873,57 @@ async fn copy_session_data_basic() {
         _ => panic!("Expected ACP update"),
     }
     assert!(loaded.plan_state.is_some());
+}
+
+#[tokio::test]
+async fn fork_mints_identity_without_copying_source_agent() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("source-identity"),
+        cwd: "/source/workspace".to_string(),
+    };
+    let mut source = adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    source.agent_id = Some(xai_message_delivery_core::AgentId::mint(0x11).to_string());
+    source.attempt_id = Some(xai_message_delivery_core::AttemptId::mint(0x22).to_string());
+    adapter.write_summary_sync(&source_info, &source).unwrap();
+
+    let target_info = Info {
+        id: acp::SessionId::new("fork-identity"),
+        cwd: "/target/workspace".to_string(),
+    };
+    adapter
+        .copy_session_data(
+            &source_info,
+            &target_info,
+            CopySessionOptions {
+                mint_session_identity: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let forked = adapter.load_session(&target_info).await.unwrap().summary;
+    assert_ne!(forked.agent_id, source.agent_id);
+    assert_ne!(forked.attempt_id, source.attempt_id);
+    assert!(
+        forked
+            .agent_id
+            .as_deref()
+            .and_then(xai_message_delivery_core::AgentId::parse)
+            .is_some()
+    );
+    assert!(
+        forked
+            .attempt_id
+            .as_deref()
+            .and_then(xai_message_delivery_core::AttemptId::parse)
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -956,7 +1013,10 @@ async fn copy_session_data_transforms_xai_updates() {
         .unwrap();
 
     let loaded = adapter.load_session(&target_info).await.unwrap();
-    match &loaded.updates[0] {
+    let Some(update) = loaded.updates.first() else {
+        panic!("expected an update: {:?}", loaded.updates);
+    };
+    match update {
         SessionUpdate::Xai(notification) => {
             assert_eq!(
                 notification.session_id.0.as_ref(),
@@ -1728,9 +1788,7 @@ async fn copy_usage_is_independent_of_copy_signals() {
     assert!(adapter.read_usage(&no_usage).await.unwrap().is_none());
 }
 
-/// A truncating (`target_prompt_index`) or filtering (`fork_filter`) fork can drop the failure announcement from the child's context.
 /// The copied announcement state must end those episodes or a still-down server is never re-announced to the child.
-///
 /// The fixture and assertions use the real [`AnnouncementState`] so the strip helper's hard-coded key cannot drift from the serde name unnoticed.
 /// On a rename the helper would no-op and the typed emptiness assert below would fail.
 #[tokio::test]

@@ -15,10 +15,6 @@ use crate::views::modal_window::ModalWindowState;
 
 use xai_grok_shell::agent::config::UiConfig;
 
-// ---------------------------------------------------------------------------
-// Public constants
-// ---------------------------------------------------------------------------
-
 /// Public display title of the modal, also used by `views/modal.rs::ActiveModal::message` so renames stay in one place.
 pub const MODAL_TITLE: &str = "Settings";
 
@@ -57,10 +53,6 @@ pub enum SettingsKeyOutcome {
     Unchanged,
 }
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 /// One row in the visible flat list: either a category header (non-selectable) or a setting row (selectable, dispatchable).
 #[derive(Debug, Clone)]
 pub enum RowEntry {
@@ -82,9 +74,8 @@ pub enum SettingsModalMode {
         original_value: SettingValue,
         supports_preview: bool,
     },
-    /// Group sub-sheet: a list of the group's child Bool toggles.
-    /// `child_idx` is the focused child within the group.
-    /// Space/Enter toggles in place (the sheet stays open); Esc returns to Browse.
+    /// Group sub-sheet: a list of the group's child Bool toggles. `child_idx` is the focused child
+    /// within the group. Space/Enter toggles in place (the sheet stays open); Esc returns to Browse.
     /// Mirrors `PickingEnum`'s open/render/commit flow but for independent toggles.
     PickingGroup {
         key: SettingKey,
@@ -161,6 +152,12 @@ pub(super) fn mode_is_consent_chooser(mode: &SettingsMode) -> bool {
     )
 }
 
+/// Settings-domain visibility policy, snapshotted at OpenSettings.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RowVisibility {
+    pub hide_appearance: bool,
+}
+
 /// Settings modal state. Boxed inside `ActiveModal::Settings` to avoid clippy `large_enum_variant`.
 pub struct SettingsModalState {
     pub window: ModalWindowState,
@@ -178,7 +175,7 @@ pub struct SettingsModalState {
     /// Row indices matching `query`, recomputed per mutation (not per frame).
     pub(super) filtered_cache: Vec<usize>,
 
-    // -- Mouse hit-test rects (populated by render) --
+    /// List viewport; mouse hit-test rects below are populated by render.
     pub list_area: Rect,
     /// Click-hit rect per row, parallel to `rows`.
     pub row_rects: Vec<Rect>,
@@ -206,16 +203,38 @@ pub struct SettingsModalState {
     /// When true, Esc/Enter from `PickingEnum` close the modal instead of returning to Browse.
     /// Set by deep-link open (`OpenSettingsFocus` / `/privacy`); cleared on leave from the picker.
     pub close_on_picker_exit: bool,
+    /// Last left-click on a picker radio: `(choice index, when)`.
+    pub(super) picker_last_click: Option<(usize, std::time::Instant)>,
+    /// Row visibility policy, snapshotted at open.
+    visibility: RowVisibility,
 }
 
 impl SettingsModalState {
-    /// Construct a new modal state from a registry and snapshots.
+    /// Appearance rows stay visible. Test helpers use this; production open
+    /// passes a [`RowVisibility`] snapshot via [`Self::new_with_row_visibility`].
     pub fn new(
         registry: Arc<SettingsRegistry>,
         ui_snapshot: UiConfig,
         pager_snapshot: PagerLocalSnapshot,
     ) -> Self {
-        let rows = build_rows(&registry);
+        Self::new_with_row_visibility(
+            registry,
+            ui_snapshot,
+            pager_snapshot,
+            RowVisibility {
+                hide_appearance: false,
+            },
+        )
+    }
+
+    /// Like [`Self::new`], but `visibility` controls which registry rows are dropped.
+    pub(crate) fn new_with_row_visibility(
+        registry: Arc<SettingsRegistry>,
+        ui_snapshot: UiConfig,
+        pager_snapshot: PagerLocalSnapshot,
+        visibility: RowVisibility,
+    ) -> Self {
+        let rows = build_rows(&registry, visibility);
         // Start on the first selectable (non-header) row.
         let selected = rows
             .iter()
@@ -245,6 +264,8 @@ impl SettingsModalState {
             expanded_keys: std::collections::HashSet::new(),
             hover_row: None,
             close_on_picker_exit: false,
+            picker_last_click: None,
+            visibility,
         }
     }
 
@@ -256,6 +277,12 @@ impl SettingsModalState {
         } else {
             None
         }
+    }
+
+    /// The expanded-row text: a lock reason replaces the description.
+    pub fn detail_text(&self, key: SettingKey, meta: &SettingMeta) -> &'static str {
+        self.row_lock(key)
+            .map_or(meta.description, CodingDataSharingLock::reason)
     }
 
     /// The currently-focused setting row, if any.
@@ -289,7 +316,7 @@ impl SettingsModalState {
         &self.filtered_cache
     }
 
-    /// Rebuild rows from current process gates (voice / kitty / minimal).
+    /// Rebuild rows from current process gates (voice / kitty) and the open-time visibility snapshot.
     /// Keeps focus on the same key when possible; exits sub-panes if the key vanished.
     pub fn rebuild_rows(&mut self) {
         let prev_key = self.focused_setting().map(|(k, _)| k);
@@ -301,7 +328,7 @@ impl SettingsModalState {
             SettingsMode::Browse | SettingsMode::FilterFocused => None,
         };
 
-        self.rows = build_rows(&self.registry);
+        self.rows = build_rows(&self.registry, self.visibility);
         self.invalidate_filter();
 
         if let Some(key) = subpane_key {
@@ -412,7 +439,11 @@ impl SettingsModalState {
         }
         // Snap to first selectable row in the visible filter.
         for &row_idx in &self.filtered_cache {
-            if matches!(self.rows[row_idx], RowEntry::Setting { .. }) {
+            if self
+                .rows
+                .get(row_idx)
+                .is_some_and(|r| matches!(r, RowEntry::Setting { .. }))
+            {
                 self.selected = row_idx;
                 return;
             }
@@ -433,8 +464,14 @@ impl SettingsModalState {
             None => 0,
         };
         while next < self.filtered_cache.len() {
-            let row_idx = self.filtered_cache[next];
-            if matches!(self.rows[row_idx], RowEntry::Setting { .. }) {
+            let Some(&row_idx) = self.filtered_cache.get(next) else {
+                break;
+            };
+            if self
+                .rows
+                .get(row_idx)
+                .is_some_and(|r| matches!(r, RowEntry::Setting { .. }))
+            {
                 self.selected = row_idx;
                 return true;
             }
@@ -456,8 +493,14 @@ impl SettingsModalState {
             None => self.filtered_cache.len() - 1,
         };
         loop {
-            let row_idx = self.filtered_cache[prev];
-            if matches!(self.rows[row_idx], RowEntry::Setting { .. }) {
+            let Some(&row_idx) = self.filtered_cache.get(prev) else {
+                break;
+            };
+            if self
+                .rows
+                .get(row_idx)
+                .is_some_and(|r| matches!(r, RowEntry::Setting { .. }))
+            {
                 self.selected = row_idx;
                 return true;
             }
@@ -474,7 +517,11 @@ impl SettingsModalState {
         if idx >= self.rows.len() {
             return false;
         }
-        if !matches!(self.rows[idx], RowEntry::Setting { .. }) {
+        if !self
+            .rows
+            .get(idx)
+            .is_some_and(|r| matches!(r, RowEntry::Setting { .. }))
+        {
             return false;
         }
         if self.selected == idx {
@@ -503,6 +550,7 @@ impl SettingsModalState {
         self.settings_breadcrumb_rect = None;
         self.breadcrumb_hovered = false;
         self.close_on_picker_exit = false;
+        self.picker_last_click = None;
     }
 
     pub fn focus_filter(&mut self) {
@@ -794,12 +842,13 @@ pub(super) fn compute_filtered(
     result
 }
 
-/// Row visibility: voice rows need the voice gate; capture needs key releases; `hidden_in_minimal` rows are dropped in minimal mode.
+/// Row visibility: voice rows need the voice gate; capture needs key releases;
+/// `hidden_in_minimal` rows drop when `hide_appearance` is set.
 /// Pure for unit tests.
 pub(super) fn setting_row_visible(
     meta: &SettingMeta,
     kitty_releases: bool,
-    minimal: bool,
+    hide_appearance: bool,
     voice_mode: bool,
 ) -> bool {
     if meta.key == "default_shell" && !cfg!(windows) {
@@ -816,15 +865,14 @@ pub(super) fn setting_row_visible(
     if meta.key == "voice_capture_mode" && !kitty_releases {
         return false;
     }
-    if minimal && meta.hidden_in_minimal {
+    if hide_appearance && meta.hidden_in_minimal {
         return false;
     }
     true
 }
 
-fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
+fn build_rows(registry: &SettingsRegistry, visibility: RowVisibility) -> Vec<RowEntry> {
     let kitty_releases = crate::app::kitty_releases_reported();
-    let minimal = crate::app::minimal_mode_active();
     let voice_mode = crate::app::voice_mode_enabled();
     // Keys that belong to a group sub-sheet are rendered only inside that sheet, never as their own top-level rows
     let group_children: std::collections::HashSet<SettingKey> = registry
@@ -844,7 +892,7 @@ fn build_rows(registry: &SettingsRegistry) -> Vec<RowEntry> {
             if meta.category != *cat {
                 continue;
             }
-            if !setting_row_visible(meta, kitty_releases, minimal, voice_mode) {
+            if !setting_row_visible(meta, kitty_releases, visibility.hide_appearance, voice_mode) {
                 continue;
             }
             if group_children.contains(meta.key) {
@@ -885,12 +933,14 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "toolset.ask_user_question.timeout_enabled" => {
             Some(Action::SetAskUserQuestionTimeoutEnabled(new))
         }
+        "subagent_model_inheritance" => Some(Action::SetSubagentModelInheritance(new)),
         "show_thinking_blocks" => Some(Action::SetShowThinkingBlocks(new)),
         "group_tool_verbs" => Some(Action::SetGroupToolVerbs(new)),
         "collapsed_edit_blocks" => Some(Action::SetCollapsedEditBlocks(new)),
         "prompt_suggestions" => Some(Action::SetPromptSuggestions(new)),
         "respect_manual_folds" => Some(Action::SetRespectManualFolds(new)),
         "page_flip_on_send" => Some(Action::SetPageFlipOnSend(new)),
+        "dashboard_preview" => Some(Action::SetDashboardPreview(new)),
         "confirm_before_rewind" => Some(Action::SetConfirmBeforeRewind(new)),
         "combine_queued_prompts" => Some(Action::SetCombineQueuedPrompts(new)),
 
@@ -1063,11 +1113,9 @@ pub(super) fn validate_string(
     }
 }
 
-/// Soft product cap on static Enum choices (settings unit tests enforce it).
-///
-/// The chooser already scrolls within the viewport when the focused choice falls off-screen (`picker_scroll_offset`).
-/// This limit exists so catalogs stay intentionally curated rather than unbounded.
-/// Sized to fit the full Grok STT language list (25 codes + client-only `auto` = 26) with headroom.
+/// Soft product cap on static Enum choices (settings unit tests enforce it). This limit exists so
+/// catalogs stay intentionally curated rather than unbounded. Sized to fit the full Grok STT
+/// language list (25 codes + client-only `auto` = 26) with headroom.
 pub(crate) const MAX_PICKER_CHOICES: usize = 32;
 
 /// The children of a group setting, or an empty slice if `key` is not a group.
@@ -1078,17 +1126,27 @@ pub(super) fn group_children(state: &SettingsModalState, key: SettingKey) -> &'s
     }
 }
 
+/// The runtime gates that can hide an Enum choice, gathered once per picker query.
+#[derive(Clone, Copy)]
+pub(super) struct EnumChoiceGates {
+    pub auto_mode: bool,
+    pub kitty_releases: bool,
+    pub terminal_theme: bool,
+}
+
 /// Whether `(key, canonical)` is gated off and must not be offered as a choice.
-/// The gated pairs: `permission_mode`'s "auto" when the auto gate is off, and `voice_capture_mode`'s "hold" without key-release reporting.
-/// Pure (gates passed as args) so it's unit-testable without touching process globals.
+/// The gated pairs: `permission_mode`'s "auto" when the auto gate is off, `voice_capture_mode`'s "hold" without key-release reporting, and the theme keys' "terminal" while its rollout gate is off.
+/// Pure (gates passed as a value) so it's unit-testable without touching process globals.
 pub(super) fn enum_choice_gated_off(
     key: SettingKey,
     canonical: &str,
-    auto_mode_gate: bool,
-    kitty_releases: bool,
+    gates: EnumChoiceGates,
 ) -> bool {
-    (key == "permission_mode" && canonical == "auto" && !auto_mode_gate)
-        || (key == "voice_capture_mode" && canonical == "hold" && !kitty_releases)
+    (key == "permission_mode" && canonical == "auto" && !gates.auto_mode)
+        || (key == "voice_capture_mode" && canonical == "hold" && !gates.kitty_releases)
+        || ((key == "theme" || key == "auto_dark_theme" || key == "auto_light_theme")
+            && canonical == "terminal"
+            && !gates.terminal_theme)
 }
 
 /// The effective static Enum choices for a picker, hiding gated-off options so the modal never offers a choice the setter would silently no-op.
@@ -1098,11 +1156,13 @@ pub(super) fn effective_enum_choices<'a>(
     choices: &'a [EnumChoice],
     snapshot: &PagerLocalSnapshot,
 ) -> Vec<&'a EnumChoice> {
-    let kitty_releases = crate::app::kitty_releases_reported();
+    let gates = EnumChoiceGates {
+        auto_mode: snapshot.auto_mode_gate,
+        kitty_releases: crate::app::kitty_releases_reported(),
+        terminal_theme: crate::theme::cache::terminal_theme_enabled(),
+    };
     choices
         .iter()
-        .filter(|c| {
-            !enum_choice_gated_off(key, c.canonical, snapshot.auto_mode_gate, kitty_releases)
-        })
+        .filter(|c| !enum_choice_gated_off(key, c.canonical, gates))
         .collect()
 }

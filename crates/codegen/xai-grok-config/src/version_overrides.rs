@@ -56,8 +56,6 @@ pub enum VersionOverrideError {
 impl VersionOverrideError {
     /// A log safe summary: entry index, field, and error category only.
     /// It never includes the raw user supplied value or the offending source line, either of which can carry a secret.
-    /// Prefer this over the `Display` impl (which echoes the value for local `Result` inspection) anywhere the message reaches logs.
-    /// Mirrors the redaction rule in [`crate::loader::toml_error_detail`].
     pub fn redacted(&self) -> String {
         match self {
             Self::Deserialize(_) => {
@@ -162,7 +160,7 @@ mod tests {
                 cfg.get(VERSION_OVERRIDES_KEY).is_none(),
                 "section must be stripped"
             );
-            cfg["x"].as_integer() == Some(1)
+            cfg.get("x").and_then(toml::Value::as_integer) == Some(1)
         }
         assert!(applies(Some("1.7.0"), None, "1.7.0")); // min inclusive
         assert!(applies(Some("1.0.0"), Some("1.7.0"), "1.7.0")); // max inclusive
@@ -194,9 +192,17 @@ mod tests {
             "#,
         );
         apply_version_overrides(&mut cfg, &v("1.8.0")).unwrap();
-        let t = &cfg["features"]["telemetry"];
-        assert_eq!(t["enabled"].as_bool(), Some(true));
-        assert_eq!(t["sample_rate"].as_float(), Some(0.5));
+        let t = cfg.get("features").and_then(|f| f.get("telemetry"));
+        assert_eq!(
+            t.and_then(|t| t.get("enabled"))
+                .and_then(toml::Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            t.and_then(|t| t.get("sample_rate"))
+                .and_then(toml::Value::as_float),
+            Some(0.5)
+        );
     }
 
     #[test]

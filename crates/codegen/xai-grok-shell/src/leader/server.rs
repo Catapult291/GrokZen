@@ -3,44 +3,40 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-/// The binary version of the currently running leader process.
-///
-/// Registration compares it against each client's `ClientCapabilities::client_version` to catch mismatches early.
-/// A mismatch produces a structured ACP notification.
-/// In development builds where `VERSION_WITH_COMMIT` is not set, this is `"unknown"`.
-/// Version-mismatch detection is then disabled (no notification sent).
+/// The binary version of the currently running leader process. Registration compares it against each client's `ClientCapabilities::client_version` to catch mismatches early.
+/// A mismatch produces a structured ACP notification. In development builds where `VERSION_WITH_COMMIT` is not set, this is `"unknown"`. Version-mismatch detection is then disabled (no notification sent).
 const LEADER_VERSION: &str = match option_env!("VERSION_WITH_COMMIT") {
     Some(v) => v,
     None => "unknown",
 };
 use super::protocol::{
     ClientCapabilities, ClientId, ClientMessage, ClientMode, ControlCommand, ControlPayload,
-    InternalMethod, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError, ServerMessage,
-    internal_notification, read_message, write_message,
+    FrameReader, InternalMethod, LEADER_PROTOCOL_VERSION, LeaderCapabilities, ProtocolError,
+    ServerMessage, internal_notification, write_message,
 };
 use super::transport::{LeaderListener, LeaderStream};
 use crate::agent::activity::AgentActivity;
-use crate::auth::AuthManager;
+use crate::agent::config::CursorWorkerConfig;
 use crate::cpu_profile::{
     ControlError, ControlErrorCode, CpuProfileManager, CpuProfileStartOptions, CpuProfileStatus,
     ShutdownStopDisposition,
 };
+use crate::leader::cursor_worker::{self, CursorWorkerControl};
+use crate::leader::roster_merge::ExternalRoster;
 use agent_client_protocol::AGENT_METHOD_NAMES;
-use kanal::{AsyncReceiver, AsyncSender};
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 use xai_computer_hub_sdk::{AuthCredential, AuthIdentity, AuthProvider};
+use xai_grok_login::AuthManager;
 use xai_grok_workspace::WorkspaceHandle;
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// Separator for namespacing request IDs.
 /// The pipe is valid in JSON strings (no escaping needed) and unlikely to appear in typical JSON-RPC IDs (usually numbers or UUIDs).
 const ID_NAMESPACE_SEP: char = '|';
-/// Cap on live notifications buffered per in-flight `session/load` (see `load_live_buffer`).
-/// A normal load resolves in well under a second, so the buffer is tiny; this bound prevents unbounded growth if a load stalls.
-/// On overflow we stop buffering and forward live normally.
-/// Correctness of the transcript is preserved by the client's eventId dedup; only the ordering nicety is lost in this degenerate case.
+/// Cap on live notifications buffered per in-flight `session/load` (see `load_live_buffer`). A normal load resolves in well under a second, so the buffer is tiny; this bound prevents unbounded growth if a load stalls.
+/// On overflow we stop buffering and forward live normally. Correctness of the transcript is preserved by the client's eventId dedup; only the ordering nicety is lost in this degenerate case.
 const MAX_BUFFERED_LIVE_PER_LOAD: usize = 4096;
 enum ServerEvent {
     Disconnected(ClientId),
@@ -56,22 +52,20 @@ enum LeaderServerPoll {
 /// A live notification buffered during an in-flight `session/load`: the shared payload plus its `event_seq`.
 /// The `event_seq` is computed at buffer time, when the message is already parsed, so the post-load flush never re-parses.
 type BufferedLive = (Arc<str>, Option<u64>);
-/// Message queued to a client handler task.
-///
-/// ACP payloads are by far the hot path (every chunk of every session fans out to every subscriber), so they travel as a shared `Arc<str>`.
-/// The routing loop pays one refcount bump per recipient instead of a full `String` clone.
-/// The live-load buffer and the interaction cache share the same allocation.
+/// Message queued to a client handler task. ACP payloads are by far the hot path (every chunk of every session fans out to every subscriber), so they travel as a shared `Arc<str>`.
+/// The routing loop pays one refcount bump per recipient instead of a full `String` clone. The live-load buffer and the interaction cache share the same allocation.
 /// The handler serializes the wire envelope via [`ServerMessageRef`] without ever building an owned `ServerMessage::Acp`.
 #[derive(Debug, Clone)]
 enum ClientOutbound {
     /// An ACP payload, shared (refcounted) across fan-out targets.
     Acp(Arc<str>),
-    /// Everything else (registration, control results, ping, shutdown, errors).
-    Message(ServerMessage),
+    /// Everything else (registration, control results, ping, shutdown, errors). Boxed: a
+    /// control result carrying a full cursor worker status dwarfs the `Acp` variant.
+    Message(Box<ServerMessage>),
 }
 impl From<ServerMessage> for ClientOutbound {
     fn from(msg: ServerMessage) -> Self {
-        Self::Message(msg)
+        Self::Message(Box::new(msg))
     }
 }
 /// Serialize-only mirror of [`ServerMessage`]'s `Acp` variant that borrows the payload.
@@ -99,10 +93,7 @@ struct OutstandingModelSwitch {
     model: String,
     seq: u64,
 }
-/// Resolves a client's `default_model` across overlapping switch requests. Each
-/// forwarded switch gets a rising sequence number, so a response that arrives
-/// late or is rejected never restores a model older than the client's most
-/// recent choice.
+/// Resolves a client's `default_model` across overlapping switch requests. Each forwarded switch gets a rising sequence number, so a response that arrives late or is rejected never restores a model older than the client's most recent choice.
 #[derive(Default)]
 struct ModelSwitchTracker {
     confirmed: Option<String>,
@@ -148,7 +139,7 @@ impl ModelSwitchTracker {
     }
 }
 struct ClientState {
-    tx: AsyncSender<ClientOutbound>,
+    tx: mpsc::UnboundedSender<ClientOutbound>,
     mode: ClientMode,
     capabilities: ClientCapabilities,
     /// The client type string from IPC registration (e.g., "grok-tui", "grok-code-extension").
@@ -180,6 +171,7 @@ pub struct LeaderServerControlState {
     pub metadata: LeaderServerMetadata,
     pub cpu_profile: Arc<Mutex<CpuProfileManager>>,
     pub workspace: Arc<WorkspaceControl>,
+    pub(crate) cursor_worker: Arc<CursorWorkerControl>,
 }
 impl LeaderServerControlState {
     pub fn new(metadata: LeaderServerMetadata) -> Self {
@@ -187,10 +179,34 @@ impl LeaderServerControlState {
             metadata,
             cpu_profile: Arc::new(Mutex::new(CpuProfileManager::new())),
             workspace: Arc::new(WorkspaceControl::new(None)),
+            cursor_worker: Arc::new(CursorWorkerControl::new(
+                CursorWorkerConfig::default(),
+                None,
+                crate::util::grok_home::grok_home(),
+                ExternalRoster::new(),
+            )),
         }
     }
     pub(crate) fn with_default_hub_url(mut self, default_hub_url: Option<String>) -> Self {
         self.workspace = Arc::new(WorkspaceControl::new(default_hub_url));
+        self
+    }
+    /// The worker door reads `[cursor_worker]`, falls back to `hub.url` for the hub
+    /// origin, keeps its worktrees under `grok_home`, and publishes its claims into `roster`
+    /// (owned by `run_leader`).
+    pub(crate) fn with_cursor_worker(
+        mut self,
+        config: CursorWorkerConfig,
+        leader_hub_url: Option<String>,
+        grok_home: std::path::PathBuf,
+        roster: ExternalRoster,
+    ) -> Self {
+        self.cursor_worker = Arc::new(CursorWorkerControl::new(
+            config,
+            leader_hub_url,
+            grok_home,
+            roster,
+        ));
         self
     }
     fn leader_capabilities(&self) -> LeaderCapabilities {
@@ -201,6 +217,7 @@ impl LeaderServerControlState {
             profile_formats: manager.profile_formats().to_vec(),
             workspace_exposure: true,
             relaunch_v1: true,
+            cursor_worker: cursor_worker::COMPILED_IN,
         }
     }
 }
@@ -241,9 +258,7 @@ impl std::fmt::Debug for WorkspaceControl {
 /// Hub [`AuthProvider`] backed by the leader's `AuthManager`: returns the current token at each connect/reconnect; never writes auth.json.
 struct LeaderAuthProvider {
     auth_manager: Arc<AuthManager>,
-    /// One background refresh at a time.
-    /// `current()` is called by a reconnect loop that can spin fast while offline.
-    /// A `refresh_lock` would serialize those tasks but not collapse them.
+    /// One background refresh at a time. `current()` is called by a reconnect loop that can spin fast while offline. A `refresh_lock` would serialize those tasks but not collapse them.
     /// Each queued one would still issue its own IdP call once the previous released.
     refresh_in_flight: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -286,11 +301,8 @@ impl AuthProvider for LeaderAuthProvider {
             .unwrap_or_default();
         AuthCredential::bearer(token)
     }
-    /// Owner identity from the leader's `AuthManager`.
-    /// The workspace derives `WorkspaceIdentity` from this provider instead of a separate auth.json read.
-    /// Mirrors the in-process path (`mvp_agent`).
-    /// Prefer `GrokAuth.team_id` (what shell telemetry/snapshot use) mapped onto a `"Team"` principal so team attribution is derived.
-    /// Otherwise pass principal fields through.
+    /// Owner identity from the leader's `AuthManager`. The workspace derives `WorkspaceIdentity` from this provider instead of a separate auth.json read. Mirrors the in-process path (`mvp_agent`).
+    /// Prefer `GrokAuth.team_id` (what shell telemetry/snapshot use) mapped onto a `"Team"` principal so team attribution is derived. Otherwise pass principal fields through.
     /// `None` when no credential is available (identity resolution never blocks).
     fn identity(&self) -> Option<AuthIdentity> {
         let a = self.auth_manager.current_or_expired()?;
@@ -314,14 +326,55 @@ struct WorkspaceExposure {
     cwd: PathBuf,
     started_at: Instant,
     paused: std::sync::atomic::AtomicBool,
+    /// Drained before the hub connection closes and re-armed on resume, since the pump is
+    /// bound to one hub connection. `None` when the connect left no hub handle.
+    metric_donation: Mutex<Option<xai_computer_hub_sdk::MetricDonationPump>>,
 }
-/// Rewrite JSON-RPC request ID **in place** by prefixing with client ID to avoid collisions.
-///
-/// Only rewrites IDs for **requests** (messages with a "method" field).
-/// Responses (messages with "result" or "error" but no "method") are left untouched so the agent can match them to its pending requests.
-///
-/// Returns `Some((namespaced_id, original_id))` when the message is a request carrying an ID (and `json` was mutated).
-/// Returns `None` otherwise (no mutation).
+/// Service name the hub allowlists for the leader's metric donation.
+const LEADER_METRIC_SERVICE: &str = "grok_leader";
+/// Bound on arming and draining the metric pump: both wait on the hub connection, and pause,
+/// stop, resume, start, and shutdown hold the workspace lock while they do.
+const METRIC_DONATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// Start exporting the process-wide Prometheus registry (workspace and worker families)
+/// over the hub connection `handle` just opened. Only runs while that connection is up.
+async fn arm_metric_donation(
+    handle: &WorkspaceHandle,
+) -> Option<xai_computer_hub_sdk::MetricDonationPump> {
+    let pump = match tokio::time::timeout(
+        METRIC_DONATION_TIMEOUT,
+        handle.metric_donation_reporter(LEADER_METRIC_SERVICE),
+    )
+    .await
+    {
+        Ok(pump) => pump,
+        Err(_elapsed) => {
+            warn!(
+                timeout_secs = METRIC_DONATION_TIMEOUT.as_secs(),
+                "leader metric export not armed: the hub connection did not answer in time"
+            );
+            return None;
+        }
+    };
+    if pump.is_none() {
+        debug!("leader metric export not armed: workspace has no hub connection");
+    }
+    pump
+}
+/// Flush what the pump has queued before its hub connection closes; an unresponsive hub is
+/// abandoned after [`METRIC_DONATION_TIMEOUT`] so teardown never waits on it.
+async fn drain_metric_donation(pump: xai_computer_hub_sdk::MetricDonationPump) {
+    if tokio::time::timeout(METRIC_DONATION_TIMEOUT, pump.drain())
+        .await
+        .is_err()
+    {
+        warn!(
+            timeout_secs = METRIC_DONATION_TIMEOUT.as_secs(),
+            "leader metric export drain timed out; disconnecting hub anyway"
+        );
+    }
+}
+/// Rewrite JSON-RPC request ID **in place** by prefixing with client ID to avoid collisions. Only rewrites IDs for **requests** (messages with a "method" field).
+/// Responses (messages with "result" or "error" but no "method") are left untouched so the agent can match them to its pending requests. Returns `None` otherwise (no mutation).
 /// The returned `namespaced_id` lets the caller key per-request state (e.g. `pending_load_by_req`) without re-parsing the rewritten payload.
 fn rewrite_request_id(
     json: &mut serde_json::Value,
@@ -331,17 +384,14 @@ fn rewrite_request_id(
     let original_id = json.get("id").cloned()?;
     let original_json = serde_json::to_string(&original_id).unwrap_or_default();
     let namespaced_id = format!("{}{}{}", client_id.0, ID_NAMESPACE_SEP, original_json);
-    json["id"] = serde_json::json!(namespaced_id);
+    if let Some(slot) = json.get_mut("id") {
+        *slot = serde_json::json!(namespaced_id);
+    }
     Some((namespaced_id, original_id))
 }
 /// Parse a namespaced response ID to find the target client, restoring the original ID **in place**.
-///
-/// Expects format: "client_id|original_id_json" where original_id_json is the JSON-serialized form of the original ID (preserving type information).
-///
-/// Returns `Some((client_id, namespaced_id))` if successful (`json` now carries the restored original ID).
-/// The returned `namespaced_id` is the raw pre-restore ID.
-/// It lets the caller match per-request state (e.g. `pending_load_by_req`) without re-parsing the original payload.
-/// On `None`, `json` is untouched.
+/// Expects format: "client_id|original_id_json" where original_id_json is the JSON-serialized form of the original ID (preserving type information). The returned `namespaced_id` is the raw pre-restore ID.
+/// It lets the caller match per-request state (e.g. `pending_load_by_req`) without re-parsing the original payload. On `None`, `json` is untouched.
 fn parse_response_id(json: &mut serde_json::Value) -> Option<(ClientId, String)> {
     let id = json.get("id")?;
     let id_str = id.as_str()?;
@@ -349,7 +399,9 @@ fn parse_response_id(json: &mut serde_json::Value) -> Option<(ClientId, String)>
     let client_id: u64 = client_part.parse().ok()?;
     let original_id: serde_json::Value = serde_json::from_str(original_json).ok()?;
     let namespaced_id = id_str.to_string();
-    json["id"] = original_id;
+    if let Some(slot) = json.get_mut("id") {
+        *slot = original_id;
+    }
     Some((ClientId(client_id), namespaced_id))
 }
 /// Extract session_id from a message's params (for session-based routing).
@@ -376,10 +428,8 @@ fn is_session_attach_request(json: &serde_json::Value) -> bool {
         .is_some_and(|m| m == "session/load" || m == "session/resume")
 }
 /// Extract the leader unicast target `ClientId` from a notification's `params._meta["x.ai/leaderClientId"]`.
-///
 /// The agent stamps this onto every `session/load` replay notification, echoing the id the leader injected into the load request.
-/// The replay then routes back to ONLY the loading client instead of broadcasting to all subscribers.
-/// Live (non-replay) turn deltas are never tagged, so they keep broadcasting.
+/// The replay then routes back to ONLY the loading client instead of broadcasting to all subscribers. Live (non-replay) turn deltas are never tagged, so they keep broadcasting.
 fn extract_target_client_id(json: &serde_json::Value) -> Option<ClientId> {
     let params = json.get("params")?;
     params
@@ -397,7 +447,6 @@ fn extract_target_client_id(json: &serde_json::Value) -> Option<ClientId> {
 /// Extract the monotonic `event_seq` counter from a notification's `_meta.eventId` (format `"{sessionId}-{counter}"`).
 /// Mirrors the `_meta` lookup in [`extract_target_client_id`], which also checks the ExtNotification `params.params` nesting.
 /// The suffix parse matches `session::storage` and the client's `acp::meta`.
-/// Returns `None` for notifications without an `eventId` (xAI one-shots / older shell).
 fn event_seq_of(json: &serde_json::Value) -> Option<u64> {
     let params = json.get("params")?;
     let event_id = params
@@ -413,25 +462,8 @@ fn event_seq_of(json: &serde_json::Value) -> Option<u64> {
     event_id.rsplit_once('-')?.1.parse::<u64>().ok()
 }
 /// Whether a payload is a machine-wide notification (no `sessionId`) that must be **broadcast to every client**.
-/// These never fall through to the last-active-client fallback:
-///
-/// - `x.ai/sessions/changed`: the session roster changed; every open dashboard must stay in sync.
-/// - `x.ai/models/update`: the model catalog changed.
-///   (Triggers: config.toml `[model.*]`/`[models]` hot-reload, a `models_cache.json` external write, an auth change, a response-header etag refresh.)
-///   Every connected client's model picker must refresh, not just the most recently active one.
-/// - `x.ai/mcp/servers_updated`: the MCP catalog resolved or changed (managed connectors fetched in the background after `initialize`).
-///   It is deliberately session-agnostic on the wire (no `sessionId`, see `extensions::mcp::notify_servers_updated`).
-///   The push fires seconds after `initialize` returns.
-///   The last-active-client fallback routinely delivered it to the wrong client (or dropped it) in multi-client leaders.
-///   Managed connectors then "disappeared" from every other client's `/mcp` view.
-///   Broadcast is safe: the pager handler only debounce-refetches `mcp/list` for agents with an open extensions modal.
-/// - `x.ai/announcements/update`: the announcements list changed (startup one-shot or the periodic settings refresh).
-///   It is session-agnostic; every client renders its own banner, so last-active-client fallback would leave every other client's banner stale.
-///   Broadcast is safe: the pager handler is idempotent and drops stale generations via its `gen` gate.
-///   (`x.ai/settings/update` stays non-broadcast: it carries auth/gate state.)
-///
-/// Matched via [`method_of`], NOT the raw top-level `method`.
-/// Agent ext notifications arrive `_`-prefixed on the wire (`_x.ai/sessions/changed`), so a raw compare would miss the production form.
+/// These never fall through to the last-active-client fallback: `x.ai/sessions/changed`: the session roster changed; every open dashboard must stay in sync.
+/// Every connected client's model picker must refresh, not just the most recently active one. `x.ai/mcp/servers_updated`: the MCP catalog resolved or changed (managed connectors fetched in the background after `initialize`). The push fires seconds after `initialize` returns. Broadcast is safe: the pager handler only debounce-refetches `mcp/list` for agents with an open extensions modal.
 fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
@@ -443,17 +475,10 @@ fn is_machine_wide_broadcast_notification(json: &serde_json::Value) -> bool {
         )
     )
 }
-/// The namespaced method a leader payload carries, normalizing the two ext wire forms the gateway produces:
-///   - direct:  `{"method":"x.ai/foo", ...}`                                 -> `x.ai/foo`
-///   - wrapped: `{"method":"_x.ai/foo","params":{"method":"x.ai/foo",...}}`  -> `x.ai/foo`
-///
-/// Gateway-forwarded ext methods/notifications (`ext_method` / `ext_notification`) arrive WRAPPED.
-/// Examples: `ask_user_question`, `exit_plan_mode`, `scheduled_task_inject_prompt`, `session_notification`.
-/// A wrapped payload has a top-level `_`-prefixed method with the real method and params nested one level under `params`.
-/// Plain methods (`session/request_permission`, `session/update`, …) arrive direct.
-/// Anything that classifies a payload by method name MUST use this: matching the raw top-level `method` misses the wrapped form.
-/// See `interaction_inner_params` for the matching params accessor.
-fn method_of(json: &serde_json::Value) -> Option<&str> {
+/// The namespaced method a leader payload carries, normalizing the two ext wire forms the gateway produces: direct: `{"method":"x.ai/foo", ...}` -> `x.ai/foo` wrapped: `{"method":"_x.ai/foo","params":{"method":"x.ai/foo",...}}` -> `x.ai/foo`
+/// Gateway-forwarded ext methods/notifications (`ext_method` / `ext_notification`) arrive WRAPPED. Examples: `ask_user_question`, `exit_plan_mode`, `session_notification`.
+/// A wrapped payload has a top-level `_`-prefixed method with the real method and params nested one level under `params`. Anything that classifies a payload by method name MUST use this: matching the raw top-level `method` misses the wrapped form.
+pub(super) fn method_of(json: &serde_json::Value) -> Option<&str> {
     let top = json.get("method")?.as_str()?;
     if let Some(stripped) = top.strip_prefix('_') {
         return Some(
@@ -478,21 +503,8 @@ fn interaction_inner_params(json: &serde_json::Value) -> Option<&serde_json::Val
         Some(params)
     }
 }
-/// Whether a payload is the `x.ai/scheduled_task_inject_prompt` notification.
-///
-/// This notification tells the receiving client to enqueue AND drive a scheduled (`/loop`) cron prompt.
-/// Ordinary `sessionId`-bearing notifications fan out to every subscriber so each renders an identical stream.
-/// This one must be routed to the SINGLE session driver.
-/// If every attached client received it, each would enqueue and try to drive the same cron turn.
-/// That duplicates the turn (phantom `#N` queue entries, competing drivers, stuck turns).
-/// The other clients render the resulting turn from the broadcast `session/update` deltas, exactly like any other turn the driver runs.
-fn is_scheduled_task_inject_prompt(json: &serde_json::Value) -> bool {
-    method_of(json) == Some("x.ai/scheduled_task_inject_prompt")
-}
-/// Whether a payload is a blocking *interaction* reverse-request: a tool permission, `ask_user_question`, or plan-approval.
-/// Unlike other reverse-requests (driver-only), these are **shared**.
-/// They broadcast to every subscriber so any client can render and answer the modal, first-answer-wins.
-/// See `SHARED_INTERACTIVE_MODALS.md`.
+/// Whether a payload is a blocking *interaction* reverse-request: a tool permission, `ask_user_question`, or plan-approval. Unlike other reverse-requests (driver-only), these are **shared**.
+/// They broadcast to every subscriber so any client can render and answer the modal, first-answer-wins. See `SHARED_INTERACTIVE_MODALS.md`.
 fn is_interaction_request(json: &serde_json::Value) -> bool {
     matches!(
         method_of(json),
@@ -504,8 +516,7 @@ fn is_interaction_request(json: &serde_json::Value) -> bool {
         )
     )
 }
-/// Extract the `tool_call_id` an interaction reverse-request carries.
-/// The leader caches it (keyed by id) for replay-on-attach and evicts it on `InteractionResolved`.
+/// Extract the `tool_call_id` an interaction reverse-request carries. The leader caches it (keyed by id) for replay-on-attach and evicts it on `InteractionResolved`.
 /// The ext-methods (`ask_user_question` / `exit_plan_mode`) carry it directly under (inner) `params`; `request_permission` nests it under `toolCall`.
 /// Tolerant of the gateway wrapper (via `interaction_inner_params`) and camel/snake spelling.
 fn extract_interaction_tool_call_id(json: &serde_json::Value) -> Option<String> {
@@ -524,10 +535,8 @@ fn extract_interaction_tool_call_id(json: &serde_json::Value) -> Option<String> 
         .and_then(|v| v.as_str())
         .map(String::from)
 }
-/// If a payload is the `InteractionResolved` broadcast, return its `tool_call_id`.
-/// That broadcast is an `x.ai/session_notification` whose `update.sessionUpdate == "interaction_resolved"`.
-/// The leader evicts the cached interaction request with it (first-answer-wins).
-/// Tolerant of the gateway wrapper and camel/snake spelling for the inner field.
+/// If a payload is the `InteractionResolved` broadcast, return its `tool_call_id`. That broadcast is an `x.ai/session_notification` whose `update.sessionUpdate == "interaction_resolved"`.
+/// The leader evicts the cached interaction request with it (first-answer-wins). Tolerant of the gateway wrapper and camel/snake spelling for the inner field.
 fn extract_interaction_resolved_tool_call_id(json: &serde_json::Value) -> Option<String> {
     if method_of(json) != Some("x.ai/session_notification") {
         return None;
@@ -582,15 +591,9 @@ fn extract_child_session_event(json: &serde_json::Value) -> Option<ChildSessionE
         _ => None,
     }
 }
-/// Drop a finished child's route and driver and detach it from the child forest.
-/// Still-live grandchildren are RE-PARENTED onto the finished child's own parent.
-/// Re-parenting (not cascade-prune) keeps a still-running grandchild of a finished intermediate reachable from the root.
-/// `backfill_child_routes` only follows forward edges.
-/// A subtree left dangling under the removed child would never be reached on a root `session/load`.
-/// A genuinely-dead leaf (no surviving children) is removed.
-///
-/// The current parent is found by searching the forest, not taken from the finish notification's sessionId.
-/// That way a grandchild already re-parented by an earlier intermediate finish is still detached from its correct edge.
+/// Drop a finished child's route and driver and detach it from the child forest. Still-live grandchildren are RE-PARENTED onto the finished child's own parent.
+/// Re-parenting (not cascade-prune) keeps a still-running grandchild of a finished intermediate reachable from the root. `backfill_child_routes` only follows forward edges.
+/// A subtree left dangling under the removed child would never be reached on a root `session/load`. A genuinely-dead leaf (no surviving children) is removed. The current parent is found by searching the forest, not taken from the finish notification's sessionId.
 fn prune_child_route(
     child_sid: &str,
     session_subscribers: &mut HashMap<String, HashSet<ClientId>>,
@@ -621,10 +624,8 @@ fn prune_child_route(
         child_sessions.remove(&parent);
     }
 }
-/// Subscribe `client` to every live descendant of `parent`, walking the parent-to-children index (depth-safe via a visited set).
-/// Driverless descendants get the parent's driver.
-/// Child routes are otherwise spawn-time snapshots.
-/// Without this, a client that attaches to the parent AFTER a subagent spawned (late attach, reconnect) never receives the child's live updates.
+/// Subscribe `client` to every live descendant of `parent`, walking the parent-to-children index (depth-safe via a visited set). Driverless descendants get the parent's driver.
+/// Child routes are otherwise spawn-time snapshots. Without this, a client that attaches to the parent AFTER a subagent spawned (late attach, reconnect) never receives the child's live updates.
 fn backfill_child_routes(
     parent: &str,
     client: ClientId,
@@ -656,13 +657,7 @@ fn backfill_child_routes(
 }
 /// Inject the requesting client's context into a `session/new`, `session/load`, or `session/resume` request, **in place**.
 /// The agent's own state names whichever client initialized last, which in leader mode is the wrong client.
-///
-/// For a session/new request:
-/// - If the client has yolo_mode enabled, injects `yoloMode: true` into the request's `_meta` object.
-/// - If the client has default_model set and the request doesn't already have a modelId, injects `modelId` into the request's `_meta` object.
-/// - Injects `clientIdentifier` so the agent can track which client owns each session (scopes `yolo_mode_changed` broadcasts in leader mode).
-///
-/// Returns `true` when `json` was mutated.
+/// For a session/new request: If the client has yolo_mode enabled, injects `yoloMode: true` into the request's `_meta` object. If the client has default_model set and the request doesn't already have a modelId, injects `modelId` into the request's `_meta` object. Injects `clientIdentifier` so the agent can track which client owns each session (scopes `yolo_mode_changed` broadcasts in leader mode).
 fn inject_session_request_context(
     json: &mut serde_json::Value,
     capabilities: &ClientCapabilities,
@@ -682,6 +677,7 @@ fn inject_session_request_context(
         && !capabilities.fs_read
         && !capabilities.fs_write
         && !capabilities.status_line
+        && !capabilities.user_message_echo
     {
         return false;
     }
@@ -754,20 +750,19 @@ fn inject_session_request_context(
                 xai_grok_status_line::CLIENT_STATUS_LINE_META.to_string(),
                 serde_json::json!(capabilities.status_line),
             );
+            if capabilities.user_message_echo {
+                meta_obj.insert(
+                    crate::session::CLIENT_USER_MESSAGE_ECHO_META.to_string(),
+                    serde_json::json!(true),
+                );
+            }
         }
     }
     mutated
 }
-/// Inject client identity into an `initialize` request.
-///
-/// In leader mode, multiple clients (TUI, IDE extension, web) share one agent process.
-/// The agent's `client_type` is set during `initialize` from `_meta.clientIdentifier`.
-/// The leader injects the IPC registration `client_type` so the agent knows the real client identity.
-///
-/// Only injects if `clientIdentifier` is not already present in `_meta`, respecting explicit client-provided values.
-///
-/// Mutates `json` in place. Returns `(mutated, was_initialize)`.
-/// The second boolean is `true` only when the message was an `initialize` request, allowing the caller to record that `initialize` has been seen.
+/// Inject client identity into an `initialize` request. In leader mode, multiple clients (TUI, IDE extension, web) share one agent process. The agent's `client_type` is set during `initialize` from `_meta.clientIdentifier`.
+/// The leader injects the IPC registration `client_type` so the agent knows the real client identity. Only injects if `clientIdentifier` is not already present in `_meta`, respecting explicit client-provided values.
+/// Mutates `json` in place. Returns `(mutated, was_initialize)`. The second boolean is `true` only when the message was an `initialize` request, allowing the caller to record that `initialize` has been seen.
 fn inject_client_identity_into_initialize(
     json: &mut serde_json::Value,
     client_type: &str,
@@ -812,11 +807,8 @@ fn extract_yolo_mode_change(json: &serde_json::Value) -> Option<bool> {
     let params = json.get("params")?;
     params.get("yolo_mode").and_then(|v| v.as_bool())
 }
-/// Extract the auto-mode intent from an `x.ai/yolo_mode_changed` notification.
-/// The leader keeps `ClientCapabilities.auto_mode` fresh the same way it tracks `yolo_mode`.
-/// Without this, a stale connect-time `auto_mode` capability would be injected into later `session/new` requests.
-/// That would re-enable Auto after the user opted out.
-/// Returns `None` when the notification doesn't change auto state.
+/// Extract the auto-mode intent from an `x.ai/yolo_mode_changed` notification. The leader keeps `ClientCapabilities.auto_mode` fresh the same way it tracks `yolo_mode`.
+/// Without this, a stale connect-time `auto_mode` capability would be injected into later `session/new` requests. That would re-enable Auto after the user opted out.
 fn extract_auto_mode_change(json: &serde_json::Value) -> Option<bool> {
     let method = json.get("method")?.as_str()?;
     if method != "x.ai/yolo_mode_changed" {
@@ -832,12 +824,8 @@ fn extract_auto_mode_change(json: &serde_json::Value) -> Option<bool> {
         _ => None,
     }
 }
-/// Inject `clientIdentifier` into a `yolo_mode_changed` notification's params.
-///
-/// In leader mode, multiple clients share one agent.
-/// Without this injection, the agent can't tell which client sent the yolo toggle and updates ALL sessions.
-/// With the `clientIdentifier` in params, the agent scopes the update to only sessions owned by the sending client.
-///
+/// Inject `clientIdentifier` into a `yolo_mode_changed` notification's params. In leader mode, multiple clients share one agent.
+/// Without this injection, the agent can't tell which client sent the yolo toggle and updates ALL sessions. With the `clientIdentifier` in params, the agent scopes the update to only sessions owned by the sending client.
 /// Mutates `json` in place; returns `true` when mutated.
 fn inject_client_identity_into_yolo_notification(
     json: &mut serde_json::Value,
@@ -868,10 +856,7 @@ fn inject_client_identity_into_yolo_notification(
     mutated
 }
 /// Build a JSON-RPC error response for requests that arrive before the leader is ready.
-///
-/// Returns `Some(payload)` when the message has an `id` field (i.e. is a request).
 /// The client then gets a structured response it can act on instead of hanging.
-/// Returns `None` for notifications (no `id`); those are silently dropped.
 fn make_leader_starting_error(json: &serde_json::Value) -> Option<String> {
     let id = json.get("id").filter(|v| !v.is_null()).cloned()?;
     let response = serde_json::json!({
@@ -897,13 +882,8 @@ fn select_outbound_payload(
         _ => payload,
     }
 }
-/// Patch the `initialize` response so `meta.modelState.currentModelId` reflects the client's `default_model`.
-/// It would otherwise reflect the agent's global `current_model_id`.
-///
-/// Without this the TUI briefly shows the agent's startup default.
-/// It then jumps to the client's preferred model once the first `session/new` response arrives.
-///
-/// Mutates `json` in place; returns `true` when patched.
+/// Patch the `initialize` response so `meta.modelState.currentModelId` reflects the client's `default_model`. It would otherwise reflect the agent's global `current_model_id`.
+/// Without this the TUI briefly shows the agent's startup default. It then jumps to the client's preferred model once the first `session/new` response arrives. Mutates `json` in place; returns `true` when patched.
 fn patch_initialize_response_model(
     json: &mut serde_json::Value,
     default_model: &Option<String>,
@@ -916,8 +896,9 @@ fn patch_initialize_response_model(
         .and_then(|v| v.as_str())
         .is_some_and(|current| current != model.as_str());
     if needs_patch {
-        json["result"]["meta"]["modelState"]["currentModelId"] =
-            serde_json::Value::String(model.clone());
+        if let Some(slot) = json.pointer_mut("/result/meta/modelState/currentModelId") {
+            *slot = serde_json::Value::String(model.clone());
+        }
         debug!(patched_model = %model, "Patched initialize response currentModelId");
         return true;
     }
@@ -1014,6 +995,7 @@ fn leader_info_payload(control_state: &LeaderServerControlState) -> ControlPaylo
         cpu_profile_stopping,
         profile_started_at,
         profile_formats: manager.profile_formats().to_vec(),
+        cursor_worker: Some(control_state.cursor_worker.info_summary()),
     }
 }
 use crate::env::PROD_COMPUTER_HUB_WS_URL as PROD_COMPUTER_HUB_URL;
@@ -1068,7 +1050,8 @@ fn workspace_server_id() -> String {
         name.to_string()
     }
 }
-async fn drain_and_disconnect(handle: &WorkspaceHandle) {
+async fn drain_and_disconnect(exposure: &WorkspaceExposure) {
+    let handle = &exposure.handle;
     let tracker = handle.activity_tracker().clone();
     tracker.set_draining();
     if tokio::time::timeout(WORKSPACE_DRAIN_TIMEOUT, tracker.wait_until_drained())
@@ -1079,6 +1062,10 @@ async fn drain_and_disconnect(handle: &WorkspaceHandle) {
             active = tracker.total_active(),
             "workspace drain timed out; disconnecting hub anyway"
         );
+    }
+    let metric_donation = exposure.metric_donation.lock().take();
+    if let Some(pump) = metric_donation {
+        drain_metric_donation(pump).await;
     }
     handle.shutdown_hub().await;
 }
@@ -1148,10 +1135,14 @@ async fn handle_workspace_start(
     let alpha_test_key = None;
     let auth = wait_for_leader_auth(ws, &cancel).await?;
     let server_id = workspace_server_id();
+    let device_id = xai_grok_telemetry::id::agent_id_async().await;
     let metadata = serde_json::json!({
         "source": "grok-workspace",
         "hostname": gethostname::gethostname().to_string_lossy(),
         "cwd": cwd_path.display().to_string(),
+        "device_id": device_id,
+        "host_kind": xai_tool_protocol::HOST_KIND_DAEMON,
+        "platform": std::env::consts::OS,
     });
     let upload_queue_enabled =
         std::env::var("GROK_WORKSPACE_UPLOAD_QUEUE_ENABLED").as_deref() != Ok("false");
@@ -1174,16 +1165,18 @@ async fn handle_workspace_start(
     )
     .await
     .map_err(|e| workspace_err(format!("failed to connect workspace to hub: {e}")))?;
+    let metric_donation = arm_metric_donation(&handle).await;
     let exposure = Arc::new(WorkspaceExposure {
         handle,
         hub_url: url_str,
         cwd: cwd_path,
         started_at: Instant::now(),
         paused: AtomicBool::new(false),
+        metric_donation: Mutex::new(metric_donation),
     });
     let payload = build_workspace_status(&control_state.metadata, Some(exposure.as_ref()));
     if let Some(old) = ws.exposure.swap(Some(exposure)) {
-        drain_and_disconnect(&old.handle).await;
+        drain_and_disconnect(&old).await;
     }
     Ok(payload)
 }
@@ -1196,7 +1189,7 @@ async fn handle_workspace_pause(
         return Err(workspace_err("no workspace exposure is running"));
     };
     if !exp.paused.load(Ordering::Relaxed) {
-        drain_and_disconnect(&exp.handle).await;
+        drain_and_disconnect(&exp).await;
         exp.paused.store(true, Ordering::Relaxed);
     }
     Ok(build_workspace_status(
@@ -1218,6 +1211,8 @@ async fn handle_workspace_resume(
             exp.handle.activity_tracker().set_draining();
             return Err(workspace_err(format!("failed to reconnect to hub: {e}")));
         }
+        let metric_donation = arm_metric_donation(&exp.handle).await;
+        *exp.metric_donation.lock() = metric_donation;
         exp.paused.store(false, Ordering::Relaxed);
     }
     Ok(build_workspace_status(
@@ -1231,7 +1226,7 @@ async fn handle_workspace_stop(
     let ws = &control_state.workspace;
     let _serialize = ws.lock.lock().await;
     if let Some(exp) = ws.exposure.swap(None) {
-        drain_and_disconnect(&exp.handle).await;
+        drain_and_disconnect(&exp).await;
     }
     Ok(build_workspace_status(&control_state.metadata, None))
 }
@@ -1249,7 +1244,7 @@ async fn finalize_workspace_on_shutdown(control_state: LeaderServerControlState)
     let _serialize = ws.lock.lock().await;
     if let Some(exp) = ws.exposure.swap(None) {
         info!("Draining workspace exposure on leader shutdown");
-        drain_and_disconnect(&exp.handle).await;
+        drain_and_disconnect(&exp).await;
     }
 }
 fn handle_control_command(
@@ -1305,6 +1300,11 @@ fn handle_control_command(
         | ControlCommand::WorkspaceStop
         | ControlCommand::WorkspaceStatus => {
             unreachable!("workspace control commands are handled asynchronously")
+        }
+        ControlCommand::CursorWorkerStart(_)
+        | ControlCommand::CursorWorkerStop
+        | ControlCommand::CursorWorkerStatus => {
+            unreachable!("cursor worker control commands are handled asynchronously")
         }
         ControlCommand::RelaunchForUpdate { .. } => {
             unreachable!("RelaunchForUpdate must be handled asynchronously")
@@ -1399,12 +1399,9 @@ const RELAUNCH_TOTAL_GRACE: Duration =
     Duration::from_millis((RELAUNCH_GRACE.as_millis() + RELAUNCH_FLUSH_GRACE.as_millis()) as u64);
 /// Poll cadence while waiting for the agent to go idle during the grace period.
 const RELAUNCH_GRACE_POLL: Duration = Duration::from_millis(100);
-/// Decide whether a [`ControlCommand::RelaunchForUpdate`] is accepted (the synchronous half).
-/// Kept separate from starting the drain so the caller can send the `Relaunching` ack BEFORE the leader begins shutting down.
+/// Decide whether a [`ControlCommand::RelaunchForUpdate`] is accepted (the synchronous half). Kept separate from starting the drain so the caller can send the `Relaunching` ack BEFORE the leader begins shutting down.
 /// Otherwise an idle leader can race the ack and the client sees a dropped control response.
-///
-/// Declines unless the target is strictly newer (directional guard) and no relaunch is already in progress (idempotent across multiple clients).
-/// On accept it sets `relaunching` so duplicate requests are declined.
+/// Declines unless the target is strictly newer (directional guard) and no relaunch is already in progress (idempotent across multiple clients). On accept it sets `relaunching` so duplicate requests are declined.
 fn decide_relaunch_for_update(
     control_state: &LeaderServerControlState,
     to_version: String,
@@ -1438,9 +1435,7 @@ fn decide_relaunch_for_update(
         grace_ms: RELAUNCH_TOTAL_GRACE.as_millis() as u64,
     })
 }
-/// Start the bounded-grace drain for an accepted relaunch.
-/// Wait up to [`RELAUNCH_GRACE`] for the agent to go idle.
-/// Idle checks both `agent_busy` (IPC traffic) and [`AgentActivity::is_busy`] (relay-driven turns, subagents).
+/// Start the bounded-grace drain for an accepted relaunch. Wait up to [`RELAUNCH_GRACE`] for the agent to go idle. Idle checks both `agent_busy` (IPC traffic) and [`AgentActivity::is_busy`] (relay-driven turns, subagents).
 /// Then flush every session actor, set [`ShutdownReason::AutoUpdate`], and cancel: the same exit path the auto-update checker uses.
 /// Must be called *after* the `Relaunching` ack has been sent so the ack is delivered before `ShuttingDown`.
 fn spawn_relaunch_drain(
@@ -1504,52 +1499,9 @@ fn make_version_mismatch_notification(
         .to_string(),
     )
 }
-/// Run the leader IPC server.
-///
-/// The socket_path is where the Unix socket will be created.
-/// Caller is responsible for:
-/// 1. Cleaning up any stale socket file before calling this
-/// 2. Acquiring the leader lock AFTER this function creates the socket
-///
-/// With this ordering:
-/// - Clients waiting for socket can connect as soon as we're ready
-/// - The lock acquisition happens after we're actually listening
-///
-/// # Readiness gating
-///
-/// The `ready_rx` watch channel controls whether ACP messages are forwarded to the agent.
-/// While `*ready_rx.borrow() == false` (leader still initializing):
-/// - Client connections and IPC registrations are accepted normally.
-/// - ACP requests (messages with an `id`) receive a structured `leader_starting` JSON-RPC error so the client can retry rather than hang.
-/// - ACP notifications (no `id`) are dropped with a trace log.
-///
-/// Once `ready_rx` is signaled `true`, all subsequent ACP traffic is forwarded to the agent as normal.
-/// (Ready means the socket is bound and bounded auth completed; the model catalog and remote settings stream in afterward.)
-///
-/// # Arguments
-///
-/// * `socket_path` - Path for the Unix domain socket
-/// * `acp_tx` - Channel to send ACP messages from clients to the agent
-/// * `response_rx` - Channel to receive responses from the agent to route to clients
-/// * `cancel` - Cancellation token for graceful shutdown
-/// * `no_exit_on_disconnect` - If true, don't exit when all clients disconnect
-/// * `client_count` - Atomic counter tracking the number of connected clients
-/// * `agent_busy` - Atomic flag set while the agent has in-flight **IPC** requests; relay-driven traffic never sets it
-/// * `agent_activity` - Agent-derived activity view (running turns, parked interactions, live subagents).
-///   The `RelaunchForUpdate` drain consults it alongside `agent_busy`, plus the pre-shutdown session flush.
-/// * `ready_rx` - Watch receiver; ACP forwarding is gated until this is `true`
-/// * `relay_demand_tx` - Watch sender flipped to `true` when the first [`ClientMode::Headless`] client registers.
-///   `run_leader` defers starting the grok.com WebSocket relay until this fires.
-///   A leader serving only interactive clients (TUI dashboard, IDE) thus never duplicates its ACP stream onto the relay.
-///   Headless registration is the devbox-flow marker: those clients are driven remotely *through* the relay.
-/// * `shutdown_tx` - Watch sender for the shutdown reason.
-///   The server subscribes its own receiver and reads it once when `cancel` fires (defaults to [`ShutdownReason::Manual`]).
-///   The auto-update checker and the [`ControlCommand::RelaunchForUpdate`] handler send [`ShutdownReason::AutoUpdate`] before cancelling.
-///   Clients then see the real reason; senders must write before cancelling.
-/// * `leader_version_override` - If `Some`, overrides [`LEADER_VERSION`] for version mismatch detection.
-///   Pass `None` in production.
-///   A test version string bypasses the `"unknown"` constant that appears in dev builds where `VERSION_WITH_COMMIT` is not set.
-/// * `control_state` - Leader-local control metadata and CPU profiling state
+/// Caller is responsible for: Cleaning up any stale socket file before calling this Acquiring the leader lock AFTER this function creates the socket The lock acquisition happens after we're actually listening
+/// ACP requests (messages with an `id`) receive a structured `leader_starting` JSON-RPC error so the client can retry rather than hang.
+/// A leader serving only interactive clients (TUI dashboard, IDE) thus never duplicates its ACP stream onto the relay. The auto-update checker and the [`ControlCommand::RelaunchForUpdate`] handler send [`ShutdownReason::AutoUpdate`] before cancelling. Clients then see the real reason; senders must write before cancelling.
 pub async fn run_leader_server(
     socket_path: std::path::PathBuf,
     acp_tx: mpsc::UnboundedSender<String>,
@@ -1569,7 +1521,7 @@ pub async fn run_leader_server(
     let shutdown_reason_rx = shutdown_tx.subscribe();
     let listener = LeaderListener::bind(&socket_path)?;
     info!("Leader server listening");
-    let (event_tx, event_rx) = kanal::unbounded_async::<ServerEvent>();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerEvent>();
     let mut clients: HashMap<ClientId, ClientState> = HashMap::new();
     let mut session_driver: HashMap<String, ClientId> = HashMap::new();
     let mut session_subscribers: HashMap<String, std::collections::HashSet<ClientId>> =
@@ -1591,7 +1543,7 @@ pub async fn run_leader_server(
             accept_result = listener.accept() => {
                 LeaderServerPoll::Accept(accept_result.map(|(stream, _)| stream))
             }
-            Ok(event) = event_rx.recv() => LeaderServerPoll::Event(event),
+            Some(event) = event_rx.recv() => LeaderServerPoll::Event(event),
             Some(payload) = response_rx.recv() => LeaderServerPoll::Response(payload),
         };
         match poll {
@@ -1602,14 +1554,14 @@ pub async fn run_leader_server(
                     debug!(pending_requests, "Resetting agent_busy on shutdown");
                     agent_busy.store(false, Ordering::Relaxed);
                 }
-                broadcast_shutdown(&clients, reason).await;
+                broadcast_shutdown(&clients, reason);
                 break;
             }
             LeaderServerPoll::Accept(accept_result) => match accept_result {
                 Ok(stream) => {
                     had_clients = true;
                     let client_id = ClientId::new();
-                    let (tx, rx) = kanal::unbounded_async();
+                    let (tx, rx) = mpsc::unbounded_channel();
                     clients.insert(
                         client_id,
                         ClientState {
@@ -1682,7 +1634,7 @@ pub async fn run_leader_server(
                                 leader_version = effective_leader_version,
                                 "Version mismatch: client binary differs from leader binary"
                             );
-                            let _ = client.tx.try_send(ClientOutbound::Acp(payload.into()));
+                            let _ = client.tx.send(ClientOutbound::Acp(payload.into()));
                         }
                     }
                 }
@@ -1794,6 +1746,24 @@ pub async fn run_leader_server(
                                 ControlCommand::WorkspaceStatus => {
                                     handle_workspace_status(control_state).await
                                 }
+                                ControlCommand::CursorWorkerStart(args) => {
+                                    control_state
+                                        .cursor_worker
+                                        .start(args, &cancel, control_state.metadata.pid)
+                                        .await
+                                }
+                                ControlCommand::CursorWorkerStop => {
+                                    control_state
+                                        .cursor_worker
+                                        .stop(control_state.metadata.pid)
+                                        .await
+                                }
+                                ControlCommand::CursorWorkerStatus => {
+                                    control_state
+                                        .cursor_worker
+                                        .status(control_state.metadata.pid)
+                                        .await
+                                }
                                 ControlCommand::RelaunchForUpdate { to_version } => {
                                     decide_relaunch_for_update(
                                         &control_state,
@@ -1807,7 +1777,6 @@ pub async fn run_leader_server(
                                 matches!(result, Ok(ControlPayload::Relaunching { .. }));
                             if let Err(e) = client_tx
                                 .send(ServerMessage::ControlResult { request_id, result }.into())
-                                .await
                             {
                                 warn!(client_id = id.0, error = %e, "Failed to send control response to client");
                             }
@@ -1830,9 +1799,7 @@ pub async fn run_leader_server(
                             json.as_ref().and_then(make_leader_starting_error)
                         {
                             if let Some(client) = clients.get(&id) {
-                                let _ = client
-                                    .tx
-                                    .try_send(ClientOutbound::Acp(error_payload.into()));
+                                let _ = client.tx.send(ClientOutbound::Acp(error_payload.into()));
                             }
                             trace!(
                                 client_id = id.0,
@@ -2002,23 +1969,9 @@ pub async fn run_leader_server(
                         patch_initialize_response_model(json, &client.capabilities.default_model);
                     }
                     let restored_payload: Arc<str> = json.to_string().into();
-                    match client.tx.try_send(ClientOutbound::Acp(restored_payload)) {
-                        Ok(true) => {
+                    match client.tx.send(ClientOutbound::Acp(restored_payload)) {
+                        Ok(()) => {
                             trace!(client_id = client_id.0, "Routed response via request ID");
-                        }
-                        Ok(false) => {
-                            warn!(
-                                client_id = client_id.0,
-                                "Failed to send response to client (channel full)"
-                            );
-                            xai_grok_telemetry::unified_log::warn(
-                                "leader.response.send_failed",
-                                None,
-                                Some(serde_json::json!({
-                                    "client_id": client_id.0,
-                                    "reason": "channel_full",
-                                })),
-                            );
                         }
                         Err(e) => {
                             warn!(client_id = client_id.0, error = %e, "Failed to send response to client (channel closed)");
@@ -2050,7 +2003,7 @@ pub async fn run_leader_server(
                                     continue;
                                 }
                                 if let Err(e) =
-                                    target.tx.try_send(ClientOutbound::Acp(buffered_payload))
+                                    target.tx.send(ClientOutbound::Acp(buffered_payload))
                                 {
                                     warn!(client_id = buf_client.0, error = %e, "Failed to flush buffered live notification after load (channel closed)");
                                     break;
@@ -2071,8 +2024,7 @@ pub async fn run_leader_server(
                         {
                             let count = cached.len();
                             for req in cached.values() {
-                                if let Err(e) = target.tx.try_send(ClientOutbound::Acp(req.clone()))
-                                {
+                                if let Err(e) = target.tx.send(ClientOutbound::Acp(req.clone())) {
                                     warn!(client_id = buf_client.0, error = %e, "Failed to replay interaction request after load (channel closed)");
                                     break;
                                 }
@@ -2096,7 +2048,7 @@ pub async fn run_leader_server(
                     .is_some_and(is_machine_wide_broadcast_notification)
                 {
                     for client in clients.values() {
-                        let _ = client.tx.try_send(ClientOutbound::Acp(payload.clone()));
+                        let _ = client.tx.send(ClientOutbound::Acp(payload.clone()));
                     }
                     trace!("Broadcast machine-wide notification to all clients");
                     continue;
@@ -2138,8 +2090,8 @@ pub async fn run_leader_server(
                             .as_ref()
                             .and_then(extract_session_id)
                             .zip(json.as_ref().and_then(event_seq_of));
-                        match client.tx.try_send(ClientOutbound::Acp(payload)) {
-                            Ok(true) => {
+                        match client.tx.send(ClientOutbound::Acp(payload)) {
+                            Ok(()) => {
                                 if let Some((sid, seq)) = replay_seq {
                                     let entry =
                                         load_replay_max_seq.entry((target, sid)).or_insert(0);
@@ -2148,12 +2100,6 @@ pub async fn run_leader_server(
                                 trace!(
                                     client_id = target.0,
                                     "Unicast replay notification to loading client"
-                                );
-                            }
-                            Ok(false) => {
-                                warn!(
-                                    client_id = target.0,
-                                    "Replay notification dropped: loading client channel full (not counted toward flush cutoff)"
                                 );
                             }
                             Err(e) => {
@@ -2206,7 +2152,6 @@ pub async fn run_leader_server(
                 let is_reverse_request = json
                     .as_ref()
                     .is_some_and(|j| j.get("id").is_some() && j.get("method").is_some());
-                let is_inject_prompt = json.as_ref().is_some_and(is_scheduled_task_inject_prompt);
                 let is_interaction =
                     is_reverse_request && json.as_ref().is_some_and(is_interaction_request);
                 if is_interaction
@@ -2223,32 +2168,28 @@ pub async fn run_leader_server(
                 {
                     let child_event = json.as_ref().and_then(extract_child_session_event);
                     let event_seq = json.as_ref().and_then(event_seq_of);
-                    if (is_reverse_request && !is_interaction) || is_inject_prompt {
+                    if is_reverse_request && !is_interaction {
                         if let Some(&driver_id) = session_driver.get(sid.as_str()) {
                             if let Some(client) = clients.get(&driver_id) {
-                                if let Err(e) =
-                                    client.tx.try_send(ClientOutbound::Acp(payload.clone()))
+                                if let Err(e) = client.tx.send(ClientOutbound::Acp(payload.clone()))
                                 {
-                                    warn!(client_id = driver_id.0, session_id = sid.as_str(), is_inject = is_inject_prompt, error = %e, "Failed to route driver-only message (channel closed)");
+                                    warn!(client_id = driver_id.0, session_id = sid.as_str(), error = %e, "Failed to route driver-only message (channel closed)");
                                 } else {
                                     trace!(
                                         client_id = driver_id.0,
                                         session_id = sid.as_str(),
-                                        is_inject = is_inject_prompt,
                                         "Routed driver-only message to driver"
                                     );
                                 }
                             } else {
                                 trace!(
                                     session_id = sid.as_str(),
-                                    is_inject = is_inject_prompt,
                                     "Dropping driver-only message: no live driver"
                                 );
                             }
                         } else {
                             trace!(
                                 session_id = sid.as_str(),
-                                is_inject = is_inject_prompt,
                                 "Dropping driver-only message: session has no driver"
                             );
                         }
@@ -2271,8 +2212,7 @@ pub async fn run_leader_server(
                                 );
                             }
                             if let Some(client) = clients.get(&cid) {
-                                if let Err(e) =
-                                    client.tx.try_send(ClientOutbound::Acp(payload.clone()))
+                                if let Err(e) = client.tx.send(ClientOutbound::Acp(payload.clone()))
                                 {
                                     warn!(client_id = cid.0, session_id = sid.as_str(), error = %e, "Failed to broadcast notification to subscriber (channel closed)");
                                 } else {
@@ -2345,7 +2285,7 @@ pub async fn run_leader_server(
                         client_id = client_id.0,
                         "Using fallback routing to last active client"
                     );
-                    if let Err(e) = client.tx.try_send(ClientOutbound::Acp(payload)) {
+                    if let Err(e) = client.tx.send(ClientOutbound::Acp(payload)) {
                         warn!(client_id = client_id.0, error = %e, "Failed to send notification via fallback routing (channel closed)");
                     }
                 } else {
@@ -2354,6 +2294,7 @@ pub async fn run_leader_server(
             }
         }
     }
+    control_state.cursor_worker.finalize_on_shutdown().await;
     finalize_workspace_on_shutdown(control_state.clone()).await;
     finalize_cpu_profile_on_shutdown(control_state).await;
     let _ = std::fs::remove_file(&socket_path);
@@ -2362,8 +2303,8 @@ pub async fn run_leader_server(
 fn spawn_client_handler(
     client_id: ClientId,
     stream: LeaderStream,
-    server_rx: AsyncReceiver<ClientOutbound>,
-    event_tx: AsyncSender<ServerEvent>,
+    server_rx: mpsc::UnboundedReceiver<ClientOutbound>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
     cancel: CancellationToken,
     ready_rx: watch::Receiver<bool>,
     control_state: LeaderServerControlState,
@@ -2382,43 +2323,44 @@ fn spawn_client_handler(
         if let Err(e) = &result {
             debug!(client_id = client_id.0, error = %e, "Client session ended");
         }
-        let _ = event_tx.send(ServerEvent::Disconnected(client_id)).await;
+        let _ = event_tx.send(ServerEvent::Disconnected(client_id));
     });
 }
 async fn run_client_session(
     client_id: ClientId,
     stream: LeaderStream,
-    server_rx: AsyncReceiver<ClientOutbound>,
-    event_tx: AsyncSender<ServerEvent>,
+    mut server_rx: mpsc::UnboundedReceiver<ClientOutbound>,
+    event_tx: mpsc::UnboundedSender<ServerEvent>,
     cancel: CancellationToken,
     mut ready_rx: watch::Receiver<bool>,
     control_state: LeaderServerControlState,
 ) -> Result<(), ProtocolError> {
-    let (mut reader, mut writer) = tokio::io::split(stream);
-    let msg: ClientMessage =
-        match tokio::time::timeout(REGISTRATION_TIMEOUT, read_message(&mut reader)).await {
-            Ok(Ok(msg)) => msg,
-            Ok(Err(e)) => {
-                warn!(client_id = client_id.0, error = %e, "Registration failed");
-                return Err(e);
-            }
-            Err(_) => {
-                warn!(
-                    client_id = client_id.0,
-                    "Registration timeout - client did not register within {:?}",
-                    REGISTRATION_TIMEOUT
-                );
-                let _ = write_message(
-                    &mut writer,
-                    &ServerMessage::Error {
-                        code: 3,
-                        message: "Registration timeout".into(),
-                    },
-                )
-                .await;
-                return Ok(());
-            }
-        };
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut reader = FrameReader::new(reader);
+    let msg: ClientMessage = match tokio::time::timeout(REGISTRATION_TIMEOUT, reader.read_message())
+        .await
+    {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(e)) => {
+            warn!(client_id = client_id.0, error = %e, "Registration failed");
+            return Err(e);
+        }
+        Err(_) => {
+            warn!(
+                client_id = client_id.0,
+                "Registration timeout - client did not register within {:?}", REGISTRATION_TIMEOUT
+            );
+            let _ = write_message(
+                &mut writer,
+                &ServerMessage::Error {
+                    code: 3,
+                    message: "Registration timeout".into(),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+    };
     let (client_type, mode, capabilities, was_ready_at_registration) = match msg {
         ClientMessage::Register {
             client_type,
@@ -2462,7 +2404,7 @@ async fn run_client_session(
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    drain_client_outbound_on_cancel(&server_rx, &mut writer).await;
+                    drain_client_outbound_on_cancel(&mut server_rx, &mut writer).await;
                     return Ok(());
                 }
                 result = ready_rx.changed() => {
@@ -2480,31 +2422,29 @@ async fn run_client_session(
             "Leader ready; sent LeaderReady to client"
         );
     }
-    let _ = event_tx
-        .send(ServerEvent::Registered(
-            client_id,
-            mode,
-            capabilities.clone(),
-            client_type.clone(),
-        ))
-        .await;
+    let _ = event_tx.send(ServerEvent::Registered(
+        client_id,
+        mode,
+        capabilities.clone(),
+        client_type.clone(),
+    ));
     info!(client_id = client_id.0, client_type = %client_type, ?mode, yolo_mode = capabilities.yolo_mode, client_version = ?capabilities.client_version, "Client registered");
     loop {
         tokio::select! {
             biased;
 
             _ = cancel.cancelled() => {
-                drain_client_outbound_on_cancel(&server_rx, &mut writer).await;
+                drain_client_outbound_on_cancel(&mut server_rx, &mut writer).await;
                 break;
             }
 
-            Ok(msg) = server_rx.recv() => {
+            Some(msg) = server_rx.recv() => {
                 if write_outbound(&mut writer, &msg).await.is_err() {
                     break;
                 }
             }
 
-            msg_result = read_message::<_, ClientMessage>(&mut reader) => {
+            msg_result = reader.read_message::<ClientMessage>() => {
                 match handle_client_inbound_message(
                     msg_result,
                     client_id,
@@ -2526,7 +2466,7 @@ enum ClientSessionAction {
     Break,
 }
 async fn drain_client_outbound_on_cancel<W>(
-    server_rx: &AsyncReceiver<ClientOutbound>,
+    server_rx: &mut mpsc::UnboundedReceiver<ClientOutbound>,
     writer: &mut W,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
@@ -2537,7 +2477,7 @@ async fn drain_client_outbound_on_cancel<W>(
         }
         tokio::task::yield_now().await;
     }
-    while let Ok(Some(msg)) = server_rx.try_recv() {
+    while let Ok(msg) = server_rx.try_recv() {
         if write_outbound(writer, &msg).await.is_err() {
             break;
         }
@@ -2546,7 +2486,7 @@ async fn drain_client_outbound_on_cancel<W>(
 async fn handle_client_inbound_message<W>(
     msg_result: Result<ClientMessage, ProtocolError>,
     client_id: ClientId,
-    event_tx: &AsyncSender<ServerEvent>,
+    event_tx: &mpsc::UnboundedSender<ServerEvent>,
     writer: &mut W,
 ) -> Result<ClientSessionAction, ProtocolError>
 where
@@ -2554,7 +2494,7 @@ where
 {
     match msg_result {
         Ok(msg @ (ClientMessage::Acp { .. } | ClientMessage::Control { .. })) => {
-            let _ = event_tx.send(ServerEvent::Message(client_id, msg)).await;
+            let _ = event_tx.send(ServerEvent::Message(client_id, msg));
             Ok(ClientSessionAction::Continue)
         }
         Ok(ClientMessage::Ping) => {
@@ -2582,31 +2522,22 @@ where
         }
     }
 }
-/// Broadcast a planned shutdown to all connected clients.
-///
-/// Sends `ShuttingDown` (advance notice with reason and `delay_ms: 0`) followed immediately by `Shutdown`.
+/// Broadcast a planned shutdown to all connected clients. Sends `ShuttingDown` (advance notice with reason and `delay_ms: 0`) followed immediately by `Shutdown`.
 /// Both messages are sent before the server exits, so clients that process the channel quickly will see both.
-///
-/// `delay_ms` is set to 0 because the server sends `Shutdown` immediately after `ShuttingDown`; there is no actual grace period.
-/// The cancel token propagates to client session handlers simultaneously.
-/// A sleep between the two messages would let session writers exit before `Shutdown` is delivered.
-/// Clients should treat `ShuttingDown` as a signal that `Shutdown` is imminent and prepare their reconnection handlers.
-async fn broadcast_shutdown(
+/// `delay_ms` is set to 0 because the server sends `Shutdown` immediately after `ShuttingDown`; there is no actual grace period. The cancel token propagates to client session handlers simultaneously. A sleep between the two messages would let session writers exit before `Shutdown` is delivered.
+fn broadcast_shutdown(
     clients: &HashMap<ClientId, ClientState>,
     reason: super::protocol::ShutdownReason,
 ) {
     for client in clients.values() {
-        let _ = client
-            .tx
-            .send(
-                ServerMessage::ShuttingDown {
-                    reason: reason.clone(),
-                    delay_ms: 0,
-                }
-                .into(),
-            )
-            .await;
-        let _ = client.tx.send(ServerMessage::Shutdown.into()).await;
+        let _ = client.tx.send(
+            ServerMessage::ShuttingDown {
+                reason: reason.clone(),
+                delay_ms: 0,
+            }
+            .into(),
+        );
+        let _ = client.tx.send(ServerMessage::Shutdown.into());
     }
 }
 pub struct ServerHandle {
@@ -2619,15 +2550,9 @@ pub struct ServerHandle {
     pub client_count: Arc<AtomicUsize>,
     /// Atomic flag: `true` while the agent has pending (in-flight) requests
     pub agent_busy: Arc<AtomicBool>,
-    /// Signal the IPC server that the leader is fully ready (socket bound and bounded auth; catalog/settings refresh runs in the background).
-    ///
-    /// Send `true` once the leader has finished initializing.
-    /// Until then, ACP requests receive a `leader_starting` error and ACP notifications are dropped.
-    ///
-    /// `spawn_leader_server` sends `true` immediately.
-    /// Callers that do not need staged startup (e.g. tests, in-process use) get a fully-ready server out of the box.
-    /// Production leader startup (`run_leader`) holds this back until bounded auth completes.
-    /// (Catalog/settings are no longer prefetched; they refresh in the background.)
+    /// Signal the IPC server that the leader is fully ready (socket bound and bounded auth; catalog/settings refresh runs in the background). Send `true` once the leader has finished initializing.
+    /// Until then, ACP requests receive a `leader_starting` error and ACP notifications are dropped. `spawn_leader_server` sends `true` immediately.
+    /// Callers that do not need staged startup (e.g. tests, in-process use) get a fully-ready server out of the box. Production leader startup (`run_leader`) holds this back until bounded auth completes. (Catalog/settings are no longer prefetched; they refresh in the background.)
     pub ready_tx: watch::Sender<bool>,
     /// Set the shutdown reason before cancelling so clients receive the correct `ShuttingDown` reason.
     /// The default value is [`ShutdownReason::Manual`]; send [`ShutdownReason::AutoUpdate`] before cancelling for auto-update shutdowns.

@@ -43,6 +43,16 @@ fn read_summary_from(session_dir: &std::path::Path) -> Summary {
     serde_json::from_slice(&std::fs::read(session_dir.join("summary.json")).unwrap()).unwrap()
 }
 
+fn mark_summary_used(session_dir: &std::path::Path) {
+    let mut summary = read_summary_from(session_dir);
+    summary.num_messages = 1;
+    std::fs::write(
+        session_dir.join("summary.json"),
+        serde_json::to_vec_pretty(&summary).unwrap(),
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 #[serial]
 async fn list_sessions_repairs_untagged_worktree_summary_in_rows_and_on_disk() {
@@ -59,11 +69,23 @@ async fn list_sessions_repairs_untagged_worktree_summary_in_rows_and_on_disk() {
     let listed = adapter.list_sessions(None).await.unwrap();
 
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].session_kind.as_deref(), Some("worktree"));
-    assert_eq!(listed[0].worktree_label.as_deref(), Some("fix-bug"));
+    assert_eq!(
+        listed.first().and_then(|x| x.session_kind.as_deref()),
+        Some("worktree")
+    );
+    assert_eq!(
+        listed.first().and_then(|x| x.worktree_label.as_deref()),
+        Some("fix-bug")
+    );
     let rows = crate::session::merge::merge(Vec::new(), listed, None, &[], 20);
-    assert_eq!(rows[0].session_kind.as_deref(), Some("worktree"));
-    assert_eq!(rows[0].worktree_label.as_deref(), Some("fix-bug"));
+    assert_eq!(
+        rows.first().and_then(|x| x.session_kind.as_deref()),
+        Some("worktree")
+    );
+    assert_eq!(
+        rows.first().and_then(|x| x.worktree_label.as_deref()),
+        Some("fix-bug")
+    );
     let on_disk = read_summary_from(&session_dir);
     assert_eq!(on_disk.session_kind.as_deref(), Some("worktree"));
     assert_eq!(on_disk.worktree_label.as_deref(), Some("fix-bug"));
@@ -95,15 +117,29 @@ async fn list_sessions_fills_missing_label_on_kinded_fork_without_changing_kind(
     let listed = adapter.list_sessions(None).await.unwrap();
 
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].session_kind.as_deref(), Some("fork"));
-    assert_eq!(listed[0].worktree_label.as_deref(), Some("fix-bug"));
     assert_eq!(
-        listed[0].source_workspace_dir.as_deref(),
+        listed.first().and_then(|x| x.session_kind.as_deref()),
+        Some("fork")
+    );
+    assert_eq!(
+        listed.first().and_then(|x| x.worktree_label.as_deref()),
+        Some("fix-bug")
+    );
+    assert_eq!(
+        listed
+            .first()
+            .and_then(|x| x.source_workspace_dir.as_deref()),
         Some("/home/user/repo")
     );
     let rows = crate::session::merge::merge(Vec::new(), listed, None, &[], 20);
-    assert_eq!(rows[0].session_kind.as_deref(), Some("fork"));
-    assert_eq!(rows[0].worktree_label.as_deref(), Some("fix-bug"));
+    assert_eq!(
+        rows.first().and_then(|x| x.session_kind.as_deref()),
+        Some("fork")
+    );
+    assert_eq!(
+        rows.first().and_then(|x| x.worktree_label.as_deref()),
+        Some("fix-bug")
+    );
     let on_disk = read_summary_from(&session_dir);
     assert_eq!(on_disk.session_kind.as_deref(), Some("fork"));
     assert_eq!(on_disk.worktree_label.as_deref(), Some("fix-bug"));
@@ -139,8 +175,14 @@ async fn list_sessions_leaves_kinded_labeled_worktree_summary_untouched() {
     let listed = adapter.list_sessions(None).await.unwrap();
 
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].session_kind.as_deref(), Some("fork"));
-    assert_eq!(listed[0].worktree_label.as_deref(), Some("existing"));
+    assert_eq!(
+        listed.first().and_then(|x| x.session_kind.as_deref()),
+        Some("fork")
+    );
+    assert_eq!(
+        listed.first().and_then(|x| x.worktree_label.as_deref()),
+        Some("existing")
+    );
     assert_eq!(
         std::fs::read(session_dir.join("summary.json")).unwrap(),
         bytes_before
@@ -166,8 +208,8 @@ async fn list_sessions_leaves_untagged_summary_outside_worktrees_untouched() {
     let listed = adapter.list_sessions(None).await.unwrap();
 
     assert_eq!(listed.len(), 1);
-    assert!(listed[0].session_kind.is_none());
-    assert!(listed[0].worktree_label.is_none());
+    assert!(listed.first().is_some_and(|x| x.session_kind.is_none()));
+    assert!(listed.first().is_some_and(|x| x.worktree_label.is_none()));
     assert_eq!(
         std::fs::read(session_dir.join("summary.json")).unwrap(),
         bytes_before
@@ -352,10 +394,18 @@ async fn list_sessions_recent_fills_missing_label_on_kinded_fork_without_changin
     let listed = adapter.list_sessions_recent(10).await.unwrap();
 
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].session_kind.as_deref(), Some("fork"));
-    assert_eq!(listed[0].worktree_label.as_deref(), Some("fix-bug"));
     assert_eq!(
-        listed[0].source_workspace_dir.as_deref(),
+        listed.first().and_then(|x| x.session_kind.as_deref()),
+        Some("fork")
+    );
+    assert_eq!(
+        listed.first().and_then(|x| x.worktree_label.as_deref()),
+        Some("fix-bug")
+    );
+    assert_eq!(
+        listed
+            .first()
+            .and_then(|x| x.source_workspace_dir.as_deref()),
         Some("/home/user/repo")
     );
     let on_disk = read_summary_from(&session_dir);
@@ -375,12 +425,20 @@ async fn list_sessions_recent_repairs_untagged_worktree_summary_in_rows_and_on_d
     let adapter = JsonlStorageAdapter::with_root(home.path().to_path_buf());
     let session_dir = adapter.session_dir(&info);
     write_untagged_summary(&session_dir, &info);
+    // Recent list omits empty untitled rows, so this must be a used row to observe the heal.
+    mark_summary_used(&session_dir);
 
     let listed = adapter.list_sessions_recent(10).await.unwrap();
 
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].session_kind.as_deref(), Some("worktree"));
-    assert_eq!(listed[0].worktree_label.as_deref(), Some("fix-bug"));
+    assert_eq!(
+        listed.first().and_then(|x| x.session_kind.as_deref()),
+        Some("worktree")
+    );
+    assert_eq!(
+        listed.first().and_then(|x| x.worktree_label.as_deref()),
+        Some("fix-bug")
+    );
     let on_disk = read_summary_from(&session_dir);
     assert_eq!(on_disk.session_kind.as_deref(), Some("worktree"));
     assert_eq!(on_disk.worktree_label.as_deref(), Some("fix-bug"));
@@ -412,6 +470,8 @@ async fn list_sessions_heal_does_not_evict_recent_sessions_from_mtime_window() {
     };
     let recent_dir = adapter.session_dir(&recent);
     write_untagged_summary(&recent_dir, &recent);
+    // Used so the mtime assertion is not the husk filter dropping an empty row.
+    mark_summary_used(&recent_dir);
     set_summary_mtime(&recent_dir, now);
 
     let listed = adapter.list_sessions(None).await.unwrap();
@@ -424,5 +484,8 @@ async fn list_sessions_heal_does_not_evict_recent_sessions_from_mtime_window() {
 
     let window = adapter.list_sessions_recent(1).await.unwrap();
     assert_eq!(window.len(), 1);
-    assert_eq!(window[0].info.id.0.to_string(), "recent-untagged");
+    assert_eq!(
+        window.first().map(|w| w.info.id.0.to_string()).as_deref(),
+        Some("recent-untagged")
+    );
 }

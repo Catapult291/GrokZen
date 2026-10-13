@@ -17,10 +17,9 @@ use super::state::FileSearchState;
 /// Maximum number of visible rows in the dropdown (excluding separator).
 pub const MAX_DROPDOWN_ROWS: u16 = 8;
 
-/// Render the file search dropdown items into the given area.
-///
-/// This renders only the result rows; the caller (AgentView) clears the panel and draws the borders, separator, and count hint.
-/// The `area` covers just the item rows.
+/// Render the file search dropdown items into the given area. This renders only the result rows;
+/// the caller (AgentView) clears the panel and draws the borders, separator, and count hint. The
+/// `area` covers just the item rows.
 pub fn render_dropdown(buf: &mut Buffer, area: Rect, file_search: &FileSearchState, theme: &Theme) {
     if area.height == 0 || area.width < 4 || !file_search.is_visible() {
         return;
@@ -51,7 +50,9 @@ pub fn render_dropdown(buf: &mut Buffer, area: Rect, file_search: &FileSearchSta
             break;
         }
 
-        let item = &topk[idx];
+        let Some(item) = topk.get(idx) else {
+            break;
+        };
         let y = area.y + row as u16;
         let is_selected = idx == selected;
         let is_hovered = hovered == Some(idx) && !is_selected;
@@ -69,8 +70,6 @@ pub fn render_dropdown(buf: &mut Buffer, area: Rect, file_search: &FileSearchSta
             theme,
         );
     }
-
-    // ── Scrollbar ───────────────────────────────────────────────────────
 
     if needs_scrollbar {
         let scrollbar_area = Rect {
@@ -179,7 +178,7 @@ fn render_fuzzy_item(
     let normal_style = Style::default().fg(text_fg).bg(row_bg).add_modifier(bold);
 
     // Render path characters after prefix, with match highlighting.
-    let mut indices = &item.indices[..];
+    let mut indices = item.indices.as_slice();
     let mut col = x + PREFIX_WIDTH;
     let max_col = x + width;
 
@@ -197,13 +196,15 @@ fn render_fuzzy_item(
 
         let is_match = indices.first() == Some(&(char_idx as u32));
         if is_match {
-            indices = &indices[1..];
+            indices = indices.get(1..).unwrap_or(&[]);
         }
 
         let style = if is_match { match_style } else { normal_style };
 
         // Write the character.
-        let ch_str = &path[byte_idx..byte_idx + ch.len_utf8()];
+        let Some(ch_str) = path.get(byte_idx..byte_idx + ch.len_utf8()) else {
+            break;
+        };
         if let Some(cell) = buf.cell_mut((col, y)) {
             cell.set_symbol(ch_str);
             cell.set_style(style);
@@ -227,5 +228,20 @@ fn render_fuzzy_item(
     {
         cell.set_char('/');
         cell.set_style(normal_style);
+    }
+
+    // Terminal theme (Reset bands): reverse video; no-op on RGB themes.
+    if embed.is_none() {
+        let row_rect = Rect {
+            x,
+            y,
+            width,
+            height: 1,
+        };
+        if is_selected {
+            buf.set_style(row_rect, theme.selection_overlay());
+        } else if is_hovered {
+            buf.set_style(row_rect, theme.hover_overlay());
+        }
     }
 }

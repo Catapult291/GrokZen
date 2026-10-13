@@ -68,10 +68,28 @@ fn session_update_tag(params: &str) -> Option<String> {
 
 pub(crate) enum ExtEvent {
     None,
-    TaskBackgrounded { task_id: String, is_monitor: bool },
-    TaskCompleted { task_id: String },
-    SubagentSpawned { subagent_id: String },
-    SubagentFinished { subagent_id: String },
+    TaskBackgrounded {
+        task_id: String,
+        is_monitor: bool,
+    },
+    TaskCompleted {
+        task_id: String,
+    },
+    SubagentSpawned {
+        subagent_id: String,
+        attempt_id: Option<String>,
+        event_seq: Option<u64>,
+    },
+    SubagentProgress {
+        subagent_id: String,
+        attempt_id: Option<String>,
+        event_seq: Option<u64>,
+    },
+    SubagentFinished {
+        subagent_id: String,
+        attempt_id: Option<String>,
+        event_seq: Option<u64>,
+    },
     MonitorEvent,
     Lifecycle(Lifecycle),
     Stream(Box<StreamEvent>),
@@ -227,11 +245,28 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             #[serde(default)]
             path: Option<String>,
         },
+        MemoryCaptureActivity {
+            activity: String,
+            from_turn: u32,
+            through_turn: u32,
+            attempt: u32,
+            #[serde(default)]
+            detail: Option<String>,
+        },
         SubagentSpawned {
             subagent_id: String,
+            #[serde(default)]
+            attempt_id: Option<String>,
+        },
+        SubagentProgress {
+            subagent_id: String,
+            #[serde(default)]
+            attempt_id: Option<String>,
         },
         SubagentFinished {
             subagent_id: String,
+            #[serde(default)]
+            attempt_id: Option<String>,
         },
         ResponseStarted {
             #[serde(default)]
@@ -261,12 +296,17 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             #[serde(default)]
             stop_sequence: Option<String>,
         },
+        TurnUsage {
+            usage: xai_grok_shell::extensions::notification::ResponseUsage,
+        },
         #[serde(other)]
         Other,
     }
     #[derive(serde::Deserialize)]
     struct XaiNotif {
         update: XaiUpdate,
+        #[serde(default, rename = "_meta")]
+        meta: Option<serde_json::Value>,
     }
 
     let xai_notif = match serde_json::from_str::<XaiNotif>(params) {
@@ -280,6 +320,13 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             return ExtEvent::None;
         }
     };
+
+    let event_seq = xai_notif
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("eventId"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(crate::acp::meta::event_id_counter);
 
     match xai_notif.update {
         XaiUpdate::AutoCompactStarted { percentage } => {
@@ -304,10 +351,43 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
         XaiUpdate::MemoryFlushCompleted { result, path } => {
             ExtEvent::Lifecycle(Lifecycle::MemoryFlushCompleted { result, path })
         }
-        XaiUpdate::SubagentSpawned { subagent_id } => ExtEvent::SubagentSpawned { subagent_id },
-        XaiUpdate::SubagentFinished { subagent_id, .. } => {
-            ExtEvent::SubagentFinished { subagent_id }
-        }
+        XaiUpdate::MemoryCaptureActivity {
+            activity,
+            from_turn,
+            through_turn,
+            attempt,
+            detail,
+        } => ExtEvent::Lifecycle(Lifecycle::MemoryCaptureActivity {
+            activity,
+            from_turn,
+            through_turn,
+            attempt,
+            detail,
+        }),
+        XaiUpdate::SubagentSpawned {
+            subagent_id,
+            attempt_id,
+        } => ExtEvent::SubagentSpawned {
+            subagent_id,
+            attempt_id,
+            event_seq,
+        },
+        XaiUpdate::SubagentProgress {
+            subagent_id,
+            attempt_id,
+        } => ExtEvent::SubagentProgress {
+            subagent_id,
+            attempt_id,
+            event_seq,
+        },
+        XaiUpdate::SubagentFinished {
+            subagent_id,
+            attempt_id,
+        } => ExtEvent::SubagentFinished {
+            subagent_id,
+            attempt_id,
+            event_seq,
+        },
         XaiUpdate::ResponseStarted {
             message_id,
             model,
@@ -337,6 +417,9 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             signature,
             stop_sequence,
         })),
+        XaiUpdate::TurnUsage { usage } => {
+            ExtEvent::Stream(Box::new(StreamEvent::TurnUsage { usage }))
+        }
         // A task_backgrounded or task_completed tag arriving here belongs on its dedicated method; log loudly
         // Any other unknown tag stays a clean ignore
         XaiUpdate::Other => {

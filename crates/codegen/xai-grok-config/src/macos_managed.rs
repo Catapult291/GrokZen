@@ -33,8 +33,6 @@ fn managed_requirements_from(read: impl FnOnce() -> Option<String>) -> Option<to
 /// Decode a base64 TOML payload into a non-empty table.
 /// The forced payload is used **verbatim**: `$VAR`/`${VAR}` are deliberately NOT expanded.
 /// Expanding from the local process environment would let the very user the forced check excludes influence the admin policy.
-/// The policy feeds yolo, permission, and minimum-version enforcement.
-/// FFI-free, so unit-tested on every platform; invalid base64/UTF-8/TOML or an empty table yields `None`.
 fn decode_managed_toml(encoded: &str) -> Option<toml::Value> {
     use base64::Engine as _;
 
@@ -132,7 +130,10 @@ mod tests {
     fn decodes_line_wrapped_base64() {
         // Profile tooling line-wraps base64; interior newlines must be tolerated.
         let raw = b64("allowed_sandbox_modes = [\"read-only\"]\n");
-        let wrapped = format!("{}\n{}", &raw[..4], &raw[4..]);
+        let Some((head, tail)) = raw.split_at_checked(4) else {
+            panic!("expected encoded payload longer than 4 chars: {raw:?}");
+        };
+        let wrapped = format!("{head}\n{tail}");
         assert!(decode_managed_toml(&wrapped).is_some());
     }
 

@@ -37,7 +37,7 @@ const fn default_true() -> bool {
 }
 
 /// Skill info returned by the list extension method.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SkillInfo {
     /// Command identity: slash name, dedup key, listing label. Plugin skills
     /// and same-scope name-collision losers (`dedupe_skills` re-key) use the
@@ -57,6 +57,10 @@ pub struct SkillInfo {
     /// the listing until a matching file is touched. None = always shown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
+    /// Frontmatter `origin`: the tool that wrote the skill (e.g. `learn`),
+    /// validated to a short slug at parse time. None = hand-written or unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
     /// Trigger phrases for model matching, separate from description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub when_to_use: Option<String>,
@@ -138,10 +142,9 @@ impl SkillInfo {
     }
 }
 
-/// Extract the skill name from a path if it points to a `SKILL.md` file.
-///
-/// Returns the parent directory name (e.g. `"/skills/deploy/SKILL.md"` → `"deploy"`).
-/// Returns `None` for non-SKILL.md paths or bare `"SKILL.md"` with no parent.
+/// Extract the skill name from a path if it points to a `SKILL.md` file. Returns the parent
+/// directory name (e.g. `"/skills/deploy/SKILL.md"` → `"deploy"`). Returns `None` for non-SKILL.md
+/// paths or bare `"SKILL.md"` with no parent.
 pub fn skill_name_from_path(path: &str) -> Option<&str> {
     let p = std::path::Path::new(path);
     if p.file_name()?.to_str()? == "SKILL.md" {
@@ -159,6 +162,7 @@ impl Default for SkillInfo {
             description: String::new(),
             has_user_specified_description: false,
             paths: None,
+            origin: None,
             when_to_use: None,
             short_description: None,
             author: None,

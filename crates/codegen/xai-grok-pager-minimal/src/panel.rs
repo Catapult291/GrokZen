@@ -41,7 +41,6 @@ pub(super) enum ListPanel {
 }
 
 /// Detect an active below-prompt list panel, or `None`.
-///
 /// Only the session picker and the MCP-servers tab are hosted as simple lists; every other modal keeps its existing (centered) rendering.
 /// Callers must check this *before* `overlay::app_modal_active`, since `SessionPicker` is also an `active_modal`.
 pub(super) fn active(agent: &AgentView) -> Option<ListPanel> {
@@ -94,8 +93,6 @@ pub(super) fn render(
         ListPanel::Mcps => render_mcps(buf, area, agent, theme, locale),
     }
 }
-
-// ─────────────────────────────── chrome ─────────────────────────────────────
 
 /// Split `area` into (title_row, second_row, divider_row, list_area, footer_row).
 /// `second_row` hosts the subtitle (mcps) or the search bar (resume).
@@ -151,8 +148,6 @@ fn render_footer(buf: &mut Buffer, row: Rect, theme: &Theme, text: &str) {
 fn render_divider(buf: &mut Buffer, row: Rect, theme: &Theme) {
     picker::render_divider(buf, row.x, row.y, row.width, theme, None);
 }
-
-// ─────────────────────────────── resume ─────────────────────────────────────
 
 /// Exact body height (display rows) for the session-picker list.
 fn resume_body_rows(
@@ -334,8 +329,6 @@ fn render_resume(
     None
 }
 
-// ──────────────────────────────── mcps ──────────────────────────────────────
-
 /// Exact body height (display rows) for the MCP list: one line per row.
 fn mcps_body_rows(
     agent: &AgentView,
@@ -407,39 +400,60 @@ fn render_mcps(
                 let mut col = vec![false; n];
                 let mut exp = vec![false; n];
                 for i in 0..n {
-                    let gk = row_group_keys[i].as_deref();
-                    if gk.is_some_and(|k| k.starts_with("mcp-section:")) {
-                        col[i] = true;
-                        exp[i] = !minimal_api::mcp_section_children_hidden(
-                            &s.mcps_collapsed_sections,
-                            gk.unwrap(),
-                            searching,
-                        );
+                    let gk = row_group_keys.get(i).and_then(|k| k.as_deref());
+                    if let Some(k) = gk.filter(|k| k.starts_with("mcp-section:")) {
+                        if let Some(c) = col.get_mut(i) {
+                            *c = true;
+                        }
+                        if let Some(e) = exp.get_mut(i) {
+                            *e = !minimal_api::mcp_section_children_hidden(
+                                &s.mcps_collapsed_sections,
+                                k,
+                                searching,
+                            );
+                        }
                     } else if gk.is_some_and(|k| k.starts_with("mcp-tools:")) {
-                        ind[i] = 1;
-                        col[i] = true;
-                        if let Some(si) = row_data_indices[i] {
-                            exp[i] = s.mcps_tools_expanded.contains(&si);
+                        if let Some(d) = ind.get_mut(i) {
+                            *d = 1;
+                        }
+                        if let Some(c) = col.get_mut(i) {
+                            *c = true;
+                        }
+                        if let Some(si) = row_data_indices.get(i).copied().flatten() {
+                            if let Some(e) = exp.get_mut(i) {
+                                *e = s.mcps_tools_expanded.contains(&si);
+                            }
                             if let Some(srv) = servers.get(si) {
                                 if !srv.enabled {
-                                    b[i] = locale
-                                        .map(|locale| {
-                                            locale
-                                                .named_text("panel.disabled", "disabled")
-                                                .into_owned()
-                                        })
-                                        .unwrap_or_else(|| "disabled".to_string());
-                                    bc[i] = Some(theme.accent_error);
+                                    let (id, english) = if srv.blocked_reason.is_some() {
+                                        ("panel.blocked_by_policy", "blocked by policy")
+                                    } else {
+                                        ("panel.disabled", "disabled")
+                                    };
+                                    if let Some(badge) = b.get_mut(i) {
+                                        *badge = locale
+                                            .map(|locale| {
+                                                locale.named_text(id, english).into_owned()
+                                            })
+                                            .unwrap_or_else(|| english.to_string());
+                                    }
+                                    if let Some(color) = bc.get_mut(i) {
+                                        *color = Some(theme.accent_error);
+                                    }
                                 } else {
-                                    b[i] = minimal_api::mcp_status_label_with_locale(
-                                        &srv.status,
-                                        locale,
-                                    )
-                                    .to_string();
-                                    bc[i] = Some(minimal_api::mcp_status_theme_color(
-                                        &srv.status,
-                                        theme,
-                                    ));
+                                    if let Some(badge) = b.get_mut(i) {
+                                        *badge = minimal_api::mcp_status_label_with_locale(
+                                            &srv.status,
+                                            locale,
+                                        )
+                                        .to_string();
+                                    }
+                                    if let Some(color) = bc.get_mut(i) {
+                                        *color = Some(minimal_api::mcp_status_theme_color(
+                                            &srv.status,
+                                            theme,
+                                        ));
+                                    }
                                 }
                                 let tool_key = if srv.tool_count == 1 {
                                     "panel.tool_count_one"
@@ -451,23 +465,25 @@ fn render_mcps(
                                 } else {
                                     "{count} tools"
                                 };
-                                rl[i] = locale
-                                    .map(|locale| {
-                                        locale
-                                            .named_text(tool_key, tool_english)
-                                            .replace("{count}", &srv.tool_count.to_string())
-                                    })
-                                    .unwrap_or_else(|| {
-                                        if srv.tool_count == 1 {
-                                            "1 tool".to_string()
-                                        } else {
-                                            format!("{} tools", srv.tool_count)
-                                        }
-                                    });
+                                if let Some(right) = rl.get_mut(i) {
+                                    *right = locale
+                                        .map(|locale| {
+                                            locale
+                                                .named_text(tool_key, tool_english)
+                                                .replace("{count}", &srv.tool_count.to_string())
+                                        })
+                                        .unwrap_or_else(|| {
+                                            if srv.tool_count == 1 {
+                                                "1 tool".to_string()
+                                            } else {
+                                                format!("{} tools", srv.tool_count)
+                                            }
+                                        });
+                                }
                             }
                         }
-                    } else {
-                        ind[i] = 2; // tool child
+                    } else if let Some(d) = ind.get_mut(i) {
+                        *d = 2; // tool child
                     }
                 }
                 let server_key = if servers.len() == 1 {
@@ -570,18 +586,18 @@ fn render_mcps(
     let entries: Vec<PickerEntry> = (0..n)
         .map(|i| {
             PickerEntry::Row(PickerRow {
-                label: labels[i].as_str(),
-                right_label: right_labels[i].as_str(),
+                label: labels.get(i).map(String::as_str).unwrap_or(""),
+                right_label: right_labels.get(i).map(String::as_str).unwrap_or(""),
                 selected: !search_active && i == selected,
-                expanded: expandeds[i],
+                expanded: expandeds.get(i).copied().unwrap_or(false),
                 fields: &empty_fields,
                 description_lines: &no_lines,
                 summary_lines: &no_lines,
                 dimmed: false,
-                indent: indents[i],
-                badge: badges[i].as_str(),
-                badge_color: badge_colors[i],
-                collapsible: collapsibles[i],
+                indent: indents.get(i).copied().unwrap_or(0),
+                badge: badges.get(i).map(String::as_str).unwrap_or(""),
+                badge_color: badge_colors.get(i).copied().flatten(),
+                collapsible: collapsibles.get(i).copied().unwrap_or(false),
                 underline_last_desc: false,
             })
         })
@@ -613,8 +629,6 @@ fn render_mcps(
     render_footer(buf, footer_row, theme, &footer);
     None
 }
-
-// ─────────────────────────────── helpers ────────────────────────────────────
 
 /// Sum the display height of grouped picker entries.
 /// A header is one row, plus the blank spacer `render_picker_content` draws before non-first headers.
@@ -666,6 +680,7 @@ mod tests {
             setup_values: std::collections::HashMap::new(),
             tools: Vec::new(),
             enabled: true,
+            blocked_reason: None,
             source: "local".to_string(),
             wire_source: McpWireSource::Local,
             plugin_name: None,
@@ -729,18 +744,6 @@ mod tests {
         a
     }
 
-    fn buffer_text(buf: &Buffer) -> String {
-        let area = buf.area;
-        let mut out = String::new();
-        for y in area.y..area.y + area.height {
-            for x in area.x..area.x + area.width {
-                out.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
-            }
-            out.push('\n');
-        }
-        out
-    }
-
     #[test]
     fn active_detects_resume_mcps_and_none() {
         assert_eq!(active(&agent()), None);
@@ -769,7 +772,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut a, ListPanel::Mcps, &theme, None);
 
-        let text = buffer_text(&buf);
+        let text = crate::buffer_text(&buf);
         assert!(text.contains("Manage MCP servers"), "title:\n{text}");
         assert!(text.contains("2 servers"), "subtitle:\n{text}");
         assert!(text.contains("alpha"), "server row:\n{text}");
@@ -795,6 +798,41 @@ mod tests {
     }
 
     #[test]
+    fn mcps_panel_badges_policy_block_over_disabled() {
+        let mut denied = mcp_server("denied-srv", McpServerDisplayStatus::Unavailable, 0);
+        denied.enabled = false;
+        denied.blocked_reason = Some("matches deniedMcpServers".into());
+        let mut manual = mcp_server("manual-srv", McpServerDisplayStatus::Ready, 2);
+        manual.enabled = false;
+        let mut a = with_mcps(vec![denied, manual]);
+        let theme = Theme::current();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        render(&mut buf, area, &mut a, ListPanel::Mcps, &theme, None);
+
+        let text = crate::buffer_text(&buf);
+        let row = |name: &str| {
+            text.lines()
+                .find(|l| l.contains(name))
+                .map(str::to_string)
+                .unwrap_or_else(|| panic!("no row for {name}:\n{text}"))
+        };
+        let denied_row = row("denied-srv");
+        assert!(
+            denied_row.contains("blocked by policy"),
+            "policy verdict must win:\n{denied_row}"
+        );
+        assert!(
+            !denied_row.contains("disabled"),
+            "policy-blocked row must not read as a personal disable:\n{denied_row}"
+        );
+        assert!(
+            row("manual-srv").contains("disabled"),
+            "personal disable keeps its badge:\n{text}"
+        );
+    }
+
+    #[test]
     fn resume_panel_renders_title_rows_and_footer() {
         let mut a = with_resume(vec![session_entry("first task"), session_entry("second")]);
         let theme = Theme::current();
@@ -802,7 +840,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut a, ListPanel::Resume, &theme, None);
 
-        let text = buffer_text(&buf);
+        let text = crate::buffer_text(&buf);
         assert!(text.contains("Resume session"), "title:\n{text}");
         assert!(text.contains("first task"), "session row:\n{text}");
         assert!(text.contains("enter confirm"), "resume footer:\n{text}");
@@ -814,32 +852,41 @@ mod tests {
 
     #[test]
     fn resume_panel_pins_hidden_external_hint_above_scrolling_list() {
-        // More native rows than the panel fits: the hint must stay pinned
+        // More Headless rows than the panel fits: the hint must stay pinned
         // above the list instead of scrolling away with it.
         let mut entries: Vec<_> = (0..20)
-            .map(|i| session_entry(&format!("native-{i}")))
+            .map(|i| {
+                let mut entry = session_entry(&format!("native-{i}"));
+                entry.session_kind = Some("headless".into());
+                entry
+            })
             .collect();
         let mut foreign = session_entry("claude-session");
         foreign.source = "claude".into();
         entries.push(foreign);
         let mut a = with_resume(entries);
+        let Some(ActiveModal::SessionPicker { source_filter, .. }) = &mut a.active_modal else {
+            panic!("expected session picker");
+        };
+        *source_filter = xai_grok_pager::views::session_picker::SourceFilter::Headless;
         let theme = Theme::current();
         let area = Rect::new(0, 0, 80, 10);
         let mut buf = Buffer::empty(area);
         render(&mut buf, area, &mut a, ListPanel::Resume, &theme, None);
 
-        let text = buffer_text(&buf);
+        let text = crate::buffer_text(&buf);
         assert!(
             text.contains("1 external session hidden \u{b7} f to show"),
             "hidden foreign rows must stay explained while the list scrolls:\n{text}"
         );
         assert!(
-            text.find("external session hidden") < text.find("native-"),
+            text.find("external session hidden").expect("pinned hint")
+                < text.find("native-").expect("visible Headless row"),
             "the hint must be pinned above the first list row:\n{text}"
         );
         assert!(
             !text.contains("claude-session"),
-            "foreign row stays hidden under the default filter:\n{text}"
+            "foreign row stays hidden under the Headless filter:\n{text}"
         );
     }
 
@@ -884,7 +931,7 @@ mod tests {
             assert_eq!(actual_cell.symbol(), expected_cell.symbol(), "column {x}");
             assert_eq!(actual_cell.style(), expected_cell.style(), "column {x}");
         }
-        let text = buffer_text(&actual);
+        let text = crate::buffer_text(&actual);
         assert!(text.contains(grapheme), "ZWJ grapheme was split: {text:?}");
         assert!(
             text.contains(combining),

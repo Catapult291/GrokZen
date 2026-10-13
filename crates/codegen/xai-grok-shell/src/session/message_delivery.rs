@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, oneshot};
 use xai_grok_tools::implementations::grok_build::task::coordinator::ActiveMessageAdmission;
-use xai_grok_tools::implementations::grok_build::task::types::{
-    ActiveAgentMessageDelivery, ActiveAgentMessageOperation,
-};
+use xai_grok_tools::implementations::grok_build::task::types::ActiveAgentMessageDelivery;
 use xai_message_delivery_core::{
     AgentSource, DeliveryEnvelope, DeliveryIdentity, HumanSource, Operation, OperationSet,
     authorize_operation,
@@ -95,13 +93,6 @@ pub(crate) fn agent_delivery_identity(message_id: String) -> AgentDeliveryIdenti
     )
 }
 
-pub(crate) fn delivery_operation(operation: ActiveAgentMessageOperation) -> Operation {
-    match operation {
-        ActiveAgentMessageOperation::Queue => Operation::Queue,
-        ActiveAgentMessageOperation::Steer => Operation::Steer,
-    }
-}
-
 #[derive(Clone)]
 pub(crate) struct MessageDeliveryHandle {
     cmd_tx: mpsc::UnboundedSender<SessionCommand>,
@@ -147,7 +138,7 @@ impl MessageDeliveryHandle {
         &self,
         envelope: DeliveryEnvelope<
             AgentSource,
-            OwnedActiveDescendantGrant,
+            CoordinatorAgentDeliveryGrant,
             Arc<str>,
             AgentDeliveryIdentity,
         >,
@@ -156,6 +147,8 @@ impl MessageDeliveryHandle {
     ) -> ActiveMessageAdmission {
         let (operation, content, identity, grant) = envelope.into_parts();
         let delivery = grant.delivery;
+        let _target_agent_id = grant.target_agent_id;
+        let _target_generation = grant.target_generation;
         if grant.target_session_id != self.target_session_id {
             return ActiveMessageAdmission::Rejected;
         }
@@ -167,8 +160,8 @@ impl MessageDeliveryHandle {
         {
             return ActiveMessageAdmission::Rejected;
         }
-        if operation != delivery_operation(delivery.operation())
-            || authorize_operation(OperationSet::QUEUE_AND_STEER, operation).is_err()
+        if operation != Operation::from(delivery.operation())
+            || authorize_operation(OperationSet::QUEUE_STEER_AND_INTERJECT, operation).is_err()
         {
             return ActiveMessageAdmission::Unsupported;
         }
@@ -192,15 +185,25 @@ impl MessageDeliveryHandle {
     }
 }
 
-pub(crate) struct OwnedActiveDescendantGrant {
+pub(crate) struct CoordinatorAgentDeliveryGrant {
     target_session_id: String,
+    target_agent_id: xai_message_delivery_core::AgentId,
+    target_generation:
+        xai_grok_tools::implementations::grok_build::task::root_control::AgentMessageGeneration,
     delivery: ActiveAgentMessageDelivery,
 }
 
-impl OwnedActiveDescendantGrant {
-    pub(crate) fn new(target_session_id: String, delivery: ActiveAgentMessageDelivery) -> Self {
-        Self {
+impl CoordinatorAgentDeliveryGrant {
+    pub(crate) fn new(
+        target_session_id: String,
+        target_agent_id: xai_message_delivery_core::AgentId,
+        target_generation: xai_grok_tools::implementations::grok_build::task::root_control::AgentMessageGeneration,
+        delivery: ActiveAgentMessageDelivery,
+    ) -> Self {
+        CoordinatorAgentDeliveryGrant {
             target_session_id,
+            target_agent_id,
+            target_generation,
             delivery,
         }
     }

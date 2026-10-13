@@ -1,4 +1,4 @@
-//! Product identity for the unofficial Simplified Chinese community build.
+//! Product identity and privacy policy for the Simplified Chinese community build.
 //!
 //! Keep distribution identity separate from UI localization. Protocol names,
 //! server endpoints, model IDs, tool names, and wire fields must not depend on
@@ -38,6 +38,15 @@ pub const LOCALE_ENV: &str = "GROK_ZH_LOCALE";
 /// Default UI locale for this distribution.
 pub const DEFAULT_UI_LOCALE: &str = "zh-CN";
 
+/// Build policy: product analytics, crash reports and OTLP exports are disabled.
+/// Configuration, environment variables and remote feature flags cannot opt in.
+pub const TELEMETRY_UPLOADS_ALLOWED: bool = false;
+/// Build policy: auxiliary session, trace and research uploads are disabled.
+/// This does not block model requests or tools explicitly requested by the user.
+pub const SESSION_DATA_UPLOADS_ALLOWED: bool = false;
+/// Build policy: feedback polling, submission and attached archives are disabled.
+pub const FEEDBACK_UPLOADS_ALLOWED: bool = false;
+
 /// Repository that owns every update accepted by the community distribution.
 pub const COMMUNITY_RELEASE_REPO: &str = "Catapult291/GrokZen";
 /// Canonical download page for the community distribution.
@@ -45,6 +54,8 @@ pub const COMMUNITY_RELEASES_URL: &str = "https://github.com/Catapult291/GrokZen
 /// Independently versioned display translations; no release API or auth token
 /// is involved. Catalog filenames are derived from a validated numeric version.
 pub const COMMUNITY_ANNOUNCEMENTS_BASE_URL: &str = "https://raw.githubusercontent.com/Catapult291/GrokZen/refs/heads/zh-dev/community/announcements";
+/// Domain catalogs follow their corresponding official load events.
+pub const COMMUNITY_DISPLAY_TRANSLATIONS_BASE_URL: &str = "https://raw.githubusercontent.com/Catapult291/GrokZen/refs/heads/zh-dev/community/display-translations";
 /// The community updater uses immutable GitHub Releases from the repository
 /// above. Release ZIPs are selected by an exact platform-specific name and
 /// verified against GitHub metadata plus the package's inner hashes before

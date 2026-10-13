@@ -110,11 +110,7 @@ pub fn load_sources(config: &toml::Value) -> Vec<MarketplaceSource> {
 }
 
 /// Source descriptor from settings JSON.
-///
-/// Discriminated by the inner `"source"` field:
-/// - `{ "source": "git", "url": "..." }`
-/// - `{ "source": "github", "repo": "owner/repo" }`
-/// - `{ "source": "local", "path": "..." }`
+/// `{ "source": "git", "url": "..." }`; `{ "source": "github", "repo": "owner/repo" }`; `{ "source": "local", "path": "..." }`.
 #[derive(Debug, serde::Deserialize)]
 #[serde(tag = "source", rename_all = "lowercase")]
 enum SettingsSource {
@@ -177,24 +173,32 @@ fn extract_marketplace_entries(
         });
     }
 }
+/// Settings roots grok itself owns (`~/.grok`); sources found here are
+/// grok-native for policy scoping.
+pub fn native_settings_roots() -> Vec<PathBuf> {
+    xai_grok_config::user_grok_home().into_iter().collect()
+}
+
+/// Settings roots owned by other tools (`~/.claude`); sources found here are
+/// foreign for policy scoping.
+pub fn foreign_settings_roots() -> Vec<PathBuf> {
+    xai_dirs::home_dir()
+        .map(|h| h.join(".claude"))
+        .into_iter()
+        .collect()
+}
+
 /// Loads additional marketplace sources from `settings.json` (`extraKnownMarketplaces`)
 /// and `known_marketplaces.json` files under `~/.grok/` and `~/.claude/`.
 pub fn load_extra_sources_from_settings(existing: &[MarketplaceSource]) -> Vec<MarketplaceSource> {
-    let roots: Vec<PathBuf> = [
-        xai_grok_config::user_grok_home(),
-        xai_dirs::home_dir().map(|h| h.join(".claude")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let roots: Vec<PathBuf> = native_settings_roots()
+        .into_iter()
+        .chain(foreign_settings_roots())
+        .collect();
     load_extra_sources_from_settings_in(existing, &roots)
 }
 
-/// Like [`load_extra_sources_from_settings`] but reads from explicit `roots`
-/// instead of `~/.grok`/`~/.claude`. Each root is checked for
-/// `settings.local.json`, `settings.json` (`extraKnownMarketplaces` key), and
-/// `plugins/known_marketplaces.json`. Lets callers (e.g. first-run auto-register
-/// tests) stay isolated from the developer's real home dir.
+/// Like [`load_extra_sources_from_settings`] but reads from explicit `roots` instead of `~/.grok`/`~/.claude`. Each root is checked for `settings.local.json`, `settings.json` (`extraKnownMarketplaces` key), and `plugins/known_marketplaces.json`. Lets callers stay isolated from the developer's real home dir.
 pub fn load_extra_sources_from_settings_in(
     existing: &[MarketplaceSource],
     roots: &[PathBuf],
@@ -263,6 +267,13 @@ pub fn load_extra_sources_from_settings_in(
 mod tests {
     use super::*;
 
+    fn nth<T>(xs: &[T], i: usize) -> &T {
+        let Some(x) = xs.get(i) else {
+            panic!("expected item {i}, got {} items", xs.len());
+        };
+        x
+    }
+
     /// Serializes every test that touches the process-global `GROK_MARKETPLACE_REQUIRE_SHA`, so they cannot race each other.
     static REQUIRE_SHA_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -278,9 +289,9 @@ mod tests {
         .unwrap();
         let sources = load_sources(&config);
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].name, "Local Dev");
+        assert_eq!(nth(&sources, 0).name, "Local Dev");
         assert!(
-            matches!(&sources[0].kind, SourceKind::Local { path } if path == &PathBuf::from("/home/user/plugins"))
+            matches!(&nth(&sources, 0).kind, SourceKind::Local { path } if path == &PathBuf::from("/home/user/plugins"))
         );
     }
 
@@ -297,9 +308,9 @@ mod tests {
         .unwrap();
         let sources = load_sources(&config);
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].name, "xAI Official");
+        assert_eq!(nth(&sources, 0).name, "xAI Official");
         assert!(
-            matches!(&sources[0].kind, SourceKind::Git { url, branch } if url.contains("xai-org") && branch.as_deref() == Some("main"))
+            matches!(&nth(&sources, 0).kind, SourceKind::Git { url, branch } if url.contains("xai-org") && branch.as_deref() == Some("main"))
         );
     }
 
@@ -411,9 +422,9 @@ mod tests {
         let mut sources = Vec::new();
         extract_marketplace_entries(marketplaces, &mut seen, &mut sources);
         assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].name, "my-marketplace");
+        assert_eq!(nth(&sources, 0).name, "my-marketplace");
         assert!(
-            matches!(&sources[0].kind, SourceKind::Git { url, .. } if url == "https://github.com/anthropics/claude-plugins-official.git")
+            matches!(&nth(&sources, 0).kind, SourceKind::Git { url, .. } if url == "https://github.com/anthropics/claude-plugins-official.git")
         );
     }
 
@@ -436,7 +447,7 @@ mod tests {
         extract_marketplace_entries(marketplaces, &mut seen, &mut sources);
         assert_eq!(sources.len(), 1);
         assert!(
-            matches!(&sources[0].kind, SourceKind::Git { url, .. } if url == "git@github.com:org/repo.git")
+            matches!(&nth(&sources, 0).kind, SourceKind::Git { url, .. } if url == "git@github.com:org/repo.git")
         );
     }
 

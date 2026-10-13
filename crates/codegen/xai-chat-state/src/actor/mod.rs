@@ -225,7 +225,7 @@ impl ChatStateActor {
                 self.increment_prompt_index();
             }
             ChatStateCommand::UpdateSamplingConfig { config } => {
-                self.state.sampling_config = config;
+                self.state.sampling_config = *config;
             }
             ChatStateCommand::RecordAgentEditedPath { path } => {
                 self.state.agent_edited_paths.insert(path);
@@ -267,10 +267,8 @@ impl ChatStateActor {
                         let _ = reply.send(crate::StripOutcome::NoMatch);
                     }
                     Some((stripped, ack_rx)) => {
-                        // Await the disk ack off-actor: the persistence
-                        // channel already orders the write against later
-                        // commands, and blocking here would stall reads
-                        // behind an fsync.
+                        // Await the disk ack off-actor: the persistence channel already
+                        // orders the write, and blocking here would stall reads behind an fsync.
                         tokio::spawn(async move {
                             let outcome = match ack_rx.await {
                                 Ok(Ok(())) => crate::StripOutcome::Applied { stripped },
@@ -315,19 +313,16 @@ impl ChatStateActor {
             ChatStateCommand::FlushHarnessTraceTurn => {
                 self.state.seal_harness_trace_turn();
             }
-            ChatStateCommand::RepairDanglingAfterHarnessHalt { class } => {
-                self.repair_dangling_after_harness_halt(class);
+            ChatStateCommand::RepairDanglingAfterHarnessHalt { class, answers } => {
+                self.repair_dangling_after_harness_halt(class, answers);
             }
             ChatStateCommand::PopStrandedContinueReminder => {
                 self.pop_stranded_continue_reminder();
             }
 
-            // ═══ Queries ═══
-            //
-            // Read queries are pure reads — repair only at write boundaries:
-            // `ChatState::new()` (startup) and `push_user_message()` (new turn).
-            // `BuildConversationRequest` retains the guard because it is only
-            // ever issued by the agent loop between turns, never by background tasks.
+            // Queries are pure reads — repair only at write boundaries
+            // (`ChatState::new`, `push_user_message`).
+            // `BuildConversationRequest` keeps the guard: it runs between turns, never from background tasks.
             ChatStateCommand::BuildConversationRequest {
                 tool_definitions,
                 memory_reminder,
@@ -380,6 +375,9 @@ impl ChatStateActor {
             ChatStateCommand::GetSamplingConfig { reply } => {
                 let _ = reply.send(self.state.sampling_config.clone());
             }
+            ChatStateCommand::ApplyTurnRequestPruning { items, reply } => {
+                let _ = reply.send(self.prune_items_for_turn_request(items));
+            }
             ChatStateCommand::GetAgentEditedPaths { reply } => {
                 let _ = reply.send(self.state.agent_edited_paths.clone());
             }
@@ -400,10 +398,9 @@ impl ChatStateActor {
                 self.truncate_to_prompt_index(target_prompt_index);
                 self.state.turn_capture = None;
                 self.state.prompt_usage = None;
-                // `harness_trace_buffer` / `harness_trace_turns` intentionally
-                // survive a rewind: the goal planner / verifier subagents
-                // genuinely ran, so their sealed trace turns stay uploadable as
-                // siblings even when the live turn that triggered them is undone.
+                // `harness_trace_buffer` / `harness_trace_turns` survive a rewind: the
+                // subagents genuinely ran, so their sealed traces stay uploadable even
+                // when the live turn that triggered them is undone.
                 let _ = reply.send(());
             }
             ChatStateCommand::CheckAutoCompactNeeded {

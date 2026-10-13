@@ -9,22 +9,16 @@
 
 use std::io::Write as _;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use portable_pty::PtySize;
-use xai_grok_pager_pty_harness::PtyController;
+use xai_grok_pager_pty_harness::{EnvOp, PtyController};
 use xai_grok_test_support::TestSandbox;
 
 fn main() -> anyhow::Result<()> {
     let sandbox = TestSandbox::new();
-    // The child ignores SIGHUP: when the holder dies its PTY master closes and
-    // the kernel HUPs the child's foreground group, which would kill a
-    // well-behaved child and mask the leak. The leaked CI pagers were exactly
-    // the ones that did not act on that SIGHUP (wedged mid-shutdown), so the
-    // fixture models them; only the kernel-side pdeathsig can reap it.
-    // `exec` keeps this a single process (no shell grandchild), so the test's
-    // liveness probe targets the one PID that must die with the holder
-    // (SIG_IGN dispositions survive exec).
+    let ready = sandbox.temp_dir().join("child-ready");
+    let ready_path = ready.to_string_lossy().into_owned();
     let controller = PtyController::spawn_in_sandbox(
         Path::new("/bin/sh"),
         PtySize {
@@ -33,11 +27,18 @@ fn main() -> anyhow::Result<()> {
             pixel_width: 0,
             pixel_height: 0,
         },
-        &["-c", "trap '' HUP; exec sleep 600"],
+        &["-c", "trap '' HUP; : > \"$READY\"; while :; do :; done"],
         &sandbox,
-        &[],
+        &[EnvOp::set("READY", &ready_path)],
         None,
     )?;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !ready.exists() {
+        if Instant::now() >= deadline {
+            anyhow::bail!("PTY child did not write READY within 30s");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let pid = controller
         .child_pid()
         .ok_or_else(|| anyhow::anyhow!("PTY child has no pid"))?;

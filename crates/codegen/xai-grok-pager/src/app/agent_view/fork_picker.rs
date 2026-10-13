@@ -19,10 +19,7 @@ impl AgentView {
     /// The owners match [`Self::jump_slot_taken`] minus the `/jump` picker: opening the fork picker closes a lingering jump picker
     /// (`open_fork_picker` does this), while `/jump` refuses to open on top of the fork picker.
     pub(crate) fn fork_picker_slot_taken(&self) -> bool {
-        self.rewind_state.is_some()
-            || self.inline_edit.is_some()
-            || self.btw_state.is_some()
-            || !self.no_input_overlay_pending()
+        self.rewind_state.is_some() || self.btw_state.is_some() || !self.no_input_overlay_pending()
     }
 
     /// Drop the picker when another overlay owns the input slot ([`Self::fork_picker_slot_taken`]), so it can't eat wheel/keys while hidden.

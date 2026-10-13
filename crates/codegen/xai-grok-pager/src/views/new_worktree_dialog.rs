@@ -139,7 +139,7 @@ pub fn render_new_worktree_dialog_with_locale(
     let prefix_w = label_prefix.width() as u16;
     let input_width = inner_width.saturating_sub(prefix_w);
     let viewport = state.viewport(input_width as usize);
-    let visible_input = &state.label()[viewport.visible_byte_range];
+    let visible_input = state.label().get(viewport.visible_byte_range).unwrap_or("");
 
     let prefix_span = Span::styled(label_prefix, Style::default().fg(theme.gray_bright));
     let input_span = Span::styled(visible_input, Style::default().fg(theme.text_primary));
@@ -148,7 +148,7 @@ pub fn render_new_worktree_dialog_with_locale(
     if input_width > 0 {
         let cursor_x = inner_x + prefix_w + viewport.cursor_display_column as u16;
         if let Some(cell) = buf.cell_mut((cursor_x, dialog.y + 2)) {
-            cell.set_style(Style::default().fg(theme.bg_dark).bg(theme.text_primary));
+            cell.set_style(theme.block_cursor_over(theme.bg_dark));
         }
     }
 
@@ -213,7 +213,7 @@ mod tests {
         for y in 0..area.height {
             let mut row = String::new();
             for x in 0..area.width {
-                row.push_str(buf[(x, y)].symbol());
+                row.push_str(buf.cell((x, y)).map(|c| c.symbol()).unwrap_or(" "));
             }
             lines.push(row);
         }
@@ -268,7 +268,8 @@ mod tests {
         let area = Rect::new(0, 0, 40, 12);
         let label = "super-long-worktree-name-that-will-not-fit";
         let text = render_to_text(area, label);
-        let tail = &label[label.len().saturating_sub(8)..];
+        let start = label.len().saturating_sub(8);
+        let tail = label.get(start..).unwrap_or("");
         assert!(
             text.contains(tail),
             "end of long name must remain visible when scrolled:\n{text}"
@@ -281,6 +282,7 @@ mod tests {
 
     #[test]
     fn narrow_dialog_keeps_middle_unicode_cursor_visible() {
+        let _theme = crate::theme::cache::pin_theme();
         let area = Rect::new(0, 0, 40, 12);
         let grapheme = "👩🏽\u{200d}💻";
         let label = format!("xxxxxxxxxxxx中e\u{301}{grapheme}tail");
@@ -291,10 +293,17 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         render_new_worktree_dialog(area, &mut buffer, &state);
 
+        // Cursor cell: `bg == text_primary` on RGB themes, SGR REVERSED
+        // where text_primary is Reset (which would match every untinted cell).
+        let theme = Theme::current();
+        let is_cursor = |cell: &ratatui::buffer::Cell| {
+            cell.modifier.contains(ratatui::style::Modifier::REVERSED)
+                || (theme.text_primary != ratatui::style::Color::Reset
+                    && cell.bg == theme.text_primary)
+        };
         assert!(
-            (0..area.height).any(|y| {
-                (0..area.width).any(|x| buffer[(x, y)].bg == Theme::current().text_primary)
-            }),
+            (0..area.height)
+                .any(|y| { (0..area.width).any(|x| buffer.cell((x, y)).is_some_and(&is_cursor)) }),
             "live cursor cell must remain visible",
         );
     }

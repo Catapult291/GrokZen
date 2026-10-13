@@ -199,7 +199,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
                             while take > 0 && !text.is_char_boundary(take) {
                                 take -= 1;
                             }
-                            current_assistant.push_str(&text[..take]);
+                            current_assistant.push_str(text.get(..take).unwrap_or(""));
                             assistant_chars += take;
                         }
                     }
@@ -223,7 +223,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
                                     while take > 0 && !title.is_char_boundary(take) {
                                         take -= 1;
                                     }
-                                    tool_meta.push(title[..take].to_string());
+                                    tool_meta.push(title.get(..take).unwrap_or("").to_string());
                                     tool_chars_emitted += take;
                                 }
                             }
@@ -239,7 +239,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
                                             while take > 0 && !p.is_char_boundary(take) {
                                                 take -= 1;
                                             }
-                                            tool_meta.push(p[..take].to_string());
+                                            tool_meta.push(p.get(..take).unwrap_or("").to_string());
                                             tool_chars_emitted += take;
                                         }
                                     }
@@ -296,7 +296,7 @@ pub(super) fn collect_all_indexable_content_single_pass(
         while start < joined.len() && !joined.is_char_boundary(start) {
             start += 1;
         }
-        joined = joined[start..].to_string();
+        joined = joined.get(start..).unwrap_or("").to_string();
     }
 
     Ok((joined, bytes_read))
@@ -318,6 +318,8 @@ pub(super) fn test_summary(
             id: acp::SessionId::new(session_id),
             cwd: cwd.to_string(),
         },
+        agent_id: None,
+        attempt_id: None,
         cwd_generation: 0,
         previous_cwd: None,
         pending_cwd_switch_reminder: None,
@@ -350,9 +352,10 @@ pub(super) fn test_summary(
         generated_title: None,
         title_is_manual: false,
         worktree_label: None,
-        agent_name: None,
+        agent: Default::default(),
         sandbox_profile: None,
         reasoning_effort: None,
+        context_window: None,
         last_turn_summary: None,
         last_turn_summary_prompt_id: None,
         last_recap: None,

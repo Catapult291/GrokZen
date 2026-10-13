@@ -70,7 +70,10 @@ impl SessionId {
 
 fn is_windows_reserved_name(raw: &str) -> bool {
     let stem_end = raw.find('.').unwrap_or(raw.len());
-    let stem = raw[..stem_end].trim_end_matches(' ');
+    let Some(stem) = raw.get(..stem_end) else {
+        return false;
+    };
+    let stem = stem.trim_end_matches(' ');
     if ["CON", "PRN", "AUX", "NUL"]
         .iter()
         .any(|reserved| stem.eq_ignore_ascii_case(reserved))
@@ -81,7 +84,7 @@ fn is_windows_reserved_name(raw: &str) -> bool {
     let Some(prefix) = stem.get(..3) else {
         return false;
     };
-    let mut suffix = stem[3..].chars();
+    let mut suffix = stem.get(3..).unwrap_or("").chars();
     (prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT"))
         && matches!(suffix.next(), Some('1'..='9' | '¹' | '²' | '³'))
         && suffix.next().is_none()
@@ -182,9 +185,6 @@ impl MemberKind {
     }
 
     /// Canonicalizes known text to a named variant.
-    ///
-    /// # Errors
-    ///
     /// [`StoreError::InvalidEnumValue`] when unknown text is empty, or [`StoreError::EnumValueTooLong`] when it exceeds [`MAX_ENUM_BYTES`].
     pub fn from_raw(raw: &str) -> Result<Self> {
         match raw {
@@ -223,9 +223,6 @@ impl MemberOrigin {
     }
 
     /// Canonicalizes known text to a named variant.
-    ///
-    /// # Errors
-    ///
     /// [`StoreError::InvalidEnumValue`] when unknown text is empty, or [`StoreError::EnumValueTooLong`] when it exceeds [`MAX_ENUM_BYTES`].
     pub fn from_raw(raw: &str) -> Result<Self> {
         match raw {
@@ -264,9 +261,6 @@ impl Grouping {
     }
 
     /// Canonicalizes known text to a named variant.
-    ///
-    /// # Errors
-    ///
     /// [`StoreError::InvalidEnumValue`] when unknown text is empty, or [`StoreError::EnumValueTooLong`] when it exceeds [`MAX_ENUM_BYTES`].
     pub fn from_raw(raw: &str) -> Result<Self> {
         match raw {
@@ -313,12 +307,6 @@ pub struct MemberMetadata {
 impl MemberMetadata {
     /// Every write path validates its metadata here, so the hottest write (the per-turn metadata sync) cannot drift from the insert path's rules.
     /// Returns a borrowed view: the per-turn sync must not pay an owned copy just to (rarely) truncate.
-    ///
-    /// # Errors
-    ///
-    /// [`StoreError::CwdRequired`] when a build member has no cwd,
-    /// [`StoreError::CwdNotAbsolute`] when a present cwd is relative,
-    /// or [`StoreError::CwdTooLong`] when it exceeds the cap.
     /// Display text over its cap truncates instead of erroring: refusing a metadata sync over a long title would be worse than clipping it.
     pub(crate) fn validated(&self, kind: &MemberKind) -> Result<ValidatedMetadataRef<'_>> {
         if matches!(kind, MemberKind::Build) && self.cwd.is_none() {
@@ -371,7 +359,7 @@ fn truncate_at_char_boundary(text: &str, max_bytes: usize) -> &str {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    &text[..end]
+    text.get(..end).unwrap_or("")
 }
 
 /// Payload for `insert_member`.
@@ -420,6 +408,49 @@ pub struct WorkspaceSnapshot {
 pub struct RankAssignment {
     pub key: MemberKey,
     pub rank: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinAssignment {
+    pub key: MemberKey,
+    pub pinned: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::AsRefStr, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum LayoutGrouping {
+    State,
+    Directory,
+}
+
+/// Atomic dashboard-v2 layout update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutPatch {
+    pub pin_assignments: Vec<PinAssignment>,
+    /// Complete ordered Build subset; omitted members are cleared and `Some(vec![])` clears all.
+    pub manual_order: Option<Vec<MemberKey>>,
+    pub grouping: Option<LayoutGrouping>,
+}
+
+impl LayoutPatch {
+    pub fn is_empty(&self) -> bool {
+        self.pin_assignments.is_empty() && self.manual_order.is_none() && self.grouping.is_none()
+    }
+}
+
+/// Disjoint transaction result; rejection includes a reliable post-rollback snapshot.
+#[derive(Debug)]
+#[must_use]
+pub enum LayoutApplyOutcome {
+    /// Transaction committed; this snapshot was read inside it.
+    Committed(WorkspaceSnapshot),
+    /// Transaction rolled back and a fresh post-rollback snapshot succeeded.
+    Rejected {
+        error: StoreError,
+        snapshot: WorkspaceSnapshot,
+    },
+    /// No reliable committed snapshot is available from this attempt.
+    Failed { error: StoreError },
 }
 
 /// What `insert_member` did.

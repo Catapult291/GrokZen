@@ -84,6 +84,9 @@ pub struct ExportedMetadata {
     /// Parent session ID if this session was forked from another session
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// Restart-stable logical agent. A new activation still mints `attempt_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
 
     // --- Subagent-specific fields (all optional for backward compatibility) ---
     /// Session kind: "parent", "subagent", or "subagent_fork".
@@ -117,6 +120,7 @@ impl ExportedMetadata {
             updated_at: Some(summary.updated_at.to_rfc3339()),
             total_messages: Some(summary.num_messages),
             parent_session_id: summary.parent_session_id.clone(),
+            agent_id: summary.agent_id.clone(),
             session_kind: None,
             subagent_type: None,
             subagent_persona: None,
@@ -318,6 +322,7 @@ mod from_summary_tests {
             updated_at: None,
             total_messages: None,
             parent_session_id: None,
+            agent_id: None,
             session_kind: None,
             subagent_type: None,
             subagent_persona: None,
@@ -327,7 +332,7 @@ mod from_summary_tests {
             title_is_manual: Some(true),
         };
         let json = serde_json::to_value(&meta).unwrap();
-        assert_eq!(json["title_is_manual"], true);
+        assert_eq!(json.get("title_is_manual"), Some(&serde_json::json!(true)));
         let back: ExportedMetadata = serde_json::from_value(json).unwrap();
         assert_eq!(back.title_is_manual, Some(true));
         assert_eq!(back.title.as_deref(), Some("Pinned"));

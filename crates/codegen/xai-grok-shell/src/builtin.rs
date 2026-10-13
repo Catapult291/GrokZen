@@ -9,26 +9,16 @@ const BUILTIN_FILES: &[(&str, &str)] = &[
     (COMMUNITY_README, include_str!("../README.zh-CN.md")),
     (
         COMMUNITY_CHANGELOG_MD,
-        include_str!(concat!(
-            "../changelogs/",
-            env!("CARGO_PKG_VERSION"),
-            ".zh-CN.md"
-        )),
+        include_str!(env!("GROK_SHELL_CHANGELOG_MD_PATH")),
     ),
     (
         COMMUNITY_CHANGELOG_JSON,
-        include_str!(concat!(
-            "../changelogs/",
-            env!("CARGO_PKG_VERSION"),
-            ".zh-CN.json"
-        )),
+        include_str!(env!("GROK_SHELL_CHANGELOG_JSON_PATH")),
     ),
 ];
 
 /// Extract built-in metadata files to `~/.grok/` on startup.
-///
-/// User skills under `~/.grok/skills/` are never managed here. Platform skills
-/// are delivered separately through the bundled skill cache.
+/// User skills under `~/.grok/skills/` are never managed here. Platform skills are delivered separately through the bundled skill cache.
 pub fn extract_builtin_files(grok_home: &std::path::Path) {
     let version = xai_grok_version::VERSION;
     // The community build shares `GROK_HOME` with the official executable,

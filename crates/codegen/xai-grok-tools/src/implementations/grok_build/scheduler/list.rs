@@ -43,13 +43,7 @@ impl crate::types::tool_metadata::ToolMetadata for SchedulerListTool {
     }
 
     fn requires_expr(&self) -> Expr<ToolRequirement> {
-        use super::create::SchedulerCreateTool;
-        use crate::types::tool_metadata::ToolMetadata as TM;
-        Expr::Value(ToolRequirement::Tool {
-            namespace: TM::tool_namespace(&SchedulerCreateTool).to_string(),
-            id: xai_tool_runtime::Tool::id(&SchedulerCreateTool).to_string(),
-            if_params: None,
-        })
+        super::scheduler_bundle_requires_expr()
     }
 }
 
@@ -125,8 +119,7 @@ impl xai_tool_runtime::Tool for SchedulerListTool {
                 let next_fire = t.next_fire_at().to_rfc3339();
                 let created = t.created_at.to_rfc3339();
                 let prompt = if t.prompt.len() > 80 {
-                    let cut = crate::util::floor_char_boundary(&t.prompt, 80);
-                    format!("{}...", &t.prompt[..cut])
+                    format!("{}...", crate::util::truncate_str(&t.prompt, 80))
                 } else {
                     t.prompt
                 };

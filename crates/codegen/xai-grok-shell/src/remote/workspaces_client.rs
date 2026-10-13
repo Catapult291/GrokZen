@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::Deserialize;
 
-use crate::auth::AuthManager;
+use xai_grok_login::AuthManager;
 
 const GROK_WEB_URL: &str = "https://grok.com";
 
@@ -116,7 +116,7 @@ impl WorkspacesClient {
         if let Some(email) = &auth.email {
             builder = builder.header("x-email", email);
         }
-        let builder = xai_file_utils::trace_context::inject_trace_context_into_request(builder);
+        let builder = xai_grok_otel::inject_trace_context_into_request(builder);
 
         let response = builder.send().await?;
         let status = response.status();
@@ -157,8 +157,9 @@ mod tests {
             "nextPageToken": "tok2"
         });
         let wire: ListWorkspacesResponseWire = serde_json::from_value(json).unwrap();
-        assert_eq!(wire.workspaces.len(), 1);
-        let w = &wire.workspaces[0];
+        let [w] = wire.workspaces.as_slice() else {
+            panic!("expected one workspace: {:?}", wire.workspaces);
+        };
         assert_eq!(w.workspace_id, "ws_9f3a");
         assert_eq!(w.name, "GPU vendor research");
         assert_eq!(w.create_time.as_deref(), Some("2026-06-18T17:30:00Z"));
@@ -170,7 +171,9 @@ mod tests {
     fn missing_fields_default_gracefully() {
         let json = serde_json::json!({ "workspaces": [{ "workspaceId": "w1" }] });
         let wire: ListWorkspacesResponseWire = serde_json::from_value(json).unwrap();
-        let w = &wire.workspaces[0];
+        let [w] = wire.workspaces.as_slice() else {
+            panic!("expected one workspace: {:?}", wire.workspaces);
+        };
         assert_eq!(w.workspace_id, "w1");
         assert!(w.name.is_empty());
         assert!(w.create_time.is_none());

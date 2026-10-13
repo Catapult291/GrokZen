@@ -9,13 +9,14 @@ use super::{
 };
 use crate::session::events::{LAZINESS_ABORT_USER_INPUT, LazinessCategory};
 use xai_grok_sampling_types::{
-    AssistantItem, ContentPart, ConversationItem, SystemItem, ToolCall, ToolResultItem, UserItem,
+    AssistantItem, ContentPart, ConversationItem, SyntheticReason, ToolCall, ToolResultItem,
+    UserItem,
 };
 
 fn user_text(text: &str) -> ConversationItem {
     ConversationItem::User(UserItem {
         content: vec![ContentPart::Text { text: text.into() }],
-        synthetic_reason: None,
+        synthetic_reason: SyntheticReason::Human,
         ..Default::default()
     })
 }
@@ -46,7 +47,6 @@ fn assistant_with_tool_call(text: &str, name: &str, args: &str) -> ConversationI
 
 /// Build an `AssistantItem` with arbitrary `reasoning`, `content`, and `tool_calls` for the `[assistant reasoning]` test coverage.
 /// Trivially-defaulted fields (`raw_output`, `model_id`, `model_fingerprint`) are filled with `None` so each test stays a one-liner.
-/// Build `[Reasoning(text), Assistant(content, tool_calls)]`, the equivalent of the old `AssistantItem { reasoning, content, tool_calls }` literal.
 /// When `reasoning_text` is empty, no Reasoning item is emitted (callers who want an encrypted-only sibling should build that variant inline).
 fn assistant_with_reasoning_items(
     reasoning_text: &str,
@@ -157,9 +157,7 @@ fn flatten_collapses_newlines_to_keep_one_line_per_item() {
 
 #[test]
 fn flatten_handles_system_items() {
-    let items = vec![ConversationItem::System(SystemItem {
-        content: "remember X".into(),
-    })];
+    let items = vec![ConversationItem::system("remember X")];
     let out = flatten_transcript_for_classifier(&items, true);
     assert_eq!(out, "[system] remember X\n");
 }
@@ -358,7 +356,7 @@ fn synthetic_user_text(
 ) -> ConversationItem {
     ConversationItem::User(UserItem {
         content: vec![ContentPart::Text { text: text.into() }],
-        synthetic_reason: Some(reason),
+        synthetic_reason: reason,
         ..Default::default()
     })
 }
@@ -389,9 +387,8 @@ fn window_pins_min_user_turns_user_prompts_into_view() {
             items.push(assistant_with_tool_call("step", "read_file", "{}"));
         }
     }
-    // Layout: U(0) Asst×10  U(11) Asst×10  U(22) Asst×10  U(33) Asst×10  U(44) Asst×10
-    // With min_user_turns=3, the 3rd-from-last user idx = U(22) at idx 22
-    // tail_start = 55 - 30 = 25.
+    // Layout: U(0).
+    // With min_user_turns=3, the 3rd-from-last user idx = U(22) at idx 22 tail_start = 55 - 30 = 25.
     // Window must start at min(25, 22) = 22.
     let start = super::laziness_window_start(&items, 30, 3, 0);
     assert_eq!(start, 22);
@@ -408,11 +405,8 @@ fn window_pins_min_assistant_turns_assistant_replies_into_view() {
             items.push(assistant_with_tool_call("step", "read_file", "{}"));
         }
     }
-    // Layout: AT(0) AC×6  AT(7) AC×6  AT(14) AC×6  AT(21) AC×6  AT(28) AC×6  AT(35) AC×6
-    // (AT = assistant text turn, AC = assistant-with-tool-call, whose non-empty content "step" also counts it as an assistant text turn.)
-    // Every assistant item is an eligible assistant text turn, so there are 42
-    // 3rd-from-last assistant-text turn idx = 42 - 3 = 39.
-    // tail_start = 42 - 30 = 12.
+    // Layout: AT(0) AC×6 AT(7) AC×6 AT(14) AC×6 AT(21) AC×6 AT(28) AC×6 AT(35) AC×6 (AT = assistant text turn, AC = assistant-with-tool-call, whose non-empty content "step" also counts it as an assistant text turn.).
+    // Every assistant item is an eligible assistant text turn, so there are 42 3rd-from-last assistant-text turn idx = 42 - 3 = 39.
     // Window must start at min(12, 39) = 12.
     let start = super::laziness_window_start(&items, 30, 0, 3);
     assert_eq!(start, 12);
@@ -429,13 +423,9 @@ fn window_takes_earliest_of_user_pin_and_assistant_pin_and_tail() {
             items.push(assistant_with_tool_call("x", "read_file", "{}"));
         }
     }
-    // Layout: U(0) AC×15  U(16) AC×15  U(32) AC×15, total 48
-    // For min_user_turns=2:
-    //   user idxs = [0, 16, 32]; 2nd-from-last = idx 16.
-    // For min_assistant_turns=10:
-    //   assistant_text idxs are every AC (45 of them); 10th-from-last = idx 47 - 9 = 38
-    // tail_start = 48 - 30 = 18.
-    // Earliest of (18, 16, 38) = 16.
+    // Layout: U(0) AC×15 U(16) AC×15 U(32) AC×15, total 48.
+    // For min_user_turns=2: user idxs = [0, 16, 32]; 2nd-from-last = idx 16.
+    // For min_assistant_turns=10: assistant_text idxs are every AC (45 of them); 10th-from-last = idx 47 - 9 = 38 tail_start = 48 - 30 = 18.
     let start = super::laziness_window_start(&items, 30, 2, 10);
     assert_eq!(start, 16);
 }
@@ -635,10 +625,30 @@ fn log_line_serializes_to_expected_jsonl_shape() {
     }
     // `decision` serializes to a fixed snake_case string via serde's rename_all
     // Pinning it catches a typo or rename without forcing a match-arm update across consumers
-    assert_eq!(parsed["decision"], "would_nudge");
-    assert_eq!(parsed["parsed"]["category"], "stalled_narration");
-    assert_eq!(parsed["items_sent"], 28);
-    assert!(parsed["abort_reason"].is_null());
+    assert_eq!(
+        parsed
+            .pointer("/decision")
+            .unwrap_or(&serde_json::Value::Null),
+        "would_nudge"
+    );
+    assert_eq!(
+        parsed
+            .pointer("/parsed/category")
+            .unwrap_or(&serde_json::Value::Null),
+        "stalled_narration"
+    );
+    assert_eq!(
+        parsed
+            .pointer("/items_sent")
+            .unwrap_or(&serde_json::Value::Null),
+        28
+    );
+    assert!(
+        parsed
+            .pointer("/abort_reason")
+            .unwrap_or(&serde_json::Value::Null)
+            .is_null()
+    );
 }
 
 #[test]
@@ -650,10 +660,30 @@ fn log_line_aborted_decision_serializes_with_reason() {
     line.parsed = None;
     let json = serde_json::to_string(&line).expect("serialize");
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("re-parse");
-    assert_eq!(parsed["decision"], "aborted");
-    assert_eq!(parsed["abort_reason"], "user_input");
-    assert!(parsed["parsed"].is_null());
-    assert!(parsed["classifier_raw_output"].is_null());
+    assert_eq!(
+        parsed
+            .pointer("/decision")
+            .unwrap_or(&serde_json::Value::Null),
+        "aborted"
+    );
+    assert_eq!(
+        parsed
+            .pointer("/abort_reason")
+            .unwrap_or(&serde_json::Value::Null),
+        "user_input"
+    );
+    assert!(
+        parsed
+            .pointer("/parsed")
+            .unwrap_or(&serde_json::Value::Null)
+            .is_null()
+    );
+    assert!(
+        parsed
+            .pointer("/classifier_raw_output")
+            .unwrap_or(&serde_json::Value::Null)
+            .is_null()
+    );
 }
 
 #[test]
@@ -688,9 +718,20 @@ fn build_laziness_debug_line_suppressed_not_goal_mode_includes_parsed_verdict() 
     );
     let json = serde_json::to_string(&line).expect("serialize");
     let v: serde_json::Value = serde_json::from_str(&json).expect("re-parse");
-    assert_eq!(v["decision"], "suppressed_not_goal_mode");
-    assert_eq!(v["parsed"]["category"], "stalled_narration");
-    assert!(v["classifier_raw_output"].is_string());
+    assert_eq!(
+        v.pointer("/decision").unwrap_or(&serde_json::Value::Null),
+        "suppressed_not_goal_mode"
+    );
+    assert_eq!(
+        v.pointer("/parsed/category")
+            .unwrap_or(&serde_json::Value::Null),
+        "stalled_narration"
+    );
+    assert!(
+        v.pointer("/classifier_raw_output")
+            .unwrap_or(&serde_json::Value::Null)
+            .is_string()
+    );
 }
 
 /// Write two lines, parse them back from disk, and confirm both round-trip cleanly.
@@ -720,9 +761,27 @@ async fn append_writes_two_lines_each_parseable() {
         2,
         "expected exactly two newline-separated lines"
     );
-    let parsed1: serde_json::Value = serde_json::from_str(lines[0]).expect("parse line 1");
-    let parsed2: serde_json::Value = serde_json::from_str(lines[1]).expect("parse line 2");
-    assert_eq!(parsed1["decision"], "would_nudge");
-    assert_eq!(parsed2["decision"], "no_nudge_not_stalled");
-    assert_eq!(parsed2["classifier_elapsed_ms"], 921);
+    let [line1, line2] = lines.as_slice() else {
+        panic!("expected exactly two newline-separated lines: {lines:?}");
+    };
+    let parsed1: serde_json::Value = serde_json::from_str(line1).expect("parse line 1");
+    let parsed2: serde_json::Value = serde_json::from_str(line2).expect("parse line 2");
+    assert_eq!(
+        parsed1
+            .pointer("/decision")
+            .unwrap_or(&serde_json::Value::Null),
+        "would_nudge"
+    );
+    assert_eq!(
+        parsed2
+            .pointer("/decision")
+            .unwrap_or(&serde_json::Value::Null),
+        "no_nudge_not_stalled"
+    );
+    assert_eq!(
+        parsed2
+            .pointer("/classifier_elapsed_ms")
+            .unwrap_or(&serde_json::Value::Null),
+        921
+    );
 }

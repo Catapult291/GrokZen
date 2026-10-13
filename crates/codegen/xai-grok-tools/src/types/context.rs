@@ -1,17 +1,9 @@
+use crate::implementations::grok_build::read_file::MAX_LINES_READ;
 use std::collections::HashMap;
 
-const MAX_LINES_READ_DEFAULT: usize = 1_000;
-
-/// Client-configurable truncation settings.
-/// All fields are optional — `None` means "use the tool's built-in default".
-///
-/// There is deliberately no per-line cap: clipping long lines silently
-/// corrupts single-line files (minified JSON, data dumps) with no way for
-/// the model to recover the clipped bytes. Non-skill reads are bounded by
-/// the whole-read `MAX_NUM_TOKENS` cap instead (skill files are exempt from
-/// all read limits by design). Other agent CLIs likewise apply no
-/// per-line cap. The wire field (`TruncationConfig.max_chars_per_line` in
-/// grok-tools.proto) is deprecated and ignored.
+/// Client-configurable truncation settings. Scalar fields are optional — `None` means "use the tool's built-in default".
+/// There is deliberately no per-line cap: clipping long lines silently corrupts single-line files (minified JSON, data
+/// dumps) with no way for the model to recover the clipped bytes.
 #[derive(Debug, Clone, Default)]
 pub struct TruncationConfig {
     /// Max total output bytes for any tool. Default: 40KB.
@@ -20,19 +12,33 @@ pub struct TruncationConfig {
     pub per_tool_max_output_bytes: HashMap<String, usize>,
     /// Max lines to read (read_file). Default: 1000.
     pub max_lines_read: Option<usize>,
-    /// Inline cap for MCP tool results only (bytes). Consulted by the MCP
-    /// truncation path (`mcp_max_output_bytes_for`) between the per-tool map
-    /// and `default_max_output_bytes`. Deliberately separate from
-    /// `default_max_output_bytes` so an MCP-specific override (e.g. a repo's
-    /// `[mcp] max_output_bytes`) never changes non-MCP readers like the
-    /// opencode bash cap.
+    /// Inline cap for MCP tool results only (bytes). Consulted by the MCP truncation path (`mcp_max_output_bytes_for`) between the per-tool map and
+    /// `default_max_output_bytes`. Deliberately separate from `default_max_output_bytes` so an MCP-specific override (e.g. a repo's `[mcp]
+    /// max_output_bytes`) never changes non-MCP readers like the opencode bash cap.
     pub mcp_max_output_bytes: Option<usize>,
+    pub whole_read: WholeReadPolicy,
+}
+
+/// Which files `read_file` returns whole under the token cap; a bit that is off makes its class a regular file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct WholeReadPolicy {
+    pub skill_markdown: bool,
+    pub instruction_files: bool,
+}
+
+impl Default for WholeReadPolicy {
+    fn default() -> WholeReadPolicy {
+        WholeReadPolicy {
+            skill_markdown: true,
+            instruction_files: true,
+        }
+    }
 }
 
 impl TruncationConfig {
     /// Resolved max lines per `read_file` window.
     pub fn max_lines_read(&self) -> usize {
-        self.max_lines_read.unwrap_or(MAX_LINES_READ_DEFAULT)
+        self.max_lines_read.unwrap_or(MAX_LINES_READ)
     }
 
     /// Resolve the max output bytes for a specific tool.
@@ -45,14 +51,9 @@ impl TruncationConfig {
         self.default_max_output_bytes.unwrap_or(builtin_default)
     }
 
-    /// Resolve the max output bytes for an **MCP** payload.
-    ///
-    /// Precedence: per-tool override > MCP-specific override
-    /// (`mcp_max_output_bytes`) > default override > built-in fallback.
-    ///
-    /// Only the MCP truncation path (`util::mcp_truncate`) should call this;
-    /// non-MCP tools keep using [`Self::max_output_bytes_for`] so that an
-    /// MCP-specific override never bleeds into their caps.
+    /// Resolve the max output bytes for an **MCP** payload. Precedence: per-tool override > MCP-specific override (`mcp_max_output_bytes`) >
+    /// default override > built-in fallback. Only the MCP truncation path (`util::mcp_truncate`) should call this; non-MCP tools keep using
+    /// [`Self::max_output_bytes_for`] so that an MCP-specific override never bleeds into their caps.
     pub fn mcp_max_output_bytes_for(&self, tool_name: &str, builtin_default: usize) -> usize {
         if let Some(&per_tool) = self.per_tool_max_output_bytes.get(tool_name) {
             return per_tool;
@@ -62,18 +63,9 @@ impl TruncationConfig {
             .unwrap_or(builtin_default)
     }
 
-    /// Replace template placeholders in a tool description with current config values.
-    ///
-    /// Recognized placeholders:
-    /// - `{max_lines_read}` — from `max_lines_read` (default 1000)
-    /// - `{max_wait_ms}` — the blocking-wait ceiling, as `3600000 (~1 h)`
-    /// - `{max_output_bytes}` — resolved via `max_output_bytes_for(tool_name, builtin_default)`
-    /// - `{max_chars_per_line}` — fixed display value for opencode-compat
-    ///   descriptions only; the opencode `read` tool clips at its own
-    ///   hardcoded `MAX_LINE_LENGTH` (2000), independent of this config.
-    ///   grok_build `read_file` never clips lines.
-    ///
-    /// Returns the original string unchanged if no placeholders are present.
+    /// Replace template placeholders in a tool description with current config values. `{max_lines_read}` — from `max_lines_read` (default 1000)
+    /// `{max_chars_per_line}` — fixed display value for opencode-compat descriptions only; the opencode `read` tool clips at its own hardcoded
+    /// `MAX_LINE_LENGTH` (2000), independent of this config. grok_build `read_file` never clips lines.
     pub fn interpolate_description(
         &self,
         description: &str,
@@ -96,19 +88,9 @@ impl TruncationConfig {
             )
     }
 
-    /// Resolve placeholders in each schema property description, and pin the
-    /// blocking-wait ceiling as a `maximum` on whichever property documents it.
-    ///
-    /// The tool description alone cannot carry the cap: `description_override`
-    /// replaces that string outright under toolchain randomization, so on most
-    /// draws the interpolated copy never reaches the model. Properties are only
-    /// ever renamed, so a bound placed here survives every draw — and a
-    /// `maximum` reaches a model that skips the prose.
-    ///
-    /// `{max_wait_ms}` in a property description is the marker for which
-    /// property is the wait, so no tool or parameter name is hardcoded and a
-    /// renamed parameter is handled for free (keys are remapped by the time
-    /// this runs).
+    /// Resolve placeholders in each schema property description, and pin the blocking-wait ceiling as a `maximum` on
+    /// whichever property documents it. The tool description alone cannot carry the cap: `description_override` replaces
+    /// that string outright under toolchain randomization, so on most draws the interpolated copy never reaches the model.
     pub fn apply_to_schema(
         &self,
         schema: &mut serde_json::Value,
@@ -147,10 +129,7 @@ mod tests {
 
     #[test]
     fn max_lines_read_default_and_override() {
-        assert_eq!(
-            TruncationConfig::default().max_lines_read(),
-            MAX_LINES_READ_DEFAULT
-        );
+        assert_eq!(TruncationConfig::default().max_lines_read(), MAX_LINES_READ);
         let cfg = TruncationConfig {
             max_lines_read: Some(50),
             ..Default::default()
@@ -191,12 +170,26 @@ mod tests {
         });
         cfg.apply_to_schema(&mut schema, "get_task_output", 40_000, cap);
 
-        let timeout = &schema["properties"]["timeout_ms"];
-        assert_eq!(timeout["description"], "Wait up to 300000 (~5 min).");
-        assert_eq!(timeout["maximum"], serde_json::json!(300_000u64));
+        let Some(timeout) = schema.pointer("/properties/timeout_ms") else {
+            panic!("expected timeout_ms: {schema}");
+        };
+        assert_eq!(
+            timeout.get("description").and_then(|v| v.as_str()),
+            Some("Wait up to 300000 (~5 min).")
+        );
+        assert_eq!(timeout.get("maximum"), Some(&serde_json::json!(300_000u64)));
         // Only the property documenting the wait gets a ceiling.
-        assert_eq!(schema["properties"]["task_ids"]["description"], "Task IDs.");
-        assert!(schema["properties"]["task_ids"].get("maximum").is_none());
+        assert_eq!(
+            schema
+                .pointer("/properties/task_ids/description")
+                .and_then(|v| v.as_str()),
+            Some("Task IDs.")
+        );
+        assert!(
+            schema
+                .pointer("/properties/task_ids")
+                .is_none_or(|p| p.get("maximum").is_none())
+        );
     }
 
     #[test]
@@ -213,43 +206,52 @@ mod tests {
         cfg.apply_to_schema(&mut schema, "get_task_output", 40_000, cap);
 
         assert_eq!(
-            schema["properties"]["max_wait"]["description"],
-            "Up to 900000 (~15 min)."
+            schema
+                .pointer("/properties/max_wait/description")
+                .and_then(|v| v.as_str()),
+            Some("Up to 900000 (~15 min).")
         );
         assert_eq!(
-            schema["properties"]["max_wait"]["maximum"],
-            serde_json::json!(900_000u64)
+            schema.pointer("/properties/max_wait/maximum"),
+            Some(&serde_json::json!(900_000u64))
         );
     }
 
-    /// The bound has to land somewhere that actually constrains the value.
-    /// `Option<u64>` could plausibly be emitted as `anyOf: [integer, null]`, in
-    /// which case a root `maximum` would be inert — so assert against the real
-    /// generated schema rather than a hand-written one, and pin the shape it
-    /// relies on. schemars puts `minimum` at the root for the same field, which
-    /// is the precedent this follows.
+    /// The bound has to land somewhere that actually constrains the value. `Option<u64>` could plausibly be emitted as `anyOf: [integer, null]`, in
+    /// which case a root `maximum` would be inert — so assert against the real generated schema rather than a hand-written one, and pin the shape
+    /// it relies on. schemars puts `minimum` at the root for the same field, which is the precedent this follows.
     #[test]
     fn apply_to_schema_bounds_the_real_optional_u64_property() {
         let generated =
             serde_json::to_value(schemars::schema_for!(xai_tool_types::TaskOutputToolInput))
                 .unwrap();
-        let timeout = &generated["properties"]["timeout_ms"];
+        let Some(timeout) = generated.pointer("/properties/timeout_ms") else {
+            panic!("expected timeout_ms: {generated}");
+        };
         assert!(
             timeout.get("anyOf").is_none(),
             "shape changed to anyOf — a root `maximum` no longer constrains the \
              integer arm, so apply_to_schema must walk the branches: {timeout}"
         );
-        assert_eq!(timeout["type"], serde_json::json!(["integer", "null"]));
+        assert_eq!(
+            timeout.get("type"),
+            Some(&serde_json::json!(["integer", "null"]))
+        );
 
         let cfg = TruncationConfig::default();
         let cap = 300_000;
         let mut schema = generated.clone();
         cfg.apply_to_schema(&mut schema, "get_task_output", 40_000, cap);
 
-        let bounded = &schema["properties"]["timeout_ms"];
-        assert_eq!(bounded["maximum"], serde_json::json!(300_000u64));
+        let Some(bounded) = schema.pointer("/properties/timeout_ms") else {
+            panic!("expected timeout_ms: {schema}");
+        };
+        assert_eq!(bounded.get("maximum"), Some(&serde_json::json!(300_000u64)));
         assert!(
-            !bounded["description"].as_str().unwrap().contains("{max_"),
+            bounded
+                .get("description")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.contains("{max_")),
             "placeholder survived: {bounded}"
         );
     }

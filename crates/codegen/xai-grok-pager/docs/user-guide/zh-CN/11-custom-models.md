@@ -102,6 +102,7 @@ description = "模型描述"                   # 可选描述
 api_key = "sk-..."                        # 此提供商的 API 密钥（可选）
 env_key = "XAI_API_KEY"                   # 保存 API 密钥的环境变量（可选；字符串或数组）
 api_backend = "chat_completions"          # "chat_completions"、"responses" 或 "messages"
+reasoning_summary = "concise"             # 仅 Responses API：none / auto / concise / detailed
 temperature = 0.7                          # 采样温度
 top_p = 0.95                               # 核采样参数
 max_completion_tokens = 8192               # 每次响应的最大 token 数
@@ -190,6 +191,20 @@ Grok 会在为会话构建客户端时读取每个变量，并只将值放入请
 
 两个字段也可用于共享的 `[model_providers.<id>]` 区段。当模型通过 `model_provider = "<id>"` 指向某个提供商，并且自身没有设置这些字段时，会继承该提供商的 `query_params` 和 `env_http_headers`，这与 `extra_headers` 的继承方式相同。
 
+<a id="model-notice"></a>
+### 模型通知
+
+`notice` 会在选中该模型期间，于提示输入框上方显示一条通知。通知无法手动关闭；切换到不带通知的模型后，它会消失。
+
+```toml
+[model.legacy]
+model = "legacy-model"
+base_url = "https://gateway.example/v1"
+notice = { severity = "warning", text = "This model is deprecated on Oct 15. Switch to grok-4.6.", label = "deprecated" }
+```
+
+`severity` 控制通知颜色，可取 `info`、`warning` 或 `critical`，默认为 `info`。`text` 必填，较长的文本会自动换行。`label` 是可选的短标签，显示在正文之前。自定义模型端点也可通过模型条目的 `notice` 或 `_meta.notice` 返回相同对象。要移除内置或远程模型自带的通知，可设置 `notice = { text = "" }`。
+
 ---
 
 <a id="overriding-built-in-models"></a>
@@ -264,6 +279,27 @@ base_url = "https://api.openai.com/v1"
 name = "GPT-4o (Responses)"
 api_backend = "responses"
 env_key = "OPENAI_API_KEY"
+```
+
+### Responses API 推理摘要与 AWS Bedrock（Mantle）
+
+Responses API 默认请求 `concise` 推理摘要，界面中的推理文本来自该摘要。将 `reasoning_summary` 设为 `detailed` 或 `auto` 可以请求更完整的摘要；设为 `none` 则省略该字段，适配拒绝此参数的网关。
+
+Bedrock 的 OpenAI 兼容网关拒绝 `reasoning.summary`，因此使用 `reasoning_summary = "none"`。认证采用 Bedrock API 密钥作为 Bearer Token；下面通过具名认证提供商生成短期密钥：
+
+```toml
+[auth_provider.bedrock]
+command = "aws-bedrock-token"   # 将 Bedrock API 密钥打印到标准输出
+token_ttl_secs = 3600
+
+[model."bedrock-grok-4.6"]
+model = "xai.grok-4.6"
+base_url = "https://bedrock-mantle.us-west-2.api.aws/openai/v1"
+name = "Grok 4.6 (Bedrock)"
+api_backend = "responses"
+reasoning_summary = "none"
+auth_provider = "bedrock"
+context_window = 500000
 ```
 
 <a id="ollama-local-models"></a>
@@ -341,12 +377,12 @@ models_base_url = "https://api.acme.com/v1"
 api_key = "my-api-key"
 ```
 
-使用带有部分模型覆盖项的 `[endpoints]` 时，Grok 会从端点配置继承 `base_url`，因此无需在每个 `[model.*]` 区段中指定它。
+配合部分模型覆盖项使用 `[endpoints]` 时，Grok 会从端点配置继承 `base_url`，无需在每个 `[model.*]` 区段中重复指定。仍需设置 `XAI_API_KEY`。单模型的 `api_key` 或 `env_key` 用于该模型的推理请求认证；启动时获取模型列表仍使用 `XAI_API_KEY`。
 
 <a id="auth-behavior"></a>
 ### 身份验证行为
 
-设置 `models_base_url` 后，Grok 使用 API 密钥身份验证（`Authorization: Bearer`），而不是会话身份验证。不需要运行 `grok-zh login`——API 密钥就足够了。
+设置 `models_base_url` 后，Grok 获取模型列表时仅使用 `XAI_API_KEY` 进行认证（`Authorization: Bearer`），不会使用 `grok-zh login` 的登录会话。如果配置了外部认证提供方（`auth_provider_command`），且未设置 `XAI_API_KEY`，则改为发送该提供方的令牌。否则，未设置 `XAI_API_KEY` 会导致获取失败，并提示你设置该变量。向自定义主机发送推理请求时会单独认证；为模型配置 `api_key` 或 `env_key` 后，这些请求也会使用 API 密钥。
 
 ---
 

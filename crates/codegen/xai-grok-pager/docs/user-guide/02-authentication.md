@@ -1,5 +1,7 @@
 # Authentication
 
+[简体中文](zh-CN/02-authentication.md)
+
 Grok supports several authentication methods, including interactive browser login, enterprise single sign-on (SSO), and headless CI/CD runners.
 
 ---
@@ -297,6 +299,13 @@ When more than one login flow is configured, Grok populates the session token fr
 3. **SpaceXAI OAuth2 browser login** -- the default
 
 During a session, the active method handles all mid-session refreshes.
+
+---
+
+## Grove Git credentials (not this page's `grok login`)
+
+
+**`~/.grok/auth.json` is never read for Git.** `grok login` does not create a Git credential and `grok logout` does not revoke one; the daemon builds its own credential cell from `auth_mode` in Grove config. Those credentials are managed with `grove status` and `grove reload-credentials` -- see [grok clone](27-grok-clone.md#authentication) for the failure classes and their next steps.
 
 ---
 

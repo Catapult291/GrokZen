@@ -62,13 +62,9 @@ pub(crate) fn apply_replace(
     Ok(())
 }
 
-/// `merge=true`: updates are merged into the existing state.
-/// - **Existing items**: `content` is optional — if omitted the previous
-///   value is kept. This lets the model mark an item from `in_progress` →
-///   `completed` without echoing the content back.
-/// - **New items** (id not yet in state): if `content` is omitted the `id`
-///   is used as a fallback so the tool never errors on a merge call. This
-///   makes the tool resilient to state being lost between calls.
+/// `merge=true`: updates are merged into the existing state. **Existing items**: `content` is optional — if omitted the previous value is kept.
+/// This lets the model mark an item from `in_progress` → `completed` without echoing the content back. **New items** (id not yet in state): if
+/// `content` is omitted the `id` is used as a fallback so the tool never errors on a merge call.
 pub(crate) fn apply_merge(state: &mut TodoState, updates: &[TodoUpdate]) -> Result<(), TodoError> {
     for u in updates {
         if state.update(&u.id, u.content.as_deref(), u.status) {
@@ -235,10 +231,9 @@ const fn default_merge() -> bool {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TodoWriteInput {
-    /// When true (the default), merge the provided todos into the existing
-    /// list by id (partial updates are allowed — leave unchanged fields
-    /// undefined). When explicitly set to false, the provided todos replace
-    /// the existing list entirely.
+    /// When true (the default), merge the provided todos into the existing list by id (partial
+    /// updates are allowed — leave unchanged fields undefined). When explicitly set to false, the
+    /// provided todos replace the existing list entirely.
     #[serde(
         default = "default_merge",
         deserialize_with = "crate::types::schema::deserialize_lenient_bool"
@@ -252,10 +247,8 @@ pub struct TodoWriteInput {
     pub todos: Vec<TodoUpdate>,
 }
 
-/// New-architecture `TodoWrite` tool.
-///
-/// State: `State<TodoState>` — persisted across calls via Resources serde.
-/// Params: `()` — no per-tool configuration.
+/// New-architecture `TodoWrite` tool. State: `State<TodoState>` — persisted across calls via
+/// Resources serde. Params: `()` — no per-tool configuration.
 #[derive(Debug, Default)]
 pub struct TodoWriteTool;
 
@@ -518,10 +511,12 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        assert_eq!(output.todos.len(), 1);
+        let [todo] = output.todos.as_slice() else {
+            panic!("expected exactly one todo, got {}", output.todos.len());
+        };
         // Id used as fallback content
-        assert_eq!(output.todos[0].content, "explore");
-        assert_eq!(output.todos[0].status, TodoStatus::Completed);
+        assert_eq!(todo.content, "explore");
+        assert_eq!(todo.status, TodoStatus::Completed);
     }
 
     #[tokio::test]
@@ -624,10 +619,13 @@ mod tests {
         let restored = resources2.get::<State<TodoState>>().unwrap();
         assert_eq!(restored.0.todo_items().count(), 2);
         let items: Vec<_> = restored.0.todo_items().collect();
-        assert_eq!(items[0].content, "First");
-        assert_eq!(items[0].status, TodoStatus::Completed);
-        assert_eq!(items[1].content, "Second");
-        assert_eq!(items[1].status, TodoStatus::InProgress);
+        let [first, second] = items.as_slice() else {
+            panic!("expected two items: {items:?}");
+        };
+        assert_eq!(first.content, "First");
+        assert_eq!(first.status, TodoStatus::Completed);
+        assert_eq!(second.content, "Second");
+        assert_eq!(second.status, TodoStatus::InProgress);
     }
 
     fn seed_state(items: &[(&str, &str, TodoStatus)]) -> TodoState {
@@ -872,13 +870,15 @@ mod tests {
         );
 
         // Content must be preserved, not replaced with id fallback.
-        assert_eq!(output.todos.len(), 3);
-        assert_eq!(output.todos[0].content, "Explore codebase");
-        assert_eq!(output.todos[0].status, TodoStatus::Completed);
-        assert_eq!(output.todos[1].content, "Review tools");
-        assert_eq!(output.todos[1].status, TodoStatus::Completed);
-        assert_eq!(output.todos[2].content, "Write tests");
-        assert_eq!(output.todos[2].status, TodoStatus::InProgress);
+        let [first, second, third] = output.todos.as_slice() else {
+            panic!("expected three todos: {:?}", output.todos);
+        };
+        assert_eq!(first.content, "Explore codebase");
+        assert_eq!(first.status, TodoStatus::Completed);
+        assert_eq!(second.content, "Review tools");
+        assert_eq!(second.status, TodoStatus::Completed);
+        assert_eq!(third.content, "Write tests");
+        assert_eq!(third.status, TodoStatus::InProgress);
     }
 
     // ── regression: merge with null content should never error ────────

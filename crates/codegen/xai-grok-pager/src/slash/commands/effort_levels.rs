@@ -4,6 +4,38 @@ use xai_grok_shell::sampling::types::{ReasoningEffort, ReasoningEffortOption};
 
 use crate::slash::command::{ArgItem, ArgPresentation};
 
+pub(crate) fn is_official_model(info: &agent_client_protocol::ModelInfo) -> bool {
+    info.meta
+        .as_ref()
+        .and_then(|meta| meta.get(xai_grok_shell::agent::config::OFFICIAL_MODEL_META_KEY))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+pub(crate) fn stamp_effort_presentations(
+    items: &mut [ArgItem],
+    options: &[ReasoningEffortOption],
+    model_id: &agent_client_protocol::ModelId,
+    info: &agent_client_protocol::ModelInfo,
+) {
+    let official = is_official_model(info);
+    let remote_options = info
+        .meta
+        .as_ref()
+        .is_some_and(|meta| meta.contains_key("reasoningEfforts"));
+    for (item, option) in items.iter_mut().zip(options) {
+        if official {
+            item.presentation = Some(ArgPresentation::OfficialEffort {
+                model_id: model_id.0.to_string(),
+                option_id: option.id.clone(),
+                is_current: item.display.ends_with(" (active)"),
+            });
+        } else if remote_options {
+            item.presentation = Some(ArgPresentation::Opaque);
+        }
+    }
+}
+
 /// Effort levels in the built-in fallback menu (strongest first).
 /// `none`/`minimal` are still accepted by `ReasoningEffort::from_str` for power users.
 pub(crate) const EFFORT_LEVELS: &[ReasoningEffort] = &[
@@ -32,7 +64,7 @@ pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
     EFFORT_LEVELS
         .iter()
         .map(|&level| ReasoningEffortOption {
-            id: level.as_str().to_string(),
+            id: level.as_ref().to_string(),
             value: level,
             label: level.to_string(),
             description: Some(effort_description(level).to_string()),
@@ -41,14 +73,8 @@ pub(crate) fn legacy_effort_options() -> Vec<ReasoningEffortOption> {
         .collect()
 }
 
-/// Build effort rows for autocomplete from a per-model option list.
-///
-/// - `mark_active` and `current_effort` mark the current session effort with `(active)`.
-/// - `insert_text_for` controls what is inserted on select:
-///   - `/effort`: the option id (`"deep"`)
-///   - `/model` chained phase: `"ModelName deep"`
-///
-/// `match_text` gets an `a `/`b `/…` sort prefix so the matcher's alphabetical tiebreak preserves the option order.
+/// Build effort rows for autocomplete from a per-model option list. `match_text` gets an `a `/`b `/…` sort prefix
+/// so the matcher's alphabetical tiebreak preserves the option order.
 pub(crate) fn build_effort_arg_items(
     options: &[ReasoningEffortOption],
     current_effort: Option<ReasoningEffort>,

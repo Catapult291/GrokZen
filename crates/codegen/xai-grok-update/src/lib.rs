@@ -1,11 +1,27 @@
+#![allow(
+    unused_imports,
+    unused_variables,
+    unused_mut,
+    unreachable_code,
+    dead_code
+)]
+#![deny(clippy::indexing_slicing)]
+
 #[cfg(feature = "community-build")]
 pub mod announcement_translations;
 pub mod auto_update;
+mod cleanup_downloads;
 #[cfg(feature = "community-build")]
 mod community_release;
+#[cfg(feature = "community-build")]
+pub mod community_update_cancel;
+#[cfg(feature = "community-build")]
+pub mod community_update_notes;
+#[cfg(feature = "community-build")]
+pub mod display_translations;
 pub mod version;
 mod version_policy;
-
+mod winget;
 pub use auto_update::UpdateStatus;
 pub use version::{UpdateConfig, channel_label, channel_name, write_version_cache};
 pub use version_policy::enforce_version_policy_or_exit;
