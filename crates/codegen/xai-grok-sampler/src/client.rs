@@ -87,12 +87,12 @@ impl GrokRequestHeaders<'_> {
     }
 }
 
-/// Deserialize a Responses SSE event, stripping unknown tools and rewriting terminal `total_tokens` from `context_details`.
+/// Deserialize a Responses SSE event, stripping unknown tools, backfilling a missing `arguments` field, and rewriting terminal `total_tokens` from `context_details`.
 pub(crate) fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
         Ok(event) => event,
         Err(first_err) => {
-            // Try sanitizing: parse as Value, strip unknown tools, retry.
+            // Try sanitizing: parse as Value, strip unknown tools, backfill missing arguments, retry.
             if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(data) {
                 // Strip tools that async_openai's rs::Tool can't deserialize (e.g., xAI-specific "x_search")
                 // Instead of maintaining a hardcoded allowlist, try deserializing each tool entry; if it fails, drop it
@@ -102,6 +102,11 @@ pub(crate) fn deserialize_response_event(data: &str) -> Result<rs::ResponseStrea
                 {
                     tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
                 }
+                // cline-pass/mimo intermittently omits `arguments` on a function_call item; async-openai's
+                // structs make it required, so one bad item used to fail the whole stream with
+                // `missing field \`arguments\``. Default it to empty: the tool-input layer then reports a
+                // per-call parse error instead of a terminal response error (same policy as the chat backend).
+                backfill_missing_arguments(&mut value);
                 if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
                     apply_terminal_event_overrides(&mut event, data);
                     return Ok(event);
@@ -117,6 +122,43 @@ pub(crate) fn deserialize_response_event(data: &str) -> Result<rs::ResponseStrea
     };
     apply_terminal_event_overrides(&mut event, data);
     Ok(event)
+}
+
+/// Type tags whose async-openai structs declare `pub arguments: String` without a serde default.
+/// Three live at the output-item layer (`OutputItem` / `ItemResourceItem`, tag = `type`); two are stream events.
+const ARGUMENTS_REQUIRED_TYPE_TAGS: &[&str] = &[
+    "function_call",
+    "mcp_call",
+    "mcp_approval_request",
+    "response.function_call_arguments.done",
+    "response.mcp_call_arguments.done",
+];
+
+/// Insert `"arguments": ""` on any tagged object that requires the field but omits it, walking the whole
+/// event so `output_item.added` / `output_item.done`, `response.output[]` on terminal events, and the
+/// `*_arguments.done` event itself are all covered. Objects that carry the field are left untouched.
+fn backfill_missing_arguments(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(tag) = map.get("type").and_then(|t| t.as_str()) {
+                if ARGUMENTS_REQUIRED_TYPE_TAGS.contains(&tag) && !map.contains_key("arguments") {
+                    map.insert(
+                        "arguments".to_string(),
+                        serde_json::Value::String(String::new()),
+                    );
+                }
+            }
+            for child in map.values_mut() {
+                backfill_missing_arguments(child);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for child in items {
+                backfill_missing_arguments(child);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// On `response.completed` / `response.incomplete`, rewrite `usage.total_tokens` to the live context length from `context_details`.
@@ -3003,6 +3045,87 @@ mod tests {
         assert_eq!(usage.output_tokens_details.reasoning_tokens, 388);
         // total_tokens is rewritten to ctx.input + ctx.output (5022 + 571), not the wire's cumulative total (6714)
         assert_eq!(usage.total_tokens, 5_593);
+    }
+
+    /// A `function_call` item emitted without `arguments` must deserialize to empty args instead of
+    /// failing the whole stream with `missing field \`arguments\`` (observed from cline-pass/mimo).
+    #[test]
+    fn deserialize_response_event_backfills_arguments_on_output_item_added() {
+        let sse = r#"{
+            "type": "response.output_item.added",
+            "sequence_number": 2,
+            "output_index": 1,
+            "item": {
+                "id": "item_1",
+                "type": "function_call",
+                "status": "in_progress",
+                "call_id": "call_1",
+                "name": "grep"
+            }
+        }"#;
+        let event = deserialize_response_event(sse).expect("parse");
+        let rs::ResponseStreamEvent::ResponseOutputItemAdded(e) = event else {
+            panic!("expected ResponseOutputItemAdded");
+        };
+        let rs::OutputItem::FunctionCall(fc) = e.item else {
+            panic!("expected FunctionCall");
+        };
+        assert_eq!(fc.call_id, "call_1");
+        assert_eq!(fc.name, "grep");
+        assert!(fc.arguments.is_empty());
+    }
+
+    /// Same repair on the authoritative copy: a terminal `response.completed` output item without
+    /// `arguments` degrades to a per-call parse error rather than a terminal serialization failure.
+    #[test]
+    fn deserialize_response_event_backfills_arguments_on_completed_output() {
+        let sse = r#"{
+            "type": "response.completed",
+            "sequence_number": 9,
+            "response": {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 0,
+                "model": "grok-build",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "item_1",
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "grep"
+                    }
+                ]
+            }
+        }"#;
+        let event = deserialize_response_event(sse).expect("parse");
+        let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
+            panic!("expected ResponseCompleted");
+        };
+        let rs::OutputItem::FunctionCall(fc) = &e.response.output[0] else {
+            panic!("expected FunctionCall");
+        };
+        assert_eq!(fc.call_id, "call_1");
+        assert!(fc.arguments.is_empty());
+    }
+
+    /// The `response.function_call_arguments.done` event itself declares a required `arguments` field.
+    #[test]
+    fn deserialize_response_event_backfills_arguments_on_arguments_done() {
+        let sse = r#"{
+            "type": "response.function_call_arguments.done",
+            "sequence_number": 5,
+            "item_id": "call_1",
+            "output_index": 1,
+            "name": "grep"
+        }"#;
+        let event = deserialize_response_event(sse).expect("parse");
+        let rs::ResponseStreamEvent::ResponseFunctionCallArgumentsDone(e) = event else {
+            panic!("expected ResponseFunctionCallArgumentsDone");
+        };
+        assert_eq!(e.item_id, "call_1");
+        assert!(e.arguments.is_empty());
+        assert_eq!(e.name.as_deref(), Some("grep"));
     }
 
     #[test]
