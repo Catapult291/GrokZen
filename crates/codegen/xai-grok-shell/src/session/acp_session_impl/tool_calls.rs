@@ -1493,10 +1493,37 @@ impl SessionActor {
                 }
             }
         };
-        let parsed = self
+        let mut parsed = self
             .tool_bridge_handle()
             .try_parse(&call.function.name, raw_input.clone())
             .await;
+        // Second chance for EOF-truncated residual params: the conservative
+        // repair drops an incomplete string member (e.g. half of `pattern`),
+        // which then fails the required-field check. Keep the emitted prefix.
+        if parsed.is_err() && parse_result.is_err() {
+            if let Some(salvaged) =
+                crate::session::helpers::tool_input_parsing::try_repair_truncated_json_keep_partial_strings(
+                    &call.function.arguments,
+                ) {
+                if salvaged != raw_input {
+                    if let Ok(input) = self
+                        .tool_bridge_handle()
+                        .try_parse(&call.function.name, salvaged.clone())
+                        .await
+                    {
+                        tracing::warn!(
+                            tool_name = %call.function.name,
+                            call_id = %call.id,
+                            original = %call.function.arguments,
+                            salvaged = %salvaged,
+                            "Salvaged EOF-truncated tool arguments by keeping the partial string value"
+                        );
+                        raw_input = salvaged;
+                        parsed = Ok(input);
+                    }
+                }
+            }
+        }
         let mut tool_input = match parsed {
             Ok(input) => input,
             Err(err) => {
