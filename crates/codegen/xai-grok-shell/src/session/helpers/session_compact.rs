@@ -187,7 +187,8 @@ fn classify_sampling_error(err: SamplingError) -> CompactFailure {
         | SamplingError::EventStreamError(_)
         | SamplingError::StreamError { .. }
         | SamplingError::EmptyResponse { .. }
-        | SamplingError::DoomLoopDetected { .. } => false,
+        | SamplingError::DoomLoopDetected { .. }
+        | SamplingError::TextRepetitionDetected { .. } => false,
     };
     if deterministic {
         CompactFailure::Deterministic(acp_err)

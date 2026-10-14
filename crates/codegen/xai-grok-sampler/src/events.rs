@@ -208,6 +208,11 @@ pub struct SamplingErrorInfo {
     /// Telemetry only; `None` for terminal-response detections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub doom_loop_aborted_at_chunk: Option<u64>,
+    /// Present only when `kind == TextRepetitionDetected`.
+    /// Which sub-detector fired, how much text had been generated, and the reading that reached
+    /// the threshold — telemetry only, never generation content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_repetition: Option<xai_grok_sampling_types::TextRepetitionTrip>,
     /// Meaningful only when `kind == Auth`: whether the rejected request actually carried a credential on the wire.
     /// Defaults to `Unknown` (charge-the-budget behavior) for payloads from older peers.
     #[serde(default, skip_serializing_if = "SentCredential::is_unknown")]
@@ -231,6 +236,7 @@ pub enum SamplingErrorKind {
     EmptyResponse,
     MaxTokensTruncation,
     DoomLoopDetected,
+    TextRepetitionDetected,
 }
 /// [`SamplingErrorKind::from_str`] error: the wire string matched no known kind (a newer peer's kind); callers degrade to untyped via `.ok()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +257,7 @@ impl std::str::FromStr for SamplingErrorKind {
             "empty_response" => Self::EmptyResponse,
             "max_tokens_truncation" => Self::MaxTokensTruncation,
             "doom_loop_detected" => Self::DoomLoopDetected,
+            "text_repetition_detected" => Self::TextRepetitionDetected,
             _ => return Err(UnknownSamplingErrorKind),
         })
     }
@@ -298,6 +305,9 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::DoomLoopDetected { .. } => {
                 (SamplingErrorKind::DoomLoopDetected, None, None, None)
             }
+            SamplingError::TextRepetitionDetected { .. } => {
+                (SamplingErrorKind::TextRepetitionDetected, None, None, None)
+            }
         };
 
         let empty_response_context = match err {
@@ -310,6 +320,18 @@ impl From<&SamplingError> for SamplingErrorInfo {
                 aborted_at_chunk,
             } => (Some(triggers.clone()), *aborted_at_chunk),
             _ => (None, None),
+        };
+        let text_repetition = match err {
+            SamplingError::TextRepetitionDetected {
+                trigger,
+                generated_chars,
+                threshold,
+            } => Some(xai_grok_sampling_types::TextRepetitionTrip {
+                trigger: *trigger,
+                generated_chars: *generated_chars,
+                threshold: *threshold,
+            }),
+            _ => None,
         };
         let credential = match err {
             SamplingError::Auth { credential, .. } => *credential,
@@ -333,6 +355,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             empty_response_context,
             doom_loop_triggers,
             doom_loop_aborted_at_chunk,
+            text_repetition,
             credential,
         }
     }
@@ -536,6 +559,7 @@ mod tests {
             EmptyResponse,
             MaxTokensTruncation,
             DoomLoopDetected,
+            TextRepetitionDetected,
         ];
         for kind in all {
             // Exhaustive match, no `_` arm: a new variant refuses to compile this test until an arm is added
@@ -543,7 +567,7 @@ mod tests {
             // Only variants listed in `all` are round-trip-checked; the compiler cannot force those two edits
             match kind {
                 Auth | Http | Api | Serialization | IdleTimeout | RateLimited | EmptyResponse
-                | MaxTokensTruncation | DoomLoopDetected => {}
+                | MaxTokensTruncation | DoomLoopDetected | TextRepetitionDetected => {}
             }
             assert_eq!(kind.as_ref().parse(), Ok(kind));
         }

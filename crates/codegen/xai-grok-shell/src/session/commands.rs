@@ -79,6 +79,8 @@ pub const PERMISSION_REJECTED_CATEGORY: &str = "PermissionRejected";
 pub const PERMISSION_CANCELLED_CATEGORY: &str = "PermissionCancelled";
 /// `_meta.cancellationCategory` of a mid-turn abort (user stop or unnamed interrupt).
 pub const MID_TURN_ABORT_CATEGORY: &str = "MidTurnAbort";
+/// `_meta.cancellationCategory` of a text-repetition-guard abort (automatic; never a user gesture).
+pub const REPETITION_GUARD_CATEGORY: &str = "RepetitionGuard";
 /// `_meta.cancellationCategory` wire name of a cancel category: an explicit match so a variant rename cannot silently change the wire.
 /// This is deliberately a second vocabulary next to the serde snake_case of the events.jsonl / after-turn rails.
 /// `_meta` shipped PascalCase and clients match it.
@@ -91,6 +93,7 @@ pub fn meta_category_str(
         CancellationCategory::PermissionRejected => PERMISSION_REJECTED_CATEGORY,
         CancellationCategory::PermissionCancelled => PERMISSION_CANCELLED_CATEGORY,
         CancellationCategory::MidTurnAbort => MID_TURN_ABORT_CATEGORY,
+        CancellationCategory::RepetitionGuard => REPETITION_GUARD_CATEGORY,
     }
 }
 /// The `cancelTrigger`, `cancellationCategory`, and `cancellationContext` `_meta` keys of a turn end, each only when set.
@@ -1015,7 +1018,7 @@ mod cancellation_category_meta_tests {
     fn pins_every_wire_name() {
         use super::{
             HOOK_DENIED_CATEGORY, MID_TURN_ABORT_CATEGORY, PERMISSION_CANCELLED_CATEGORY,
-            PERMISSION_REJECTED_CATEGORY,
+            PERMISSION_REJECTED_CATEGORY, REPETITION_GUARD_CATEGORY,
         };
         let cancelled = |category| PromptCompletionKind::Cancelled {
             category,
@@ -1037,6 +1040,10 @@ mod cancellation_category_meta_tests {
             (
                 cancelled(Some(CancellationCategory::PermissionCancelled)),
                 Some(PERMISSION_CANCELLED_CATEGORY),
+            ),
+            (
+                cancelled(Some(CancellationCategory::RepetitionGuard)),
+                Some(REPETITION_GUARD_CATEGORY),
             ),
             (cancelled(None), None),
             (

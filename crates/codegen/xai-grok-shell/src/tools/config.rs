@@ -238,6 +238,7 @@ impl ShellToolsetConfig {
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
+            text_repetition_guard: None,
             header_injector: None,
         };
         let mut toolset = base.unwrap_or_else(|| Self {

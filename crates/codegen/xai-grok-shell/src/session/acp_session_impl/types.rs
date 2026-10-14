@@ -55,6 +55,11 @@ pub(crate) enum SamplerFailureRecovery {
         kind: xai_grok_sampler::SamplingErrorKind,
         status_code: Option<u16>,
     },
+    /// The text-repetition guard tripped: end the turn as cancelled under
+    /// `cancellation_category = repetition_guard` (no compaction, no retry, no error banner).
+    TurnCancelledByRepetitionGuard {
+        trip: xai_grok_sampling_types::TextRepetitionTrip,
+    },
 }
 
 /// Outcome of a single turn attempt via the sampler-based path.
@@ -76,6 +81,10 @@ pub(crate) enum SamplerTurnOutcome {
     RetryTransient {
         kind: xai_grok_sampler::SamplingErrorKind,
         status_code: Option<u16>,
+    },
+    /// Mirrors [`SamplerFailureRecovery::TurnCancelledByRepetitionGuard`].
+    TurnCancelledByRepetitionGuard {
+        trip: xai_grok_sampling_types::TextRepetitionTrip,
     },
 }
 

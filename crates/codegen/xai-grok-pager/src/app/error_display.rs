@@ -68,6 +68,9 @@ impl From<xai_grok_shell::sampling::error::SamplingErrorKind> for WireErrorType 
             K::EmptyResponse => Self::EmptyResponse,
             K::MaxTokensTruncation => Self::MaxTokensTruncation,
             K::DoomLoopDetected => Self::Other,
+            // The guard's user copy rides the message text (the turn ends via its own
+            // cancellation category, not a typed retry-failure banner).
+            K::TextRepetitionDetected => Self::Other,
         }
     }
 }

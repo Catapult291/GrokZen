@@ -52,6 +52,16 @@ pub enum Event {
         #[serde(skip_serializing_if = "Option::is_none")]
         cancellation_context: Option<serde_json::Value>,
     },
+    /// The text-repetition guard tripped on streamed model text and aborted the turn.
+    /// Telemetry companion to `TurnEnded { cancellation_category: repetition_guard }`.
+    TextRepetitionTripped {
+        /// Which sub-detector fired: `identical_run` | `chunk_periodicity`.
+        trigger: String,
+        /// Assistant characters generated before the abort.
+        generated_chars: u64,
+        /// Threshold reading that fired: identical-token run length or chunk repeat count.
+        threshold: u64,
+    },
     Interjected {
         source: InterjectionSource,
         image_count: u32,
@@ -441,6 +451,9 @@ pub enum CancellationCategory {
     PermissionRejected,
     PermissionCancelled,
     MidTurnAbort,
+    /// The text-repetition guard aborted the turn: the model's streamed output degenerated into a
+    /// repetition loop. Automatic, never a user gesture.
+    RepetitionGuard,
 }
 
 #[cfg(test)]
@@ -474,6 +487,7 @@ mod tests {
             CancellationCategory::PermissionRejected,
             CancellationCategory::PermissionCancelled,
             CancellationCategory::MidTurnAbort,
+            CancellationCategory::RepetitionGuard,
         ] {
             let value = serde_json::to_value(variant).unwrap();
             let decoded: CancellationCategory = serde_json::from_value(value).unwrap();
@@ -494,6 +508,10 @@ mod tests {
                 "\"permission_cancelled\"",
             ),
             (CancellationCategory::MidTurnAbort, "\"mid_turn_abort\""),
+            (
+                CancellationCategory::RepetitionGuard,
+                "\"repetition_guard\"",
+            ),
         ] {
             let json = serde_json::to_string(&variant).unwrap();
             assert_eq!(json, expected, "{variant:?} must serialize to {expected}");

@@ -749,6 +749,7 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
                         empty_response_context: None,
                         doom_loop_triggers: None,
                         doom_loop_aborted_at_chunk: None,
+                        text_repetition: None,
                         credential: xai_grok_sampling_types::SentCredential::Unknown,
                     },
                 })
@@ -794,6 +795,7 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
                         empty_response_context: None,
                         doom_loop_triggers: None,
                         doom_loop_aborted_at_chunk: None,
+                        text_repetition: None,
                         credential: xai_grok_sampling_types::SentCredential::Unknown,
                     },
                 })
@@ -825,6 +827,7 @@ async fn failed_event_preserves_streaming_capture_for_takeout() {
                         empty_response_context: None,
                         doom_loop_triggers: None,
                         doom_loop_aborted_at_chunk: None,
+                        text_repetition: None,
                         credential: xai_grok_sampling_types::SentCredential::Unknown,
                     },
                 })
@@ -1397,6 +1400,7 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
                 }),
                 doom_loop_triggers: None,
                 doom_loop_aborted_at_chunk: None,
+                text_repetition: None,
                 credential: xai_grok_sampling_types::SentCredential::Unknown,
             };
 
@@ -1474,6 +1478,78 @@ async fn reasoning_only_doomloop_turn_captures_every_generation_as_segments() {
             assert_eq!(first.reasoning_text, "thinking attempt 1");
             assert_eq!(second.reasoning_text, "thinking attempt 2");
             assert_eq!(capture.empty_reason.as_deref(), Some("reasoning_only"));
+        })
+        .await;
+}
+
+/// A text-repetition trip on the owned request records the session counters, writes the
+/// events.jsonl forensic line, and still releases the terminal drain barrier (handoff §5.3.4/§5.3.5).
+#[tokio::test(flavor = "current_thread")]
+async fn text_repetition_trip_records_signals_and_event() {
+    use xai_grok_sampler::{RequestId, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let mut fixture = make_replay_send_update_fixture().await;
+            let events_dir = tempfile::tempdir().expect("temp events dir");
+            fixture.actor.events =
+                crate::session::events::EventTracker::new(events_dir.path());
+            let actor = Arc::new(fixture.actor);
+            let req = RequestId::random();
+            own_request(&actor, &req);
+
+            actor
+                .handle_sampling_event(SamplingEvent::Failed {
+                    request_id: req.clone(),
+                    error: SamplingErrorInfo {
+                        kind: SamplingErrorKind::TextRepetitionDetected,
+                        status_code: None,
+                        message:
+                            "output repetition guard tripped (identical_run) after 512 characters"
+                                .to_string(),
+                        is_retryable: false,
+                        retry_after_secs: None,
+                        should_retry: None,
+                        error_code: None,
+                        model_metadata: None,
+                        empty_response_context: None,
+                        doom_loop_triggers: None,
+                        doom_loop_aborted_at_chunk: None,
+                        text_repetition: Some(xai_grok_sampling_types::TextRepetitionTrip {
+                            trigger: xai_grok_sampling_types::TextRepetitionTrigger::IdenticalRun,
+                            generated_chars: 512,
+                            threshold: 64,
+                        }),
+                        credential: xai_grok_sampling_types::SentCredential::Unknown,
+                    },
+                })
+                .await;
+
+            let snap = actor
+                .signals_handle()
+                .snapshot()
+                .await
+                .expect("signals snapshot");
+            assert_eq!(snap.text_repetition_aborts, 1);
+            assert_eq!(
+                snap.text_repetition_guard_top_trigger.as_deref(),
+                Some("identical_run")
+            );
+            assert!(
+                !actor.turn_stream_drained.lock().contains_key(&req),
+                "Failed must take the terminal drain barrier sender"
+            );
+
+            let log = std::fs::read_to_string(events_dir.path().join("events.jsonl"))
+                .unwrap_or_default();
+            assert!(
+                super::super::support::has_event_with(&log, "text_repetition_tripped", |v| {
+                    v.get("trigger").and_then(|t| t.as_str()) == Some("identical_run")
+                        && v.get("generated_chars").and_then(|n| n.as_u64()) == Some(512)
+                        && v.get("threshold").and_then(|n| n.as_u64()) == Some(64)
+                }),
+                "events.jsonl must record trigger/generated_chars/threshold; log:\n{log}"
+            );
         })
         .await;
 }

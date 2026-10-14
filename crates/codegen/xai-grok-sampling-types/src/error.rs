@@ -8,6 +8,7 @@ use thiserror::Error;
 use xai_circuit_breaker::RetryPolicy;
 
 use crate::provider_error::{parse_provider_error, parse_provider_error_str};
+use crate::text_repetition::TextRepetitionTrigger;
 
 pub type Result<T> = std::result::Result<T, SamplingError>;
 
@@ -187,6 +188,17 @@ pub enum SamplingError {
     DoomLoopDetected {
         triggers: Vec<String>,
         aborted_at_chunk: Option<u64>,
+    },
+    /// The client-side text-repetition guard tripped mid-stream: the model's visible text
+    /// degenerated into a repetition loop. Terminal by design — the attempt is aborted and the
+    /// turn is handed back to the user instead of resampled (a resample can repeat the loop).
+    /// `generated_chars` / `threshold` are telemetry (characters produced; run length or chunk
+    /// repeat count that fired) and never include generation content.
+    #[error("output repetition guard tripped ({}) after {generated_chars} characters", trigger.as_str())]
+    TextRepetitionDetected {
+        trigger: TextRepetitionTrigger,
+        generated_chars: u64,
+        threshold: u32,
     },
 }
 
@@ -403,7 +415,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::TextRepetitionDetected { .. } => false,
         }
     }
 
@@ -421,6 +434,8 @@ impl SamplingError {
             SamplingError::EmptyResponse { .. } => true,
             SamplingError::MaxTokensTruncation => false,
             SamplingError::DoomLoopDetected { .. } => true,
+            // Terminal by design: the poisoned output must not be retried or resampled.
+            SamplingError::TextRepetitionDetected { .. } => false,
         }
     }
 
@@ -485,7 +500,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::TextRepetitionDetected { .. } => false,
         }
     }
 
@@ -508,7 +524,8 @@ impl SamplingError {
             | SamplingError::IdleTimeout { .. }
             | SamplingError::EmptyResponse { .. }
             | SamplingError::MaxTokensTruncation
-            | SamplingError::DoomLoopDetected { .. } => false,
+            | SamplingError::DoomLoopDetected { .. }
+            | SamplingError::TextRepetitionDetected { .. } => false,
         }
     }
 

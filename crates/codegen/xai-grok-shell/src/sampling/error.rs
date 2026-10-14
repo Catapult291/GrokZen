@@ -175,6 +175,11 @@ pub(crate) fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
         SamplingError::DoomLoopDetected { .. } => {
             acp::Error::internal_error().data(err.to_string())
         }
+        // The turn normally ends via the `repetition_guard` cancellation; this mapping only
+        // fires on stray paths (/btw, subagents without the turn loop) and shows the trip label.
+        SamplingError::TextRepetitionDetected { .. } => {
+            acp::Error::internal_error().data(err.to_string())
+        }
     }
 }
 

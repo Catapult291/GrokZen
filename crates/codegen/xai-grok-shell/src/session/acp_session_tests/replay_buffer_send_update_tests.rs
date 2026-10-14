@@ -61,7 +61,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         }
     });
     let (persistence_tx, persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
-    let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+    let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
     let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
     let terminal = Arc::new(DummyTerminal {});
     let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -132,6 +132,7 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
         compactions_remaining: std::cell::Cell::new(None),
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
+        text_repetition_guard: None,
         doom_loop_turn_tally: Default::default(),
         file_state_tracker: Arc::new(FileStateTracker::new()),
         rewind_pending_prompt: std::sync::Mutex::new(None),

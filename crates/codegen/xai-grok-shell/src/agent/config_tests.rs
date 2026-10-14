@@ -4562,6 +4562,73 @@ fn resolve_long_reasoning_reminder_precedence() {
         "env JSON enables over a TOML false and its tokens win; delay falls through"
     );
 }
+/// Gate: `[text_repetition_guard]` > remote `text_repetition_guard` > default(ON), merged per
+/// field; each layer's `Some(false)` is an independent kill switch (no env layer by design).
+#[test]
+#[serial]
+fn resolve_text_repetition_guard_precedence() {
+    use crate::util::config::TextRepetitionGuardSettings;
+    let default_cfg = Config::default();
+    let p = default_cfg
+        .resolve_text_repetition_guard()
+        .expect("default is ON");
+    assert_eq!(p.max_identical_token_run, 64, "default tunables unchanged");
+    assert_eq!(p.chunk_size, 50, "default tunables unchanged");
+    assert_eq!(p.chunk_repeat_threshold, 10, "default tunables unchanged");
+    assert_eq!(p.history_limit, 5000, "default tunables unchanged");
+
+    let toml_off = Config {
+        text_repetition_guard: TextRepetitionGuardSettings {
+            enabled: Some(false),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    assert!(
+        toml_off.resolve_text_repetition_guard().is_none(),
+        "TOML kill switch"
+    );
+
+    let remote_off = Config {
+        remote_settings: Some(crate::util::config::RemoteSettings {
+            text_repetition_guard: Some(TextRepetitionGuardSettings {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(
+        remote_off.resolve_text_repetition_guard().is_none(),
+        "remote settings kill switch"
+    );
+
+    // Per-field merge: TOML tunables beat remote tunables, unset fields fall through.
+    let tuned = Config {
+        text_repetition_guard: TextRepetitionGuardSettings {
+            enabled: None,
+            max_identical_token_run: Some(16),
+            chunk_repeat_threshold: Some(6),
+            chunk_size: None,
+            history_limit: None,
+        },
+        remote_settings: Some(crate::util::config::RemoteSettings {
+            text_repetition_guard: Some(TextRepetitionGuardSettings {
+                history_limit: Some(8000),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let p = tuned.resolve_text_repetition_guard().expect("on");
+    assert_eq!(p.max_identical_token_run, 16, "TOML beats remote");
+    assert_eq!(p.chunk_repeat_threshold, 6, "TOML beats remote");
+    assert_eq!(p.history_limit, 8000, "per-field remote merge");
+    assert_eq!(p.chunk_size, 50, "unset field keeps the default");
+}
+
 /// Gate precedence: env > `[doom_loop_recovery]` > remote settings > default(ON).
 /// The remote layer merges PER-FIELD from the nested `doom_loop_recovery` object, and each layer's `false` is an independent kill switch.
 /// One test covers the full ladder.

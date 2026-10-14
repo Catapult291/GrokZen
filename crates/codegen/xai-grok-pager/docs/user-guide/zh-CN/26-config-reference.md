@@ -579,6 +579,16 @@ Grok Build 还会按以下层级读取配置；后列层级优先，但 requirem
 | `telemetry.otel_log_tool_content` | `boolean` | `pin` | `user` | tool_input、tool_output、full_command 和 error_message 的正文开关；与 details 相互独立，默认关闭。只开 CONTENT 不会保留原样 MCP 名称和路径。也对应 `OTEL_LOG_TOOL_CONTENT`。 |
 | `telemetry.trace_upload` | `boolean` | `pin` | `user` | 上传会话跟踪数据；requirements 固定值优先于用户配置。 |
 
+### `text_repetition_guard`
+
+| 键 | 类型／取值 | Requirements | 托管 | 说明 |
+| --- | --- | --- | --- | --- |
+| `text_repetition_guard.enabled` | `boolean` | `yes` | `user` | 流式文本复读熔断总开关；模型输出退化为复读循环时自动中止本轮（`cancellation_category = repetition_guard`）。默认开启，设为 false 可禁用。 |
+| `text_repetition_guard.max_identical_token_run` | `integer` | `yes` | `user` | D1：连续相同 token 的熔断阈值（8..=4096，默认 64）。 |
+| `text_repetition_guard.chunk_size` | `integer` | `yes` | `user` | D2：分块大小，单位字符（16..=256，默认 50）。 |
+| `text_repetition_guard.chunk_repeat_threshold` | `integer` | `yes` | `user` | D2：同分块重复命中次数（4..=64，默认 10）。 |
+| `text_repetition_guard.history_limit` | `integer` | `yes` | `user` | D2：流式历史窗口，单位字符（250..=50000，默认 5000）。 |
+
 ### `tools`
 
 | 键 | 类型／取值 | Requirements | 托管 | 说明 |

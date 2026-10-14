@@ -739,6 +739,11 @@ pub struct Config {
     /// See [`crate::util::config::DoomLoopRecoverySettings`].
     #[serde(default)]
     pub doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings,
+    /// `[text_repetition_guard]` section: the shared settings struct.
+    /// ONE type serves this TOML table and the remote settings `text_repetition_guard` object.
+    /// See [`crate::util::config::TextRepetitionGuardSettings`].
+    #[serde(default)]
+    pub text_repetition_guard: crate::util::config::TextRepetitionGuardSettings,
     /// One type serves this TOML table and the remote `long_reasoning_reminder` object.
     #[serde(default)]
     pub long_reasoning_reminder: crate::util::config::LongReasoningReminderSettings,
@@ -1145,6 +1150,7 @@ impl Default for Config {
             goal: GoalConfig::default(),
             workflows: WorkflowsConfig::default(),
             doom_loop_recovery: crate::util::config::DoomLoopRecoverySettings::default(),
+            text_repetition_guard: crate::util::config::TextRepetitionGuardSettings::default(),
             long_reasoning_reminder: crate::util::config::LongReasoningReminderSettings::default(),
             worktree: WorktreeConfigSection::default(),
             auto_mode: AutoModeConfig::default(),
@@ -2030,6 +2036,53 @@ impl Config {
                     Policy::DEFAULT_RECOVERY_WINDOW_TOKENS,
                     Policy::clamp_window_tokens,
                 ),
+        })
+    }
+    /// Client-side text-repetition guard policy for streamed model output.
+    /// Merged PER-FIELD across the `[text_repetition_guard]` TOML table and the remote settings
+    /// `text_repetition_guard` object (TOML > remote > default; no env layer).
+    /// Gate: local `enabled` > remote `enabled` > default ON; `Some(false)` is the kill switch.
+    /// `None` disables the guard entirely, so disabled has exactly one spelling.
+    pub(crate) fn resolve_text_repetition_guard(
+        &self,
+    ) -> Option<xai_grok_sampling_types::TextRepetitionGuardPolicy> {
+        use xai_grok_sampling_types::TextRepetitionGuardPolicy as Policy;
+        let remote = self
+            .remote_settings
+            .as_ref()
+            .and_then(|s| s.text_repetition_guard.as_ref());
+        let enabled = self
+            .text_repetition_guard
+            .enabled
+            .or(remote.and_then(|s| s.enabled))
+            .unwrap_or(true);
+        enabled.then(|| Policy {
+            max_identical_token_run: self
+                .text_repetition_guard
+                .max_identical_token_run
+                .or(remote.and_then(|s| s.max_identical_token_run))
+                .map_or(
+                    Policy::DEFAULT_MAX_IDENTICAL_TOKEN_RUN,
+                    Policy::clamp_max_identical_token_run,
+                ),
+            chunk_size: self
+                .text_repetition_guard
+                .chunk_size
+                .or(remote.and_then(|s| s.chunk_size))
+                .map_or(Policy::DEFAULT_CHUNK_SIZE, Policy::clamp_chunk_size),
+            chunk_repeat_threshold: self
+                .text_repetition_guard
+                .chunk_repeat_threshold
+                .or(remote.and_then(|s| s.chunk_repeat_threshold))
+                .map_or(
+                    Policy::DEFAULT_CHUNK_REPEAT_THRESHOLD,
+                    Policy::clamp_chunk_repeat_threshold,
+                ),
+            history_limit: self
+                .text_repetition_guard
+                .history_limit
+                .or(remote.and_then(|s| s.history_limit))
+                .map_or(Policy::DEFAULT_HISTORY_LIMIT, Policy::clamp_history_limit),
         })
     }
     pub(crate) fn resolve_long_reasoning_reminder(
@@ -4867,6 +4920,7 @@ pub(crate) fn sampling_config_for_model(
         compactions_remaining: info.compactions_remaining,
         compaction_at_tokens: info.compaction_at_tokens,
         doom_loop_recovery: None,
+        text_repetition_guard: None,
         header_injector: None,
     }
 }
