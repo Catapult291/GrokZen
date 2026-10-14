@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.18",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.17",
+  "community": [
+    {
+      "text": "默认 Shell 新增 niubash 选项；Git Bash 恢复 MSYS 路径转换；超长命令改走暂存脚本避免静默截断。",
+      "commits": [
+        "e2446081e9b1e0c27b5bc81fdd43acff74ca2403",
+        "eb4aa26b6b485a3f3c3ec51ffe0ee9faf9640511",
+        "64bf624d21dfd39b2adcc0b07ac68c402eb58722"
+      ]
+    },
+    {
+      "text": "Windows Bash 家族命令合并 stdout/stderr；持久化后台任务退出后补发完成通知；配置文件身份改用文件系统真实 ID。",
+      "commits": [
+        "e2446081e9b1e0c27b5bc81fdd43acff74ca2403",
+        "eb4aa26b6b485a3f3c3ec51ffe0ee9faf9640511",
+        "64bf624d21dfd39b2adcc0b07ac68c402eb58722"
+      ]
+    },
+    {
+      "text": "detach 与 hook 强制确认不再被 yolo 自动应答吞掉；修复 Windows 路径、后台 worker 自杀与跨平台编译问题。",
+      "commits": [
+        "e2446081e9b1e0c27b5bc81fdd43acff74ca2403",
+        "eb4aa26b6b485a3f3c3ec51ffe0ee9faf9640511",
+        "64bf624d21dfd39b2adcc0b07ac68c402eb58722"
+      ]
+    }
+  ],
+  "upstream": []
+}
