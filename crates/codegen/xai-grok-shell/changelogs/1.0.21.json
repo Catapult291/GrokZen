@@ -1,17 +1,47 @@
 [
   {
-    "category": "fixes",
-    "description": "**Permission mode** (auto / always-approve) now stays visible when the agent enters plan mode and is restored on exit.",
+    "category": "features",
+    "description": "**Synced with upstream 1.0.45** — one merge absorbs the upstream Chinese fork through `release-v1.0.45` (official monorepo content roughly 1.0.25–1.0.45). Privacy hardening, the Windows adaptations, and the update channel pointing at this repository are kept.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Custom agents** from plugins or your config can now be chosen directly with spawn_subagent.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**MCP servers** can now use a token file that is re-read on every request so rotating credentials stay fresh.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Models can now show** a colored notice banner above the prompt while selected.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "Typing, pasting, or pressing Shift+Tab on the welcome screen now immediately opens the session instead of creating a duplicate one.",
+    "description": "**Subagent wait status** now correctly shows \"Waiting for N subagents…\" when the parent turn is blocked.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "Dock sections, queue body, and reveal rows now stay within their documented height rules even on crowded terminals.",
+    "description": "**Permission mode** (auto / always-approve) stays visible when the agent enters plan mode and is restored on exit.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Dock sections, queue body, and reveal rows** stay within their documented height rules even on crowded terminals.",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**Privacy gates stay closed through the sync** — `TELEMETRY_UPLOADS_ALLOWED=false` remains a compile-time gate; upstream tests that assume shared defaults take an in-test privacy branch instead of loosening the gate.",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**This is an independent community build** — it carries the privacy hardening and the Windows adaptations, and its version number follows this repository's own series.",
     "breaking_change": false
   }
 ]
