@@ -292,7 +292,11 @@ pub(super) fn render_auth(
                 area,
                 y,
                 bottom,
-                Line::from(Span::styled(err.clone(), gray)),
+                Line::from(Span::styled(
+                    xai_grok_pager::views::welcome::localized_auth_error_for_display(locale, err)
+                        .into_owned(),
+                    gray,
+                )),
             );
         }
         MinimalAuthHint::TrustFolder { workspace } => {

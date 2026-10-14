@@ -988,6 +988,7 @@
   "turn.interject.failed_requeued": "插话失败——已重新排队：{error}",
   "rewind.undo.failed": "撤销失败：{error}",
   "settings.persist.save_failed": "✗ 无法保存 {key}：{error}",
+  "auth.error.request_url": "无法向登录服务发送请求（{url}）",
   "auth.no_login_method": "没有可用的登录方式",
   "auth.reauthenticated_retrying": "已重新认证，正在重试…",
   "auth.post_login.team_applied": "已应用团队托管配置。",
