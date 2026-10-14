@@ -1,0 +1,47 @@
+[
+  {
+    "category": "features",
+    "description": "**已并入上游 1.0.45 能力** —— 一次合并吸收上游中文社区版至 `release-v1.0.45`（官方 monorepo 约 1.0.25–1.0.45），同时保留隐私加固、Windows 适配与指向本仓库的更新通道。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**自定义智能体**可通过 `spawn_subagent` 直接选择（来自插件或配置）。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**MCP 服务器**支持令牌文件，每次请求重新读取，轮换后的凭据立即生效。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**模型可显示彩色通知横幅**，选中期间显示在输入框上方。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**子代理等待状态**在父轮次被阻塞时正确显示“正在等待 N 个子代理…”。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**权限模式**（自动 / 始终批准）进入计划模式时保持可见，退出后恢复。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Dock 分区、队列主体与 reveal 行**在拥挤终端下仍遵守文档中的高度规则。",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**同步全程隐私门保持关闭** —— `TELEMETRY_UPLOADS_ALLOWED=false` 仍是编译期门；假定可共享默认值的上游测试改走测试内隐私分支，不放宽该门。",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**本版为社区独立构建** —— 包含隐私加固与 Windows 适配，版本号沿用本仓库自身序列。",
+    "breaking_change": false
+  }
+]
