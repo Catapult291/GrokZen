@@ -165,6 +165,8 @@ pub(crate) fn prior_turn_interrupt_from_cancellation(
         CancellationCategory::PermissionRejected => Some(PriorTurnInterrupt::PermissionRejected),
         CancellationCategory::PermissionCancelled => Some(PriorTurnInterrupt::PermissionCancelled),
         CancellationCategory::HookDenied => None,
+        // Automatic, not a user interrupt: no envelope marker on the next user turn.
+        CancellationCategory::RepetitionGuard => None,
     }
 }
 
@@ -621,6 +623,10 @@ mod tests {
         // Automatic terminations are NOT user interrupts, so they get no marker
         assert_eq!(
             prior_turn_interrupt_from_cancellation(CancellationCategory::HookDenied),
+            None
+        );
+        assert_eq!(
+            prior_turn_interrupt_from_cancellation(CancellationCategory::RepetitionGuard),
             None
         );
     }

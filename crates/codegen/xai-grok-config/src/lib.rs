@@ -120,8 +120,8 @@ pub use remote_announcement::{AnnouncementCta, RemoteAnnouncement};
 pub use remote_fetch::{remote_fetch_enabled_from_layers, resolve_remote_fetch_enabled};
 pub use remote_settings::{
     CampaignOverride, ConsentGate, ContextualHintsRemote, DoomLoopRecoverySettings, GoalRoleModel,
-    LongReasoningReminderSettings, RemoteRequestEncoding, RemoteSettings, WorktreeAutoGcSettings,
-    WorktreeKindMaxAge, deserialize_tolerant,
+    LongReasoningReminderSettings, RemoteRequestEncoding, RemoteSettings,
+    TextRepetitionGuardSettings, WorktreeAutoGcSettings, WorktreeKindMaxAge, deserialize_tolerant,
 };
 pub use resolved::{BoolFlag, ConfigSource, Resolved, resolve_string_flag};
 pub use validation::{

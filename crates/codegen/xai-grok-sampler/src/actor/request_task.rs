@@ -148,6 +148,7 @@ pub(crate) async fn run_request_task(
             &cancel_token,
             doom_check,
             Arc::clone(&output_observed),
+            config.text_repetition_guard,
         )
         .instrument(sampling_span.clone())
         .await;
@@ -249,6 +250,18 @@ pub(crate) async fn run_request_task(
                 recovery_items,
             } => {
                 completion.merge_doom_loop_signals(doom_loop_signals);
+                // A text-repetition trip is terminal for the request: the streamed output is
+                // poisoned, so there is nothing to resample and no transport retry to consult.
+                // The shell maps the kind onto a repetition-guard turn cancellation.
+                if let SamplingError::TextRepetitionDetected { .. } = &error {
+                    let terminal_event_queued = emit_failed(&event_tx, &request_id, &error);
+                    send_completion(
+                        &mut completion,
+                        Err(clone_error(&error)),
+                        terminal_event_queued,
+                    );
+                    return request_id;
+                }
                 // Doom-loop resamples run on their own budget and never consult the transport classifier
                 // No classifier change can silently debit the transport budget for a doom failure
                 if let SamplingError::DoomLoopDetected { .. } = &error {
@@ -533,6 +546,7 @@ async fn run_one_attempt(
     cancel_token: &CancellationToken,
     doom_check: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
+    text_repetition_guard: Option<xai_grok_sampling_types::TextRepetitionGuardPolicy>,
 ) -> AttemptOutcome {
     let length_policy = request.length_policy;
     match client.api_backend() {
@@ -553,6 +567,7 @@ async fn run_one_attempt(
                 FailedResponseCapture::default(),
                 output_observed,
                 length_policy,
+                text_repetition_guard,
             )
             .await
         }
@@ -593,6 +608,7 @@ async fn run_one_attempt(
                 failed_response,
                 output_observed,
                 length_policy,
+                text_repetition_guard,
             )
             .await
         }
@@ -613,6 +629,7 @@ async fn run_one_attempt(
                 FailedResponseCapture::default(),
                 output_observed,
                 length_policy,
+                text_repetition_guard,
             )
             .await
         }
@@ -658,8 +675,10 @@ async fn drive_l2(
     failed_response: FailedResponseCapture,
     output_observed: Arc<AtomicBool>,
     length_policy: xai_grok_sampling_types::LengthPolicy,
+    text_repetition_guard: Option<xai_grok_sampling_types::TextRepetitionGuardPolicy>,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
+    let mut repetition_guard = text_repetition_guard.map(crate::text_repetition::TextRepetitionGuard::new);
     let mut doom_loop_signals = Vec::new();
     let mut await_first_output_span = Some(tracing::info_span!("sampling.await_first_output"));
     loop {
@@ -750,6 +769,24 @@ async fn drive_l2(
                     });
                 }
                 Some(other) => {
+                    // Judge model-authored message text before it is forwarded: on a trip the
+                    // triggering chunk never reaches the session and the attempt fails terminally.
+                    if let SamplingEvent::ChannelToken { channel, text, .. } = &other
+                        && *channel == crate::events::SamplingChannel::Text
+                        && let Some(trip) = repetition_guard
+                            .as_mut()
+                            .and_then(|guard| guard.on_text_chunk(text))
+                    {
+                        return AttemptOutcome::Failed {
+                            error: SamplingError::TextRepetitionDetected {
+                                trigger: trip.trigger,
+                                generated_chars: trip.generated_chars,
+                                threshold: trip.threshold,
+                            },
+                            doom_loop_signals,
+                            recovery_items: Vec::new(),
+                        };
+                    }
                     if matches!(
                         other,
                         SamplingEvent::FirstToken { .. }
@@ -834,6 +871,21 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
             triggers: info.doom_loop_triggers.clone().unwrap_or_default(),
             aborted_at_chunk: info.doom_loop_aborted_at_chunk,
         },
+        SamplingErrorKind::TextRepetitionDetected => {
+            let trip = info
+                .text_repetition
+                .clone()
+                .unwrap_or(xai_grok_sampling_types::TextRepetitionTrip {
+                    trigger: xai_grok_sampling_types::TextRepetitionTrigger::IdenticalRun,
+                    generated_chars: 0,
+                    threshold: 0,
+                });
+            SamplingError::TextRepetitionDetected {
+                trigger: trip.trigger,
+                generated_chars: trip.generated_chars,
+                threshold: trip.threshold,
+            }
+        }
     }
 }
 
@@ -940,7 +992,8 @@ fn strip_reason_for_image_error(err: &SamplingError) -> StripReason {
         | SamplingError::IdleTimeout { .. }
         | SamplingError::EmptyResponse { .. }
         | SamplingError::MaxTokensTruncation
-        | SamplingError::DoomLoopDetected { .. } => StripReason::PayloadHeuristic,
+        | SamplingError::DoomLoopDetected { .. }
+        | SamplingError::TextRepetitionDetected { .. } => StripReason::PayloadHeuristic,
     }
 }
 
@@ -976,6 +1029,7 @@ fn handle_cancellation(
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        text_repetition: None,
         credential: SentCredential::Unknown,
     };
     let terminal_event_queued = event_tx
@@ -1104,6 +1158,7 @@ mod tests {
             FailedResponseCapture::default(),
             Arc::new(AtomicBool::new(false)),
             policy,
+            None,
         )
         .await
     }
@@ -1124,6 +1179,7 @@ mod tests {
             FailedResponseCapture::default(),
             Arc::new(AtomicBool::new(false)),
             xai_grok_sampling_types::LengthPolicy::Fail,
+            None,
         )
         .await
     }
@@ -1187,6 +1243,7 @@ mod tests {
             FailedResponseCapture::default(),
             Arc::new(AtomicBool::new(false)),
             xai_grok_sampling_types::LengthPolicy::Fail,
+            None,
         )
         .await;
 
@@ -1241,6 +1298,54 @@ mod tests {
             response.stop_reason,
             Some(xai_grok_sampling_types::StopReason::Length)
         );
+    }
+
+    /// Handoff §6.3 (sampler half): a mock stream of repetition-flood text deltas must fail the
+    /// attempt with `TextRepetitionDetected` instead of completing it.
+    #[tokio::test]
+    async fn repetition_guard_aborts_attempt_on_text_flood() {
+        use crate::events::SamplingChannel;
+        let (event_tx, _event_rx) = mpsc::unbounded_channel();
+        let deltas = (0u64..400).map(|chunk_index| SamplingEvent::ChannelToken {
+            request_id: RequestId::from("repetition-flood"),
+            channel: SamplingChannel::Text,
+            text: "<br>\n".to_string(),
+            chunk_index,
+        });
+        let outcome = drive_l2(
+            stream::iter(deltas),
+            RequestId::from("repetition-flood"),
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            FailedResponseCapture::default(),
+            Arc::new(AtomicBool::new(false)),
+            xai_grok_sampling_types::LengthPolicy::Fail,
+            Some(xai_grok_sampling_types::TextRepetitionGuardPolicy::default()),
+        )
+        .await;
+        let AttemptOutcome::Failed { error, .. } = outcome else {
+            panic!("flooded text stream must fail the attempt, got {outcome:?}");
+        };
+        assert!(
+            matches!(
+                error,
+                xai_grok_sampling_types::SamplingError::TextRepetitionDetected { .. }
+            ),
+            "expected TextRepetitionDetected, got {error:?}"
+        );
+        // The trip fires early: well under the full 400-delta (2,000-character) flood.
+        if let xai_grok_sampling_types::SamplingError::TextRepetitionDetected {
+            generated_chars,
+            ..
+        } = error
+        {
+            assert!(
+                generated_chars <= 2_000,
+                "guard must trip within the first 2,000 characters, fired at {generated_chars}"
+            );
+        }
     }
 
     fn with_tool_call(mut event: SamplingEvent, arguments: &str) -> SamplingEvent {
@@ -1330,6 +1435,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            text_repetition: None,
             credential: SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
@@ -1353,6 +1459,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            text_repetition: None,
             credential: SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);
@@ -1431,6 +1538,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            text_repetition: None,
             credential: SentCredential::Unknown,
         };
         let err = synthesize_from_info(&info);

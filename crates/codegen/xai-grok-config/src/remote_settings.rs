@@ -34,6 +34,30 @@ pub struct DoomLoopRecoverySettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub window_tokens: Option<u32>,
 }
+/// Text-repetition guard settings: one struct serves both the local `[text_repetition_guard]` TOML
+/// table and the remote `text_repetition_guard` JSON object. Every field is `Option` with a
+/// per-field default, so a partial object parses and unknown future keys are ignored.
+/// Unset fields fall through per-field in `resolve_text_repetition_guard`: TOML, then remote, then default.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TextRepetitionGuardSettings {
+    /// Master switch for the streaming text-repetition guard (default on).
+    /// `Some(false)` is the kill switch; absent uses the client default (on).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// D1: identical-token run cap (clamped to 8..=4096; absent uses the client default, 64).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_identical_token_run: Option<u32>,
+    /// D2: chunk size in characters (clamped to 16..=256; absent uses the client default, 50).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_size: Option<u32>,
+    /// D2: same-chunk repeat threshold (clamped to 4..=64; absent uses the client default, 10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_repeat_threshold: Option<u32>,
+    /// D2: history window in characters (clamped to 250..=50000; absent uses the client default, 5000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_limit: Option<u32>,
+}
 /// Shared shape of the `[long_reasoning_reminder]` TOML table and the remote `long_reasoning_reminder` object; unset fields fall through per field.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default)]
@@ -424,6 +448,10 @@ pub struct RemoteSettings {
     /// Absent means every knob falls through to TOML/defaults; a partial object falls through per-field.
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoverySettings>,
+    /// The remote settings `text_repetition_guard` JSON object; see [`TextRepetitionGuardSettings`].
+    /// Absent means every knob falls through to TOML/defaults; a partial object falls through per-field.
+    #[serde(default)]
+    pub text_repetition_guard: Option<TextRepetitionGuardSettings>,
     /// Automatic worktree GC policy; see [`WorktreeAutoGcSettings`].
     /// Absent means every knob falls through to TOML/defaults; a partial object falls through per-field.
     /// A value that is present but malformed drops to `None` instead of failing the whole `RemoteSettings` parse.

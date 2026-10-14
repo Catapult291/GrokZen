@@ -3177,6 +3177,37 @@ impl SessionActor {
                     turn_phases.record_sampling_retries(1);
                     continue;
                 }
+                Ok(SamplerTurnOutcome::TurnCancelledByRepetitionGuard { trip }) => {
+                    // Visible transcript note (handoff §5.3.2) and a model-visible reminder
+                    // (§5.3.3) so the next call does not blindly continue the poisoned output.
+                    let trigger = trip.trigger.as_str();
+                    let notice = format!(
+                        "已自动中止本轮：检测到输出复读循环（连续 {} 次相同片段 / 触发器 {trigger}）。\
+                         可直接重试；若反复出现，建议 /compact 或新开会话。",
+                        trip.threshold
+                    );
+                    self.send_hook_annotation_with_kind(
+                        crate::extensions::notification::HookAnnotationKind::Note,
+                        &format!("\u{26a0} {notice}"),
+                    )
+                    .await;
+                    self.push_system_reminder(&format!(
+                        "The previous turn was automatically stopped because the model's output \
+                         entered a repetition loop (detector: {trigger}). Do not continue that \
+                         output; address the user's latest message afresh. If you notice yourself \
+                         repeating the same phrase, stop and ask the user for guidance."
+                    ));
+                    return Ok(TurnOutcome::Cancelled {
+                        category: Some(
+                            crate::session::events::CancellationCategory::RepetitionGuard,
+                        ),
+                        context: Some(crate::session::commands::CancellationContext {
+                            reason: Some(format!("text_repetition:{trigger}")),
+                            trigger: Some("auto".to_string()),
+                            ..Default::default()
+                        }),
+                    });
+                }
                 Ok(SamplerTurnOutcome::RefreshAuthAndResubmit { credential, store }) => {
                     if auth_retry_schedule.reset_if_incident_spans_suspend() {
                         tracing::info!("auth 401 retry: incident spanned a suspend; budget reset");

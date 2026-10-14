@@ -506,6 +506,19 @@ impl SessionActor {
                 );
                 self.signals_handle()
                     .record_error_typed(error.kind.as_ref());
+                // Text-repetition guard: the trip detail rides the error payload (request still
+                // owned above, so this lands on the aborting turn and cannot leak into the next).
+                if error.kind == xai_grok_sampler::SamplingErrorKind::TextRepetitionDetected
+                    && let Some(trip) = &error.text_repetition
+                {
+                    self.signals_handle()
+                        .record_text_repetition_abort(trip.trigger.as_str());
+                    self.emit_event(crate::session::events::Event::TextRepetitionTripped {
+                        trigger: trip.trigger.as_str().to_string(),
+                        generated_chars: trip.generated_chars,
+                        threshold: u64::from(trip.threshold),
+                    });
+                }
                 if let Some(ref ctx) = error.empty_response_context {
                     tracing::info!(
                         empty_response = true,

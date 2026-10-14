@@ -2364,6 +2364,7 @@ mod tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            text_repetition: None,
             credential: xai_grok_sampling_types::SentCredential::Unknown,
         };
         // SamplingError is not PartialEq (it carries reqwest/serde errors), so destructure once and compare all fields in a single assert

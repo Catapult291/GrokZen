@@ -811,6 +811,11 @@ pub(crate) struct SessionActor {
     /// Server-side doom-loop check policy, resolved once at spawn by `Config::resolve_doom_loop_recovery`; `None` means disabled.
     /// `reconstruct_full_config` threads it into the sampler config, and the sampler itself sends the matching `x-grok-doom-loop-check` header.
     pub(crate) doom_loop_recovery: Option<xai_grok_sampling_types::DoomLoopRecoveryPolicy>,
+    /// Client-side text-repetition guard policy, resolved once at spawn by
+    /// `Config::resolve_text_repetition_guard`; `None` means disabled. Threaded into the sampler
+    /// config each turn; a trip fails the attempt with kind `TextRepetitionDetected`, which the
+    /// turn loop converts into a `repetition_guard` cancellation.
+    pub(crate) text_repetition_guard: Option<xai_grok_sampling_types::TextRepetitionGuardPolicy>,
     /// Telemetry-only per-turn detector/recovery tally (deduplicated labels, attempts, budget-spent accept, tightest recovery trigger).
     /// Accumulated by the event drainer and taken at turn end for analytics events.
     pub(crate) doom_loop_turn_tally:

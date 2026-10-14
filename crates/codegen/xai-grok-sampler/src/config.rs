@@ -119,6 +119,11 @@ pub struct SamplerConfig {
     #[serde(default)]
     pub doom_loop_recovery: Option<DoomLoopRecoveryPolicy>,
 
+    /// Client-side text-repetition guard policy for message-channel text; `None` disables it.
+    /// Trips abort the attempt (never resample): poisoned output must not be replayed.
+    #[serde(default)]
+    pub text_repetition_guard: Option<xai_grok_sampling_types::TextRepetitionGuardPolicy>,
+
     /// Per-request header injector (e.g. OTel traceparent). Called in `post()`.
     #[serde(skip)]
     pub header_injector: Option<SharedHeaderInjector>,
@@ -163,6 +168,7 @@ impl Default for SamplerConfig {
             compactions_remaining: None,
             compaction_at_tokens: None,
             doom_loop_recovery: None,
+            text_repetition_guard: None,
             header_injector: None,
         }
     }

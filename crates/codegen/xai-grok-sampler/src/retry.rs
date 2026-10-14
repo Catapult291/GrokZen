@@ -285,6 +285,17 @@ pub fn format_sampling_error(err: &SamplingError, retry_count: Option<u32>) -> S
                 triggers.join(", ")
             )
         }
+        SamplingError::TextRepetitionDetected {
+            trigger,
+            generated_chars,
+            ..
+        } => {
+            format!(
+                "{}Output repetition guard tripped ({}) after {generated_chars} characters; ending the turn.",
+                retry_prefix,
+                trigger.as_str(),
+            )
+        }
     }
 }
 
@@ -339,6 +350,15 @@ pub(crate) fn clone_error(err: &SamplingError) -> SamplingError {
         } => SamplingError::DoomLoopDetected {
             triggers: triggers.clone(),
             aborted_at_chunk: *aborted_at_chunk,
+        },
+        SamplingError::TextRepetitionDetected {
+            trigger,
+            generated_chars,
+            threshold,
+        } => SamplingError::TextRepetitionDetected {
+            trigger: *trigger,
+            generated_chars: *generated_chars,
+            threshold: *threshold,
         },
     }
 }

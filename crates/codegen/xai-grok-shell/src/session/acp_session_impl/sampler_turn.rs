@@ -109,7 +109,8 @@ pub(super) fn transient_retry_eligible(error: &xai_grok_sampler::SamplingErrorIn
         | SamplingErrorKind::RateLimited
         | SamplingErrorKind::EmptyResponse
         | SamplingErrorKind::MaxTokensTruncation
-        | SamplingErrorKind::DoomLoopDetected => false,
+        | SamplingErrorKind::DoomLoopDetected
+        | SamplingErrorKind::TextRepetitionDetected => false,
     }
 }
 
@@ -299,6 +300,7 @@ fn revoked_sampling_info() -> xai_grok_sampler::SamplingErrorInfo {
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        text_repetition: None,
         credential: xai_grok_sampling_types::SentCredential::Unknown,
     }
 }
@@ -796,6 +798,7 @@ impl SessionActor {
             compaction_at_tokens: self.compaction_at_tokens.get(),
             // The sampler sends the opt-in header itself when this is set.
             doom_loop_recovery: self.doom_loop_recovery,
+            text_repetition_guard: self.text_repetition_guard,
             header_injector: Some(std::sync::Arc::new(TraceContextInjector)),
         }
     }
@@ -1039,6 +1042,8 @@ impl SessionActor {
             || self.tool_context.sampler_retry_only_before_output
         {
             sampler_config.doom_loop_recovery = None;
+            // The text-repetition guard stays armed for budgeted/one-shot streams too: it aborts
+            // (never resamples), which is exactly the sanctioned handling for poisoned output.
         }
         // Carry over the session's per-chunk idle timeout via `SamplerConfig.idle_timeout_secs`
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
@@ -1195,6 +1200,20 @@ impl SessionActor {
         park: TurnParkState,
     ) -> Result<SamplerFailureRecovery, acp::Error> {
         use xai_grok_sampler::SamplingErrorKind;
+
+        // The repetition guard already decided this turn is over: no compaction ladder, no
+        // transient budget, no error banner. Surface a dedicated cancelled outcome instead and
+        // let the turn loop end the turn under `cancellation_category = repetition_guard`.
+        if error.kind == SamplingErrorKind::TextRepetitionDetected {
+            let trip = error.text_repetition.clone().unwrap_or(
+                xai_grok_sampling_types::TextRepetitionTrip {
+                    trigger: xai_grok_sampling_types::TextRepetitionTrigger::IdenticalRun,
+                    generated_chars: 0,
+                    threshold: 0,
+                },
+            );
+            return Ok(SamplerFailureRecovery::TurnCancelledByRepetitionGuard { trip });
+        }
 
         // On an in-flight salvage continuation, a max-tokens failure or a probable context overflow is not terminal.
         // Return before the budgeted-child rewrites so the marker survives for workflow children.
@@ -1954,6 +1973,9 @@ impl SessionActor {
             SamplerFailureRecovery::RetryTransient { kind, status_code } => {
                 Ok(SamplerTurnOutcome::RetryTransient { kind, status_code })
             }
+            SamplerFailureRecovery::TurnCancelledByRepetitionGuard { trip } => {
+                Ok(SamplerTurnOutcome::TurnCancelledByRepetitionGuard { trip })
+            }
         }
     }
 
@@ -2368,6 +2390,7 @@ mod stream_drain_tests {
             empty_response_context: None,
             doom_loop_triggers: None,
             doom_loop_aborted_at_chunk: None,
+            text_repetition: None,
             credential: xai_grok_sampling_types::SentCredential::Unknown,
         };
         let result = error_after_stream_drain(StreamDrainOutcome::Revoked, original);

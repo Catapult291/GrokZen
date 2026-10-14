@@ -22,6 +22,7 @@ fn error_of_kind(
         empty_response_context: None,
         doom_loop_triggers: None,
         doom_loop_aborted_at_chunk: None,
+        text_repetition: None,
         credential: xai_grok_sampling_types::SentCredential::Unknown,
     }
 }

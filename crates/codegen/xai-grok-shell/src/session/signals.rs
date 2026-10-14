@@ -290,6 +290,14 @@ pub struct SessionSignals {
     /// Stream chunks consumed by doomed attempts at their mid-stream abort points, summed across resamples (terminal detections add nothing).
     #[serde(default)]
     pub doom_loop_recovery_aborted_chunks: u64,
+    /// Text-repetition guard aborts: streamed model text degenerated into a repetition loop and the
+    /// harness ended the turn (`cancellation_category = repetition_guard`).
+    #[serde(default)]
+    pub text_repetition_aborts: u32,
+    /// Which sub-detector fired the session's first text-repetition abort
+    /// (`identical_run` | `chunk_periodicity`); first-wins, labels only.
+    #[serde(default)]
+    pub text_repetition_guard_top_trigger: Option<String>,
     /// Configured idle timeout threshold (seconds); set once at session start.
     #[serde(default)]
     pub inference_idle_timeout_configured_secs: Option<u64>,
@@ -462,6 +470,9 @@ pub enum SignalEvent {
     RecordDoomLoopAcceptedAfterBudget {
         triggers: Vec<String>,
     },
+
+    /// Record a text-repetition guard abort; `trigger` is `identical_run` | `chunk_periodicity`.
+    RecordTextRepetitionAbort { trigger: String },
 
     /// Set-once tracing config fields (idle timeout threshold).
     /// Called once at session construction; preserved on the backend when unset.
@@ -716,6 +727,14 @@ impl SessionSignalsHandle {
         let _ = self
             .tx
             .send(SignalEvent::RecordDoomLoopAcceptedAfterBudget { triggers });
+    }
+
+    /// Record a text-repetition guard abort (streamed output degenerated; turn ended automatically).
+    /// `trigger` is the sub-detector label: `identical_run` | `chunk_periodicity`.
+    pub(crate) fn record_text_repetition_abort(&self, trigger: &str) {
+        let _ = self.tx.send(SignalEvent::RecordTextRepetitionAbort {
+            trigger: trigger.to_string(),
+        });
     }
 
     /// Set-once tracing config fields at session construction.
@@ -1107,6 +1126,13 @@ impl SessionSignalsActor {
                 SignalEvent::RecordDoomLoopAcceptedAfterBudget { triggers } => {
                     self.signals.doom_loop_recovery_accepted_after_budget += 1;
                     self.merge_doom_loop_top_trigger(&triggers);
+                }
+                SignalEvent::RecordTextRepetitionAbort { trigger } => {
+                    self.signals.text_repetition_aborts += 1;
+                    // First-wins: the session's original detector is the stable "top" label.
+                    if self.signals.text_repetition_guard_top_trigger.is_none() {
+                        self.signals.text_repetition_guard_top_trigger = Some(trigger);
+                    }
                 }
                 SignalEvent::SetTracingConfig {
                     inference_idle_timeout_configured_secs,

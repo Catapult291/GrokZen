@@ -581,6 +581,16 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | `telemetry.otel_log_tool_content` | `boolean` | `pin` | `user` | Body gate for tool_input, tool_output, full_command, and error_message. Independent of details; default off. CONTENT-only loses verbatim MCP names and paths. Also OTEL_LOG_TOOL_CONTENT. |
 | `telemetry.trace_upload` | `boolean` | `pin` | `user` | Upload session traces. Requirements pin beats user config. |
 
+### `text_repetition_guard`
+
+| Key | Type / Values | Requirements | Managed | Details |
+| --- | --- | --- | --- | --- |
+| `text_repetition_guard.enabled` | `boolean` | `yes` | `user` | Master switch for the streaming text-repetition guard: a turn whose model output degenerates into a repetition loop is aborted automatically (`cancellation_category = repetition_guard`). Default on; set false to disable. |
+| `text_repetition_guard.max_identical_token_run` | `integer` | `yes` | `user` | D1: consecutive identical tokens that trip the guard (8..=4096, default 64). |
+| `text_repetition_guard.chunk_size` | `integer` | `yes` | `user` | D2: chunk size in characters (16..=256, default 50). |
+| `text_repetition_guard.chunk_repeat_threshold` | `integer` | `yes` | `user` | D2: same-chunk repeats that trip the guard (4..=64, default 10). |
+| `text_repetition_guard.history_limit` | `integer` | `yes` | `user` | D2: streaming history window in characters (250..=50000, default 5000). |
+
 ### `tools`
 
 | Key | Type / Values | Requirements | Managed | Details |

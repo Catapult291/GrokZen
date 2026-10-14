@@ -1186,6 +1186,26 @@ async fn test_doom_loop_recovery_counters() {
 }
 
 #[tokio::test]
+async fn test_text_repetition_abort_counters() {
+    let (handle, actor) = SessionSignalsActor::new();
+    let actor_handle = tokio::spawn(actor.run());
+
+    handle.record_text_repetition_abort("chunk_periodicity");
+    handle.record_text_repetition_abort("identical_run");
+
+    let snap = handle.snapshot().await.unwrap();
+    assert_eq!(snap.text_repetition_aborts, 2);
+    assert_eq!(
+        snap.text_repetition_guard_top_trigger.as_deref(),
+        Some("chunk_periodicity"),
+        "the session's first detector keeps the top-trigger slot"
+    );
+
+    handle.shutdown();
+    actor_handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn test_set_tracing_config() {
     let (handle, actor) = SessionSignalsActor::new();
     let actor_handle = tokio::spawn(actor.run());
