@@ -1018,6 +1018,21 @@ impl ConversationItem {
         })
     }
 
+    /// Create the startup `<user_info>` / rules / VCS-status prefix inserted after the primary prompt.
+    /// Tagged [`SyntheticReason::SessionPrefix`] so `main_turn_count` and title-refresh checkpoints skip it.
+    /// Still a `User` content part on the wire — the reason is internal turn-metadata only.
+    pub fn session_prefix(content: impl Into<String>) -> Self {
+        Self::User(UserItem {
+            content: vec![ContentPart::Text {
+                text: Arc::<str>::from(content.into()),
+            }],
+            synthetic_reason: SyntheticReason::SessionPrefix,
+            cwd_generation: None,
+            prior_turn_interrupt: None,
+            prompt_index: None,
+        })
+    }
+
     /// Create a synthetic user message for a runtime system reminder.
     /// Used for injected `<system-reminder>` content such as skill discovery updates and plan-mode reminders.
     /// Tagged with [`SyntheticReason::SystemReminder`] so downstream code can skip it when counting real user prompts.
@@ -2270,6 +2285,17 @@ mod tests {
     use super::*;
     use crate::tool_overrides::*;
     use assert_matches::assert_matches;
+
+    #[test]
+    fn session_prefix_is_tagged_and_not_human() {
+        let item = ConversationItem::session_prefix("<user_info>OS: test</user_info>");
+        let ConversationItem::User(u) = &item else {
+            panic!("session_prefix must be a User item");
+        };
+        assert_eq!(u.synthetic_reason, SyntheticReason::SessionPrefix);
+        assert!(!u.synthetic_reason.is_human());
+        assert!(!u.synthetic_reason.starts_prompt_turn());
+    }
 
     /// Keeps `forwards_prompt_cache_key()` honest against each mapping: a key that never reaches the wire looks like a 0% cache hit, not a bug.
     #[test]

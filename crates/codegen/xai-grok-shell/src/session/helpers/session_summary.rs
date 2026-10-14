@@ -40,6 +40,44 @@ pub(crate) fn checkpoints_reached(turns: usize) -> usize {
 /// Applied on a char boundary, so a multibyte title is capped a little shorter, which is fine for a safety bound.
 const TITLE_MAX_BYTES: usize = 80;
 
+/// Hard cap on fallback title length in Unicode scalar values.
+/// Whitespace-word capping alone leaves CJK prompts almost intact (few spaces), so a Chinese first prompt used to become the entire title.
+/// 50 keeps a normal 10-word English title intact (`"one two … ten"` is 49 chars) while still cutting a long CJK first prompt.
+const TITLE_FALLBACK_MAX_CHARS: usize = 50;
+
+/// Max consecutive failed refresh attempts at a checkpoint before force-advancing.
+/// Failure no longer burns the checkpoint on the first miss, but a permanently broken backend still freezes after this many tries.
+pub(crate) const TITLE_REFRESH_MAX_ATTEMPTS: u32 = 3;
+
+/// Decide the next title-refresh checkpoint after one attempt.
+///
+/// `current_idx` is the durable watermark (checkpoints already committed).
+/// `target_idx` is [`checkpoints_reached`] for the current main-turn count (`target_idx > current_idx` when a refresh is due).
+/// `success` is whether the model produced a non-empty title.
+/// `consecutive_failures` is the in-memory failure streak at `current_idx` *before* this attempt.
+///
+/// Returns `(next_idx, next_consecutive_failures, persist_watermark)`:
+/// - Success advances to `target_idx` (catch-up preserved) and clears the streak.
+/// - Failure leaves the checkpoint open so the next successful turn can retry.
+/// - After [`TITLE_REFRESH_MAX_ATTEMPTS`] consecutive failures the checkpoint is force-advanced so a bad model cannot spawn side-calls forever.
+pub(crate) fn next_title_refresh_state(
+    current_idx: usize,
+    target_idx: usize,
+    success: bool,
+    consecutive_failures: u32,
+) -> (usize, u32, bool) {
+    debug_assert!(target_idx > current_idx);
+    if success {
+        return (target_idx, 0, true);
+    }
+    let failures = consecutive_failures.saturating_add(1);
+    if failures >= TITLE_REFRESH_MAX_ATTEMPTS {
+        (target_idx, 0, true)
+    } else {
+        (current_idx, failures, false)
+    }
+}
+
 /// An explicit sampler route a backend pins its titles to, instead of the configured default.
 #[derive(Clone)]
 pub struct DirectSessionTitleRoute {
@@ -182,18 +220,22 @@ pub fn title_source_text(user_message: &str) -> String {
 }
 
 /// The deterministic first-ten-words fallback shared by every initial-title path.
+/// Also hard-capped by character count so space-delimited languages keep the word rule while CJK (almost no spaces) cannot spill the whole prompt into the title.
 pub fn title_fallback_from_user_text(user_message: &str) -> String {
     let text = title_source_text(user_message);
-    let s = text
+    let mut s = text
         .split_whitespace()
         .take(10)
         .collect::<Vec<_>>()
         .join(" ");
     if s.is_empty() {
-        "New session".to_string()
-    } else {
-        s
+        return "New session".to_string();
     }
+    if s.chars().count() > TITLE_FALLBACK_MAX_CHARS {
+        s = s.chars().take(TITLE_FALLBACK_MAX_CHARS).collect();
+        s = s.trim_end().to_string();
+    }
+    s
 }
 
 pub(super) fn contains_han(text: &str) -> bool {
@@ -484,6 +526,59 @@ mod tests {
                 "one two three four five six seven eight nine ten eleven"
             ),
             "one two three four five six seven eight nine ten"
+        );
+    }
+
+    #[test]
+    fn fallback_caps_cjk_without_spaces() {
+        use super::{TITLE_FALLBACK_MAX_CHARS, contains_han};
+        // Regression: a long Chinese first prompt used to become the entire title because
+        // whitespace-word capping alone almost never truncates CJK.
+        let long = format!(
+            "https://in.mesl.cloud/#/dashboard ，这是一个机场网站，我得先到官网打开10分钟订阅链接开关[Image #1] ，才能在代理软件导入、更新链接，怎么让这个开关保持打开状态？{}",
+            "继续补充很长的上下文内容".repeat(8)
+        );
+        let out = title_fallback_from_user_text(&long);
+        assert!(
+            out.chars().count() <= TITLE_FALLBACK_MAX_CHARS,
+            "fallback chars {} > cap {}: {out}",
+            out.chars().count(),
+            TITLE_FALLBACK_MAX_CHARS
+        );
+        assert!(contains_han(&out));
+        assert!(out.starts_with("https://in.mesl.cloud/#/dashboard"));
+        // Full prompt must not survive as the title.
+        assert_ne!(out, title_source_text(&long));
+    }
+
+    #[test]
+    fn fallback_empty_input_is_new_session() {
+        assert_eq!(title_fallback_from_user_text(""), "New session");
+    }
+
+    #[test]
+    fn next_title_refresh_success_advances_and_clears_failures() {
+        use super::next_title_refresh_state;
+        assert_eq!(next_title_refresh_state(0, 1, true, 2), (1, 0, true));
+        // Catch-up past a skipped checkpoint is preserved on success.
+        assert_eq!(next_title_refresh_state(0, 2, true, 0), (2, 0, true));
+    }
+
+    #[test]
+    fn next_title_refresh_failure_keeps_checkpoint_until_budget() {
+        use super::{TITLE_REFRESH_MAX_ATTEMPTS, next_title_refresh_state};
+        // First and second failures leave the checkpoint open (retry on the next successful turn).
+        assert_eq!(next_title_refresh_state(0, 1, false, 0), (0, 1, false));
+        assert_eq!(next_title_refresh_state(0, 1, false, 1), (0, 2, false));
+        // Third consecutive failure force-advances so a bad model cannot retry forever.
+        assert_eq!(
+            next_title_refresh_state(0, 1, false, TITLE_REFRESH_MAX_ATTEMPTS - 1),
+            (1, 0, true)
+        );
+        // Force-advance still catch-ups to the latest reached checkpoint.
+        assert_eq!(
+            next_title_refresh_state(0, 2, false, TITLE_REFRESH_MAX_ATTEMPTS - 1),
+            (2, 0, true)
         );
     }
 
