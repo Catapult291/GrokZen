@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.17",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.16",
+  "community": [
+    {
+      "text": "`/fork` 支持从较早轮次分叉；`/undo` 独立为仅回退对话；会话选择器上限提升到 100 条并排除空壳会话。",
+      "commits": [
+        "798167a18586c6c17edd1fe1e67fd85e67b5f089"
+      ]
+    },
+    {
+      "text": "问题选项的自由回答支持粘贴图片；紧凑模式下的回底指示器独占一行，不再被输入框覆盖。",
+      "commits": [
+        "798167a18586c6c17edd1fe1e67fd85e67b5f089"
+      ]
+    }
+  ],
+  "upstream": []
+}
