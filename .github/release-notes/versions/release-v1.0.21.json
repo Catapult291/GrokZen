@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.21",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.20",
+  "community": [
+    {
+      "text": "一次性合并上游中文社区版至 release-v1.0.45（吸收官方 monorepo 约 1.0.25–1.0.45），保留隐私加固、Windows 适配与指向本仓库的更新通道。",
+      "commits": [
+        "888a60f57f2dded2eb94d34138dbfafc194e92b9",
+        "31ba6b197d01c74953e672aa7b7bcb098155c09b"
+      ]
+    },
+    {
+      "text": "补齐合并后界面中文：fork/删除会话/模型不匹配/截断展开等 question.* 提示，以及登录失败时的 reqwest 包装文案（显示“无法向登录服务发送请求（URL）”）。",
+      "commits": [
+        "067e9104127c329992ac7c6a506c657c96721b67",
+        "f666f0c5124a7a7be10573ed7532ab45fda45ae5"
+      ]
+    }
+  ],
+  "upstream": [
+    {
+      "base": "74448f295dc6db0a1df067a9c1b7cfb156d59fac",
+      "tip": "3f5d07f8cb2e9be395131296a3efc4635713db7f",
+      "label": "上游 1.0.17–1.0.45",
+      "highlights": [
+        {
+          "text": "插件或配置中的自定义智能体可直接作为子代理启动；父回合等待子代理时显示等待数量；新增 worktree create 等工作树操作。",
+          "commits": [
+            "bbde0a5dca12aff20c9efaae0903f7c0ecbe3e05"
+          ]
+        },
+        {
+          "text": "MCP 服务器支持令牌文件并按请求重读；结构化结果已含在文本中时不再重复显示；网关工具显示来源边界恢复。",
+          "commits": [
+            "bbde0a5dca12aff20c9efaae0903f7c0ecbe3e05",
+            "52e2fa08f30f6be51aba6b715cf55de46118fd3c"
+          ]
+        },
+        {
+          "text": "新增 /context-window；模型可显示彩色通知横幅；补齐 1.0.45 界面与文件夹信任确认等中文文案。",
+          "commits": [
+            "93000093194ee84af36cf68002cb638cadce22d4",
+            "2444a07a5ebde5edf06f3e08a2712a54b1323e59"
+          ]
+        },
+        {
+          "text": "同步 1.0.36–1.0.45 区间能力与中文回归修复，覆盖模型、技能、插件市场与计划约束等运行时文案。",
+          "commits": [
+            "0e7a82080a90e2848de6434f6781e9ee775d14e2",
+            "fbd6273ffae36dfdca8eace8e88a17a2a7affab9",
+            "2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8"
+          ]
+        }
+      ]
+    }
+  ]
+}
