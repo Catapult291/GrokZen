@@ -160,7 +160,8 @@ impl SessionActor {
         };
         let mut conversation = self.chat_state_handle.get_conversation().await;
         let insert_at = conversation.len().min(1);
-        conversation.insert(insert_at, ConversationItem::user(prefix));
+        // SessionPrefix (not Human): `<user_info>` must not count as a main turn for recap / title-refresh checkpoints.
+        conversation.insert(insert_at, ConversationItem::session_prefix(prefix));
         if !self.startup_hints.preserve_inherited_system
             && !conversation_has_project_instructions(&conversation)
             && let Some(agents_md_reminder) = self.agent.borrow().agents_md_user_reminder()

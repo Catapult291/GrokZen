@@ -1126,9 +1126,14 @@ pub(crate) struct SessionActor {
     /// A finishing task whose generation no longer matches must not persist its result.
     pub(crate) title_refresh_generation: std::cell::Cell<u64>,
     /// Index into `TITLE_REFRESH_TURNS` of the next checkpoint to apply.
-    /// Advanced when an attempt completes (success *or* failure, with catch-up past skipped checkpoints), and persisted to the watermark.
+    /// Advanced on a successful attempt (with catch-up past skipped checkpoints) and persisted to the watermark.
+    /// A failed attempt leaves the checkpoint open until the in-memory failure budget force-advances it (see `title_refresh_failures`).
     /// Once it reaches the end the title is frozen.
     pub(crate) next_title_refresh_idx: std::cell::Cell<usize>,
+    /// Consecutive failed title-refresh attempts at `next_title_refresh_idx`.
+    /// In-memory only: resume may retry a few more times before the force-advance budget is spent again.
+    /// Cleared on success, `/rename`, and force-advance.
+    pub(crate) title_refresh_failures: std::cell::Cell<u32>,
     /// True while THIS session has a prompt turn in flight (RAII-guarded in `handle_prompt`).
     /// `tool_context.is_turn_active` is the agent-wide coordinator flag shared by all sessions, so it is unusable for per-session decisions.
     /// `Arc` so it can be re-checked inside the chat-state actor's `RepairHistory` handler.

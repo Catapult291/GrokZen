@@ -11,7 +11,8 @@ use super::side_call::AuxCall;
 use crate::session::helpers::{session_recap, session_summary};
 
 /// Upper bound on the title-refresh model call so a hung backend cannot hold the one-at-a-time refresh slot indefinitely.
-const TITLE_REFRESH_MODEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(45);
+/// Generous relative to slow aux chains (observed mimo TTFT can exceed 80s); a hung backend still cannot hold the slot forever.
+const TITLE_REFRESH_MODEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl SessionActor {
     /// Spawn a title refresh after a successful turn, unless the title is frozen or one is already running.
@@ -25,7 +26,8 @@ impl SessionActor {
             return;
         }
         // One refresh at a time: a whole-conversation title doesn't need the very latest turn.
-        // Letting the in-flight call finish (rather than aborting and respawning every turn) guarantees the checkpoint is eventually consumed.
+        // Letting the in-flight call finish (rather than aborting and respawning every turn) guarantees the checkpoint is eventually
+        // committed (success, or force-advance after the failure budget) or left open for a retry on the next successful turn.
         // The check is `is_finished` (not just `is_some`) so a panicked task can't wedge the slot shut.
         if self
             .title_refresh_task
@@ -57,6 +59,7 @@ impl SessionActor {
             0
         };
         self.next_title_refresh_idx.set(idx);
+        self.title_refresh_failures.set(0);
         session_summary::save_title_refresh_watermark(
             &crate::session::persistence::session_dir(&self.session_info),
             idx,
@@ -74,8 +77,8 @@ impl SessionActor {
     }
 
     /// `generation` is the spawn-time token.
-    /// A persistently failing model therefore cannot keep spawning side-calls forever.
-    /// Only a stale attempt, one whose generation was bumped by an abort (prompt, rewind, shutdown), bails without consuming.
+    /// Only a stale attempt, one whose generation was bumped by an abort (prompt, rewind, shutdown), bails without committing.
+    /// A failed model call does **not** advance the checkpoint on the first miss; see [`session_summary::next_title_refresh_state`].
     async fn refresh_title(&self, generation: u64) {
         let conversation = self.chat_state_handle.get_conversation().await;
         let turns = session_recap::main_turn_count(&conversation);
@@ -92,12 +95,31 @@ impl SessionActor {
         if self.title_refresh_generation.get() != generation {
             return;
         }
-        self.next_title_refresh_idx.set(target_idx);
-        // Persist the checkpoint (even on a failed attempt) so the freeze is durable and a failing model can't keep re-attempting after resume
-        session_summary::save_title_refresh_watermark(
-            &crate::session::persistence::session_dir(&self.session_info),
+
+        let (next_idx, next_failures, persist) = session_summary::next_title_refresh_state(
+            idx,
             target_idx,
+            title.is_some(),
+            self.title_refresh_failures.get(),
         );
+        self.next_title_refresh_idx.set(next_idx);
+        self.title_refresh_failures.set(next_failures);
+        // Persist only committed advances (success, or the force-advance after the failure budget).
+        // A failed-but-retryable attempt leaves the watermark untouched so resume still retries.
+        if persist {
+            session_summary::save_title_refresh_watermark(
+                &crate::session::persistence::session_dir(&self.session_info),
+                next_idx,
+            );
+        } else {
+            tracing::warn!(
+                turns,
+                idx,
+                target_idx,
+                failures = next_failures,
+                "title refresh failed; checkpoint left open for retry"
+            );
+        }
         if let Some(title) = title {
             tracing::info!(turns, chars = title.len(), "session title refreshed");
             // The persistence actor overwrites an auto title but never a manual `/rename` (checked under the summary lock)

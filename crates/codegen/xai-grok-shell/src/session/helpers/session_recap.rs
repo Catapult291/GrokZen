@@ -479,6 +479,15 @@ mod tests {
         let empty: Vec<ConversationItem> = vec![ConversationItem::system("sys".to_string())];
         assert_eq!(main_turn_count(&empty), 0);
 
+        // Startup `<user_info>` prefix must not count as a main turn (title-refresh / recap checkpoints).
+        let with_prefix = vec![
+            ConversationItem::system("sys".to_string()),
+            ConversationItem::session_prefix("<user_info>OS: test</user_info>"),
+            ConversationItem::user("real prompt".to_string()),
+            ConversationItem::user("second prompt".to_string()),
+        ];
+        assert_eq!(main_turn_count(&with_prefix), 2);
+
         let tool_loop = vec![
             ConversationItem::user("fix it".to_string()),
             ConversationItem::assistant_tool_calls(vec![ToolCall {
