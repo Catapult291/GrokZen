@@ -2710,6 +2710,7 @@ impl SessionActor {
         let mut tool_turn_count: usize = 1;
         let mut loop_index: u32 = 0;
         let mut identical_tool_calls = IdenticalToolCallRun::default();
+        let mut cross_turn_loop = CrossTurnLoopGuard::default();
         let mut todo_gate_fires: u32 = 0;
         let mut length_salvage_streak = LengthSalvageStreak::default();
         let mut auth_retry_schedule = AuthRetrySchedule::new();
@@ -3461,6 +3462,7 @@ impl SessionActor {
                 ));
             }
             let mut tool_calls = response.tool_calls().to_vec();
+            let step_assistant_text = response.assistant_text();
             let over_cap = self.media_gen_over_cap(&tool_calls);
             if xai_grok_tools::media_gen_limits::should_resample_egregious(
                 &over_cap,
@@ -3810,6 +3812,62 @@ impl SessionActor {
                 .map(|tc| tc.name.clone())
                 .min()
                 .unwrap_or_default();
+            // Cross-turn breaker: same visible preamble + same tool-name set across consecutive
+            // steps. Runs before tool execution so the Nth identical poll batch is never launched.
+            // Salvage continuations re-emit truncated text by design and are exempt.
+            if !salvage.awaiting_continuation()
+                && let Some(run_len) = cross_turn_loop.observe(
+                    &step_assistant_text,
+                    &tool_calls
+                        .iter()
+                        .map(|tc| tc.name.clone())
+                        .collect::<Vec<_>>(),
+                )
+            {
+                tracing::warn!(
+                    session_id = %self.session_info.id,
+                    run_len,
+                    "cross_turn_loop: ending turn after repeated identical preamble + tool set"
+                );
+                xai_grok_telemetry::unified_log::warn(
+                    "shell.turn.cross_turn_loop_stop",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "loop_index": loop_index,
+                        "run_len": run_len,
+                        "threshold": crate::session::CROSS_TURN_LOOP_THRESHOLD,
+                    })),
+                );
+                self.signals_handle().record_cross_turn_loop_abort();
+                self.finalize_turn_bookkeeping(
+                    req_id,
+                    std::mem::take(&mut turn_span_totals),
+                    turn_sampling,
+                )
+                .await;
+                self.send_hook_annotation_with_kind(
+                    crate::extensions::notification::HookAnnotationKind::Note,
+                    &format!(
+                        "\u{26a0} 已自动中止本轮：检测到跨轮复读（连续 {run_len} 轮相同开场白与工具组合）。\
+                         可直接重试；若反复出现，建议 /compact 或新开会话。"
+                    ),
+                )
+                .await;
+                self.push_system_reminder(
+                    "The previous turn was automatically stopped because the model kept emitting \
+                     the same visible preamble and the same tools across consecutive steps \
+                     (a cross-turn loop). Do not repeat that sequence; wait for tool results to \
+                     change, switch to a different tool, or stop and ask the user for guidance.",
+                );
+                return Ok(TurnOutcome::Cancelled {
+                    category: Some(crate::session::events::CancellationCategory::CrossTurnLoop),
+                    context: Some(crate::session::commands::CancellationContext {
+                        reason: Some(format!("cross_turn_loop:run_len={run_len}")),
+                        trigger: Some("auto".to_string()),
+                        ..Default::default()
+                    }),
+                });
+            }
             let tool_bridge = self.tool_bridge_handle();
             let step_tool_kinds = tool_calls
                 .iter()

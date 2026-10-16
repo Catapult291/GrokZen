@@ -1206,6 +1206,21 @@ async fn test_text_repetition_abort_counters() {
 }
 
 #[tokio::test]
+async fn test_cross_turn_loop_abort_counter() {
+    let (handle, actor) = SessionSignalsActor::new();
+    let actor_handle = tokio::spawn(actor.run());
+
+    handle.record_cross_turn_loop_abort();
+    handle.record_cross_turn_loop_abort();
+
+    let snap = handle.snapshot().await.unwrap();
+    assert_eq!(snap.cross_turn_loop_aborts, 2);
+
+    handle.shutdown();
+    actor_handle.await.unwrap();
+}
+
+#[tokio::test]
 async fn test_set_tracing_config() {
     let (handle, actor) = SessionSignalsActor::new();
     let actor_handle = tokio::spawn(actor.run());

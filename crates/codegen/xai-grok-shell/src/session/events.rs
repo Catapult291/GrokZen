@@ -167,6 +167,7 @@ pub(crate) fn prior_turn_interrupt_from_cancellation(
         CancellationCategory::HookDenied => None,
         // Automatic, not a user interrupt: no envelope marker on the next user turn.
         CancellationCategory::RepetitionGuard => None,
+        CancellationCategory::CrossTurnLoop => None,
     }
 }
 
@@ -627,6 +628,10 @@ mod tests {
         );
         assert_eq!(
             prior_turn_interrupt_from_cancellation(CancellationCategory::RepetitionGuard),
+            None
+        );
+        assert_eq!(
+            prior_turn_interrupt_from_cancellation(CancellationCategory::CrossTurnLoop),
             None
         );
     }

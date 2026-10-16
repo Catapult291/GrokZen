@@ -335,6 +335,9 @@ pub enum StopCancelledReason {
     /// The text-repetition guard aborted the turn automatically: the model's streamed text
     /// degenerated into a repetition loop. Runtime-caused, never a user gesture.
     RepetitionGuard,
+    /// The cross-turn loop breaker aborted the turn automatically: consecutive steps repeated the
+    /// same visible preamble and the same tool-name set. Runtime-caused, never a user gesture.
+    CrossTurnLoop,
     Unknown,
 }
 
@@ -354,6 +357,7 @@ impl StopCancelledReason {
             }
             Self::MaxTurns | Self::NoProgress => CancelledBy::Runtime,
             Self::RepetitionGuard => CancelledBy::Runtime,
+            Self::CrossTurnLoop => CancelledBy::Runtime,
             Self::Unknown => CancelledBy::Unknown,
         }
     }
@@ -976,6 +980,7 @@ mod tests {
             StopCancelledReason::MaxTurns => ("max_turns", "runtime"),
             StopCancelledReason::NoProgress => ("no_progress", "runtime"),
             StopCancelledReason::RepetitionGuard => ("repetition_guard", "runtime"),
+            StopCancelledReason::CrossTurnLoop => ("cross_turn_loop", "runtime"),
             StopCancelledReason::Unknown => ("unknown", "unknown"),
         };
         for reason in <StopCancelledReason as strum::IntoEnumIterator>::iter() {

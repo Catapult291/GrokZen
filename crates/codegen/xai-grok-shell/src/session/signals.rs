@@ -298,6 +298,10 @@ pub struct SessionSignals {
     /// (`identical_run` | `chunk_periodicity`); first-wins, labels only.
     #[serde(default)]
     pub text_repetition_guard_top_trigger: Option<String>,
+    /// Cross-turn loop-breaker aborts: consecutive steps repeated the same visible preamble and
+    /// tool-name set, and the harness ended the turn (`cancellation_category = cross_turn_loop`).
+    #[serde(default)]
+    pub cross_turn_loop_aborts: u32,
     /// Configured idle timeout threshold (seconds); set once at session start.
     #[serde(default)]
     pub inference_idle_timeout_configured_secs: Option<u64>,
@@ -473,6 +477,9 @@ pub enum SignalEvent {
 
     /// Record a text-repetition guard abort; `trigger` is `identical_run` | `chunk_periodicity`.
     RecordTextRepetitionAbort { trigger: String },
+
+    /// Record a cross-turn loop-breaker abort (same preamble + tool set across steps).
+    RecordCrossTurnLoopAbort,
 
     /// Set-once tracing config fields (idle timeout threshold).
     /// Called once at session construction; preserved on the backend when unset.
@@ -735,6 +742,11 @@ impl SessionSignalsHandle {
         let _ = self.tx.send(SignalEvent::RecordTextRepetitionAbort {
             trigger: trigger.to_string(),
         });
+    }
+
+    /// Record a cross-turn loop-breaker abort (same preamble + tool set across steps).
+    pub(crate) fn record_cross_turn_loop_abort(&self) {
+        let _ = self.tx.send(SignalEvent::RecordCrossTurnLoopAbort);
     }
 
     /// Set-once tracing config fields at session construction.
@@ -1133,6 +1145,9 @@ impl SessionSignalsActor {
                     if self.signals.text_repetition_guard_top_trigger.is_none() {
                         self.signals.text_repetition_guard_top_trigger = Some(trigger);
                     }
+                }
+                SignalEvent::RecordCrossTurnLoopAbort => {
+                    self.signals.cross_turn_loop_aborts += 1;
                 }
                 SignalEvent::SetTracingConfig {
                     inference_idle_timeout_configured_secs,
