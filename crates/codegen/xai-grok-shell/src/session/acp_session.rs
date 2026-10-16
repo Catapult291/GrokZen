@@ -97,8 +97,11 @@ mod goal;
 mod named_workflow_args;
 #[path = "acp_session_impl/turn.rs"]
 mod turn;
+#[path = "acp_session_impl/cross_turn_loop.rs"]
+mod cross_turn_loop;
 #[path = "acp_session_impl/workflow.rs"]
 mod workflow_run;
+pub(crate) use cross_turn_loop::{CrossTurnLoopGuard, CROSS_TURN_LOOP_THRESHOLD};
 pub(crate) use turn::SUBAGENT_USAGE_DRAIN;
 #[path = "acp_session_impl/tool_layer_images.rs"]
 mod tool_layer_images;

@@ -134,6 +134,7 @@ pub(super) fn cancel_reason_for_completion(
             Some(Cat::PermissionCancelled) => StopCancelledReason::PermissionCancelled,
             Some(Cat::MidTurnAbort) => StopCancelledReason::UserInterrupt,
             Some(Cat::RepetitionGuard) => StopCancelledReason::RepetitionGuard,
+            Some(Cat::CrossTurnLoop) => StopCancelledReason::CrossTurnLoop,
             Some(Cat::HookDenied) => {
                 tracing::debug!("a hook denial ended a turn; reporting it as unclassified");
                 StopCancelledReason::Unknown
