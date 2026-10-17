@@ -154,3 +154,108 @@ async fn syntax_error_maps_to_codemode_syntax() {
         Some("codemode_syntax")
     );
 }
+
+#[tokio::test]
+async fn configured_timeout_overrides_default() {
+    use crate::types::resources::Params;
+    let resources = crate::types::resources::Resources::default().into_shared();
+    resources.lock().await.insert(Params(super::CodemodeParams {
+        timeout_secs: Some(1),
+        ..Default::default()
+    }));
+    let mut ctx =
+        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    ctx.extensions.insert(resources);
+
+    let started = std::time::Instant::now();
+    let err = super::Codemode
+        .run(ctx, super::CodemodeInput { code: "while (true) {}".into() })
+        .await
+        .expect_err("dead loop must be killed");
+    let elapsed = started.elapsed();
+    let details = err.details.expect("custom details");
+    assert_eq!(
+        details.get("code").and_then(serde_json::Value::as_str),
+        Some("codemode_timeout")
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "configured 1s timeout not applied: {elapsed:?}"
+    );
+}
+
+/// End-to-end through `InnerDispatch`: the sandbox's `useTool` really
+/// dispatches, and the script's `toolsCalled` audit lists the target.
+#[tokio::test]
+async fn use_tool_dispatches_through_inner_dispatch() {
+    use std::sync::Mutex;
+    use xai_tool_runtime::{ToolDispatch, ToolStream, TypedToolOutput};
+
+    struct EchoDispatch {
+        calls: Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolDispatch for EchoDispatch {
+        async fn call(
+            &self,
+            tool_id: xai_tool_protocol::ToolId,
+            args: serde_json::Value,
+            _ctx: xai_tool_runtime::ToolCallContext,
+        ) -> ToolStream<TypedToolOutput> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tool_id.as_str().to_string(), args.clone()));
+            let out = serde_json::json!({
+                "type": "Text",
+                "text": format!("echo:{}", tool_id.as_str()),
+            });
+            xai_tool_runtime::terminal_only(Ok(TypedToolOutput::from_value(tool_id, out)))
+        }
+    }
+
+    let dispatch = Arc::new(EchoDispatch {
+        calls: Mutex::new(Vec::new()),
+    });
+    let resources = crate::types::resources::Resources::default().into_shared();
+    let mut ctx =
+        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    ctx.extensions
+        .insert(crate::types::resources::InnerDispatch(dispatch.clone()));
+    ctx.extensions.insert(resources);
+
+    let output = super::Codemode
+        .run(
+            ctx,
+            super::CodemodeInput {
+                code: r#"
+const a = await tools.useTool("mock__echo", { x: 1 });
+const b = await tools.useTool("mock__echo", { x: 2 });
+return { a: a.text, b: b.text };
+"#
+                .into(),
+            },
+        )
+        .await
+        .expect("codemode run with dispatch");
+
+    let calls = dispatch.calls.lock().unwrap().clone();
+    let names: Vec<&str> = calls.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, vec!["mock__echo", "mock__echo"]);
+    assert_eq!(calls[0].1, serde_json::json!({ "x": 1 }));
+    assert_eq!(calls[1].1, serde_json::json!({ "x": 2 }));
+
+    let ToolOutput::Text(text) = output else {
+        panic!("expected text output");
+    };
+    let envelope: serde_json::Value = serde_json::from_str(&text.text).expect("json envelope");
+    assert_eq!(
+        envelope.pointer("/result/a"),
+        Some(&serde_json::json!("echo:mock__echo"))
+    );
+    assert_eq!(
+        envelope.get("toolsCalled"),
+        Some(&serde_json::json!(["mock__echo", "mock__echo"]))
+    );
+}

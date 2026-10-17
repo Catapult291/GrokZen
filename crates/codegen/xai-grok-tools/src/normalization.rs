@@ -108,6 +108,7 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::MemoryGet(_)
         | ToolInput::SearchTool(_)
         | ToolInput::UseTool(_)
+        | ToolInput::Codemode(_)
         | ToolInput::EnterPlanMode(_)
         | ToolInput::ExitPlanMode(_)
         | ToolInput::AskUserQuestion(_)

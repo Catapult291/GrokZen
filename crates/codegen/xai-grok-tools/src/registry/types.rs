@@ -764,6 +764,10 @@ impl ToolRegistryBuilder {
                 crate::implementations::use_tool::UseToolParams,
             >();
         b.register_with_params::<
+                crate::implementations::codemode::Codemode,
+                crate::implementations::codemode::CodemodeParams,
+            >();
+        b.register_with_params::<
                 grok_build_concise::ReadFileConciseTool,
                 grok_build::read_file::ReadFileParams,
             >();

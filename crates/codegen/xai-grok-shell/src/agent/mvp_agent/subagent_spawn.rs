@@ -353,6 +353,7 @@ impl MvpAgent {
                             .to_bash_params_json_with_remote(cfg.remote_settings.as_ref()),
                     ),
                     ask_user_question: None,
+                    codemode: Some(cfg.toolset.codemode.to_params_json()),
                 }
             },
             plugin_registry: self.plugin_registry_handle.snapshot(),
