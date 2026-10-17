@@ -65,6 +65,8 @@ pub(crate) struct ResolvedToolParamsJson {
     pub bash: Option<serde_json::Map<String, serde_json::Value>>,
     /// `[toolset.ask_user_question]` timeout policy for the ask tool.
     pub ask_user_question: Option<serde_json::Map<String, serde_json::Value>>,
+    /// `[toolset.codemode]` sandbox limits for the codemode meta-tool.
+    pub codemode: Option<serde_json::Map<String, serde_json::Value>>,
 }
 /// The live memory-v2 file-access policy shared by spawn, the `/memory` toggle, and rebuilds.
 /// The lock never escapes: readers get a clone, writers replace the value.
@@ -371,6 +373,9 @@ impl AgentRebuildSpec {
         }
         if let Some(ask_user_question_params_json) = tool_params_json.ask_user_question.clone() {
             builder = builder.with_ask_user_question_params(ask_user_question_params_json);
+        }
+        if let Some(codemode_params_json) = tool_params_json.codemode.clone() {
+            builder = builder.with_codemode_params(codemode_params_json);
         }
         if let Some(prompt_working_directory) = prompt_working_directory.clone() {
             builder = builder.with_prompt_working_directory(prompt_working_directory);

@@ -18,6 +18,46 @@ use crate::types::tool_index::ToolIndex;
 /// Wire name of the codemode meta-tool.
 pub const CODEMODE_NAME: &str = "codemode";
 
+/// User-configurable sandbox limits (`[toolset.codemode]` in config.toml).
+/// Every field is optional; `None` keeps the engine default from
+/// [`Limits::default`].
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct CodemodeParams {
+    /// Wall-clock deadline for one script run (seconds). Default 30.
+    pub timeout_secs: Option<u64>,
+    /// QuickJS memory cap (MiB). Default 64.
+    pub memory_mb: Option<usize>,
+    /// Maximum `searchTool` + `useTool` calls per script. Default 64.
+    pub max_host_calls: Option<usize>,
+    /// Maximum concurrent host calls (Promise.all fan-out). Default 4.
+    pub max_concurrency: Option<usize>,
+    /// Return-value budget (KiB); larger values are truncated. Default 256.
+    pub max_return_kb: Option<usize>,
+}
+
+impl CodemodeParams {
+    /// Overlay configured values onto the engine defaults.
+    pub fn to_limits(&self) -> Limits {
+        let defaults = Limits::default();
+        Limits {
+            timeout: std::time::Duration::from_secs(
+                self.timeout_secs.unwrap_or(defaults.timeout.as_secs()),
+            ),
+            memory_bytes: self.memory_mb.unwrap_or(defaults.memory_bytes / (1024 * 1024))
+                * (1024 * 1024),
+            max_stack_bytes: defaults.max_stack_bytes,
+            max_host_calls: self.max_host_calls.unwrap_or(defaults.max_host_calls),
+            max_concurrency: self.max_concurrency.unwrap_or(defaults.max_concurrency),
+            max_return_bytes: self.max_return_kb.unwrap_or(defaults.max_return_bytes / 1024)
+                * 1024,
+            max_console_lines: defaults.max_console_lines,
+        }
+    }
+}
+
+crate::register_resource!("grok_build", "Codemode", CodemodeParams);
+
 /// Host binding backed by the session's tool index and `use_tool` dispatch
 /// (local MCP via `InnerDispatch`, managed gateway via catalog fallback).
 struct CodemodeHost {
@@ -185,13 +225,21 @@ impl xai_tool_runtime::Tool for Codemode {
             Ok(resources) => resources.lock().await.get::<ToolIndex>().cloned(),
             Err(_) => None,
         };
+        let limits = match shared_resources(&ctx) {
+            Ok(resources) => resources
+                .lock()
+                .await
+                .get::<crate::types::resources::Params<CodemodeParams>>()
+                .map(|p| p.0.to_limits())
+                .unwrap_or_default(),
+            Err(_) => Limits::default(),
+        };
 
         let host = Arc::new(CodemodeHost {
             ctx,
             index,
             tools_called: Mutex::new(Vec::new()),
         });
-        let limits = Limits::default();
         let outcome = execute(&input.code, host.clone(), &limits)
             .await
             .map_err(|e| {

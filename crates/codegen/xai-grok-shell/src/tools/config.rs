@@ -155,6 +155,47 @@ impl WebFetchToolConfig {
     }
 }
 
+/// User configurable sandbox limits for the codemode meta-tool (`[toolset.codemode]`).
+/// `None` fields keep the engine defaults (30s / 64 MiB / 64 host calls / concurrency 4 / 256 KiB return).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CodemodeToolConfig {
+    /// Wall-clock deadline for one script run (seconds).
+    pub timeout_secs: Option<u64>,
+    /// QuickJS memory cap (MiB).
+    pub memory_mb: Option<usize>,
+    /// Maximum `searchTool` + `useTool` calls per script.
+    pub max_host_calls: Option<usize>,
+    /// Maximum concurrent host calls (Promise.all fan-out).
+    pub max_concurrency: Option<usize>,
+    /// Return-value budget (KiB); larger values are truncated.
+    pub max_return_kb: Option<usize>,
+}
+
+impl CodemodeToolConfig {
+    /// Serialize the configured (non-`None`) fields into the params map merged
+    /// onto `GrokBuild:codemode` by the agent builder.
+    pub(crate) fn to_params_json(&self) -> serde_json::Map<String, serde_json::Value> {
+        let mut map = serde_json::Map::new();
+        if let Some(v) = self.timeout_secs {
+            map.insert("timeout_secs".into(), v.into());
+        }
+        if let Some(v) = self.memory_mb {
+            map.insert("memory_mb".into(), v.into());
+        }
+        if let Some(v) = self.max_host_calls {
+            map.insert("max_host_calls".into(), v.into());
+        }
+        if let Some(v) = self.max_concurrency {
+            map.insert("max_concurrency".into(), v.into());
+        }
+        if let Some(v) = self.max_return_kb {
+            map.insert("max_return_kb".into(), v.into());
+        }
+        map
+    }
+}
+
 /// This is the *shell-side* config that holds sampling-level settings (e.g., web search API key from the sampling client).
 /// It is distinct from `xai_grok_tools::registry::types::ToolsetConfig` which holds tool-implementation-level config (bash limits, web search mode).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,6 +207,9 @@ pub struct ShellToolsetConfig {
     pub web_fetch: WebFetchToolConfig,
     #[serde(default)]
     pub ask_user_question: AskUserQuestionToolConfig,
+    /// `[toolset.codemode]` sandbox limits for the codemode meta-tool.
+    #[serde(default)]
+    pub codemode: CodemodeToolConfig,
     /// Which file-operation toolset to use: `"standard"` (default) or `"hashline"`.
     #[serde(default)]
     pub file_toolset: FileToolset,
@@ -246,6 +290,7 @@ impl ShellToolsetConfig {
             web_search: web_search_sampling_config(default_base),
             web_fetch: WebFetchToolConfig::default(),
             ask_user_question: AskUserQuestionToolConfig::default(),
+            codemode: CodemodeToolConfig::default(),
             file_toolset: FileToolset::default(),
             hashline: HashlineSchemeConfig::default(),
         });

@@ -83,6 +83,7 @@ pub struct AgentBuilder {
     paths_config: crate::prompt::paths::PathsConfig,
     bash_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     ask_user_question_params_json: Option<serde_json::Map<String, serde_json::Value>>,
+    codemode_params_json: Option<serde_json::Map<String, serde_json::Value>>,
     plugin_registry: Option<std::sync::Arc<crate::plugins::PluginRegistry>>,
     context_window_tokens: Option<u64>,
     api_key_provider: Option<xai_grok_tools::types::SharedApiKeyProvider>,
@@ -337,6 +338,7 @@ impl AgentBuilder {
             paths_config: Default::default(),
             bash_params_json: None,
             ask_user_question_params_json: None,
+            codemode_params_json: None,
             plugin_registry: None,
             context_window_tokens: None,
             api_key_provider: None,
@@ -642,6 +644,14 @@ impl AgentBuilder {
     /// Inject `[toolset.bash]` overrides from config.toml into bash tool params.
     pub fn with_bash_params(mut self, params: serde_json::Map<String, serde_json::Value>) -> Self {
         self.bash_params_json = Some(params);
+        self
+    }
+    /// Inject the shell-resolved `[toolset.codemode]` sandbox limits into the codemode meta-tool.
+    pub fn with_codemode_params(
+        mut self,
+        params: serde_json::Map<String, serde_json::Value>,
+    ) -> Self {
+        self.codemode_params_json = Some(params);
         self
     }
     /// Inject the shell-resolved `[toolset.ask_user_question]` params (timeout policy) into the ask_user_question tool.
@@ -975,6 +985,9 @@ impl AgentBuilder {
                 ],
                 bash_params,
             );
+        }
+        if let Some(ref codemode_params) = self.codemode_params_json {
+            merge_tool_params(&mut tool_config, &["GrokBuild:codemode"], codemode_params);
         }
         if let Some(ref ask_params) = self.ask_user_question_params_json {
             merge_tool_params(

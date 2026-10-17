@@ -4767,6 +4767,10 @@ impl MvpAgent {
         let tool_params_json = crate::session::agent_rebuild::ResolvedToolParamsJson {
             bash: Some(bash_params_json),
             ask_user_question: ask_user_question_params_json,
+            codemode: {
+                let cfg = self.cfg.borrow();
+                Some(cfg.toolset.codemode.to_params_json())
+            },
         };
         let backend_tools_enabled = self
             .cfg
