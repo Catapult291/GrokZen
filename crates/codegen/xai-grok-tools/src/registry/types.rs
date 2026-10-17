@@ -4054,6 +4054,50 @@ mod tests {
             );
         }
     }
+    /// §6-4 (codemode acceptance): codemode ships in the model-visible builtin
+    /// set while MCP tools stay hidden behind search/use even when codemode
+    /// itself is present.
+    #[tokio::test]
+    async fn tool_definitions_builtins_only_lists_codemode_and_hides_mcp() {
+        let tmp = TempDir::new().unwrap();
+        let builder = ToolRegistryBuilder::new();
+        let config = ToolServerConfig {
+            tools: vec![
+                ToolConfig::for_tool::<crate::implementations::codemode::Codemode>(),
+                ToolConfig::for_tool::<crate::implementations::use_tool::UseTool>(),
+                ToolConfig::for_tool::<crate::implementations::search_tool::SearchTool>(),
+            ],
+            behavior_preset: None,
+        };
+        let ctx = test_session_context(&tmp);
+        let toolset = builder.finalize(config, ctx).unwrap();
+        toolset
+            .register_tool(
+                "linear__save_issue".to_string(),
+                FakeMcpTool {
+                    description: "Create or update a Linear issue".into(),
+                },
+                Some(serde_json::json!({"type": "object", "properties": {}})),
+            )
+            .unwrap();
+        let builtins = toolset.tool_definitions_builtins_only();
+        let names: Vec<&str> = builtins
+            .iter()
+            .map(|d| d.function.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"codemode"),
+            "codemode must be model-visible; got {names:?}"
+        );
+        assert!(names.contains(&"search_tool") && names.contains(&"use_tool"));
+        for def in &builtins {
+            assert!(
+                !def.function.name.contains("__"),
+                "MCP tool {} should be hidden",
+                def.function.name
+            );
+        }
+    }
     /// `task` tool must be rejected when neither `get_task_output` nor
     /// `kill_task` are present in the toolset.
     #[test]

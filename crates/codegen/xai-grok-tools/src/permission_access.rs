@@ -75,6 +75,9 @@ impl From<&crate::types::ToolInput> for AccessKind {
                 AccessKind::Read(u.source_path().map(|p| p.to_string_lossy().into_owned()))
             }
             ToolInput::WebFetch(wf) => AccessKind::WebFetch(wf.url.clone()),
+            // The codemode script can drive any host tool (including edits and
+            // MCP calls), so it always prompts: never auto-approved as Read.
+            ToolInput::Codemode(_) => AccessKind::Tool("codemode".to_owned()),
             ToolInput::Dynamic(value) => access_kind_from_dynamic(value),
             #[allow(unreachable_patterns)]
             _ => AccessKind::Tool("unclassified_tool".to_owned()),
@@ -398,6 +401,43 @@ mod tests {
             AccessKind::Bash(c) if c == "rm -rf /"
         ));
     }
+    /// Codemode can drive any host tool from its script, so it must classify as a
+    /// prompting access (never Read) and be rejected by an `Edit(*)` deny rule;
+    /// a Read-only allow never auto-approves it.
+    #[test]
+    fn codemode_maps_to_tool_access_and_respects_edit_deny() {
+        use crate::implementations::codemode::CodemodeInput;
+        use crate::types::ToolInput;
+        use xai_grok_permission_rules::policy::CompiledPolicy;
+        use xai_grok_permission_rules::rules::parse_permission_rule;
+        use xai_grok_permission_rules::types::{Decision, PermissionConfig, RuleAction};
+
+        let input = ToolInput::Codemode(CodemodeInput {
+            code: "return 1;".into(),
+        });
+        let access = AccessKind::from(&input);
+        assert!(
+            matches!(access, AccessKind::Tool(ref name) if name == "codemode"),
+            "Codemode must map to AccessKind::Tool(\"codemode\"), got {access:?}"
+        );
+
+        let deny_edits = CompiledPolicy::new(PermissionConfig::new(vec![
+            parse_permission_rule("Edit(*)", RuleAction::Deny).unwrap(),
+        ]));
+        assert!(
+            matches!(deny_edits.evaluate(&access), Some(Decision::Reject(_))),
+            "Edit(*) deny must reject codemode (Tool(_) shares the Edit filter)"
+        );
+
+        let allow_read_only = CompiledPolicy::new(PermissionConfig::new(vec![
+            parse_permission_rule("Read", RuleAction::Allow).unwrap(),
+        ]));
+        assert!(
+            allow_read_only.evaluate(&access).is_none(),
+            "a Read-only allow must not auto-approve codemode"
+        );
+    }
+
     #[test]
     fn write_scoped_access_respects_edit_deny_and_not_read_allow() {
         use crate::implementations::opencode::edit::EditInput;
