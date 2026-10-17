@@ -57,6 +57,7 @@ fn allowlist_keeps_mcp_access() {
         tool("GrokBuild:grep", ToolKind::Search),
         tool("GrokBuild:search_tool", ToolKind::SearchTool),
         tool("GrokBuild:use_tool", ToolKind::UseTool),
+        tool("GrokBuild:codemode", ToolKind::Codemode),
     ];
     let allowed = entries(&["read_file"]);
 
@@ -72,7 +73,8 @@ fn allowlist_keeps_mcp_access() {
         vec![
             "GrokBuild:read_file",
             "GrokBuild:search_tool",
-            "GrokBuild:use_tool"
+            "GrokBuild:use_tool",
+            "GrokBuild:codemode"
         ],
         ids(&listed)
     );

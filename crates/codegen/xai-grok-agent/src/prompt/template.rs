@@ -705,7 +705,7 @@ mod tests {
                 .unwrap()
                 .trim();
                 // search_tool and use_tool are always built-in, so they never need a guard
-                const ALWAYS_BUILTIN: &[&str] = &["search_tool", "use_tool"];
+                const ALWAYS_BUILTIN: &[&str] = &["search_tool", "use_tool", "codemode"];
                 if let Some(kind) = body.strip_prefix("tools.by_kind.")
                     && kind.chars().all(|c| c.is_alphanumeric() || c == '_')
                     && !ALWAYS_BUILTIN.contains(&kind)

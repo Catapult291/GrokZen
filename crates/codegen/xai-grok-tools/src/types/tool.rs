@@ -92,6 +92,7 @@ pub enum ToolKind {
     InitOrUpdateApp,
     SearchTool,
     UseTool,
+    Codemode,
     Monitor,
     GoalUpdate,
     Workflow,

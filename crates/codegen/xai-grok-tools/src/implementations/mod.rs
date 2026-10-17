@@ -1,4 +1,5 @@
 pub mod codex;
+pub mod codemode;
 pub mod cursor_rules_on_read;
 pub mod editor_infra;
 pub mod grok_build;
@@ -31,6 +32,7 @@ mod tool_feature_names_tests;
 pub fn extra_write_qualified_ids() -> Vec<String> {
     Vec::new()
 }
+pub use codemode::{CODEMODE_NAME, Codemode};
 pub use search_tool::{SEARCH_TOOL_NAME, SearchTool};
 pub use use_tool::{USE_TOOL_NAME, UseTool, UseToolInput};
 pub use web_search::WebSearchConfig;

@@ -27,6 +27,7 @@ members = [
     "crates/codegen/xai-grok-auth",
     "crates/codegen/xai-grok-bundle",
     "crates/codegen/xai-grok-cloud-config",
+    "crates/codegen/xai-grok-codemode",
     "crates/codegen/xai-grok-config",
     "crates/codegen/xai-grok-config-types",
     "crates/codegen/xai-grok-dashboard-store",
@@ -247,6 +248,7 @@ reflink-copy = "0.1"
 regex = "1"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json", "multipart", "http2", "blocking", "socks"], default-features = false }
 reqwest-middleware = { version = "0.4.1", features = ["json", "multipart"] }
+rquickjs = { version = "0.14", features = ["futures", "macro", "classes", "bindgen", "parallel"] }
 resvg = { version = "0.47", default-features = false, features = ["text"] }
 rhai = { version = "1.25", features = ["serde"] }
 ring = "0.17"

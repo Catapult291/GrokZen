@@ -66,6 +66,7 @@ impl ToolKind {
             ToolKind::InitOrUpdateApp => "Init or Update App",
             ToolKind::SearchTool => "Search Tools",
             ToolKind::UseTool => "Use Tool",
+            ToolKind::Codemode => "Codemode",
             ToolKind::Monitor => "Monitor",
             ToolKind::GoalUpdate => "Update Goal",
             ToolKind::Workflow => "Workflow",
@@ -110,6 +111,7 @@ impl ToolKind {
             | ToolKind::InitOrUpdateApp
             | ToolKind::SearchTool
             | ToolKind::UseTool
+            | ToolKind::Codemode
             | ToolKind::Monitor
             | ToolKind::GoalUpdate
             | ToolKind::Workflow
