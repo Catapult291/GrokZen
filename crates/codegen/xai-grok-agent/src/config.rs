@@ -12,6 +12,7 @@ use xai_grok_tools::implementations::grok_build;
 use xai_grok_tools::implementations::grok_build_concise;
 use xai_grok_tools::implementations::memory;
 use xai_grok_tools::implementations::opencode;
+use xai_grok_tools::implementations::codemode;
 use xai_grok_tools::implementations::search_tool;
 use xai_grok_tools::implementations::use_tool;
 use xai_grok_tools::registry::types::{ToolConfig, ToolServerConfig};
@@ -274,6 +275,7 @@ fn grok_build_core_toolset_with(
         (&grok_build::MonitorTool).into(),
         (&search_tool::SearchTool).into(),
         (&use_tool::UseTool).into(),
+        (&codemode::Codemode).into(),
         (&grok_build::UpdateGoalTool).into(),
     ];
     if include_workflow {

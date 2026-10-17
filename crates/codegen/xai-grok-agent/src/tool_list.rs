@@ -106,7 +106,10 @@ pub fn listed_tools<'a>(
                         || (spawns && TASK_DEPS.contains(&short_tool_name(&tool.id)))
                         // MCP access is always-on under a `tools:` allowlist (compat parity): keep the `search_tool`/`use_tool` meta-tools
                         // To remove it, deny them via `disallowed_tools`; the denylist runs first and wins
-                        || matches!(tool.kind, Some(ToolKind::SearchTool | ToolKind::UseTool))
+                        || matches!(
+                            tool.kind,
+                            Some(ToolKind::SearchTool | ToolKind::UseTool | ToolKind::Codemode)
+                        )
                 })
                 .collect();
             ListedTools {

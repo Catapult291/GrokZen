@@ -61,6 +61,7 @@ pub fn max_calls_per_batch(kind: ToolKind, limits: &MediaGenBatchLimits) -> Opti
         | ToolKind::InitOrUpdateApp
         | ToolKind::SearchTool
         | ToolKind::UseTool
+        | ToolKind::Codemode
         | ToolKind::Monitor
         | ToolKind::GoalUpdate
         | ToolKind::Workflow
@@ -486,7 +487,7 @@ mod tests {
         );
         assert_eq!(
             ToolKind::VARIANT_COUNT,
-            media_kinds.len() + 33,
+            media_kinds.len() + 34,
             "ToolKind grew/shrank; update max_calls_per_batch arms and this count"
         );
     }

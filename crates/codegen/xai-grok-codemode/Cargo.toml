@@ -1,0 +1,18 @@
+[package]
+license = "Apache-2.0"
+name = "xai-grok-codemode"
+version = "0.1.0"
+edition.workspace = true
+description = "In-process QuickJS sandbox for the codemode meta-tool: a model-written JS script orchestrates search/use tool calls on the harness side; only the final JSON-safe return value re-enters model context"
+
+[dependencies]
+futures.workspace = true
+rquickjs = { workspace = true }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

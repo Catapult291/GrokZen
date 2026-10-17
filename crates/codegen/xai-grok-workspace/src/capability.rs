@@ -92,6 +92,7 @@ pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::InitOrUpdateApp,
     ToolKind::SearchTool,
     ToolKind::UseTool,
+    ToolKind::Codemode,
     ToolKind::Monitor,
     ToolKind::GoalUpdate,
     ToolKind::Workflow,
@@ -142,7 +143,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         | Monitor | Workflow => matches!(mode, M::Execute),
 
         // Integration dispatch.
-        UseTool => matches!(mode, M::ReadWrite | M::Execute),
+        UseTool | Codemode => matches!(mode, M::ReadWrite | M::Execute),
 
         // Catch-all: only `All` mode keeps it (early-return above)
         Other => false,
