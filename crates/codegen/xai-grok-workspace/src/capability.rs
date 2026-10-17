@@ -156,6 +156,19 @@ mod tests {
     use crate::session::tool_config::test_support;
     use xai_grok_tools::types::tool::ToolKind;
 
+    /// §6-2 (codemode acceptance): read-only sessions must filter codemode out
+    /// before it can run — same class as use_tool.
+    #[test]
+    fn codemode_filtered_out_of_read_only_sessions() {
+        use CapabilityMode as M;
+        assert!(
+            !kind_allowed(M::ReadOnly, ToolKind::Codemode),
+            "codemode can drive writes through useTool and must not appear in ReadOnly"
+        );
+        assert!(kind_allowed(M::ReadWrite, ToolKind::Codemode));
+        assert!(kind_allowed(M::Execute, ToolKind::Codemode));
+    }
+
     fn make_cfg(tools: Vec<ToolConfig>) -> ToolServerConfig {
         ToolServerConfig {
             tools,
