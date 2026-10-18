@@ -560,8 +560,27 @@ pub(super) fn handle_rewind_points_loaded(
     }
 
     // Oldest first, like the `/fork` picker's rows, so the picker reads in conversation order.
-    let mut sorted = points;
+    // Synthetic turns (auto-wake / system-reminder) have no user prompt to name — they used to
+    // show as “(no preview)” and just confuse the list — so the picker only lists real prompts.
+    let mut sorted: Vec<_> = points
+        .into_iter()
+        .filter(|p| {
+            p.prompt_preview
+                .as_deref()
+                .is_some_and(|s| !s.trim().is_empty())
+        })
+        .collect();
     sorted.sort_by_key(|p| p.prompt_index);
+    if sorted.is_empty() {
+        if let Some(stashed) = stashed {
+            agent.prompt.restore(stashed);
+        }
+        app.show_toast(
+            app.locale
+                .named_static_text("rewind.no_undoable_prompts", "No undoable prompts"),
+        );
+        return vec![];
+    }
     let draft = stashed.or_else(|| stash_prompt(&mut agent.prompt));
     // The cursor starts on the newest turn — the least destructive cut, and the row the flow landed
     // on before the list was reordered — so its preview anchors that turn at the transcript top.

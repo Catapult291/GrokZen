@@ -1135,12 +1135,7 @@ fn undo_keeps_pinned_mode_across_running_turn_cancel_offer() {
     assert!(
         effects
             .iter()
-            .any(|e| matches!(e, Effect::CancelTurn { .. }))
-    );
-    assert!(
-        effects
-            .iter()
-            .any(|e| matches!(e, Effect::FetchRewindPoints { .. })),
+            .any(|e| matches!(e, Effect::CancelTurnThenFetchRewindPoints { .. })),
         "got {effects:?}"
     );
 
@@ -1161,5 +1156,63 @@ fn undo_keeps_pinned_mode_across_running_turn_cancel_offer() {
             }
         ),
         "got {effects:?}"
+    );
+}
+
+/// Synthetic / system-reminder turns have no user prompt text; they must not appear as “(no preview)” rows.
+#[test]
+fn picker_drops_points_without_prompt_preview() {
+    let mut app = app_with_two_turns();
+    let id = AgentId(0);
+
+    let mut with_preview = rewind_point(0);
+    with_preview.prompt_preview = Some("fix the bug".into());
+    let mut blank_preview = rewind_point(1);
+    blank_preview.prompt_preview = Some("   ".into());
+    let mut missing_preview = rewind_point(2);
+    missing_preview.prompt_preview = None;
+
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![with_preview, blank_preview, missing_preview],
+        }),
+        &mut app,
+    );
+
+    match &app.agents[&id].rewind_state.as_ref().unwrap().phase {
+        crate::views::rewind::RewindPhase::Picker { points, selected } => {
+            assert_eq!(points.len(), 1, "only the previewed turn stays: {points:?}");
+            assert_eq!(points[0].prompt_index, 0);
+            assert_eq!(*selected, 0);
+        }
+        other => panic!("expected picker, got {other:?}"),
+    }
+}
+
+/// If every turn is synthetic, the flow reports no undoable prompts instead of an empty picker.
+#[test]
+fn all_blank_previews_toast_instead_of_empty_picker() {
+    let mut app = app_with_two_turns();
+    let id = AgentId(0);
+
+    let mut blank = rewind_point(0);
+    blank.prompt_preview = None;
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsLoaded {
+            agent_id: id,
+            points: vec![blank],
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty(), "got {effects:?}");
+    assert!(
+        app.agents[&id].rewind_state.is_none(),
+        "no picker when nothing is rewindable"
+    );
+    assert_eq!(
+        app.agents[&id].toast.as_ref().map(|(m, _)| m.as_str()),
+        Some("No undoable prompts")
     );
 }
