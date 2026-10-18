@@ -69,19 +69,18 @@ pub(super) fn collect_terminal_logs(
             left_out += 1;
             continue;
         };
-        let Some(name) = path.strip_prefix(base).ok().and_then(Path::to_str) else {
+        let Some(rel) = path.strip_prefix(base).ok() else {
             continue;
         };
+        // Archive names are portable: always `/`, never the platform separator.
+        let name = rel.to_string_lossy().replace('\\', "/");
         let Ok(Some(file)) = artifacts.open_non_artifact(&path) else {
             continue;
         };
         match read_log_for_archive(file) {
             Ok(data) => {
                 budget = left;
-                files.push(CopiedSessionFile {
-                    name: name.to_owned(),
-                    data,
-                });
+                files.push(CopiedSessionFile { name, data });
             }
             Err(e) => tracing::warn!(?e, "Failed to read terminal log during session copy"),
         }

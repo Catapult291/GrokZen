@@ -104,10 +104,11 @@ fn capture_debug_entries(
             crate::extensions::notification::MemoryCaptureDebugEntry {
                 statement: observation.statement,
                 body: observation.body,
+                // Forward-slash form so the committed path matches what the memory store records.
                 path: workspace_dir
                     .join(relative_path)
                     .to_string_lossy()
-                    .into_owned(),
+                    .replace('\\', "/"),
             }
         })
         .collect()

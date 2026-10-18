@@ -2685,9 +2685,8 @@ fn collect_session_files_recursive_with_artifacts(
                 Ok(p) => p,
                 Err(_) => continue,
             };
-            let Some(name) = rel_path.to_str() else {
-                continue;
-            };
+            // Archive names are portable: always `/`, never the platform separator.
+            let name = rel_path.to_string_lossy().replace('\\', "/");
             let Ok(Some(mut file)) = artifacts.open_non_artifact(&path) else {
                 continue;
             };
@@ -2696,10 +2695,7 @@ fn collect_session_files_recursive_with_artifacts(
                 tracing::warn!(?e, "Failed to read session file during copy");
                 continue;
             }
-            files.push(CopiedSessionFile {
-                name: name.to_string(),
-                data,
-            });
+            files.push(CopiedSessionFile { name, data });
         } else if file_type.is_dir() && path != base.join(archive_logs::TERMINAL_DIR) {
             collect_session_files_recursive_with_artifacts(base, &path, files, artifacts);
         }
