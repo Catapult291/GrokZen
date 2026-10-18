@@ -128,11 +128,7 @@ impl TextRepetitionGuard {
         if fence_count % 2 == 1 {
             self.in_code_block = !self.in_code_block;
         }
-        if was_in_code_block
-            || self.in_code_block
-            || fence_count > 0
-            || divider_like(text)
-        {
+        if was_in_code_block || self.in_code_block || fence_count > 0 || divider_like(text) {
             // Code blocks and dividers are legal to repeat; neither detector sees them.
             // A piece that itself contains a fence marker is skipped too: a whole block arriving
             // in one delta must not be judged between its fences (parity alone would miss it).
@@ -360,7 +356,11 @@ fn table_like(text: &str) -> bool {
         if trimmed.starts_with('|') {
             return true;
         }
-        trimmed.chars().take_while(|c| matches!(c, '|' | '+' | '-')).count() >= 3
+        trimmed
+            .chars()
+            .take_while(|c| matches!(c, '|' | '+' | '-'))
+            .count()
+            >= 3
     })
 }
 
@@ -388,7 +388,11 @@ fn heading_like(text: &str) -> bool {
     text.lines().any(|line| {
         let trimmed = line.trim_start();
         let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-        hashes > 0 && trimmed.chars().nth(hashes).is_some_and(|c| c.is_whitespace())
+        hashes > 0
+            && trimmed
+                .chars()
+                .nth(hashes)
+                .is_some_and(|c| c.is_whitespace())
     })
 }
 

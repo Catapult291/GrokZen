@@ -4081,10 +4081,7 @@ mod tests {
             )
             .unwrap();
         let builtins = toolset.tool_definitions_builtins_only();
-        let names: Vec<&str> = builtins
-            .iter()
-            .map(|d| d.function.name.as_str())
-            .collect();
+        let names: Vec<&str> = builtins.iter().map(|d| d.function.name.as_str()).collect();
         assert!(
             names.contains(&"codemode"),
             "codemode must be model-visible; got {names:?}"

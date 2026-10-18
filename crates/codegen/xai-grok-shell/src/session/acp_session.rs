@@ -91,17 +91,17 @@ mod compaction_segments;
 mod types;
 pub(crate) use types::*;
 pub use types::{TodoGateDecision, TodoGateReason};
+#[path = "acp_session_impl/cross_turn_loop.rs"]
+mod cross_turn_loop;
 #[path = "acp_session_impl/goal.rs"]
 mod goal;
 #[path = "acp_session_impl/named_workflow_args.rs"]
 mod named_workflow_args;
 #[path = "acp_session_impl/turn.rs"]
 mod turn;
-#[path = "acp_session_impl/cross_turn_loop.rs"]
-mod cross_turn_loop;
 #[path = "acp_session_impl/workflow.rs"]
 mod workflow_run;
-pub(crate) use cross_turn_loop::{CrossTurnLoopGuard, CROSS_TURN_LOOP_THRESHOLD};
+pub(crate) use cross_turn_loop::{CROSS_TURN_LOOP_THRESHOLD, CrossTurnLoopGuard};
 pub(crate) use turn::SUBAGENT_USAGE_DRAIN;
 #[path = "acp_session_impl/tool_layer_images.rs"]
 mod tool_layer_images;

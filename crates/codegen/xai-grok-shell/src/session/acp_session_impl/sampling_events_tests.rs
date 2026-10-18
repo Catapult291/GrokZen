@@ -1492,8 +1492,7 @@ async fn text_repetition_trip_records_signals_and_event() {
         .run_until(async {
             let mut fixture = make_replay_send_update_fixture().await;
             let events_dir = tempfile::tempdir().expect("temp events dir");
-            fixture.actor.events =
-                crate::session::events::EventTracker::new(events_dir.path());
+            fixture.actor.events = crate::session::events::EventTracker::new(events_dir.path());
             let actor = Arc::new(fixture.actor);
             let req = RequestId::random();
             own_request(&actor, &req);
@@ -1540,8 +1539,8 @@ async fn text_repetition_trip_records_signals_and_event() {
                 "Failed must take the terminal drain barrier sender"
             );
 
-            let log = std::fs::read_to_string(events_dir.path().join("events.jsonl"))
-                .unwrap_or_default();
+            let log =
+                std::fs::read_to_string(events_dir.path().join("events.jsonl")).unwrap_or_default();
             assert!(
                 super::super::support::has_event_with(&log, "text_repetition_tripped", |v| {
                     v.get("trigger").and_then(|t| t.as_str()) == Some("identical_run")

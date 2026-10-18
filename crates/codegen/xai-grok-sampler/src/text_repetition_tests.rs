@@ -6,10 +6,7 @@ use super::*;
 const CHUNK_SIZES: [usize; 6] = [8, 16, 32, 4, 64, 7];
 
 /// Feed `text` in 4–64-character slices; returns `(trip, characters fed when it fired)`.
-fn feed_chunked(
-    guard: &mut TextRepetitionGuard,
-    text: &str,
-) -> Option<(TextRepetitionTrip, u64)> {
+fn feed_chunked(guard: &mut TextRepetitionGuard, text: &str) -> Option<(TextRepetitionTrip, u64)> {
     let chars: Vec<char> = text.chars().collect();
     let mut index = 0usize;
     let mut fed = 0u64;
@@ -31,9 +28,8 @@ fn feed_chunked(
 /// one normal sentence followed by 37,397 `<br>` units — the 187 KB single-message flood of
 /// 2026-10-14 04:02 (UTC+8) that none of the existing defenses caught.
 fn incident_flood() -> String {
-    let mut text = String::from(
-        "「进程分流」入口已显示（OCR rect [224,278,325,306]）。点击进入：\n",
-    );
+    let mut text =
+        String::from("「进程分流」入口已显示（OCR rect [224,278,325,306]）。点击进入：\n");
     for _ in 0..37_397 {
         text.push_str("<br>\n");
     }
@@ -101,7 +97,10 @@ fn incident_jsonl_fixture_trips_within_two_thousand_chars() {
         r"C:\Users\bypassnro\.grok\sessions\C%3A%5CUsers%5Cbypassnro%5CDocuments%5Cproject%5CBettbox-Mod\01a136c5-9378-7631-8b84-4623552291a9\chat_history.jsonl",
     );
     let Ok(file) = std::fs::File::open(path) else {
-        eprintln!("skipping: incident fixture not present at {}", path.display());
+        eprintln!(
+            "skipping: incident fixture not present at {}",
+            path.display()
+        );
         return;
     };
     use std::io::{BufRead, BufReader};
@@ -114,8 +113,7 @@ fn incident_jsonl_fixture_trips_within_two_thousand_chars() {
         }
     }
     assert!(!line.is_empty(), "message 256 not found in fixture");
-    let value: serde_json::Value =
-        serde_json::from_str(&line).expect("fixture line must be JSON");
+    let value: serde_json::Value = serde_json::from_str(&line).expect("fixture line must be JSON");
     let content = value
         .get("content")
         .and_then(serde_json::Value::as_str)
@@ -123,8 +121,8 @@ fn incident_jsonl_fixture_trips_within_two_thousand_chars() {
     assert_eq!(content.matches("<br>").count(), 37_397);
 
     let mut guard = TextRepetitionGuard::new(TextRepetitionGuardPolicy::default());
-    let (trip, fed) = feed_chunked(&mut guard, content)
-        .expect("the real incident message must trip the guard");
+    let (trip, fed) =
+        feed_chunked(&mut guard, content).expect("the real incident message must trip the guard");
     assert!(
         fed <= 2_000,
         "real fixture must trip within 2,000 characters, fired at {fed} ({:?})",
@@ -208,7 +206,11 @@ fn trip_latches_and_a_fresh_guard_starts_clean() {
     assert!(guard.on_text_chunk(&flood).is_none());
 
     let mut fresh = TextRepetitionGuard::new(TextRepetitionGuardPolicy::default());
-    assert!(fresh.on_text_chunk("A single ordinary reply. Short and done.").is_none());
+    assert!(
+        fresh
+            .on_text_chunk("A single ordinary reply. Short and done.")
+            .is_none()
+    );
     assert!(fresh.on_text_chunk(&flood).is_some(), "fresh guard re-arms");
 }
 

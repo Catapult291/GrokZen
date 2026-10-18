@@ -203,9 +203,7 @@ async fn gated_host_json<T: serde::Serialize>(
 ) -> String {
     let n = host_calls.fetch_add(1, Ordering::SeqCst);
     if n >= max_host_calls {
-        return format!(
-            "{CALL_LIMIT_PREFIX}host call limit of {max_host_calls} exceeded"
-        );
+        return format!("{CALL_LIMIT_PREFIX}host call limit of {max_host_calls} exceeded");
     }
     let _permit = match semaphore.acquire().await {
         Ok(p) => p,
@@ -217,8 +215,7 @@ async fn gated_host_json<T: serde::Serialize>(
         }
     };
     match call.await {
-        Ok(value) => serde_json::to_string(&value)
-            .unwrap_or_else(|_| "null".to_string()),
+        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string()),
         Err(err) => stringify_host_error(&err),
     }
 }
@@ -236,7 +233,9 @@ fn value_to_console_line<'js>(ctx: &Ctx<'js>, v: &rquickjs::Value<'js>) -> Strin
         }
     }
     if let Ok(Some(s)) = ctx.json_stringify(v) {
-        return s.to_string().unwrap_or_else(|_| "<unprintable>".to_string());
+        return s
+            .to_string()
+            .unwrap_or_else(|_| "<unprintable>".to_string());
     }
     "<unprintable>".to_string()
 }
@@ -248,15 +247,18 @@ fn make_console_fn<'js>(
     max_lines: usize,
     console: Arc<Mutex<Vec<String>>>,
 ) -> Result<rquickjs::Function<'js>, rquickjs::Error> {
-    rquickjs::Function::new(ctx.clone(), move |ctx: Ctx<'js>, args: Rest<rquickjs::Value<'js>>| {
-        let line = args
-            .0
-            .iter()
-            .map(|v| value_to_console_line(&ctx, v))
-            .collect::<Vec<_>>()
-            .join(" ");
-        push_console_line(&console, max_lines, line);
-    })
+    rquickjs::Function::new(
+        ctx.clone(),
+        move |ctx: Ctx<'js>, args: Rest<rquickjs::Value<'js>>| {
+            let line = args
+                .0
+                .iter()
+                .map(|v| value_to_console_line(&ctx, v))
+                .collect::<Vec<_>>()
+                .join(" ");
+            push_console_line(&console, max_lines, line);
+        },
+    )
 }
 
 /// Bind raw `__cm_*` globals onto `ctx`. The JS [`GLUE`] builds the
@@ -293,28 +295,26 @@ fn bind_globals(
         let host_calls = host_calls.clone();
         let semaphore = semaphore.clone();
         let max_host_calls = limits.max_host_calls;
-        let search = Async(
-            move |_ctx: Ctx<'_>, arg_json: String| {
-                let host = host.clone();
-                let host_calls = host_calls.clone();
-                let semaphore = semaphore.clone();
-                async move {
-                    let arg: serde_json::Value =
-                        serde_json::from_str(&arg_json).unwrap_or(serde_json::Value::Null);
-                    let query = arg
-                        .get("query")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("")
-                        .to_string();
-                    let limit = arg
-                        .get("limit")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(5) as usize;
-                    let fut = async move { host.search(query, limit).await };
-                    gated_host_json(&host_calls, max_host_calls, &semaphore, fut).await
-                }
-            },
-        );
+        let search = Async(move |_ctx: Ctx<'_>, arg_json: String| {
+            let host = host.clone();
+            let host_calls = host_calls.clone();
+            let semaphore = semaphore.clone();
+            async move {
+                let arg: serde_json::Value =
+                    serde_json::from_str(&arg_json).unwrap_or(serde_json::Value::Null);
+                let query = arg
+                    .get("query")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let limit = arg
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(5) as usize;
+                let fut = async move { host.search(query, limit).await };
+                gated_host_json(&host_calls, max_host_calls, &semaphore, fut).await
+            }
+        });
         globals.set("__cm_search", Func::from(search))?;
     }
 
@@ -324,19 +324,17 @@ fn bind_globals(
         let host_calls = host_calls.clone();
         let semaphore = semaphore.clone();
         let max_host_calls = limits.max_host_calls;
-        let use_tool = Async(
-            move |_ctx: Ctx<'_>, name: String, input_json: String| {
-                let host = host.clone();
-                let host_calls = host_calls.clone();
-                let semaphore = semaphore.clone();
-                async move {
-                    let input: serde_json::Value =
-                        serde_json::from_str(&input_json).unwrap_or(serde_json::Value::Null);
-                    let fut = async move { host.use_tool(name, input).await };
-                    gated_host_json(&host_calls, max_host_calls, &semaphore, fut).await
-                }
-            },
-        );
+        let use_tool = Async(move |_ctx: Ctx<'_>, name: String, input_json: String| {
+            let host = host.clone();
+            let host_calls = host_calls.clone();
+            let semaphore = semaphore.clone();
+            async move {
+                let input: serde_json::Value =
+                    serde_json::from_str(&input_json).unwrap_or(serde_json::Value::Null);
+                let fut = async move { host.use_tool(name, input).await };
+                gated_host_json(&host_calls, max_host_calls, &semaphore, fut).await
+            }
+        });
         globals.set("__cm_use", Func::from(use_tool))?;
     }
 
@@ -387,21 +385,23 @@ pub async fn execute(
                 &limits_clone,
             )
             .map_err(|e| CodemodeError::new(CodemodeErrorKind::Runtime, format!("bind: {e}")))?;
-            let promise: Promise = ctx.eval_promise(full_source.as_bytes().to_vec()).map_err(
-                |e| {
-                    // Usually compile/parse time — but the wrapper's synchronous
-                    // prefix can also run into the interrupt handler or OOM.
-                    let detail = pending_exception_text(&ctx).unwrap_or_else(|| e.to_string());
-                    let lower = detail.to_ascii_lowercase();
-                    if lower.contains("interrupted") {
-                        CodemodeError::new(CodemodeErrorKind::Timeout, detail)
-                    } else if lower.contains("out of memory") || lower.contains("stack overflow") {
-                        CodemodeError::new(CodemodeErrorKind::Oom, detail)
-                    } else {
-                        CodemodeError::new(CodemodeErrorKind::Syntax, detail)
-                    }
-                },
-            )?;
+            let promise: Promise =
+                ctx.eval_promise(full_source.as_bytes().to_vec())
+                    .map_err(|e| {
+                        // Usually compile/parse time — but the wrapper's synchronous
+                        // prefix can also run into the interrupt handler or OOM.
+                        let detail = pending_exception_text(&ctx).unwrap_or_else(|| e.to_string());
+                        let lower = detail.to_ascii_lowercase();
+                        if lower.contains("interrupted") {
+                            CodemodeError::new(CodemodeErrorKind::Timeout, detail)
+                        } else if lower.contains("out of memory")
+                            || lower.contains("stack overflow")
+                        {
+                            CodemodeError::new(CodemodeErrorKind::Oom, detail)
+                        } else {
+                            CodemodeError::new(CodemodeErrorKind::Syntax, detail)
+                        }
+                    })?;
             // eval_promise (JS_EVAL_FLAG_ASYNC) resolves the outer promise to
             // a `{ value: <completion> }` record; the completion itself may be
             // the IIFE's promise, which is awaited here in Rust.
@@ -433,7 +433,9 @@ pub async fn execute(
                 .json_stringify(inner)
                 .map_err(|e| classify_fatal_text(&e.to_string()))?;
             let envelope_json: std::string::String = match stringified {
-                Some(s) => s.to_string().map_err(|e| classify_fatal_text(&e.to_string()))?,
+                Some(s) => s
+                    .to_string()
+                    .map_err(|e| classify_fatal_text(&e.to_string()))?,
                 None => "null".to_string(),
             };
             serde_json::from_str(&envelope_json)
@@ -459,15 +461,16 @@ pub async fn execute(
 
     let (value, truncated) = match envelope.get("ok").and_then(serde_json::Value::as_bool) {
         Some(true) => {
-            let raw = envelope
-                .get("value")
-                .cloned()
-                .unwrap_or_else(|| match envelope.get("text") {
-                    Some(serde_json::Value::String(s)) => {
-                        serde_json::json!({ "text": s.clone() })
-                    }
-                    _ => serde_json::Value::Null,
-                });
+            let raw =
+                envelope
+                    .get("value")
+                    .cloned()
+                    .unwrap_or_else(|| match envelope.get("text") {
+                        Some(serde_json::Value::String(s)) => {
+                            serde_json::json!({ "text": s.clone() })
+                        }
+                        _ => serde_json::Value::Null,
+                    });
             fit_return(raw, limits.max_return_bytes)
         }
         Some(false) => {
@@ -484,7 +487,10 @@ pub async fn execute(
                     .to_string();
                 return Err(CodemodeError::host(code, message));
             }
-            if let Some(msg) = envelope.get("callLimit").and_then(serde_json::Value::as_str) {
+            if let Some(msg) = envelope
+                .get("callLimit")
+                .and_then(serde_json::Value::as_str)
+            {
                 return Err(CodemodeError::new(CodemodeErrorKind::CallLimit, msg));
             }
             let message = envelope
@@ -525,7 +531,12 @@ pub async fn execute(
 fn fit_return(value: serde_json::Value, max_bytes: usize) -> (serde_json::Value, bool) {
     let text = match serde_json::to_string(&value) {
         Ok(t) => t,
-        Err(_) => return (serde_json::json!({ "text": "return value unserializable" }), true),
+        Err(_) => {
+            return (
+                serde_json::json!({ "text": "return value unserializable" }),
+                true,
+            );
+        }
     };
     if text.len() <= max_bytes {
         return (value, false);

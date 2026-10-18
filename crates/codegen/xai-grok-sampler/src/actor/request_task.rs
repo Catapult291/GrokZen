@@ -678,7 +678,8 @@ async fn drive_l2(
     text_repetition_guard: Option<xai_grok_sampling_types::TextRepetitionGuardPolicy>,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
-    let mut repetition_guard = text_repetition_guard.map(crate::text_repetition::TextRepetitionGuard::new);
+    let mut repetition_guard =
+        text_repetition_guard.map(crate::text_repetition::TextRepetitionGuard::new);
     let mut doom_loop_signals = Vec::new();
     let mut await_first_output_span = Some(tracing::info_span!("sampling.await_first_output"));
     loop {
@@ -872,14 +873,13 @@ fn synthesize_from_info(info: &SamplingErrorInfo) -> SamplingError {
             aborted_at_chunk: info.doom_loop_aborted_at_chunk,
         },
         SamplingErrorKind::TextRepetitionDetected => {
-            let trip = info
-                .text_repetition
-                .clone()
-                .unwrap_or(xai_grok_sampling_types::TextRepetitionTrip {
+            let trip = info.text_repetition.clone().unwrap_or(
+                xai_grok_sampling_types::TextRepetitionTrip {
                     trigger: xai_grok_sampling_types::TextRepetitionTrigger::IdenticalRun,
                     generated_chars: 0,
                     threshold: 0,
-                });
+                },
+            );
             SamplingError::TextRepetitionDetected {
                 trigger: trip.trigger,
                 generated_chars: trip.generated_chars,

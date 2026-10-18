@@ -12,4 +12,4 @@ mod runtime;
 
 pub use error::{CodemodeError, CodemodeErrorKind};
 pub use host::{HostCallError, HostFuture, HostTools};
-pub use runtime::{execute, ExecOutcome, Limits};
+pub use runtime::{ExecOutcome, Limits, execute};
