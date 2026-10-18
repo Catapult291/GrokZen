@@ -1019,6 +1019,7 @@ pub(super) async fn run_session(
                                     )
                                 });
                             }
+                            session.tool_context.monitor_heartbeat.clear(&task_id);
                             if let Some(buffer) = &session.tool_context.monitor_event_buffer {
                                 let dropped = buffer.drain_matching(|e| e.task_id == task_id);
                                 if !dropped.is_empty() {
@@ -1031,6 +1032,30 @@ pub(super) async fn run_session(
                             }
                         }
                         SessionCommand::InjectNotification { prompt_id, prompt_blocks, priority, source } => {
+                            // Identical heartbeat reprints for the same monitor must not start another
+                            // NotificationDrain turn (poll scripts that echo unchanged status every interval).
+                            if matches!(&source, NotificationSource::MonitorEvent { .. }) {
+                                let event_text = prompt_blocks
+                                    .iter()
+                                    .filter_map(|block| match block {
+                                        acp::ContentBlock::Text(text) => Some(text.text.as_str()),
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                                let task_id = source.task_id();
+                                if !session
+                                    .tool_context
+                                    .monitor_heartbeat
+                                    .should_wake(task_id, &event_text)
+                                {
+                                    tracing::debug!(
+                                        task_id = %task_id,
+                                        "skipping identical monitor heartbeat wake"
+                                    );
+                                    continue;
+                                }
+                            }
                             let is_turn_active = session
                                 .session_turn_active
                                 .load(std::sync::atomic::Ordering::SeqCst);
