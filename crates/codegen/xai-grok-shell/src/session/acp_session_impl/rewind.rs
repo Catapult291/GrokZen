@@ -421,25 +421,9 @@ impl SessionActor {
                 .persistence_tx
                 .send(PersistenceMsg::LastRecap(None));
 
-            // Re-derive the AUTO title-refresh checkpoint from the shortened conversation.
-            // A rewind below a checkpoint re-opens refreshing, while one still past the window stays frozen.
-            // Persist it so the reopened state survives resume (unlike compaction, a rewind genuinely removes the turns those checkpoints described).
-            let session_dir = crate::session::persistence::session_dir(&self.session_info);
-            if !crate::session::persistence::title_is_manual_in_dir(&session_dir) {
-                let post_rewind_turns = crate::session::helpers::session_recap::main_turn_count(
-                    &self.chat_state_handle.get_conversation().await,
-                );
-                let idx = crate::session::helpers::session_summary::checkpoints_reached(
-                    post_rewind_turns,
-                );
-                self.next_title_refresh_idx.set(idx);
-                // Rewind re-derives the checkpoint; drop any failure streak from the pre-rewind attempt budget.
-                self.title_refresh_failures.set(0);
-                crate::session::helpers::session_summary::save_title_refresh_watermark(
-                    &session_dir,
-                    idx,
-                );
-            }
+            // The shortened conversation no longer matches what the last refresh titled.
+            // Clear the success marker so the next idle/end refresh re-titles (a manual rename stays pinned via `title_refresh_frozen`).
+            self.title_refresh_done_turns.set(None);
         }
 
         // Update the file state tracker to reflect the rewind.

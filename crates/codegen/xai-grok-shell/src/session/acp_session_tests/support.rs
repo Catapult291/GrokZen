@@ -527,8 +527,8 @@ async fn create_test_actor_inner(
         turn_summary_generation: std::cell::Cell::new(0),
         title_refresh_task: std::cell::RefCell::new(None),
         title_refresh_generation: std::cell::Cell::new(0),
-        next_title_refresh_idx: std::cell::Cell::new(0),
-        title_refresh_failures: std::cell::Cell::new(0),
+        title_refresh_frozen: std::cell::Cell::new(false),
+        title_refresh_done_turns: std::cell::Cell::new(None),
         turn_summary_enabled: false,
         title_refresh_enabled: false,
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1215,11 +1215,36 @@ pub(crate) fn stdio(name: &str, cmd: &str) -> acp::McpServer {
     } else {
         vec![]
     };
+    // MCP spawn uses CreateProcess with the bare name; resolve via PATH so a
+    // shell-only PATH entry (Niubash/`sleep`) still produces a real child on Windows.
+    let program = resolve_bare_command(cmd);
     acp::McpServer::Stdio(
-        acp::McpServerStdio::new(name.to_string(), cmd)
+        acp::McpServerStdio::new(name.to_string(), program)
             .args(args)
             .env(vec![]),
     )
+}
+
+/// Resolve a bare command name against `PATH`, preferring a real file on disk.
+/// Returns the input unchanged when nothing matches (so the caller still gets a spawn attempt).
+fn resolve_bare_command(cmd: &str) -> String {
+    #[cfg(windows)]
+    {
+        let Ok(path_var) = std::env::var("PATH") else {
+            return cmd.to_string();
+        };
+        for dir in std::env::split_paths(&path_var) {
+            for ext in ["", ".exe", ".cmd", ".bat"] {
+                let candidate = dir.join(format!("{cmd}{ext}"));
+                if candidate.is_file() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+    cmd.to_string()
 }
 pub(crate) async fn register_stub(bridge: &crate::tools::bridge::ToolBridge, name: &'static str) {
     bridge

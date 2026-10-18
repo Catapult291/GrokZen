@@ -3941,7 +3941,11 @@ fn validate_hooks_path_rejects_relative_path() {
 }
 #[test]
 fn validate_hooks_path_rejects_outside_grok_home() {
-    let result = validate_hooks_path("/tmp/evil-hooks");
+    // Outside-home absolute path. A bare `/tmp/...` is absolute on Unix but NOT on Windows
+    // (`Path::is_absolute` needs a drive/UNC prefix there), so build it from grok_home's parent.
+    let grok_home = crate::util::grok_home::grok_home();
+    let outside = grok_home.parent().unwrap_or(&grok_home).join("evil-hooks");
+    let result = validate_hooks_path(&outside.display().to_string());
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(

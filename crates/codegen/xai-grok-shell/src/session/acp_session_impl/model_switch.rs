@@ -415,6 +415,20 @@ impl SessionActor {
         }
         self.re_register_mcp_tools_on_rebuilt_bridge().await;
         self.run_mcp_init_with_claim(claim).await;
+        {
+            let s = self.mcp_state.lock().await;
+            tracing::info!(
+                session_id = %self.session_info.id.0,
+                is_initialized = s.is_initialized(),
+                has_mcp_servers = s.has_mcp_servers(),
+                is_initializing = s.is_initializing(),
+                has_finished_init = s.has_finished_init(),
+                init_progress = ?s.init_progress(),
+                handshaking = ?s.handshaking_servers_iter().cloned().collect::<Vec<_>>(),
+                client_names = ?s.all_clients().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                "handle_rebuild_agent_for_definition: post-init state before prefix wait"
+            );
+        }
         self.deferred_prefix.cancel();
         let new_user_prefix = self
             .build_prefix_after_mcp_wait(self.requires_full_mcp_wait())

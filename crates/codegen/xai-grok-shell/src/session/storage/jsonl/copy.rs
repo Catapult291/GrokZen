@@ -438,24 +438,7 @@ impl JsonlStorageAdapter {
             clear_announced_failure_episodes(&self.announcement_state_file(target_info))?;
         }
 
-        // Title-refresh watermark: only a managed parent (one with a watermark) passes managed state to the child.
-        // So a fork of a pre-feature session stays unmanaged (frozen) rather than being adopted.
-        // A full fork inherits the parent's checkpoint (keeping the inherited title frozen).
-        if let Some(parent_idx) =
-            crate::session::helpers::session_summary::load_title_refresh_watermark(
-                &self.session_dir(source_info),
-            )
-        {
-            let child_idx = if options.target_prompt_index.is_none() {
-                parent_idx
-            } else {
-                0
-            };
-            crate::session::helpers::session_summary::save_title_refresh_watermark(
-                &self.session_dir(target_info),
-                child_idx,
-            );
-        }
+        // The child's title-refresh gate comes from its own summary (`title_is_manual`, inherited by the copy) at spawn; no watermark file anymore.
 
         // Copied verbatim: the archive is immutable, so no cwd rewrite.
         let compaction_segments_copied = if copy_compaction_segments {

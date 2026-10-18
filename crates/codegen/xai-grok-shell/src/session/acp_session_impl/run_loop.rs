@@ -83,6 +83,9 @@ pub(super) async fn fire_session_end_hooks(
 ) {
     let span = session_end::span(Phase::Hooks);
     start.seal_and_join().await;
+    // Last-chance whole-conversation title refresh: covers a quit before the session ever went idle and earlier failed idle attempts.
+    // Guards plus the model-call timeout bound how long teardown can wait here.
+    session.finalize_title_refresh().await;
     let envelope = session.fire_hook(
         xai_grok_hooks::event::HookEventName::SessionEnd,
         None,
@@ -1190,8 +1193,10 @@ pub(super) async fn run_session(
                                     )
                                     .await;
                                 }
-                                if cancel.turn_stopped {
-                                    session.emit_session_idle_if_idle().await;
+                                if cancel.turn_stopped
+                                    && session.emit_session_idle_if_idle().await
+                                {
+                                    session.maybe_refresh_title();
                                 }
                             }
                         }
@@ -2416,7 +2421,10 @@ pub(super) async fn run_session(
                     SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                     // If no user prompt started, check for pending notifications
                     SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await;
-                    session.emit_session_idle_if_idle().await;
+                    if session.emit_session_idle_if_idle().await {
+                        // Whole-conversation auto-title refresh once the session settles idle (final backstop runs at session end)
+                        session.maybe_refresh_title();
+                    }
                     // LazinessDetector: spawn an idle-triggered classifier dispatch.
                     // The method is a no-op when the per-model `laziness_detector.enabled = false` (the v1 default for every model).
                     // No classification cost is incurred without explicit opt-in.
@@ -2429,11 +2437,9 @@ pub(super) async fn run_session(
                     // Per-turn dashboard summary (display-only side-call); spawned so the actor loop keeps accepting commands.
                     // `turn_succeeded` keeps cancelled/errored/refused turns from triggering a fresh model call.
                     // A user who hit Ctrl+C wants model activity to stop.
+                    // The auto-title refresh is NOT triggered here: it waits for the session to settle idle (see above) or ends at session end.
                     if turn_ran && turn_succeeded {
                         session.restart_turn_summary(completed_prompt_id);
-                        // Early-session auto-title refresh (turns 3 and 6), then frozen
-                        // Same success gating as the turn summary
-                        session.maybe_refresh_title();
                     }
                 }
         }

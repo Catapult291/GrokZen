@@ -590,12 +590,13 @@ impl SessionActor {
 
     /// Notifies extensions when the session settles idle (nothing running, nothing queued).
     /// The idle check stays host-side; extensions only get the event.
+    /// Returns whether the session was settled (the ping fired) so callers can trigger idle-only side-work such as the title refresh.
     /// Ignores `notifications_suppressed`, unlike [`is_session_idle_for_injection`].
-    pub(super) async fn emit_session_idle_if_idle(&self) {
+    pub(super) async fn emit_session_idle_if_idle(&self) -> bool {
         let suppressed = {
             let state = self.state.lock().await;
             if state_is_busy(&state) {
-                return;
+                return false;
             }
             state.notifications_suppressed
         };
@@ -607,13 +608,14 @@ impl SessionActor {
         // Like the session-end `Stop`: a subagent settling is not the session settling.
         // `SessionEnd` itself still fires for a child, carrying `subagentType`.
         if self.startup_hints.is_subagent {
-            return;
+            return false;
         }
         for contributor in self.extension_registry.session_lifecycle_contributors() {
             contributor
                 .on_session_idle(&xai_agent_lifecycle::SessionIdleInput)
                 .await;
         }
+        true
     }
 
     /// Sweep this session's buffered monitor events (`drain_owned`) into `pending_notifications`.

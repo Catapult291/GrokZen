@@ -15,7 +15,8 @@ use super::doom_loop_telemetry::merge_tightest_trigger;
 use super::inference_metrics::{InferenceLatencyStats, compute_percentiles};
 
 /// Sample the process resident-set high-water mark in bytes.
-/// Uses `getrusage(RUSAGE_SELF)` on Unix; returns 0 if sampling fails or on non-Unix targets.
+/// Unix: `getrusage(RUSAGE_SELF)`. Windows: `GetProcessMemoryInfo` peak working set.
+/// Returns 0 if sampling fails or on other targets.
 /// Cheap enough to call once per turn.
 pub(crate) fn sample_rss_bytes() -> u64 {
     #[cfg(unix)]
@@ -39,9 +40,40 @@ pub(crate) fn sample_rss_bytes() -> u64 {
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        sample_rss_bytes_windows()
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         0
+    }
+}
+
+/// Peak working set of the current process, in bytes. `GetCurrentProcess` returns a
+/// pseudo-handle that must not be closed.
+#[cfg(windows)]
+fn sample_rss_bytes_windows() -> u64 {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    // SAFETY: pseudo-handle for this process; the out-buffer is correctly sized via `cb`.
+    unsafe {
+        let mut counters = PROCESS_MEMORY_COUNTERS {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ..Default::default()
+        };
+        if GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            &mut counters,
+            std::mem::size_of_val(&counters) as u32,
+        )
+        .is_ok()
+        {
+            counters.PeakWorkingSetSize as u64
+        } else {
+            0
+        }
     }
 }
 

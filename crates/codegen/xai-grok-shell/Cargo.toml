@@ -207,6 +207,9 @@ windows = { workspace = true }
 
 [dev-dependencies]
 xai-dirs = { workspace = true }
+# Flip FEEDBACK_UPLOADS_ALLOWED / SESSION_DATA_UPLOADS_ALLOWED on so unit tests
+# can drive upload paths against local mock servers. Release builds never enable it.
+xai-grok-product = { path = "../xai-grok-product", features = ["test-uploads"] }
 xai-grok-status-line = { workspace = true, features = ["test-support"] }
 criterion = { workspace = true }
 # Pre-main unified-log redirect (`test_support::redirect_unified_log_for_tests`).

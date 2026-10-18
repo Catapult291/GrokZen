@@ -145,16 +145,10 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
             .persistence_tx
             .send(PersistenceMsg::ManualTitleRenamed(title.clone()));
         // Freeze the auto title refresh so an in-flight one can't flip the user's title and no later refresh fights it
-        // The actor persists the frozen watermark
+        // Dormant sessions need no extra write: `update_session_title` already pinned `title_is_manual` in the summary, which spawn reads.
         let _ = handle
             .cmd_tx
             .send(crate::session::commands::SessionCommand::TitleRenamed { manual: true });
-    } else {
-        // Dormant session: no actor to freeze it, so persist the frozen watermark directly for the next resume
-        crate::session::helpers::session_summary::save_title_refresh_watermark(
-            &crate::session::persistence::session_dir(&info),
-            crate::session::helpers::session_summary::TITLE_REFRESH_TURNS.len(),
-        );
     }
 
     // Update session search index with new title
@@ -231,16 +225,10 @@ async fn reset_session_title_to_auto(
         if let Some(handle) = agent.resident_handle(&session_id_acp) {
             let _ = handle.persistence_tx.send(PersistenceMsg::ResetTitleToAuto);
             // Reopen the auto title refresh so it can re-title from the whole conversation now that the manual pin is gone
-            // The actor persists the reopened watermark
+            // Dormant sessions need no extra write: `reset_title_to_auto` cleared `title_is_manual`, so spawn starts unfrozen.
             let _ = handle
                 .cmd_tx
                 .send(crate::session::commands::SessionCommand::TitleRenamed { manual: false });
-        } else {
-            // Dormant session: persist the reopened watermark directly so the whole-conversation retitle can run on the next resume
-            crate::session::helpers::session_summary::save_title_refresh_watermark(
-                &crate::session::persistence::session_dir(&info),
-                0,
-            );
         }
         // Non-resident sessions have no persistence actor / RemoteSync.
         // Mirror the rename writeback path so a dormant unpin cannot leave the remote pin for a later pull to restore

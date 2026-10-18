@@ -5,6 +5,11 @@ edition.workspace = true
 license = "Apache-2.0"
 description = "Community distribution identity for Grok Build Chinese"
 
+[features]
+# Test-only escape hatch for upload-path unit tests (local mock servers).
+# Never enabled for release/production builds.
+test-uploads = []
+
 [dependencies]
 # Feature-unification: `privacy` is default-on in xai-grok-version; pinning it
 # here guarantees PRIVACY_BUILD policy bits stay true in every product binary
