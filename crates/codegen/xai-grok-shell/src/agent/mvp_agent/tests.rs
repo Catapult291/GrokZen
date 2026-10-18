@@ -2650,6 +2650,14 @@ async fn upload_trace_missing_intent_with_global_consent_stays_compatible() {
     }
     insert_resident_session(&agent, "sess", tmp.path());
     assert!(!agent.feedback_trace_offer());
+    if xai_grok_version::research_data_collection_forbidden() {
+        let err = upload_trace_error(&agent, serde_json::json!({ "sessionId": "sess" }), None).await;
+        assert!(
+            err.to_string().contains(NOT_AVAILABLE),
+            "privacy hard-off must beat global consent: {err}"
+        );
+        return;
+    }
     let err = upload_trace_error(&agent, serde_json::json!({ "sessionId": "sess" }), None).await;
     assert!(err.to_string().contains(NO_SESSION_DIR), "got: {err}");
 }
@@ -2673,8 +2681,12 @@ async fn upload_trace_exact_intent_cannot_bypass_the_offer_gate() {
 #[tokio::test]
 #[serial_test::serial]
 async fn upload_trace_exact_intent_requires_and_consumes_a_matching_grant() {
+    use xai_grok_test_support::EnvGuard;
     let tmp = tempfile::tempdir().unwrap();
     let _env = trace_gate_env(tmp.path());
+    // Privacy build hard-offs Feedback via config; GROK_FEEDBACK_ENABLED is the
+    // only remaining opt-in and is what opens the gate this test exercises.
+    let _fb = EnvGuard::set("GROK_FEEDBACK_ENABLED", "1");
     let agent = build_agent_with_auth(personal_xai_oauth_auth());
     make_trace_card_eligible(&agent);
     insert_resident_session(&agent, "sess", tmp.path());
@@ -2718,8 +2730,10 @@ async fn upload_trace_exact_intent_requires_and_consumes_a_matching_grant() {
 #[tokio::test]
 #[serial_test::serial]
 async fn upload_trace_exact_intent_cannot_bypass_residency() {
+    use xai_grok_test_support::EnvGuard;
     let tmp = tempfile::tempdir().unwrap();
     let _env = trace_gate_env(tmp.path());
+    let _fb = EnvGuard::set("GROK_FEEDBACK_ENABLED", "1");
     let agent = build_agent_with_auth(personal_xai_oauth_auth());
     make_trace_card_eligible(&agent);
     let err = upload_trace_error(
@@ -2734,8 +2748,10 @@ async fn upload_trace_exact_intent_cannot_bypass_residency() {
 #[tokio::test]
 #[serial_test::serial]
 async fn upload_trace_checks_residency_before_the_offer_gate() {
+    use xai_grok_test_support::EnvGuard;
     let tmp = tempfile::tempdir().unwrap();
     let _env = trace_gate_env(tmp.path());
+    let _fb = EnvGuard::set("GROK_FEEDBACK_ENABLED", "1");
     let agent = build_agent_with_auth(personal_xai_oauth_auth());
     let err = upload_trace_error(&agent, serde_json::json!({ "sessionId": "sess" }), None).await;
     assert!(err.to_string().contains("session not found"), "got: {err}");
@@ -2802,8 +2818,10 @@ async fn upload_trace_team_account_rejects_even_the_exact_intent() {
 #[tokio::test]
 #[serial_test::serial]
 async fn upload_trace_archive_failure_uses_an_isolated_directory() {
+    use xai_grok_test_support::EnvGuard;
     let tmp = tempfile::tempdir().unwrap();
     let _env = trace_gate_env(tmp.path());
+    let _fb = EnvGuard::set("GROK_FEEDBACK_ENABLED", "1");
     let session_dir = tmp.path().join("session");
     std::fs::create_dir(&session_dir).unwrap();
     let agent = build_agent_with_auth(personal_xai_oauth_auth());
@@ -2830,6 +2848,29 @@ async fn upload_trace_archive_failure_uses_an_isolated_directory() {
 async fn upload_trace_upload_failure_uses_an_isolated_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let _env = trace_gate_env(tmp.path());
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: one_shot_feedback_gcs_config requires an enabled
+        // telemetry posture, which the hard-off never grants.
+        let agent = build_agent_with_auth(personal_xai_oauth_auth());
+        make_trace_card_eligible(&agent);
+        insert_resident_session(&agent, "sess", tmp.path());
+        let token = agent.issue_feedback_trace_upload_grant(acp::SessionId::new("sess"));
+        let err = upload_trace_error(
+            &agent,
+            serde_json::json!({
+                "sessionId": "sess",
+                "intent": "send_this_session",
+                "traceUploadToken": token,
+            }),
+            None,
+        )
+        .await;
+        assert!(
+            err.to_string().contains(NOT_AVAILABLE),
+            "privacy: one-shot GCS config stays closed: {err}"
+        );
+        return;
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -4459,6 +4500,15 @@ async fn opted_out_user_uploads_traces_only_to_own_bucket() {
         agent.trace_upload_config_snapshot().is_none(),
         "precondition: no own bucket, so the opt-out blocks uploads"
     );
+    if xai_grok_version::research_data_collection_forbidden() {
+        agent.cfg.borrow_mut().endpoints.trace_upload_bucket = Some("s3://acme-traces".into());
+        assert!(
+            agent.trace_upload_config_snapshot().is_none(),
+            "privacy hard-off must keep own-bucket uploads closed"
+        );
+        assert!(agent.is_data_collection_disabled());
+        return;
+    }
     agent.cfg.borrow_mut().endpoints.trace_upload_bucket = Some("s3://acme-traces".into());
     let is_own_bucket = |method: Option<crate::session::repo_changes::UploadMethod>| {
         matches!(
@@ -4496,6 +4546,14 @@ async fn diagnostic_upload_skipped_for_opted_out_user_with_own_bucket() {
         let mut cfg = agent.cfg.borrow_mut();
         cfg.endpoints.trace_upload_url = Some(stub_url);
         cfg.endpoints.trace_upload_bucket = Some("s3://acme-traces".into());
+    }
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: trace upload is hard-off, so no uploader is wired.
+        assert!(
+            agent.diagnostic_upload_config().is_none(),
+            "privacy build: diagnostics upload must never be wired"
+        );
+        return;
     }
     let uploader = agent
         .diagnostic_upload_config()

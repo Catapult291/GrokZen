@@ -7416,6 +7416,23 @@ telemetry = "garbage"
 #[test]
 #[serial]
 fn is_telemetry_explicitly_disabled_sync_env_signals() {
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: product telemetry is hard-off; env signals cannot opt in.
+        let _g0 = EnvGuard::set("GROK_TELEMETRY_ENABLED", "0");
+        let _d = EnvGuard::unset("DISABLE_TELEMETRY");
+        assert!(is_telemetry_explicitly_disabled_sync());
+        drop(_g0);
+        let _g1 = EnvGuard::set("GROK_TELEMETRY_ENABLED", "1");
+        assert!(
+            is_telemetry_explicitly_disabled_sync(),
+            "privacy hard-off must ignore GROK_TELEMETRY_ENABLED=1"
+        );
+        drop(_g1);
+        let _none = EnvGuard::unset("GROK_TELEMETRY_ENABLED");
+        let _d1 = EnvGuard::set("DISABLE_TELEMETRY", "1");
+        assert!(is_telemetry_explicitly_disabled_sync());
+        return;
+    }
     unsafe { std::env::set_var("GROK_TELEMETRY_ENABLED", "0") };
     unsafe { std::env::remove_var("DISABLE_TELEMETRY") };
     assert!(is_telemetry_explicitly_disabled_sync());
@@ -7435,6 +7452,15 @@ fn resolve_telemetry_mode_disable_env_beats_opt_in_but_not_requirements_pin() {
     let mut cfg = Config::default();
     cfg.features.telemetry = Some(TelemetryMode::Enabled);
     let _falsy = EnvGuard::set("DISABLE_TELEMETRY", "0");
+    if xai_grok_version::research_data_collection_forbidden() {
+        let resolved = cfg.resolve_telemetry_mode();
+        assert_eq!(
+            (resolved.value, resolved.source),
+            (TelemetryMode::Disabled, ConfigSource::Default),
+            "privacy hard-off must beat env/config/requirement tiers"
+        );
+        return;
+    }
     let resolved = cfg.resolve_telemetry_mode();
     assert_eq!(
         (resolved.value, resolved.source),
@@ -7471,6 +7497,15 @@ fn requirements_telemetry_pin_beats_user_config() {
         TelemetryMode::Disabled,
         crate::config::RequirementSource::Unknown,
     );
+    if xai_grok_version::research_data_collection_forbidden() {
+        let off = cfg.resolve_telemetry_mode();
+        assert_eq!(
+            (off.value, off.source),
+            (TelemetryMode::Disabled, ConfigSource::Default),
+            "privacy hard-off wins over the requirements pin"
+        );
+        return;
+    }
     let off = cfg.resolve_telemetry_mode();
     assert_eq!(
         (off.value, off.source),

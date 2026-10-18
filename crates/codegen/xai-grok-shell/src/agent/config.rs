@@ -256,7 +256,10 @@ impl TraceUploadEndpoints for EndpointsConfig {
         if self.resolve_direct_upload_method().is_some() {
             auth.is_zdr_team()
         } else {
-            auth.is_data_collection_disabled()
+            // Account-level privacy flags only. Build-policy hard-off
+            // (`SESSION_DATA_UPLOADS_ALLOWED` / research collection) is enforced
+            // separately and must not make every normal account look blocked here.
+            auth.is_zdr_team() || auth.coding_data_retention_opt_out
         }
     }
 }
