@@ -508,7 +508,9 @@ pub enum SignalEvent {
     },
 
     /// Record a text-repetition guard abort; `trigger` is `identical_run` | `chunk_periodicity`.
-    RecordTextRepetitionAbort { trigger: String },
+    RecordTextRepetitionAbort {
+        trigger: String,
+    },
 
     /// Record a cross-turn loop-breaker abort (same preamble + tool set across steps).
     RecordCrossTurnLoopAbort,

@@ -566,8 +566,16 @@ mod tests {
             // That failure is the reminder to also extend `all` and `from_str`
             // Only variants listed in `all` are round-trip-checked; the compiler cannot force those two edits
             match kind {
-                Auth | Http | Api | Serialization | IdleTimeout | RateLimited | EmptyResponse
-                | MaxTokensTruncation | DoomLoopDetected | TextRepetitionDetected => {}
+                Auth
+                | Http
+                | Api
+                | Serialization
+                | IdleTimeout
+                | RateLimited
+                | EmptyResponse
+                | MaxTokensTruncation
+                | DoomLoopDetected
+                | TextRepetitionDetected => {}
             }
             assert_eq!(kind.as_ref().parse(), Ok(kind));
         }

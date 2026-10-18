@@ -8,7 +8,7 @@ pub use input::CodemodeInput;
 
 use std::sync::{Arc, Mutex};
 
-use xai_grok_codemode::{execute, HostCallError, HostFuture, HostTools, Limits};
+use xai_grok_codemode::{HostCallError, HostFuture, HostTools, Limits, execute};
 use xai_tool_runtime::{Tool as _, ToolCallContext};
 
 use crate::types::output::{TextOutput, ToolOutput};
@@ -44,12 +44,16 @@ impl CodemodeParams {
             timeout: std::time::Duration::from_secs(
                 self.timeout_secs.unwrap_or(defaults.timeout.as_secs()),
             ),
-            memory_bytes: self.memory_mb.unwrap_or(defaults.memory_bytes / (1024 * 1024))
+            memory_bytes: self
+                .memory_mb
+                .unwrap_or(defaults.memory_bytes / (1024 * 1024))
                 * (1024 * 1024),
             max_stack_bytes: defaults.max_stack_bytes,
             max_host_calls: self.max_host_calls.unwrap_or(defaults.max_host_calls),
             max_concurrency: self.max_concurrency.unwrap_or(defaults.max_concurrency),
-            max_return_bytes: self.max_return_kb.unwrap_or(defaults.max_return_bytes / 1024)
+            max_return_bytes: self
+                .max_return_kb
+                .unwrap_or(defaults.max_return_bytes / 1024)
                 * 1024,
             max_console_lines: defaults.max_console_lines,
         }
@@ -101,7 +105,11 @@ impl HostTools for CodemodeHost {
         serde_json::Value::Array(servers)
     }
 
-    fn search(&self, query: String, limit: usize) -> HostFuture<Result<serde_json::Value, HostCallError>> {
+    fn search(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> HostFuture<Result<serde_json::Value, HostCallError>> {
         let ctx = self.ctx.clone();
         Box::pin(async move {
             let input = crate::implementations::search_tool::SearchToolInput {
@@ -138,10 +146,11 @@ impl HostTools for CodemodeHost {
             // InnerDispatch (skips reminder/persistence — the outer codemode
             // call does one post-processing pass), managed-gateway fallback
             // preserved.
-            let output =
-                crate::implementations::use_tool::dispatch_mcp_tool(&ctx, &tool_name, input, "codemode")
-                    .await
-                    .map_err(host_error_from_tool)?;
+            let output = crate::implementations::use_tool::dispatch_mcp_tool(
+                &ctx, &tool_name, input, "codemode",
+            )
+            .await
+            .map_err(host_error_from_tool)?;
             Ok(serde_json::json!({
                 "text": output.to_prompt_format(),
                 "isError": output.is_error(),
@@ -242,9 +251,7 @@ impl xai_tool_runtime::Tool for Codemode {
         });
         let outcome = execute(&input.code, host.clone(), &limits)
             .await
-            .map_err(|e| {
-                xai_tool_runtime::ToolError::custom(e.code.clone(), e.message.clone())
-            })?;
+            .map_err(|e| xai_tool_runtime::ToolError::custom(e.code.clone(), e.message.clone()))?;
 
         let tools_called = host
             .tools_called
@@ -273,8 +280,7 @@ impl xai_tool_runtime::Tool for Codemode {
             "truncated": outcome.truncated,
         });
         Ok(ToolOutput::Text(TextOutput {
-            text: serde_json::to_string_pretty(&envelope)
-                .unwrap_or_else(|_| "{}".to_string()),
+            text: serde_json::to_string_pretty(&envelope).unwrap_or_else(|_| "{}".to_string()),
             consumed_completion_task_id: None,
         }))
     }

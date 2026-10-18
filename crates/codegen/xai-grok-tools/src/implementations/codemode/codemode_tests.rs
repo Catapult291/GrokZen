@@ -60,8 +60,7 @@ async fn servers_and_search_visible_in_sandbox() {
         .insert(ToolIndex(Arc::new(StaticToolIndex {
             snapshot: one_tool_snapshot(),
         })));
-    let mut ctx =
-        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
     ctx.extensions.insert(resources);
 
     let output = super::Codemode
@@ -109,8 +108,7 @@ return {
 #[tokio::test]
 async fn host_error_surfaces_original_code() {
     let resources = crate::types::resources::Resources::default().into_shared();
-    let mut ctx =
-        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
     ctx.extensions.insert(resources);
 
     // No InnerDispatch and no gateway: local dispatch fails with a clear
@@ -135,8 +133,7 @@ async fn host_error_surfaces_original_code() {
 #[tokio::test]
 async fn syntax_error_maps_to_codemode_syntax() {
     let resources = crate::types::resources::Resources::default().into_shared();
-    let mut ctx =
-        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
     ctx.extensions.insert(resources);
 
     let err = super::Codemode
@@ -163,13 +160,17 @@ async fn configured_timeout_overrides_default() {
         timeout_secs: Some(1),
         ..Default::default()
     }));
-    let mut ctx =
-        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
     ctx.extensions.insert(resources);
 
     let started = std::time::Instant::now();
     let err = super::Codemode
-        .run(ctx, super::CodemodeInput { code: "while (true) {}".into() })
+        .run(
+            ctx,
+            super::CodemodeInput {
+                code: "while (true) {}".into(),
+            },
+        )
         .await
         .expect_err("dead loop must be killed");
     let elapsed = started.elapsed();
@@ -219,8 +220,7 @@ async fn use_tool_dispatches_through_inner_dispatch() {
         calls: Mutex::new(Vec::new()),
     });
     let resources = crate::types::resources::Resources::default().into_shared();
-    let mut ctx =
-        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
     ctx.extensions
         .insert(crate::types::resources::InnerDispatch(dispatch.clone()));
     ctx.extensions.insert(resources);
@@ -286,8 +286,7 @@ async fn default_host_call_budget_is_64() {
         "handoff pins the default budget at 64"
     );
     let resources = crate::types::resources::Resources::default().into_shared();
-    let mut ctx =
-        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
     ctx.extensions
         .insert(crate::types::resources::InnerDispatch(Arc::new(OkDispatch)));
     ctx.extensions.insert(resources);
@@ -326,12 +325,16 @@ async fn dead_loop_kill_leaves_next_run_usable() {
         timeout_secs: Some(1),
         ..Default::default()
     }));
-    let mut ctx =
-        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
     ctx.extensions.insert(resources.clone());
 
     let err = super::Codemode
-        .run(ctx, super::CodemodeInput { code: "while (true) {}".into() })
+        .run(
+            ctx,
+            super::CodemodeInput {
+                code: "while (true) {}".into(),
+            },
+        )
         .await
         .expect_err("dead loop must be killed");
     let details = err.details.expect("custom details");
@@ -340,11 +343,15 @@ async fn dead_loop_kill_leaves_next_run_usable() {
         Some("codemode_timeout")
     );
 
-    let mut ctx =
-        xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
+    let mut ctx = xai_tool_runtime::ToolCallContext::new(xai_tool_protocol::ToolCallId::new_v7());
     ctx.extensions.insert(resources);
     let output = super::Codemode
-        .run(ctx, super::CodemodeInput { code: "return 6 * 7;".into() })
+        .run(
+            ctx,
+            super::CodemodeInput {
+                code: "return 6 * 7;".into(),
+            },
+        )
         .await
         .expect("run after a kill must succeed");
     let ToolOutput::Text(text) = output else {
@@ -391,7 +398,9 @@ async fn token_accounting_structural_reduction_ge_40_percent() {
         ) -> xai_grok_codemode::HostFuture<
             Result<serde_json::Value, xai_grok_codemode::HostCallError>,
         > {
-            Box::pin(async { Ok(json!({ "results": [], "total_hidden_tools": 2, "status": "ready" })) })
+            Box::pin(async {
+                Ok(json!({ "results": [], "total_hidden_tools": 2, "status": "ready" }))
+            })
         }
         fn use_tool(
             &self,
@@ -435,13 +444,9 @@ for (const org of orgs) {
 return slugs;
 "#;
     let out = std::sync::Arc::new(SentryishHost);
-    let outcome = xai_grok_codemode::execute(
-        code,
-        out,
-        &xai_grok_codemode::Limits::default(),
-    )
-    .await
-    .expect("orchestration script runs");
+    let outcome = xai_grok_codemode::execute(code, out, &xai_grok_codemode::Limits::default())
+        .await
+        .expect("orchestration script runs");
     let codemode_bytes = serde_json::to_string(&outcome.value).unwrap().len();
 
     let ratio = codemode_bytes as f64 / baseline_bytes as f64;

@@ -36,7 +36,11 @@ pub trait HostTools: Send + Sync + 'static {
 
     /// Discovery, same shape as `search_tool`'s model-visible output:
     /// `{ results: [{ server, tools }], total_hidden_tools, status, note }`.
-    fn search(&self, query: String, limit: usize) -> HostFuture<Result<serde_json::Value, HostCallError>>;
+    fn search(
+        &self,
+        query: String,
+        limit: usize,
+    ) -> HostFuture<Result<serde_json::Value, HostCallError>>;
 
     /// Dispatch any discovered tool (local MCP or managed gateway), same
     /// distribution semantics as `use_tool` (single post-processing pass;

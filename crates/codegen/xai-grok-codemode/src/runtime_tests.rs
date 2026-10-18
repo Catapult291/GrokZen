@@ -55,7 +55,11 @@ impl HostTools for MockHost {
         json!([{ "name": "mock", "description": "mock server", "toolCount": 2 }])
     }
 
-    fn search(&self, _query: String, _limit: usize) -> HostFuture<Result<serde_json::Value, HostCallError>> {
+    fn search(
+        &self,
+        _query: String,
+        _limit: usize,
+    ) -> HostFuture<Result<serde_json::Value, HostCallError>> {
         Box::pin(async {
             Ok(json!({
                 "results": [{
@@ -77,7 +81,10 @@ impl HostTools for MockHost {
         let fail = self.fail.clone();
         let latency = self.latency;
         // Record synchronously before boxing so assertions do not race the future.
-        self.calls.lock().unwrap().push((tool_name.clone(), input.clone()));
+        self.calls
+            .lock()
+            .unwrap()
+            .push((tool_name.clone(), input.clone()));
         Box::pin(async move {
             if latency > Duration::ZERO {
                 tokio::time::sleep(latency).await;
@@ -102,13 +109,9 @@ fn fast_limits() -> Limits {
 
 #[tokio::test]
 async fn eval_simple_return() {
-    let out = execute(
-        "return 1 + 1;",
-        Arc::new(MockHost::new()),
-        &fast_limits(),
-    )
-    .await
-    .unwrap();
+    let out = execute("return 1 + 1;", Arc::new(MockHost::new()), &fast_limits())
+        .await
+        .unwrap();
     assert_eq!(out.value, json!(2));
     assert!(!out.truncated);
     assert_eq!(out.host_calls, 0);
@@ -156,7 +159,11 @@ async fn host_error_passthrough_keeps_code() {
     .unwrap_err();
     assert_eq!(err.kind, CodemodeErrorKind::Host);
     assert_eq!(err.code, "permission_denied");
-    assert!(err.message.contains("user rejected"), "got: {}", err.message);
+    assert!(
+        err.message.contains("user rejected"),
+        "got: {}",
+        err.message
+    );
     assert_eq!(err.kind_code(), "codemode_host_error");
 }
 
@@ -238,9 +245,13 @@ async fn syntax_error_classified() {
 
 #[tokio::test]
 async fn bare_throw_is_runtime_error() {
-    let err = execute(r#"throw new Error("boom");"#, Arc::new(MockHost::new()), &fast_limits())
-        .await
-        .unwrap_err();
+    let err = execute(
+        r#"throw new Error("boom");"#,
+        Arc::new(MockHost::new()),
+        &fast_limits(),
+    )
+    .await
+    .unwrap_err();
     assert_eq!(err.kind, CodemodeErrorKind::Runtime, "got: {err:?}");
     assert!(err.message.contains("boom"), "got: {}", err.message);
 }
@@ -326,5 +337,3 @@ async fn search_tool_round_trip() {
         Some(&json!("mock__echo"))
     );
 }
-
-

@@ -21,10 +21,7 @@ use xai_grok_sampling_types::{TextRepetitionGuardPolicy, TextRepetitionTrip};
 const CHUNK_SIZES: [usize; 6] = [8, 16, 32, 4, 64, 7];
 
 /// Feed `text` like a stream; returns the first trip with the character count fed when it fired.
-fn feed_chunked(
-    guard: &mut TextRepetitionGuard,
-    text: &str,
-) -> Option<(TextRepetitionTrip, u64)> {
+fn feed_chunked(guard: &mut TextRepetitionGuard, text: &str) -> Option<(TextRepetitionTrip, u64)> {
     let chars: Vec<char> = text.chars().collect();
     let mut index = 0usize;
     let mut cycle = 0usize;
