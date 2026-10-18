@@ -43,9 +43,22 @@ pub const DEFAULT_UI_LOCALE: &str = "zh-CN";
 pub const TELEMETRY_UPLOADS_ALLOWED: bool = false;
 /// Build policy: auxiliary session, trace and research uploads are disabled.
 /// This does not block model requests or tools explicitly requested by the user.
+///
+/// The `test-uploads` cargo feature flips both upload switches on so dependent
+/// crates' unit tests can drive the upload path against local mock servers.
+/// Release builds never enable that feature.
+#[cfg(not(feature = "test-uploads"))]
 pub const SESSION_DATA_UPLOADS_ALLOWED: bool = false;
+/// See [`SESSION_DATA_UPLOADS_ALLOWED`].
+#[cfg(feature = "test-uploads")]
+pub const SESSION_DATA_UPLOADS_ALLOWED: bool = true;
 /// Build policy: feedback polling, submission and attached archives are disabled.
+/// See [`SESSION_DATA_UPLOADS_ALLOWED`] for the test-only override.
+#[cfg(not(feature = "test-uploads"))]
 pub const FEEDBACK_UPLOADS_ALLOWED: bool = false;
+/// See [`SESSION_DATA_UPLOADS_ALLOWED`].
+#[cfg(feature = "test-uploads")]
+pub const FEEDBACK_UPLOADS_ALLOWED: bool = true;
 
 /// Repository that owns every update accepted by the community distribution.
 pub const COMMUNITY_RELEASE_REPO: &str = "Catapult291/GrokZen";

@@ -24,18 +24,6 @@ Write the title in the same natural language as the user query. If the user quer
 
 Just generate the session_title and nothing else"#;
 
-/// Real-user turn counts at which the auto title is refreshed from the whole conversation, then frozen.
-/// Refreshing at a couple of early turns lets the title catch up to the real topic without churning enough to make sessions hard to recognize.
-/// A manual `/rename` always wins and stops refreshes.
-pub(crate) const TITLE_REFRESH_TURNS: [usize; 2] = [3, 6];
-
-/// Number of [`TITLE_REFRESH_TURNS`] checkpoints reached at `turns` real-user turns, i.e. the checkpoint index to advance to.
-/// This catches up past any checkpoints a burst of turns jumped over.
-/// Equal to `TITLE_REFRESH_TURNS.len()` means the title is frozen.
-pub(crate) fn checkpoints_reached(turns: usize) -> usize {
-    TITLE_REFRESH_TURNS.iter().filter(|&&t| turns >= t).count()
-}
-
 /// Hard byte cap guarding runaway title output; the instruction already targets 5-10 words.
 /// Applied on a char boundary, so a multibyte title is capped a little shorter, which is fine for a safety bound.
 const TITLE_MAX_BYTES: usize = 80;
@@ -44,39 +32,6 @@ const TITLE_MAX_BYTES: usize = 80;
 /// Whitespace-word capping alone leaves CJK prompts almost intact (few spaces), so a Chinese first prompt used to become the entire title.
 /// 50 keeps a normal 10-word English title intact (`"one two … ten"` is 49 chars) while still cutting a long CJK first prompt.
 const TITLE_FALLBACK_MAX_CHARS: usize = 50;
-
-/// Max consecutive failed refresh attempts at a checkpoint before force-advancing.
-/// Failure no longer burns the checkpoint on the first miss, but a permanently broken backend still freezes after this many tries.
-pub(crate) const TITLE_REFRESH_MAX_ATTEMPTS: u32 = 3;
-
-/// Decide the next title-refresh checkpoint after one attempt.
-///
-/// `current_idx` is the durable watermark (checkpoints already committed).
-/// `target_idx` is [`checkpoints_reached`] for the current main-turn count (`target_idx > current_idx` when a refresh is due).
-/// `success` is whether the model produced a non-empty title.
-/// `consecutive_failures` is the in-memory failure streak at `current_idx` *before* this attempt.
-///
-/// Returns `(next_idx, next_consecutive_failures, persist_watermark)`:
-/// - Success advances to `target_idx` (catch-up preserved) and clears the streak.
-/// - Failure leaves the checkpoint open so the next successful turn can retry.
-/// - After [`TITLE_REFRESH_MAX_ATTEMPTS`] consecutive failures the checkpoint is force-advanced so a bad model cannot spawn side-calls forever.
-pub(crate) fn next_title_refresh_state(
-    current_idx: usize,
-    target_idx: usize,
-    success: bool,
-    consecutive_failures: u32,
-) -> (usize, u32, bool) {
-    debug_assert!(target_idx > current_idx);
-    if success {
-        return (target_idx, 0, true);
-    }
-    let failures = consecutive_failures.saturating_add(1);
-    if failures >= TITLE_REFRESH_MAX_ATTEMPTS {
-        (target_idx, 0, true)
-    } else {
-        (current_idx, failures, false)
-    }
-}
 
 /// An explicit sampler route a backend pins its titles to, instead of the configured default.
 #[derive(Clone)]
@@ -124,48 +79,6 @@ fn direct_session_title_sampling_config(
         context_window: 200_000,
         client_version,
         ..SamplerConfig::default()
-    }
-}
-
-/// Durable title-refresh checkpoint watermark under `{session_dir}/`: the number of [`TITLE_REFRESH_TURNS`] checkpoints already consumed.
-/// Only a committed value is persisted, so an aborted refresh still retries.
-pub(crate) const TITLE_REFRESH_WATERMARK_FILE: &str = "title_refresh_idx";
-
-/// Load the persisted checkpoint index, clamped to the number of checkpoints so a stale larger value still means "frozen".
-/// `None` when the session has no watermark yet (fresh, pre-feature, or feature-was-off).
-/// The caller decides the starting checkpoint for that case (see [`initial_title_refresh_idx`]).
-pub(crate) fn load_title_refresh_watermark(session_dir: &std::path::Path) -> Option<usize> {
-    std::fs::read_to_string(session_dir.join(TITLE_REFRESH_WATERMARK_FILE))
-        .ok()
-        .and_then(|s| s.trim().parse::<usize>().ok())
-        .map(|idx| idx.min(TITLE_REFRESH_TURNS.len()))
-}
-
-/// The checkpoint index a session starts at on spawn.
-/// A managed session (has a watermark) uses it; the watermark is authoritative and durable across compaction.
-/// An unmanaged session is *adopted* as open (`0`) only when the feature is enabled and it is brand new (no turns); otherwise it freezes.
-pub(crate) fn initial_title_refresh_idx(
-    watermark: Option<usize>,
-    enabled: bool,
-    turns: usize,
-) -> usize {
-    match watermark {
-        Some(idx) => idx,
-        None if enabled && turns == 0 => 0,
-        None => TITLE_REFRESH_TURNS.len(),
-    }
-}
-
-/// Persist the checkpoint index after a completed attempt.
-/// It is best-effort and written atomically (temp sibling, then rename).
-/// A crash mid-write therefore can't leave a partial/empty file that would load as `0` and reopen the refresh window.
-pub(crate) fn save_title_refresh_watermark(session_dir: &std::path::Path, idx: usize) {
-    if !session_dir.is_dir() {
-        return;
-    }
-    let path = session_dir.join(TITLE_REFRESH_WATERMARK_FILE);
-    if let Err(e) = crate::session::storage::write_bytes_atomic(&path, idx.to_string().as_bytes()) {
-        tracing::warn!(error = %e, path = %path.display(), "failed to persist title refresh watermark");
     }
 }
 
@@ -262,7 +175,8 @@ fn validated_generated_title(source: &str, generated: &str) -> Option<String> {
 }
 
 /// Generate the initial session title from the first user message, for the fast first-prompt path ([`crate::session::summary::SummaryGenerator`]).
-/// The title is later refreshed from the whole conversation at the early checkpoints in [`TITLE_REFRESH_TURNS`], then frozen.
+/// The title is later re-generated from the whole conversation when the session settles idle and once more at session end,
+/// until a manual `/rename` pins it.
 pub async fn generate_session_summary(
     user_message: String,
     client: OaiCompatClient,
@@ -386,56 +300,6 @@ mod tests {
     }
 
     #[test]
-    fn checkpoints_reached_counts_and_catches_up() {
-        use super::{TITLE_REFRESH_TURNS, checkpoints_reached};
-        assert_eq!(checkpoints_reached(0), 0);
-        assert_eq!(checkpoints_reached(2), 0);
-        assert_eq!(checkpoints_reached(3), 1);
-        assert_eq!(checkpoints_reached(5), 1);
-        assert_eq!(checkpoints_reached(6), 2);
-        // A burst past the last checkpoint catches up to frozen, no overshoot.
-        assert_eq!(checkpoints_reached(50), TITLE_REFRESH_TURNS.len());
-    }
-
-    /// The freeze watermark round-trips (durable across a shortened conversation, e.g. compaction).
-    #[test]
-    fn title_refresh_watermark_round_trips_and_clamps() {
-        use super::{
-            TITLE_REFRESH_TURNS, TITLE_REFRESH_WATERMARK_FILE, load_title_refresh_watermark,
-            save_title_refresh_watermark,
-        };
-        let dir = tempfile::TempDir::new().unwrap();
-        assert_eq!(
-            load_title_refresh_watermark(dir.path()),
-            None,
-            "missing → None"
-        );
-        save_title_refresh_watermark(dir.path(), 1);
-        assert_eq!(load_title_refresh_watermark(dir.path()), Some(1));
-        std::fs::write(dir.path().join(TITLE_REFRESH_WATERMARK_FILE), "99").unwrap();
-        assert_eq!(
-            load_title_refresh_watermark(dir.path()),
-            Some(TITLE_REFRESH_TURNS.len()),
-            "stale-large watermark reads as frozen"
-        );
-    }
-
-    #[test]
-    fn initial_title_refresh_idx_adopts_only_fresh_enabled_sessions() {
-        use super::{TITLE_REFRESH_TURNS, initial_title_refresh_idx};
-        let frozen = TITLE_REFRESH_TURNS.len();
-        // Managed: watermark is authoritative regardless of enabled/turns.
-        assert_eq!(initial_title_refresh_idx(Some(1), true, 9), 1);
-        assert_eq!(initial_title_refresh_idx(Some(frozen), true, 0), frozen);
-        // Unmanaged, enabled, and brand new: adopt open
-        assert_eq!(initial_title_refresh_idx(None, true, 0), 0);
-        // Unmanaged but already has turns (pre-feature, even if compacted): frozen
-        assert_eq!(initial_title_refresh_idx(None, true, 5), frozen);
-        // Unmanaged with the feature off: frozen even when brand new
-        assert_eq!(initial_title_refresh_idx(None, false, 0), frozen);
-    }
-
-    #[test]
     fn title_refresh_instruction_wraps_tag_and_asks_for_whole_conversation() {
         let text = title_refresh_instruction("system-reminder");
         assert!(text.starts_with("<system-reminder>"));
@@ -554,32 +418,6 @@ mod tests {
     #[test]
     fn fallback_empty_input_is_new_session() {
         assert_eq!(title_fallback_from_user_text(""), "New session");
-    }
-
-    #[test]
-    fn next_title_refresh_success_advances_and_clears_failures() {
-        use super::next_title_refresh_state;
-        assert_eq!(next_title_refresh_state(0, 1, true, 2), (1, 0, true));
-        // Catch-up past a skipped checkpoint is preserved on success.
-        assert_eq!(next_title_refresh_state(0, 2, true, 0), (2, 0, true));
-    }
-
-    #[test]
-    fn next_title_refresh_failure_keeps_checkpoint_until_budget() {
-        use super::{TITLE_REFRESH_MAX_ATTEMPTS, next_title_refresh_state};
-        // First and second failures leave the checkpoint open (retry on the next successful turn).
-        assert_eq!(next_title_refresh_state(0, 1, false, 0), (0, 1, false));
-        assert_eq!(next_title_refresh_state(0, 1, false, 1), (0, 2, false));
-        // Third consecutive failure force-advances so a bad model cannot retry forever.
-        assert_eq!(
-            next_title_refresh_state(0, 1, false, TITLE_REFRESH_MAX_ATTEMPTS - 1),
-            (1, 0, true)
-        );
-        // Force-advance still catch-ups to the latest reached checkpoint.
-        assert_eq!(
-            next_title_refresh_state(0, 2, false, TITLE_REFRESH_MAX_ATTEMPTS - 1),
-            (2, 0, true)
-        );
     }
 
     #[test]

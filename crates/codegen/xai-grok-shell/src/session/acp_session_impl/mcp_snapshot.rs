@@ -518,7 +518,21 @@ impl SessionActor {
                 if s.is_init_abandoned() {
                     return McpHandshakeWait::Abandoned;
                 }
-                !s.has_mcp_servers() || s.is_initialized()
+                let settled = !s.has_mcp_servers() || s.is_initialized();
+                if settled && first_pass {
+                    tracing::info!(
+                        session_id = %self.session_info.id.0,
+                        is_initialized = s.is_initialized(),
+                        has_mcp_servers = s.has_mcp_servers(),
+                        is_initializing = s.is_initializing(),
+                        has_finished_init = s.has_finished_init(),
+                        init_progress = ?s.init_progress(),
+                        handshaking = ?s.handshaking_servers_iter().cloned().collect::<Vec<_>>(),
+                        client_names = ?s.all_clients().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+                        "wait_for_mcp_handshakes_until: first-pass Complete"
+                    );
+                }
+                settled
             };
             if settled {
                 if first_pass {

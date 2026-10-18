@@ -16,10 +16,7 @@ pub(crate) struct PathProvider;
 
 impl PathProvider {
     pub(crate) async fn suggest(&self, ctx: &SuggestContext) -> Vec<RankedSuggestion> {
-        // shell_token quoting is POSIX-only: cmd/pwsh would misparse the escaped line, so Windows serves no deterministic completions
-        if cfg!(windows) {
-            return Vec::new();
-        }
+        // shell_token quoting is POSIX-style, matching the default Windows shell (niubash / Git Bash).
         let tok = match extract_command_token(ctx.prefix()) {
             Some(t) => t,
             None => return Vec::new(),
@@ -405,8 +402,10 @@ mod tests {
             }
         }
 
-        let path_var = format!("{}:{}", bin1.to_str().unwrap(), bin2.to_str().unwrap());
-        let result = scan_path_from(&path_var);
+        // Platform PATH separator: `:` on Unix, `;` on Windows.
+        let path_var =
+            std::env::join_paths([&bin1, &bin2]).expect("temp paths join into a PATH entry list");
+        let result = scan_path_from(&path_var.to_string_lossy());
         assert_eq!(result, vec!["shared_cmd"]);
     }
 }

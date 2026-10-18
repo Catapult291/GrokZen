@@ -325,7 +325,7 @@ webpki-roots = "0.26"
 which = "8"
 whoami = "1.4"
 wildmatch = "2"
-windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes"] }
+windows = { version = "0.61", features = ["Win32_Security", "Win32_Security_Authorization", "Win32_Foundation", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Console", "Win32_System_Pipes", "Win32_System_ProcessStatus"] }
 wiremock = "0.6"
 wl-clipboard-rs = "0.9"
 xai-acp-lib = { path = "crates/codegen/xai-acp-lib" }
@@ -456,12 +456,15 @@ strip = true
 panic = "abort"
 split-debuginfo = "unpacked"
 codegen-units = 128
-debug = "line-tables-only"
+# No DWARF or .pdb in dev builds. line-tables-only produced a 790 MB grok_zh.pdb and a
+# 145 GB debug/incremental cache (measured 2026-09-29); use release-dist when debug info
+# is actually needed.
+debug = 0
 opt-level = 0
 lto = false
 incremental = true
 
-# Skip debug info for non-workspace dependencies; workspace crates keep line-tables-only.
+# Dependencies never emit debug info (already implied by debug = 0 above).
 [profile.dev.package."*"]
 debug = false
 

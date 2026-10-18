@@ -1,9 +1,10 @@
-//! Early-session auto-title refresh on `SessionActor`.
+//! Idle/end auto-title refresh on `SessionActor`.
 //!
 //! The first title comes from the fast first-prompt path ([`crate::session::summary::SummaryGenerator`]).
-//! This side-call refreshes it from the whole conversation at [`crate::session::helpers::session_summary::TITLE_REFRESH_TURNS`] and then freezes.
-//! A weak first prompt therefore doesn't leave the session mistitled.
-//! The refresh is best-effort and generation-guarded; a manual `/rename` always wins (enforced by the `RegenerateTitle` persistence path).
+//! This side-call re-titles from the whole conversation whenever the session settles idle, with one last-chance run at session end,
+//! so even a single-prompt long-running session gets a summary title instead of the raw first prompt.
+//! A manual `/rename` freezes the refresh (`/rename --auto` reopens it).
+//! The refresh is best-effort and generation-guarded; persistence never overwrites a manual title.
 
 use super::*;
 
@@ -15,19 +16,17 @@ use crate::session::helpers::{session_recap, session_summary};
 const TITLE_REFRESH_MODEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 impl SessionActor {
-    /// Spawn a title refresh after a successful turn, unless the title is frozen or one is already running.
+    /// Spawn a title refresh after the session settles idle, unless the title is frozen or one is already running.
     /// No-op for subagents and when post-turn side-calls are disabled (title refresh shares the `turn_summary_enabled` gate).
-    /// At most one refresh runs at a time and it is left to finish; the checkpoint decision and freeze happen in [`Self::refresh_title`].
+    /// At most one refresh runs at a time and it is left to finish; [`Self::refresh_title`] decides whether the conversation changed since the last success.
     pub(crate) fn maybe_refresh_title(self: &Arc<Self>) {
         if !self.title_refresh_enabled || self.startup_hints.is_subagent {
             return;
         }
-        if self.next_title_refresh_idx.get() >= session_summary::TITLE_REFRESH_TURNS.len() {
+        if self.title_refresh_frozen.get() {
             return;
         }
         // One refresh at a time: a whole-conversation title doesn't need the very latest turn.
-        // Letting the in-flight call finish (rather than aborting and respawning every turn) guarantees the checkpoint is eventually
-        // committed (success, or force-advance after the failure budget) or left open for a retry on the next successful turn.
         // The check is `is_finished` (not just `is_some`) so a panicked task can't wedge the slot shut.
         if self
             .title_refresh_task
@@ -48,26 +47,37 @@ impl SessionActor {
         *self.title_refresh_task.borrow_mut() = Some(task);
     }
 
-    /// A manual rename freezes the auto refresh (so a racing in-flight refresh can't flip the title and no later refresh fights the user's title).
-    /// `/rename --auto` reopens it so the whole-conversation refresh can re-title.
-    /// Aborts any in-flight refresh either way and persists the new checkpoint so the decision survives resume.
-    pub(crate) fn on_title_renamed(&self, manual: bool) {
-        self.abort_title_refresh();
-        let idx = if manual {
-            session_summary::TITLE_REFRESH_TURNS.len()
-        } else {
-            0
-        };
-        self.next_title_refresh_idx.set(idx);
-        self.title_refresh_failures.set(0);
-        session_summary::save_title_refresh_watermark(
-            &crate::session::persistence::session_dir(&self.session_info),
-            idx,
-        );
+    /// Last-chance refresh at session end: the idle trigger may never have run (quit mid-turn) or its model call may have failed.
+    /// Awaits an in-flight refresh first (it already describes the settled conversation), then runs one synchronously when the conversation still has no success recorded for its current shape.
+    /// Called from `fire_session_end_hooks`, so guards plus the model-call timeout bound how long session teardown can wait.
+    pub(crate) async fn finalize_title_refresh(&self) {
+        if !self.title_refresh_enabled
+            || self.startup_hints.is_subagent
+            || self.title_refresh_frozen.get()
+        {
+            return;
+        }
+        // Take the handle out before awaiting: the task's completion closure also borrows the slot.
+        if let Some(task) = self.title_refresh_task.borrow_mut().take() {
+            let _ = task.await;
+        }
+        if self.title_refresh_frozen.get() {
+            return;
+        }
+        self.refresh_title(self.title_refresh_generation.get())
+            .await;
     }
 
-    /// Bumps the generation so a task that finishes after the abort neither persists its result nor consumes a checkpoint.
-    /// Called on rewind (the snapshot is now stale) and shutdown (free the actor `Arc`); a new prompt deliberately does not abort it.
+    /// A manual rename freezes the auto refresh (so a racing in-flight refresh can't flip the title and no later refresh fights the user's title).
+    /// `/rename --auto` reopens it; both directions clear the success marker so the next idle/end refresh runs against the renamed conversation.
+    pub(crate) fn on_title_renamed(&self, manual: bool) {
+        self.abort_title_refresh();
+        self.title_refresh_frozen.set(manual);
+        self.title_refresh_done_turns.set(None);
+    }
+
+    /// Bumps the generation so a task that finishes after the abort neither persists its result nor counts as the idle/end attempt.
+    /// Called on rename, rewind (the snapshot is now stale) and shutdown (free the actor `Arc`); a new prompt deliberately does not abort it.
     pub(crate) fn abort_title_refresh(&self) {
         self.title_refresh_generation
             .set(self.title_refresh_generation.get().wrapping_add(1));
@@ -77,15 +87,17 @@ impl SessionActor {
     }
 
     /// `generation` is the spawn-time token.
-    /// Only a stale attempt, one whose generation was bumped by an abort (prompt, rewind, shutdown), bails without committing.
-    /// A failed model call does **not** advance the checkpoint on the first miss; see [`session_summary::next_title_refresh_state`].
+    /// Only a stale attempt, one whose generation was bumped by an abort (rename, rewind, shutdown), bails without committing.
+    /// A failed model call commits nothing, so the next idle/end event retries.
     async fn refresh_title(&self, generation: u64) {
         let conversation = self.chat_state_handle.get_conversation().await;
         let turns = session_recap::main_turn_count(&conversation);
 
-        let idx = self.next_title_refresh_idx.get();
-        let target_idx = session_summary::checkpoints_reached(turns);
-        if target_idx <= idx {
+        // Nothing human to title yet (prefix/system items only), already titled for this turn shape, or pinned by a manual rename.
+        if turns == 0
+            || self.title_refresh_done_turns.get() == Some(turns)
+            || self.title_refresh_frozen.get()
+        {
             return;
         }
 
@@ -96,31 +108,8 @@ impl SessionActor {
             return;
         }
 
-        let (next_idx, next_failures, persist) = session_summary::next_title_refresh_state(
-            idx,
-            target_idx,
-            title.is_some(),
-            self.title_refresh_failures.get(),
-        );
-        self.next_title_refresh_idx.set(next_idx);
-        self.title_refresh_failures.set(next_failures);
-        // Persist only committed advances (success, or the force-advance after the failure budget).
-        // A failed-but-retryable attempt leaves the watermark untouched so resume still retries.
-        if persist {
-            session_summary::save_title_refresh_watermark(
-                &crate::session::persistence::session_dir(&self.session_info),
-                next_idx,
-            );
-        } else {
-            tracing::warn!(
-                turns,
-                idx,
-                target_idx,
-                failures = next_failures,
-                "title refresh failed; checkpoint left open for retry"
-            );
-        }
         if let Some(title) = title {
+            self.title_refresh_done_turns.set(Some(turns));
             tracing::info!(turns, chars = title.len(), "session title refreshed");
             // The persistence actor overwrites an auto title but never a manual `/rename` (checked under the summary lock)
             // It notifies clients only when the write lands
@@ -128,6 +117,11 @@ impl SessionActor {
                 .notifications
                 .persistence_tx
                 .send(PersistenceMsg::RegenerateTitle(title));
+        } else {
+            tracing::warn!(
+                turns,
+                "title refresh failed; will retry on the next idle/end"
+            );
         }
     }
 
@@ -151,7 +145,7 @@ impl SessionActor {
             setup.context_window,
         );
         // Deliberately tool-free: unlike the turn summary, the request carries no tools
-        // The model then can't spend the call on a tool invocation that would leave empty text and burn the checkpoint
+        // The model then can't spend the call on a tool invocation that would leave empty text and waste the attempt
         // (The conversation prefix still shares the parent prompt-cache key.)
         let request = self.parent_cached_request(AuxCall {
             items,

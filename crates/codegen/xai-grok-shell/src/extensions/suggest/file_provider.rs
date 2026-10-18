@@ -43,10 +43,8 @@ pub(crate) struct FilePathProvider;
 
 impl FilePathProvider {
     pub(crate) async fn suggest(&self, ctx: &SuggestContext) -> Vec<RankedSuggestion> {
-        // shell_token quoting is POSIX-only: cmd and pwsh would misparse the escaped line, so Windows serves no deterministic completions
-        if cfg!(windows) {
-            return Vec::new();
-        }
+        // shell_token quoting is POSIX-style (`\` escape, `$VAR`, `/` separators). That matches the default
+        // Windows shell (niubash / Git Bash); cmd/pwsh users should prefer `"` quoting and `/` path forms.
         let tok = match extract_file_context(ctx.prefix()) {
             Some(t) => t,
             None => return Vec::new(),
@@ -1040,7 +1038,9 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         std::fs::write(sub.join("main.rs"), "").unwrap();
 
-        let text = format!("{}/src/m", tmp.path().display());
+        // shell_token is POSIX-oriented: feed `/`-separated path text (Windows `Path::display` uses `\`).
+        let cwd_token = tmp.path().display().to_string().replace('\\', "/");
+        let text = format!("{cwd_token}/src/m");
         let cursor = text.len();
         let ctx = SuggestContext::new(text, cursor, "/ignored".into());
         let results = FilePathProvider.suggest(&ctx).await;

@@ -1122,21 +1122,18 @@ pub(crate) struct SessionActor {
     /// Early-session title-refresh gate, resolved once at spawn (defaults to `turn_summary_enabled`; see `Config::resolve_title_refresh`).
     pub(crate) title_refresh_enabled: bool,
     /// The in-flight title-refresh side-call, if any.
-    /// Only one runs at a time (a newer completion skips rather than aborts); aborted on rename, rewind, and shutdown.
+    /// Only one runs at a time (a newer idle skip does not abort it); aborted on rename, rewind, and shutdown.
     /// See `maybe_refresh_title`.
     pub(crate) title_refresh_task: std::cell::RefCell<Option<tokio::task::JoinHandle<()>>>,
     /// Generation of the currently registered title-refresh task.
     /// A finishing task whose generation no longer matches must not persist its result.
     pub(crate) title_refresh_generation: std::cell::Cell<u64>,
-    /// Index into `TITLE_REFRESH_TURNS` of the next checkpoint to apply.
-    /// Advanced on a successful attempt (with catch-up past skipped checkpoints) and persisted to the watermark.
-    /// A failed attempt leaves the checkpoint open until the in-memory failure budget force-advances it (see `title_refresh_failures`).
-    /// Once it reaches the end the title is frozen.
-    pub(crate) next_title_refresh_idx: std::cell::Cell<usize>,
-    /// Consecutive failed title-refresh attempts at `next_title_refresh_idx`.
-    /// In-memory only: resume may retry a few more times before the force-advance budget is spent again.
-    /// Cleared on success, `/rename`, and force-advance.
-    pub(crate) title_refresh_failures: std::cell::Cell<u32>,
+    /// Manual `/rename` pins the title: no auto refresh until `/rename --auto`.
+    /// Durable form lives in `summary.json` `title_is_manual`, read once at spawn (`title_is_manual_in_dir`).
+    pub(crate) title_refresh_frozen: std::cell::Cell<bool>,
+    /// `main_turn_count` of the conversation at the last successful refresh.
+    /// `None` means nothing titled yet (or a rename/rewind cleared it) → the next idle/end refresh runs.
+    pub(crate) title_refresh_done_turns: std::cell::Cell<Option<usize>>,
     /// True while THIS session has a prompt turn in flight (RAII-guarded in `handle_prompt`).
     /// `tool_context.is_turn_active` is the agent-wide coordinator flag shared by all sessions, so it is unusable for per-session decisions.
     /// `Arc` so it can be re-checked inside the chat-state actor's `RepairHistory` handler.

@@ -586,18 +586,21 @@ async fn files_only_reverts_the_file_and_keeps_the_conversation() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
-            let notes = std::path::Path::new("/tmp/notes-files-only.toml");
-            let cwd = std::path::Path::new("/tmp");
+            // MockFs is rooted at `std::env::temp_dir()` (see create_test_actor); paths must
+            // live under that root so revert joins resolve to the same keys as the seed writes.
+            let base = std::env::temp_dir();
+            let notes = base.join("notes-files-only.toml");
+            let cwd = base.as_path();
             actor
                 .tool_context
                 .fs
-                .write_file(notes, b"alpha = 2\n")
+                .write_file(&notes, b"alpha = 2\n")
                 .await
                 .expect("seed the edited file");
             actor.file_state_tracker.begin_prompt(1).await;
             actor
                 .file_state_tracker
-                .add_before_snapshot_for_prompt(1, notes, cwd, Some("alpha = 1\n".into()))
+                .add_before_snapshot_for_prompt(1, &notes, cwd, Some("alpha = 1\n".into()))
                 .await;
             actor
                 .file_state_tracker
@@ -639,7 +642,7 @@ async fn files_only_reverts_the_file_and_keeps_the_conversation() {
             let restored = actor
                 .tool_context
                 .fs
-                .try_read_to_string(notes)
+                .try_read_to_string(&notes)
                 .await
                 .expect("read restored file");
             assert_eq!(restored.as_deref(), Some("alpha = 1\n"));
@@ -667,18 +670,20 @@ async fn preview_reports_an_external_edit_and_changes_nothing() {
             let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
-            let notes = std::path::Path::new("/tmp/notes-preview.toml");
-            let cwd = std::path::Path::new("/tmp");
+            // Same MockFs root constraint as the files_only twin.
+            let base = std::env::temp_dir();
+            let notes = base.join("notes-preview.toml");
+            let cwd = base.as_path();
             actor
                 .tool_context
                 .fs
-                .write_file(notes, b"alpha = 2\n")
+                .write_file(&notes, b"alpha = 2\n")
                 .await
                 .expect("seed the agent edit");
             actor.file_state_tracker.begin_prompt(1).await;
             actor
                 .file_state_tracker
-                .add_before_snapshot_for_prompt(1, notes, cwd, Some("alpha = 1\n".into()))
+                .add_before_snapshot_for_prompt(1, &notes, cwd, Some("alpha = 1\n".into()))
                 .await;
             actor
                 .file_state_tracker
@@ -687,7 +692,7 @@ async fn preview_reports_an_external_edit_and_changes_nothing() {
             actor
                 .tool_context
                 .fs
-                .write_file(notes, b"alpha = 9\n")
+                .write_file(&notes, b"alpha = 9\n")
                 .await
                 .expect("external edit");
 
@@ -723,7 +728,7 @@ async fn preview_reports_an_external_edit_and_changes_nothing() {
             let current = actor
                 .tool_context
                 .fs
-                .try_read_to_string(notes)
+                .try_read_to_string(&notes)
                 .await
                 .expect("read file");
             assert_eq!(current.as_deref(), Some("alpha = 9\n"));

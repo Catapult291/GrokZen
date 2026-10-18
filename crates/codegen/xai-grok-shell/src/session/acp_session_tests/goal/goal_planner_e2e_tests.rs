@@ -1433,9 +1433,10 @@ async fn setup_goal_reminder_is_plan_aware_when_planner_enabled() {
 
             let snap = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(snap.plan_file.as_deref(), Some(plan_path.as_path()));
+            // Templates ship with CRLF on Windows checkouts; compare against LF-normalized text.
             let expected = format!("\nPlan: {}\n", plan_path.display());
             assert!(
-                reminder.contains(&expected),
+                reminder.replace("\r\n", "\n").contains(&expected),
                 "reminder must carry the plan pointer line `{expected}`:\n{reminder}"
             );
         })
@@ -1496,7 +1497,7 @@ async fn goal_resume_reminder_is_plan_aware_when_planner_enabled() {
 
             let expected = format!("\nPlan: {}\n", plan_path.display());
             assert!(
-                reminder.contains(&expected),
+                reminder.replace("\r\n", "\n").contains(&expected),
                 "resume reminder must carry the plan pointer `{expected}`:\n{reminder}"
             );
         })

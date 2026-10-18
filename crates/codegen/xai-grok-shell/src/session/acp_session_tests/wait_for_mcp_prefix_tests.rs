@@ -159,7 +159,9 @@ async fn gate_re_owns_an_abandoned_init_instead_of_waiting_on_it() {
         .await;
 }
 
-#[tokio::test(flavor = "current_thread", start_paused = true)]
+/// Real `sleep` children pin process I/O, which freezes `start_paused` virtual time at 0ns elapsed;
+/// the 15s delivery deadline only fires under a live clock while those children are still handshaking.
+#[tokio::test(flavor = "current_thread")]
 async fn delivery_tool_sessions_wait_fully_under_progressive_strategy() {
     tokio::task::LocalSet::new()
         .run_until(progressive_body())
@@ -285,22 +287,37 @@ async fn budget_body() {
     .await
     .expect("the full wait re-owns an abandoned init instead of waiting on it");
 
-    let starter = actor_with_mcp(vec![stdio("slow", "sleep")], false, vec![]).await;
+    // A self-started wait must outlive finish_init's early unblock; settle (or the bound) is what pays it.
+    // Manual Finished+handshaking keeps the window without a real sleep child, which would freeze virtual time.
+    let starter = actor_with_mcp(vec![], false, vec![]).await;
     starter.mcp_strategy.set(McpInitStrategy::Blocking);
     *starter.delivery_tools.borrow_mut() = vec!["slow__post".to_string()];
+    {
+        let mut st = starter.mcp_state.lock().await;
+        std::mem::forget(st.try_start_init().expect("claims init"));
+        st.mark_servers_initializing(vec!["slow".to_string()]);
+        st.finish_init();
+    }
+    let state = Arc::clone(&starter.mcp_state);
+    tokio::task::spawn_local(async move {
+        tokio::time::sleep(Duration::from_secs(6)).await;
+        state.lock().await.complete_init();
+    });
     let (_defs, starter_ms) = starter.prepare_tool_definitions_timed().await;
     assert!(
         starter_ms >= 5_000,
         "a self-started wait must not conclude at finish_init"
     );
 
+    // Config supersession cancels the stale pass; the wait re-owns and must not settle until the
+    // new generation does. Manual handshaking keeps that window free of a real sleep child.
     let superseded = actor_with_mcp(vec![stdio("slow2", "sleep")], false, vec![]).await;
-    let stale_claim = superseded
-        .mcp_state
-        .lock()
-        .await
-        .try_start_init()
-        .expect("stale pass claims");
+    let stale_claim = {
+        let mut st = superseded.mcp_state.lock().await;
+        let claim = st.try_start_init().expect("stale pass claims");
+        st.mark_servers_initializing(vec!["slow2".to_string()]);
+        claim
+    };
     let wait = superseded.wait_for_mcp_initialized_bounded_once();
     tokio::pin!(wait);
     assert!(
@@ -308,13 +325,13 @@ async fn budget_body() {
             .await
             .is_err()
     );
-    assert!(
-        superseded
-            .mcp_state
-            .lock()
-            .await
-            .update_configs(vec![stdio("slow3", "sleep")])
-    );
+    {
+        let mut st = superseded.mcp_state.lock().await;
+        assert!(st.update_configs(vec![stdio("slow3", "sleep")]));
+        // Claim the successor generation before the wait is polled, so re-own finds a live pass.
+        std::mem::forget(st.try_start_init().expect("successor claims"));
+        st.mark_servers_initializing(vec!["slow3".to_string()]);
+    }
     assert!(
         tokio::time::timeout(Duration::from_secs(5), &mut wait)
             .await
@@ -334,6 +351,11 @@ async fn budget_body() {
         assert!(st.is_initializing() && st.try_start_init().is_none());
     }
     assert!(!superseded.full_mcp_wait_timed_out());
+    let state = Arc::clone(&superseded.mcp_state);
+    tokio::task::spawn_local(async move {
+        tokio::time::sleep(ms(300)).await;
+        state.lock().await.complete_init();
+    });
     tokio::time::timeout(Duration::from_secs(200), &mut wait)
         .await
         .expect("the wait concludes at the new generation's settle");

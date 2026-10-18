@@ -1307,6 +1307,14 @@ impl SessionActor {
             self.cancel_superseded_init(&generation, claim.guard);
             return;
         };
+        tracing::info!(
+            server_count = configs_to_start.len(),
+            acp_pending_count = acp_pending_names.len(),
+            existing_client_count = claim.existing_client_names.len(),
+            config_names = ?claim.configs.iter().map(mcp_server_name).collect::<Vec<_>>(),
+            existing_client_names = ?claim.existing_client_names,
+            "run_init_pass: about to spawn pending MCP clients"
+        );
         self.events
             .emit(crate::session::mcp_servers::build_config_resolved_event(
                 &claim.configs,
@@ -1428,6 +1436,11 @@ impl SessionActor {
                     }
                     mcp_state.mark_server_ready(name);
                 }
+                tracing::info!(
+                    failed_spawn_count = failed_spawns.len(),
+                    spawned_count = mcp_clients.len(),
+                    "run_init_pass: finished_init after spawn pass"
+                );
                 mcp_state.finish_init();
                 failed_spawns
             })
