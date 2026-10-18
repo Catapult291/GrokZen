@@ -647,20 +647,11 @@ pub fn render_rewind_overlay(
                         return Line::from("");
                     };
                     let dot_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
-                    let file_info = if point.has_file_changes {
-                        rewind_text(locale, "rewind.files_count", " · {count} files")
-                            .replace("{count}", &point.num_file_snapshots.to_string())
-                    } else {
-                        String::new()
-                    };
-                    let preview_width = ctx.content_width.saturating_sub(2).saturating_sub(
-                        unicode_width::UnicodeWidthStr::width(file_info.as_str()) as u16,
-                    );
                     let preview: String = crate::render::line_utils::truncate_str(
                         point.prompt_preview.as_deref().unwrap_or_else(|| {
                             rewind_static(locale, "rewind.no_preview", "(no preview)")
                         }),
-                        preview_width as usize,
+                        ctx.content_width.saturating_sub(2) as usize,
                     );
                     let text_style = Style::default()
                         .fg(theme.text_primary)
@@ -670,12 +661,10 @@ pub fn render_rewind_overlay(
                         } else {
                             Modifier::empty()
                         });
-                    let meta_style = Style::default().fg(theme.gray).bg(ctx.row_bg);
 
                     Line::from(vec![
                         Span::styled("\u{00B7} ", dot_style),
                         Span::styled(preview, text_style),
-                        Span::styled(file_info, meta_style),
                     ])
                 },
             );
@@ -1326,6 +1315,37 @@ mod tests {
         let cancel = render(&phase_with_cursor(CONFIRM_OPTIONS - 1));
         assert!(cancel.contains("要回退什么？"), "got: {cancel}");
         assert!(cancel.contains("否"), "got: {cancel}");
+    }
+
+    #[test]
+    fn picker_never_shows_file_counts() {
+        let locale = zh_cn_locale();
+        let area = Rect::new(0, 0, 120, 6);
+        let mut point_with_files = point(0);
+        point_with_files.has_file_changes = true;
+        point_with_files.num_file_snapshots = 2;
+        point_with_files.prompt_preview = Some("alpha".into());
+        let phase = RewindPhase::Picker {
+            points: vec![point_with_files],
+            selected: 0,
+        };
+
+        let mut buf = Buffer::empty(area);
+        render_rewind_overlay(&mut buf, area, &phase, true, Some(&locale));
+        let rendered = (0..area.height)
+            .map(|row| {
+                (0..area.width)
+                    .map(|col| buf[(col, row)].symbol().to_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .replace(' ', "");
+        assert!(
+            !rendered.contains("个文件") && !rendered.contains("files"),
+            "picker must not show file counts: {rendered}"
+        );
+        assert!(rendered.contains("alpha"), "got: {rendered}");
     }
 
     #[test]
