@@ -1,137 +1,42 @@
 [
   {
-    "category": "fixes",
-    "description": "**MCP connectors** now correctly show when they need re-authentication even if no tools are listed.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Extensions modal** shortcuts now work when the tab bar is focused, and invalid actions on headers show helpful messages.",
+    "category": "features",
+    "description": "**Streaming text-repetition abort** stops a turn that degenerates into a mechanical token/chunk loop (`repetition_guard`). On by default; disable with `text_repetition_guard.enabled=false`.",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**Built-in agent tools** now take precedence over user MCP servers when tool names collide.",
+    "description": "**Cross-turn loop guard** cancels after three consecutive turns with the same reply and the same tool.",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**Desktop app tools** are now available through a dedicated first-party MCP server.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Send now** button and shortcuts now work correctly when an automatic background turn is running.",
+    "description": "**codemode meta-tool** orchestrates search/use inside a QuickJS sandbox so intermediate results stay out of the main context. Configure via `[toolset.codemode]`.",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**Remote control pickers** can now group servers by device using announced device identity.",
-    "breaking_change": false
-  },
-  {
-    "category": "features",
-    "description": "**edit_file diffs** now show real file line numbers instead of starting at line 1.",
-    "breaking_change": false
-  },
-  {
-    "category": "features",
-    "description": "**Permission prompts for file edits** now auto-expand the diff row so you can see the change before approving.",
+    "description": "**Session titles re-refresh on idle/end** instead of fixed turn checkpoints. Manual `/rename` still freezes; `/rename --auto` reopens.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**Resumed sessions** now show the exact text you typed for mid-turn follow-ups instead of the wrapped system message.",
-    "breaking_change": false
-  },
-  {
-    "category": "performance",
-    "description": "**Opening or resuming sessions** no longer pauses the interface while reading MCP config files.",
-    "breaking_change": false
-  },
-  {
-    "category": "features",
-    "description": "**Sending a message to a finished subagent** now continues that same subagent instead of failing.",
-    "breaking_change": false
-  },
-  {
-    "category": "features",
-    "description": "**Background subagent completion messages** now show the actual output instead of just a pointer to run the tool.",
+    "description": "**CJK fallback titles** truncate on character boundaries; failed generations no longer burn the refresh.",
     "breaking_change": false
   },
   {
     "category": "fixes",
-    "description": "**`/skills`** command now updates the model with newly installed skills even when written from another NFS client.",
+    "description": "**Windows path suggestions** no longer return empty for file and PATH tokens.",
     "breaking_change": false
   },
   {
-    "category": "fixes",
-    "description": "**Auto mode** no longer instantly runs destructive `git checkout --` commands; they now go through the model for safety.",
+    "category": "internal",
+    "description": "Peak RSS sampling uses `GetProcessMemoryInfo` on Windows. `test-uploads` is test-only; release privacy gates stay closed.",
     "breaking_change": false
   },
   {
-    "category": "fixes",
-    "description": "**Fixed a crash** that could occur when restoring pasted content after certain skill injections or rewinds.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Subagents and workflows** now respect the same bash timeout and auto-background settings configured for the parent session.",
-    "breaking_change": false
-  },
-  {
-    "category": "features",
-    "description": "**Dashboard** now shows a unified header with location picker and an actions row for creating agents or resuming previous sessions.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Fixed model backend selection** so an explicit chat_completions setting in config.toml is no longer overwritten by same-slug siblings.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Slash command advertisements** no longer spam repeatedly when your current directory is your home folder.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Foreground shell commands** no longer produce spurious background-task reminders or incorrect kill results.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Queued follow-up buttons** now appear in the order [Send now][edit][cancel].",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**`/compact instructions`** in the pager are now passed to the compaction backend (bare `/compact` is unchanged).",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**`/goal`** (and resume) after pressing Esc now correctly starts the goal planner instead of failing with \"Planning failed\".",
-    "breaking_change": false
-  },
-  {
-    "category": "features",
-    "description": "**New `grok-workspaced daemon`** mode lets a long-lived process expose folders to the Computer Hub (separate from the Desktop-supervised sidecar).",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**run_terminal_cmd** now correctly tells the model that foreground commands are backgrounded after ~15s instead of the 120s timeout value.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Skill announcements** no longer repeat the same list of available skills multiple times in a session.",
-    "breaking_change": false
-  },
-  {
-    "category": "fixes",
-    "description": "**Monitor events** in multi-session processes now correctly wake idle sessions instead of being buffered until the next prompt.",
+    "category": "internal",
+    "description": "Community independent build with privacy hardening and Windows adaptations.",
     "breaking_change": false
   }
 ]
