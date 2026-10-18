@@ -1056,7 +1056,11 @@ mod tests {
         std::fs::create_dir_all(&grok).unwrap();
         std::fs::write(
             grok.join("config.toml"),
-            format!("[plugins]\npaths = [\"{}\"]\n", plugin_dir.display()),
+            format!(
+                "[plugins]\npaths = [\"{}\"]\n",
+                // TOML basic strings treat `\` as escape; portable `/` keeps the fixture valid on Windows.
+                plugin_dir.display().to_string().replace('\\', "/")
+            ),
         )
         .unwrap();
 

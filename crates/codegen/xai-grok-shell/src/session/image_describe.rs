@@ -383,9 +383,10 @@ pub(crate) fn persist_and_prepend_image_files(
     original_user_message: &str,
 ) -> std::io::Result<String> {
     let persisted = persist_user_images(session_dir, images)?;
+    // Model-visible asset paths use `/` so the same string works on every platform.
     let image_paths: Vec<String> = persisted
         .iter()
-        .map(|p| p.path.to_string_lossy().into_owned())
+        .map(|p| p.path.to_string_lossy().replace('\\', "/"))
         .collect();
     Ok(match render_image_files_block(&image_paths) {
         Some(files_block) => format!("{files_block}\n\n{original_user_message}"),
