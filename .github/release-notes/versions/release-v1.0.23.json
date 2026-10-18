@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.23",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.22",
+  "community": [
+    {
+      "text": "codemode 生产修复：grok-build-plan 系工具集补注册 + 模板去 search/use 硬依赖，headless 会话可直接调用。",
+      "commits": [
+        "107d71da853a9d2f04bc7d1436f3136cb149b05d"
+      ]
+    },
+    {
+      "text": "/undo 选择器去「· N 个文件」后缀并过滤无预览合成轮。",
+      "commits": [
+        "f299b398adb9177f738628966f0ce17a782309b6"
+      ]
+    }
+  ],
+  "upstream": []
+}

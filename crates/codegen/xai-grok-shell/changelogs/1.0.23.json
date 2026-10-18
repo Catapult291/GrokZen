@@ -1,7 +1,17 @@
 [
   {
     "category": "fixes",
-    "description": "**Fixed bare URLs and emails** inside table cells so every wrapped line remains a working hyperlink.",
+    "description": "**codemode toolset parity** — grok-build-plan / no_subagents / ask_user toolsets now register codemode; headless and plan sessions can see and call it.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**codemode template hardening** — the description template no longer interpolates use_tool / search_tool params or by_kind entries, so denying those tools no longer panics rendering (process exit 0xC0000409).",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**/undo picker cleanup** — picker rows drop the \"· N files\" suffix, and synthetic turns without a user prompt preview are filtered out (empty result toasts \"No undoable prompts\").",
     "breaking_change": false
   }
 ]
