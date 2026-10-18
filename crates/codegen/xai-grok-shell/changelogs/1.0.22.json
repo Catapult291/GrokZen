@@ -31,7 +31,12 @@
   },
   {
     "category": "internal",
-    "description": "Peak RSS sampling uses `GetProcessMemoryInfo` on Windows. `test-uploads` is test-only; release privacy gates stay closed.",
+    "description": "Peak RSS sampling uses `GetProcessMemoryInfo` on Windows.",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "`test-uploads` is test-only; release privacy gates stay closed.",
     "breaking_change": false
   },
   {
