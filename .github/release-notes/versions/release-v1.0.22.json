@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.22",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.21",
+  "community": [
+    {
+      "text": "文本复读熔断与跨轮熔断 CrossTurnLoopGuard，默认拦住复读机与同工具循环。",
+      "commits": [
+        "92e647efb1647066ca3c9115458c219a2678a901",
+        "96a570170bc734da83c33c282306b8ef2fbbdac0"
+      ]
+    },
+    {
+      "text": "codemode 元工具：QuickJS 沙盒编排 search/use，中间结果不进主上下文。",
+      "commits": [
+        "1630de1042eaf9f383984652c3d76a7a8b30eba7",
+        "26c655892ef780ae88f99bbcebf8c3f6d7e93286",
+        "99b5cda9cc75b9a38ea11b820fdafec73021253b"
+      ]
+    },
+    {
+      "text": "会话标题：CJK 回退修复 + 空闲/结束时重刷；Windows 路径补全与 RSS 采样。",
+      "commits": [
+        "f8223d40922b69a7581f2efaffe05479480bacc3",
+        "caa26086d75b8021c12960114a89bb99a9a2826c"
+      ]
+    }
+  ],
+  "upstream": []
+}

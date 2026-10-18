@@ -1,0 +1,47 @@
+[
+  {
+    "category": "features",
+    "description": "**文本复读熔断** —— 流式输出陷入同 token / 同块机械循环时自动取消该轮（`repetition_guard`），默认开启，可用 `text_repetition_guard.enabled=false` 关闭。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**跨轮熔断 CrossTurnLoopGuard** —— 同一句回复 + 同一工具连续 3 轮后取消，防模型卡在跨回合循环里烧钱。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**codemode 元工具** —— QuickJS 沙盒内编排 search/use 工具调用，中间结果不进主上下文；`[toolset.codemode]` 可配调用预算等，权限按普通工具审批。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**会话标题空闲/结束时重刷** —— 不再按固定轮数检查点刷新；会话空闲与结束时从全文重取标题，手动 `/rename` 仍冻结、`/rename --auto` 解冻。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**会话标题 CJK 回退不再截断成半句** —— 回退标题按字符而非字节截断；生成失败不再烧掉刷新机会；前缀 turn 不计入 main turn 数。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Windows 下文件/路径补全恢复** —— 去掉对 Windows 的早退；按 `join_paths` 去重 PATH，shell 补全能给出 POSIX 形态路径。",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**Windows 内存采样** —— `sample_rss_bytes` 在 Windows 上走 `GetProcessMemoryInfo`，峰值工作集不再恒为 0。",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**测试上传门 `test-uploads`** —— 仅测试 feature 翻转反馈/会话上传开关，release 构建永不启用；隐私编译期门不变。",
+    "breaking_change": false
+  },
+  {
+    "category": "internal",
+    "description": "**本版为社区独立构建** —— 包含隐私加固与 Windows 适配，版本号沿用本仓库自身序列。",
+    "breaking_change": false
+  }
+]
