@@ -1,0 +1,17 @@
+[
+  {
+    "category": "fixes",
+    "description": "**codemode 工具集补齐** —— grok-build-plan / no_subagents / ask_user 三个工具集补注册 codemode；此前全线模型（agentType=grok-build-plan）headless 与 plan 会话里模型看不到也调不了 codemode。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**codemode 模板防 panic** —— description 模板去掉对 use_tool / search_tool 参数与 by_kind 条目的硬插值，裁剪这两个工具时不再触发渲染 panic（进程 0xC0000409）。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**/undo 选择器去噪** —— 回退点列表去掉「· N 个文件」后缀；无用户 prompt 预览的合成轮（auto-wake / system-reminder）不再出现，全部被滤空时提示「No undoable prompts」。",
+    "breaking_change": false
+  }
+]
