@@ -68,6 +68,34 @@ impl TaskOutputTokenBudget {
     }
 }
 pub struct BlockingWaitState(std::sync::Mutex<BlockingWaitInner>);
+
+/// Last model-facing monitor event text per `task_id`.
+/// Identical reprints of a heartbeat must not start another NotificationDrain turn.
+#[derive(Debug, Clone, Default)]
+pub struct MonitorHeartbeatTracker {
+    inner: Arc<parking_lot::Mutex<HashMap<String, String>>>,
+}
+
+impl MonitorHeartbeatTracker {
+    /// Returns `true` when this `(task_id, event_text)` should wake the model.
+    /// Records the text on the waking path so the next identical line is suppressed.
+    pub fn should_wake(&self, task_id: &str, event_text: &str) -> bool {
+        let mut map = self.inner.lock();
+        match map.get(task_id) {
+            Some(prev) if prev == event_text => false,
+            _ => {
+                map.insert(task_id.to_string(), event_text.to_string());
+                true
+            }
+        }
+    }
+
+    /// Forget a monitor after TaskCompleted / kill so a restarted watcher can wake again.
+    pub fn clear(&self, task_id: &str) {
+        self.inner.lock().remove(task_id);
+    }
+}
+
 #[derive(Default)]
 struct BlockingWaitInner {
     depth: usize,
@@ -223,6 +251,10 @@ pub struct ToolContext {
     /// They are injected as ONE hidden synthetic user message before the next sampling step.
     pub monitor_event_buffer:
         Option<xai_grok_tools::implementations::grok_build::monitor::types::MonitorEventBuffer>,
+    /// Suppresses re-wakes when the same monitor reprints an unchanged heartbeat line.
+    /// Each stdout line is designed to wake the main agent; a poll script that echoes
+    /// `status=in_progress` every interval would otherwise spam identical NotificationDrain turns.
+    pub monitor_heartbeat: MonitorHeartbeatTracker,
     pub task_completion_reservations:
         Option<xai_grok_tools::reminders::task_completion::TaskCompletionReservations>,
     pub task_wake_suppressed:
@@ -338,6 +370,7 @@ impl ToolContext {
             is_turn_active: None,
             unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             monitor_event_buffer: None,
+            monitor_heartbeat: MonitorHeartbeatTracker::default(),
             task_completion_reservations: None,
             task_wake_suppressed: None,
             synthetic_trace_tx: None,
@@ -399,7 +432,7 @@ mod output_budget_tests {
 }
 #[cfg(test)]
 mod tests {
-    use super::BlockingWaitState;
+    use super::{BlockingWaitState, MonitorHeartbeatTracker};
     use crate::{terminal::AsyncTerminalRunner, tools::ToolContext};
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -434,6 +467,7 @@ mod tests {
                 is_turn_active: None,
                 unattributed_background_usage: Arc::new(std::sync::atomic::AtomicBool::new(false)),
                 monitor_event_buffer: None,
+                monitor_heartbeat: MonitorHeartbeatTracker::default(),
                 task_completion_reservations: None,
                 task_wake_suppressed: None,
                 synthetic_trace_tx: None,
@@ -451,5 +485,32 @@ mod tests {
                 live_orphan_heal_lock: Arc::new(tokio::sync::Mutex::new(())),
             }
         }
+    }
+
+    #[test]
+    fn monitor_heartbeat_wakes_once_per_identical_text() {
+        let tracker = MonitorHeartbeatTracker::default();
+        assert!(tracker.should_wake("ci-1", "status=in_progress"));
+        assert!(
+            !tracker.should_wake("ci-1", "status=in_progress"),
+            "identical heartbeat must not re-wake"
+        );
+        assert!(
+            tracker.should_wake("ci-1", "DONE"),
+            "material state change must wake"
+        );
+        assert!(
+            tracker.should_wake("ci-2", "status=in_progress"),
+            "a different monitor may wake on the same body"
+        );
+    }
+
+    #[test]
+    fn monitor_heartbeat_clear_lets_a_restarted_watcher_wake() {
+        let tracker = MonitorHeartbeatTracker::default();
+        assert!(tracker.should_wake("ci-1", "status=in_progress"));
+        assert!(!tracker.should_wake("ci-1", "status=in_progress"));
+        tracker.clear("ci-1");
+        assert!(tracker.should_wake("ci-1", "status=in_progress"));
     }
 }

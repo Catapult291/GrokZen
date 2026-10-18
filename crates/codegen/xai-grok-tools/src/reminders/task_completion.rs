@@ -260,13 +260,29 @@ fn split_wrapped_monitor_event(event_text: &str) -> Option<(&str, &str)> {
 /// Format drained [`MonitorEventNotification`]s for the turn loop's hidden synthetic user message. Model-facing only —
 /// the pager renders monitor events from the structured `x.ai/monitor_event` notification, never by parsing this text.
 /// Multiple events batch under one count preamble, grouped per monitor (first-seen order, within-monitor order kept).
+/// Consecutive identical event texts for the same `task_id` collapse to one line so a heartbeat script cannot
+/// pad a drain turn with N copies of the same status.
 pub fn format_monitor_events(
     events: &[crate::implementations::grok_build::monitor::types::MonitorEventNotification],
     task_output_name: Option<&str>,
 ) -> Option<String> {
     use std::fmt::Write as _;
     let tool_hint = task_output_name.unwrap_or("get_task_output");
-    match events {
+    // Collapse consecutive identical (task_id, event_text) pairs across the whole drain batch.
+    let mut collapsed: Vec<
+        crate::implementations::grok_build::monitor::types::MonitorEventNotification,
+    > = Vec::with_capacity(events.len());
+    for event in events {
+        match collapsed.last() {
+            Some(prev)
+                if prev.task_id == event.task_id && prev.event_text == event.event_text =>
+            {
+                continue;
+            }
+            _ => collapsed.push(event.clone()),
+        }
+    }
+    match collapsed.as_slice() {
         [] => None,
         [event] => {
             let (label, inner) = match split_wrapped_monitor_event(&event.event_text) {
@@ -279,23 +295,26 @@ pub fn format_monitor_events(
                     label,
                 );
             Some(format!(
-                "<monitor-event task_id=\"{}\">\n[{}] {}\n</monitor-event>",
-                event.task_id, label, inner,
+                "<monitor-event task_id=\"{}\">\n[{}] {}\n</monitor-event>\n\n{}",
+                event.task_id,
+                label,
+                inner,
+                MONITOR_WAKE_REPLY_GUIDANCE,
             ))
         }
         _ => {
             type Event =
                 crate::implementations::grok_build::monitor::types::MonitorEventNotification;
             let mut groups: Vec<(&str, Vec<&Event>)> = Vec::new();
-            for event in events {
-                match groups.iter_mut().find(|(id, _)| *id == event.task_id) {
+            for event in &collapsed {
+                match groups.iter_mut().find(|(id, _)| *id == event.task_id.as_str()) {
                     Some((_, group)) => group.push(event),
                     None => groups.push((&event.task_id, vec![event])),
                 }
             }
             let mut buf = format!(
                 "{} monitor events from {} {} (use {} to identify each monitor):",
-                events.len(),
+                collapsed.len(),
                 groups.len(),
                 if groups.len() == 1 {
                     "monitor"
@@ -326,10 +345,15 @@ pub fn format_monitor_events(
                 }
                 buf.push_str("\n</monitor>");
             }
+            let _ = write!(buf, "\n\n{}", MONITOR_WAKE_REPLY_GUIDANCE);
             Some(buf)
         }
     }
 }
+
+/// Model-facing rules for a monitor wake. Heartbeat lines that restate an unchanged
+/// status must not produce another user-visible status / task-classification reply.
+const MONITOR_WAKE_REPLY_GUIDANCE: &str = "Monitor wake rules: heartbeat or no-change lines must not produce a user-visible reply, task classification, or status preamble. Act only on terminal outcomes (DONE/FAILED/CANCELLED) or a material state change; otherwise end the turn with empty user-facing content and leave the monitor running.";
 /// Whether a background task should be surfaced to the session whose owner id is `my_owner`. A task is in scope only
 /// when it has no recorded owner (legacy / non-grok-build backends) or its owner matches the current session;
 /// cross-session tasks are filtered out so their completions surface in the owning session, not here.
@@ -2737,7 +2761,7 @@ mod tests {
     }
     /// Single event => lean `<monitor-event>` form; multiple => count-led
     /// batch with per-monitor `<monitor>` groups and numbered labels;
-    /// empty => `None`.
+    /// empty => `None`. Every non-empty form appends the monitor wake guidance.
     #[test]
     fn format_monitor_events_single_vs_batched() {
         use crate::implementations::grok_build::monitor::types::MonitorEventNotification;
@@ -2754,9 +2778,13 @@ mod tests {
             Some("get_task_output"),
         )
         .expect("single event formats");
-        assert_eq!(
-            single, "<monitor-event task_id=\"task-0\">\n[alpha] line 0\n</monitor-event>",
-            "single event must use the lean monitor-event form"
+        assert!(
+            single.starts_with("<monitor-event task_id=\"task-0\">\n[alpha] line 0\n</monitor-event>\n\n"),
+            "single event must use the lean monitor-event form: {single}"
+        );
+        assert!(
+            single.contains("Monitor wake rules:"),
+            "single event must carry reply guidance: {single}"
         );
         let bare = crate::implementations::grok_build::monitor::types::MonitorEventNotification {
             task_id: "task-9".into(),
@@ -2765,9 +2793,10 @@ mod tests {
         };
         let single_bare =
             format_monitor_events(std::slice::from_ref(&bare), None).expect("bare event formats");
-        assert_eq!(
-            single_bare,
-            "<monitor-event task_id=\"task-9\">\n[event] bare text, no wrapper\n</monitor-event>"
+        assert!(
+            single_bare
+                .starts_with("<monitor-event task_id=\"task-9\">\n[event] bare text, no wrapper\n</monitor-event>\n\n"),
+            "bare event keeps lean form: {single_bare}"
         );
         let batched = format_monitor_events(
             &[
@@ -2805,6 +2834,47 @@ mod tests {
             batched.matches("to identify each monitor").count(),
             1,
             "exactly one preamble: {batched}"
+        );
+        assert!(
+            batched.contains("Monitor wake rules:"),
+            "batch must carry reply guidance: {batched}"
+        );
+    }
+
+    /// Consecutive identical heartbeat lines for one monitor collapse to a single event
+    /// so a poll script cannot pad a drain turn with N copies of the same status.
+    #[test]
+    fn format_monitor_events_collapses_consecutive_identical_heartbeats() {
+        use crate::implementations::grok_build::monitor::types::MonitorEventNotification;
+        let event = |task: &str, desc: &str, text: &str| MonitorEventNotification {
+            task_id: task.to_string(),
+            event_text: format!(
+                "<monitor-event description=\"{desc}\" task_id=\"{task}\">\n{text}\n</monitor-event>"
+            ),
+            owner_session_id: None,
+        };
+        let heartbeat = event("ci", "release CI", "status=in_progress");
+        let done = event("ci", "release CI", "DONE");
+        let batched = format_monitor_events(
+            &[
+                heartbeat.clone(),
+                heartbeat.clone(),
+                heartbeat.clone(),
+                done.clone(),
+            ],
+            None,
+        )
+        .expect("heartbeats format");
+        assert!(
+            batched.starts_with(
+                "2 monitor events from 1 monitor \
+                 (use get_task_output to identify each monitor):"
+            ),
+            "identical consecutive heartbeats collapse to one line each: {batched}"
+        );
+        assert!(
+            batched.contains("[1] status=in_progress\n[2] DONE"),
+            "collapsed group keeps first heartbeat then DONE: {batched}"
         );
     }
     /// `split_wrapped_monitor_event`: parses the exact `wrap_monitor_event`
