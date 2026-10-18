@@ -406,6 +406,7 @@ fn grok_build_plan_toolset() -> ToolServerConfig {
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
+            (&codemode::Codemode).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
             // Plan mode tools
@@ -484,6 +485,7 @@ fn grok_build_plan_no_subagents_toolset() -> ToolServerConfig {
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
+            (&codemode::Codemode).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
             // Plan mode tools
@@ -514,6 +516,7 @@ fn grok_build_ask_user_toolset() -> ToolServerConfig {
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
+            (&codemode::Codemode).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
             (&grok_build::AskUserQuestionTool).into(),
@@ -1841,6 +1844,30 @@ mod tests {
                 full_ids.contains(present.as_str()),
                 "workspace_grok_build_toolset must ship `{present}`"
             );
+        }
+    }
+    /// Regression: every toolset that ships `search_tool`/`use_tool` must also ship `codemode`.
+    /// The default session agent is `grok-build-plan` (model `agentType` metadata), so omitting
+    /// codemode there made the meta-tool invisible in production despite being registered in
+    /// `grok_build_core_toolset` (handoff §26; measured gap 2026-10-18).
+    #[test]
+    fn search_use_toolsets_also_ship_codemode() {
+        let codemode_id = ToolConfig::from(&codemode::Codemode).id;
+        let has = |cfg: &ToolServerConfig| cfg.tools.iter().any(|t| t.id == codemode_id);
+        let named = |name: &str| toolset_for_preset(name).expect("known preset");
+        for (label, cfg) in [
+            ("grok-build", named("grok-build")),
+            ("grok-build-plan", named("grok-build-plan")),
+            ("grok-build core", default_grok_build_toolset()),
+            ("grok-build plan", grok_build_plan_toolset()),
+            (
+                "grok-build plan no-subagents",
+                grok_build_plan_no_subagents_toolset(),
+            ),
+            ("grok-build ask-user", grok_build_ask_user_toolset()),
+            ("workspace grok-build", workspace_grok_build_toolset()),
+        ] {
+            assert!(has(&cfg), "{label} must ship `{codemode_id}`");
         }
     }
     /// Exhaustive match, so adding a new `BuiltinAgentName` won't compile until classified.

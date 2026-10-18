@@ -460,3 +460,21 @@ return slugs;
         "codemode context bytes {codemode_bytes} must be <=60% of baseline {baseline_bytes}"
     );
 }
+
+/// Regression (2026-10-18): the description template must render when
+/// `search_tool`/`use_tool` are absent from the toolset (e.g. headless
+/// `--disallowed-tools use_tool,search_tool`). Prose used to interpolate
+/// `${{ params.use_tool.tool_name }}` / `${{ tools.by_kind.search_tool }}`,
+/// and the strict renderer panicked on the undefined values, killing the
+/// whole session process at definition build.
+#[test]
+fn description_template_renders_without_search_use_tool() {
+    use std::collections::HashMap;
+    let renderer =
+        crate::types::template_renderer::TemplateRenderer::new(HashMap::new(), HashMap::new());
+    let rendered = renderer
+        .render(&super::Codemode.description_template())
+        .expect("codemode description must not require search_tool/use_tool in the toolset");
+    assert!(rendered.contains("use_tool"));
+    assert!(rendered.contains("searchTool"));
+}

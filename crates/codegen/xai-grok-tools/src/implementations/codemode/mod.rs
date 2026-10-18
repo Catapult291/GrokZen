@@ -178,12 +178,12 @@ impl crate::types::tool_metadata::ToolMetadata for Codemode {
         "Run a sandboxed JavaScript program that orchestrates multiple tool calls on the \
          harness side; only the script's final returned JSON comes back into context.\n\n\
          Use this for multi-step work that would otherwise take many rounds of \
-         `${{ params.use_tool.tool_name }}` calls (discover + N MCP calls + post-process). \
+         `use_tool` calls (discover + N MCP calls + post-process). \
          Do NOT use codemode for a single simple call — a direct `use_tool` call is cheaper.\n\n\
          Sandbox globals:\n\
          - `await host.servers()` — connected MCP servers: `[{ name, description, toolCount }]`\n\
          - `await tools.searchTool({ query, limit })` — discover tools + input schemas \
-         (same shape as `${{ tools.by_kind.search_tool }}`)\n\
+         (same shape as `search_tool`)\n\
          - `await tools.useTool(name, input)` — call a discovered tool (`{ text, isError }`)\n\
          Also available: `Promise.all`, `console.log` (debug only), JSON/Math/Array. \
          No network, no filesystem, 30s timeout, 64 host-call budget.\n\n\
