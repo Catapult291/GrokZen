@@ -441,6 +441,20 @@ mod tests {
             .block_on(resolve_identity(&cfg))
     }
 
+    /// A command printing exactly `json` on stdout through the platform shell `shell_c` picks.
+    /// `cmd /C` cannot carry the JSON inline: std backslash-escapes every `"` while building the
+    /// Windows command line and cmd echoes those backslashes, so serde sees invalid JSON.
+    /// Windows therefore prints a fixture file with `type`; `sh -c` echoes the literal.
+    fn emit_json(dir: &std::path::Path, name: &str, json: &str) -> String {
+        if cfg!(windows) {
+            let path = dir.join(name);
+            std::fs::write(&path, json).unwrap();
+            format!("type {}", path.display())
+        } else {
+            format!("echo '{json}'")
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn os_user_resolves_to_current_user() {
@@ -598,14 +612,27 @@ mod tests {
     /// Multi-line commands and commands longer than [`MAX_VALUE_LEN`] bytes must reach the shell, not be rejected for exceeding the length limit.
     #[test]
     fn multi_line_and_long_commands_still_run() {
-        let multi_line = "true\necho '{\"name\": \"multi-line\"}'";
+        let dir = tempfile::tempdir().unwrap();
+        let emit = emit_json(dir.path(), "payload.json", r#"{"name": "multi-line"}"#);
+        let multi_line = if cfg!(windows) {
+            // cmd /C executes only the first line of a multi-line script; lead with the payload
+            format!("{emit}\ncd .")
+        } else {
+            format!("true\n{emit}")
+        };
         let resolved = resolve(FeedbackUserConfig {
             command: Some(multi_line.into()),
             ..cfg()
         });
         assert_eq!(resolved.name.as_deref(), Some("multi-line"));
 
-        let long = format!("{}echo '{{\"name\": \"long-cmd\"}}'", "true && ".repeat(40));
+        let emit = emit_json(dir.path(), "long.json", r#"{"name": "long-cmd"}"#);
+        let noop = if cfg!(windows) {
+            "cd . && "
+        } else {
+            "true && "
+        };
+        let long = format!("{}{emit}", noop.repeat(40));
         assert!(long.len() > MAX_VALUE_LEN);
         let resolved = resolve(FeedbackUserConfig {
             command: Some(long),
@@ -617,9 +644,16 @@ mod tests {
     #[test]
     fn command_output_wins_then_falls_back_per_field() {
         // A command's emitted fields win over the declarative sources.
+        // The declarative name is a literal, not `os_user`: a command failure must surface a fixed
+        // value, never the host account name (which would differ per machine and leak into assertions).
+        let dir = tempfile::tempdir().unwrap();
         let resolved = resolve(FeedbackUserConfig {
-            name: vec!["os_user".into()],
-            command: Some(r#"echo '{"name": "from-cmd", "email": "cmd@example.com"}'"#.into()),
+            name: vec!["decl-user".into()],
+            command: Some(emit_json(
+                dir.path(),
+                "full.json",
+                r#"{"name": "from-cmd", "email": "cmd@example.com"}"#,
+            )),
             ..cfg()
         });
         assert_eq!(resolved.name.as_deref(), Some("from-cmd"));
@@ -628,7 +662,11 @@ mod tests {
         // A field the command omits falls back to the declarative source.
         let resolved = resolve(FeedbackUserConfig {
             email: vec!["fallback@example.com".into()],
-            command: Some(r#"echo '{"name": "cmd-user"}'"#.into()),
+            command: Some(emit_json(
+                dir.path(),
+                "name_only.json",
+                r#"{"name": "cmd-user"}"#,
+            )),
             ..cfg()
         });
         assert_eq!(resolved.name.as_deref(), Some("cmd-user"));
@@ -637,14 +675,22 @@ mod tests {
         // A command-emitted email without `@` is rejected like a literal one, so resolution falls back to the declarative email source
         let resolved = resolve(FeedbackUserConfig {
             email: vec!["fallback@example.com".into()],
-            command: Some(r#"echo '{"name": "cmd-user", "email": "not-an-email"}'"#.into()),
+            command: Some(emit_json(
+                dir.path(),
+                "bad_email.json",
+                r#"{"name": "cmd-user", "email": "not-an-email"}"#,
+            )),
             ..cfg()
         });
         assert_eq!(resolved.email.as_deref(), Some("fallback@example.com"));
 
         // Whitespace-only command fields count as unresolved too.
         let resolved = resolve(FeedbackUserConfig {
-            command: Some(r#"echo '{"name": "  ", "email": ""}'"#.into()),
+            command: Some(emit_json(
+                dir.path(),
+                "blank.json",
+                r#"{"name": "  ", "email": ""}"#,
+            )),
             ..cfg()
         });
         assert!(resolved.is_empty());
@@ -674,10 +720,12 @@ mod tests {
     async fn cache_resolves_once_per_config_and_reresolves_on_change() {
         let dir = tempfile::tempdir().unwrap();
         let counter = dir.path().join("runs");
-        let command = format!(
-            "echo run >> {}; echo '{{\"name\": \"cached-user\"}}'",
-            counter.display()
-        );
+        let emit = emit_json(dir.path(), "cached.json", r#"{"name": "cached-user"}"#);
+        let command = if cfg!(windows) {
+            format!("echo run>>{} & {emit}", counter.display())
+        } else {
+            format!("echo run >> {}; {emit}", counter.display())
+        };
         let cache = IdentityCache::new();
 
         assert_eq!(cache.get(None).await, None, "no opt-in, no identity");
@@ -712,11 +760,25 @@ mod tests {
     ) -> (String, std::path::PathBuf) {
         let counter = dir.join("runs");
         let marker = dir.join("ready");
-        let command = format!(
-            "echo run >> {c}; if [ -f {p} ]; then echo '{then_json}'; else touch {p}; echo '{first_json}'; fi",
-            c = counter.display(),
-            p = marker.display()
-        );
+        let command = if cfg!(windows) {
+            let emit = emit_json(dir, "first_then.json", then_json);
+            // cmd has no `if [ -f ]` / `touch`: `if exist` gates on the marker, `echo x>` creates it,
+            // and the first run prints the payload from a fixture file the test pre-writes below.
+            let first_path = dir.join("first.json");
+            std::fs::write(&first_path, first_json).unwrap();
+            format!(
+                "echo run>>{c} & if exist {p} ({emit}) else (echo x>{p} & type {f})",
+                c = counter.display(),
+                p = marker.display(),
+                f = first_path.display()
+            )
+        } else {
+            format!(
+                "echo run >> {c}; if [ -f {p} ]; then echo '{then_json}'; else touch {p}; echo '{first_json}'; fi",
+                c = counter.display(),
+                p = marker.display()
+            )
+        };
         (command, counter)
     }
 
@@ -855,10 +917,20 @@ mod tests {
         // The cache holds its lock across resolution so the work isn't duplicated
         let dir = tempfile::tempdir().unwrap();
         let counter = dir.path().join("runs");
-        let command = format!(
-            "echo run >> {}; sleep 0.2; echo '{{\"name\": \"once\", \"email\": \"once@example.com\"}}'",
-            counter.display()
+        let emit = emit_json(
+            dir.path(),
+            "once.json",
+            r#"{"name": "once", "email": "once@example.com"}"#,
         );
+        let command = if cfg!(windows) {
+            // cmd has no `sleep`; ping's inter-packet gap is the portable ~1s delay
+            format!(
+                "echo run>>{} & ping -n 2 127.0.0.1>nul & {emit}",
+                counter.display()
+            )
+        } else {
+            format!("echo run >> {}; sleep 0.2; {emit}", counter.display())
+        };
         let cache = IdentityCache::new();
         let cfg = FeedbackUserConfig {
             command: Some(command),
