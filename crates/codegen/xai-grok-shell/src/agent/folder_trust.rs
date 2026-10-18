@@ -603,6 +603,9 @@ mod tests {
         // HOME overridden so workspace_key sees the tempdir as home; GROK_HOME-isolated store GROK_FOLDER_TRUST unset so the default-on flag applies.
         let home = tempfile::tempdir().unwrap();
         let _home = EnvGuard::set("HOME", home.path());
+        // xai_dirs::home_dir() reads USERPROFILE on Windows; pin BOTH so the tempdir is the
+        // unrecordable home root on every platform instead of the real host profile
+        let _userprofile = EnvGuard::set("USERPROFILE", home.path());
         let grok_home = tempfile::tempdir().unwrap();
         let _env = EnvGuard::set("GROK_HOME", grok_home.path());
         let _flag = EnvGuard::unset("GROK_FOLDER_TRUST");
@@ -647,12 +650,17 @@ mod tests {
         let mut store = TrustStore::load();
         store.set_trusted(&workspace_key(tmp.path())).unwrap();
         assert!(resolve_and_record(tmp.path(), None, false));
-        let env = xai_grok_workspace::envrc::load_envrc_or_empty(tmp.path());
-        assert_eq!(
-            env.get("GATED_ENVRC"),
-            Some(&"1".to_string()),
-            "trusted folder must load `.envrc`"
-        );
+        // The `.envrc` evaluator (`direnv` or `/bin/bash`) doesn't exist on default Windows;
+        // the gate verdicts above are the cross-platform contract, the load content is unix-only
+        #[cfg(unix)]
+        {
+            let env = xai_grok_workspace::envrc::load_envrc_or_empty(tmp.path());
+            assert_eq!(
+                env.get("GATED_ENVRC"),
+                Some(&"1".to_string()),
+                "trusted folder must load `.envrc`"
+            );
+        }
     }
 
     #[test]
@@ -1511,12 +1519,16 @@ mod tests {
         );
 
         // The gated `.envrc` load (the call-site contract) runs because the gate is inert/trusted, so the var is present with no store grant
-        let env = xai_grok_workspace::envrc::load_envrc_or_empty(tmp.path());
-        assert_eq!(
-            env.get("LOCAL_BUILD_ENVRC"),
-            Some(&"1".to_string()),
-            "local build: `.envrc` must load without any store grant"
-        );
+        // Evaluator-gated to unix like the gate test above: no direnv//bin/bash on default Windows
+        #[cfg(unix)]
+        {
+            let env = xai_grok_workspace::envrc::load_envrc_or_empty(tmp.path());
+            assert_eq!(
+                env.get("LOCAL_BUILD_ENVRC"),
+                Some(&"1".to_string()),
+                "local build: `.envrc` must load without any store grant"
+            );
+        }
     }
 
     #[test]
