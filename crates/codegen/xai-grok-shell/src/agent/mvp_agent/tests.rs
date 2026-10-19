@@ -6167,59 +6167,67 @@ async fn spawn_seeds_root_conversation_group_in_turn_config() {
 }
 /// `remove_session` releases the workspace binding and drains the per-session side maps.
 /// Test agents default to `workspace_ops = None`, so no other test reaches the release.
-#[tokio::test]
+/// `bind_local_session` builds a LocalTerminalBackend that uses `spawn_local`, so this must run on a LocalSet.
+#[tokio::test(flavor = "current_thread")]
 async fn remove_session_releases_workspace_binding_and_side_maps() {
-    let agent = build_minimal_agent_for_tests();
-    let sid = acp::SessionId::new("test-session-workspace-release");
-    let ops = xai_grok_workspace::WorkspaceOps::for_test();
-    let toolset =
-        std::sync::Arc::new(xai_grok_tools::registry::types::FinalizedToolset::empty_for_test());
-    let toolset_weak = std::sync::Arc::downgrade(&toolset);
-    ops.bind_local_session(
-        sid.0.as_ref(),
-        std::env::temp_dir(),
-        xai_hunk_tracker::HunkTrackerHandle::noop(),
-        toolset,
-        None,
-    )
-    .expect("bind_local_session must succeed");
-    assert!(toolset_weak.upgrade().is_some());
-    *agent.workspace_ops.borrow_mut() = Some(ops);
-    agent
-        .session_registry
-        .set_unavailable_model(&sid, acp::ModelId::new(std::sync::Arc::from("gone-model")));
-    agent.set_turn_number(&sid, 3);
-    let (_permission_tx, permission_rx) =
-        tokio::sync::mpsc::unbounded_channel::<xai_grok_workspace::permission::PermissionEvent>();
-    agent
-        .session_registry
-        .set_permission_receiver(&sid, permission_rx);
-    let _ = agent.session_registry.live_orphan_heal_lock(&sid);
-    assert_eq!(agent.session_registry.counts().live_orphan_heal_locks, 1);
-    let root = agent
-        .session_registry
-        .register_root(sid.clone(), test_root_identity(1, 2));
-    assert_root_views(&agent, &sid, Some(&root));
-    agent.retire_root_session(&sid);
-    assert_root_views(&agent, &sid, None);
-    agent.remove_session(&sid);
-    assert_root_views(&agent, &sid, None);
-    assert_eq!(
-        agent.session_registry.counts().live_orphan_heal_locks,
-        0,
-        "remove_session must evict the live-orphan heal mutex"
-    );
-    assert!(
-        toolset_weak.upgrade().is_none(),
-        "the workspace binding must release the toolset"
-    );
-    assert!(agent.session_registry.unavailable_model(&sid).is_none());
-    assert_eq!(agent.session_registry.counts().resident_resources, 0);
-    assert_eq!(
-        agent.session_registry.counts().retained_resources,
-        0,
-        "retained per-session resources must be reclaimed on removal"
-    );
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let agent = build_minimal_agent_for_tests();
+            let sid = acp::SessionId::new("test-session-workspace-release");
+            let ops = xai_grok_workspace::WorkspaceOps::for_test();
+            let toolset = std::sync::Arc::new(
+                xai_grok_tools::registry::types::FinalizedToolset::empty_for_test(),
+            );
+            let toolset_weak = std::sync::Arc::downgrade(&toolset);
+            ops.bind_local_session(
+                sid.0.as_ref(),
+                std::env::temp_dir(),
+                xai_hunk_tracker::HunkTrackerHandle::noop(),
+                toolset,
+                None,
+            )
+            .expect("bind_local_session must succeed");
+            assert!(toolset_weak.upgrade().is_some());
+            *agent.workspace_ops.borrow_mut() = Some(ops);
+            agent
+                .session_registry
+                .set_unavailable_model(&sid, acp::ModelId::new(std::sync::Arc::from("gone-model")));
+            agent.set_turn_number(&sid, 3);
+            let (_permission_tx, permission_rx) =
+                tokio::sync::mpsc::unbounded_channel::<
+                    xai_grok_workspace::permission::PermissionEvent,
+                >();
+            agent
+                .session_registry
+                .set_permission_receiver(&sid, permission_rx);
+            let _ = agent.session_registry.live_orphan_heal_lock(&sid);
+            assert_eq!(agent.session_registry.counts().live_orphan_heal_locks, 1);
+            let root = agent
+                .session_registry
+                .register_root(sid.clone(), test_root_identity(1, 2));
+            assert_root_views(&agent, &sid, Some(&root));
+            agent.retire_root_session(&sid);
+            assert_root_views(&agent, &sid, None);
+            agent.remove_session(&sid);
+            assert_root_views(&agent, &sid, None);
+            assert_eq!(
+                agent.session_registry.counts().live_orphan_heal_locks,
+                0,
+                "remove_session must evict the live-orphan heal mutex"
+            );
+            assert!(
+                toolset_weak.upgrade().is_none(),
+                "the workspace binding must release the toolset"
+            );
+            assert!(agent.session_registry.unavailable_model(&sid).is_none());
+            assert_eq!(agent.session_registry.counts().resident_resources, 0);
+            assert_eq!(
+                agent.session_registry.counts().retained_resources,
+                0,
+                "retained per-session resources must be reclaimed on removal"
+            );
+        })
+        .await;
 }
 /// Without a bridge, `ext_method` falls through to the unchanged local dispatch (`rewind::handle`), which reports the missing session.
 /// That proves the routing hook is skipped in local mode.

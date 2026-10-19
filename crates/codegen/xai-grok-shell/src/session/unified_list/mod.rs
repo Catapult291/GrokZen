@@ -1028,6 +1028,37 @@ mod tests {
                 "non-chat: client kind filter untouched"
             );
         }
+        if !crate::agent::chat_modes::process_chat_mode_enabled() {
+            // This community build hard-offs process chat mode (`process_chat_mode_enabled` is
+            // a constant `false`), so the force-rewrite never runs and every client kind shape
+            // (including empty/null/unknown) passes through untouched.
+            let _on = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
+            let req = parse_list_req(&raw).expect("parse");
+            let parsed = ParsedMeta::parse(req.meta.as_ref());
+            assert_eq!(
+                parsed.facet_filters.get(KIND_FACET_KEY),
+                Some(&vec![serde_json::json!("build")]),
+                "chat mode hard-off: client kind filter untouched"
+            );
+            assert_eq!(
+                parsed.facet_filters.get("starred"),
+                Some(&vec![serde_json::json!(true)]),
+                "other facets pass through"
+            );
+            for bad in [
+                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": [] } } }),
+                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": null } } }),
+                serde_json::json!({ "_meta": { "x.ai/facetFilters": { "kind": ["other"] } } }),
+            ] {
+                let req = parse_list_req(&bad.to_string()).expect("parse");
+                let parsed = ParsedMeta::parse(req.meta.as_ref());
+                assert!(
+                    parsed.facet_filters.get(KIND_FACET_KEY).is_some(),
+                    "chat mode hard-off: empty/null/unknown kind must not be rewritten: {bad}"
+                );
+            }
+            return;
+        }
         {
             let _on = xai_grok_test_support::EnvGuard::set(GROK_CHAT_MODE_ENV, "1");
             let req = parse_list_req(&raw).expect("parse");
@@ -1035,7 +1066,7 @@ mod tests {
             let expected_build = if cfg!(feature = "local-workspace") {
                 Some(&vec![serde_json::json!("build")])
             } else {
-                Some(&vec![serde_json::json!("build")])
+                Some(&vec![serde_json::json!("chat")])
             };
             assert_eq!(
                 parsed.facet_filters.get(KIND_FACET_KEY),

@@ -557,10 +557,14 @@ async fn pre_tool_use_ask_on_a_plan_file_edit_forces_a_prompt() {
                 Arc::new(actor_with_pre_tool_use_hook(ASK_HOOK, /*yolo=*/ true, gateway_tx).await);
             activate_plan_mode(&actor);
             let gateway = RecordingGateway::spawn(gateway_rx, PromptAnswer::Select("allow-once"));
+            // The tracker's plan file lives under `std::env::temp_dir()/test-session`, which is
+            // not `/tmp` on Windows; use the live path so the plan-mode carve-out matches.
+            let plan_path = actor.plan_mode.lock().plan_file_path().to_path_buf();
+            let plan_str = plan_path.to_string_lossy().into_owned();
 
             let result = prepare_call(
                 &actor,
-                search_replace_call_at("call_plan_file_ask", "/tmp/test-session/plan.md"),
+                search_replace_call_at("call_plan_file_ask", &plan_str),
             )
             .await;
             assert!(

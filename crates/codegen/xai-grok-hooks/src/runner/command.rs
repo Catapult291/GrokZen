@@ -907,15 +907,33 @@ fn parse_prompt_result(
     }
     match exit_code {
         0 => (HookRunnerResult::Success, elapsed),
-        GATE_EXIT_CODE => (
-            HookRunnerResult::Block {
-                reason: stderr_message.unwrap_or_else(|| {
-                    format!("Prompt blocked by hook '{hook_name}' (exit code {GATE_EXIT_CODE})")
-                }),
-                hook_name: hook_name.to_string(),
-            },
-            elapsed,
-        ),
+        GATE_EXIT_CODE => {
+            // Windows bash-family hooks run under `exec 2>&1` (see [`bash_family_merged_command`]),
+            // so a script's `>&2` lands on stdout and the real stderr is empty. Prefer the dedicated
+            // stderr line, then fall back to the first non-JSON stdout line before the generic message.
+            let reason = stderr_message.or_else(|| {
+                let trimmed = stdout.trim();
+                if trimmed.is_empty() || trimmed.starts_with('{') {
+                    None
+                } else {
+                    trimmed
+                        .lines()
+                        .map(str::trim)
+                        .find(|line| !line.is_empty())
+                        .map(clip_reason)
+                        .filter(|line| !line.is_empty())
+                }
+            });
+            (
+                HookRunnerResult::Block {
+                    reason: reason.unwrap_or_else(|| {
+                        format!("Prompt blocked by hook '{hook_name}' (exit code {GATE_EXIT_CODE})")
+                    }),
+                    hook_name: hook_name.to_string(),
+                },
+                elapsed,
+            )
+        }
         _ => (failed_with_exit_code(exit_code, stderr), elapsed),
     }
 }
@@ -1793,6 +1811,22 @@ mod tests {
         );
 
         let (result, _) = parse_prompt_result("", "", 2, "p", Duration::ZERO);
+        assert_eq!(
+            prompt_block_reason(result),
+            "Prompt blocked by hook 'p' (exit code 2)"
+        );
+    }
+
+    /// Windows bash-family hooks run under `exec 2>&1`, so a script's `>&2` lands on stdout
+    /// and the real stderr is empty. Exit 2 must still surface that line as the block reason.
+    #[test]
+    fn prompt_exit_2_falls_back_to_stdout_when_stderr_is_empty() {
+        let (result, _) = parse_prompt_result("no prod deploys\n", "", 2, "p", Duration::ZERO);
+        assert_eq!(prompt_block_reason(result), "no prod deploys");
+
+        // JSON stdout is the decision channel, not the free-text reason.
+        let (result, _) =
+            parse_prompt_result(r#"{"decision":"approve"}"#, "", 2, "p", Duration::ZERO);
         assert_eq!(
             prompt_block_reason(result),
             "Prompt blocked by hook 'p' (exit code 2)"
