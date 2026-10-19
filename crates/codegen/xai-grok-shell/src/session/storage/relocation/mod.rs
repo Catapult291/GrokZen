@@ -117,6 +117,17 @@ fn select(paths: &[PathBuf], cwd_parent: Option<&Path>) -> Option<PathBuf> {
     selected.filter(|path| cwd_parent.is_none_or(|parent| path.parent() == Some(parent)))
 }
 
+/// A bucket unlinked between `readdir(parent)` and opening it reports `NotFound` on Unix;
+/// the same delete race reports `PermissionDenied` on Windows (a delete-pending directory
+/// still answers ACCESS_DENIED), so both kinds mean "vanishing" and the scan skips the
+/// entry instead of failing the whole listing.
+fn is_vanishing(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+    )
+}
+
 fn load_candidates(sessions_root: &Path) -> Result<(SessionCandidates, SessionCandidates)> {
     let entries = match fs::read_dir(sessions_root) {
         Ok(entries) => entries,
@@ -137,22 +148,23 @@ fn load_candidates(sessions_root: &Path) -> Result<(SessionCandidates, SessionCa
             continue;
         }
         // A sibling test (or another process on a shared $HOME) can unlink this
-        // cwd bucket after readdir(parent) and before we open it.
+        // cwd bucket after readdir(parent) and before we open it. `is_vanishing`
+        // treats Windows' PermissionDenied form of that same race as a skip too.
         let session_entries = match fs::read_dir(&cwd_path) {
             Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if is_vanishing(&error) => continue,
             Err(error) => return Err(io_error("read", &cwd_path, error)),
         };
         for session_entry in session_entries {
             let session_entry = match session_entry {
                 Ok(entry) => entry,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if is_vanishing(&error) => continue,
                 Err(error) => return Err(io_error("read", &cwd_path, error)),
             };
             let path = session_entry.path();
             let file_type = match session_entry.file_type() {
                 Ok(file_type) => file_type,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if is_vanishing(&error) => continue,
                 Err(error) => return Err(io_error("inspect", &path, error)),
             };
             let Some(id) = session_entry.file_name().to_str().map(str::to_owned) else {
@@ -169,7 +181,7 @@ fn load_candidates(sessions_root: &Path) -> Result<(SessionCandidates, SessionCa
                 {
                     persisted.entry(id).or_default().push(path);
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) if is_vanishing(&error) => {}
                 Err(error) => return Err(io_error("inspect", &summary, error)),
                 Ok(_) => {}
             }

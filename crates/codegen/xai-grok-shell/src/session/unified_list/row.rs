@@ -236,7 +236,11 @@ mod tests {
             session_id: "sess_abc123".into(),
             summary: "Implement session list API".into(),
             updated_at: "2026-10-29T14:22:15Z".into(),
-            cwd: "/Users/me/xai".into(),
+            cwd: std::env::temp_dir()
+                .join("me")
+                .join("xai")
+                .to_string_lossy()
+                .into_owned(),
             ..MergedSession::default()
         };
         let info = merged_session_to_row(merged, facet_registry()).into_session_info();

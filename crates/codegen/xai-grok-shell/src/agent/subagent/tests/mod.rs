@@ -214,7 +214,7 @@ fn wedged_child_handle() -> (
     let (hunk_event_tx, _hunk_event_rx) = mpsc::unbounded_channel();
     let hunk_tracker_handle = xai_hunk_tracker::HunkTrackerActor::spawn(
         "test".to_string(),
-        PathBuf::from("/tmp"),
+        std::env::temp_dir(),
         hunk_event_tx,
         xai_hunk_tracker::TrackingMode::AllDirty,
         CancellationToken::new(),
@@ -230,7 +230,7 @@ fn wedged_child_handle() -> (
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         info: SessionInfo {
             id: acp::SessionId::new("test"),
-            cwd: "/tmp".to_string(),
+            cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         },
         max_turns: None,
         resolved_tool_overrides: std::sync::Arc::new(arc_swap::ArcSwapOption::empty()),
@@ -257,9 +257,9 @@ fn wedged_child_handle() -> (
             std::sync::atomic::AtomicU64::new(0),
         ),
         tool_context: crate::tools::ToolContext::new_local_context(
-            xai_grok_paths::AbsPathBuf::new(PathBuf::from("/tmp")).unwrap(),
+            xai_grok_paths::AbsPathBuf::new(std::env::temp_dir()).unwrap(),
             std::sync::Arc::new(
-                xai_grok_workspace::file_system::LocalFs::new(PathBuf::from("/tmp")),
+                xai_grok_workspace::file_system::LocalFs::new(std::env::temp_dir()),
             ),
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
@@ -272,7 +272,7 @@ fn wedged_child_handle() -> (
         non_interactive: false,
         plan_mode: std::sync::Arc::new(
             parking_lot::Mutex::new(
-                crate::session::plan_mode::PlanModeTracker::new(PathBuf::from("/tmp")),
+                crate::session::plan_mode::PlanModeTracker::new(std::env::temp_dir()),
             ),
         ),
         force_compact: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
