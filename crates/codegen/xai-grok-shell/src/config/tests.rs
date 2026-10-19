@@ -4008,7 +4008,16 @@ fn managed_settings_disables_features_and_requirements_overrides() {
             cfg.features.telemetry,
             Some(crate::agent::config::TelemetryMode::Enabled)
         );
-    assert!(cfg.is_feature_enabled(Feature::Feedback));
+    if xai_grok_version::research_data_collection_forbidden() {
+        // Privacy build: Feedback is hard-off before the requirements pin resolves,
+        // so managed-settings disable + requirements enable still leaves it disabled.
+        assert!(
+            !cfg.is_feature_enabled(Feature::Feedback),
+            "privacy hard-off must beat the requirements pin for Feedback"
+        );
+    } else {
+        assert!(cfg.is_feature_enabled(Feature::Feedback));
+    }
     assert!(cfg.ui.yolo);
 }
 /// REGRESSION: external managed-settings.json is advisory, not authoritative.

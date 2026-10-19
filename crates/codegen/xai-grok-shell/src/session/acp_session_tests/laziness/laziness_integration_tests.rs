@@ -566,9 +566,9 @@ async fn debug_mode_bypasses_idle_wait() {
             drop(Arc::try_unwrap(actor).ok().unwrap());
             // The bypass path still does a chat-state MPSC roundtrip, two tool-bridge reads, and `prepare_chat_completion` with a JWT refresh
             // It then attempts a TCP connect against localhost and appends a JSONL line; all of that can run slowly on shared CI
-            // 2s is still 30_000 times faster than the configured 60_000ms idle threshold, so the bypass signal is unambiguous
+            // 5s is still 12_000 times faster than the configured 60_000ms idle threshold, so the bypass signal is unambiguous
             assert!(
-                elapsed < std::time::Duration::from_millis(2000),
+                elapsed < std::time::Duration::from_millis(5000),
                 "idle threshold must be bypassed in debug mode (took {elapsed:?})",
             );
             // Sanity: the classifier did reach the sampler and record an outcome, confirming the wait was skipped (not the function returning early)

@@ -2126,8 +2126,10 @@ async fn get_transcript_path_returns_some_when_file_exists() {
             assert!(hint.ends_with("updates.jsonl"));
             actor.compaction.compaction_mode = xai_chat_state::CompactionMode::Summary;
             assert!(actor.transcript_hint().is_none());
+            // Only the file this test created. The session dir is keyed by the shared
+            // fixture id ("test-auto-compact") + temp cwd, so a whole-dir wipe here races
+            // sibling tests writing assets into the same directory (NotFound flakes).
             let _ = std::fs::remove_file(&updates_path);
-            let _ = std::fs::remove_dir_all(&session_dir);
         })
         .await;
 }
