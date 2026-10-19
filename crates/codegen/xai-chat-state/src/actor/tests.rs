@@ -5233,7 +5233,8 @@ async fn prefix_stable_across_forty_tool_rounds() {
 
         let region = system_tools_region(&req);
         assert_eq!(
-            region, baseline_region,
+            region,
+            baseline_region,
             "tool round {round}: system+tools head drifted (fp {:016x} -> {:016x})",
             region_fingerprint(&baseline_region),
             region_fingerprint(&region),
@@ -5700,9 +5701,8 @@ async fn g6_memory_lands_only_in_system_head_never_mid_history() {
         ConversationItem::system("You are helpful."),
         ConversationItem::user("hello"),
     ]);
-    let reminder = format!(
-        "{MEMORY_CONTEXT_OPEN_TAG}\nRemember: user likes Rust\n{MEMORY_CONTEXT_CLOSE_TAG}"
-    );
+    let reminder =
+        format!("{MEMORY_CONTEXT_OPEN_TAG}\nRemember: user likes Rust\n{MEMORY_CONTEXT_CLOSE_TAG}");
 
     let req1 = h
         .handle
@@ -5731,7 +5731,8 @@ async fn g6_memory_lands_only_in_system_head_never_mid_history() {
     // Grow history, then re-inject on a clone (persist=false).
     h.handle
         .push_assistant_response(ConversationItem::assistant("Hi there!"));
-    h.handle.push_user_message(ConversationItem::user("Tell me more"));
+    h.handle
+        .push_user_message(ConversationItem::user("Tell me more"));
 
     let req2 = h
         .handle
@@ -5775,14 +5776,7 @@ async fn g6_persisted_memory_freezes_system_head_across_turns() {
 
     let req1 = h
         .handle
-        .build_request(
-            vec![],
-            Some(reminder),
-            true,
-            None,
-            "c".into(),
-            "r1".into(),
-        )
+        .build_request(vec![], Some(reminder), true, None, "c".into(), "r1".into())
         .await
         .unwrap();
     let head1 = req1.items.first().map(|i| i.text_content());
@@ -5792,7 +5786,8 @@ async fn g6_persisted_memory_freezes_system_head_across_turns() {
         .push_assistant_response(ConversationItem::assistant("Working on it"));
     h.handle
         .push_tool_result(ConversationItem::tool_result("call_1", "file bytes"));
-    h.handle.push_user_message(ConversationItem::user("continue"));
+    h.handle
+        .push_user_message(ConversationItem::user("continue"));
 
     let req2 = h
         .handle
@@ -5828,9 +5823,8 @@ async fn g6_memory_upsert_stays_inside_system_head() {
         ConversationItem::system("You are helpful."),
         ConversationItem::user("hello"),
     ]);
-    let reminder_a = format!(
-        "{MEMORY_CONTEXT_OPEN_TAG}\nRemember: user likes Rust\n{MEMORY_CONTEXT_CLOSE_TAG}"
-    );
+    let reminder_a =
+        format!("{MEMORY_CONTEXT_OPEN_TAG}\nRemember: user likes Rust\n{MEMORY_CONTEXT_CLOSE_TAG}");
     let reminder_b = format!(
         "{MEMORY_CONTEXT_OPEN_TAG}\nRemember: user likes Rust and Python\n{MEMORY_CONTEXT_CLOSE_TAG}"
     );

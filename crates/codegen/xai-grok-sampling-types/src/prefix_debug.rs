@@ -15,8 +15,7 @@ use crate::ConversationRequest;
 /// and are compared separately by the system+tools region assertions.
 pub fn responses_input_json(req: &ConversationRequest) -> serde_json::Value {
     let create: crate::rs::CreateResponse = req.into();
-    let mut body =
-        serde_json::to_value(&create).expect("CreateResponse serialization cannot fail");
+    let mut body = serde_json::to_value(&create).expect("CreateResponse serialization cannot fail");
     crate::patch_reasoning_text_types(&mut body);
     body.get("input")
         .cloned()
@@ -125,10 +124,8 @@ mod tests {
             ConversationItem::system("sys"),
             ConversationItem::user("hello"),
         ];
-        let with_tools = ConversationRequest::from_items(items.clone()).with_tools(vec![
-            tool("read_file"),
-            tool("edit_file"),
-        ]);
+        let with_tools = ConversationRequest::from_items(items.clone())
+            .with_tools(vec![tool("read_file"), tool("edit_file")]);
         let without_tools = ConversationRequest::from_items(items);
 
         assert_eq!(
