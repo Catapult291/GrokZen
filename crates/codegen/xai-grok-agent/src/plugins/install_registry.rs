@@ -343,8 +343,7 @@ pub fn acquire_file_lock(
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
             Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.raw_os_error() == contended =>
+                if e.kind() == std::io::ErrorKind::WouldBlock || e.raw_os_error() == contended =>
             {
                 if std::time::Instant::now() >= deadline {
                     return Err(format!(
