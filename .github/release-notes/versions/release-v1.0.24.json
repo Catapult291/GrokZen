@@ -5,7 +5,7 @@
   "previous_tag": "release-v1.0.23",
   "community": [
     {
-      "text": "缓存守卫 G4–G7：前缀稳定 LCP 快照、compaction 后冻结 system head、会话内热更冷缓存警告，turn usage token 加权入遥测。",
+      "text": "长会话缓存守卫：compaction 与长工具循环后仍能稳定复用提示词前缀缓存；会话内热更/升级时会提示冷缓存风险。",
       "commits": [
         "c99bb7467ef268d97ce19ebdb3374052a47d265e",
         "3d9a8e51f87aa1d5c764472b60a5d36be1b95574",
@@ -14,7 +14,7 @@
       ]
     },
     {
-      "text": "标题刷新与 flush/dream/suggest/turn-summary 旁路迁到 cline-pass/deepseek-v4.1-flash，主回合不再被旁路请求占用。",
+      "text": "标题刷新与记忆整理、回合摘要等后台旁路请求改由轻量旁路模型处理，主对话回合不再被这些请求占用。",
       "commits": [
         "4bf5acaf54e6a0bb94040ad50ae37fb70e070a90",
         "f605e9e69a22bcd80565e283540a50582ab843cd"

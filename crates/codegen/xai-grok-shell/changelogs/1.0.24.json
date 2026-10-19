@@ -1,12 +1,12 @@
 [
   {
     "category": "features",
-    "description": "**Prompt-prefix cache guards** — frozen system head after compaction, an input[:k] LCP snapshot over 40-round tool loops, and cold-cache warnings on in-session upgrades keep long sessions on a warm prompt prefix.",
+    "description": "**Long-session cache guards** — the prompt prefix cache stays reusable across compaction and long tool loops; in-session upgrades warn about cold caches.",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**Side-channel bypass model** — title refresh plus flush / dream / suggest / turn-summary requests now run on cline-pass/deepseek-v4.1-flash instead of occupying the main turn.",
+    "description": "**Lighter background requests** — title refresh plus memory and turn-summary background requests now run on a lightweight bypass model instead of occupying the main turn.",
     "breaking_change": false
   },
   {
