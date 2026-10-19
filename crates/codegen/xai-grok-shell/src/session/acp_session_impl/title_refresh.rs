@@ -15,6 +15,14 @@ use crate::session::helpers::{session_recap, session_summary};
 /// Generous relative to slow aux chains (observed mimo TTFT can exceed 80s); a hung backend still cannot hold the slot forever.
 const TITLE_REFRESH_MODEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// Dedicated side model for title refresh so the call does not compete with the main conversation's KV pool.
+/// Catalog-guarded: when missing (or already the session model), the call falls back to the parent-cached path.
+/// Matches the cache-miss G1 target (`cline-pass/deepseek-v4.1-flash`).
+const TITLE_REFRESH_SIDE_MODEL: &str = "cline-pass/deepseek-v4.1-flash";
+
+/// Titles are 5-10 words; a hard output cap keeps a runaway sample short and cheap.
+const TITLE_REFRESH_MAX_OUTPUT_TOKENS: u32 = 256;
+
 impl SessionActor {
     /// Spawn a title refresh after the session settles idle, unless the title is frozen or one is already running.
     /// No-op for subagents and when post-turn side-calls are disabled (title refresh shares the `turn_summary_enabled` gate).
@@ -126,41 +134,125 @@ impl SessionActor {
     }
 
     /// One tool-free model call producing a cleaned whole-conversation title, or `None` on any setup/model failure or empty output.
+    ///
+    /// Prefers [`TITLE_REFRESH_SIDE_MODEL`] so the main conversation's cache pool is not displaced by a 0%-hit title body.
+    /// When the side model is missing from the catalog (or already the session model), falls back to the parent-cached path.
     async fn generate_refreshed_title(
         &self,
         conversation: Vec<ConversationItem>,
     ) -> Option<String> {
-        let setup = match self.prepare_side_call().await {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "title refresh: failed to prepare sampling client");
-                return None;
-            }
+        self.refresh_token_if_expired().await;
+        let session_config = self.reconstruct_full_config().await;
+
+        let side_cfg = if self.models_manager.model_in_catalog(TITLE_REFRESH_SIDE_MODEL)
+            && session_config.model != TITLE_REFRESH_SIDE_MODEL
+        {
+            self.resolve_aux_sampler_config(TITLE_REFRESH_SIDE_MODEL)
+                .await
+                .map(|mut cfg| {
+                    crate::agent::config::stamp_session_local_sampler_fields(
+                        &mut cfg,
+                        &session_config,
+                        self.client_identifier.clone(),
+                        session_config.max_retries,
+                    );
+                    cfg
+                })
+        } else {
+            None
         };
+
+        // Isolated side model: do not share the parent `prompt_cache_key` (different KV pool; sharing would only add noise).
+        let shared_parent_prefix = side_cfg.is_none();
+        let (client, model, context_window, reasoning_effort, strip_reasoning): (
+            xai_grok_sampler::SamplingClient,
+            String,
+            u64,
+            Option<xai_grok_sampling_types::ReasoningEffort>,
+            bool,
+        ) = if let Some(cfg) = side_cfg {
+            let model = cfg.model.clone();
+            let context_window = cfg.context_window;
+            let reasoning_effort = cfg.reasoning_effort;
+            // Not sharing the parent prefix: strip reasoning to shrink the whole-conversation replay.
+            let strip_reasoning = true;
+            match xai_grok_sampler::SamplingClient::new(cfg) {
+                Ok(c) => (c, model, context_window, reasoning_effort, strip_reasoning),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "title refresh: failed to prepare side sampling client"
+                    );
+                    return None;
+                }
+            }
+        } else {
+            let setup = match self.prepare_side_call().await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "title refresh: failed to prepare sampling client"
+                    );
+                    return None;
+                }
+            };
+            (
+                setup.client,
+                setup.model,
+                setup.context_window,
+                setup.reasoning_effort,
+                setup.strip_reasoning,
+            )
+        };
+
         let instruction = session_summary::title_refresh_instruction(self.reminder_wrapper_tag());
         let items = session_recap::budget_instruction_items(
             conversation,
             instruction,
-            setup.strip_reasoning,
-            setup.context_window,
+            strip_reasoning,
+            context_window,
         );
         // Deliberately tool-free: unlike the turn summary, the request carries no tools
         // The model then can't spend the call on a tool invocation that would leave empty text and waste the attempt
-        // (The conversation prefix still shares the parent prompt-cache key.)
-        let request = self.parent_cached_request(AuxCall {
-            items,
-            tools: Vec::new(),
-            hosted_tools: Vec::new(),
-            model: setup.model.clone(),
-            reasoning_effort: setup.reasoning_effort,
-            backend: setup.client.api_backend(),
-            conv_id: format!("title-refresh-{}", uuid::Uuid::new_v4()),
-            req_id: format!("xai-title-refresh-{}", uuid::Uuid::new_v4()),
-        });
+        let conv_id = format!("title-refresh-{}", uuid::Uuid::new_v4());
+        let req_id = format!("xai-title-refresh-{}", uuid::Uuid::new_v4());
+        let request = if shared_parent_prefix {
+            // Parent path keeps the shared prompt-cache prefix for the common same-model case.
+            let mut request = self.parent_cached_request(AuxCall {
+                items,
+                tools: Vec::new(),
+                hosted_tools: Vec::new(),
+                model,
+                reasoning_effort,
+                backend: client.api_backend(),
+                conv_id,
+                req_id,
+            });
+            request.max_output_tokens = Some(TITLE_REFRESH_MAX_OUTPUT_TOKENS);
+            request
+        } else {
+            // Side model: unique pck, tool-free, capped output.
+            ConversationRequest {
+                items,
+                tools: Vec::new(),
+                hosted_tools: Vec::new(),
+                model: Some(model),
+                reasoning_effort,
+                x_grok_conv_id: Some(conv_id),
+                x_grok_req_id: Some(req_id),
+                x_grok_session_id: Some(self.session_info.id.to_string()),
+                x_grok_agent_id: Some(xai_grok_telemetry::id::agent_id()),
+                prompt_cache_key: Some(format!("title-refresh-{}", uuid::Uuid::new_v4())),
+                max_output_tokens: Some(TITLE_REFRESH_MAX_OUTPUT_TOKENS),
+                length_policy: xai_grok_sampling_types::LengthPolicy::Fail,
+                ..Default::default()
+            }
+        };
 
         let response = match tokio::time::timeout(
             TITLE_REFRESH_MODEL_TIMEOUT,
-            setup.client.conversation_collect(request),
+            client.conversation_collect(request),
         )
         .await
         {
@@ -177,11 +269,7 @@ impl SessionActor {
                 return None;
             }
         };
-        super::side_call::log_prompt_cache_usage(
-            "title_refresh",
-            setup.client.api_backend(),
-            &response,
-        );
+        super::side_call::log_prompt_cache_usage("title_refresh", client.api_backend(), &response);
         let title = session_summary::clean_title_text(&response.assistant_text());
         if title.is_empty() {
             tracing::debug!("title refresh: model returned empty title");
