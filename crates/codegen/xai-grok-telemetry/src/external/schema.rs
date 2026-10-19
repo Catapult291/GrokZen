@@ -673,6 +673,9 @@ pub fn map_turn_completed(ev: &events::TurnCompleted) -> Option<ExternalRecord> 
             ExternalKey::CancellationCategory,
             ev.cancellation_category.as_deref(),
         )
+        // Token-weighted cache closed loop (G4): turn-summed prompt / cached-read for hit-rate regression.
+        .attr_opt(ExternalKey::InputTokens, ev.prompt_tokens)
+        .attr_opt(ExternalKey::CacheReadTokens, ev.cached_prompt_tokens)
         .metric(MetricIncrement::TurnCount {
             outcome,
             model: ev.model_id.clone(),

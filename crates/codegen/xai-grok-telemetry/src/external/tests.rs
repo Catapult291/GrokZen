@@ -707,6 +707,8 @@ fn one_failed_turn_increments_error_count_exactly_once() {
             error_detail: None,
             context_tokens: None,
             turn_tokens: None,
+            prompt_tokens: None,
+            cached_prompt_tokens: None,
         },
     );
     // Both api_error events are exported as log records
@@ -754,6 +756,8 @@ fn turn_error_increments_error_count() {
             error_detail: None,
             context_tokens: None,
             turn_tokens: None,
+            prompt_tokens: None,
+            cached_prompt_tokens: None,
         },
     );
     let mut names = exported_metric_names(&stream);
@@ -779,6 +783,8 @@ fn turn_completed_carries_event_session_id_without_ctx() {
             error_detail: None,
             context_tokens: None,
             turn_tokens: None,
+            prompt_tokens: None,
+            cached_prompt_tokens: None,
         },
     );
     let events = exported_events(&stream);
@@ -792,6 +798,37 @@ fn turn_completed_carries_event_session_id_without_ctx() {
         attr(event, "cancellation_category").as_deref(),
         Some("task_aborted")
     );
+}
+
+#[test]
+fn turn_completed_exports_turn_summed_prompt_and_cache_read_tokens() {
+    // G4 cache closed loop: token-weighted hit rate must be reconstructible from turn_completed alone.
+    let stream = build(gates_off());
+    emit_event_into(
+        &stream,
+        &events::TurnCompleted {
+            outcome: events::Outcome::Completed,
+            duration_ms: 1200,
+            tool_call_count: 4,
+            model_id: "grok-4".into(),
+            session_id: Some("sess-cold".into()),
+            cancellation_category: None,
+            error_category: None,
+            error_code: None,
+            error_detail: None,
+            context_tokens: None,
+            turn_tokens: None,
+            prompt_tokens: Some(141_663),
+            cached_prompt_tokens: Some(0),
+        },
+    );
+    let events = exported_events(&stream);
+    let event = events
+        .iter()
+        .find(|(name, _)| name == "grok_code.turn_completed")
+        .expect("turn_completed exported");
+    assert_eq!(attr(event, "input_tokens").as_deref(), Some("141663"));
+    assert_eq!(attr(event, "cache_read_tokens").as_deref(), Some("0"));
 }
 
 #[test]
