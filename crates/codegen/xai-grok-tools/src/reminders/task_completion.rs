@@ -274,9 +274,7 @@ pub fn format_monitor_events(
     > = Vec::with_capacity(events.len());
     for event in events {
         match collapsed.last() {
-            Some(prev)
-                if prev.task_id == event.task_id && prev.event_text == event.event_text =>
-            {
+            Some(prev) if prev.task_id == event.task_id && prev.event_text == event.event_text => {
                 continue;
             }
             _ => collapsed.push(event.clone()),
@@ -296,10 +294,7 @@ pub fn format_monitor_events(
                 );
             Some(format!(
                 "<monitor-event task_id=\"{}\">\n[{}] {}\n</monitor-event>\n\n{}",
-                event.task_id,
-                label,
-                inner,
-                MONITOR_WAKE_REPLY_GUIDANCE,
+                event.task_id, label, inner, MONITOR_WAKE_REPLY_GUIDANCE,
             ))
         }
         _ => {
@@ -307,7 +302,10 @@ pub fn format_monitor_events(
                 crate::implementations::grok_build::monitor::types::MonitorEventNotification;
             let mut groups: Vec<(&str, Vec<&Event>)> = Vec::new();
             for event in &collapsed {
-                match groups.iter_mut().find(|(id, _)| *id == event.task_id.as_str()) {
+                match groups
+                    .iter_mut()
+                    .find(|(id, _)| *id == event.task_id.as_str())
+                {
                     Some((_, group)) => group.push(event),
                     None => groups.push((&event.task_id, vec![event])),
                 }
@@ -2779,7 +2777,9 @@ mod tests {
         )
         .expect("single event formats");
         assert!(
-            single.starts_with("<monitor-event task_id=\"task-0\">\n[alpha] line 0\n</monitor-event>\n\n"),
+            single.starts_with(
+                "<monitor-event task_id=\"task-0\">\n[alpha] line 0\n</monitor-event>\n\n"
+            ),
             "single event must use the lean monitor-event form: {single}"
         );
         assert!(

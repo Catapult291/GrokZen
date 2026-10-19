@@ -1909,8 +1909,7 @@ async fn g6_compaction_memory_lands_in_tail_after_stable_prefix() {
         "{MEMORY_CONTEXT_OPEN_TAG}\n## Relevant Memory from Past Sessions\n\n\
          remember the prior login fix\n{MEMORY_CONTEXT_CLOSE_TAG}"
     );
-    let system_reminder =
-        format!("<system-reminder>\n{memory_block}\n</system-reminder>");
+    let system_reminder = format!("<system-reminder>\n{memory_block}\n</system-reminder>");
 
     let compacted = build_compacted_history(CompactedHistoryInput {
         system_message: ConversationItem::system("You are a helpful assistant."),
@@ -1930,7 +1929,9 @@ async fn g6_compaction_memory_lands_in_tail_after_stable_prefix() {
         "compacted history must open with the original system message"
     );
     assert!(
-        !at(&compacted, 0).text_content().contains(MEMORY_CONTEXT_OPEN_TAG),
+        !at(&compacted, 0)
+            .text_content()
+            .contains(MEMORY_CONTEXT_OPEN_TAG),
         "memory must not be rewritten into the system head at compaction time"
     );
 
