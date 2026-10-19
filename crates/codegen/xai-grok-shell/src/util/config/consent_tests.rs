@@ -39,8 +39,11 @@ account = "other@example.com"
     assert_eq!(reparsed, consent);
 }
 
+/// GROK_HOME is process-global: use the crate-wide default `#[serial]` lock, not a custom
+/// label — `serial(GROK_HOME)` would exclude only same-labelled peers and let every other
+/// `EnvGuard` holder flip the env mid-test (this test then reads an empty config).
 #[tokio::test]
-#[serial_test::serial(GROK_HOME)]
+#[serial_test::serial]
 async fn set_consent_answer_is_monotonic_per_account() {
     let home = tempfile::tempdir().expect("home");
     let _guard = xai_grok_test_support::env::EnvGuard::set("GROK_HOME", home.path());

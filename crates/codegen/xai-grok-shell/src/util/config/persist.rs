@@ -122,9 +122,12 @@ pub(crate) async fn lock_config_writes() -> std::io::Result<ConfigWriteGuard> {
     .map_err(|e| std::io::Error::other(format!("config lock task failed: {e}")))?
 }
 /// Exclusive advisory `flock` on `<grok_home>/.config-init.lock`, retried briefly, serializing
-/// `config.toml` read-modify-writes; only `WouldBlock` retries, and the file is never removed.
+/// `config.toml` read-modify-writes; only contention retries, and the file is never removed.
+/// Windows contention surfaces as `ERROR_LOCK_VIOLATION` (os 33, `Uncategorized`) rather than
+/// `WouldBlock`, so both spellings of "held elsewhere" go back into the poll.
 pub fn acquire_init_lock(grok_home: &std::path::Path) -> std::io::Result<std::fs::File> {
     use fs2::FileExt;
+    let contended = fs2::lock_contended_error().raw_os_error();
     let _ = std::fs::create_dir_all(grok_home);
     let lock_path = grok_home.join(".config-init.lock");
     let file = std::fs::OpenOptions::new()
@@ -135,7 +138,10 @@ pub fn acquire_init_lock(grok_home: &std::path::Path) -> std::io::Result<std::fs
     for _ in 0..50 {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.raw_os_error() == contended =>
+            {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             Err(e) => return Err(e),

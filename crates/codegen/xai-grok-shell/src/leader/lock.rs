@@ -197,6 +197,8 @@ impl LeaderLock {
     pub fn write_pid(&mut self) -> io::Result<()> {
         if let Some(file) = &mut self.lock_file {
             file.set_len(0)?;
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(0))?;
             write!(file, "{}", std::process::id())?;
             file.sync_all()?;
         }
@@ -204,7 +206,18 @@ impl LeaderLock {
     }
 
     /// Read PID from lock file (for diagnostics).
+    /// Reads through the held handle when this process owns the lock: on Windows the
+    /// byte-range lock blocks reads from any other handle (os 33), while the locked
+    /// handle itself reads fine. Falls back to a path read when not holding the lock.
     pub fn read_pid(&self) -> Option<u32> {
+        if let Some(file) = &self.lock_file {
+            let mut content = String::new();
+            let mut handle: &File = file;
+            use std::io::{Seek, SeekFrom};
+            handle.seek(SeekFrom::Start(0)).ok()?;
+            handle.read_to_string(&mut content).ok()?;
+            return content.trim().parse().ok();
+        }
         Self::read_pid_from_path(&self.lock_path)
     }
 
@@ -357,6 +370,10 @@ mod tests {
 
         let pid = lock.read_pid().unwrap();
         assert_eq!(pid, std::process::id());
+        // Windows byte-range locks block reads from any other handle (os 33), so the
+        // path-based read is only meaningful once this holder releases; release() keeps
+        // the files (Drop would delete them as leader cleanup).
+        lock.release().unwrap();
         assert_eq!(
             LeaderLock::read_pid_from_path(lock.lock_path()),
             Some(std::process::id())
