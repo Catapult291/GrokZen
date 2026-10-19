@@ -309,6 +309,7 @@ pub(crate) fn test_app() -> AppView {
         startup_warnings: Vec::new(),
         is_api_key_auth: false,
         pending_update_version: None,
+        update_notice_shown_for: None,
         foreign_resume_launch_generation: 0,
         foreign_resume_launch: None,
         quit_for_update: false,

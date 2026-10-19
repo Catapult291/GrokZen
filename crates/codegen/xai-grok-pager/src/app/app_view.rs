@@ -1046,8 +1046,11 @@ pub struct AppView {
     /// Whether the user authenticated with an API key (shown in the version badge).
     pub is_api_key_auth: bool,
     /// Latest version string from a background update check.
-    /// Set when a newer version is detected; rendered as a notification on the welcome screen.
+    /// Set when a newer version is detected; rendered as a notification on the welcome screen and (G7) as a cold-cache notice inside open sessions.
     pub pending_update_version: Option<String>,
+    /// Version whose update notice was already committed into a session scrollback (G7).
+    /// Deduplicates the in-session notice across agent switches while the same update stays pending.
+    pub update_notice_shown_for: Option<String>,
     /// When true, the event loop should exit so the user can relaunch to pick up the downloaded update.
     pub quit_for_update: bool,
     /// Printed to stderr after terminal restore when Welcome yes could not save trust.
@@ -1622,6 +1625,7 @@ impl AppView {
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
             pending_update_version: None,
+            update_notice_shown_for: None,
             foreign_resume_launch_generation: 0,
             foreign_resume_launch: None,
             quit_for_update: false,
@@ -6222,6 +6226,7 @@ pub(crate) mod legacy_tests {
             startup_warnings: Vec::new(),
             is_api_key_auth: false,
             pending_update_version: None,
+            update_notice_shown_for: None,
             foreign_resume_launch_generation: 0,
             foreign_resume_launch: None,
             quit_for_update: false,

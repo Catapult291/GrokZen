@@ -2537,12 +2537,8 @@ pub(crate) async fn run(
                     );
                     let latest = update.latest_version;
                     app.pending_update_version = Some(latest.clone());
-                    // The full TUI shows this on the welcome screen, which minimal has none of Commit a one-line update notice into native scrollback instead `app`, not `term_state`: the mode can switch at runtime
-                    // Commit a one-line update notice into native scrollback instead
-                    // `app`, not `term_state`: the mode can switch at runtime
-                    if app.screen_mode.is_minimal() {
-                        dispatch::commit_minimal_update_notice(&mut app, &latest);
-                    }
+                    // Commit a one-line update notice into the session scrollback whenever a session is open (G7): minimal has no welcome screen, and a full-TUI session open when the check lands would otherwise never see the update. No-op on the welcome screen, where the tip renders instead.
+                    dispatch::commit_update_notice(&mut app, &latest);
                     presenter.request(false);
                 }
             }

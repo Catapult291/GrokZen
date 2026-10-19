@@ -500,20 +500,25 @@ pub(super) fn dispatch_manage_billing(app: &mut AppView) -> Vec<Effect> {
 }
 
 /// Commit a one-line "update available" notice into the active agent's scrollback.
-/// Minimal mode has no welcome screen (where the full TUI shows updates), so the background update check's result is shown here instead.
-/// No-op when there is no active agent.
-pub(crate) fn commit_minimal_update_notice(app: &mut AppView, latest_version: &str) {
+/// Called when the background update check lands on an open session, and when a session opens while an update is still pending — minimal mode has no welcome screen, and a full-TUI session open (or entered later) would otherwise never see the update.
+/// The cold-cache sentence (G7) tells a long conversation what a hot upgrade does to it: the first turn after restart re-reads the whole prompt.
+/// No-op when there is no active agent, or when this exact version's notice was already committed (dedup across agent switches).
+pub(crate) fn commit_update_notice(app: &mut AppView, latest_version: &str) {
+    if app.update_notice_shown_for.as_deref() == Some(latest_version) {
+        return;
+    }
     let message = app
         .locale
         .named_text(
             "status.update_available",
-            "Update available: v{version}. Restart to apply.",
+            "Update available: v{version}. Restart to apply. The first turn after the upgrade re-reads this conversation (cold model cache).",
         )
         .replace("{version}", latest_version);
     if let ActiveView::Agent(id) = app.active_view
         && let Some(agent) = app.agents.get_mut(&id)
     {
         agent.scrollback.push_block(RenderBlock::system(message));
+        app.update_notice_shown_for = Some(latest_version.to_string());
     }
 }
 

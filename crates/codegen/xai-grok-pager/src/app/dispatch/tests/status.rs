@@ -2170,21 +2170,42 @@ fn show_usage_with_redirect_url_fetches_session_only() {
 }
 
 #[test]
-fn minimal_update_notice_commits_a_system_block() {
+fn update_notice_commits_a_system_block() {
     let mut app = test_app_with_agent();
     let before = agent_scrollback_len(&app);
-    commit_minimal_update_notice(&mut app, "9.9.9");
+    commit_update_notice(&mut app, "9.9.9");
     assert_eq!(agent_scrollback_len(&app), before + 1);
     let text = last_system_text(&app, AgentId(0));
     assert!(text.contains("Update available: v9.9.9"), "got: {text:?}");
     assert!(text.contains("Restart to apply."), "got: {text:?}");
+    // G7: the in-session notice must spell out the cold-cache consequence for a long conversation.
+    assert!(text.contains("re-reads this conversation"), "got: {text:?}");
 }
 
 #[test]
-fn minimal_update_notice_no_active_agent_is_noop() {
+fn update_notice_no_active_agent_is_noop() {
     let mut app = test_app();
     // Must not panic and must not require an agent.
-    commit_minimal_update_notice(&mut app, "9.9.9");
+    commit_update_notice(&mut app, "9.9.9");
+}
+
+#[test]
+fn update_notice_dedups_the_same_version_across_calls() {
+    let mut app = test_app_with_agent();
+    commit_update_notice(&mut app, "9.9.9");
+    let after_first = agent_scrollback_len(&app);
+    commit_update_notice(&mut app, "9.9.9");
+    assert_eq!(
+        agent_scrollback_len(&app),
+        after_first,
+        "the same pending version must not repeat across agent switches"
+    );
+    commit_update_notice(&mut app, "9.9.10");
+    assert_eq!(
+        agent_scrollback_len(&app),
+        after_first + 1,
+        "a newer version must show again"
+    );
 }
 
 /// `/tutorial` (and the palette entry) open the overlay; dispatching again while open toggles it closed.

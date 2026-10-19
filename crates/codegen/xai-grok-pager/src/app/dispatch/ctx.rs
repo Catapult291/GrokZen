@@ -295,6 +295,10 @@ pub(crate) fn switch_to_agent(app: &mut AppView, target: AgentId, cause: SwitchC
     // Seed the auto feature gate on the (possibly new) active agent's slash registry
     app.sync_permission_mode_slash_gate();
     surface_yolo_launch_block_notice(app, target);
+    // A session opening while an update is pending gets the same notice (G7): warns that the first turn after a hot upgrade re-reads this conversation (cold model cache). Deduped inside for the pending version, so agent bouncing does not repeat it.
+    if let Some(version) = app.pending_update_version.clone() {
+        super::commit_update_notice(app, &version);
+    }
 
     if matches!(cause, SwitchCause::New | SwitchCause::Fork)
         && let Some(previous) = previous_top_level

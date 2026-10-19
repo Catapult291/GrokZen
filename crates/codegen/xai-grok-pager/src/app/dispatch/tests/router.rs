@@ -2281,6 +2281,41 @@ fn switch_to_agent_surfaces_launch_block_notice_once() {
     assert!(agent_ref(&app, id2).toast.is_none());
     assert_eq!(agent_ref(&app, id2).scrollback.iter_entries().count(), 0);
 }
+/// G7: a session opening while an update is pending gets the in-session update notice once —
+/// with the cold-cache sentence — and the same pending version never repeats across switches.
+#[test]
+fn switch_to_agent_surfaces_pending_update_cold_cache_notice_once() {
+    use crate::app::app_view::ActiveView;
+    let mut app = test_app();
+    app.pending_update_version = Some("9.9.9".into());
+    let id = AgentId(0);
+    let session = make_test_agent_session(&app, id, "test-session");
+    app.agents
+        .insert(id, AgentView::new(session, ScrollbackState::new()));
+    switch_to_agent(&mut app, id, SwitchCause::New);
+    let texts = system_texts(&app, id);
+    assert_eq!(
+        texts.len(),
+        1,
+        "session entry with a pending update must commit the notice: {texts:?}"
+    );
+    assert!(
+        texts[0].contains("Update available: v9.9.9"),
+        "got: {texts:?}"
+    );
+    assert!(
+        texts[0].contains("re-reads this conversation"),
+        "got: {texts:?}"
+    );
+    // Leave the session and re-enter: the same pending version must not commit again.
+    app.active_view = ActiveView::Welcome;
+    switch_to_agent(&mut app, id, SwitchCause::Load);
+    assert_eq!(
+        system_texts(&app, id).len(),
+        1,
+        "the same pending version must not repeat across switches"
+    );
+}
 /// Switching to a non-auto/non-yolo agent re-anchors a stale global `"auto"` mirror (left by a different agent) to `"ask"`.
 /// The cycle's `sync_active_auto_flag` derive then can't copy that Auto onto the now-active agent.
 #[test]
