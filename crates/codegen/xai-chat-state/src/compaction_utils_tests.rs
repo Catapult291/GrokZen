@@ -1886,6 +1886,77 @@ async fn build_compacted_history_full_scenario() {
         );
     }
 }
+
+/// G6: post-compaction memory recovery must land in the tail system-reminder,
+/// strictly after the compacted stable prefix (system + user prefix + summary).
+/// Mid-history placement would rewrite the new prefix for every subsequent turn.
+#[tokio::test]
+async fn g6_compaction_memory_lands_in_tail_after_stable_prefix() {
+    use crate::types::{MEMORY_CONTEXT_CLOSE_TAG, MEMORY_CONTEXT_OPEN_TAG};
+
+    let conversation = vec![
+        ConversationItem::system("You are a helpful assistant."),
+        ConversationItem::user(
+            "<user_info>OS: macos</user_info>\n\n<user_query>\nfix the login bug\n</user_query>",
+        ),
+        ConversationItem::assistant("Let me look."),
+        ConversationItem::tool_result("tc1", "file contents here"),
+        ConversationItem::assistant("Found the bug, fixing."),
+    ];
+    let state_context =
+        CompactionStateContext::build(&conversation, CompactionInputs::default()).await;
+    let memory_block = format!(
+        "{MEMORY_CONTEXT_OPEN_TAG}\n## Relevant Memory from Past Sessions\n\n\
+         remember the prior login fix\n{MEMORY_CONTEXT_CLOSE_TAG}"
+    );
+    let system_reminder =
+        format!("<system-reminder>\n{memory_block}\n</system-reminder>");
+
+    let compacted = build_compacted_history(CompactedHistoryInput {
+        system_message: ConversationItem::system("You are a helpful assistant."),
+        user_message_prefix: "<user_info>OS: macos</user_info>".to_string(),
+        agents_md_reminder: None,
+        state_context: &state_context,
+        compaction_summary: "Summary: fixed login bug.".to_string(),
+        system_reminder: Some(system_reminder),
+        summary_before_recent: false,
+        transcript_hint: None,
+        summary_count: 1,
+    });
+
+    // Stable prefix head: original system message stays at index 0.
+    assert!(
+        matches!(at(&compacted, 0), ConversationItem::System(_)),
+        "compacted history must open with the original system message"
+    );
+    assert!(
+        !at(&compacted, 0).text_content().contains(MEMORY_CONTEXT_OPEN_TAG),
+        "memory must not be rewritten into the system head at compaction time"
+    );
+
+    // Memory lives only in the tail system-reminder.
+    let tag_indices: Vec<usize> = compacted
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.text_content().contains(MEMORY_CONTEXT_OPEN_TAG))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        tag_indices,
+        vec![compacted.len() - 1],
+        "post-compaction memory must be the single tail item, got indices {tag_indices:?}"
+    );
+    let tail = at(&compacted, compacted.len() - 1);
+    assert!(
+        matches!(tail, ConversationItem::User(u) if u.synthetic_reason == SyntheticReason::SystemReminder),
+        "tail memory carrier must be a SystemReminder user item"
+    );
+    assert!(
+        tail.text_content().contains(MEMORY_CONTEXT_OPEN_TAG)
+            && tail.text_content().contains("prior login fix"),
+        "tail must carry the memory block"
+    );
+}
 #[tokio::test]
 async fn build_compacted_history_minimal_no_reminder() {
     let conversation = vec![
