@@ -33,6 +33,12 @@ pub struct TurnCompleted {
     pub context_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_tokens: Option<u64>,
+    /// Token-weighted cache closed loop: turn-summed prompt tokens across main-loop model calls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    /// Token-weighted cache closed loop: turn-summed cached-read prompt tokens (for hit-rate regression).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_prompt_tokens: Option<u64>,
 }
 
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]

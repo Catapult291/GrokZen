@@ -603,6 +603,8 @@ mod tests {
                 error_detail: None,
                 context_tokens: None,
                 turn_tokens: None,
+                prompt_tokens: None,
+                cached_prompt_tokens: None,
             }
         }
         fn session_id(stream: &TestStream) -> Option<String> {

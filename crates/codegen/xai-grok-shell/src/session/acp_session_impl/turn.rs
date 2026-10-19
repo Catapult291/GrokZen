@@ -114,6 +114,8 @@ struct TurnCompletionEmitter {
     emitted: bool,
     context_tokens: Option<u64>,
     turn_tokens: Option<u64>,
+    prompt_tokens: Option<u64>,
+    cached_prompt_tokens: Option<u64>,
 }
 impl TurnCompletionEmitter {
     fn new(session: Arc<SessionActor>, model_id: String, started: std::time::Instant) -> Self {
@@ -124,11 +126,21 @@ impl TurnCompletionEmitter {
             emitted: false,
             context_tokens: None,
             turn_tokens: None,
+            prompt_tokens: None,
+            cached_prompt_tokens: None,
         }
     }
-    fn record_turn_usage(&mut self, turn_tokens: u64, context_tokens: Option<u64>) {
+    fn record_turn_usage(
+        &mut self,
+        turn_tokens: u64,
+        context_tokens: Option<u64>,
+        prompt_tokens: u64,
+        cached_prompt_tokens: u64,
+    ) {
         self.turn_tokens = Some(turn_tokens);
         self.context_tokens = context_tokens;
+        self.prompt_tokens = Some(prompt_tokens);
+        self.cached_prompt_tokens = Some(cached_prompt_tokens);
     }
     /// Re-anchor the model and duration clock when the turn's work starts (post-setup), so an abort
     /// during the turn measures like a completed turn instead of counting setup time.
@@ -161,6 +173,8 @@ impl TurnCompletionEmitter {
             error_detail: outcome.error_detail,
             context_tokens: self.context_tokens,
             turn_tokens: self.turn_tokens,
+            prompt_tokens: self.prompt_tokens,
+            cached_prompt_tokens: self.cached_prompt_tokens,
         });
     }
 }
@@ -324,6 +338,18 @@ pub(super) fn record_failed_sample_on_turn_span(
     };
     record_last_sample(span, stop_reason, false, 0);
 }
+
+/// Cold-cache threshold for `shell.cache.cold` (G4 / H3): a large prompt that re-read almost nothing.
+const COLD_CACHE_MIN_PROMPT_TOKENS: u32 = 50_000;
+/// Hit rate below which a ≥50k-token prompt counts as cold (5%).
+const COLD_CACHE_MAX_HIT_RATE: f64 = 0.05;
+
+/// Whether this model call looks like a cold cache pool: prompt ≥50k tokens and cached-read <5% of it.
+fn is_cold_cache(prompt_tokens: u32, cached_prompt_tokens: u32) -> bool {
+    prompt_tokens >= COLD_CACHE_MIN_PROMPT_TOKENS
+        && f64::from(cached_prompt_tokens) < COLD_CACHE_MAX_HIT_RATE * f64::from(prompt_tokens)
+}
+
 /// How the turn's per-block user-message echo is published to clients / `updates.jsonl`.
 /// Turns whose content must not render as a user prompt (notification drain) are hidden by the *pager* via the `hideFromScrollback` chunk meta.
 /// The persisted line is never omitted.
@@ -1449,11 +1475,15 @@ impl SessionActor {
         if !prompt_was_blocked
             && let Ok(Some(bill)) = self.chat_state_handle.try_get_prompt_usage().await
         {
+            let estimated_context_tokens = self
+                .chat_state_handle
+                .try_get_estimated_total_tokens()
+                .await;
             turn_completion_emitter.record_turn_usage(
                 bill.totals.total_tokens(),
-                self.chat_state_handle
-                    .try_get_estimated_total_tokens()
-                    .await,
+                estimated_context_tokens,
+                bill.totals.input_tokens,
+                bill.totals.cached_read_tokens,
             );
         }
         turn_completion_emitter.emit(
@@ -2709,6 +2739,8 @@ impl SessionActor {
         let mut turn_tools_called: Vec<String> = Vec::new();
         let mut tool_turn_count: usize = 1;
         let mut loop_index: u32 = 0;
+        // Completion time of the previous successful model call in this turn; feeds `shell.cache.cold`'s `gap_ms_from_prev`.
+        let mut last_inference_done_at: Option<std::time::Instant> = None;
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut cross_turn_loop = CrossTurnLoopGuard::default();
         let mut todo_gate_fires: u32 = 0;
@@ -3388,6 +3420,24 @@ impl SessionActor {
                     "tokens_per_sec": tokens_per_sec,
                 })),
             );
+            // Cache-miss observability (G4 / H3): a large prompt that re-read almost nothing
+            // marks a cold pool; time+prompt_tokens align with AxonHub req / 3055 cold-cache-retry.
+            if let (Some(prompt), Some(cached)) = (prompt_tokens, cached_prompt_tokens)
+                && is_cold_cache(prompt, cached)
+            {
+                xai_grok_telemetry::unified_log::info(
+                    "shell.cache.cold",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "loop_index": loop_index,
+                        "prompt": prompt,
+                        "cached": cached,
+                        "gap_ms_from_prev": last_inference_done_at
+                            .map(|t| t.elapsed().as_millis() as u64),
+                    })),
+                );
+            }
+            last_inference_done_at = Some(std::time::Instant::now());
             if let Some(usage) = response.usage.as_ref() {
                 self.chat_state_handle
                     .record_token_usage(u64::from(usage.total_tokens));
@@ -4386,6 +4436,32 @@ mod structured_output_validation_tests {
         assert_eq!(err, "invalid output schema: boom");
     }
 }
+#[cfg(test)]
+mod cold_cache_tests {
+    use super::is_cold_cache;
+
+    #[test]
+    fn small_prompts_are_never_cold_regardless_of_hit_rate() {
+        assert!(!is_cold_cache(49_999, 0), "just under the 50k floor");
+        assert!(!is_cold_cache(0, 0));
+    }
+
+    #[test]
+    fn large_prompt_with_zero_cache_is_cold() {
+        assert!(is_cold_cache(50_000, 0));
+        assert!(is_cold_cache(200_000, 0));
+    }
+
+    #[test]
+    fn hit_rate_boundary_is_strictly_below_five_percent() {
+        // 5% of 100k = 5k; cached == threshold is NOT cold.
+        assert!(!is_cold_cache(100_000, 5_000));
+        assert!(is_cold_cache(100_000, 4_999));
+        // Full hit on a huge prompt is warm.
+        assert!(!is_cold_cache(500_000, 500_000));
+    }
+}
+
 #[cfg(test)]
 mod last_sample_span_tests {
     use super::{TurnSpanTotals, record_failed_sample_on_turn_span};

@@ -2126,6 +2126,8 @@ mod tests {
                 error_detail,
                 context_tokens: None,
                 turn_tokens: None,
+                prompt_tokens: None,
+                cached_prompt_tokens: None,
             }
         }
         let omitted = serde_json::to_value(tc(None, None)).unwrap();
@@ -2165,6 +2167,8 @@ mod tests {
                 error_detail: None,
                 context_tokens,
                 turn_tokens: None,
+                prompt_tokens: None,
+                cached_prompt_tokens: None,
             }
         }
         let included = serde_json::to_value(tc(Some(204_958))).unwrap();
@@ -2182,6 +2186,42 @@ mod tests {
         assert!(
             omitted.get("context_tokens").is_none(),
             "context_tokens must be omitted, not zero, when None: {omitted}"
+        );
+    }
+
+    #[test]
+    fn turn_completed_prompt_and_cached_tokens_omit_when_none_include_when_some() {
+        fn tc(prompt_tokens: Option<u64>, cached_prompt_tokens: Option<u64>) -> TurnCompleted {
+            TurnCompleted {
+                outcome: Outcome::Completed,
+                duration_ms: 900,
+                tool_call_count: 2,
+                model_id: "grok-4.6".into(),
+                session_id: None,
+                cancellation_category: None,
+                error_category: None,
+                error_code: None,
+                error_detail: None,
+                context_tokens: None,
+                turn_tokens: None,
+                prompt_tokens,
+                cached_prompt_tokens,
+            }
+        }
+        let included = serde_json::to_value(tc(Some(141_663), Some(0))).unwrap();
+        assert_eq!(
+            included.get("prompt_tokens").and_then(|v| v.as_u64()),
+            Some(141_663),
+            "zero cached must still serialize when present: {included}"
+        );
+        assert_eq!(
+            included.get("cached_prompt_tokens").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        let omitted = serde_json::to_value(tc(None, None)).unwrap();
+        assert!(
+            omitted.get("prompt_tokens").is_none() && omitted.get("cached_prompt_tokens").is_none(),
+            "prompt/cached tokens must be omitted, not zero, when None: {omitted}"
         );
     }
 
