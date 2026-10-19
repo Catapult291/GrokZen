@@ -1,7 +1,32 @@
 [
   {
+    "category": "features",
+    "description": "**提示前缀缓存守卫** —— compaction 后冻结 system head、40 轮工具循环的 input[:k] LCP 快照、会话内热更附带冷缓存警告，长会话稳定复用暖前缀。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**旁路模型迁移** —— 标题刷新与 flush/dream/suggest/turn-summary 请求迁到 cline-pass/deepseek-v4.1-flash 执行，不再占用主回合。",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**冷缓存可观测** —— turn usage token 加权计入遥测，缓存未命中信号体现在 span 与 product row。",
+    "breaking_change": false
+  },
+  {
     "category": "fixes",
-    "description": "**Esc** 不再取消正在运行的本轮任务，而是提示使用 Ctrl+C。",
+    "description": "**Windows 文件与路径加固** —— 文件锁不再与 os error 33 竞争，Windows 代码路径清除 Unix 路径假设，修复路径分隔符与编码问题。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**测试隔离与隐私构建** —— 本机环境泄露、隐私构建上传门禁、遥测断言与资源采样在 CI 下全部成立，全量测试恢复零失败。",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**监视器与会话行为** —— 相同心跳不再重复唤醒监视器；会话行为、运行时与配置开关回归、单外 compaction 互踩均已修复。",
     "breaking_change": false
   }
 ]
