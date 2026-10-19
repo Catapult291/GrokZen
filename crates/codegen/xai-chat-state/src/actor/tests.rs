@@ -5670,3 +5670,218 @@ async fn restore_snapshot_restores_all_fields() {
     let tokens = h.handle.get_total_tokens().await;
     assert_eq!(tokens, 500);
 }
+
+// ============================================================================
+// G6 — memory injection region stays out of the mid-history stable prefix
+// ============================================================================
+// Design (H1/G6): first-round memory is upserted into the leading System head and
+// frozen; post-compaction recovery re-injects via a tail system-reminder after the
+// compacted history. Any mid-history rewrite of the memory block busts the KV-cache
+// prefix for the entire downstream conversation — P0 defect.
+
+use crate::types::{MEMORY_CONTEXT_CLOSE_TAG, MEMORY_CONTEXT_OPEN_TAG};
+
+/// Count items whose text contains the memory-context open tag.
+fn memory_tag_item_indices(items: &[ConversationItem]) -> Vec<usize> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| item.text_content().contains(MEMORY_CONTEXT_OPEN_TAG))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// G6: first-round persist injects memory into the system head only.
+/// After more turns, a non-persist re-inject of the same reminder must not
+/// introduce a second block or place one mid-history.
+#[tokio::test]
+async fn g6_memory_lands_only_in_system_head_never_mid_history() {
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::system("You are helpful."),
+        ConversationItem::user("hello"),
+    ]);
+    let reminder = format!(
+        "{MEMORY_CONTEXT_OPEN_TAG}\nRemember: user likes Rust\n{MEMORY_CONTEXT_CLOSE_TAG}"
+    );
+
+    let req1 = h
+        .handle
+        .build_request(
+            vec![],
+            Some(reminder.clone()),
+            true,
+            None,
+            "c".into(),
+            "r1".into(),
+        )
+        .await
+        .unwrap();
+
+    // Exactly one memory block, and it is the leading System item.
+    assert_eq!(
+        memory_tag_item_indices(&req1.items),
+        vec![0],
+        "first-round memory must live only in the system head"
+    );
+    assert!(matches!(
+        req1.items.first(),
+        Some(ConversationItem::System(_))
+    ));
+
+    // Grow history, then re-inject on a clone (persist=false).
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("Hi there!"));
+    h.handle.push_user_message(ConversationItem::user("Tell me more"));
+
+    let req2 = h
+        .handle
+        .build_request(
+            vec![],
+            Some(reminder.clone()),
+            false,
+            None,
+            "c".into(),
+            "r2".into(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        memory_tag_item_indices(&req2.items),
+        vec![0],
+        "memory must never be rewritten mid-history after the first inject"
+    );
+    // The live conversation still only has the original two items (persist already
+    // wrote the head; non-persist must not append a second block).
+    assert_eq!(
+        memory_tag_item_indices(&h.handle.get_conversation().await),
+        vec![0],
+        "live conversation must hold a single frozen head block"
+    );
+}
+
+/// G6: once a memory block is persisted, subsequent builds without a new reminder
+/// keep the system head byte-identical and the prior request as an append-only prefix.
+/// This is the freeze invariant that protects the stable prefix.
+#[tokio::test]
+async fn g6_persisted_memory_freezes_system_head_across_turns() {
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::system("You are a helpful coding agent."),
+        ConversationItem::user("start the task"),
+    ]);
+    let reminder = format!(
+        "{MEMORY_CONTEXT_OPEN_TAG}\nRemember: user prefers bash\n{MEMORY_CONTEXT_CLOSE_TAG}"
+    );
+
+    let req1 = h
+        .handle
+        .build_request(
+            vec![],
+            Some(reminder),
+            true,
+            None,
+            "c".into(),
+            "r1".into(),
+        )
+        .await
+        .unwrap();
+    let head1 = req1.items.first().map(|i| i.text_content());
+
+    // Shell freezes via `context_injected`: later turns pass no new reminder.
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("Working on it"));
+    h.handle
+        .push_tool_result(ConversationItem::tool_result("call_1", "file bytes"));
+    h.handle.push_user_message(ConversationItem::user("continue"));
+
+    let req2 = h
+        .handle
+        .build_request(vec![], None, false, None, "c".into(), "r2".into())
+        .await
+        .unwrap();
+
+    let head2 = req2.items.first().map(|i| i.text_content());
+    assert_eq!(
+        head1.as_deref(),
+        head2.as_deref(),
+        "persisted memory must freeze the system head across turns"
+    );
+    assert!(
+        head2
+            .as_deref()
+            .is_some_and(|h| h.contains(MEMORY_CONTEXT_OPEN_TAG)),
+        "frozen head must still carry the memory block"
+    );
+    assert_prefix_stable_pair(
+        &req1,
+        &req2,
+        "G6: memory-frozen turn 1 -> turn 2 must stay append-only",
+    );
+}
+
+/// G6: a second persist with different reminder content upserts inside the
+/// existing head section. There must still be exactly one memory block at index 0 —
+/// never a second copy mid-history.
+#[tokio::test]
+async fn g6_memory_upsert_stays_inside_system_head() {
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::system("You are helpful."),
+        ConversationItem::user("hello"),
+    ]);
+    let reminder_a = format!(
+        "{MEMORY_CONTEXT_OPEN_TAG}\nRemember: user likes Rust\n{MEMORY_CONTEXT_CLOSE_TAG}"
+    );
+    let reminder_b = format!(
+        "{MEMORY_CONTEXT_OPEN_TAG}\nRemember: user likes Rust and Python\n{MEMORY_CONTEXT_CLOSE_TAG}"
+    );
+
+    let _ = h
+        .handle
+        .build_request(
+            vec![],
+            Some(reminder_a),
+            true,
+            None,
+            "c".into(),
+            "r1".into(),
+        )
+        .await
+        .unwrap();
+
+    h.handle
+        .push_assistant_response(ConversationItem::assistant("ok"));
+    h.handle.push_user_message(ConversationItem::user("more"));
+
+    let req2 = h
+        .handle
+        .build_request(
+            vec![],
+            Some(reminder_b.clone()),
+            true,
+            None,
+            "c".into(),
+            "r2".into(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        memory_tag_item_indices(&req2.items),
+        vec![0],
+        "upsert must rewrite only the system-head section, not inject mid-history"
+    );
+    let head = req2.items.first().unwrap().text_content();
+    assert!(
+        head.contains(MEMORY_CONTEXT_OPEN_TAG),
+        "head must still open a memory block"
+    );
+    assert!(
+        head.contains("Rust and Python"),
+        "upserted reminder text must replace the prior section in place"
+    );
+    assert_eq!(
+        head.matches(MEMORY_CONTEXT_OPEN_TAG).count(),
+        1,
+        "upsert must not accumulate duplicate memory blocks in the head"
+    );
+}
