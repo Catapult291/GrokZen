@@ -316,7 +316,10 @@ mod tests {
         assert_eq!(deserialized.session_kind.as_deref(), Some("fork"));
     }
 
+    // `#[serial]` because this test sets the process-global GROK_HOME via EnvGuard; running
+    // it alongside any other env mutator lets live config resolves split across two homes.
     #[tokio::test]
+    #[serial_test::serial]
     async fn fork_request_rejects_out_of_range_target_before_copying() {
         use crate::session::storage::StorageAdapter;
         use tempfile::TempDir;

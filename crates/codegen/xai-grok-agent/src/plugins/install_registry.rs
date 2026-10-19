@@ -322,12 +322,15 @@ const LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 
 /// Exclusive advisory flock on `lock_path`, polled until `timeout`; per open file description,
 /// so it conflicts in-process too. The ONE flock helper for every plugin lock site.
+/// Windows contention surfaces as `ERROR_LOCK_VIOLATION` (os 33, `Uncategorized`) rather than
+/// `WouldBlock`, so both spellings of "held elsewhere" stay on the poll path until the timeout.
 pub fn acquire_file_lock(
     label: &str,
     lock_path: &Path,
     timeout: std::time::Duration,
 ) -> Result<std::fs::File, String> {
     use fs2::FileExt;
+    let contended = fs2::lock_contended_error().raw_os_error();
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -339,7 +342,10 @@ pub fn acquire_file_lock(
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.raw_os_error() == contended =>
+            {
                 if std::time::Instant::now() >= deadline {
                     return Err(format!(
                         "{label} lock timeout after {}s for {}",
