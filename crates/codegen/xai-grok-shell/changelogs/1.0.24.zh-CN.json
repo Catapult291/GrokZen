@@ -1,12 +1,12 @@
 [
   {
     "category": "features",
-    "description": "**提示前缀缓存守卫** —— compaction 后冻结 system head、40 轮工具循环的 input[:k] LCP 快照、会话内热更附带冷缓存警告，长会话稳定复用暖前缀。",
+    "description": "**长会话缓存守卫** —— compaction 与长工具循环后仍能稳定复用提示词前缀缓存；会话内热更时会提示冷缓存风险。",
     "breaking_change": false
   },
   {
     "category": "features",
-    "description": "**旁路模型迁移** —— 标题刷新与 flush/dream/suggest/turn-summary 请求迁到 cline-pass/deepseek-v4.1-flash 执行，不再占用主回合。",
+    "description": "**旁路请求走轻量模型** —— 标题刷新与记忆整理、回合摘要等后台请求改由轻量旁路模型处理，主对话回合不再被占用。",
     "breaking_change": false
   },
   {
