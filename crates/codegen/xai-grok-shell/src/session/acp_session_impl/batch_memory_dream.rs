@@ -35,32 +35,55 @@ impl SessionActor {
         let started_at = Instant::now();
         self.send_xai_notification(SessionUpdate::MemoryDreamQueued)
             .await;
-        let sampling_client = match self.prepare_chat_completion(false).await {
-            Ok(client) => client,
-            Err(error) => {
-                tracing::warn!(target: xai_grok_telemetry::memory_log::TARGET, error = %error, "batch Dream authentication failed");
-                xai_grok_telemetry::session_ctx::log_event(MemoryV2DreamLifecycle {
-                    disposition: MemoryV2DreamDisposition::Failed,
-                    failure_class: Some(MemoryV2FailureClass::Model),
-                    ..MemoryV2DreamLifecycle::default()
-                });
-                return MemoryDreamResponse::new(MemoryDreamDisposition::Failed);
+        // Prefer the cache-miss side model (G2) so dream does not compete with the main conversation's KV pool.
+        let session_config = self.reconstruct_full_config().await;
+        let side_cfg = self.resolve_cache_miss_side_sampler(&session_config).await;
+        let (sampling_client, model) = if let Some(cfg) = side_cfg {
+            let model = cfg.model.clone();
+            match xai_grok_sampler::SamplingClient::new(cfg) {
+                Ok(client) => (client, model),
+                Err(error) => {
+                    tracing::warn!(target: xai_grok_telemetry::memory_log::TARGET, error = %error, "batch Dream side sampler build failed; using session model");
+                    let client = match self.prepare_chat_completion(false).await {
+                        Ok(client) => client,
+                        Err(error) => {
+                            tracing::warn!(target: xai_grok_telemetry::memory_log::TARGET, error = %error, "batch Dream authentication failed");
+                            xai_grok_telemetry::session_ctx::log_event(MemoryV2DreamLifecycle {
+                                disposition: MemoryV2DreamDisposition::Failed,
+                                failure_class: Some(MemoryV2FailureClass::Model),
+                                ..MemoryV2DreamLifecycle::default()
+                            });
+                            return MemoryDreamResponse::new(MemoryDreamDisposition::Failed);
+                        }
+                    };
+                    let model = session_config.model.clone();
+                    (client, model)
+                }
             }
+        } else {
+            let client = match self.prepare_chat_completion(false).await {
+                Ok(client) => client,
+                Err(error) => {
+                    tracing::warn!(target: xai_grok_telemetry::memory_log::TARGET, error = %error, "batch Dream authentication failed");
+                    xai_grok_telemetry::session_ctx::log_event(MemoryV2DreamLifecycle {
+                        disposition: MemoryV2DreamDisposition::Failed,
+                        failure_class: Some(MemoryV2FailureClass::Model),
+                        ..MemoryV2DreamLifecycle::default()
+                    });
+                    return MemoryDreamResponse::new(MemoryDreamDisposition::Failed);
+                }
+            };
+            let model = session_config.model.clone();
+            (client, model)
         };
-        let sampling_config = self.chat_state_handle.get_sampling_config().await;
-        let context_window: u64 = sampling_config
-            .as_ref()
-            .map_or(0, |config| config.context_window.get());
-        let model = sampling_config
-            .map(|config| config.model)
-            .unwrap_or_default();
+        let context_window: u64 = session_config.context_window;
         let (model, reasoning_effort) =
             resolve_memory_model_and_effort(&self.models_manager, model);
         // About four bytes per token; keep half the window for reasoning and output.
         let max_request_bytes = usize::try_from(context_window.saturating_mul(2))
             .ok()
-            .filter(|bytes| *bytes > 0)
-            .map_or(MAX_REQUEST_BYTES, |bytes| bytes.min(MAX_REQUEST_BYTES));
+            .filter(|bytes: &usize| *bytes > 0)
+            .map_or(MAX_REQUEST_BYTES, |bytes: usize| bytes.min(MAX_REQUEST_BYTES));
         let controls = self.memory.v2_config;
         let options = BatchDreamOptions {
             global_dir: storage.global_dir().to_path_buf(),

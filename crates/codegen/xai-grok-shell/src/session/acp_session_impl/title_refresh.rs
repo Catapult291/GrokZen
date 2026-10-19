@@ -9,16 +9,11 @@
 use super::*;
 
 use super::side_call::AuxCall;
-use crate::session::helpers::{session_recap, session_summary};
+use crate::session::helpers::{session_recap, session_summary, CACHE_MISS_SIDE_MODEL as TITLE_REFRESH_SIDE_MODEL};
 
 /// Upper bound on the title-refresh model call so a hung backend cannot hold the one-at-a-time refresh slot indefinitely.
 /// Generous relative to slow aux chains (observed mimo TTFT can exceed 80s); a hung backend still cannot hold the slot forever.
 const TITLE_REFRESH_MODEL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-/// Dedicated side model for title refresh so the call does not compete with the main conversation's KV pool.
-/// Catalog-guarded: when missing (or already the session model), the call falls back to the parent-cached path.
-/// Matches the cache-miss G1 target (`cline-pass/deepseek-v4.1-flash`).
-const TITLE_REFRESH_SIDE_MODEL: &str = "cline-pass/deepseek-v4.1-flash";
 
 /// Titles are 5-10 words; a hard output cap keeps a runaway sample short and cheap.
 const TITLE_REFRESH_MAX_OUTPUT_TOKENS: u32 = 256;

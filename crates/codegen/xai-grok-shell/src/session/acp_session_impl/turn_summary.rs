@@ -3,6 +3,7 @@
 //! Pure prompt helpers live in [`crate::session::helpers::turn_summary`].
 
 use super::*;
+use crate::session::helpers::CACHE_MISS_SIDE_MODEL;
 
 impl SessionActor {
     /// Any generation still running is aborted: its result would describe an older turn.
@@ -67,13 +68,14 @@ impl SessionActor {
         self.refresh_token_if_expired().await;
         let session_config = self.reconstruct_full_config().await;
         // Resolve the helper's own endpoint and credentials; the session endpoint may not serve it.
-        let aux_config = if self.models_manager.model_in_catalog(&settings.model) {
-            self.resolve_aux_sampler_config(&settings.model).await
-        } else {
-            None
-        };
-        let mut config = match aux_config {
-            Some(mut cfg) => {
+        // Prefer the cache-miss side model (G2) so this 0%-hit body does not compete with the main KV pool.
+        // Fall back to [turn_summary].model when listed, else the session path.
+        let aux_config = if self.models_manager.model_in_catalog(CACHE_MISS_SIDE_MODEL)
+            && session_config.model != CACHE_MISS_SIDE_MODEL
+        {
+            self.resolve_cache_miss_side_sampler(&session_config).await
+        } else if self.models_manager.model_in_catalog(&settings.model) {
+            self.resolve_aux_sampler_config(&settings.model).await.map(|mut cfg| {
                 crate::agent::config::stamp_session_local_sampler_fields(
                     &mut cfg,
                     &session_config,
@@ -81,7 +83,12 @@ impl SessionActor {
                     session_config.max_retries,
                 );
                 cfg
-            }
+            })
+        } else {
+            None
+        };
+        let mut config = match aux_config {
+            Some(cfg) => cfg,
             None => session_config,
         };
         if self
