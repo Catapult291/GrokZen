@@ -72,6 +72,11 @@ pub(crate) fn effective_suggest_model(
         PromptSuggestModelPin::Unpinned => match client_hint {
             Some(model) => in_catalog(model).then(|| model.to_owned()),
             None if reasoning_is_off => {
+                // G2: prefer the cache-miss side model so suggest does not share the main KV pool.
+                let side = crate::session::helpers::CACHE_MISS_SIDE_MODEL;
+                if in_catalog(side) {
+                    return Some(side.to_owned());
+                }
                 let alias = crate::util::config::NON_REASONING_PROMPT_SUGGEST_MODEL;
                 in_catalog(alias).then(|| alias.to_owned()).or_else(|| {
                     session_model
@@ -79,9 +84,15 @@ pub(crate) fn effective_suggest_model(
                         .map(str::to_owned)
                 })
             }
-            None => session_model
-                .filter(|model| in_catalog(model))
-                .map(str::to_owned),
+            None => {
+                let side = crate::session::helpers::CACHE_MISS_SIDE_MODEL;
+                if in_catalog(side) {
+                    return Some(side.to_owned());
+                }
+                session_model
+                    .filter(|model| in_catalog(model))
+                    .map(str::to_owned)
+            }
         },
     }
 }
@@ -242,6 +253,7 @@ pub(crate) fn sanitize_suggestion(raw: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::config::PromptSuggestModelPin as Pin;
+    use crate::session::helpers::CACHE_MISS_SIDE_MODEL;
 
     // -- effective_suggest_model ---------------------------------------------
 
@@ -267,6 +279,39 @@ mod tests {
             effective_suggest_model(&Pin::Unpinned, None, Some("session"), true, |m| m == alias)
                 .as_deref(),
             Some(alias)
+        );
+    }
+
+    #[test]
+    fn effective_model_unpinned_prefers_cache_miss_side_model() {
+        let side = CACHE_MISS_SIDE_MODEL;
+        // Reasoning on: side model beats session.
+        assert_eq!(
+            effective_suggest_model(&Pin::Unpinned, None, Some("session"), false, |m| m == side
+                || m
+                    == "session")
+            .as_deref(),
+            Some(side)
+        );
+        // Reasoning off: side model beats the non-reasoning alias.
+        assert_eq!(
+            effective_suggest_model(&Pin::Unpinned, None, Some("session"), true, |m| m == side
+                || m
+                    == crate::util::config::NON_REASONING_PROMPT_SUGGEST_MODEL)
+            .as_deref(),
+            Some(side)
+        );
+    }
+
+    #[test]
+    fn effective_model_client_hint_still_wins_over_side_model() {
+        let side = CACHE_MISS_SIDE_MODEL;
+        assert_eq!(
+            effective_suggest_model(&Pin::Unpinned, Some("hinted"), Some("session"), false, |m| {
+                m == side || m == "hinted"
+            })
+            .as_deref(),
+            Some("hinted")
         );
     }
 

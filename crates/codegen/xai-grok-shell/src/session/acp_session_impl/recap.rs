@@ -747,8 +747,23 @@ impl SessionActor {
         };
 
         self.refresh_token_if_expired().await;
-        let mut sampling_config = self.reconstruct_full_config().await;
-        sampling_config.model = model.clone();
+        // Prefer the cache-miss side sampler when the effective model is the side model (G2),
+        // so suggest uses the side endpoint/creds rather than only swapping the session model id.
+        let mut sampling_config = if model == crate::session::helpers::CACHE_MISS_SIDE_MODEL {
+            match self.resolve_cache_miss_side_sampler(&self.reconstruct_full_config().await).await
+            {
+                Some(cfg) => cfg,
+                None => {
+                    let mut cfg = self.reconstruct_full_config().await;
+                    cfg.model = model.clone();
+                    cfg
+                }
+            }
+        } else {
+            let mut cfg = self.reconstruct_full_config().await;
+            cfg.model = model.clone();
+            cfg
+        };
         sampling_config.reasoning_effort = None;
         let supports_reasoning = self.models_manager.model_supports_reasoning_effort(&model);
         let suggest_reasoning = prompt_suggest::resolve_suggest_reasoning(

@@ -1164,20 +1164,33 @@ impl SessionActor {
             Do not include `<!-- memory-v2 provenance -->` comments in content; they are stripped and not stored. \
             Do not mention or attempt tools, shell, workspace files, MEMORY.md, databases, archive, \
             extraction, or another Dream.";
-        let sampling_client =
-            self.prepare_chat_completion(false)
+        // Prefer the cache-miss side model (G2) so v2 Dream does not compete with the main conversation's KV pool.
+        let session_config = self.reconstruct_full_config().await;
+        let side_cfg = self.resolve_cache_miss_side_sampler(&session_config).await;
+        let (sampling_client, model) = if let Some(cfg) = side_cfg {
+            let model = cfg.model.clone();
+            match xai_grok_sampler::SamplingClient::new(cfg) {
+                Ok(client) => (client, model),
+                Err(error) => {
+                    return Err(V2DreamModelFailure {
+                        class: MemoryV2FailureClass::Model,
+                        detail: format!("side sampler build failed: {error}"),
+                        usage: xai_grok_telemetry::memory_telemetry::MemoryV2ModelUsage::default(),
+                    });
+                }
+            }
+        } else {
+            let client = self
+                .prepare_chat_completion(false)
                 .await
                 .map_err(|error| V2DreamModelFailure {
                     class: MemoryV2FailureClass::Model,
                     detail: error.to_string(),
                     usage: xai_grok_telemetry::memory_telemetry::MemoryV2ModelUsage::default(),
                 })?;
-        let model = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|config| config.model)
-            .unwrap_or_default();
+            let model = session_config.model.clone();
+            (client, model)
+        };
         let (model, reasoning_effort) =
             super::memory_capture::resolve_memory_model_and_effort(&self.models_manager, model);
         let request = ConversationRequest {

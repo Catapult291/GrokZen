@@ -4,6 +4,7 @@
 use super::*;
 
 use crate::remote::DEFAULT_CONTEXT_WINDOW;
+use crate::session::helpers::CACHE_MISS_SIDE_MODEL;
 
 #[derive(Debug, PartialEq)]
 struct PromptCacheUsage {
@@ -99,6 +100,30 @@ pub(super) fn should_strip_side_call_reasoning(
 }
 
 impl SessionActor {
+    /// Resolve a stamped aux sampler for [`CACHE_MISS_SIDE_MODEL`] when it is listed and distinct from the session model.
+    /// Returns `None` so callers keep the session/parent path (same endpoint, same model).
+    pub(super) async fn resolve_cache_miss_side_sampler(
+        &self,
+        session_config: &xai_grok_sampler::SamplerConfig,
+    ) -> Option<xai_grok_sampler::SamplerConfig> {
+        if !self.models_manager.model_in_catalog(CACHE_MISS_SIDE_MODEL)
+            || session_config.model == CACHE_MISS_SIDE_MODEL
+        {
+            return None;
+        }
+        self.resolve_aux_sampler_config(CACHE_MISS_SIDE_MODEL)
+            .await
+            .map(|mut cfg| {
+                crate::agent::config::stamp_session_local_sampler_fields(
+                    &mut cfg,
+                    session_config,
+                    self.client_identifier.clone(),
+                    session_config.max_retries,
+                );
+                cfg
+            })
+    }
+
     /// Request skeleton for an auxiliary call that replays the parent conversation under the parent's `prompt_cache_key`.
     /// Temperature stays unset: cli-chat-proxy may inject a `thinking` config, and the Messages API then requires temperature == 1.
     pub(crate) fn parent_cached_request(&self, call: AuxCall) -> ConversationRequest {

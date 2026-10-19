@@ -504,15 +504,26 @@ impl SessionActor {
         })
     }
 
-    /// Make the dream model call using the session's sampling client.
+    /// Make the dream model call using the cache-miss side model when listed, else the session's sampling client.
     async fn run_dream_model_call(&self, user_message: &str) -> Result<String, acp::Error> {
-        let sampling_client = self.prepare_chat_completion(false).await?;
-        let model = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .map(|c| c.model)
-            .unwrap_or_default();
+        let session_config = self.reconstruct_full_config().await;
+        let side_cfg = self.resolve_cache_miss_side_sampler(&session_config).await;
+        let (sampling_client, model) = if let Some(cfg) = side_cfg {
+            let model = cfg.model.clone();
+            match xai_grok_sampler::SamplingClient::new(cfg) {
+                Ok(c) => (c, model),
+                Err(e) => {
+                    tracing::warn!(error = %e, "dream: side sampler build failed; using session model");
+                    let client = self.prepare_chat_completion(false).await?;
+                    let model = session_config.model.clone();
+                    (client, model)
+                }
+            }
+        } else {
+            let client = self.prepare_chat_completion(false).await?;
+            let model = session_config.model.clone();
+            (client, model)
+        };
         let session_id = self.session_info.id.to_string();
         let request = ConversationRequest {
             items: vec![
@@ -569,7 +580,38 @@ impl SessionActor {
             .await;
 
         let result = async {
-            let sampling_client = self.prepare_chat_completion(false).await?;
+            let session_config = self.reconstruct_full_config().await;
+            // Explicit [compaction.memory_flush].flush_model wins; else prefer the cache-miss side model (G2)
+            // so this 0%-hit body does not compete with the main conversation's KV pool.
+            let explicit_flush_model = self.memory.flush_config.flush_model.clone();
+            let side_cfg = if explicit_flush_model.is_none() {
+                self.resolve_cache_miss_side_sampler(&session_config).await
+            } else {
+                None
+            };
+            let (sampling_client, model) = if let Some(cfg) = side_cfg {
+                let model = cfg.model.clone();
+                match xai_grok_sampler::SamplingClient::new(cfg) {
+                    Ok(c) => (c, model),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: xai_grok_telemetry::memory_log::TARGET,
+                            error = %e,
+                            "MEMORY_FLUSH: side sampler build failed; using session model"
+                        );
+                        let client = self.prepare_chat_completion(false).await?;
+                        let model = explicit_flush_model.unwrap_or(session_config.model.clone());
+                        (client, model)
+                    }
+                }
+            } else {
+                let client = self.prepare_chat_completion(false).await?;
+                let model = match explicit_flush_model {
+                    Some(m) => m,
+                    None => session_config.model.clone(),
+                };
+                (client, model)
+            };
             let MemoryFlushSnapshot {
                 counts,
                 chat_history,
@@ -621,12 +663,6 @@ impl SessionActor {
                 "Now write the memory summary as described in the system prompt.",
             ));
 
-            let model = match self.memory.flush_config.flush_model.clone() {
-                Some(m) => m,
-                None => self.chat_state_handle.get_sampling_config().await
-                    .map(|c| c.model)
-                    .unwrap_or_default(),
-            };
             tracing::info!(
                 target: xai_grok_telemetry::memory_log::TARGET,
                 "MEMORY_FLUSH: using model={model}"
