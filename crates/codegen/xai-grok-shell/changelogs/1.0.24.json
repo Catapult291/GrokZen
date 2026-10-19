@@ -1,7 +1,32 @@
 [
   {
+    "category": "features",
+    "description": "**Prompt-prefix cache guards** — frozen system head after compaction, an input[:k] LCP snapshot over 40-round tool loops, and cold-cache warnings on in-session upgrades keep long sessions on a warm prompt prefix.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Side-channel bypass model** — title refresh plus flush / dream / suggest / turn-summary requests now run on cline-pass/deepseek-v4.1-flash instead of occupying the main turn.",
+    "breaking_change": false
+  },
+  {
+    "category": "features",
+    "description": "**Cold-cache observability** — turn usage tokens are weighted into telemetry, and cache-miss signals surface in spans and product rows.",
+    "breaking_change": false
+  },
+  {
     "category": "fixes",
-    "description": "**Esc** no longer cancels a running turn and instead reminds you to use Ctrl+C.",
+    "description": "**Windows file and path hardening** — file locks no longer race with os error 33, Unix path assumptions are removed from Windows code paths, and path separator/encoding failures are fixed.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Test-suite isolation** — local environment leaks, privacy-build upload gates, telemetry assertions and resource sampling now hold under CI; the full suite is back to zero failures.",
+    "breaking_change": false
+  },
+  {
+    "category": "fixes",
+    "description": "**Monitor and session behavior** — identical heartbeats no longer re-wake the monitor, and regressions in session behavior, runtime/config switches and out-of-band compaction interference are fixed.",
     "breaking_change": false
   }
 ]
