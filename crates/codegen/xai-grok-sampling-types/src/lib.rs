@@ -10,6 +10,7 @@ pub mod conversation;
 pub mod doom_loop;
 pub mod error;
 pub mod messages;
+pub mod prefix_debug;
 pub mod provider_error;
 pub mod serde_helpers;
 pub mod text_repetition;
@@ -28,6 +29,7 @@ pub use self::error::{
     is_retryable_api_status, is_size_overflow_error_code, parse_error_code, status_user_message,
     user_facing_api_error_message,
 };
+pub use self::prefix_debug::{input_prefix_lcp, responses_input_json};
 pub use self::text_repetition::{
     TextRepetitionGuardPolicy, TextRepetitionTrigger, TextRepetitionTrip,
 };

@@ -2741,6 +2741,11 @@ impl SessionActor {
         let mut loop_index: u32 = 0;
         // Completion time of the previous successful model call in this turn; feeds `shell.cache.cold`'s `gap_ms_from_prev`.
         let mut last_inference_done_at: Option<std::time::Instant> = None;
+        // Optional adjacent-request `input[:k]` LCP snapshot (G5 / H1): `GROK_DEBUG_PREFIX_LCP=1`
+        // records how far each round's input continues the previous one; a break is a guaranteed miss.
+        let prefix_lcp_debug = std::env::var("GROK_DEBUG_PREFIX_LCP")
+            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"));
+        let mut prev_input_region: Option<serde_json::Value> = None;
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut cross_turn_loop = CrossTurnLoopGuard::default();
         let mut todo_gate_fires: u32 = 0;
@@ -3061,6 +3066,26 @@ impl SessionActor {
                 })?;
             if salvage.enabled() {
                 request.length_policy = xai_grok_sampling_types::LengthPolicy::CompletePartial;
+            }
+            if prefix_lcp_debug {
+                let input_region = xai_grok_sampling_types::responses_input_json(&request);
+                if let Some(prev) = prev_input_region.as_ref() {
+                    let lcp = xai_grok_sampling_types::input_prefix_lcp(prev, &input_region);
+                    let prev_len = prev.as_array().map(Vec::len).unwrap_or(0);
+                    let curr_len = input_region.as_array().map(Vec::len).unwrap_or(0);
+                    xai_grok_telemetry::unified_log::info(
+                        "shell.prefix.lcp",
+                        Some(self.session_info.id.0.as_ref()),
+                        Some(serde_json::json!({
+                            "loop_index": loop_index,
+                            "lcp": lcp,
+                            "prev_items": prev_len,
+                            "curr_items": curr_len,
+                            "prefix_broke": lcp < prev_len,
+                        })),
+                    );
+                }
+                prev_input_region = Some(input_region);
             }
             self.emit_event(crate::session::events::Event::PhaseChanged {
                 phase: crate::session::events::Phase::WaitingForModel,
