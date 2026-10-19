@@ -2440,7 +2440,13 @@ async fn session_meta_publishes_the_sessions_spawn_pins() {
     agent.insert_resident(&sid, handle);
     let model_state = agent.model_state(Some(&sid));
     let mut meta = serde_json::Map::new();
-    agent.insert_session_config_meta(&mut meta, &sid, std::env::temp_dir().to_string_lossy().into_owned(), None, &model_state);
+    agent.insert_session_config_meta(
+        &mut meta,
+        &sid,
+        std::env::temp_dir().to_string_lossy().into_owned(),
+        None,
+        &model_state,
+    );
     assert_eq!(
         meta.get(crate::session::MEMORY_MODE_META_KEY),
         Some(&serde_json::json!("v2")),
@@ -2651,7 +2657,8 @@ async fn upload_trace_missing_intent_with_global_consent_stays_compatible() {
     insert_resident_session(&agent, "sess", tmp.path());
     assert!(!agent.feedback_trace_offer());
     if xai_grok_version::research_data_collection_forbidden() {
-        let err = upload_trace_error(&agent, serde_json::json!({ "sessionId": "sess" }), None).await;
+        let err =
+            upload_trace_error(&agent, serde_json::json!({ "sessionId": "sess" }), None).await;
         assert!(
             err.to_string().contains(NOT_AVAILABLE),
             "privacy hard-off must beat global consent: {err}"
@@ -6193,10 +6200,9 @@ async fn remove_session_releases_workspace_binding_and_side_maps() {
                 .session_registry
                 .set_unavailable_model(&sid, acp::ModelId::new(std::sync::Arc::from("gone-model")));
             agent.set_turn_number(&sid, 3);
-            let (_permission_tx, permission_rx) =
-                tokio::sync::mpsc::unbounded_channel::<
-                    xai_grok_workspace::permission::PermissionEvent,
-                >();
+            let (_permission_tx, permission_rx) = tokio::sync::mpsc::unbounded_channel::<
+                xai_grok_workspace::permission::PermissionEvent,
+            >();
             agent
                 .session_registry
                 .set_permission_receiver(&sid, permission_rx);

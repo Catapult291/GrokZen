@@ -139,8 +139,7 @@ pub fn acquire_init_lock(grok_home: &std::path::Path) -> std::io::Result<std::fs
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
             Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.raw_os_error() == contended =>
+                if e.kind() == std::io::ErrorKind::WouldBlock || e.raw_os_error() == contended =>
             {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
