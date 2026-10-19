@@ -63,7 +63,7 @@ pub(crate) use session::lifecycle::{abandon_unused_home_session, maybe_create_ho
 pub(crate) use settings::ui::refresh_open_settings_modals;
 #[cfg(test)]
 pub(crate) use settings::ui::{ROLLBACK_NO_ARM_TOAST, build_pager_snapshot};
-pub(crate) use status::commit_minimal_update_notice;
+pub(crate) use status::commit_update_notice;
 #[cfg(test)]
 pub(crate) use turn::{CANCEL_RESEND_GRACE, TURN_END_RECONCILE_GRACE};
 pub(crate) use turn::{

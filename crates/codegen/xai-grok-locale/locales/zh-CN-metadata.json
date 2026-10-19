@@ -1322,7 +1322,7 @@
   "status.billing.warning.percent_left": "{label}剩余：{percent}%",
   "status.billing.warning.credits_left": "额度余额：{amount}",
   "status.billing.no_data": "暂无计费数据。",
-  "status.update_available": "已有更新：v{version} — 重启后应用。",
+  "status.update_available": "已有更新：v{version} — 重启后应用。升级后的首轮将重读全部对话（模型缓存冷启动）。",
   "palette.section.session": "会话",
   "palette.new_session": "新建会话",
   "palette.new_session_worktree": "在工作树中新建会话",
