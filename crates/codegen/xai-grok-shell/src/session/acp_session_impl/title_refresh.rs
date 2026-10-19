@@ -9,7 +9,9 @@
 use super::*;
 
 use super::side_call::AuxCall;
-use crate::session::helpers::{session_recap, session_summary, CACHE_MISS_SIDE_MODEL as TITLE_REFRESH_SIDE_MODEL};
+use crate::session::helpers::{
+    CACHE_MISS_SIDE_MODEL as TITLE_REFRESH_SIDE_MODEL, session_recap, session_summary,
+};
 
 /// Upper bound on the title-refresh model call so a hung backend cannot hold the one-at-a-time refresh slot indefinitely.
 /// Generous relative to slow aux chains (observed mimo TTFT can exceed 80s); a hung backend still cannot hold the slot forever.
@@ -139,7 +141,9 @@ impl SessionActor {
         self.refresh_token_if_expired().await;
         let session_config = self.reconstruct_full_config().await;
 
-        let side_cfg = if self.models_manager.model_in_catalog(TITLE_REFRESH_SIDE_MODEL)
+        let side_cfg = if self
+            .models_manager
+            .model_in_catalog(TITLE_REFRESH_SIDE_MODEL)
             && session_config.model != TITLE_REFRESH_SIDE_MODEL
         {
             self.resolve_aux_sampler_config(TITLE_REFRESH_SIDE_MODEL)

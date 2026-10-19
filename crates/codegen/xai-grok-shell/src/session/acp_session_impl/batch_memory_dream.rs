@@ -83,7 +83,9 @@ impl SessionActor {
         let max_request_bytes = usize::try_from(context_window.saturating_mul(2))
             .ok()
             .filter(|bytes: &usize| *bytes > 0)
-            .map_or(MAX_REQUEST_BYTES, |bytes: usize| bytes.min(MAX_REQUEST_BYTES));
+            .map_or(MAX_REQUEST_BYTES, |bytes: usize| {
+                bytes.min(MAX_REQUEST_BYTES)
+            });
         let controls = self.memory.v2_config;
         let options = BatchDreamOptions {
             global_dir: storage.global_dir().to_path_buf(),
