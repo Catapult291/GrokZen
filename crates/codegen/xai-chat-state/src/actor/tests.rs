@@ -5138,6 +5138,118 @@ async fn prefix_stable_after_image_pruning() {
     }
 }
 
+/// The cache-keyed head region from the wire body: leading `system` input items plus the
+/// `tools` array. G5 acceptance: this region must stay byte-identical across tool rounds.
+fn system_tools_region(req: &xai_grok_sampling_types::ConversationRequest) -> serde_json::Value {
+    let input = xai_grok_sampling_types::responses_input_json(req);
+    let system: Vec<serde_json::Value> = input
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .take_while(|item| item.get("role").and_then(|r| r.as_str()) == Some("system"))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    let tools = serialize_via_public_api(req)
+        .get("tools")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    serde_json::json!({ "system": system, "tools": tools })
+}
+
+/// Compact fingerprint of a region for assertion messages.
+fn region_fingerprint(region: &serde_json::Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    region.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// G5 acceptance: 40 consecutive main-loop tool rounds keep the system+tools head
+/// byte-identical and the `input` region append-only (`input[:k]` LCP equals the full
+/// previous item count each round). A break in either is a guaranteed cache miss.
+#[tokio::test]
+async fn prefix_stable_across_forty_tool_rounds() {
+    use xai_grok_sampling_types::{ToolCall, ToolSpec};
+
+    let h = TestHarness::with_conversation(vec![
+        ConversationItem::system("You are a helpful coding agent."),
+        ConversationItem::user("start the task"),
+    ]);
+    let tools = vec![
+        ToolSpec {
+            name: "read_file".to_string(),
+            description: Some("Read a file".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+        },
+        ToolSpec {
+            name: "run_terminal_command".to_string(),
+            description: Some("Run a command".to_string()),
+            parameters: serde_json::json!({"type": "object"}),
+        },
+    ];
+
+    let req0 = h
+        .handle
+        .build_request(tools.clone(), None, false, None, "c".into(), "r0".into())
+        .await
+        .unwrap();
+    let baseline_region = system_tools_region(&req0);
+    assert!(
+        baseline_region
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|t| !t.is_empty()),
+        "the fixture must start with a non-empty tools region"
+    );
+    let mut prev_input = xai_grok_sampling_types::responses_input_json(&req0);
+
+    for round in 1..=40 {
+        h.handle
+            .push_assistant_response(ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: format!("call_{round}").into(),
+                name: "read_file".to_string(),
+                arguments: r#"{"path":"src/lib.rs"}"#.into(),
+            }]));
+        h.handle.push_tool_result(ConversationItem::tool_result(
+            format!("call_{round}"),
+            format!("file bytes for round {round}"),
+        ));
+
+        let req = h
+            .handle
+            .build_request(
+                tools.clone(),
+                None,
+                false,
+                None,
+                "c".into(),
+                format!("r{round}"),
+            )
+            .await
+            .unwrap();
+
+        let region = system_tools_region(&req);
+        assert_eq!(
+            region, baseline_region,
+            "tool round {round}: system+tools head drifted (fp {:016x} -> {:016x})",
+            region_fingerprint(&baseline_region),
+            region_fingerprint(&region),
+        );
+
+        let input = xai_grok_sampling_types::responses_input_json(&req);
+        let prev_len = prev_input.as_array().map(Vec::len).unwrap_or(0);
+        let lcp = xai_grok_sampling_types::input_prefix_lcp(&prev_input, &input);
+        assert_eq!(
+            lcp, prev_len,
+            "tool round {round}: input[:{prev_len}] LCP broke at item {lcp}"
+        );
+        prev_input = input;
+    }
+}
+
 /// Regression: small images under the 50 MB ceiling must be preserved across turns.
 /// Rewriting old images every turn busted the KV-cache prefix (the behavior this size-gate replaces).
 #[tokio::test]
