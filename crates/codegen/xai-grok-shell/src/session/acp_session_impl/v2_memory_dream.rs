@@ -1180,14 +1180,14 @@ impl SessionActor {
                 }
             }
         } else {
-            let client = self
-                .prepare_chat_completion(false)
-                .await
-                .map_err(|error| V2DreamModelFailure {
-                    class: MemoryV2FailureClass::Model,
-                    detail: error.to_string(),
-                    usage: xai_grok_telemetry::memory_telemetry::MemoryV2ModelUsage::default(),
-                })?;
+            let client =
+                self.prepare_chat_completion(false)
+                    .await
+                    .map_err(|error| V2DreamModelFailure {
+                        class: MemoryV2FailureClass::Model,
+                        detail: error.to_string(),
+                        usage: xai_grok_telemetry::memory_telemetry::MemoryV2ModelUsage::default(),
+                    })?;
             let model = session_config.model.clone();
             (client, model)
         };

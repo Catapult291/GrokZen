@@ -750,7 +750,9 @@ impl SessionActor {
         // Prefer the cache-miss side sampler when the effective model is the side model (G2),
         // so suggest uses the side endpoint/creds rather than only swapping the session model id.
         let mut sampling_config = if model == crate::session::helpers::CACHE_MISS_SIDE_MODEL {
-            match self.resolve_cache_miss_side_sampler(&self.reconstruct_full_config().await).await
+            match self
+                .resolve_cache_miss_side_sampler(&self.reconstruct_full_config().await)
+                .await
             {
                 Some(cfg) => cfg,
                 None => {

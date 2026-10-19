@@ -75,15 +75,17 @@ impl SessionActor {
         {
             self.resolve_cache_miss_side_sampler(&session_config).await
         } else if self.models_manager.model_in_catalog(&settings.model) {
-            self.resolve_aux_sampler_config(&settings.model).await.map(|mut cfg| {
-                crate::agent::config::stamp_session_local_sampler_fields(
-                    &mut cfg,
-                    &session_config,
-                    self.client_identifier.clone(),
-                    session_config.max_retries,
-                );
-                cfg
-            })
+            self.resolve_aux_sampler_config(&settings.model)
+                .await
+                .map(|mut cfg| {
+                    crate::agent::config::stamp_session_local_sampler_fields(
+                        &mut cfg,
+                        &session_config,
+                        self.client_identifier.clone(),
+                        session_config.max_retries,
+                    );
+                    cfg
+                })
         } else {
             None
         };

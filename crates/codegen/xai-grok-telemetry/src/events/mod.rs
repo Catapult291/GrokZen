@@ -2215,7 +2215,9 @@ mod tests {
             "zero cached must still serialize when present: {included}"
         );
         assert_eq!(
-            included.get("cached_prompt_tokens").and_then(|v| v.as_u64()),
+            included
+                .get("cached_prompt_tokens")
+                .and_then(|v| v.as_u64()),
             Some(0)
         );
         let omitted = serde_json::to_value(tc(None, None)).unwrap();
