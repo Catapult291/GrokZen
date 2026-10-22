@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "tag": "release-v1.0.25",
+  "prerelease": false,
+  "previous_tag": "release-v1.0.24",
+  "community": [
+    {
+      "text": "安全依赖升级：zip 升至 9.0.5，并完成更新器与 PPTX 读取的接口适配；rustls-webpki / webpki-roots 保持本机最新安全版本。",
+      "commits": [
+        "0ef0404aa9c5bf0c49e6205db00afedbe32255fe"
+      ]
+    }
+  ],
+  "upstream": []
+}
