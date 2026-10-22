@@ -1,7 +1,7 @@
 [
   {
     "category": "fixes",
-    "description": "**安全依赖升级** —— zip 由 3.x / 8.6 升级到 9.0.5，消除已知压缩包解析相关漏洞；rustls-webpki / webpki-roots 保持本机最新安全版本。",
+    "description": "**安全依赖升级** —— zip 由 3.x / 8.6 升级到 9.0.5，消除已知压缩包解析相关漏洞。",
     "breaking_change": false
   },
   {
