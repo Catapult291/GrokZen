@@ -35,7 +35,7 @@ sha2 = { workspace = true }
 xai-tty-utils = { workspace = true }
 # MinGit archive extraction. Not `workspace = true`: the workspace pin has
 # default features on (aes/bzip2/lzma/zstd); MinGit entries are only deflated.
-zip = { version = "3", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate-flate2"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
 libc = { workspace = true }

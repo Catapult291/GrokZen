@@ -399,7 +399,7 @@ xai-tool-types = { path = "crates/common/xai-tool-types" }
 xai-tracing = { path = "crates/common/xai-tracing" }
 xai-tty-utils = { path = "crates/codegen/xai-tty-utils" }
 zbus = { version = "5" }
-zip = "3"
+zip = "9.0.5"
 zstd = "0.13"
 
 [profile.release]
