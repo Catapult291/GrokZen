@@ -691,7 +691,10 @@ fn validate_zip_layout(
         let entry = archive
             .by_index(index)
             .with_context(|| format!("reading ZIP entry {index}"))?;
-        let raw_name = entry.name().to_string();
+        let raw_name = entry
+            .name()
+            .with_context(|| format!("reading ZIP entry name {index}"))?
+            .into_owned();
         let raw_without_directory_suffix = raw_name.strip_suffix('/').unwrap_or(&raw_name);
         if raw_name.contains('\\')
             || raw_name.contains(':')
