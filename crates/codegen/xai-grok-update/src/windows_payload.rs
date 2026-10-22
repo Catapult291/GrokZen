@@ -744,13 +744,15 @@ mod tests {
     }
 
     #[test]
-    fn extract_zip_refuses_non_plain_path_components() {
+    fn extract_zip_treats_dot_prefixed_paths_as_plain_names() {
         let tmp = tempfile::tempdir().unwrap();
         let zip = tmp.path().join("dot.zip");
         write_zip(&zip, &[("./cmd/git.exe", Some(b"MZ".as_slice()))]);
         let staging = tmp.path().join(".staging-0.2.10");
-        let err = extract_zip(&zip, &staging).unwrap_err();
-        assert!(err.to_string().contains("escapes"), "{err:#}");
-        assert!(!staging.join("cmd").join("git.exe").exists());
+        extract_zip(&zip, &staging).unwrap();
+        assert_eq!(
+            std::fs::read(staging.join("cmd").join("git.exe")).unwrap(),
+            b"MZ"
+        );
     }
 }
