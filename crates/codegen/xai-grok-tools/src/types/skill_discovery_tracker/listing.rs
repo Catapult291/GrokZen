@@ -17,7 +17,10 @@ pub(super) const DEFAULT_CHAR_BUDGET: usize =
 /// Per-entry cap on description + when_to_use combined. Discovery only — the
 /// full skill body is loaded on invocation, so the listing stays terse. Split
 /// proportionally between the two fields (see `proportional_budgets`).
-const MAX_LISTING_COMBINED_BYTES: usize = 400;
+/// Raised from 400 so the common user-skill set (largest ~890B: niubash) is
+/// listed without truncation; total listing cost is still bounded by
+/// `DEFAULT_CHAR_BUDGET` via the tiered shortener.
+const MAX_LISTING_COMBINED_BYTES: usize = 900;
 /// Minimum description length before falling back to names-only.
 const MIN_DESC_LENGTH: usize = 20;
 
@@ -58,6 +61,10 @@ struct SkillEntry<'a> {
     name: &'a str,
     description: &'a str,
     when_to_use: Option<&'a str>,
+    /// Frontmatter `metadata.role` marker (`router`, `curator`, …). When set,
+    /// the entry is tagged so routing entries are distinguishable from
+    /// ordinary skills in the listing.
+    role: Option<&'a str>,
     display_path: String,
 }
 
@@ -75,20 +82,30 @@ impl<'a> SkillEntry<'a> {
 
     /// Render the entry with description and when_to_use truncated to the
     /// budgets from `proportional_budgets`. `func_desc` must be the result of
-    /// `self.func_desc()`.
+    /// `self.func_desc()`. A `role` marker renders as `name [role]:` so router
+    /// entries are distinguishable from ordinary skills.
     fn format(&self, func_desc: &str, desc_budget: usize, wtu_budget: usize) -> String {
         let desc = truncate_str_with_marker(func_desc, desc_budget);
+        let label = self.name_label();
         if let Some(wtu) = self.when_to_use {
             let wtu = truncate_str_with_marker(strip_leading_trigger_prefix(wtu), wtu_budget);
             format!(
                 "- {}: {}\n  Use when: {}\n  Absolute path: {}",
-                self.name, desc, wtu, self.display_path
+                label, desc, wtu, self.display_path
             )
         } else {
             format!(
                 "- {}: {}\n  Absolute path: {}",
-                self.name, desc, self.display_path
+                label, desc, self.display_path
             )
+        }
+    }
+
+    /// Name with the optional role tag: `re` → `re [router]`.
+    fn name_label(&self) -> String {
+        match self.role {
+            Some(role) => format!("{} [{}]", self.name, role),
+            None => self.name.to_string(),
         }
     }
 
@@ -117,15 +134,19 @@ impl<'a> SkillEntry<'a> {
         format!("- {}", self.name)
     }
 
-    /// Byte length of the fixed overhead (name, path, Use when label) excluding content.
+    /// Byte length of the fixed overhead (name, role tag, path, Use when label) excluding content.
     fn overhead(&self) -> usize {
-        // "- " + name + ": " + "\n  Absolute path: " + path + "\n"
-        let base = "- ".len()
+        // "- " + name + [role tag] + ": " + "\n  Absolute path: " + path + "\n"
+        let mut base = "- ".len()
             + self.name.len()
             + ": ".len()
             + "\n  Absolute path: ".len()
             + self.display_path.len()
             + "\n".len();
+        if let Some(role) = self.role {
+            // " [role]"
+            base += " [".len() + role.len() + "]".len();
+        }
         if self.when_to_use.is_some() {
             base + "  Use when: ".len() + "\n".len()
         } else {
@@ -138,20 +159,28 @@ impl<'a> SkillEntry<'a> {
     /// Render as an `<agent_skill>` XML row with description and when_to_use
     /// truncated to their budgets. When `when_to_use` is present it follows the
     /// description after an em-dash: `description — Use when: trigger phrases`.
+    /// A `role` marker renders as a `role="…"` attribute so router entries are
+    /// distinguishable from ordinary skills.
     fn format_xml(&self, func_desc: &str, desc_budget: usize, wtu_budget: usize) -> String {
         let desc = truncate_str_with_marker(func_desc, desc_budget);
+        let role_attr = self
+            .role
+            .map(|r| format!(" role=\"{}\"", xml_attr_escape(r)))
+            .unwrap_or_default();
         if let Some(wtu) = self.when_to_use {
             let wtu = truncate_str_with_marker(strip_leading_trigger_prefix(wtu), wtu_budget);
             format!(
-                "<agent_skill fullPath=\"{}\">{} \u{2014} Use when: {}</agent_skill>\n",
+                "<agent_skill fullPath=\"{}\"{}>{} \u{2014} Use when: {}</agent_skill>\n",
                 xml_attr_escape(&self.display_path),
+                role_attr,
                 xml_text_escape(&desc),
                 xml_text_escape(&wtu),
             )
         } else {
             format!(
-                "<agent_skill fullPath=\"{}\">{}</agent_skill>\n",
+                "<agent_skill fullPath=\"{}\"{}>{}</agent_skill>\n",
                 xml_attr_escape(&self.display_path),
+                role_attr,
                 xml_text_escape(&desc),
             )
         }
@@ -168,8 +197,12 @@ impl<'a> SkillEntry<'a> {
 
     /// Byte length of the fixed XML overhead excluding description body.
     fn overhead_xml(&self) -> usize {
-        let base = "<agent_skill fullPath=\"\"></agent_skill>\n".len()
+        let mut base = "<agent_skill fullPath=\"\"></agent_skill>\n".len()
             + xml_attr_escape(&self.display_path).len();
+        if let Some(role) = self.role {
+            // " role=\"\""
+            base += " role=\"\"".len() + xml_attr_escape(role).len();
+        }
         if self.when_to_use.is_some() {
             base + " \u{2014} Use when: ".len()
         } else {
@@ -511,6 +544,7 @@ fn build_skill_entry<'a>(
         name: &s.name,
         description: &s.description,
         when_to_use: wtu,
+        role: s.role.as_deref(),
         display_path: match (real_prefix, display_prefix) {
             (Some(real), Some(display)) => s.path.replace(real, display),
             _ => s.path.clone(),
@@ -754,6 +788,7 @@ mod tests {
                 name: "s",
                 description: desc,
                 when_to_use: wtu,
+                role: None,
                 display_path: "/p/SKILL.md".to_owned(),
             }
         }
@@ -1616,16 +1651,122 @@ mod tests {
             name: "s",
             description: "desc",
             when_to_use: None,
+            role: None,
             display_path: "/p/SKILL.md".to_owned(),
         };
         let with = SkillEntry {
             name: "s",
             description: "desc",
             when_to_use: Some("trigger"),
+            role: None,
             display_path: "/p/SKILL.md".to_owned(),
         };
         let diff = with.overhead() - without.overhead();
         assert_eq!(diff, "  Use when: ".len() + "\n".len());
+    }
+
+    // ── role marker (router/curator annotation) ──────────────────
+
+    #[test]
+    fn role_tagged_on_name_line_in_text_listing() {
+        let skills = [
+            SkillInfo {
+                role: Some("router".to_owned()),
+                ..skill("re", "逆向工程总入口（路由）：APK/DEX 反编译。")
+            },
+            skill("ddc", "Rust 高性能 DEX→Java 反编译器。"),
+        ];
+        let text = announce(&skills, 8_000).unwrap();
+        assert!(
+            text.contains("- re [router]: "),
+            "router entry must carry role tag: {text}"
+        );
+        assert!(
+            !text.contains("- ddc ["),
+            "skill without role must stay untagged: {text}"
+        );
+        assert!(text.contains("- ddc: "), "plain entry shape: {text}");
+    }
+
+    #[test]
+    fn role_tagged_in_budgeted_xml() {
+        let skills = [SkillInfo {
+            role: Some("router".to_owned()),
+            ..skill("re", "Routing entry.")
+        }];
+        let mut announced = HashSet::new();
+        let text = format_announcement_xml(
+            &skills,
+            &mut announced,
+            None,
+            None,
+            XmlRenderMode::Budgeted {
+                budget_chars: Some(8_000),
+                overflow_indicator: false,
+            },
+        )
+        .unwrap();
+        assert!(
+            text.contains("<agent_skill fullPath=\"/skills/re/SKILL.md\" role=\"router\">"),
+            "role must render as attribute: {text}"
+        );
+    }
+
+    #[test]
+    fn role_absent_keeps_verbatim_and_text_shapes() {
+        // Vendor-compat (verbatim) never renders the role attribute.
+        let skills = [skill("plain", "No role here.")];
+        let mut announced = HashSet::new();
+        let text =
+            format_announcement_xml(&skills, &mut announced, None, None, XmlRenderMode::Verbatim)
+                .unwrap();
+        assert!(!text.contains("role="), "verbatim shape unchanged: {text}");
+    }
+
+    #[test]
+    fn overhead_includes_role_tag() {
+        let base = SkillEntry {
+            name: "s",
+            description: "desc",
+            when_to_use: None,
+            role: None,
+            display_path: "/p/SKILL.md".to_owned(),
+        };
+        let tagged = SkillEntry {
+            name: "s",
+            description: "desc",
+            when_to_use: None,
+            role: Some("router"),
+            display_path: "/p/SKILL.md".to_owned(),
+        };
+        assert_eq!(tagged.overhead() - base.overhead(), " [router]".len());
+        assert_eq!(
+            tagged.overhead_xml() - base.overhead_xml(),
+            " role=\"router\"".len()
+        );
+    }
+
+    /// End-to-end: frontmatter `metadata.role` flows through the parser into
+    /// the rendered listing annotation.
+    #[test]
+    fn role_flows_from_frontmatter_into_listing() {
+        use crate::implementations::skills::discovery::parse_skill_files;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("re");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            "---\nname: re\ndescription: 逆向工程总入口。\nmetadata:\n  spec-version: \"1.0\"\n  role: router\n---\n\nbody\n",
+        )
+        .unwrap();
+        let skills = parse_skill_files(vec![(
+            dir.join("SKILL.md"),
+            crate::implementations::skills::types::SkillScope::Local,
+        )]);
+        assert_eq!(skills[0].role.as_deref(), Some("router"));
+        let text = announce(&skills, 8_000).unwrap();
+        assert!(text.contains("- re [router]: "), "got:\n{text}");
     }
 
     #[test]
@@ -1781,12 +1922,14 @@ mod tests {
             name: "s",
             description: "desc",
             when_to_use: None,
+            role: None,
             display_path: "/p/SKILL.md".to_owned(),
         };
         let with_wtu = SkillEntry {
             name: "s",
             description: "desc",
             when_to_use: Some("trigger"),
+            role: None,
             display_path: "/p/SKILL.md".to_owned(),
         };
         let diff = with_wtu.overhead_xml() - without.overhead_xml();

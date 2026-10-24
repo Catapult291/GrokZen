@@ -15,11 +15,49 @@ const BUILTIN_FILES: &[(&str, &str)] = &[
         COMMUNITY_CHANGELOG_JSON,
         include_str!(env!("GROK_SHELL_CHANGELOG_JSON_PATH")),
     ),
+    (SPEC_FILE_NAME, SPEC_FILE_CONTENT),
 ];
+
+/// Skill-router spec, embedded from the repository source of truth
+/// (`docs/SKILL_ROUTER_SPEC.md`) so every installed copy ships with the binary.
+const SPEC_FILE_NAME: &str = "SKILL_ROUTER_SPEC.md";
+const SPEC_FILE_CONTENT: &str = include_str!("../../../../docs/SKILL_ROUTER_SPEC.md");
+
+/// Skill-router ledger template. Seeded only when absent: the file is
+/// machine-local state and must never be overwritten after creation.
+const LEDGER_FILE_NAME: &str = "skill-router-ledger.md";
+const LEDGER_FILE_TEMPLATE: &str = "\
+# Skill 路由台账
+
+spec: `SKILL_ROUTER_SPEC.md`（同目录提取副本，版本见其首表；唯一源 `GrokZen/docs/SKILL_ROUTER_SPEC.md`）
+
+## Accepted routes
+
+| name | path | domain | created | spec |
+|------|------|--------|---------|------|
+
+## Decisions
+
+| date | type | subjects | result | reason | operator |
+|------|------|----------|--------|--------|----------|
+
+## Notes
+
+- 无白名单：子 skill 保持独立 listing。
+- 本文件是机器本地状态：仅在缺失时由启动提取创建，之后启动不会覆盖。
+";
 
 /// Extract built-in metadata files to `~/.grok/` on startup.
 /// User skills under `~/.grok/skills/` are never managed here. Platform skills are delivered separately through the bundled skill cache.
+///
+/// Skill-router assets (spec copy + ledger template) seed on every startup when
+/// absent, so a same-version build activates them too; the spec copy also
+/// refreshes with the version-gated write below, the ledger never does.
 pub fn extract_builtin_files(grok_home: &std::path::Path) {
+    let _ = std::fs::create_dir_all(grok_home);
+    seed_builtin_file_if_absent(grok_home, SPEC_FILE_NAME, SPEC_FILE_CONTENT);
+    seed_builtin_file_if_absent(grok_home, LEDGER_FILE_NAME, LEDGER_FILE_TEMPLATE);
+
     let version = xai_grok_version::VERSION;
     // The community build shares `GROK_HOME` with the official executable,
     // but its extracted metadata must not share ownership markers or changelog
@@ -33,8 +71,6 @@ pub fn extract_builtin_files(grok_home: &std::path::Path) {
         return;
     }
 
-    let _ = std::fs::create_dir_all(grok_home);
-
     for &(filename, content) in BUILTIN_FILES {
         if let Err(e) = std::fs::write(grok_home.join(filename), content) {
             tracing::debug!(error = %e, filename, "Failed to extract built-in file");
@@ -43,6 +79,16 @@ pub fn extract_builtin_files(grok_home: &std::path::Path) {
 
     let _ = std::fs::write(&marker, version);
     tracing::debug!(version, "Extracted built-in files");
+}
+
+fn seed_builtin_file_if_absent(grok_home: &std::path::Path, filename: &str, content: &str) {
+    let path = grok_home.join(filename);
+    if path.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::write(&path, content) {
+        tracing::debug!(error = %e, filename, "Failed to seed built-in file");
+    }
 }
 
 /// `(name, sha256)` of every `SKILL.md` body ever extracted into `$GROK_HOME/skills/`; `help` rows hash the pre-substitution bytes.
@@ -187,7 +233,7 @@ mod tests {
 
     #[test]
     fn bundled_metadata_is_the_community_chinese_release() {
-        assert_eq!(BUILTIN_FILES.len(), 3);
+        assert_eq!(BUILTIN_FILES.len(), 4);
         assert_eq!(BUILTIN_FILES[0].0, COMMUNITY_README);
         assert!(BUILTIN_FILES[0].1.contains("grok-zh"));
         assert!(BUILTIN_FILES[0].1.contains("简体中文社区版"));
@@ -262,6 +308,55 @@ mod tests {
         assert_eq!(markdown_descriptions.len(), entries.len());
         assert_eq!(json_descriptions.len(), entries.len());
         assert_eq!(markdown_descriptions, json_descriptions);
+
+        // Phase 6 bundle distribution: the skill-router spec ships embedded.
+        assert_eq!(BUILTIN_FILES[3].0, SPEC_FILE_NAME);
+        assert!(BUILTIN_FILES[3].1.contains("# Skill Router 写作规范"));
+        assert!(BUILTIN_FILES[3].1.contains("spec-version"));
+    }
+
+    #[test]
+    fn skill_router_assets_seed_when_version_marker_already_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        std::fs::write(
+            home.join(COMMUNITY_METADATA_MARKER),
+            xai_grok_version::VERSION,
+        )
+        .unwrap();
+
+        extract_builtin_files(home);
+
+        let spec = std::fs::read_to_string(home.join(SPEC_FILE_NAME)).unwrap();
+        assert!(spec.starts_with("# Skill Router 写作规范"));
+        let ledger = std::fs::read_to_string(home.join(LEDGER_FILE_NAME)).unwrap();
+        assert!(ledger.starts_with("# Skill 路由台账"));
+    }
+
+    #[test]
+    fn skill_router_ledger_never_overwritten_but_spec_refreshes_with_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        extract_builtin_files(home);
+        std::fs::write(home.join(LEDGER_FILE_NAME), "custom ledger").unwrap();
+        std::fs::write(home.join(SPEC_FILE_NAME), "custom spec").unwrap();
+        std::fs::write(
+            home.join(COMMUNITY_METADATA_MARKER),
+            "0.0.0-stale",
+        )
+        .unwrap();
+
+        extract_builtin_files(home);
+
+        assert_eq!(
+            std::fs::read_to_string(home.join(LEDGER_FILE_NAME)).unwrap(),
+            "custom ledger"
+        );
+        assert_ne!(
+            std::fs::read_to_string(home.join(SPEC_FILE_NAME)).unwrap(),
+            "custom spec"
+        );
     }
 
     #[test]

@@ -61,6 +61,11 @@ pub struct SkillInfo {
     /// validated to a short slug at parse time. None = hand-written or unknown.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<String>,
+    /// Frontmatter `metadata.role`: entry-kind marker (e.g. `router`, `curator`)
+    /// that lets the listing distinguish routing entries from ordinary skills.
+    /// Validated to a short slug at parse time; None = absent or invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// Trigger phrases for model matching, separate from description.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub when_to_use: Option<String>,
@@ -163,6 +168,7 @@ impl Default for SkillInfo {
             has_user_specified_description: false,
             paths: None,
             origin: None,
+            role: None,
             when_to_use: None,
             short_description: None,
             author: None,
