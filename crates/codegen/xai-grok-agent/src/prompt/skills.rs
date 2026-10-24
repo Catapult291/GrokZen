@@ -1506,6 +1506,7 @@ mod tests {
             has_user_specified_description: false,
             paths: None,
             origin: None,
+            role: None,
             enabled: true,
             body: None,
         }

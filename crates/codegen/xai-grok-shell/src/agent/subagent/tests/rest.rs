@@ -3216,6 +3216,7 @@ fn make_test_skill(
         has_user_specified_description: false,
         paths: None,
         origin: None,
+        role: None,
         body: None,
     }
 }

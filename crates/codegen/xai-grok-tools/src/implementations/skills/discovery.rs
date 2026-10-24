@@ -16,6 +16,9 @@ pub const MAX_DESCRIPTION_LEN: usize = 1024;
 pub const MAX_NAME_LEN: usize = 64;
 /// `origin:` is a telemetry identifier, so it is held to a tighter slug than `name`.
 pub const MAX_ORIGIN_LEN: usize = 32;
+/// `metadata.role` is a listing annotation (`router`, `curator`, …); capped
+/// short so it can never bloat the per-entry listing overhead.
+pub const MAX_ROLE_LEN: usize = 16;
 pub const MAX_FRONTMATTER_BYTES: usize = 4096;
 pub const MAX_BODY_PEEK_BYTES: usize = 2048;
 pub const MAX_SKILL_WALK_DEPTH: usize = 5;
@@ -171,6 +174,29 @@ fn parse_origin_frontmatter(value: Option<&serde_yaml::Value>) -> Option<String>
     is_slug.then_some(origin)
 }
 
+/// Parse `metadata.role` — the entry-kind marker (`router`, `curator`, …) that lets the
+/// listing distinguish routing entries from ordinary skills. Reads the `metadata:` mapping
+/// and validates `role` as `[a-z][a-z0-9-]{0,MAX_ROLE_LEN-1}` after trim/lowercase;
+/// anything else is `None`.
+fn parse_role_frontmatter(value: Option<&serde_yaml::Value>) -> Option<String> {
+    use serde_yaml::Value;
+    let Value::Mapping(map) = value? else {
+        return None;
+    };
+    let raw = map
+        .get(Value::String("role".to_string()))?
+        .as_str()?
+        .trim()
+        .to_ascii_lowercase();
+    let is_valid = !raw.is_empty()
+        && raw.len() <= MAX_ROLE_LEN
+        && raw.starts_with(|c: char| c.is_ascii_alphabetic())
+        && raw
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+    is_valid.then_some(raw)
+}
+
 /// Coerce `allowed-tools`: a comma- or space-delimited string, or a YAML list.
 /// Separators inside `()` are kept whole so a spec like `Bash(git diff:*)`
 /// survives. A wrong type yields `None`.
@@ -318,6 +344,9 @@ pub struct ParsedFrontmatter {
     pub paths: Option<Vec<String>>,
     /// Validated `origin:` slug naming the tool that wrote the skill. None = absent or invalid.
     pub origin: Option<String>,
+    /// Validated `metadata.role` entry-kind marker (`router`, `curator`, …).
+    /// None = absent or invalid.
+    pub role: Option<String>,
 }
 
 #[derive(Debug)]
@@ -567,6 +596,7 @@ pub fn parse_skill_frontmatter(
         has_user_specified_description,
         paths,
         origin: parse_origin_frontmatter(frontmatter.get("origin")),
+        role: parse_role_frontmatter(frontmatter.get("metadata")),
     })
 }
 
@@ -712,6 +742,7 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                             has_user_specified_description: false,
                             paths: None,
                             origin: None,
+                            role: None,
                         },
                         _ => return None,
                     }
@@ -738,6 +769,7 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                             has_user_specified_description: false,
                             paths: None,
                             origin: None,
+                            role: None,
                         },
                         _ => return None,
                     }
@@ -808,6 +840,7 @@ pub fn parse_skill_files(skill_files: Vec<(PathBuf, SkillScope)>) -> Vec<SkillIn
                 has_user_specified_description: parsed.has_user_specified_description,
                 paths: parsed.paths,
                 origin: parsed.origin,
+                role: parsed.role,
                 enabled: true,
                 body: None,
             })
@@ -1163,6 +1196,51 @@ mod tests {
             "---\nname: d\ndescription: x\norigin:\n  - learn\n---\n",
         );
         assert_eq!(None, non_scalar.origin);
+    }
+
+    #[test]
+    fn role_promoted_from_metadata_or_none() {
+        let at_cap = "a".repeat(MAX_ROLE_LEN);
+        let over_cap = "a".repeat(MAX_ROLE_LEN + 1);
+        let cases = [
+            ("router", Some("router")),
+            ("  Router  ", Some("router")),
+            ("curator", Some("curator")),
+            ("leaf2", Some("leaf2")),
+            (at_cap.as_str(), Some(at_cap.as_str())),
+            (over_cap.as_str(), None),
+            ("has space", None),
+            ("under_score", None),
+            ("2fast", None),
+            ("", None),
+        ];
+        for (raw, expected) in cases {
+            let skill = parse_one(
+                "d",
+                &format!("---\nname: d\ndescription: x\nmetadata:\n  role: \"{raw}\"\n---\n"),
+            );
+            assert_eq!(expected, skill.role.as_deref(), "role: {raw:?}");
+        }
+
+        // Absent / non-mapping metadata → None.
+        let absent = parse_one("d", "---\nname: d\ndescription: x\n---\n");
+        assert_eq!(None, absent.role);
+        let non_mapping = parse_one(
+            "d",
+            "---\nname: d\ndescription: x\nmetadata:\n  - router\n---\n",
+        );
+        assert_eq!(None, non_mapping.role);
+
+        // role does not clobber sibling metadata keys; both survive.
+        let siblings = parse_one(
+            "d",
+            "---\nname: d\ndescription: x\nmetadata:\n  spec-version: \"1.0\"\n  role: router\n---\n",
+        );
+        assert_eq!(siblings.role.as_deref(), Some("router"));
+        assert_eq!(
+            siblings.metadata.as_ref().and_then(|m| m.get("spec-version")).map(String::as_str),
+            Some("1.0")
+        );
     }
 
     #[test]

@@ -24,9 +24,28 @@ use crate::types::resources::SharedResources;
 use crate::types::skill_discovery_tracker::SkillManager;
 use crate::types::tool::{Reminder, ToolKind};
 
+/// Fixed one-line absorption-judgment prompt (Phase 6 hard path). Returned by
+/// [`SkillDiscoveryReminder`] on the tool call that let new skills enter the
+/// listing, so the harness itself nudges the §6 absorption judgment instead of
+/// relying on the model to notice the listing increment (Phase 4 soft path).
+/// Emission is gated by `SystemRemindersEnabled`: the registry skips
+/// `collect_reminders` entirely in concise mode, so this never fires there.
+const ABSORPTION_JUDGMENT_HINT: &str = "New skills were just added to the skill listing. When the current task wraps up or the user is idle, run the absorption judgment (skill-curator skill): for each new skill decide absorb / standalone / noted against the accepted router skills, and record one line in ~/.grok/skill-router-ledger.md.";
+
+/// Hint vector for a discovery that did (not) add skills to the listing.
+fn absorption_hint(any_new: bool) -> Vec<String> {
+    if any_new {
+        vec![ABSORPTION_JUDGMENT_HINT.to_string()]
+    } else {
+        vec![]
+    }
+}
+
 /// Cross-cutting reminder that discovers skills in subdirectories near filesystem paths accessed by tools. **Concise
 /// mode limitation (V1):** This reminder is globally disabled when `SystemRemindersEnabled(false)` is set (concise
-/// mode). This means dynamic skill discovery will NOT fire in concise mode.
+/// mode). This means dynamic skill discovery will NOT fire in concise mode. When discovery lets new skills enter the
+/// listing, the reminder additionally emits [`ABSORPTION_JUDGMENT_HINT`] (Phase 6 hard path) so the harness itself
+/// prompts the absorption judgment.
 pub struct SkillDiscoveryReminder;
 
 impl SkillDiscoveryReminder {
@@ -131,7 +150,7 @@ impl Reminder for SkillDiscoveryReminder {
             if !skills.is_empty() {
                 let mut res = resources.lock().await;
                 if let Some(tracker) = res.get_mut::<SkillManager>() {
-                    tracker.add_discovered(skills);
+                    return absorption_hint(tracker.add_discovered(skills));
                 }
             }
             return vec![];
@@ -177,9 +196,10 @@ impl Reminder for SkillDiscoveryReminder {
         }
 
         // Re-acquire lock and merge results into tracker. The reminder does NOT produce
-        // announcement text. It just updates the tracker state. The session drains announcements
-        // from the tracker via take_pending_reconciliation() after each tool call.
-        {
+        // listing text (the session drains that from the tracker via
+        // take_pending_reconciliation()); it only emits the fixed absorption-judgment
+        // hint when new skills actually entered the listing.
+        let any_new = {
             let mut res = resources.lock().await;
             let tracker = match res.get_mut::<SkillManager>() {
                 Some(t) => t,
@@ -190,19 +210,18 @@ impl Reminder for SkillDiscoveryReminder {
             tracker.checked_dirs.extend(checked_dirs_snapshot);
 
             // Add discovered skills (dedup by canonical path, sets pending flag).
-            tracker.add_discovered(discovered);
-        }
+            tracker.add_discovered(discovered)
+        };
 
-        // Return empty -- announcement delivery is handled by the session
-        // via take_pending_reconciliation(), NOT by this reminder.
-        vec![]
+        absorption_hint(any_new)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::output::ApplyPatchFileResult;
+    use crate::types::output::{ApplyPatchFileResult, FileContent, ReadFileOutput};
+    use crate::types::resources::{Resources, SharedResources};
 
     fn edited(path: &str, move_to: Option<&str>) -> ApplyPatchFileResult {
         ApplyPatchFileResult {
@@ -230,5 +249,91 @@ mod tests {
         );
         let failed_patch = ToolOutput::ApplyPatch(ApplyPatchOutput::ParseError("x".into()));
         assert!(SkillDiscoveryReminder::extract_activation_paths(&failed_patch).is_empty());
+    }
+
+    /// Phase 6 hard path: a tool call that registers a new SKILL.md must emit the
+    /// absorption-judgment hint exactly once; repeating it must not re-emit.
+    #[tokio::test]
+    async fn new_skill_discovery_emits_absorption_hint_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let skill_dir = tmp.path().join(".grok").join("skills").join("newleaf");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let skill_md = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_md,
+            "---\nname: newleaf\ndescription: A brand new skill for testing.\n---\n\nbody\n",
+        )
+        .unwrap();
+
+        let mut mgr = SkillManager::new();
+        mgr.cwd = Some(tmp.path().to_path_buf());
+        mgr.git_root = None;
+        let mut res = Resources::default();
+        res.insert(mgr);
+        let shared: SharedResources = std::sync::Arc::new(tokio::sync::Mutex::new(res));
+
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
+            content: String::new(),
+            content_concise: None,
+            absolute_path: skill_md,
+            offset: None,
+            limit: None,
+            raw_output: String::new(),
+            total_lines: 0,
+            extracted_images: Vec::new(),
+        }));
+
+        let first = SkillDiscoveryReminder
+            .collect_reminders(shared.clone(), &output)
+            .await;
+        assert_eq!(
+            first.len(),
+            1,
+            "first discovery must emit exactly the hint: {first:?}"
+        );
+        assert!(
+            first[0].contains("skill-curator") && first[0].contains("skill-router-ledger"),
+            "hint must point at the absorption protocol: {}",
+            first[0]
+        );
+
+        let second = SkillDiscoveryReminder
+            .collect_reminders(shared.clone(), &output)
+            .await;
+        assert!(
+            second.is_empty(),
+            "already-registered skill must not re-emit the hint: {second:?}"
+        );
+    }
+
+    /// No new skills → no hint (walk path with no SKILL.md anywhere nearby).
+    #[tokio::test]
+    async fn no_discovery_emits_no_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("plain.txt");
+        std::fs::write(&file, "hi").unwrap();
+
+        let mut mgr = SkillManager::new();
+        mgr.cwd = Some(tmp.path().to_path_buf());
+        mgr.git_root = None;
+        let mut res = Resources::default();
+        res.insert(mgr);
+        let shared: SharedResources = std::sync::Arc::new(tokio::sync::Mutex::new(res));
+
+        let output = ToolOutput::ReadFile(ReadFileOutput::FileContent(FileContent {
+            content: String::new(),
+            content_concise: None,
+            absolute_path: file,
+            offset: None,
+            limit: None,
+            raw_output: String::new(),
+            total_lines: 0,
+            extracted_images: Vec::new(),
+        }));
+
+        let hints = SkillDiscoveryReminder
+            .collect_reminders(shared, &output)
+            .await;
+        assert!(hints.is_empty(), "expected no hint, got: {hints:?}");
     }
 }
