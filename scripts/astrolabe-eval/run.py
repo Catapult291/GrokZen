@@ -31,6 +31,7 @@ command lines.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shlex
@@ -38,16 +39,21 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections import Counter
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
+LIMIT_KEYS = ("max_turns", "timeout_s")
+MAX_TURNS_MARKERS = ("max turns reached", "max_turns_reached")
+IO_DENIED_MARKERS = ("0x80070005", "access is denied", "拒绝访问")
 
 
 def load_tasks(path: Path) -> list[dict]:
     with path.open("rb") as handle:
         data = tomllib.load(handle)
     tasks = data.get("task", [])
+    category_limits = data.get("category_limits", {})
     seen: set[str] = set()
     for task in tasks:
         missing = {"id", "category", "prompt", "expect", "accept"} - task.keys()
@@ -56,6 +62,13 @@ def load_tasks(path: Path) -> list[dict]:
         if task["id"] in seen:
             raise SystemExit(f"duplicate task id {task['id']}")
         seen.add(task["id"])
+        limits = category_limits.get(task["category"], {})
+        for key in LIMIT_KEYS:
+            value = task.get(key, limits.get(key))
+            if value is not None:
+                if int(value) <= 0:
+                    raise SystemExit(f"task {task['id']}: {key} must be positive")
+                task[key] = int(value)
     return tasks
 
 
@@ -128,12 +141,39 @@ def prepare_isolated_home(out_dir: Path) -> Path:
     return home
 
 
-def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
-    env = os.environ.copy()
-    env["GROK_ASTROLABE"] = "off" if arm == "off" else "auto"
-    env.setdefault("NO_COLOR", "1")
-    if args.home_path:
-        env["GROK_HOME"] = args.home_path
+def _text(value) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
+
+
+def error_text(result: dict) -> str:
+    joined = " ".join(result.get("errors") or [])
+    return f"{joined} {result.get('stderr_tail', '')}".lower()
+
+
+def is_io_denied(result: dict) -> bool:
+    text = error_text(result)
+    return any(marker in text for marker in IO_DENIED_MARKERS)
+
+
+def classify(result: dict) -> str:
+    """Routing outcome for finished runs, run-level outcome otherwise."""
+    text = error_text(result)
+    if result["exit_code"] == -1 or "[timeout]" in text:
+        return "timeout"
+    if any(marker in text for marker in MAX_TURNS_MARKERS):
+        return "max_turns"
+    if result["exit_code"] != 0:
+        return "error"
+    if result["strict"]:
+        return "ok"
+    if result["acceptable"]:
+        return "alt"
+    return "miss"
+
+
+def build_cmd(args: argparse.Namespace, task: dict, max_turns: int) -> list[str]:
     cmd = [
         args.bin,
         "-p",
@@ -142,12 +182,15 @@ def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
         "streaming-json",
         "--always-approve",
     ]
-    if args.max_turns:
-        cmd += ["--max-turns", str(args.max_turns)]
-    if args.dry_run:
-        print(f"[dry-run] ({arm}) cwd={args.repo} GROK_ASTROLABE={env['GROK_ASTROLABE']}")
-        print("          " + " ".join(shlex.quote(part) for part in cmd))
-        return {**task, "arm": arm, "dry_run": True}
+    if max_turns:
+        cmd += ["--max-turns", str(max_turns)]
+    return cmd
+
+
+def execute(
+    args: argparse.Namespace, task: dict, arm: str, env: dict, max_turns: int, timeout: int
+) -> dict:
+    cmd = build_cmd(args, task, max_turns)
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -158,12 +201,14 @@ def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=args.timeout,
+            timeout=timeout,
         )
-        stdout, stderr, code = completed.stdout, completed.stderr, completed.returncode
+        stdout = _text(completed.stdout)
+        stderr = _text(completed.stderr)
+        code = completed.returncode
     except subprocess.TimeoutExpired as expired:
-        stdout = expired.stdout or ""
-        stderr = (expired.stderr or "") + "\n[timeout]"
+        stdout = _text(expired.stdout)
+        stderr = _text(expired.stderr) + "\n[timeout]"
         code = -1
     duration = time.monotonic() - started
     parsed = parse_stream(stdout.splitlines())
@@ -173,10 +218,13 @@ def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
         "arm": arm,
         "expect": task["expect"],
         "accept": task["accept"],
+        "max_turns": max_turns,
+        "timeout_s": timeout,
         "exit_code": code,
         "duration_s": round(duration, 1),
         "strict": parsed["first_tool"] == task["expect"],
         "acceptable": parsed["first_tool"] in task["accept"],
+        "stderr_tail": stderr.strip()[-400:],
         **parsed,
     }
     if code != 0 and not result["errors"]:
@@ -184,18 +232,57 @@ def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
     return result
 
 
-def summarize(results: list[dict], arms: list[str], tasks: dict[str, dict]) -> str:
+def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
+    env = os.environ.copy()
+    env["GROK_ASTROLABE"] = "off" if arm == "off" else "auto"
+    env.setdefault("NO_COLOR", "1")
+    if args.home_path:
+        env["GROK_HOME"] = args.home_path
+    max_turns = task.get("max_turns") or args.max_turns
+    timeout = task.get("timeout_s") or args.timeout
+    if args.dry_run:
+        cmd = build_cmd(args, task, max_turns)
+        print(
+            f"[dry-run] ({arm}) cwd={args.repo} GROK_ASTROLABE={env['GROK_ASTROLABE']} "
+            f"timeout={timeout}s"
+        )
+        print("          " + " ".join(shlex.quote(part) for part in cmd))
+        return {**task, "arm": arm, "dry_run": True}
+    attempts = 0
+    while True:
+        attempts += 1
+        result = execute(args, task, arm, env, max_turns, timeout)
+        if attempts > args.retries or not is_io_denied(result):
+            break
+        print(
+            f"[{arm}] {task['id']}: session I/O denied, retry {attempts}/{args.retries}",
+            flush=True,
+        )
+        time.sleep(1.0)
+    result["attempts"] = attempts
+    result["status"] = classify(result)
+    return result
+
+
+def summarize(
+    results: list[dict], arms: list[str], tasks: dict[str, dict], tasks_hash: str = ""
+) -> str:
     lines = ["# Astrolabe tool-selection eval", ""]
+    if tasks_hash:
+        lines += [f"tasks: {len(tasks)} (`sha256:{tasks_hash}`)", ""]
     header = (
-        "| arm | tasks | strict | acceptable | avg calls | avg turns "
-        "| avg input tok | avg output tok | avg total tok | avg seconds |"
+        "| arm | tasks | completed | max turns | timeout+error | strict | acceptable "
+        "| avg calls | avg turns | avg input tok | avg output tok | avg total tok | avg seconds |"
     )
-    lines += [header, "|---|---|---|---|---|---|---|---|---|---|"]
+    lines += [header, "|---" * 13 + "|"]
     for arm in arms:
         rows = [r for r in results if r["arm"] == arm and not r.get("dry_run")]
         if not rows:
             continue
         count = len(rows)
+        statuses = Counter(r["status"] for r in rows)
+        completed = sum(statuses[s] for s in ("ok", "alt", "miss"))
+        failed = statuses["timeout"] + statuses["error"]
         strict = sum(1 for r in rows if r["strict"])
         acceptable = sum(1 for r in rows if r["acceptable"])
         calls = sum(len(r["tools"]) for r in rows) / count
@@ -205,11 +292,12 @@ def summarize(results: list[dict], arms: list[str], tasks: dict[str, dict]) -> s
         tokens_total = sum(r["total_tokens"] for r in rows) / count
         seconds = sum(r["duration_s"] for r in rows) / count
         lines.append(
-            f"| {arm} | {count} | {strict}/{count} | {acceptable}/{count} "
+            f"| {arm} | {count} | {completed} | {statuses['max_turns']} | {failed} "
+            f"| {strict}/{count} | {acceptable}/{count} "
             f"| {calls:.1f} | {turns:.1f} | {tokens_in:.0f} | {tokens_out:.0f} "
             f"| {tokens_total:.0f} | {seconds:.1f} |"
         )
-    lines += ["", "## Per category (strict / tasks)", ""]
+    lines += ["", "## Per category (strict / tasks, completed)", ""]
     categories = sorted({t["category"] for t in tasks.values()})
     rows = "| category | " + " | ".join(arms) + " |"
     lines += [rows, "|---|" + "---|" * len(arms)]
@@ -221,14 +309,15 @@ def summarize(results: list[dict], arms: list[str], tasks: dict[str, dict]) -> s
                 for r in results
                 if r["arm"] == arm and r["category"] == category and not r.get("dry_run")
             ]
-            cells.append(f"{sum(1 for r in subset if r['strict'])}/{len(subset)}")
+            completed = sum(1 for r in subset if r["status"] in ("ok", "alt", "miss"))
+            cells.append(f"{sum(1 for r in subset if r['strict'])}/{len(subset)} ({completed})")
         lines.append(f"| {category} | " + " | ".join(cells) + " |")
-    lines += ["", "## Misses", ""]
+    lines += ["", "## Routing misses", ""]
     for arm in arms:
         misses = [
             r
             for r in results
-            if r["arm"] == arm and not r["strict"] and not r.get("dry_run")
+            if r["arm"] == arm and not r.get("dry_run") and r["status"] == "miss"
         ]
         if not misses:
             continue
@@ -238,6 +327,27 @@ def summarize(results: list[dict], arms: list[str], tasks: dict[str, dict]) -> s
             lines.append(
                 f"- `{miss['id']}` expected `{miss['expect']}`, first "
                 f"`{miss['first_tool']}` (calls: {', '.join(miss['tools'][:6]) or 'none'})"
+            )
+        lines.append("")
+    lines += ["", "## Incomplete runs", ""]
+    for arm in arms:
+        incomplete = [
+            r
+            for r in results
+            if r["arm"] == arm
+            and not r.get("dry_run")
+            and r["status"] in ("max_turns", "timeout", "error")
+        ]
+        if not incomplete:
+            continue
+        lines.append(f"### {arm}")
+        lines.append("")
+        for row in incomplete:
+            detail = (row.get("errors") or [f"exit {row['exit_code']}"])[0].replace("\n", " ")
+            lines.append(
+                f"- `{row['id']}` {row['status']} after {row['turns']} turns, "
+                f"first `{row['first_tool']}` (`max_turns`={row.get('max_turns')}, "
+                f"timeout={row.get('timeout_s')}s): {detail}"
             )
         lines.append("")
     return "\n".join(lines) + "\n"
@@ -253,10 +363,16 @@ def main() -> int:
     parser.add_argument("--task", action="append", default=[], help="run only these ids")
     parser.add_argument("--timeout", type=int, default=240)
     parser.add_argument(
+        "--retries",
+        type=int,
+        default=1,
+        help="retries for transient session I/O failures (0x80070005)",
+    )
+    parser.add_argument(
         "--max-turns",
         type=int,
         default=0,
-        help="cap model turns per task (0 disables); 10 bounds open-ended tasks",
+        help="default turn cap when the task and its category set none (0 disables)",
     )
     parser.add_argument("--out", default=str(REPO.parent / "astrolabe-eval-results"))
     parser.add_argument(
@@ -276,7 +392,8 @@ def main() -> int:
     if not args.dry_run and not Path(args.bin).exists():
         raise SystemExit(f"binary not found: {args.bin} (build it or pass --bin)")
 
-    task_list = load_tasks(Path(args.tasks))
+    tasks_path = Path(args.tasks)
+    task_list = load_tasks(tasks_path)
     if args.task:
         wanted = set(args.task)
         task_list = [task for task in task_list if task["id"] in wanted]
@@ -302,11 +419,8 @@ def main() -> int:
                     # process is interrupted.
                     live_handle.write(json.dumps(result, ensure_ascii=False) + "\n")
                     live_handle.flush()
-                    state = (
-                        "ok" if result["strict"] else ("alt" if result["acceptable"] else "MISS")
-                    )
                     print(
-                        f"[{arm}] {task['id']}: {state} first={result['first_tool']} "
+                        f"[{arm}] {task['id']}: {result['status']} first={result['first_tool']} "
                         f"calls={len(result['tools'])} turns={result['turns']} "
                         f"{result['duration_s']}s",
                         flush=True,
@@ -319,7 +433,8 @@ def main() -> int:
     with jsonl.open("w", encoding="utf-8") as handle:
         for result in results:
             handle.write(json.dumps(result, ensure_ascii=False) + "\n")
-    summary = summarize(results, arms, tasks_by_id)
+    tasks_hash = hashlib.sha256(tasks_path.read_bytes()).hexdigest()[:12]
+    summary = summarize(results, arms, tasks_by_id, tasks_hash)
     report = out / f"summary-{stamp}.md"
     report.write_text(summary, encoding="utf-8")
     print()
