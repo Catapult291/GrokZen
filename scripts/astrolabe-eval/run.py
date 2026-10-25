@@ -23,6 +23,9 @@ Examples
     # Full sweep, both arms:
     python scripts/astrolabe-eval/run.py --arms auto,off
 
+    # Repeat each task N times and majority-vote the first tool:
+    python scripts/astrolabe-eval/run.py --arms auto,off --repeat 3
+
 The binary must understand ``-p/--print``, ``--output-format
 streaming-json`` and ``--always-approve``; ``--dry-run`` prints the exact
 command lines.
@@ -283,7 +286,9 @@ def execute(
     return result
 
 
-def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
+def run_one(
+    args: argparse.Namespace, task: dict, arm: str, sample: int = 1
+) -> dict:
     env = os.environ.copy()
     env["GROK_ASTROLABE"] = "off" if arm == "off" else "auto"
     env.setdefault("NO_COLOR", "1")
@@ -300,10 +305,10 @@ def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
         lsp_note = "GROK_LSP_TOOLS=1" if args.lsp_ready else "GROK_LSP_TOOLS unset"
         print(
             f"[dry-run] ({arm}) cwd={args.repo} GROK_ASTROLABE={env['GROK_ASTROLABE']} "
-            f"{lsp_note} timeout={timeout}s"
+            f"{lsp_note} timeout={timeout}s sample={sample}/{args.repeat}"
         )
         print("          " + " ".join(shlex.quote(part) for part in cmd))
-        return {**task, "arm": arm, "dry_run": True}
+        return {**task, "arm": arm, "sample": sample, "dry_run": True}
     attempts = 0
     while True:
         attempts += 1
@@ -316,8 +321,92 @@ def run_one(args: argparse.Namespace, task: dict, arm: str) -> dict:
         )
         time.sleep(1.0)
     result["attempts"] = attempts
+    result["sample"] = sample
     result["status"] = classify(result)
     return result
+
+
+def aggregate_majority(results: list[dict]) -> list[dict]:
+    """Collapse N samples of each (arm, task) into one majority-vote row.
+
+    Routing (``first_tool`` / ``strict`` / ``acceptable`` / ``status``) uses
+    the majority first tool among completed samples only. Ties prefer the
+    expected tool, then the first accepted fallback, then lexicographic
+    order. When every sample is unfinished the row keeps the most common
+    incomplete status. Cost metrics (calls/turns/tokens/seconds) stay the
+    arithmetic mean over all samples.
+    """
+    by_key: dict[tuple[str, str], list[dict]] = {}
+    for row in results:
+        if row.get("dry_run"):
+            continue
+        by_key.setdefault((row["arm"], row["id"]), []).append(row)
+
+    aggregated: list[dict] = []
+    for samples in by_key.values():
+        samples = sorted(samples, key=lambda r: int(r.get("sample") or 1))
+        base = samples[0]
+        completed = [r for r in samples if r["status"] in ("ok", "alt", "miss")]
+        incomplete = [r for r in samples if r["status"] not in ("ok", "alt", "miss")]
+        votes = Counter(r.get("first_tool") for r in completed if r.get("first_tool"))
+        sample_statuses = [r["status"] for r in samples]
+        sample_first = [r.get("first_tool") for r in samples]
+
+        if votes:
+            top = [tool for tool, n in votes.items() if n == max(votes.values())]
+            if base["expect"] in top:
+                first_tool = base["expect"]
+            else:
+                first_tool = next((tool for tool in base["accept"] if tool in top), top[0])
+            strict = first_tool == base["expect"]
+            acceptable = first_tool in base["accept"]
+            status = "ok" if strict else ("alt" if acceptable else "miss")
+        else:
+            # Every sample unfinished: keep the modal first tool for display
+            # and the most common incomplete status.
+            incomplete_votes = Counter(
+                r.get("first_tool") for r in samples if r.get("first_tool")
+            )
+            first_tool = incomplete_votes.most_common(1)[0][0] if incomplete_votes else None
+            strict = first_tool == base["expect"] if first_tool else False
+            acceptable = first_tool in base["accept"] if first_tool else False
+            status = Counter(sample_statuses).most_common(1)[0][0]
+
+        def mean(key: str) -> float:
+            return sum(float(r.get(key) or 0) for r in samples) / len(samples)
+
+        aggregated.append(
+            {
+                "id": base["id"],
+                "category": base["category"],
+                "arm": base["arm"],
+                "expect": base["expect"],
+                "accept": base["accept"],
+                "max_turns": base.get("max_turns"),
+                "timeout_s": base.get("timeout_s"),
+                "sample": len(samples),
+                "samples": len(samples),
+                "completed_samples": len(completed),
+                "incomplete_samples": len(incomplete),
+                "first_tool": first_tool,
+                "strict": strict,
+                "acceptable": acceptable,
+                "status": status,
+                "votes": dict(votes),
+                "sample_statuses": sample_statuses,
+                "sample_first_tools": sample_first,
+                "tools": (completed[0] if completed else samples[0]).get("tools", []),
+                "turns": int(mean("turns")),
+                "input_tokens": int(mean("input_tokens")),
+                "output_tokens": int(mean("output_tokens")),
+                "total_tokens": int(mean("total_tokens")),
+                "duration_s": round(mean("duration_s"), 1),
+                "exit_code": 0 if completed else samples[0].get("exit_code", 0),
+                "errors": [],
+            }
+        )
+    aggregated.sort(key=lambda r: (r["arm"], r["id"]))
+    return aggregated
 
 
 def summarize(
@@ -326,10 +415,16 @@ def summarize(
     tasks: dict[str, dict],
     tasks_hash: str = "",
     lsp_ready: str | None = None,
+    repeat: int = 1,
 ) -> str:
     lines = ["# Astrolabe tool-selection eval", ""]
     if tasks_hash:
         lines += [f"tasks: {len(tasks)} (`sha256:{tasks_hash}`)", ""]
+    if repeat > 1:
+        lines += [
+            f"repeat: {repeat} (majority vote on first tool among completed samples)",
+            "",
+        ]
     if lsp_ready:
         lines += [f"lsp fixture: {lsp_ready} (`GROK_LSP_TOOLS=1`)", ""]
     else:
@@ -384,6 +479,30 @@ def summarize(
                 label += " no-lsp"
             cells.append(label)
         lines.append(f"| {category} | " + " | ".join(cells) + " |")
+    if repeat > 1:
+        lines += ["", "## Majority votes", ""]
+        for arm in arms:
+            rows = [
+                r
+                for r in results
+                if r["arm"] == arm and not r.get("dry_run") and r.get("votes")
+            ]
+            if not rows:
+                continue
+            lines.append(f"### {arm}")
+            lines.append("")
+            for row in rows:
+                vote_text = ", ".join(
+                    f"{tool}={count}" for tool, count in sorted(
+                        row["votes"].items(), key=lambda item: (-item[1], item[0] or "")
+                    )
+                )
+                lines.append(
+                    f"- `{row['id']}` majority `{row['first_tool']}` "
+                    f"({row['completed_samples']}/{row['samples']} completed; "
+                    f"{vote_text})"
+                )
+            lines.append("")
     lines += ["", "## Routing misses", ""]
     for arm in arms:
         misses = [
@@ -396,9 +515,16 @@ def summarize(
         lines.append(f"### {arm}")
         lines.append("")
         for miss in misses:
+            samples_note = ""
+            if repeat > 1:
+                firsts = ", ".join(
+                    str(tool) for tool in (miss.get("sample_first_tools") or [])
+                )
+                samples_note = f"; samples: {firsts or 'n/a'}"
             lines.append(
-                f"- `{miss['id']}` expected `{miss['expect']}`, first "
+                f"- `{miss['id']}` expected `{miss['expect']}`, majority "
                 f"`{miss['first_tool']}` (calls: {', '.join(miss['tools'][:6]) or 'none'})"
+                f"{samples_note}"
             )
         lines.append("")
     lines += ["", "## Incomplete runs", ""]
@@ -446,6 +572,12 @@ def main() -> int:
         default=0,
         help="default turn cap when the task and its category set none (0 disables)",
     )
+    parser.add_argument(
+        "--repeat",
+        type=int,
+        default=1,
+        help="run each task N times and majority-vote the first tool",
+    )
     parser.add_argument("--out", default=str(REPO.parent / "astrolabe-eval-results"))
     parser.add_argument(
         "--isolated-home",
@@ -471,6 +603,8 @@ def main() -> int:
     unknown = set(arms) - {"auto", "off"}
     if unknown:
         raise SystemExit(f"unknown arms: {sorted(unknown)}")
+    if args.repeat < 1:
+        raise SystemExit("--repeat must be >= 1")
     if not args.dry_run and not Path(args.bin).exists():
         raise SystemExit(f"binary not found: {args.bin} (build it or pass --bin)")
 
@@ -525,19 +659,24 @@ def main() -> int:
     with live.open("w", encoding="utf-8") as live_handle:
         for arm in arms:
             for task in task_list:
-                result = run_one(args, task, arm)
-                results.append(result)
-                if not args.dry_run:
-                    # Written per run so a long sweep keeps its data if the
-                    # process is interrupted.
-                    live_handle.write(json.dumps(result, ensure_ascii=False) + "\n")
-                    live_handle.flush()
-                    print(
-                        f"[{arm}] {task['id']}: {result['status']} first={result['first_tool']} "
-                        f"calls={len(result['tools'])} turns={result['turns']} "
-                        f"{result['duration_s']}s",
-                        flush=True,
-                    )
+                for sample in range(1, args.repeat + 1):
+                    result = run_one(args, task, arm, sample)
+                    results.append(result)
+                    if not args.dry_run:
+                        # Written per run so a long sweep keeps its data if the
+                        # process is interrupted.
+                        live_handle.write(json.dumps(result, ensure_ascii=False) + "\n")
+                        live_handle.flush()
+                        sample_note = (
+                            f" sample {sample}/{args.repeat}" if args.repeat > 1 else ""
+                        )
+                        print(
+                            f"[{arm}] {task['id']}{sample_note}: {result['status']} "
+                            f"first={result['first_tool']} "
+                            f"calls={len(result['tools'])} turns={result['turns']} "
+                            f"{result['duration_s']}s",
+                            flush=True,
+                        )
 
     if args.dry_run:
         return 0
@@ -548,7 +687,12 @@ def main() -> int:
             handle.write(json.dumps(result, ensure_ascii=False) + "\n")
     tasks_hash = hashlib.sha256(tasks_path.read_bytes()).hexdigest()[:12]
     summary = summarize(
-        results, arms, tasks_by_id, tasks_hash, lsp_ready=args.lsp_ready
+        aggregate_majority(results),
+        arms,
+        tasks_by_id,
+        tasks_hash,
+        lsp_ready=args.lsp_ready,
+        repeat=args.repeat,
     )
     report = out / f"summary-{stamp}.md"
     report.write_text(summary, encoding="utf-8")
