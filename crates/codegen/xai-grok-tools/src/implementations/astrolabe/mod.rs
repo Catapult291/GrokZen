@@ -18,14 +18,16 @@ use std::sync::Arc;
 use xai_grok_astrolabe::{
     CancelHandle, DenyPolicy, DiagnosticsRequest, FindReferencesRequest, FindSymbolRequest,
     GotoDefinitionRequest, LanguagesRequest, LspDiagnostic, LspFallback, LspLocation, LspSeverity,
-    PathMap, ResolveContextRequest, SearchCodeRequest, engine_for, root_for_cwd,
+    PathMap, ResolveContextRequest, SearchCodeRequest, engine_for_session, root_for_cwd,
 };
 
 use crate::implementations::lsp::{
     DiagnosticSeverityLevel, LspBackend, PreciseDiagnostic, PreciseLocation,
 };
 use crate::types::output::{TextOutput, ToolOutput};
-use crate::types::resources::{DenyReadGlobs, DisplayCwd, SharedResources};
+use crate::types::resources::{
+    DenyReadGlobs, DisplayCwd, FileSystem, RespectGitignore, SharedResources,
+};
 use crate::types::tool::{ToolKind, ToolNamespace};
 use crate::types::tool_metadata::{ToolMetadata, resolve_cwd, shared_resources};
 
@@ -76,6 +78,43 @@ pub const PRECISE_TOOL_IDS: [&str; 3] = [
     "GrokBuild:get_diagnostics",
 ];
 
+/// Registry ids of every tool this module owns.
+pub const TOOL_IDS: [&str; 7] = [
+    "GrokBuild:search_code",
+    "GrokBuild:find_symbol",
+    "GrokBuild:resolve_context",
+    "GrokBuild:get_languages",
+    "GrokBuild:find_references",
+    "GrokBuild:goto_definition",
+    "GrokBuild:get_diagnostics",
+];
+
+/// `true` for a tool served by the in-process index. The toolset drops these
+/// for a remote or sandboxed file system, where local indexing would read a
+/// different tree than `read_file`.
+pub fn is_astrolabe_tool(registry_id: &str) -> bool {
+    TOOL_IDS.contains(&registry_id)
+}
+
+/// [`listing_enabled`] plus the file-system requirement: a remote or
+/// sandboxed backend hides the index tools and leaves everything else alone.
+pub fn listed(registry_id: &str, local_fs: bool) -> bool {
+    listed_for(
+        xai_grok_astrolabe::process_config().mode,
+        registry_id,
+        local_fs,
+    )
+}
+
+/// [`listed`] with an explicit mode (pure, testable).
+pub fn listed_for(
+    mode: xai_grok_astrolabe::AstrolabeMode,
+    registry_id: &str,
+    local_fs: bool,
+) -> bool {
+    listing_enabled_for(mode, registry_id) && (local_fs || !is_astrolabe_tool(registry_id))
+}
+
 /// `true` for one of the precise tools. Toolset builders use it to place
 /// `lsp` ahead of them: `by_kind.lsp` is first-come, so the generic tool must
 /// keep that slot.
@@ -125,14 +164,22 @@ struct CallEnv {
     paths: PathMap,
     deny: DenyPolicy,
     hashline_note: bool,
+    respect_gitignore: bool,
 }
+
+/// Why the index tools refuse a session whose files do not live on this
+/// machine: the engine reads bytes from local disk, so indexing a remote or
+/// sandboxed workspace would answer from the wrong tree.
+const REMOTE_WORKSPACE_NOTE: &str = "astrolabe index tools need a local workspace. This session's file system is remote or \
+     sandboxed, so an in-process index would read different bytes than read_file. Use grep and \
+     read_file instead, or set [toolset.astrolabe] mode = \"off\" to hide these tools.";
 
 async fn call_env(
     ctx: &xai_tool_runtime::ToolCallContext,
     resources: &SharedResources,
 ) -> Result<CallEnv, xai_tool_runtime::ToolError> {
     let cwd = resolve_cwd(ctx, resources).await?;
-    let (display, deny, hashline_note) = {
+    let (display, deny, hashline_note, respect_gitignore, is_local) = {
         let res = resources.lock().await;
         (
             res.get::<DisplayCwd>().map(|d| d.0.clone()),
@@ -141,8 +188,18 @@ async fn call_env(
                 .unwrap_or_default(),
             res.get::<crate::types::resources::Params<SearchCodeParams>>()
                 .is_some_and(|p| p.0.hashline_note),
+            res.get::<RespectGitignore>().is_none_or(|r| r.0),
+            // Only a backend that explicitly marks itself remote disables the
+            // index; a missing resource keeps the historical local behavior.
+            res.get::<FileSystem>().is_none_or(|fs| fs.0.is_local()),
         )
     };
+    if !is_local {
+        return Err(xai_tool_runtime::ToolError::custom(
+            "astrolabe",
+            REMOTE_WORKSPACE_NOTE,
+        ));
+    }
     let cfg = xai_grok_astrolabe::process_config();
     let root = root_for_cwd(&cwd, cfg);
     let paths = PathMap::new(root, cwd, display);
@@ -150,7 +207,20 @@ async fn call_env(
         deny: DenyPolicy::for_root(paths.root(), &deny),
         paths,
         hashline_note,
+        respect_gitignore,
     })
+}
+
+/// The shared engine for this session's root and ignore policy.
+async fn open_engine(
+    env: &CallEnv,
+) -> Result<Arc<xai_grok_astrolabe::AstrolabeEngine>, xai_tool_runtime::ToolError> {
+    let root = env.paths.root().to_path_buf();
+    let cfg = xai_grok_astrolabe::process_config().clone();
+    let respect_gitignore = env.respect_gitignore;
+    blocking(move || engine_for_session(&root, &cfg, respect_gitignore))
+        .await?
+        .map_err(engine_error)
 }
 
 fn engine_error(err: xai_grok_astrolabe::EngineError) -> xai_tool_runtime::ToolError {
@@ -307,10 +377,7 @@ impl xai_tool_runtime::Tool for SearchCodeTool {
         }
         let cfg = xai_grok_astrolabe::process_config().clone();
         let budget_bytes = cfg.budget_bytes;
-        let root = env.paths.root().to_path_buf();
-        let engine = blocking(move || engine_for(&root, &cfg))
-            .await?
-            .map_err(engine_error)?;
+        let engine = open_engine(&env).await?;
         let paths = env.paths;
         let deny = env.deny;
         let hashline_note = env.hashline_note;
@@ -396,11 +463,7 @@ impl xai_tool_runtime::Tool for FindSymbolTool {
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         let resources = shared_resources(&ctx)?;
         let env = call_env(&ctx, &resources).await?;
-        let cfg = xai_grok_astrolabe::process_config().clone();
-        let root = env.paths.root().to_path_buf();
-        let engine = blocking(move || engine_for(&root, &cfg))
-            .await?
-            .map_err(engine_error)?;
+        let engine = open_engine(&env).await?;
         let paths = env.paths;
         let deny = env.deny;
         let out = blocking(move || engine.find_symbol(&paths, &deny, input)).await?;
@@ -463,11 +526,7 @@ impl xai_tool_runtime::Tool for ResolveContextTool {
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         let resources = shared_resources(&ctx)?;
         let env = call_env(&ctx, &resources).await?;
-        let cfg = xai_grok_astrolabe::process_config().clone();
-        let root = env.paths.root().to_path_buf();
-        let engine = blocking(move || engine_for(&root, &cfg))
-            .await?
-            .map_err(engine_error)?;
+        let engine = open_engine(&env).await?;
         let paths = env.paths;
         let deny = env.deny;
         let out = blocking(move || engine.resolve_context(&paths, &deny, input)).await?;
@@ -529,11 +588,7 @@ impl xai_tool_runtime::Tool for GetLanguagesTool {
     ) -> Result<ToolOutput, xai_tool_runtime::ToolError> {
         let resources = shared_resources(&ctx)?;
         let env = call_env(&ctx, &resources).await?;
-        let cfg = xai_grok_astrolabe::process_config().clone();
-        let root = env.paths.root().to_path_buf();
-        let engine = blocking(move || engine_for(&root, &cfg))
-            .await?
-            .map_err(engine_error)?;
+        let engine = open_engine(&env).await?;
         let paths = env.paths;
         let deny = env.deny;
         let out = blocking(move || engine.get_languages(&paths, &deny, input)).await?;
@@ -602,11 +657,7 @@ impl xai_tool_runtime::Tool for FindReferencesTool {
         let symbol = input.symbol.clone();
         let offset = input.offset;
         let dry_run = input.dry_run_rename.clone();
-        let root = env.paths.root().to_path_buf();
-        let engine_cfg = cfg.clone();
-        let engine = blocking(move || engine_for(&root, &engine_cfg))
-            .await?
-            .map_err(engine_error)?;
+        let engine = open_engine(&env).await?;
         let paths_for_call = env.paths.clone();
         let deny_for_call = env.deny.clone();
         let outcome = blocking(move || {
@@ -727,11 +778,7 @@ impl xai_tool_runtime::Tool for GotoDefinitionTool {
         let cfg = xai_grok_astrolabe::process_config().clone();
         let use_host = host_lsp_allowed() && lsp.is_some();
         let symbol = input.symbol.clone();
-        let root = env.paths.root().to_path_buf();
-        let engine_cfg = cfg.clone();
-        let engine = blocking(move || engine_for(&root, &engine_cfg))
-            .await?
-            .map_err(engine_error)?;
+        let engine = open_engine(&env).await?;
         let paths_for_call = env.paths.clone();
         let deny_for_call = env.deny.clone();
         let outcome = blocking(move || {
@@ -887,11 +934,7 @@ impl xai_tool_runtime::Tool for GetDiagnosticsTool {
             }
         }
 
-        let root = env.paths.root().to_path_buf();
-        let engine_cfg = cfg.clone();
-        let engine = blocking(move || engine_for(&root, &engine_cfg))
-            .await?
-            .map_err(engine_error)?;
+        let engine = open_engine(&env).await?;
         let paths = env.paths;
         let deny = env.deny;
         let out = blocking(move || engine.get_diagnostics(&paths, &deny, input))
@@ -1196,6 +1239,111 @@ mod tests {
     /// The hashline toolset swaps `read_file`/`grep` for anchor-aware tools;
     /// `search_code` cannot produce anchors, so its output must say where to
     /// get them. Without the param the note stays out of the result.
+    /// A backend that proxies reads elsewhere: the in-process index must not
+    /// answer from this host's disk.
+    struct RemoteFs;
+
+    #[async_trait::async_trait]
+    impl crate::computer::types::AsyncFileSystem for RemoteFs {
+        fn is_local(&self) -> bool {
+            false
+        }
+
+        async fn read_file(
+            &self,
+            _path: &Path,
+        ) -> Result<Vec<u8>, crate::computer::types::ComputerError> {
+            Err(crate::computer::types::ComputerError::io_with_kind(
+                "remote reads are not available in this test",
+                std::io::ErrorKind::Unsupported,
+            ))
+        }
+
+        async fn write_file(
+            &self,
+            _path: &Path,
+            _data: &[u8],
+        ) -> Result<(), crate::computer::types::ComputerError> {
+            Err(crate::computer::types::ComputerError::io_with_kind(
+                "remote writes are not available in this test",
+                std::io::ErrorKind::Unsupported,
+            ))
+        }
+
+        async fn delete_file(
+            &self,
+            _path: &Path,
+        ) -> Result<(), crate::computer::types::ComputerError> {
+            Err(crate::computer::types::ComputerError::io_with_kind(
+                "remote deletes are not available in this test",
+                std::io::ErrorKind::Unsupported,
+            ))
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_code_refuses_a_remote_file_system() {
+        let tmp = workspace();
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        resources.insert(FileSystem(std::sync::Arc::new(RemoteFs)));
+        let ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+        let err = xai_tool_runtime::Tool::run(
+            &SearchCodeTool,
+            ctx,
+            SearchCodeRequest {
+                query: "native_marker".to_string(),
+                ..SearchCodeRequest::default()
+            },
+        )
+        .await
+        .expect_err("remote sessions must not get an in-process index");
+        let message = format!("{err}");
+        assert!(message.contains("local workspace"), "{message}");
+    }
+
+    /// The session's `RespectGitignore` selects the index policy: with it off,
+    /// `search_code` sees the same ignored files `grep` would.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn search_code_follows_the_session_gitignore_policy() {
+        let tmp = workspace();
+        std::fs::write(tmp.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(
+            tmp.path().join("ignored.rs"),
+            "fn ignored_policy_marker() {}\n",
+        )
+        .unwrap();
+
+        let run = |respect: bool| {
+            let root = tmp.path().to_path_buf();
+            async move {
+                let mut resources = Resources::new();
+                resources.insert(Cwd(root));
+                resources.insert(RespectGitignore(respect));
+                let ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+                let output = xai_tool_runtime::Tool::run(
+                    &SearchCodeTool,
+                    ctx,
+                    SearchCodeRequest {
+                        query: "ignored_policy_marker".to_string(),
+                        ..SearchCodeRequest::default()
+                    },
+                )
+                .await
+                .unwrap();
+                let ToolOutput::Text(text) = output else {
+                    panic!("search_code must return text");
+                };
+                text.text
+            }
+        };
+
+        let hidden = run(true).await;
+        assert!(!hidden.contains("ignored.rs"), "{hidden}");
+        let visible = run(false).await;
+        assert!(visible.contains("ignored.rs"), "{visible}");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn search_code_appends_the_hashline_note_only_when_configured() {
         use crate::types::resources::Params;
@@ -1279,6 +1427,27 @@ mod tests {
     }
 
     #[test]
+    fn remote_file_systems_hide_only_the_index_tools() {
+        use xai_grok_astrolabe::AstrolabeMode;
+        for id in TOOL_IDS {
+            assert!(
+                !listed_for(AstrolabeMode::Auto, id, false),
+                "{id} must not be listed for a remote workspace"
+            );
+            assert!(
+                listed_for(AstrolabeMode::Auto, id, true),
+                "{id} must be listed for a local workspace"
+            );
+        }
+        // Everything else keeps its slot.
+        assert!(listed_for(AstrolabeMode::Auto, "GrokBuild:grep", false));
+        assert!(listed_for(
+            AstrolabeMode::Auto,
+            "GrokBuild:read_file",
+            false
+        ));
+    }
+
     fn off_hides_only_the_index_tools() {
         use xai_grok_astrolabe::AstrolabeMode;
         assert!(listing_enabled_for(

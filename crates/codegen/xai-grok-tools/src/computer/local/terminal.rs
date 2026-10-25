@@ -2759,12 +2759,23 @@ impl LocalTerminalBackend {
         let actor_tx = cmd_tx.downgrade();
         let cancel_token = CancellationToken::new();
 
+        // `spawn_local` needs a `LocalSet` or a current-thread runtime. Hosts
+        // also build this backend on a multi-thread runtime (a subagent's
+        // worker), where `spawn_local` panics; the actor future is `Send`, so
+        // `tokio::spawn` is the correct host there.
+        let local_set_host = use_spawn_local
+            && tokio::runtime::Handle::try_current()
+                .map(|handle| {
+                    handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread
+                })
+                .unwrap_or(false);
+
         let cancel_token_clone = cancel_token.clone();
         let actor_fut = async move {
             let (cgroup_guard, memory_monitor) = match memory_config {
                 Some(config) => {
                     let guard = CgroupGuard::try_create(&config).await;
-                    let monitor = MemoryMonitor::start(&guard, &config, use_spawn_local).await;
+                    let monitor = MemoryMonitor::start(&guard, &config, local_set_host).await;
                     (guard, monitor)
                 }
                 None => (CgroupGuard::noop(), MemoryMonitor::noop()),
@@ -2787,7 +2798,7 @@ impl LocalTerminalBackend {
             actor.run().await;
         };
 
-        if use_spawn_local {
+        if local_set_host {
             tokio::task::spawn_local(actor_fut);
         } else {
             tokio::spawn(actor_fut);
@@ -3857,6 +3868,15 @@ mod tests {
             owner_session_id: None,
             description: None,
         }
+    }
+
+    /// Subagents build their toolset on the worker runtime, which is a
+    /// multi-thread runtime with no `LocalSet`. The actor constructor used to
+    /// call `spawn_local` unconditionally and panicked there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backend_constructs_off_a_local_set() {
+        let backend = LocalTerminalBackend::new_local(SearchShadowConfig::default());
+        drop(backend);
     }
 
     #[tokio::test]

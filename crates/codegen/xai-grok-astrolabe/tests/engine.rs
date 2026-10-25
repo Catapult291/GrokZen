@@ -115,6 +115,29 @@ fn search_code_returns_body_and_cwd_relative_paths() {
 }
 
 #[test]
+fn gitignored_files_follow_the_session_policy() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join(".gitignore"), "ignored.rs\n").unwrap();
+    fs::write(
+        fixture.root.join("ignored.rs"),
+        "fn ignored_policy_marker() {}\n",
+    )
+    .unwrap();
+
+    let cfg = fixture.cfg();
+    let root = root_for_cwd(&fixture.root, &cfg);
+    let map = fixture.map(&fixture.root);
+
+    let respecting = xai_grok_astrolabe::engine_for_session(&root, &cfg, true).expect("engine");
+    let text = search(&respecting, &map, "ignored_policy_marker");
+    assert!(!text.contains("ignored.rs"), "{text}");
+
+    let open = xai_grok_astrolabe::engine_for_session(&root, &cfg, false).expect("engine");
+    let text = search(&open, &map, "ignored_policy_marker");
+    assert!(text.contains("ignored.rs"), "{text}");
+}
+
+#[test]
 fn search_code_glob_limits_candidates() {
     let fixture = Fixture::new();
     let engine = fixture.engine();

@@ -26,13 +26,25 @@
 #     seven tools plus index status / wait-ready / note-edited helpers. No
 #     `rmcp` type appears in its public signatures.
 #  4. `crates/astrolabe-mcp/src/server.rs`:
-#     - `new_native()` (structured output always on) and `pub(crate)`
-#       accessors for index state, stats, leader lock, root and
-#       `native_note_edited()`;
+#     - `new_native()` / `new_native_configured()` / `new_native_with_lsp()` /
+#       `new_native_with_options()` / `new_native_full()` (structured output
+#       always on; watcher, built-in LSP, persistence and `.gitignore` policy
+#       selectable) and `pub(crate)` accessors for index state, stats, leader
+#       lock, root and `native_note_edited()`;
 #     - `SearchParams.glob` (include glob) plus `build_include_set()` and the
 #       two candidate filters that consume it.
-#  5. `crates/astrolabe-mcp/src/session.rs`: `pub(crate) fn note_edited()`.
-#  6. Rustfmt applied to every touched file; no semantic change.
+#  5. `crates/astrolabe-mcp/src/session.rs`: `pub(crate) fn note_edited()`;
+#     `scan_options()` keeps the cold build, inline repair and watcher on one
+#     set of scan gates.
+#  6. `crates/astrolabe-mcp/src/knobs.rs`: `McpKnobs.lsp_enabled`,
+#     `persist_enabled` and `respect_gitignore`, plumbed through
+#     `reindex::mcp_index_options()` and `session.rs`; env overrides
+#     `ASTROLABE_PERSIST` / `ASTROLABE_RESPECT_GITIGNORE`.
+#  7. Rustfmt applied to every touched file; no semantic change.
+#  8. `crates/astrolabe-mcp/src/index.rs`: `text_only_paths` skips `.gitignore`
+#     and `.ignore` (VCS pattern files); ripgrep hides dotfiles, so returning
+#     them made `search_code` and `grep` disagree on the same literal. Unit
+#     tests cover that and the `respect_gitignore = false` admitted set.
 # ============================================================================
 
 [workspace]

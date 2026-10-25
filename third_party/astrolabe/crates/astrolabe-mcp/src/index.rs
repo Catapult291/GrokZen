@@ -328,6 +328,7 @@ impl RepoIndex {
                         filter.is_none_or(|f| s.contains(f))
                             && !in_graph_set.contains(s)
                             && !is_lock_file(s)
+                            && !is_vcs_ignore_file(s)
                     })
                     .collect()
             }
@@ -430,6 +431,16 @@ fn is_lock_file(path: &str) -> bool {
     LOCKS.contains(&name)
 }
 
+/// VCS ignore files hold path patterns, not source. Ripgrep skips them as
+/// hidden files, so returning them from `search_code` would make the two
+/// search tools disagree on the same literal.
+fn is_vcs_ignore_file(path: &str) -> bool {
+    matches!(
+        path.rsplit('/').next().unwrap_or(path),
+        ".gitignore" | ".ignore"
+    )
+}
+
 /// Read a source file through [`FileCache`], keyed by repo-relative path.
 ///
 /// Returns `(lines, hit)`. A changed mtime is a miss; the cache already
@@ -478,7 +489,17 @@ pub(crate) fn build_with_options(
     persist: bool,
     parse_cache_bytes: u64,
 ) -> anyhow::Result<RepoIndex> {
-    let opts = mcp_index_options(persist, parse_cache_bytes);
+    build_with_options_full(root, persist, parse_cache_bytes, true)
+}
+
+#[cfg(test)]
+pub(crate) fn build_with_options_full(
+    root: &Path,
+    persist: bool,
+    parse_cache_bytes: u64,
+    respect_gitignore: bool,
+) -> anyhow::Result<RepoIndex> {
+    let opts = mcp_index_options(persist, parse_cache_bytes, respect_gitignore);
     let incremental = IncrementalIndex::build(root, &opts);
     Ok(RepoIndex::from_incremental(root.to_path_buf(), incremental))
 }
@@ -489,9 +510,10 @@ pub(crate) fn build_cancellable(
     root: &Path,
     persist: bool,
     parse_cache_bytes: u64,
+    respect_gitignore: bool,
     cancel: &std::sync::atomic::AtomicBool,
 ) -> Option<RepoIndex> {
-    let opts = mcp_index_options(persist, parse_cache_bytes);
+    let opts = mcp_index_options(persist, parse_cache_bytes, respect_gitignore);
     let incremental = IncrementalIndex::build_cancellable(root, &opts, cancel)?;
     Some(RepoIndex::from_incremental(root.to_path_buf(), incremental))
 }
@@ -745,6 +767,51 @@ mod tests {
         assert!(!hit, "changed mtime must be a miss");
         assert_eq!(&*lines, &["line-two".to_string()]);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn respect_gitignore_false_admits_ignored_files() {
+        let dir = unique_temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(dir.join("ignored.rs"), "fn hidden() {}\n").unwrap();
+        std::fs::write(dir.join("visible.rs"), "fn shown() {}\n").unwrap();
+
+        let paths = |index: &RepoIndex| -> Vec<String> {
+            index
+                .graph()
+                .files
+                .iter()
+                .map(|file| file.path.as_str().to_owned())
+                .collect()
+        };
+
+        let respecting = build_with_options_full(&dir, false, 1 << 20, true).expect("index build");
+        let ignored = paths(&respecting);
+        assert!(!ignored.iter().any(|p| p == "ignored.rs"), "{ignored:?}");
+        assert!(ignored.iter().any(|p| p == "visible.rs"), "{ignored:?}");
+
+        let open = build_with_options_full(&dir, false, 1 << 20, false).expect("index build");
+        let ignored = paths(&open);
+        assert!(ignored.iter().any(|p| p == "ignored.rs"), "{ignored:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn text_only_paths_skip_vcs_ignore_files() {
+        let dir = unique_temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".gitignore"), "target\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "hello\n").unwrap();
+        let index = build(&dir).expect("index build");
+        let paths: Vec<&str> = index
+            .text_only_paths(None)
+            .iter()
+            .map(|path| path.as_str())
+            .collect();
+        assert!(!paths.contains(&".gitignore"), "{paths:?}");
+        assert!(paths.contains(&"notes.txt"), "{paths:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -29,6 +29,12 @@ impl AcpFsAdapter {
 
 #[async_trait::async_trait]
 impl AsyncFileSystem for AcpFsAdapter {
+    fn is_local(&self) -> bool {
+        // Reads go through the ACP gateway to the client's machine (or a
+        // sandbox there). Local indexing would read this host's disk instead.
+        false
+    }
+
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, ComputerError> {
         let read_req = acp::ReadTextFileRequest::new(self.session_id.clone(), path.to_path_buf());
 

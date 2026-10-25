@@ -1059,10 +1059,13 @@ impl ToolRegistryBuilder {
     ) -> Result<FinalizedToolset, Vec<RequirementError>> {
         // `GROK_ASTROLABE=off` hides the index tools here, before `by_kind` is
         // resolved, so the prompt never points at a tool that is not listed.
+        // A remote/sandboxed file system hides them for the same reason: the
+        // index reads local disk, which is not the tree the session edits.
+        let local_fs = ctx.fs.is_local();
         let mut tools: Vec<_> = config
             .tools
             .into_iter()
-            .filter(|tool| crate::implementations::astrolabe::listing_enabled(&tool.id))
+            .filter(|tool| crate::implementations::astrolabe::listed(&tool.id, local_fs))
             .collect();
         if !xai_grok_astrolabe::process_config().replace_grep {
             crate::implementations::astrolabe::demote_search_code(&mut tools);
