@@ -45,6 +45,30 @@ impl DiskChangeKind {
     }
 }
 
+/// A position returned by a structured precise query. `path` is absolute and
+/// `line`/`character` are 0-based, exactly as LSP reports them; callers
+/// convert to the 1-based model contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreciseLocation {
+    pub path: std::path::PathBuf,
+    pub line: u32,
+    pub character: u32,
+    pub end_line: u32,
+    pub end_character: u32,
+}
+
+/// A diagnostic from the language server for one file. `line`/`character` are
+/// 1-based (the display contract shared with `read_diagnostics`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreciseDiagnostic {
+    pub line: u32,
+    pub character: u32,
+    pub severity: DiagnosticSeverityLevel,
+    pub message: String,
+    pub source: Option<String>,
+    pub code: Option<String>,
+}
+
 /// Trait object interface for LSP operations.
 ///
 /// Implemented by `LspBackendAdapter` which wraps `LspManager`.
@@ -57,6 +81,36 @@ pub trait LspBackend: Send + Sync + 'static {
     fn is_ready(&self) -> bool;
 
     async fn dispatch(&self, input: &LspToolInput) -> LspToolResult;
+
+    /// Structured references at a 0-based position, for the native precise
+    /// tools. The default keeps third-party backends compiling: they simply
+    /// cannot answer structured queries.
+    async fn precise_references(
+        &self,
+        _path: &std::path::Path,
+        _line: u32,
+        _character: u32,
+    ) -> Result<Vec<PreciseLocation>, String> {
+        Err("structured references are not supported by this backend".to_string())
+    }
+
+    /// Structured definitions at a 0-based position.
+    async fn precise_definition(
+        &self,
+        _path: &std::path::Path,
+        _line: u32,
+        _character: u32,
+    ) -> Result<Vec<PreciseLocation>, String> {
+        Err("structured definitions are not supported by this backend".to_string())
+    }
+
+    /// Diagnostics for one file, opening it first when needed.
+    async fn precise_diagnostics(
+        &self,
+        _path: &std::path::Path,
+    ) -> Result<Vec<PreciseDiagnostic>, String> {
+        Err("structured diagnostics are not supported by this backend".to_string())
+    }
 
     async fn drain_diagnostics(&self, timeout: std::time::Duration) -> Option<DiagnosticsSummary>;
 

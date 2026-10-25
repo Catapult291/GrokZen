@@ -356,7 +356,6 @@ impl ToolNotificationHandle {
         send_timeout, BashExecutionTimeout, BashExecutionTimeout;
         send_backgrounded, BashExecutionBackgrounded, BashExecutionBackgrounded;
         send_failed, BashExecutionFailed, BashExecutionFailed;
-        send_file_written, FileWritten, FileWritten;
         send_task_complete, TaskSnapshot, TaskCompleted;
         send_subagent_completed, SubagentCompleted, SubagentCompleted;
         send_plan_mode_entered, PlanModeEntered, PlanModeEntered;
@@ -371,6 +370,18 @@ impl ToolNotificationHandle {
         send_scheduled_task_removed, ScheduledTaskRemoved, ScheduledTaskRemoved;
         send_scheduled_task_created, ScheduledTaskCreated, ScheduledTaskCreated;
         send_monitor_event, MonitorEvent, MonitorEvent;
+    }
+}
+
+impl ToolNotificationHandle {
+    /// Notify listeners that a file was written, and tell the in-process code
+    /// index about it. The index hook lives here because every successful edit
+    /// (search_replace, hashline, opencode write/edit, apply_patch) emits this
+    /// notification: it is the one place that cannot be missed, so the next
+    /// `search_code` sees the new text instead of waiting for the watcher.
+    pub fn send_file_written(&self, value: FileWritten) {
+        xai_grok_astrolabe::note_edited_on_disk(std::slice::from_ref(&value.absolute_path));
+        self.send(ToolNotification::FileWritten(value));
     }
 }
 

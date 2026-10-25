@@ -86,6 +86,23 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
             (field::PATTERN, req(&g.pattern)),
             (field::PATH, opt(g.path.as_ref())),
         ]),
+        ToolInput::SearchCode(s) => obj([
+            (field::PATTERN, req(&s.query)),
+            (field::PATH, opt(s.path.as_ref())),
+        ]),
+        ToolInput::FindSymbol(f) => obj([
+            (field::PATTERN, req(&f.query)),
+            (field::PATH, opt(f.path.as_ref())),
+        ]),
+        ToolInput::FindReferences(f) => obj([
+            (field::PATTERN, req(&f.symbol)),
+            (field::PATH, opt(f.path.as_ref())),
+        ]),
+        ToolInput::GotoDefinition(g) => obj([
+            (field::PATTERN, opt(g.symbol.as_ref())),
+            (field::PATH, opt(g.path.as_ref())),
+        ]),
+        ToolInput::GetDiagnostics(d) => obj([(field::PATH, req(&d.path))]),
         ToolInput::TodoWrite(_)
         | ToolInput::Skill(_)
         | ToolInput::MCPTool(_)
@@ -121,6 +138,8 @@ pub fn canonical_input(input: &ToolInput) -> Option<serde_json::Value> {
         | ToolInput::SchedulerList(_)
         | ToolInput::UpdateGoal(_)
         | ToolInput::Workflow(_)
+        | ToolInput::ResolveContext(_)
+        | ToolInput::GetLanguages(_)
         | ToolInput::Dynamic(_) => return None,
     })
 }

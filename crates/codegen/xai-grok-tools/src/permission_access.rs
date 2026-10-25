@@ -20,6 +20,33 @@ impl From<&crate::types::ToolInput> for AccessKind {
                 path: g.path.clone(),
                 glob: g.include.clone(),
             },
+            // The native index tools only read the workspace; `get_languages`
+            // has no path at all. Mapped to Grep so a read-deny policy and the
+            // read-only auto-approval apply exactly as they do for `grep`.
+            ToolInput::SearchCode(s) => AccessKind::Grep {
+                path: s.path.clone(),
+                glob: s.glob.clone(),
+            },
+            ToolInput::FindSymbol(f) => AccessKind::Grep {
+                path: f.path.clone(),
+                glob: None,
+            },
+            ToolInput::ResolveContext(c) => AccessKind::Grep {
+                path: c.path.clone(),
+                glob: None,
+            },
+            ToolInput::GetLanguages(_) => AccessKind::Read(None),
+            // Precise reads: references and definitions scan the workspace
+            // (Grep), single-file diagnostics read one path.
+            ToolInput::FindReferences(f) => AccessKind::Grep {
+                path: f.path.clone(),
+                glob: None,
+            },
+            ToolInput::GotoDefinition(g) => AccessKind::Grep {
+                path: g.path.clone(),
+                glob: None,
+            },
+            ToolInput::GetDiagnostics(d) => AccessKind::Read(Some(d.path.clone())),
             ToolInput::TodoWrite(_)
             | ToolInput::TaskOutput(_)
             | ToolInput::WaitTasks(_)

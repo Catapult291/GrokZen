@@ -37,7 +37,7 @@ impl crate::types::tool_metadata::ToolMetadata for LspTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"Code intelligence via language servers.${%- if tools.by_kind.search and tools.by_kind.read %} Prefer over ${{ tools.by_kind.search }}/${{ tools.by_kind.read }} for understanding code.${%- endif %}
+        r#"Code intelligence via language servers. Use it for hover, goToImplementation, documentSymbol, and workspaceSymbol. For definitions, references, and single-file diagnostics, prefer goto_definition/find_references/get_diagnostics when they are available: they answer from the code index without starting a server.
 Operations: goToDefinition (jump to where a symbol is defined), findReferences (all usages of a symbol), hover (type info/docs at a position), goToImplementation (trait/interface implementations), documentSymbol (list all symbols in a file), workspaceSymbol (search symbols by name across the workspace — requires query parameter, not file_path).
 Requires file_path + line + character for position-based operations."#
     }

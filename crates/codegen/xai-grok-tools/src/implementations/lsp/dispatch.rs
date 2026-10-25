@@ -206,6 +206,87 @@ impl super::LspBackend for LspBackendAdapter {
         dispatch_on_sockets(input, sockets).await
     }
 
+    async fn precise_references(
+        &self,
+        path: &std::path::Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<super::PreciseLocation>, String> {
+        self.ensure_ready().await?;
+        let mut socket = {
+            let mut mgr = self.lsp_manager.lock().await;
+            mgr.socket_for_file(path).await
+        }
+        .ok_or_else(|| format!("No LSP server configured for {}", path.display()))?;
+        let params = ReferenceParams {
+            text_document_position: text_document_position(path, line, character)
+                .map_err(|e| e.to_string())?,
+            context: ReferenceContext {
+                include_declaration: true,
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let result = timed_request(socket.references(params))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(result
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(precise_location)
+            .collect())
+    }
+
+    async fn precise_definition(
+        &self,
+        path: &std::path::Path,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<super::PreciseLocation>, String> {
+        self.ensure_ready().await?;
+        let mut socket = {
+            let mut mgr = self.lsp_manager.lock().await;
+            mgr.socket_for_file(path).await
+        }
+        .ok_or_else(|| format!("No LSP server configured for {}", path.display()))?;
+        let params = GotoDefinitionParams {
+            text_document_position_params: text_document_position(path, line, character)
+                .map_err(|e| e.to_string())?,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let response = timed_request(socket.definition(params))
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(parse_goto_response(response)
+            .into_iter()
+            .filter_map(precise_location)
+            .collect())
+    }
+
+    async fn precise_diagnostics(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Vec<super::PreciseDiagnostic>, String> {
+        self.ensure_ready().await?;
+        let entries =
+            <Self as super::LspBackend>::read_diagnostics(self, &[path.to_path_buf()]).await;
+        let mut out = Vec::new();
+        for entry in entries {
+            for diagnostic in entry.diagnostics {
+                out.push(super::PreciseDiagnostic {
+                    line: diagnostic.line,
+                    character: diagnostic.column,
+                    severity: diagnostic.severity,
+                    message: diagnostic.message,
+                    source: diagnostic.source,
+                    code: diagnostic.code,
+                });
+            }
+        }
+        Ok(out)
+    }
+
     async fn drain_diagnostics(
         &self,
         timeout: std::time::Duration,
@@ -538,6 +619,17 @@ async fn dispatch_workspace_symbols(
 }
 
 // ── Response converters ─────────────────────────────────────────────────
+
+fn precise_location(location: Location) -> Option<super::PreciseLocation> {
+    let path = location.uri.to_file_path().ok()?;
+    Some(super::PreciseLocation {
+        path,
+        line: location.range.start.line,
+        character: location.range.start.character,
+        end_line: location.range.end.line,
+        end_character: location.range.end.character,
+    })
+}
 
 fn parse_goto_response(response: Option<GotoDefinitionResponse>) -> Vec<Location> {
     match response {

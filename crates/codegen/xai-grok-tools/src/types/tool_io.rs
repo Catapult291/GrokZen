@@ -39,6 +39,10 @@ use crate::implementations::search_tool::SearchToolInput;
 use crate::implementations::skills::skill::SkillInput;
 use crate::implementations::use_tool::UseToolInput;
 use serde::{Deserialize, Serialize};
+use xai_grok_astrolabe::{
+    DiagnosticsRequest, FindReferencesRequest, FindSymbolRequest, GotoDefinitionRequest,
+    LanguagesRequest, ResolveContextRequest, SearchCodeRequest,
+};
 use xai_tool_types::KillTaskToolInput;
 use xai_tool_types::TaskOutputToolInput;
 use xai_tool_types::TaskToolInput;
@@ -97,6 +101,13 @@ pub enum ToolInput {
     SchedulerList(crate::implementations::grok_build::scheduler::list::SchedulerListInput),
     UpdateGoal(UpdateGoalInput),
     Workflow(crate::implementations::grok_build::workflow::WorkflowToolInput),
+    SearchCode(SearchCodeRequest),
+    FindSymbol(FindSymbolRequest),
+    ResolveContext(ResolveContextRequest),
+    GetLanguages(LanguagesRequest),
+    FindReferences(FindReferencesRequest),
+    GotoDefinition(GotoDefinitionRequest),
+    GetDiagnostics(DiagnosticsRequest),
     /// Dynamic input for runtime-registered tools (MCP, etc.)
     Dynamic(serde_json::Value),
 }

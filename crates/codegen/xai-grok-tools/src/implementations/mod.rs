@@ -1,3 +1,4 @@
+pub mod astrolabe;
 pub mod codemode;
 pub mod codex;
 pub mod cursor_rules_on_read;
@@ -14,6 +15,10 @@ pub mod skills;
 pub mod task_output;
 pub mod use_tool;
 pub mod web_search;
+pub use astrolabe::{
+    FindReferencesTool, FindSymbolTool, GetDiagnosticsTool, GetLanguagesTool, GotoDefinitionTool,
+    ResolveContextTool, SearchCodeTool,
+};
 pub use grok_build::bash::{BashError, BashToolInput};
 pub use grok_build::{
     AskUserQuestionTool, BashTool, EnterPlanModeTool, ExitPlanModeTool, GrepTool, KillTaskTool,

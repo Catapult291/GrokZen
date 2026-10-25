@@ -51,10 +51,10 @@ const CLAUDE_TOOLS: &[ClaudeTool] = &[
     k("NotebookEdit",    Edit,                 &["search_replace", "hashline_edit"]),
     k("Bash",            Execute,              &["run_terminal_command"]),
     k("PowerShell",      Execute,              &[]),
-    k("Grep",            Search,               &["grep", "hashline_grep"]),
+    k("Grep",            Search,               &["grep", "hashline_grep", "search_code"]),
     k("Glob",            List,                 &["list_dir"]),
     k("LS",              List,                 &[]),                                  // legacy name for Glob
-    k("LSP",             Lsp,                  &["lsp"]),
+    k("LSP",             Lsp,                  &["lsp", "find_references", "goto_definition", "get_diagnostics"]),
     k("WebSearch",       WebSearch,            &["web_search"]),
     k("WebFetch",        WebFetch,             &["web_fetch"]),
     k("DeployApp",       DeployApp,            &[]),
