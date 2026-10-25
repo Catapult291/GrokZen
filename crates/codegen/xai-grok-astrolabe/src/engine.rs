@@ -247,6 +247,14 @@ impl AstrolabeEngine {
         self.respect_gitignore
     }
 
+    /// `true` when this process holds the exclusive `<root>/.astrolabe/`
+    /// indexer lock and may write the parse cache. A follower (another engine
+    /// for the same root already elected) serves tools from its own in-memory
+    /// graph and may read the leader's store, but never writes it.
+    pub fn is_leader(&self) -> bool {
+        self.server.native_is_leader()
+    }
+
     pub fn config(&self) -> &AstrolabeConfig {
         &self.cfg
     }

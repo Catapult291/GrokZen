@@ -140,6 +140,99 @@ fn gitignored_files_follow_the_session_policy() {
     assert!(text.contains("ignored.rs"), "{text}");
 }
 
+/// Two engines for one root with opposite `.gitignore` policies share a store
+/// path. The store is a per-file parse cache (content-hash keyed), not the
+/// graph itself: each engine scans under its own policy, the exclusive
+/// `indexer.lock` elects one writer, and the follower only reads. Concurrent
+/// cold builds must still answer each policy correctly and leave one readable
+/// store — never two leaders, never a half-written `index.redb`.
+#[test]
+fn concurrent_gitignore_policies_share_one_store_without_cross_talk() {
+    use std::sync::Barrier;
+    use std::thread;
+
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join(".gitignore"), "ignored.rs\n").unwrap();
+    fs::write(
+        fixture.root.join("ignored.rs"),
+        "fn concurrent_ignored_policy_marker() {}\n",
+    )
+    .unwrap();
+
+    let cfg = fixture.cfg();
+    let root = root_for_cwd(&fixture.root, &cfg);
+    let map = fixture.map(&fixture.root);
+    let barrier = Arc::new(Barrier::new(2));
+
+    let spawn = |respect: bool| {
+        let root = root.clone();
+        let cfg = cfg.clone();
+        let map = map.clone();
+        let barrier = Arc::clone(&barrier);
+        thread::spawn(move || {
+            let engine = xai_grok_astrolabe::engine_for_session(
+                &root,
+                &cfg,
+                respect,
+                &DenyPolicy::default(),
+            )
+            .expect("engine");
+            // Align the first query so both cold builds race the store lock.
+            barrier.wait();
+            let text = search(&engine, &map, "concurrent_ignored_policy_marker");
+            let leader = engine.is_leader();
+            (text, leader, engine)
+        })
+    };
+
+    // Both threads must be live before either joins: the barrier is size 2.
+    let respecting_handle = spawn(true);
+    let open_handle = spawn(false);
+    let respecting = respecting_handle.join().expect("respect=true thread");
+    let open = open_handle.join().expect("respect=false thread");
+
+    assert!(
+        !respecting.0.contains("ignored.rs"),
+        "respect=true must stay blind to gitignored files: {}",
+        respecting.0
+    );
+    assert!(
+        open.0.contains("ignored.rs"),
+        "respect=false must still see gitignored files: {}",
+        open.0
+    );
+    // Both engines remain queryable after the race; the store must not be
+    // corrupted into an open failure or empty graph.
+    assert!(
+        respecting.0.contains("concurrent_ignored_policy_marker")
+            || open.0.contains("concurrent_ignored_policy_marker"),
+        "at least one engine must answer the marker; got respect={} open={}",
+        respecting.0,
+        open.0
+    );
+    assert_eq!(
+        respecting.1 as u8 + open.1 as u8,
+        1,
+        "exactly one of the dual-policy engines may hold the indexer lock \
+         (respect leader={}, open leader={})",
+        respecting.1,
+        open.1
+    );
+
+    let store = fixture.root.join(".astrolabe").join("index.redb");
+    assert!(
+        store.is_file(),
+        "persist=repo dual engines must leave a store at {}",
+        store.display()
+    );
+    // A follow-up query after both threads finish must still succeed: the
+    // store is openable and the graphs still answer.
+    let again = search(&respecting.2, &map, "concurrent_ignored_policy_marker");
+    assert!(!again.contains("ignored.rs"), "{again}");
+    let again = search(&open.2, &map, "concurrent_ignored_policy_marker");
+    assert!(again.contains("ignored.rs"), "{again}");
+}
+
 #[test]
 fn search_code_glob_limits_candidates() {
     let fixture = Fixture::new();
