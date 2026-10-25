@@ -69,6 +69,23 @@ pub struct PreciseDiagnostic {
     pub code: Option<String>,
 }
 
+/// One language server registered on the host (from `lsp.json` / plugins),
+/// with whether a live client is currently running for it.
+///
+/// Status surfaces like `get_languages` use this when `lsp_fallback = grok`
+/// so the LSP column reflects the host pool instead of Astrolabe's PATH probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostLspServerStatus {
+    /// Config key in `lsp.json` (e.g. `rust-analyzer`).
+    pub name: String,
+    /// Command that would start (or is running) this server.
+    pub command: String,
+    /// Language ids from the extension map values (e.g. `rust`, `typescript`).
+    pub languages: Vec<String>,
+    /// `true` when the manager holds a live client for this server.
+    pub running: bool,
+}
+
 /// Trait object interface for LSP operations.
 ///
 /// Implemented by `LspBackendAdapter` which wraps `LspManager`.
@@ -128,6 +145,14 @@ pub trait LspBackend: Send + Sync + 'static {
     /// already open, waits briefly for diagnostics to settle, then returns all ERROR/WARNING
     /// diagnostics grouped by file.
     async fn read_diagnostics(&self, paths: &[std::path::PathBuf]) -> Vec<FileDiagnosticEntry>;
+
+    /// Snapshot of every language server registered on the host and whether
+    /// each one currently has a live client. Default empty: backends that do
+    /// not own a manager report nothing, and status surfaces fall back to
+    /// their own probe.
+    async fn list_server_statuses(&self) -> Vec<HostLspServerStatus> {
+        Vec::new()
+    }
 }
 
 /// A single diagnostic entry returned by `LspBackend::read_diagnostics`.

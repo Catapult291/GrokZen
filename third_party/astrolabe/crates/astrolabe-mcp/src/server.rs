@@ -1634,6 +1634,37 @@ pub(crate) struct BudgetOnly {
     #[serde(default = "default_budget")]
     #[schemars(description = "Token budget.")]
     pub budget_tokens: usize,
+    /// Host language servers from the Grok tool layer (`lsp_fallback=grok`).
+    /// Native-only: never appears in the MCP schema or client payload.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub host_lsp: Option<Vec<HostLspServer>>,
+}
+
+/// One host language-server registration from `~/.grok/lsp.json` (or plugins),
+/// with whether a live client is currently running. Used only on the native
+/// path so `get_languages` can report the host pool instead of Astrolabe's
+/// PATH probe when `lsp_fallback = grok`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostLspServer {
+    /// Config key in `lsp.json` (e.g. `rust-analyzer`).
+    pub name: String,
+    /// Command that starts (or is running) this server.
+    pub command: String,
+    /// Language ids from the extension map values (e.g. `rust`, `typescript`).
+    pub languages: Vec<String>,
+    /// `true` when the host manager holds a live client for this server.
+    pub running: bool,
+}
+
+impl Default for BudgetOnly {
+    fn default() -> Self {
+        Self {
+            root: None,
+            budget_tokens: default_budget(),
+            host_lsp: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -4684,6 +4715,35 @@ impl AstrolabeServer {
                     total.1 += u64::from(file.loc);
                 }
             }
+            // Host pool (`lsp_fallback=grok`) wins when the tool layer handed
+            // us a non-empty registration list; PATH probe stays for the
+            // astrolabe fallback and for languages the host does not cover.
+            let host_by_lang: BTreeMap<&str, &HostLspServer> = params
+                .host_lsp
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .flat_map(|s| s.languages.iter().map(move |lang| (lang.as_str(), s)))
+                .collect();
+            let host_section = params.host_lsp.as_ref().map(|servers| {
+                let mut lines: Vec<String> = servers
+                    .iter()
+                    .map(|s| {
+                        let state = if s.running { "running" } else { "configured" };
+                        let langs = if s.languages.is_empty() {
+                            "(no extension map)".to_string()
+                        } else {
+                            s.languages.join(", ")
+                        };
+                        format!("  {} [{}] {} — {langs}", s.name, s.command, state)
+                    })
+                    .collect();
+                lines.sort();
+                format!(
+                    "Host LSP servers (from lsp.json / plugins):\n{}\n",
+                    lines.join("\n")
+                )
+            });
             let installer = crate::ensure_ls::default_installer();
             let status_by_name: std::collections::BTreeMap<&str, _> = installer
                 .probed_statuses()
@@ -4693,12 +4753,32 @@ impl AstrolabeServer {
             let mut rows: Vec<_> = totals
                 .into_iter()
                 .map(|(language, (files, loc))| {
-                    let suffix = status_by_name
-                        .get(language)
-                        .map(|s| s.summary_suffix())
-                        .unwrap_or_else(|| {
-                            " — AST-only (language server probe not wired)".to_string()
-                        });
+                    let suffix = match host_by_lang.get(language) {
+                        Some(host) if host.running => {
+                            format!(" — Ready (host: {})", host.name)
+                        }
+                        Some(host) => {
+                            format!(
+                                " — configured (host: {}; not running yet)",
+                                host.name
+                            )
+                        }
+                        None if params.host_lsp.is_some() => {
+                            match status_by_name.get(language) {
+                                Some(s) => format!("{} (astrolabe PATH probe)", s.summary_suffix()),
+                                None => {
+                                    " — AST-only (no host LSP; language server probe not wired)"
+                                        .to_string()
+                                }
+                            }
+                        }
+                        None => status_by_name
+                            .get(language)
+                            .map(|s| s.summary_suffix())
+                            .unwrap_or_else(|| {
+                                " — AST-only (language server probe not wired)".to_string()
+                            }),
+                    };
                     format!("{language}: {files} files, {loc} LOC{suffix}")
                 })
                 .collect();
@@ -4715,15 +4795,27 @@ impl AstrolabeServer {
                 cache_misses,
                 "file cache occupancy"
             );
+            let status_legend = if params.host_lsp.is_some() {
+                "LSP status: Ready = host language server running; \
+                 configured = registered in lsp.json but not running yet; \
+                 (astrolabe PATH probe) = not covered by the host pool; \
+                 AST-only = parse/index only (server not wired).\n\
+                 If a precise tool reports Unavailable, start the host language server or install the named server locally.\n"
+            } else {
+                "LSP status: Ready = server on PATH; needs_install = language server missing; \
+                 AST-only = parse/index only (server not wired).\n\
+                 If a precise tool reports Unavailable, install the named language server locally.\n"
+            };
             let mut body = format!(
                 "supported languages: python, go, java, rust, typescript, tsx, javascript, c, cpp, objc, objcpp, swift, php, vue, dart, csharp, visualbasic, kotlin, shell, ruby, lua\n\
                  confidence: exact (来自已扫描文件元数据 + LSP discovery)\n\
                  file_cache: {cache_bytes}/{} bytes, hits={cache_hits}, misses={cache_misses}\n\
-                 LSP status: Ready = server on PATH; needs_install = language server missing; \
-                 AST-only = parse/index only (server not wired).\n\
-                 If a precise tool reports Unavailable, install the named language server locally.\n",
+                 {status_legend}",
                 session.cache_budget_bytes
             );
+            if let Some(section) = host_section {
+                body.push_str(&section);
+            }
             for row in kept {
                 body.push_str(row);
                 body.push('\n');
@@ -5896,6 +5988,7 @@ mod tests {
         assert_first_text(server.get_languages(Parameters(BudgetOnly {
             root: None,
             budget_tokens: 100,
+            host_lsp: None,
         })));
     }
 
@@ -5930,6 +6023,7 @@ mod tests {
         let result = server.get_languages(Parameters(BudgetOnly {
             root: None,
             budget_tokens: 100,
+            host_lsp: None,
         }));
         let text = result.content[0].as_text().unwrap().text.clone();
         let structured = result.structured_content.expect("opt-in structured");
@@ -7533,6 +7627,7 @@ mod tests {
         let languages = server.get_languages(Parameters(BudgetOnly {
             root: None,
             budget_tokens: 1000,
+            host_lsp: None,
         }));
         let text = languages.content[0].as_text().unwrap().text.as_str();
         assert!(text.contains("syntax/compile errors: 1"), "{text}");
@@ -7555,6 +7650,7 @@ mod tests {
         let result = server.get_languages(Parameters(BudgetOnly {
             root: None,
             budget_tokens: 100,
+            host_lsp: None,
         }));
         let text = result.content[0].as_text().unwrap().text.as_str();
         assert!(
@@ -7566,6 +7662,69 @@ mod tests {
             "cache budget should appear in text: {text}"
         );
         assert!(result.structured_content.is_none());
+    }
+
+    /// Native-only host LSP list overrides the PATH-probe column for covered
+    /// languages and appends the registration inventory.
+    #[test]
+    fn get_languages_host_lsp_overrides_the_path_probe_column() {
+        let server = ready_server();
+        let result = server.get_languages(Parameters(BudgetOnly {
+            root: None,
+            budget_tokens: 2000,
+            host_lsp: Some(vec![
+                HostLspServer {
+                    name: "rust-analyzer".into(),
+                    command: "rust-analyzer".into(),
+                    languages: vec!["rust".into()],
+                    running: true,
+                },
+                HostLspServer {
+                    name: "pyright".into(),
+                    command: "pyright-langserver".into(),
+                    languages: vec!["python".into()],
+                    running: false,
+                },
+            ]),
+        }));
+        let text = result.content[0].as_text().unwrap().text.as_str();
+        assert!(
+            text.contains("Host LSP servers"),
+            "host inventory section: {text}"
+        );
+        assert!(
+            text.contains("rust-analyzer [rust-analyzer] running"),
+            "{text}"
+        );
+        assert!(
+            text.contains("pyright [pyright-langserver] configured"),
+            "{text}"
+        );
+        assert!(text.contains("Ready (host: rust-analyzer)"), "{text}");
+        assert!(
+            text.contains("LSP status: Ready = host language server running"),
+            "legend follows the host pool: {text}"
+        );
+    }
+
+    /// Empty host list keeps the PATH-probe column (astrolabe fallback).
+    #[test]
+    fn get_languages_without_host_lsp_keeps_the_path_probe() {
+        let server = ready_server();
+        let result = server.get_languages(Parameters(BudgetOnly {
+            root: None,
+            budget_tokens: 2000,
+            host_lsp: None,
+        }));
+        let text = result.content[0].as_text().unwrap().text.as_str();
+        assert!(
+            !text.contains("Host LSP servers"),
+            "no host section without host_lsp: {text}"
+        );
+        assert!(
+            text.contains("LSP status: Ready = server on PATH"),
+            "path-probe legend: {text}"
+        );
     }
 
     /// The "N 个文件有语法错误" footnote cost 7.2 KB over 87 of 223 results in
@@ -7644,6 +7803,7 @@ mod tests {
         let languages = server.get_languages(Parameters(BudgetOnly {
             root: None,
             budget_tokens: 200,
+            host_lsp: None,
         }));
         let languages_text = languages.content[0].as_text().unwrap().text.as_str();
         assert!(languages_text.contains("hits="), "{languages_text}");
@@ -9448,6 +9608,7 @@ mod tests {
         let langs_res = server.get_languages(Parameters(BudgetOnly {
             root: None,
             budget_tokens: 2500,
+            host_lsp: None,
         }));
         let langs_text = langs_res.content[0].as_text().unwrap().text.as_str();
         let first_body_line = langs_text
@@ -9731,6 +9892,7 @@ mod tests {
         let langs_res = server.get_languages(Parameters(BudgetOnly {
             root: None,
             budget_tokens: 2500,
+            host_lsp: None,
         }));
         let langs_text = langs_res.content[0].as_text().unwrap().text.as_str();
         assert!(
@@ -9754,6 +9916,7 @@ mod tests {
         let langs_res = server.get_languages(Parameters(BudgetOnly {
             root: None,
             budget_tokens: 2500,
+            host_lsp: None,
         }));
         let langs_text = langs_res.content[0].as_text().unwrap().text.as_str();
         assert!(
@@ -9906,6 +10069,7 @@ mod mcp_routing_tests {
             server.get_languages(Parameters(BudgetOnly {
                 root: Some("DOCS".into()),
                 budget_tokens: 200,
+                host_lsp: None,
             }))
         });
         assert!(

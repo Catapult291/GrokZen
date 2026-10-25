@@ -591,9 +591,30 @@ impl xai_tool_runtime::Tool for GetLanguagesTool {
         let resources = shared_resources(&ctx)?;
         let env = call_env(&ctx, &resources).await?;
         let engine = open_engine(&env).await?;
+        let lsp = host_lsp(&resources).await;
+        // Host pool wins for the LSP column when `lsp_fallback=grok` and a
+        // backend is installed; empty/`astrolabe` keeps the PATH probe.
+        let host_servers: Vec<xai_grok_astrolabe::HostLspServer> =
+            if host_lsp_allowed() && lsp.is_some() {
+                lsp.as_ref()
+                    .expect("checked above")
+                    .list_server_statuses()
+                    .await
+                    .into_iter()
+                    .map(|s| xai_grok_astrolabe::HostLspServer {
+                        name: s.name,
+                        command: s.command,
+                        languages: s.languages,
+                        running: s.running,
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let paths = env.paths;
         let deny = env.deny;
-        let out = blocking(move || engine.get_languages(&paths, &deny, input)).await?;
+        let out =
+            blocking(move || engine.get_languages(&paths, &deny, input, &host_servers)).await?;
         Ok(text_output(out.map_err(engine_error)?.text))
     }
 }
@@ -960,7 +981,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::implementations::lsp::{
-        DiagnosticsSummary, DiskChangeKind, FileDiagnosticEntry, LspToolInput, LspToolResult,
+        DiagnosticsSummary, DiskChangeKind, FileDiagnosticEntry, HostLspServerStatus, LspToolInput,
+        LspToolResult,
     };
     use crate::types::resources::{Cwd, Resources};
 
@@ -1054,6 +1076,57 @@ mod tests {
     /// Minimal backend: one reference at the queried position.
     #[derive(Debug)]
     struct FakeLsp;
+
+    /// Backend that reports a running rust-analyzer registration.
+    #[derive(Debug)]
+    struct FakeLspWithServers;
+
+    #[async_trait::async_trait]
+    impl LspBackend for FakeLspWithServers {
+        fn ensure_started_background(&self) {}
+
+        async fn ensure_ready(&self) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn is_ready(&self) -> bool {
+            true
+        }
+
+        async fn dispatch(&self, _input: &LspToolInput) -> LspToolResult {
+            LspToolResult {
+                text: String::new(),
+                is_error: false,
+            }
+        }
+
+        async fn drain_diagnostics(&self, _timeout: Duration) -> Option<DiagnosticsSummary> {
+            None
+        }
+
+        async fn notify_file_changed(&self, _path: &Path, _content: &str) {}
+
+        async fn notify_file_event(
+            &self,
+            _path: &Path,
+            _content: Option<&str>,
+            _kind: DiskChangeKind,
+        ) {
+        }
+
+        async fn read_diagnostics(&self, _paths: &[PathBuf]) -> Vec<FileDiagnosticEntry> {
+            Vec::new()
+        }
+
+        async fn list_server_statuses(&self) -> Vec<HostLspServerStatus> {
+            vec![HostLspServerStatus {
+                name: "rust-analyzer".into(),
+                command: "rust-analyzer".into(),
+                languages: vec!["rust".into()],
+                running: true,
+            }]
+        }
+    }
 
     #[async_trait::async_trait]
     impl LspBackend for FakeLsp {
@@ -1426,6 +1499,34 @@ mod tests {
             panic!("get_languages must return text");
         };
         assert!(text.text.contains("rust"), "{}", text.text);
+    }
+
+    /// Host LSP registrations surface in `get_languages` when the session
+    /// has a backend (`lsp_fallback=grok` is the process default).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_languages_reports_the_host_lsp_pool() {
+        let tmp = workspace();
+        let mut resources = Resources::new();
+        resources.insert(Cwd(tmp.path().to_path_buf()));
+        let backend: Arc<dyn LspBackend> = Arc::new(FakeLspWithServers);
+        resources.insert(backend);
+        let ctx = crate::types::tool_metadata::test_ctx(resources.into_shared());
+        let output = xai_tool_runtime::Tool::run(&GetLanguagesTool, ctx, LanguagesRequest {})
+            .await
+            .unwrap();
+        let ToolOutput::Text(text) = output else {
+            panic!("get_languages must return text");
+        };
+        assert!(
+            text.text.contains("Host LSP servers"),
+            "{}",
+            text.text
+        );
+        assert!(
+            text.text.contains("Ready (host: rust-analyzer)"),
+            "{}",
+            text.text
+        );
     }
 
     #[test]

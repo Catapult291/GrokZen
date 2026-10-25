@@ -391,6 +391,19 @@ impl super::LspBackend for LspBackendAdapter {
         }
         results
     }
+
+    async fn list_server_statuses(&self) -> Vec<super::HostLspServerStatus> {
+        let mgr = self.lsp_manager.lock().await;
+        mgr.servers
+            .iter()
+            .map(|(name, cfg)| super::HostLspServerStatus {
+                name: name.clone(),
+                command: cfg.command.clone(),
+                languages: cfg.extensions.values().cloned().collect(),
+                running: mgr.clients.contains_key(name),
+            })
+            .collect()
+    }
 }
 
 // ── Internal types ──────────────────────────────────────────────────────
